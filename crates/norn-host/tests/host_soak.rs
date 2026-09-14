@@ -49,18 +49,25 @@
 //! the memory and descriptor bands were authored over. One establishment armed
 //! is one condition met and the rest of the run served.
 //!
-//! Three things are then required of the run, and each is a count rather than a
-//! clock. The recovery **happened**: the seam's own record says the stream arm
-//! fired, exactly once, and the count of recoveries the load reports is held to
-//! [`baselines::SOAK_RECOVERY_DOSE`]. It **completed**: an attempt has
-//! [`RECOVERY_LIMIT`] to bring the entry back and a run spends at most
-//! [`RECOVERY_ATTEMPTS`] of them. And **nothing starved while it was in
-//! flight**: the load keeps churning and taking warm read-only requests through
-//! the recovery rather than blocking on it, and every tick the recovery covered
-//! is required to have taken its churn turn and its warm read at the authored
-//! cadence. That last one is what the other bars cannot say — a process that
-//! stopped serving to recover holds a flat resident set and opens no
-//! descriptors.
+//! Three things are then required of the run. The recovery **happened**: the
+//! seam's own record says the stream arm fired, exactly once, and the count of
+//! recoveries the load reports is held to [`baselines::SOAK_RECOVERY_DOSE`]. It
+//! **completed**: an attempt has [`RECOVERY_LIMIT`] to bring the entry back and
+//! a run spends at most [`RECOVERY_ATTEMPTS`] of them. And **nothing starved
+//! while it was in flight**: the load keeps churning and taking warm read-only
+//! requests through the recovery rather than blocking on it.
+//!
+//! **The no-starvation term is wall clock, and it is the one term here that
+//! is.** Starvation is a load that stopped, and a load that stopped advances no
+//! tick — so a count of ticks compared against the loop's own iterations agrees
+//! with itself whatever the run did. What is asked instead is the rate: the
+//! stretch between losing service and getting it back is measured in real time,
+//! and over it the load must have landed at least the churn turns and warm
+//! reads its cadence owes for that much time. Every look at the entry's state
+//! across the window carries the crate's own probe bound with it, so a host
+//! that stopped answering is a typed failure rather than a slow window. That
+//! term is what the other bars cannot say — a process that stopped serving to
+//! recover holds a flat resident set and opens no descriptors.
 //!
 //! Generation happens in the parent so that the child's samples are of the
 //! attachment and the load, and the counter assertions are made in the child
@@ -84,10 +91,18 @@
 //! run's record non-qualifying, so calibration runs are never counted toward
 //! the five (`norn_testkit::certification::ledger::NAMED_EXIT_BARS`, held to
 //! the constant by a test in `settle.rs`, which holds every entry of that
-//! registry to the baseline it names). It is the peak of the *load*: the child
-//! samples itself from inside the churn loop, which it reaches once the
-//! attachment is ready, so the attach and the heal over the ≥5k tree are ahead
-//! of the first sample and outside the series.
+//! registry to the baseline it names). It is the peak of the *load and the one
+//! re-attach inside it*: the child samples itself from inside the churn loop,
+//! which it reaches once the attachment is ready, so the attach the load starts
+//! with is ahead of the first sample — and the deliberate recovery's re-attach,
+//! which walks the same ≥5k tree, is not.
+//!
+//! **The slope is read over the samples outside the recovery windows.** A
+//! re-attach's walk is attach cost, it lands in the first quartile every run,
+//! and the slope is a bound on a rise between quartile means — so left in the
+//! series it would sit in the denominator and depress a ratio that is only ever
+//! failed by a large one. The peak keeps every sample and the slope drops the
+//! window: the two bars read the run they each describe.
 //!
 //! Running this needs `/proc` or its BSD equivalent, so the case is present on
 //! Linux and macOS and absent elsewhere. The scheduled lane runs it on Linux.
@@ -189,10 +204,11 @@ const STORE_READ_PROBE: Duration = Duration::from_secs(5);
 
 /// How often a sample is preceded by a warm read-only request, in samples.
 ///
-/// The cadence is the load's request dose. A recovery demanded on a tick the
-/// cadence does not fall on takes one anyway, so the stretch a recovery covers
-/// always owes at least one request and the no-starvation term over it is never
-/// a comparison of two zeroes.
+/// The cadence is the load's request dose, and it is what the no-starvation
+/// term charges a recovery window the wall clock of. A recovery demanded on a
+/// tick the cadence does not fall on takes a request anyway, so the window
+/// always opens with one rather than with whatever the rotation happened to
+/// owe.
 const COUNTER_CHECK_EVERY: u64 = 5;
 
 /// How many Markdown files the churn cycles through.
@@ -208,11 +224,16 @@ const CHURN_DIR: &str = "soak-churn";
 ///
 /// It covers everything the child spends outside the declared duration, each
 /// part carrying its own bound: attaching the ≥5k profile
-/// ([`attach::READY_LIMIT`], 240s) and the wait for the last write to reconcile
-/// ([`RECONCILE_LIMIT`], 120s) — 360s in sum, so a child that reaches this is
-/// stuck rather than slow. **A recovery is not among them**: the load waits one
-/// out inside its own loop, churning and reading through it, so the ticks it
-/// takes are ticks of the declared duration rather than time added to it.
+/// ([`attach::READY_LIMIT`], 240s), the recovery that may still be in flight
+/// when the duration runs out ([`RECOVERY_ATTEMPTS`] × [`RECOVERY_LIMIT`],
+/// 180s), and the wait for the last write to reconcile ([`RECONCILE_LIMIT`],
+/// 120s) — 540s in sum, so a child that reaches this is stuck rather than slow.
+///
+/// **A recovery inside the duration costs nothing here**: the load waits that
+/// one out inside its own loop, churning and reading through it, so its ticks
+/// are ticks of the declared duration. The term above is for the other
+/// placement — a hiccup observed in the last stretch of the run, which the loop
+/// keeps turning past the deadline to settle rather than ending the run on.
 ///
 /// It is deliberately small enough that the child's deadline lands well inside
 /// the job's own timeout. What the parent judges is the child's stdout, and it
@@ -227,6 +248,37 @@ const ATTACH_HEADROOM: Duration = Duration::from_secs(600);
 /// load, and a run that needed many demands to stay attached is not that, even
 /// if it eventually came back.
 const RECOVERY_ATTEMPTS: u32 = 3;
+
+/// The fewest ticks a recovery window may span.
+///
+/// **A window narrower than this proves nothing about starvation.** The
+/// no-starvation term is charged over the window's wall clock, so a recovery
+/// that landed inside a single tick would owe nothing and pass vacuously. This
+/// is the floor that makes the term a measurement rather than an arithmetic
+/// identity: two ticks is a window the cadence is charged over and the load had
+/// to keep working across.
+///
+/// It is a count and not a clock — the window is read in ticks, and a tick is
+/// the same unit of load on a slow runner as on a fast one. Two is grounded on
+/// what the recovery has to do: the demand re-installs coverage over the ≥5k
+/// profile, so the re-attach re-walks and content-hash heals that tree before
+/// the entry reads ready, and the load samples itself once a second. Observed
+/// at three ticks on a local macOS run at the default duration; the scheduled
+/// Linux lane walks the same tree. Safe because the load's own bound on the
+/// same window is [`RECOVERY_ATTEMPTS`] × [`RECOVERY_LIMIT`] above, two orders
+/// of magnitude out: a window can only fail this by being *fast*, which is the
+/// direction that makes the term vacuous. Review it if the recovery path stops
+/// re-walking the tree, if the profile shrinks, or if [`SAMPLE_INTERVAL`] grows.
+const RECOVERY_WINDOW_MINIMUM_TICKS: u64 = 2;
+
+/// How much of a recovery window's wall clock the load is not charged the
+/// cadence over.
+///
+/// One tick. The window's ends are read on tick boundaries and the doses are
+/// owed per tick, so the charged span is the window minus the partial tick its
+/// edges cost. Slack in the direction that makes a false failure impossible:
+/// what the term is there to catch is a load that stopped for whole ticks.
+const RECOVERY_WINDOW_SLACK: Duration = SAMPLE_INTERVAL;
 
 /// How long one recovery attempt waits for the attachment to be ready again.
 ///
@@ -304,22 +356,20 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
 
     let samples = Sample::parse_all(&outcome.stdout_text());
     let recoveries = reported_recoveries(&outcome.stdout_text());
-    // The arm's own record, read before the count it explains: a run that
-    // recovered without it recovered from something this case did not arrange,
-    // and the dose below would then be met by a hiccup.
     let attested = Attestation::read(&hits);
-    attested.assert_reached(
-        "the load's deliberate recovery",
-        &[
-            (SEAM, WATCH_SEAM),
-            ("stage", ARMED_STAGE),
-            ("answer", ARMED_ANSWER),
-        ],
-    );
-    attested.assert_count("the load's deliberate recovery", 1);
+    // **The slope's series is the load at rest.** A recovery re-installs
+    // coverage, and the walk that heals the ≥5k tree behind it is attach cost
+    // landing inside the run — in the first quartile every time, because the
+    // arm is owed to the first change the load churns. Left in, it inflates the
+    // denominator of a ratio whose whole job is to bound a rise, so a bar that
+    // never reddens would be the reading. The peak below keeps every sample:
+    // what it is the height of is the run, recovery included.
+    let settled = at_rest(&samples);
     assert!(
-        samples.len() >= MINIMUM_SAMPLES,
-        "the load reported {} samples, which is too few to judge a slope over",
+        settled.len() >= MINIMUM_SAMPLES,
+        "the load reported {} samples outside its recovery windows, of {} in all, which is too \
+         few to judge a slope over",
+        settled.len(),
         samples.len()
     );
 
@@ -327,8 +377,8 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         samples.first().expect("a first sample"),
         samples.last().expect("a last sample"),
     );
-    let head = quartile_mean(&samples, 0);
-    let tail = quartile_mean(&samples, 3);
+    let head = quartile_mean(&settled, 0);
+    let tail = quartile_mean(&settled, 3);
     let slope = baselines::per_mille(tail, head);
     let peak = peak_resident_set(&samples);
     let descriptor_growth = last.open_fds.saturating_sub(first.open_fds);
@@ -338,6 +388,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         &[
             ("load duration (s)", duration.as_secs().to_string()),
             ("samples", samples.len().to_string()),
+            ("samples outside a recovery", settled.len().to_string()),
             ("attachment recoveries", recoveries.to_string()),
             (
                 "recovery dose",
@@ -373,6 +424,36 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         ],
     );
 
+    // **Read after the summary is written, with the dose.** The summary is the
+    // night's measurement product — the slope, the descriptor delta and the
+    // peak — and the load ran an hour for it whether or not the arm fired. An
+    // arm that missed is a bar that failed, and it fails below rather than
+    // where it would take those readings with it.
+    //
+    // The arm's own record is read before the count it explains: a run that
+    // recovered without it recovered from something this case did not arrange,
+    // and the dose would then be met by a hiccup.
+    attested.assert_reached(
+        "the load's deliberate recovery",
+        &[
+            (SEAM, WATCH_SEAM),
+            ("stage", ARMED_STAGE),
+            ("answer", ARMED_ANSWER),
+        ],
+    );
+    // Counted under this seam rather than over the whole file: a second arm the
+    // child is given later is a different condition, and it would otherwise
+    // read here as this one having fired twice.
+    let firings = attested
+        .hits()
+        .iter()
+        .filter(|hit| hit.get(SEAM) == Some(WATCH_SEAM))
+        .count();
+    assert_eq!(
+        firings, 1,
+        "the load's deliberate recovery fired {firings} times at {WATCH_SEAM}, where the arm is \
+         budgeted to the one establishment its attach makes"
+    );
     assert!(
         // The dose is a floor, so it is the reading and the run's count is the
         // ceiling: a run fits when its count reaches at least the dose.
@@ -420,13 +501,15 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
 struct Sample {
     rss_bytes: u64,
     open_fds: usize,
+    /// Whether a recovery was in flight across the tick this was taken on.
+    recovering: bool,
 }
 
 impl Sample {
     /// The sample lines in `report`, in the order the child printed them.
     ///
     /// A line is read by its keys rather than by position, and a line missing
-    /// either key is not a sample — the child's output also carries the test
+    /// any of them is not a sample — the child's output also carries the test
     /// harness's own chatter, and reading that as a reading of zero would
     /// flatten a slope by adding samples nobody took.
     fn parse_all(report: &str) -> Vec<Sample> {
@@ -437,6 +520,7 @@ impl Sample {
                 Some(Sample {
                     rss_bytes: field(line, "rss_bytes=")?.parse().ok()?,
                     open_fds: field(line, "open_fds=")?.parse().ok()?,
+                    recovering: field(line, "recovering=")? == "1",
                 })
             })
             .collect()
@@ -444,10 +528,11 @@ impl Sample {
 
     fn line(&self, elapsed: Duration) -> String {
         format!(
-            "sample elapsed_ms={} rss_bytes={} open_fds={}",
+            "sample elapsed_ms={} rss_bytes={} open_fds={} recovering={}",
             elapsed.as_millis(),
             self.rss_bytes,
-            self.open_fds
+            self.open_fds,
+            u8::from(self.recovering)
         )
     }
 }
@@ -478,6 +563,22 @@ fn reported_recoveries(report: &str) -> u32 {
         .unwrap_or_else(|| panic!("`{line}` does not carry a recovery count"))
 }
 
+/// The samples the load took outside every recovery window.
+///
+/// **What the slope is read over.** A recovery re-installs coverage and the
+/// walk that heals the tree behind it is attach cost, which is a different
+/// subject from the steady load whose trend the slope bounds — and it lands in
+/// the first quartile by construction, where it would depress the ratio the
+/// slope compares. The peak is read over the whole series instead, because the
+/// height the process reached is the height it reached.
+fn at_rest(samples: &[Sample]) -> Vec<Sample> {
+    samples
+        .iter()
+        .filter(|sample| !sample.recovering)
+        .copied()
+        .collect()
+}
+
 /// The highest resident set the series holds.
 ///
 /// **The peak term of the memory invariant at this profile.** The slope reads
@@ -485,15 +586,19 @@ fn reported_recoveries(report: &str) -> u32 {
 /// them, so the height the load ever reached is a separate reading — and it is
 /// the maximum of samples already taken rather than a second instrument.
 ///
-/// Two things it is not, and both are about what the series covers. The samples
-/// are of the current resident set on a one-second cadence, so this is the
-/// highest sampled value and not the kernel's high-water mark: an allocation
-/// that lands and is released between two ticks is not in it. And the series
-/// begins once the attachment reads ready — the churn loop takes the first
-/// sample — so the attach and the heal walk over the ≥5k tree are before it,
-/// and a cost paid there and released is outside every reading. What this
-/// answers for is the load's own sustained peak; the attach's peak is barred at
-/// the 2k profile by the per-PR lane and is unmeasured at this one.
+/// One thing it is not: the samples are of the current resident set on a
+/// one-second cadence, so this is the highest sampled value and not the
+/// kernel's high-water mark — an allocation that lands and is released between
+/// two ticks is not in it.
+///
+/// **The first attach is outside the series and the re-attach is inside it.**
+/// The series begins once the attachment reads ready, so the cost of the attach
+/// the load starts with is before the first sample. The deliberate recovery's
+/// re-attach is not: it walks and content-hash heals the same ≥5k tree from
+/// inside the run, and every sample it spans is in this maximum. So what the
+/// peak is the height of is the load *and* one re-attach over the profile —
+/// which is the whole series, by the same rule as before, now that the series
+/// holds one.
 fn peak_resident_set(samples: &[Sample]) -> u64 {
     samples
         .iter()
@@ -595,7 +700,7 @@ fn run_load(root: &Path) {
         // The state is read first, so a recovery that begins on this tick has
         // the churn turn and the warm read below inside its own window: what
         // the load kept doing while it recovered is counted over whole ticks.
-        let observed = host.state(vault.name());
+        let observed = probed_state(&host, vault.name());
         let demanded = recovering.is_none() && !serving(&observed);
         if demanded {
             recoveries += 1;
@@ -608,9 +713,8 @@ fn run_load(root: &Path) {
         }
 
         // The cadence, and one request on the tick a recovery is demanded on:
-        // a recovery the host answers inside a few ticks would otherwise be a
-        // window the cadence owes nothing over, and the no-starvation term
-        // there would be a comparison of two zeroes.
+        // a window the cadence does not fall inside would otherwise open with
+        // no request against it at all.
         if demanded || tick.is_multiple_of(COUNTER_CHECK_EVERY) {
             assert_warm_reads_derive_nothing(&mut store, &subject);
             if let Some(flight) = recovering.as_mut() {
@@ -621,6 +725,10 @@ fn run_load(root: &Path) {
         let sample = Sample {
             rss_bytes: current_rss_bytes(),
             open_fds: open_fd_count().expect("this process's descriptor count"),
+            // The tick is inside a recovery window when one is outstanding
+            // across it, settled or not: the re-attach's walk is work this
+            // sample holds, and the slope's series is read without it.
+            recovering: recovering.is_some(),
         };
         println!("{}", sample.line(started.elapsed()));
 
@@ -631,12 +739,15 @@ fn run_load(root: &Path) {
             }
         }
 
-        if Instant::now() >= deadline {
-            assert!(
-                recovering.is_none(),
-                "the load ended with a recovery still in flight, so the reconcile proof below \
-                 would be read off an entry that is not serving"
-            );
+        // **A recovery still in flight keeps the loop turning.** The bar is
+        // that the host kept serving under load, not that nothing ever
+        // hiccuped, so a demand raised in the last stretch of the run is waited
+        // out the way one raised anywhere else is — churning and reading
+        // through it — rather than ending the run. What bounds the overrun is
+        // the recovery's own [`RECOVERY_ATTEMPTS`] × [`RECOVERY_LIMIT`], which
+        // [`ATTACH_HEADROOM`] covers; a host that will not come back fails
+        // there, saying so.
+        if Instant::now() >= deadline && recovering.is_none() {
             assert_the_churn_reached_the_store(&mut store, &written);
             drop(lease);
             println!("{RECOVERY_LINE_PREFIX}ticks={tick} recoveries={recoveries}");
@@ -676,6 +787,9 @@ struct Recovering {
     /// The demand the current attempt asked under, handed back to the load when
     /// the entry serves again.
     lease: DemandLease<ProductionEntryOps>,
+    /// When the load stopped being served, which is where the window the
+    /// no-starvation term is charged over begins.
+    began_at: Instant,
     /// When the current attempt asked.
     asked: Instant,
     /// How many attempts have been spent, the current one included.
@@ -718,6 +832,7 @@ impl Recovering {
             lease: host
                 .retry(name, AttachMode::Durable)
                 .expect("re-requesting the attachment"),
+            began_at: Instant::now(),
             asked: Instant::now(),
             attempts: 1,
             began: tick,
@@ -737,22 +852,23 @@ impl Recovering {
     /// the window's own line in the stream its parent reads.
     #[allow(clippy::disallowed_macros)] // The child's report is a machine-consumed stream its parent reads.
     fn settled(mut self, host: &Host<ProductionEntryOps>, name: &VaultName, tick: u64) -> Settled {
-        let observed = host.state(name);
+        let observed = probed_state(host, name);
         assert!(
             !names_no_vault(&observed),
             "the host serves no vault under `{name}`: {observed:?}"
         );
         if observed == Ok(TrustState::Ready) {
-            self.assert_the_load_was_served_across_it(tick);
+            let window = self.began_at.elapsed();
+            self.assert_the_load_was_served_across_it(tick, window);
             println!(
                 "recovery began_tick={} ticks={} attempts={} churn_turns={} warm_reads={} \
-                 elapsed_ms={}",
+                 window_ms={}",
                 self.began,
                 tick - self.began + 1,
                 self.attempts,
                 self.churn_turns,
                 self.warm_reads,
-                self.asked.elapsed().as_millis()
+                window.as_millis()
             );
             return Settled::Serving(self.lease);
         }
@@ -776,45 +892,92 @@ impl Recovering {
         Settled::Waiting(self)
     }
 
-    /// **The no-starvation term.** Every tick the recovery covered took its
-    /// churn turn, and every tick of it that owed a warm read-only request took
-    /// one.
+    /// **The no-starvation term, charged over wall clock.** The stretch between
+    /// the load losing its service and getting it back is real time, and over
+    /// that time the load kept churning and kept taking warm read-only requests
+    /// at the doses its cadence owes for it.
     ///
-    /// The window is whole ticks, `began` through `tick` inclusive: the state
-    /// read that begins a recovery comes before that tick's own churn and warm
-    /// read, so both of them are work the load did with the demand already
-    /// outstanding. What this forbids is a load that recovers by stopping —
-    /// every other bar in this suite is satisfied by a process that sat still.
-    fn assert_the_load_was_served_across_it(&self, tick: u64) {
+    /// **Wall clock and not ticks.** A tick count compared against the loop's
+    /// own iterations is an identity: a load that made no progress advances no
+    /// tick, so a window of three ticks that took half a minute reads the same
+    /// as one that took three seconds, and starvation is exactly the thing that
+    /// is invisible. What is asked here instead is the rate — for a window of
+    /// `w` seconds the cadence owes `w` churn turns and `w /
+    /// COUNTER_CHECK_EVERY` warm reads, and the load must have landed at least
+    /// that many.
+    ///
+    /// One tick of the window is not charged ([`RECOVERY_WINDOW_SLACK`]): the
+    /// window's ends are read on tick boundaries, so its edges hold a partial
+    /// tick the cadence never owed a dose over. The comparison is a floor and
+    /// not an equality for the same reason — a load doing more than its cadence
+    /// owes is not starving.
+    ///
+    /// The window is also required to span [`RECOVERY_WINDOW_MINIMUM_TICKS`],
+    /// so that a recovery landing inside a single tick is reported as the
+    /// window that owed nothing rather than passing this vacuously.
+    ///
+    /// What this forbids is a load that recovers by stopping — every other bar
+    /// in this suite is satisfied by a process that sat still.
+    fn assert_the_load_was_served_across_it(&self, tick: u64, window: Duration) {
         let ticks = tick - self.began + 1;
-        assert_eq!(
-            self.churn_turns, ticks,
-            "the load took {} churn turns across the {ticks} ticks a recovery was in flight for, \
-             so the vault stopped changing while the host came back",
+        assert!(
+            ticks >= RECOVERY_WINDOW_MINIMUM_TICKS,
+            "a recovery came back inside {ticks} tick(s), under the \
+             {RECOVERY_WINDOW_MINIMUM_TICKS} a window has to span for the load's doses over it to \
+             owe anything, so nothing here was measured about starving"
+        );
+
+        let charged = window.saturating_sub(RECOVERY_WINDOW_SLACK);
+        let owed_churn = doses_over(charged, SAMPLE_INTERVAL);
+        assert!(
+            self.churn_turns >= owed_churn,
+            "the load took {} churn turns across the {window:?} a recovery was in flight for, \
+             where its cadence owes {owed_churn} over that stretch, so the vault stopped changing \
+             while the host came back",
             self.churn_turns
         );
-        let owed = warm_reads_over(self.began, tick);
-        assert_eq!(
-            self.warm_reads, owed,
-            "the load took {} warm read-only requests across the {ticks} ticks a recovery was in \
-             flight for, where its cadence owes {owed}, so it stopped taking requests while the \
-             host came back",
+
+        let owed_reads = doses_over(charged, SAMPLE_INTERVAL * COUNTER_CHECK_EVERY as u32);
+        assert!(
+            self.warm_reads >= owed_reads,
+            "the load took {} warm read-only requests across the {window:?} a recovery was in \
+             flight for, where its cadence owes {owed_reads} over that stretch, so it stopped \
+             taking requests while the host came back",
             self.warm_reads
         );
     }
 }
 
-/// How many warm read-only requests the ticks in `began..=through` owe, where
-/// `began` is the tick a recovery was demanded on.
+/// How many doses a cadence of one per `every` owes over `span`.
 ///
-/// One for that tick, which a demanded recovery always takes, and one for every
-/// tick after it that the cadence falls on. The rule is asked of a stretch of
-/// ticks rather than restated as arithmetic: what the window owes is what the
-/// loop would have done over the same ticks.
-fn warm_reads_over(began: u64, through: u64) -> u64 {
-    1 + (began + 1..=through)
-        .filter(|tick| tick.is_multiple_of(COUNTER_CHECK_EVERY))
-        .count() as u64
+/// Whole doses only: a cadence owes its next one when the interval has passed,
+/// not part-way through it.
+fn doses_over(span: Duration, every: Duration) -> u64 {
+    (span.as_millis() / every.as_millis()) as u64
+}
+
+/// One look at what the entry under `name` publishes, bounded.
+///
+/// A look is a lock and a label, and [`attach::STATE_PROBE`] is what the whole
+/// crate separates a host that has stopped answering from a condition that has
+/// not arrived with. The load reads the state on every tick and again on every
+/// settling look, outside any wait, so the bound is applied here: a probe that
+/// overran is not a recovery taking its time, and no number of fresh demands
+/// answers it. It ends the run where it is found.
+fn probed_state(
+    host: &Host<ProductionEntryOps>,
+    name: &VaultName,
+) -> Result<TrustState, ErrorEnvelope> {
+    let began = Instant::now();
+    let observed = host.state(name);
+    let took = began.elapsed();
+    assert!(
+        took <= attach::STATE_PROBE,
+        "one look at what `{name}` publishes cost {took:?}, past the {:?} a look at a published \
+         label may take: the host has stopped answering rather than the entry not being back",
+        attach::STATE_PROBE
+    );
+    observed
 }
 
 /// Whether what the host answered is the refusal a name it holds no entry under

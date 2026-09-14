@@ -72,11 +72,17 @@
 //!   answer the stage does not carry, or one stage armed twice — is a mistake in
 //!   the harness rather than a stage nothing is armed at, so it panics.
 //! - `NORN_FS_WATCH_ARMED_WATCHES` — how many of this process's watch
-//!   establishments the arm reaches, as a number. Absent, it reaches every one
-//!   of them. Named, the first that many establishments carry the arm and every
-//!   one after them carries an empty one. A value this module cannot read — a
-//!   spelling that is not a number, or a zero, which arms the stages named
-//!   beside it at no watch at all — is a mistake in the harness, so it panics.
+//!   establishments carry the arm, as a number. Absent, every one of them does.
+//!   Named, the first that many carry it and every one after them carries an
+//!   empty arm. The count is over the process rather than over a vault: a
+//!   process attaching two vaults spends the budget on whichever establishes
+//!   first, and it is spent where the arm is composed, so an establishment that
+//!   fails before it reaches any boundary has still carried one. A value this
+//!   module cannot read — a spelling that is not a number, or a zero, which arms
+//!   the stages named beside it at no watch at all — is a mistake in the
+//!   harness, so it panics, and so does a budget spelled where
+//!   `NORN_FS_WATCH_ARMED_STAGES` arms nothing, because it bounds a condition
+//!   nothing meets.
 //! - `NORN_FS_ARM_HITS` — the write seam's record file, and the same one here. A
 //!   fired arm appends `seam=norn-fs/watch stage=<name> answer=<name>` to it
 //!   before it answers, so a harness reads which boundary the watcher actually
@@ -124,6 +130,14 @@
 //! arm is a condition rather than a case. That crate's own `induced-failure`
 //! feature forwards to this one, so a lane arming a host has this reader
 //! compiled in.
+//!
+//! **`norn-host`'s scheduled soak load is the one consumer that budgets the
+//! arm.** Its child attaches once under a long mixed load, armed at the stream
+//! stage and budgeted to that one establishment, so the entry loses coverage a
+//! single time and the demand the load holds re-installs it. Every watch the
+//! recovery puts up after that is an ordinary one, which is what keeps the rest
+//! of the hour a load being served rather than a process re-attaching. That
+//! budget is the whole reason the third variable exists.
 //!
 //! **The one watcher trust transition that arms nothing is a root that stops
 //! being covered.** A directory removal is a condition a test can arrange, so
@@ -723,17 +737,38 @@ mod armed {
     /// The process's stages, where the budget still holds an establishment, and
     /// an empty arm where it does not. A process that named no budget has every
     /// establishment carry the stages, which is what an arm has always meant.
+    ///
+    /// A budget spelled where nothing is armed is refused here rather than
+    /// ignored: it bounds a condition that is never met, so the harness that
+    /// spelled it is reading a number it never had.
     pub(super) fn stages_this_watch_takes() -> &'static [(Stage, Answer)] {
         let stages = stages();
-        // Asked only where something is armed: a budget spent by the watches of
-        // an unarmed process would make the first armed one — there is never one
-        // — carry nothing, and it reads the environment of every ordinary run
-        // for an answer nothing uses.
-        if stages.is_empty() || takes_an_establishment() {
+        if stages.is_empty() {
+            refuse_a_budget_that_bounds_nothing();
+            return &[];
+        }
+        if takes_an_establishment() {
             stages
         } else {
             &[]
         }
+    }
+
+    /// Refuse a process that budgeted an arm and armed no stage.
+    ///
+    /// The budget is not *spent* by an unarmed process — a count consumed by
+    /// watches carrying nothing would leave the first armed establishment,
+    /// were there ever one, short — but it is read, because a budget standing
+    /// beside a misspelled or forgotten [`ARMED_STAGES`] is the harness mistake
+    /// this seam refuses loudly rather than the unbudgeted meaning.
+    fn refuse_a_budget_that_bounds_nothing() {
+        static REFUSED: OnceLock<()> = OnceLock::new();
+        REFUSED.get_or_init(|| {
+            assert!(
+                std::env::var_os(ARMED_WATCHES).is_none(),
+                "{ARMED_WATCHES} budgets an arm and {ARMED_STAGES} arms no stage, so the budget                  bounds a condition nothing meets"
+            );
+        });
     }
 
     /// Whether the budget still holds an establishment, taking one where it

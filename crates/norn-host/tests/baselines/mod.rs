@@ -15,9 +15,12 @@
 //!
 //! Every band below is the pinned toolchain's unoptimized build. The
 //! attachment bands are the peak resident set the kernel accounted to the child
-//! process that attached; the soak bands are that child's own samples of itself
-//! over a long mixed load. Repeated local readings cover **macos-arm64**
-//! natively.
+//! process that attached, read with no cargo feature named; the soak bands are
+//! that child's own samples of itself over a long mixed load, read with
+//! `induced-failure` on, which is what arms the recovery that load is required
+//! to trip. The two subjects are set out beside
+//! [`assert_the_profile_the_bars_were_authored_on`]. Repeated local readings
+//! cover **macos-arm64** natively.
 //!
 //! **The platform that gates is `ubuntu-latest` x86_64-glibc.** Every band
 //! below carries its hosted readings beside the local ones, the same way the
@@ -180,6 +183,19 @@ pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 /// quartile means rather than endpoints is what keeps one sample taken during a
 /// changeset commit from deciding the run.
 ///
+/// **The series this is read over excludes the load's recovery windows.** The
+/// load trips one deliberate recovery, and the re-attach behind it walks and
+/// heals the ≥5k tree from inside the run — attach cost, in the first quartile
+/// every time, because the arm is owed to the first change the load churns.
+/// Left in the series it would raise the denominator of a ratio that is only
+/// ever failed by a large one, which desensitizes the bar rather than
+/// stretching it. The quartile-means reasoning above is about an incidental
+/// spike; a cost placed in one quartile by construction is not one, so it is
+/// dropped rather than averaged over. `host_soak.rs` marks each sample with
+/// whether a recovery was outstanding across its tick, and the peak beside this
+/// keeps every sample because the height a run reached is the height it
+/// reached.
+///
 /// Observed on `ubuntu-latest` x86_64-glibc, which is the platform that gates:
 /// **1.00 on each of the thirteen hour-long nightlies the hosted lane has run**,
 /// 2026-08-05 through 2026-08-17, with first-quartile means of 17.27–17.99 MiB
@@ -226,13 +242,27 @@ pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
 /// qualification ledger types every such run non-qualifying under, so the
 /// readings accumulate without the runs counting.
 ///
-/// **What it is the peak of is the load, and the attach is not in it.** The
-/// series starts once the attachment reads ready, so the heal walk over the
-/// ≥5k tree completes before the first sample and its cost is outside every
-/// reading taken here. [`ATTACH_PEAK_RSS_CEILING_BYTES`] bars that phase at the
-/// 2k profile and nothing bars it at ≥5k — an attach peak at soak scale is a
-/// third reading, needing an instrument that survives the phase rather than
-/// samples it, and it is not taken yet.
+/// **What it is the peak of is the load and the one re-attach inside it.** The
+/// series starts once the attachment reads ready, so the walk the load's first
+/// attach makes over the ≥5k tree completes before the first sample and is
+/// outside every reading taken here. The deliberate recovery's re-attach is
+/// inside them: it re-walks and content-hash heals the same tree while the
+/// series is being sampled, so that walk's own high-water mark is a candidate
+/// for this maximum on every run. [`ATTACH_PEAK_RSS_CEILING_BYTES`] bars the
+/// first-attach phase at the 2k profile and nothing bars it at ≥5k — an attach
+/// peak at soak scale is a third reading, needing an instrument that survives
+/// the phase rather than samples it, and it is not taken yet.
+///
+/// **The readings below are the load without that walk, so this calibration is
+/// stale until a hosted run re-reads it.** They were taken before the load
+/// armed a recovery, and what the ceiling is authored over must be the series
+/// the bar now sees: the next `workflow_dispatch` of the certification lane is
+/// what re-reads the peak at the ≥5k profile with the re-attach in the series,
+/// and the value here is re-authored off that reading before it is trusted as
+/// a band of the current subject. The local reading at the short duration with
+/// the recovery in the series is **22.84 MiB**, inside the 22.31–23.20 band
+/// below, which says the move is small on macos-arm64 and says nothing about
+/// the hosted lane's ≥5k walk.
 ///
 /// Observed on `ubuntu-latest` x86_64-glibc at the scheduled hour, which is the
 /// lane that gates: the peak has been recorded on **every nightly since the
@@ -483,6 +513,26 @@ pub fn fits<T: PartialOrd>(reading: T, ceiling: T) -> bool {
 /// It fails at run time rather than at compile time on purpose: a release build
 /// of the workspace suite is a normal thing to want, and it is only the
 /// measurement cases that are wrong under it.
+///
+/// **The build's feature set is the other half of that subject, and the two
+/// halves of this file are read on different ones.** A cargo feature changes
+/// what is compiled the way a profile does, so it is stated here rather than
+/// left to a reader to recompute off the checkout:
+///
+/// - The `ATTACH_*` bands are read **feature-off**. `memory.rs` compiles under
+///   the plain workspace build and the per-PR lane's attach step names no
+///   feature.
+/// - The `SOAK_*` bands are read **with `induced-failure` on**. `host_soak.rs`
+///   is a whole file behind that feature — the load arms `norn-fs`'s watcher
+///   seam to trip its deliberate recovery, and the seam has a reader nowhere
+///   else — so its feature set is closed by construction and there is no
+///   run-time guard here to match the profile assertion below. The lane that
+///   reads them names the feature in its step's `LANE_FEATURES`, and the
+///   suite-manifest digest closes over the workflow that does, so the
+///   feature-on transition moves the digest and restarts lockdown's count.
+///
+/// A qualification record carries the platform and the runner but no
+/// build-configuration field, so what the measured build was is read here.
 #[allow(clippy::assertions_on_constants)] // The constant is the build profile, and the point is to fail the run under the wrong one.
 pub fn assert_the_profile_the_bars_were_authored_on() {
     assert!(

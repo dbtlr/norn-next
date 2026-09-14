@@ -305,6 +305,139 @@ fn lane_steps(workflow: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The features a target's own source puts the whole file behind.
+///
+/// Read off the inner attributes rather than off a table: a suite that is
+/// `#![cfg(feature = "...")]` compiles to zero tests without the feature, and
+/// the file itself is the only place that fact is stated.
+fn features_a_target_is_behind(source: &str) -> BTreeSet<String> {
+    source
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| {
+            let rest = line.strip_prefix("#![cfg(feature = \"")?;
+            let (feature, _) = rest.split_once('"')?;
+            Some(feature.to_string())
+        })
+        .collect()
+}
+
+/// The step body each lane invocation sits in, as `(package, target, body)`.
+///
+/// A step is the invocation line and everything under it up to the next step,
+/// which is where a workflow puts the environment a step runs with.
+fn lane_step_bodies(workflow: &str) -> Vec<(String, String, String)> {
+    let lines: Vec<&str> = workflow.lines().collect();
+    let mut steps = Vec::new();
+    for (at, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let mut tokens = trimmed.split_whitespace();
+        if tokens
+            .find(|token| *token == LANE_SCRIPT || token.ends_with(&format!("/{LANE_SCRIPT}")))
+            .is_none()
+        {
+            continue;
+        }
+        let (Some(package), Some(target)) = (tokens.next(), tokens.next()) else {
+            continue;
+        };
+        let indent = line.len() - line.trim_start().len();
+        let end = lines[at + 1..]
+            .iter()
+            .position(|later| {
+                let trimmed = later.trim_start();
+                trimmed.starts_with("- ") && later.len() - trimmed.len() <= indent
+            })
+            .map_or(lines.len(), |offset| at + 1 + offset);
+        steps.push((
+            package.to_string(),
+            target.to_string(),
+            lines[at..end].join("\n"),
+        ));
+    }
+    steps
+}
+
+/// The features a lane step declares through `LANE_FEATURES`.
+fn features_a_step_names(body: &str) -> BTreeSet<String> {
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.strip_prefix(&format!("{LANE_FEATURES}:")))
+        .flat_map(|value| {
+            value
+                .trim()
+                .trim_matches('"')
+                .split([',', ' '])
+                .filter(|named| !named.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The environment key a lane step names its cargo features through.
+const LANE_FEATURES: &str = "LANE_FEATURES";
+
+/// **A step running a suite that sits behind a cargo feature names that
+/// feature.** A target compiled without it is zero tests, and a lane running
+/// zero tests measures nothing it claims to.
+///
+/// The pairing is between two files that never mention each other: the suite
+/// states the feature it is behind in its own `#![cfg(...)]`, and the workflow
+/// states the features it builds with in the step's `LANE_FEATURES`. Nothing
+/// else reads the pair, so a feature dropped from a step is silent — the suite
+/// compiles away, `lane-suite.sh`'s zero-pass guard catches it at whatever hour
+/// that lane runs, and per-PR nothing notices. This is what notices.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: reads this repository's own workflow files and test sources.
+pub fn assert_lane_steps_name_the_features_their_targets_need(
+    manifest_dir: &Path,
+    package: &str,
+    lanes: &[(&str, &str)],
+) {
+    let directory = workflows_directory(manifest_dir);
+    let workflows: Vec<String> = std::fs::read_dir(&directory)
+        .unwrap_or_else(|e| panic!("reading {} for workflows: {e}", directory.display()))
+        .map(|entry| entry.expect("a directory entry").path())
+        .filter(|path| path.extension().is_some_and(|e| e == "yml" || e == "yaml"))
+        .map(|path| {
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+        })
+        .collect();
+
+    for (stem, _) in lanes {
+        let source_path = manifest_dir.join("tests").join(format!("{stem}.rs"));
+        let source = std::fs::read_to_string(&source_path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", source_path.display()));
+        let needed = features_a_target_is_behind(&source);
+        if needed.is_empty() {
+            continue;
+        }
+        for workflow in &workflows {
+            for (named, target, body) in lane_step_bodies(workflow) {
+                if named != package || target != *stem {
+                    continue;
+                }
+                let declared = features_a_step_names(&body);
+                let missing: Vec<&String> = needed
+                    .iter()
+                    .filter(|one| !declared.contains(*one))
+                    .collect();
+                assert!(
+                    missing.is_empty(),
+                    "a lane step runs `{package}`'s `{target}` and its `{LANE_FEATURES}` does not \
+                     name {missing:?}, which that suite is behind. Without the feature the target \
+                     compiles to zero tests and the step reports having measured nothing"
+                );
+            }
+        }
+    }
+}
+
 /// The workflows directory above `manifest_dir`.
 ///
 /// The walk is upward from the package's own manifest directory rather than

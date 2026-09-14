@@ -332,6 +332,24 @@ fn an_unreadable_budget_refuses_the_process_it_was_spelled_for() {
     }
 }
 
+/// **A budget beside no arm ends the process too.** The budget bounds how often
+/// a condition is met, so a harness that spelled one and misspelled or forgot
+/// the stages has written a case whose condition is never met and whose count
+/// reads as if it were — the same silent pass an unreadable budget would be.
+#[test]
+fn a_budget_with_no_stage_armed_refuses_the_process_it_was_spelled_for() {
+    let tree = Tree::new("budget-with-no-stages");
+    let run = tree.spawn(&[(ARMED_WATCHES, "1")]);
+
+    assert_ne!(
+        run.status,
+        RunStatus::Exited(0),
+        "a budget standing beside no armed stage was read as an ordinary unarmed run"
+    );
+    tree.attestation()
+        .assert_never_reached("a budget with no stage armed", &[(SEAM, CHILD_SEAM)]);
+}
+
 /// How many times the watcher seam's own arms recorded themselves.
 fn firings(attested: &Attestation) -> usize {
     attested
