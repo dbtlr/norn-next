@@ -14,7 +14,14 @@
 # against a table that crate owns (its tests/lanes.rs). A stray `#[ignore]`
 # therefore cannot be silently adopted by whichever lane runs its suite.
 #
+# A suite whose cases sit behind a feature compiles to zero tests without it, so
+# the step that runs one names the feature in `LANE_FEATURES`. It arrives in the
+# environment rather than in the argument list because the two tokens after this
+# script are the pairing `norn_testkit::lanes` reads as the package and the
+# target a step adopts, and a flag between them would be read as one of those.
+#
 # usage: lane-suite.sh <package> <test-target> [extra harness args...]
+#        LANE_FEATURES=<features> lane-suite.sh ...
 
 set -uo pipefail
 
@@ -38,7 +45,15 @@ shift 2
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
 
-cargo test --locked -p "$package" --test "$target" -- --ignored "$@" 2>&1 | tee "$log"
+# Expanded through the `+` form below, so an empty array is no argument at all
+# rather than the unbound-variable error `set -u` raises for one on the bash 3.2
+# that macOS ships.
+features=()
+if [ -n "${LANE_FEATURES:-}" ]; then
+  features=(--features "$LANE_FEATURES")
+fi
+
+cargo test --locked -p "$package" --test "$target" ${features[@]+"${features[@]}"} -- --ignored "$@" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 
 if [ "$status" -ne 0 ]; then
