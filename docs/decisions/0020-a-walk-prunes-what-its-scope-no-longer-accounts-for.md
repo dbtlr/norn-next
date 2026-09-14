@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0023-a-walk-refusal-that-stands-is-a-reading.md
 date: 2026-08-13
 ---
 

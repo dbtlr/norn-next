@@ -371,7 +371,7 @@ batches a case is judging.
 
 | Injected failure | Required outcome |
 |---|---|
-| Process killed mid-increment | **Handled at rung 2.** **The changeset is the unit of atomicity**, and an increment is one or more of them: a changeset lands whole or not at all, so a process that dies inside one leaves the store holding no part of it. A heal-scale increment is chunked into separately atomic changesets, so a tear between two of them leaves every chunk that committed and no part of the one in flight — each generation whole, the vault's coverage short. Either way the work the tear lost returns through the attach heal's ordinary content-hash comparison. One flush is a changeset plus the findings recorded after it, each in its own transaction, so a tear between the two leaves the increment landed — a tombstone where a quarantined path had a row, the derived row where a document read without its frontmatter — with no finding beside it. **The state such a tear leaves is the pending maintenance, at rest in the rows themselves**: no pending-work table stands beside the store and none is owed, because what the tear leaves demands its own re-derivation and the next heal that reaches it converges the pair. Two signals in the rows' own state are what demand it, and both are read without an edit to the file: a markdown place inside the vault's membership holding no row is re-derived unconditionally, which is every quarantined path the vault still holds; and a row asserting an absent frontmatter projection beside a nonzero count of frontmatter-scoped diagnostics, with no document-scoped finding standing at it, is re-derived on an unchanged content hash — which is every degraded document a tear left bare. Between the tear and the next heal over that path the finding is absent, so the vault under-reports across that window — bounded by heal cadence, never permanent. The subject-axis prune of [ADR 0020](decisions/0020-a-walk-prunes-what-its-scope-no-longer-accounts-for.md) runs at the job end that follows, and a tear before it leaves exactly the state a heal that never pruned leaves — reached, as every stale finding is, by the next walk whose clean scope covers the place. All three tears are injected: inside one changeset, at a chunk boundary, and between a flush's increment and its findings. The last is the one whose recovery is the row-borne signals above rather than a repair path, so its case is stated over both of them — a tombstone standing where a quarantined path had a row, and a degraded row standing bare — and asserts the findings are re-recorded by the next heal with no edit to either file. |
+| Process killed mid-increment | **Handled at rung 2.** **The changeset is the unit of atomicity**, and an increment is one or more of them: a changeset lands whole or not at all, so a process that dies inside one leaves the store holding no part of it. A heal-scale increment is chunked into separately atomic changesets, so a tear between two of them leaves every chunk that committed and no part of the one in flight — each generation whole, the vault's coverage short. Either way the work the tear lost returns through the attach heal's ordinary content-hash comparison. One flush is a changeset plus the findings recorded after it, each in its own transaction, so a tear between the two leaves the increment landed — a tombstone where a quarantined path had a row, the derived row where a document read without its frontmatter — with no finding beside it. **The state such a tear leaves is the pending maintenance, at rest in the rows themselves**: no pending-work table stands beside the store and none is owed, because what the tear leaves demands its own re-derivation and the next heal that reaches it converges the pair. Two signals in the rows' own state are what demand it, and both are read without an edit to the file: a markdown place inside the vault's membership holding no row is re-derived unconditionally, which is every quarantined path the vault still holds; and a row asserting an absent frontmatter projection beside a nonzero count of frontmatter-scoped diagnostics, with no document-scoped finding standing at it, is re-derived on an unchanged content hash — which is every degraded document a tear left bare. Between the tear and the next heal over that path the finding is absent, so the vault under-reports across that window — bounded by heal cadence, never permanent. The subject-axis prune of [ADR 0023](decisions/0023-a-walk-refusal-that-stands-is-a-reading.md) runs at the job end that follows, and a tear before it leaves exactly the state a heal that never pruned leaves — reached, as every stale finding is, by the next walk whose clean scope covers the place. All three tears are injected: inside one changeset, at a chunk boundary, and between a flush's increment and its findings. The last is the one whose recovery is the row-borne signals above rather than a repair path, so its case is stated over both of them — a tombstone standing where a quarantined path had a row, and a degraded row standing bare — and asserts the findings are re-recorded by the next heal with no edit to either file. |
 | Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. The row is stated over the **derived store's own writes**, which is where a rung meets a full disk; a disk that fills under the write kernel staging a shadow is the same condition with a different required outcome — refuse before the swap and leave the destination alone, report nothing after it — and is reached in `norn-fs`'s lockdown suite rather than here. |
 | Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. A document the heal cannot open is refused rather than quarantined for the same reason — nothing was read, so nothing is known about what the document holds. **A revoked directory is also a directory watch coverage is installed over**, so on a backend that adds a watch per directory the install meets the denial before the heal walks, and trust is withdrawn as a lost watcher rather than as a refused heal. Either door leaves the entry untrusted naming the path, every committed row standing, and nothing pruned, so the row holds whichever the platform takes. |
 | A document norn cannot decode | **Quarantined at rung 2.** The document yields no facts, a finding names it and the cause class — withheld while a readable document stands at its rendered spelling — the heal keeps going, and the entry reaches `Ready` serving every other document. |
@@ -409,11 +409,20 @@ included — has been read.
 
 **A name reached that way is stated, never passed over in silence.** The walk yields it as a
 root it read nothing under, the same notation it yields for a root it deliberately does not
-enter, and the heal holds that root the way it holds every other one. The two axes part
+enter, and the heal reads the reason rather than the notation alone. The two axes part
 there: the rows stored beneath it converge on what a walk begun now holds — no document is
 at that name, so they are pruned — while the findings under it stay **withheld**, because
-nothing in this job read a place under a name it never entered, and a job that took them
-would be claiming an enumeration it never made. What stands at the name now, where an edit
+nothing in this job read a place under a name it never entered, what is at that name now is
+a question this walk never asked, and a job that took them would be claiming an enumeration
+it never made. **A root the walk deliberately does not enter is the other answer**, and the
+two axes converge together there: an exclusion root, a mechanism subtree, a shadow basename,
+a link, a device-like entry, a name below an entry the walk reads rather than descends into —
+each is a fact about an entry that stands, so a derivation begun from zero over the same
+tree refuses it the same way and holds nothing beneath it. The findings under such a root go
+the way the rows go, on the job's own schedule: the rows die inside the prune's increment and
+the findings are taken once every scope of the job has run, so a process killed between the
+two leaves rows pruned and findings standing — which the next walk that enumerates their
+places takes, by this same rule. What stands at the name now, where an edit
 replaced it rather than removing it, is a change of the vault's own and nothing here
 describes it. A page holding a vanished name still covers the run of names it listed, so the
 rest of the directory is paged exactly once and no name between that one and the page
@@ -428,8 +437,8 @@ the paging stat is pinned at the production path from a third fault seam, descri
 other two below.
 
 **Quarantine is per document; refusal is per vault.** See
-[ADR 0020](decisions/0020-a-walk-prunes-what-its-scope-no-longer-accounts-for.md), which
-supersedes ADR 0019. A document norn can derive nothing from — path bytes that are not
+[ADR 0023](decisions/0023-a-walk-refusal-that-stands-is-a-reading.md), which
+supersedes ADR 0020. A document norn can derive nothing from — path bytes that are not
 UTF-8, a path spelling the document-path grammar refuses, or a body that is not UTF-8 — is
 a fact about one document rather than about the vault, so it never withdraws the vault.
 The rung-2 heal skips its facts, records a finding naming the path and the cause class —
@@ -505,12 +514,22 @@ and no discard reaches it — and a walk that enumerated a scope cleanly knows s
 path does: that nothing under that scope stands there at all. So a walk ends by taking, on each
 side, the findings whose subject its own scope holds and that nothing it read concluded — the same
 scope, in the same job-end recording that files what it did read, on the axis the rows are pruned
-on. **What licenses that is enumeration rather than absence.** Three things withhold it, and each
-of them leaves the finding standing: a walk that refused ends its job ahead of its own prune; a
-root the walk did not enter covers the places beneath it, so a finding under a withheld subtree
-survives whatever else the walk read; and a place is named by every spelling that renders onto it,
+on. **What licenses that is enumeration, or a refusal that stands, rather than absence.** Three things
+withhold it, and each of them leaves the finding standing: a walk that refused ends its job ahead
+of its own prune; a root the walk read nothing at and cannot state a standing refusal for — a name
+that vanished inside one of the walk's own windows — covers the places beneath it, so a finding
+under a withheld subtree survives whatever else the walk read, and covers every marker-carrying
+place in the job where the vanished root's own spelling the directory grammar refuses, since such a
+root addresses no range of stored paths and which of the places it hid is unknowable from outside
+it; and a place is named by every spelling that renders onto it,
 so a walk rooted below that place's deepest unrendered ancestor read some of those spellings and
-never the rest and concludes nothing there. The collision is where the sides tell apart most
+never the rest and concludes nothing there. That last one is what keeps a scoped leg off the places
+its own refused root hides: the leg read one of the spellings rendering there and the vault heal
+reads them all, so the two legs agree on authority and the heal is what converges the places. It
+bites twice — on the rendered place a refused root stands at where the document grammar refuses its
+spelling, and on every marker-carrying place beneath a refused root whose spelling no prefix admits,
+which the leg has no range of stored paths to register for at all. Both are bounded by the next
+heal, and until it runs the maintained store holds findings a build from zero does not. The collision is where the sides tell apart most
 clearly — the document whose bytes were refused can leave while a refused spelling still renders
 onto its place, and the walk that still reads that spelling ends the content findings there and
 leaves the spelling ones. **A

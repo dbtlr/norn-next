@@ -677,23 +677,7 @@ fn an_ambiguity_classs_membership_change_converges_on_a_build_from_zero() {
 #[test]
 fn a_rendering_collision_that_clears_converges_on_a_build_from_zero() {
     let sandbox = sandbox("churn-collision");
-    // The name is asked for outside the vault first, because the name is this
-    // case's whole subject: a workload that could not write it would judge a
-    // tree with no collision in it. **The platform lane is declared, not
-    // skipped** — the same rule the case flip runs under. A filesystem that
-    // refuses this name fails here, saying so, rather than logging a line and
-    // reporting a pass over nothing.
-    let probe = sandbox.work_dir().join("bad\\name.probe");
-    if let Err(problem) = std::fs::write(&probe, b"a name") {
-        panic!(
-            "this filesystem will not create `{}`: {problem}. A backslash in a name is what this \
-             case is about, so there is no tree to judge here and no lane declared for a volume \
-             that refuses one — declare it, the way the case-flip case declares what its volume \
-             does with case.",
-            probe.display()
-        );
-    }
-    std::fs::remove_file(&probe).expect("removing the probe");
+    declare_a_backslash_name(&sandbox);
 
     let script = Script::new(
         "a rendering collision that clears",
@@ -737,6 +721,172 @@ fn a_rendering_collision_that_clears_converges_on_a_build_from_zero() {
         vec![FindingKind::PathNamesNoDocument.as_str().to_string()],
         "the vacated place carries no statement about the name norn cannot spell"
     );
+}
+
+/// **A directory that becomes a name the walk reads nothing through.**
+///
+/// A symbolic link is named by a walk and never traversed, so the places that
+/// stood under the directory are places no derivation reaches once the link
+/// stands there. **The two axes go together or the store diverges**: the rows
+/// beneath the refused root die, and the finding filed at the place a refused
+/// spelling rendered onto has to die with them — a build from zero over the
+/// same final tree refuses that root as well and holds neither.
+///
+/// The forbidden shape is a store that prunes the rows and keeps the findings.
+/// It leaves the maintained vault saying that a document norn cannot name
+/// stands somewhere nothing can be reached, at a place a fresh derivation is
+/// silent about, and no later walk can ever reach that place to take the
+/// statement back.
+///
+/// **The phase lands on an attached, settled host**, so the watcher's own
+/// scoped increment is the leg that reads it: the dirty paths it reports all
+/// sit at or under the name that is now a link, and the increment converges the
+/// rows and the findings there together. The sibling case below lands its phase
+/// detached and puts the same tree in front of the attach heal.
+///
+/// Neither case pins one leg against a mutation of the other — a real watcher
+/// may replay reports from before an attach, so the two legs overlap on any
+/// lane. What each leg does on its own is pinned deterministically in
+/// `norn-host`'s own cases, watcherless for the heal and against
+/// `scoped_increment` for the increment.
+#[test]
+fn a_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero() {
+    let sandbox = sandbox("churn-refused-root");
+    declare_a_backslash_name(&sandbox);
+
+    let mut ink = churn::Ink::new(83);
+    let opening = Script::new(
+        "a directory holding a document and a name the grammar refuses",
+        vec![
+            Step::new(
+                "write the document the directory holds",
+                Act::Write {
+                    at: "churn/linked/note.md".to_string(),
+                    bytes: ink.document("under the directory"),
+                },
+            ),
+            Step::new(
+                "write a name the document-path grammar refuses beside it",
+                Act::Write {
+                    at: "churn/linked/bad\\name.md".to_string(),
+                    bytes: b"# a body\n".to_vec(),
+                },
+            ),
+        ],
+    )
+    .without_rows_at("churn/linked/bad\\name.md");
+    let refusing = Script::new(
+        "the directory becomes a link the walk reads nothing through",
+        vec![Step::new(
+            "replace the directory with a symbolic link",
+            Act::ReplaceWithLink {
+                at: "churn/linked".to_string(),
+                to: "away".to_string(),
+            },
+        )],
+    );
+
+    let mut churned =
+        attach_and_churn(sandbox, &opening, When::Settled).then(&refusing, When::Settled);
+    churned.judge("a directory replaced by a link the walk refuses", 0);
+
+    let place = "churn/linked/bad\u{fffd}name.md";
+    for (label, vault) in churned.both_derivations() {
+        let mut store = vault.store();
+        let projection = StoreProjection::read(&mut store).expect("projecting a store");
+        assert!(
+            kinds_at(&projection, place).is_empty(),
+            "{label} holds {:?} at a place under a root the walk reads nothing through",
+            kinds_at(&projection, place)
+        );
+    }
+}
+
+/// **A directory whose own name no prefix admits becomes a name the walk reads
+/// nothing through.**
+///
+/// The root's spelling carries a backslash, which the directory grammar
+/// refuses, so it addresses no range of stored paths at all: the places it
+/// holds are reachable only as the marker-carrying places they render onto.
+/// **A refusal that stands is still a reading.** A walk begun now names the
+/// link and never traverses it, so a derivation from zero over the final tree
+/// holds no row and no finding under that root, and the maintained store has to
+/// hold neither.
+///
+/// The forbidden shape is a store that answers such a root by withdrawing its
+/// authority over every marker-carrying place in the job. One link nobody named
+/// would then freeze every undecodable place in the vault — permanently, since
+/// a link that stands never stops standing — while a fresh derivation over the
+/// same tree is silent about the places under it.
+///
+/// **The heal is the only leg that converges this, so the phase lands while
+/// nothing is attached** and the attach heal reads the final tree. A scoped
+/// increment answering a dirty path under such a root has no range of stored
+/// paths to register — the spelling admits no prefix — so it never reaches the
+/// places the root hides, and it enumerated one of the spellings rendering onto
+/// them rather than all of them. There is no row beneath such a root for it to
+/// converge — the spelling poisons every path under it, so the store holds none
+/// — and the findings at the places it hides are left to the heal that follows.
+/// A phase landing on an attached host would judge a store that still held
+/// them.
+#[test]
+fn a_refused_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero() {
+    let sandbox = sandbox("churn-unaddressable-root");
+    declare_a_backslash_name(&sandbox);
+
+    let mut ink = churn::Ink::new(97);
+    let opening = Script::new(
+        "a directory whose own name the directory grammar refuses",
+        vec![
+            Step::new(
+                "write a document under the refused directory",
+                Act::Write {
+                    at: "churn/hidden\\dir/note.md".to_string(),
+                    bytes: ink.document("under a refused directory"),
+                },
+            ),
+            Step::new(
+                "write a document at a readable place, whose finding the case keeps",
+                Act::Write {
+                    at: "churn/outside\\name.md".to_string(),
+                    bytes: b"# a body\n".to_vec(),
+                },
+            ),
+        ],
+    )
+    .without_rows_at("churn/hidden\\dir/note.md")
+    .without_rows_at("churn/outside\\name.md");
+    let refusing = Script::new(
+        "the refused directory becomes a link the walk reads nothing through",
+        vec![Step::new(
+            "replace the refused directory with a symbolic link",
+            Act::ReplaceWithLink {
+                at: "churn/hidden\\dir".to_string(),
+                to: "away".to_string(),
+            },
+        )],
+    );
+
+    let mut churned =
+        attach_and_churn(sandbox, &opening, When::Settled).then(&refusing, When::Before);
+    churned.judge("a directory no prefix admits replaced by a refused link", 0);
+
+    let hidden = "churn/hidden\u{fffd}dir/note.md";
+    let outside = "churn/outside\u{fffd}name.md";
+    for (label, vault) in churned.both_derivations() {
+        let mut store = vault.store();
+        let projection = StoreProjection::read(&mut store).expect("projecting a store");
+        assert!(
+            kinds_at(&projection, hidden).is_empty(),
+            "{label} holds {:?} at a place under a root the walk reads nothing through",
+            kinds_at(&projection, hidden)
+        );
+        assert!(
+            !kinds_at(&projection, outside).is_empty(),
+            "{label} holds nothing at the marker-carrying place the walk still reads, so the \
+             control proves nothing"
+        );
+    }
 }
 
 /// **The instrument moves with one seeded unit of work.**
@@ -1073,6 +1223,26 @@ struct Churned {
     /// attach heal that came before it.
     #[cfg(feature = "induced-failure")]
     maintenance: EvidenceReading,
+}
+
+/// **The platform lane for a backslash in a name, declared rather than
+/// skipped.** The name is asked for outside the vault, because a case that
+/// writes one is about that name: a workload that could not write it would
+/// judge a tree the case is not about. A filesystem that refuses the name fails
+/// here, saying so, rather than logging a line and reporting a pass over
+/// nothing — the same rule the case flip runs under.
+fn declare_a_backslash_name(sandbox: &Sandbox) {
+    let probe = sandbox.work_dir().join("bad\\name.probe");
+    if let Err(problem) = std::fs::write(&probe, b"a name") {
+        panic!(
+            "this filesystem will not create `{}`: {problem}. A backslash in a name is what this \
+             case is about, so there is no tree to judge here and no lane declared for a volume \
+             that refuses one — declare it, the way the case-flip case declares what its volume \
+             does with case.",
+            probe.display()
+        );
+    }
+    std::fs::remove_file(&probe).expect("removing the probe");
 }
 
 fn sandbox(label: &str) -> Sandbox {

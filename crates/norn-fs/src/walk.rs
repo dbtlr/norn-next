@@ -175,6 +175,13 @@ impl Vault {
     /// root, and the last name's spelling is reached only once every name above
     /// it is there — so an absent ancestor answers, and a shadow basename below
     /// one is never spelled at all.
+    ///
+    /// **Every notation this states stands**, in the sense
+    /// [`SkipReason::stands`] names: a name that is not there answers `None`
+    /// here rather than [`SkipReason::Vanished`], which is what makes that the
+    /// one reason this never yields. A caller whose authority turns on the
+    /// distinction still asks the reason for it, so a reason class added later
+    /// is answered at the consumer rather than by this sentence.
     pub fn skip_reaching(&self, relative: &Path) -> Result<Option<SkipFact>, WalkError> {
         let subtree = self.normalize(relative)?;
         if let Some((root, reason)) = self.exclusions.covering_root(&subtree) {
@@ -694,6 +701,34 @@ pub enum SkipReason {
     /// a fact about an entry, so no spelling earns a refusal where no entry
     /// stands.
     Vanished,
+}
+
+impl SkipReason {
+    /// Whether a walk begun now reaches this root no further than this one did.
+    ///
+    /// Every reason but [`SkipReason::Vanished`] is a fact about an entry that
+    /// stands: an exclusion root, a mechanism subtree, a shadow basename, a
+    /// link, a device-like entry, a name below an entry the walk reads rather
+    /// than descends into. A derivation started from zero over this tree
+    /// refuses each of them the same way, so a consumer converging derived
+    /// state against what such a derivation holds may conclude the places
+    /// beneath one: they hold nothing, and will hold nothing for as long as the
+    /// entry stands.
+    ///
+    /// A vanished name is the other answer. Nothing was read at it, and what
+    /// stands there now is a question this walk never asked — so a consumer
+    /// owes the places beneath it the hold [`SkipReason::Vanished`] states.
+    pub fn stands(self) -> bool {
+        match self {
+            Self::HostExclusion
+            | Self::Mechanism
+            | Self::Shadow
+            | Self::SymbolicLink(_)
+            | Self::SpecialFile(_)
+            | Self::UnderAnEntry => true,
+            Self::Vanished => false,
+        }
+    }
 }
 
 impl From<Excluded> for SkipReason {
