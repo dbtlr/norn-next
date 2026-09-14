@@ -1209,7 +1209,7 @@ impl Family {
     ///
     /// The list is held exhaustive against this module's own source: a
     /// constructor returning a [`Phased`] that no variant here names fails
-    /// [`tests::every_phased_constructor_is_a_family`], so a family added to the
+    /// the `every_phased_constructor_is_a_family` test, so a family added to the
     /// driver reaches both suites rather than only the one whose author added
     /// it.
     pub const ALL: &'static [Family] = &[
