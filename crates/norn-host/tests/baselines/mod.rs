@@ -197,8 +197,23 @@ pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 /// that bar cannot see is a descriptor the work acquired and the host never
 /// handed back, because under a continuous load the two are the same number.
 /// This is the reading that separates them: the load stops churning and stops
-/// reading, the process sits idle for a bounded window, and the descriptors
-/// still open then are the ones held for no work at all.
+/// reading, and the descriptors still open once the host has nothing left to do
+/// are the ones held for no work at all.
+///
+/// **The reading is taken when the host is observed quiet, never after a fixed
+/// sleep.** The harness waits on the host's own account of what is running
+/// against the entry — nothing claimed, no leg registered, no job queued, no
+/// release in flight, nothing pinned — and reads the descriptors the moment that
+/// holds. A fixed sleep states the wrong thing in both directions: a drain that
+/// outruns it on a loaded runner is counted as descriptors the host kept, which
+/// fails this bar and resets the five-run count over a machine that was merely
+/// busy, and a host that settles at once still pays the rest of the window. The
+/// quiescent window is therefore a **bound** on that wait, and a wait that
+/// reaches it is a typed failure naming what was still in flight rather than a
+/// reading taken mid-drain. How long the host took to go quiet is recorded in
+/// the run's summary beside the count, so a bar met by a host that settled in
+/// two seconds and one met by a host that took twenty-nine are not the same
+/// record.
 ///
 /// **It is not an idle detach.** The entry stays attached and stays watched:
 /// the reap interval the soak harness configures is deliberately longer than

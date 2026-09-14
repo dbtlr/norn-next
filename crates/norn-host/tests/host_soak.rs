@@ -235,6 +235,13 @@ const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// has not landed.
 const STORE_READ_PROBE: Duration = Duration::from_secs(5);
 
+/// How long one reading of what the host still has in flight may take.
+///
+/// The probe takes one entry lock and copies five booleans out of it, so what a
+/// bound this wide catches is a lock held by work that is not returning rather
+/// than a slow evaluation.
+const QUIET_PROBE: Duration = Duration::from_secs(5);
+
 /// How often a sample is preceded by a warm read-only request, in samples.
 ///
 /// The cadence is the load's request dose, and it is what the no-starvation
@@ -354,17 +361,26 @@ const RECONCILE_LIMIT: Duration = Duration::from_secs(120);
 /// and the count taken at the end of it is of a host holding descriptors for no
 /// work at all.
 ///
-/// Thirty seconds, and it is a bound rather than a wait for an event. The
-/// host's watch poll runs every 50 ms and the load samples itself every
-/// [`SAMPLE_INTERVAL`], so the window is six hundred polls and thirty sampling
-/// periods — long enough that anything a drain was going to hand back has been
-/// handed back, and short enough to sit inside the child's own deadline beside
-/// the recovery waits.
+/// **Thirty seconds is the bound on that wait, not the wait itself.** The child
+/// waits for the host to go quiet — nothing claimed, no leg registered, no job
+/// queued, no release in flight, nothing pinned, read through
+/// [`Host::work_in_flight`] — and takes the reading the moment it does. A fixed
+/// sleep would be wrong in both directions: a drain that outruns the window on a
+/// loaded runner would be read as descriptors the host kept, failing the bar and
+/// resetting the five-run count over a machine that was merely busy, and a host
+/// that goes quiet in two seconds would still pay the other twenty-eight.
+///
+/// What the bound is for is the other answer. A host still working after thirty
+/// seconds of nothing asked of it is not a reading to take at all, so the wait
+/// fails with what was still in flight rather than measuring a host mid-drain.
+/// Thirty seconds is six hundred watch polls and thirty sampling periods at this
+/// suite's cadences, and it sits inside the child's own deadline beside the
+/// recovery waits.
 ///
 /// **It is not long enough to reap the entry, and deliberately so.**
-/// [`attach::IDLE_AFTER`] is longer than the load plus this window, which
+/// [`attach::IDLE_AFTER`] is longer than the load plus this bound, which
 /// [`run_load`] asserts, so the attachment is still standing and still watched
-/// across it. What the reading after it is of is a host at rest under coverage,
+/// however long the wait takes. What the reading after it is of is a host at rest under coverage,
 /// which is the state a vault sits in between a user's edits — not a host taken
 /// down.
 const QUIESCENCE: Duration = Duration::from_secs(30);
@@ -436,7 +452,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
     let recoveries = reported_recoveries(&outcome.stdout_text());
     let windows = reported_recovery_windows(&outcome.stdout_text());
     let high_water = reported_high_water(&outcome.stdout_text());
-    let quiescent_fds = reported_quiescent_fds(&outcome.stdout_text());
+    let (quiescent_fds, settled_ms) = reported_quiescent_fds(&outcome.stdout_text());
     let attested = Attestation::read(&hits);
     // **The slope's series is the load at rest.** A recovery re-installs
     // coverage, and the walk that heals the ≥5k tree behind it is attach cost
@@ -529,7 +545,11 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
                 "descriptor growth allowance",
                 baselines::SOAK_FD_GROWTH_ALLOWANCE.to_string(),
             ),
-            ("quiescent window (s)", QUIESCENCE.as_secs().to_string()),
+            ("quiescent bound (s)", QUIESCENCE.as_secs().to_string()),
+            (
+                "time the host took to go quiet (ms)",
+                settled_ms.to_string(),
+            ),
             (
                 "open descriptors, post-quiescence",
                 quiescent_fds.to_string(),
@@ -616,8 +636,9 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         assert!(
             baselines::fits(quiescent_retention, ceiling),
             "the host still held {quiescent_retention} descriptors above the load's first sample \
-             after {QUIESCENCE:?} of doing nothing, past a retention ceiling of {ceiling}: {} at \
-             the first sample, {} at the last and {quiescent_fds} at rest",
+             once it went quiet ({settled_ms} ms after the load stopped), past a retention \
+             ceiling of {ceiling}: {} at the first sample, {} at the last and {quiescent_fds} at \
+             rest",
             first.open_fds,
             last.open_fds
         );
@@ -938,19 +959,23 @@ fn reported_high_water(report: &str) -> Option<u64> {
 /// publishes. A missing line is a child that ended before its window did, and
 /// judging the run without the reading would report a bar as met that nothing
 /// took.
-fn reported_quiescent_fds(report: &str) -> usize {
+fn reported_quiescent_fds(report: &str) -> (usize, u64) {
     let line = report
         .lines()
         .find(|line| line.starts_with(QUIESCENT_LINE_PREFIX))
         .unwrap_or_else(|| {
             panic!(
-                "the load printed no `{QUIESCENT_LINE_PREFIX}` line, so it never sat idle for \
-                 {QUIESCENCE:?} and the descriptors it holds at rest went unread"
+                "the load printed no `{QUIESCENT_LINE_PREFIX}` line, so the host never went quiet \
+                 inside {QUIESCENCE:?} and the descriptors it holds at rest went unread"
             )
         });
-    field(line, "open_fds=")
+    let open_fds = field(line, "open_fds=")
         .and_then(|value| value.parse().ok())
-        .unwrap_or_else(|| panic!("`{line}` does not carry a descriptor count"))
+        .unwrap_or_else(|| panic!("`{line}` does not carry a descriptor count"));
+    let settled_ms = field(line, "settled_ms=")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("`{line}` does not carry how long the host took to go quiet"));
+    (open_fds, settled_ms)
 }
 
 /// The highest resident set the series holds.
@@ -1058,11 +1083,14 @@ const RECOVERY_WINDOW_PREFIX: &str = "recovery ";
 /// the parent's reading is an `Option` rather than a required field.
 const HIGH_WATER_LINE_PREFIX: &str = "high water ";
 
-/// What the child prints once it has sat idle for [`QUIESCENCE`], and what the
-/// parent reads the post-quiescence descriptor count off.
+/// What the child prints once the host has gone quiet, and what the parent reads
+/// the post-quiescence descriptor count off.
 ///
-/// A run that ends without this line ended before its quiescent window did, so
-/// the parent requires it rather than treating its absence as a platform that
+/// It carries how long the wait took beside the count, so the record says
+/// whether the host settled promptly or spent most of [`QUIESCENCE`] draining.
+///
+/// A run that ends without this line ended before the host went quiet, so the
+/// parent requires it rather than treating its absence as a platform that
 /// publishes nothing.
 const QUIESCENT_LINE_PREFIX: &str = "quiescent ";
 
@@ -1174,14 +1202,32 @@ fn run_load(root: &Path) {
                 println!("{HIGH_WATER_LINE_PREFIX}rss_bytes={high_water}");
             }
             // **The quiescent reading.** The lease is gone and the loop has
-            // stopped, so nothing above touches the host across this sleep: no
-            // churn, no warm read, no demand. The entry stays attached and
-            // stays watched — [`attach::IDLE_AFTER`] is longer than any load
-            // here — so what the count below is of is a host at rest under
-            // coverage rather than one being torn down.
-            std::thread::sleep(QUIESCENCE);
+            // stopped, so nothing above touches the host from here: no churn,
+            // no warm read, no demand. What is left is whatever the host was
+            // still doing, and the reading is taken when that reaches nothing
+            // rather than after a fixed sleep — a drain is a host still holding
+            // descriptors *for* work, which is the one thing this bar must not
+            // read as descriptors it kept. The entry stays attached and stays
+            // watched across the wait — [`attach::IDLE_AFTER`] is longer than
+            // the load plus the bound — so what the count below is of is a host
+            // at rest under coverage rather than one being torn down.
+            let settling = Instant::now();
+            wait_until(
+                "the host stops working on the vault it just finished loading",
+                Budget::new(QUIESCENCE, QUIET_PROBE),
+                || match host.work_in_flight(vault.name()) {
+                    Some(in_flight) if in_flight.is_quiet() => Observed::Met(()),
+                    Some(in_flight) => Observed::pending(format!("{in_flight:?}")),
+                    None => Observed::pending("the host no longer serves the vault"),
+                },
+            )
+            .expect("the host goes quiet inside the quiescent bound");
+            let settled = settling.elapsed();
             let quiescent = open_fd_count().expect("this process's descriptor count at rest");
-            println!("{QUIESCENT_LINE_PREFIX}open_fds={quiescent}");
+            println!(
+                "{QUIESCENT_LINE_PREFIX}open_fds={quiescent} settled_ms={}",
+                settled.as_millis()
+            );
             return;
         }
         // Semantic: the interval is the sampling cadence. What the run

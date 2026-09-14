@@ -1537,6 +1537,40 @@ fn reclaim_unwound_leg<O: EntryOps>(
     }
 }
 
+/// What is running against an entry at the instant it was read.
+///
+/// Each field is one of the holds [`EntryState::held_by_anything`] answers for
+/// that says a leg is in flight. The two holds it leaves out are the ones an
+/// at-rest entry carries anyway: coverage in the entry's own hand, and the
+/// demand leases a client holds over it.
+#[cfg(feature = "induced-failure")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WorkInFlight {
+    /// A claim stands on the entry's scheduling gate.
+    pub claim_held: bool,
+    /// A leg is registered against the entry.
+    pub leg_registered: bool,
+    /// A job is waiting in the entry's queue slot for a worker.
+    pub job_queued: bool,
+    /// A release is on its way to [`EntryOps::detach`].
+    pub detach_in_flight: bool,
+    /// Work running outside the entry's lock is coming back to a lock of its
+    /// own, a read included.
+    pub pinned: bool,
+}
+
+#[cfg(feature = "induced-failure")]
+impl WorkInFlight {
+    /// Whether nothing at all is running against the entry.
+    pub fn is_quiet(&self) -> bool {
+        !self.claim_held
+            && !self.leg_registered
+            && !self.job_queued
+            && !self.detach_in_flight
+            && !self.pinned
+    }
+}
+
 /// Answer for a scheduled job that found the attachment taken at its own
 /// epoch.
 ///
@@ -2342,6 +2376,39 @@ impl<O: EntryOps> Host<O> {
     #[cfg(feature = "induced-failure")]
     pub fn classifications(&self) -> usize {
         self.shared.entries.classifications()
+    }
+
+    /// What the entry `name` still has running against it, and nothing where the
+    /// host serves no such name.
+    ///
+    /// Every hold that says a leg is between the lock that started it and the
+    /// lock that ends it is named here, and no hold that merely says the entry
+    /// is being served: coverage the entry holds in its own hand and the demand
+    /// leases standing over it are what an attached, at-rest entry looks like,
+    /// so neither is in flight. What is in flight is the claim on the gate, the
+    /// leg registration, a job waiting in the queue slot, a release, and a pin —
+    /// and [`WorkInFlight::is_quiet`] is all five standing down.
+    ///
+    /// A reading is of one instant. An entry a watcher polls is briefly held on
+    /// every pass, so a caller that wants "the host went quiet" reads this under
+    /// a bounded wait rather than once.
+    ///
+    /// **Behind `induced-failure`.** A client asks [`Host::state`] what an entry
+    /// is; what is running against it is internal bookkeeping, opened here for
+    /// the suites that have to know the host stopped working before they measure
+    /// it at rest.
+    #[cfg(feature = "induced-failure")]
+    pub fn work_in_flight(&self, name: &VaultName) -> Option<WorkInFlight> {
+        self.shared.entries.get(name).map(|entry| {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            WorkInFlight {
+                claim_held: state.claim.is_held(),
+                leg_registered: state.claim.leg().is_some(),
+                job_queued: state.claim.slot_taken(),
+                detach_in_flight: state.detach_in_flight,
+                pinned: state.pinned(),
+            }
+        })
     }
 
     /// How many live demand leases are waiting on the recovery `name`'s entry
