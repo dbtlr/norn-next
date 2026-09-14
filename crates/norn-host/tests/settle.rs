@@ -1,5 +1,5 @@
-//! **How long rung 1 takes**, measured for every churn family the certification
-//! inventory carries.
+//! **How long rung 1 takes**, measured over every leg of every workload family
+//! the churn driver's roll carries.
 //!
 //! The churn suite beside this one states that a live attachment converges on
 //! what a build from zero holds. It states nothing about *when*: its settle
