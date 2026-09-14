@@ -32,9 +32,9 @@
 //! readings beside them are the same case at the short default duration, which
 //! is what a developer runs.
 //!
-//! **Three bands here can spell a calibration state, and none of them is in
-//! one.** [`SOAK_PEAK_RSS_CEILING_BYTES`], [`SOAK_HIGH_WATER_RSS_CEILING_BYTES`]
-//! and [`SOAK_SETTLE_CEILING`] are `Option`s: `Some` bars the run, and `None`
+//! **Four bands here can spell a calibration state, and none of them is in
+//! one.** [`SOAK_PEAK_RSS_CEILING_BYTES`], [`SOAK_HIGH_WATER_RSS_CEILING_BYTES`],
+//! [`SOAK_SETTLE_CEILING`] and [`SOAK_QUIESCENT_FD_RETENTION`] are `Option`s: `Some` bars the run, and `None`
 //! records the reading, bars nothing, and stamps its own runs non-qualifying
 //! through the ledger's exit-bar registry
 //! (`norn_testkit::certification::ledger::NAMED_EXIT_BARS`, held to these
