@@ -25,7 +25,10 @@
 # workflow from the certification run and therefore never leaves a certification
 # run without a record.
 #
-# The ancestry check needs history, so the caller's checkout is unshallow.
+# The ancestry check needs history, so the caller's checkout is unshallow and
+# nothing here fetches shallowly: a `--depth` fetch marks the clone shallow, and
+# an ancestry question asked of a shallow clone is answered about the history
+# that happened to be fetched.
 #
 # Writes `sha=<sha>` to the file `GITHUB_OUTPUT` names when that variable is
 # set, and prints the sha on stdout either way.
@@ -62,7 +65,7 @@ fi
 # Fetched rather than trusted. A typo, a commit off a fork, a branch that was
 # force-pushed away and a commit nobody pushed all pass the shape check above
 # and name no tree a run could be built from.
-if ! git fetch --no-tags --depth=1 origin "$sha" >/dev/null 2>&1; then
+if ! git fetch --no-tags origin "$sha" >/dev/null 2>&1; then
   echo "::error::the pinned candidate ${sha} cannot be fetched from this repository, so no run can be built from it" >&2
   exit 1
 fi

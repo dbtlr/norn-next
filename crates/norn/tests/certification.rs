@@ -532,7 +532,103 @@ fn assert_the_lane_certifies_the_ref_it_was_dispatched_at(lane: &str, body: &str
             );
         }
     }
+
+    // **The shell variable is only half the chain.** The stamps above read
+    // `$SCHEDULED` and `$DISPATCHING_ACTOR`, and what those hold is the `env:`
+    // mapping of the step that sets them. A mapping naming a literal —
+    // `DISPATCHING_ACTOR: github-actions[bot]` — leaves every assertion above
+    // satisfied and hands a typed dispatch the identity the record treats as
+    // the dispatcher's, which is the whole of the schedule guard. So the two
+    // values that decide the count are held to the expressions that produce
+    // them, exactly and nowhere else.
+    for (name, expression, what) in [
+        (
+            "SCHEDULED",
+            "${{ inputs.scheduled }}",
+            "what the dispatch asserted",
+        ),
+        (
+            "DISPATCHING_ACTOR",
+            "${{ github.triggering_actor }}",
+            "who the runner says made the dispatch, which no input can reach",
+        ),
+    ] {
+        let bound = settings(body, name);
+        assert!(
+            !bound.is_empty(),
+            "`{lane}` stamps `{name}` into the record and binds it to nothing, so the stamp \
+             carries an empty value for {what}"
+        );
+        for value in bound {
+            assert_eq!(
+                value, expression,
+                "`{lane}` binds `{name}` to `{value}` rather than to `{expression}`. That value \
+                 is {what}, and a literal there is a value somebody wrote into the lane instead \
+                 of one the run was given."
+            );
+        }
+    }
 }
+
+/// **The pointer script holds the pin to the default branch.**
+///
+/// The dispatcher builds the pinned tree, and GitHub serves every sha reachable
+/// in the repository network — a fork's pull-request head included. The
+/// ancestry check is therefore the thing standing between a one-line pointer
+/// edit and unreviewed code running with the dispatcher's token, and nothing
+/// else in this workspace exercises it: a run of the script needs a remote and
+/// a clone, which a pull request does not have.
+///
+/// So the invocation is read off the file. Weaker than running it, and it is
+/// the claim that can be made here: an ancestry check deleted, or turned into a
+/// comparison against something other than the branch the dispatcher passes in,
+/// fails a pull request rather than passing quietly into a nightly.
+#[test]
+fn the_pointer_script_holds_the_pin_to_the_default_branch() {
+    let script = std::fs::read_to_string(workspace_root().join(POINTER_SCRIPT))
+        .expect("reading the pointer script");
+    let invocations: Vec<&str> = script
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter(|line| line.contains("merge-base --is-ancestor"))
+        .collect();
+    assert_eq!(
+        invocations.len(),
+        1,
+        "`{POINTER_SCRIPT}` names `merge-base --is-ancestor` {} times. The dispatcher checks the \
+         pinned tree out and builds it, so a pin that was never on the default branch is \
+         unreviewed code running with the dispatcher's token: {invocations:?}",
+        invocations.len()
+    );
+    let invocation = invocations[0];
+    assert!(
+        invocation.contains("\"$sha\"") && invocation.contains("${default}"),
+        "`{POINTER_SCRIPT}` checks ancestry of something other than the pin against the branch it \
+         was given: {invocation}"
+    );
+    assert!(
+        script
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .any(|line| line.contains("git fetch --no-tags origin \"+refs/heads/${default}")),
+        "`{POINTER_SCRIPT}` checks ancestry against a ref it never fetches, which answers nothing \
+         on a clone that does not already hold the default branch"
+    );
+    assert!(
+        !script
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .any(|line| line.contains("--depth")),
+        "`{POINTER_SCRIPT}` fetches shallowly, and an ancestry check over a shallow clone answers \
+         about the history that was fetched rather than about the branch"
+    );
+}
+
+/// The one parser of the pointer format, called by the dispatcher.
+const POINTER_SCRIPT: &str = ".github/scripts/soak-candidate.sh";
 
 /// **The dispatcher carries the clock and nothing a run does.**
 ///
