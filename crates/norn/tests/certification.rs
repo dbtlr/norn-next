@@ -525,22 +525,26 @@ fn assert_the_lane_certifies_the_ref_it_was_dispatched_at(lane: &str, body: &str
              environment, so the record carries nothing for {what}"
         );
         for line in stamped {
+            let value = stamped_value(line, key);
             assert!(
-                line.contains("$") || line.contains("inputs."),
-                "`{lane}` stamps `{key}` from a literal rather than from the dispatch that \
-                 carried it: {line}"
+                value.starts_with('$') || value.contains("${{"),
+                "`{lane}` stamps `{key}` as `{value}`, a literal rather than the value the \
+                 dispatch carried: {line}"
             );
         }
     }
 
     // **The shell variable is only half the chain.** The stamps above read
-    // `$SCHEDULED` and `$DISPATCHING_ACTOR`, and what those hold is the `env:`
-    // mapping of the step that sets them. A mapping naming a literal —
-    // `DISPATCHING_ACTOR: github-actions[bot]` — leaves every assertion above
-    // satisfied and hands a typed dispatch the identity the record treats as
-    // the dispatcher's, which is the whole of the schedule guard. So the two
-    // values that decide the count are held to the expressions that produce
-    // them, exactly and nowhere else.
+    // `$SCHEDULED`, `$DISPATCHING_ACTOR` and `$DISPATCHER_DIGEST`, and what
+    // those hold is the `env:` mapping of the step that sets them. A mapping
+    // naming a literal — `DISPATCHING_ACTOR: github-actions[bot]` — leaves
+    // every assertion above satisfied and hands a typed dispatch the identity
+    // the record treats as the dispatcher's, which is the whole of the
+    // schedule guard. The `env:` mapping is also the only safe way to carry an
+    // input into a `run:` block, because a `${{ }}` expansion inside one is
+    // dispatcher text pasted into the script. So the three values a record
+    // reads off the dispatch are held to the expressions that produce them,
+    // exactly and nowhere else.
     for (name, expression, what) in [
         (
             "SCHEDULED",
@@ -551,6 +555,11 @@ fn assert_the_lane_certifies_the_ref_it_was_dispatched_at(lane: &str, body: &str
             "DISPATCHING_ACTOR",
             "${{ github.triggering_actor }}",
             "who the runner says made the dispatch, which no input can reach",
+        ),
+        (
+            "DISPATCHER_DIGEST",
+            "${{ inputs.dispatcher_digest }}",
+            "the dispatcher's own reading of the suite at the pin",
         ),
     ] {
         let bound = settings(body, name);
@@ -568,6 +577,80 @@ fn assert_the_lane_certifies_the_ref_it_was_dispatched_at(lane: &str, body: &str
             );
         }
     }
+
+    assert_the_dispatch_inputs_are_shaped_before_they_are_stamped(lane, body);
+}
+
+/// The two dispatcher-supplied inputs are held to a shape before the step
+/// appends anything to `GITHUB_ENV`.
+///
+/// **A stamp is a line, and a line break is a second stamp.** `GITHUB_ENV` is
+/// read as `KEY=VALUE` lines, so an input carrying a newline writes whatever
+/// follows it as an assignment of its own — including
+/// [`ledger::DISPATCHING_ACTOR`], the unforgeable half of the schedule term.
+/// The `env:` binding checked above keeps the value out of the script text; it
+/// does not keep a newline out of the value. What does is the refusal: the
+/// assertion is exactly `true` or `false`, the digest is 64 lowercase hex
+/// characters or empty, and neither shape holds a line break.
+///
+/// Read positionally, because the order is the claim: a check that runs after
+/// the append has already let the extra assignment through.
+fn assert_the_dispatch_inputs_are_shaped_before_they_are_stamped(lane: &str, body: &str) {
+    let lines: Vec<&str> = body.lines().map(str::trim).collect();
+    let stamp = format!("{}=", ledger::SCHEDULED);
+    let stamped_at = lines
+        .iter()
+        .position(|line| !line.starts_with('#') && line.contains(&stamp))
+        .unwrap_or_else(|| {
+            panic!(
+                "`{lane}` appends no `{}` stamp to read an order against",
+                ledger::SCHEDULED
+            )
+        });
+    for (variable, shape) in [
+        ("SCHEDULED", "exactly `true` or `false`"),
+        ("DISPATCHER_DIGEST", "64 lowercase hex characters, or empty"),
+    ] {
+        let refused_at = lines[..stamped_at]
+            .iter()
+            .position(|line| line.contains("::error::") && line.contains(variable))
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{lane}` stamps the dispatch without refusing a `{variable}` that is not {shape} \
+                     first, so a newline in that input writes a second assignment into the job \
+                     environment"
+                )
+            });
+        // The refusal has to be this diagnosis's own: an `exit 1` belonging to
+        // the next check would read as this one's, and a lane that names a
+        // shape and carries on would pass.
+        let next_diagnosis = lines[refused_at + 1..stamped_at]
+            .iter()
+            .position(|line| line.contains("::error::"))
+            .map_or(stamped_at, |offset| refused_at + 1 + offset);
+        assert!(
+            lines[refused_at..next_diagnosis]
+                .iter()
+                .any(|line| line.contains("exit 1")),
+            "`{lane}` names a `{variable}` that is not {shape} and stamps it anyway: the \
+             diagnosis is not followed by a refusal before the append"
+        );
+    }
+}
+
+/// What a stamp line assigns to `key`: the text between `key=` and the quote
+/// closing the echoed assignment.
+///
+/// The line as a whole is no evidence about the value — every stamp ends in
+/// `>> "$GITHUB_ENV"`, so a literal stamp still carries a `$`.
+fn stamped_value<'a>(line: &'a str, key: &str) -> &'a str {
+    line.split_once(&format!("{key}="))
+        .map(|(_, assigned)| assigned)
+        .unwrap_or_default()
+        .split('"')
+        .next()
+        .unwrap_or_default()
+        .trim()
 }
 
 /// **The pointer script holds the pin to the default branch.**

@@ -131,8 +131,15 @@ permissions:
 
 # Keyed on the commit rather than on the workflow: two candidates are two
 # subjects, and a run of one has no reason to wait behind a run of the other.
-# Runs of the same candidate still queue, because they are entries in one
-# sequence and the campaign reads them in order.
+#
+# Runs of the same candidate serialise rather than cancel each other: a run
+# already going keeps going, and a second waits behind it, because both are
+# entries in one sequence the campaign reads in order. The default queue depth
+# holds one waiting run and cancels an earlier waiting one when a third
+# arrives. That loses nothing this lane produces: the dispatcher sends one run
+# per candidate per night, so a third run of one commit overlapping the first
+# two is a dispatcher fault, and the entry it would have added is one the
+# campaign should not count either.
 concurrency:
   group: ${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: false
@@ -243,6 +250,22 @@ jobs:
           DISPATCHING_ACTOR: ${{ github.triggering_actor }}
           DISPATCHER_DIGEST: ${{ inputs.dispatcher_digest }}
         run: |
+          # Both inputs are dispatcher-supplied text on their way into
+          # GITHUB_ENV, where a line break starts a second assignment. So each
+          # is held to its shape first and the step refuses what does not fit:
+          # a value that cannot hold a newline cannot write a stamp beside the
+          # one it was asked for.
+          case "$SCHEDULED" in
+            true | false) ;;
+            *)
+              echo "::error::SCHEDULED is not the assertion this step stamps. The scheduled input is exactly true or false, and this dispatch sent something else."
+              exit 1
+              ;;
+          esac
+          if [ -n "$DISPATCHER_DIGEST" ] && ! [[ "$DISPATCHER_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::DISPATCHER_DIGEST is not a digest. The dispatcher_digest input is 64 lowercase hex characters, or empty where nobody dispatched this run from the pointer, and this dispatch sent something else."
+            exit 1
+          fi
           if [ "$SCHEDULED" = "true" ] && [ "$DISPATCHING_ACTOR" != "github-actions[bot]" ]; then
             echo "::warning::${DISPATCHING_ACTOR} dispatched this run asserting scheduled=true. The assertion is honoured only for a dispatch carrying the app identity, so this run is recorded scheduled: false and classifies manual-dispatch."
           fi
@@ -554,6 +577,22 @@ jobs:
           DISPATCHING_ACTOR: ${{ github.triggering_actor }}
           DISPATCHER_DIGEST: ${{ inputs.dispatcher_digest }}
         run: |
+          # Both inputs are dispatcher-supplied text on their way into
+          # GITHUB_ENV, where a line break starts a second assignment. So each
+          # is held to its shape first and the step refuses what does not fit:
+          # a value that cannot hold a newline cannot write a stamp beside the
+          # one it was asked for.
+          case "$SCHEDULED" in
+            true | false) ;;
+            *)
+              echo "::error::SCHEDULED is not the assertion this step stamps. The scheduled input is exactly true or false, and this dispatch sent something else."
+              exit 1
+              ;;
+          esac
+          if [ -n "$DISPATCHER_DIGEST" ] && ! [[ "$DISPATCHER_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::DISPATCHER_DIGEST is not a digest. The dispatcher_digest input is 64 lowercase hex characters, or empty where nobody dispatched this run from the pointer, and this dispatch sent something else."
+            exit 1
+          fi
           if [ "$SCHEDULED" = "true" ] && [ "$DISPATCHING_ACTOR" != "github-actions[bot]" ]; then
             echo "::warning::${DISPATCHING_ACTOR} dispatched this run asserting scheduled=true. The assertion is honoured only for a dispatch carrying the app identity, so this run is recorded scheduled: false and classifies manual-dispatch."
           fi
