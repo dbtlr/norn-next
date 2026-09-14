@@ -526,10 +526,14 @@ fn assert_the_lane_certifies_the_ref_it_was_dispatched_at(lane: &str, body: &str
         );
         for line in stamped {
             let value = stamped_value(line, key);
+            // A `${{ }}` expression inside `run:` is shell text GitHub expands
+            // before bash reads the line: the injection the `env:` binding
+            // exists to prevent. Only a shell reference to the bound variable
+            // is a stamp.
             assert!(
-                value.starts_with('$') || value.contains("${{"),
-                "`{lane}` stamps `{key}` as `{value}`, a literal rather than the value the \
-                 dispatch carried: {line}"
+                value.starts_with('$') && !value.contains("${{"),
+                "`{lane}` stamps `{key}` as `{value}`, a literal or an expression expanded \
+                 into shell text rather than the bound variable the dispatch carried: {line}"
             );
         }
     }
