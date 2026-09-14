@@ -418,14 +418,34 @@ pub struct ExitBar {
 /// The refusal below only reaches the bars this list names, so a bar nobody
 /// registered would fail open — green runs under it would qualify. What holds
 /// the list exhaustive is a test that scans every crate's baselines file for
-/// public `Option`-typed constants: an `Option` band *is* the
-/// authored-or-calibrating spelling, so each one must have an entry here whose
-/// pointer names it, and each entry's pointer must resolve to one.
-pub const NAMED_EXIT_BARS: &[ExitBar] = &[ExitBar {
-    name: "soak-host-peak-rss-ceiling",
-    authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_PEAK_RSS_CEILING_BYTES",
-    armed: true,
-}];
+/// public constants: every `Option`-typed one must have an entry here whose
+/// pointer names it, because an `Option` band *is* the authored-or-calibrating
+/// spelling and an unregistered one is the fail-open direction.
+///
+/// **A bar that is not `Option`-typed belongs here too, always armed.** The
+/// list is the roll of what the exit contract measures rather than the roll of
+/// what is mid-calibration, so an always-authored value such as the descriptor
+/// budget carries `armed: true` and is held to that by the same sweep: a
+/// non-`Option` constant has no unauthored state to be in, and an entry
+/// claiming otherwise would stamp every run non-qualifying over a bar that is
+/// in fact armed.
+pub const NAMED_EXIT_BARS: &[ExitBar] = &[
+    ExitBar {
+        name: "soak-host-peak-rss-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_PEAK_RSS_CEILING_BYTES",
+        armed: true,
+    },
+    ExitBar {
+        name: "soak-settle-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_SETTLE_CEILING",
+        armed: false,
+    },
+    ExitBar {
+        name: "attach-fd-budget",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::FD_BUDGET",
+        armed: true,
+    },
+];
 
 /// The names of the bars this build has unarmed — what the writer stamps into
 /// [`Record::unauthored_exit_bars`], and empty in a build whose suite evaluates
@@ -666,6 +686,13 @@ impl Record {
     /// manifest digest against a build years later would refuse the evidence
     /// rather than read it.
     pub fn problems(&self, workspace_root: &Path) -> Vec<String> {
+        self.problems_against(workspace_root, NAMED_EXIT_BARS)
+    }
+
+    /// The same reading over an explicit bar registry, which is what lets a
+    /// test say what a sound record looks like under a build with every bar
+    /// armed while this build is mid-calibration on one of them.
+    fn problems_against(&self, workspace_root: &Path, bars: &[ExitBar]) -> Vec<String> {
         let mut problems = Vec::new();
         if self.candidate_sha.trim().is_empty() {
             problems.push("the record names no candidate".to_string());
@@ -688,7 +715,7 @@ impl Record {
             ));
         }
         if self.classification == Classification::Qualifying {
-            problems.extend(self.qualifying_claims(workspace_root));
+            problems.extend(self.qualifying_claims_against(workspace_root, bars));
         }
         problems.extend(self.reconciliation_problems());
 
@@ -711,11 +738,8 @@ impl Record {
     /// candidate was, whether the run came off the schedule, and which of the
     /// two platform answers the inventory's platform-deciding lanes require
     /// this run supplied.
-    fn qualifying_claims(&self, workspace_root: &Path) -> Vec<String> {
-        self.qualifying_claims_against(workspace_root, NAMED_EXIT_BARS)
-    }
-
-    /// The claims check over an explicit bar registry, which is what lets a
+    ///
+    /// **The check runs over an explicit bar registry**, which is what lets a
     /// test hold a record against a build whose bars are unarmed without
     /// un-authoring a real one.
     ///
@@ -1043,7 +1067,7 @@ mod tests {
 
     use super::{
         CaseOutcome, Classification, DISPATCHER_IDENTITY, ExitBar, NonQualifying, Outcome,
-        Platform, Preflight, Record, RunResult, came_off_the_schedule,
+        Platform, Preflight, Record, RunResult, came_off_the_schedule, unauthored_exit_bars,
     };
     use crate::certification::inventory::{self, REQUIRED_CASES};
     use crate::certification::manifest;
@@ -1099,12 +1123,53 @@ mod tests {
         record
     }
 
+    /// Every bar of [`super::NAMED_EXIT_BARS`], claimed armed. What a sound
+    /// record looks like is a question about the record rather than about which
+    /// bar this build happens to be calibrating, so the test below asks it
+    /// against a registry with nothing unarmed in it.
+    fn every_bar_armed() -> Vec<ExitBar> {
+        super::NAMED_EXIT_BARS
+            .iter()
+            .map(|bar| ExitBar {
+                armed: true,
+                ..*bar
+            })
+            .collect()
+    }
+
     #[test]
     fn a_sound_qualifying_record_produces_no_problem() {
         let root = workspace_root();
         let record = qualifying_at(&root);
-        assert_eq!(record.problems(&root), Vec::<String>::new());
-        assert!(record.qualifies(&root));
+        assert_eq!(
+            record.problems_against(&root, &every_bar_armed()),
+            Vec::<String>::new()
+        );
+    }
+
+    /// **A build mid-calibration refuses every qualifying record, and for
+    /// exactly the bars it names unarmed.**
+    ///
+    /// The record above is sound in every other way, so what is left when it is
+    /// read against this build's own registry is the bar check alone. It holds
+    /// whichever way the registry stands: a build with every bar armed counts
+    /// the record, and a build calibrating one refuses it and says which.
+    #[test]
+    fn a_sound_record_is_refused_for_exactly_the_bars_this_build_leaves_unarmed() {
+        let root = workspace_root();
+        let record = qualifying_at(&root);
+        let problems = record.problems(&root);
+        let unarmed = unauthored_exit_bars();
+        for name in &unarmed {
+            assert!(
+                problems
+                    .iter()
+                    .any(|problem| problem.contains(&format!("`{name}` unauthored"))),
+                "{problems:?}"
+            );
+        }
+        assert_eq!(problems.len(), unarmed.len(), "{problems:?}");
+        assert_eq!(record.qualifies(&root), unarmed.is_empty());
     }
 
     #[test]
@@ -1582,20 +1647,26 @@ mod tests {
         );
     }
 
-    /// **An `Option`-typed baseline is an exit bar, and every one is
-    /// registered.** A band authored `None` that nobody added to
-    /// [`super::NAMED_EXIT_BARS`] would stamp nothing into any record and its
-    /// green runs would qualify — the fail-open direction — so the registry is
-    /// held exhaustive against the baselines files themselves, and each
-    /// entry's pointer is held to a constant that exists. The files are found
-    /// rather than listed — every crate's `tests/baselines/mod.rs` or
+    /// **An `Option`-typed baseline is an exit bar, every one is registered,
+    /// and no registered pointer names nothing.** A band authored `None` that
+    /// nobody added to [`super::NAMED_EXIT_BARS`] would stamp nothing into any
+    /// record and its green runs would qualify — the fail-open direction — so
+    /// the registry is held exhaustive against the baselines files themselves,
+    /// and each entry's pointer is held to a constant that exists. The files
+    /// are found rather than listed — every crate's `tests/baselines/mod.rs` or
     /// `tests/baselines.rs` — and the sweep reads public constants, which is
     /// what a band asserted by more than one binary is.
+    ///
+    /// **A registered bar that is not `Option`-typed is held to `armed`.** Such
+    /// a constant has no unauthored state to be in, so an entry calling it
+    /// unarmed would stamp every run non-qualifying over a bar nothing is
+    /// calibrating.
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: reads the checkout's own baselines files.
     fn every_option_typed_baseline_is_a_registered_exit_bar() {
         let root = workspace_root();
         let mut option_bars = Vec::new();
+        let mut every_bar = Vec::new();
         let crates = std::fs::read_dir(root.join("crates")).expect("listing the crates directory");
         for crate_dir in crates {
             let crate_dir = crate_dir.expect("reading a crates entry").path();
@@ -1631,9 +1702,11 @@ mod tests {
                     let Some((name, ty)) = rest.split_once(':') else {
                         continue;
                     };
+                    let pointer = format!("{file}::{}", name.trim());
                     if ty.trim_start().starts_with("Option<") {
-                        option_bars.push(format!("{file}::{}", name.trim()));
+                        option_bars.push(pointer.clone());
                     }
+                    every_bar.push(pointer);
                 }
             }
         }
@@ -1652,9 +1725,16 @@ mod tests {
         }
         for bar in super::NAMED_EXIT_BARS {
             assert!(
-                option_bars.iter().any(|pointer| pointer == bar.authored_at),
-                "`{}` names no Option-typed constant in any baselines file, so the registry \
-                 points a reader at nothing",
+                every_bar.iter().any(|pointer| pointer == bar.authored_at),
+                "`{}` names no public constant in any baselines file, so the registry points a \
+                 reader at nothing",
+                bar.authored_at
+            );
+            assert!(
+                bar.armed || option_bars.iter().any(|pointer| pointer == bar.authored_at),
+                "`{}` is registered unarmed and names a constant that is not `Option`-typed, so \
+                 there is no calibration state for it to be in and every run under it would be \
+                 stamped non-qualifying over a bar that is armed",
                 bar.authored_at
             );
         }

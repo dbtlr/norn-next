@@ -255,8 +255,17 @@ run on its own after the failing suite rather than beside it, because a probe sa
 machine while a suite runs on it reads that suite.
 
 Rung 1 is the **churn suite**'s — bursts, atomic replaces, branch flips, mid-mutation
-edits — whose bar is convergence-to-equivalence with a from-scratch build and a settle
-bound proportional to the changed set. It is the warm path, so it is reached by ordinary
+edits — whose bar is convergence-to-equivalence with a from-scratch build. Its settle
+budgets, proportional to the changed set, are runaway bounds rather than bars: a settle
+that reaches one is stuck, and how long one really takes is a clock the per-PR lane does
+not read. **What reads that clock is an instrument in the scheduled lane and a ceiling
+that is not yet authored.** `norn-host`'s settle suite times every churn family from its
+workload's final change to the derived store holding what the tree implies and to the
+attachment publishing `Ready` again, records both readings under every run, and compares
+them against `SOAK_SETTLE_CEILING` only where one is authored. It stands `None`, so the
+readings accumulate and nothing is barred — and the ledger's exit-bar registry names it,
+which types every run taken under it non-qualifying so a calibration window never counts
+toward lockdown's five. It is the warm path, so it is reached by ordinary
 operation rather than by injected failure. **That suite is built**, and it is two halves:
 `norn-testkit`'s churn driver holds the workload families as seeded scripts, each step
 saying in words what it does to a tree, and `norn-host`'s churn suite applies them to a

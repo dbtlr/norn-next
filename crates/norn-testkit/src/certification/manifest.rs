@@ -246,8 +246,9 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
     // the candidate SHA, which moves when the file does.
     ManifestFile {
         path: "crates/norn-host/tests/churn.rs",
-        why: "the churn suite, whose authored cost bounds and settle budgets are the bars a \
-              qualifying run passes under",
+        why: "the churn suite, whose authored cost bounds are the bars a qualifying run passes \
+              under, and whose settle budgets are the runaway bounds it converges inside. How \
+              long a settle may take is a clock and is barred in `settle.rs` instead",
     },
     ManifestFile {
         path: "crates/norn-host/tests/equivalence.rs",
@@ -300,9 +301,22 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
         path: "crates/norn-host/tests/host_soak.rs",
         why: "the scheduled lane's host workload and the comparisons that apply the soak bars: \
               the peak ceiling, the slope ratio and the descriptor allowance are enforced here, \
-              and the test holding the ledger's armed claim to the authored ceiling sits beside \
-              them. A comparison deleted with the digest standing would count runs that \
-              evaluated less",
+              A comparison deleted with the digest standing would count runs that evaluated \
+              less",
+    },
+    ManifestFile {
+        path: "crates/norn-host/tests/settle.rs",
+        why: "the scheduled lane's clock on rung 1: how a churn family's settle is timed from its \
+              final change, the comparison that applies the settle ceiling, the negative control \
+              that requires an over-ceiling reading to be refused, and the test holding every \
+              entry of the ledger's exit-bar registry to the baseline it names. A reading taken \
+              by a different instrument is a different reading",
+    },
+    ManifestFile {
+        path: "crates/norn-host/tests/fd_budget.rs",
+        why: "the probe the descriptor budget is read through, and the equality between its two \
+              scales that the vault-size claim really rests on. A bar authored in the baselines \
+              and applied here is two files, and loosening either is a run that measured less",
     },
     // The recorded baselines. A measurement lane compares against these rather
     // than against a history, so a baseline edited is a bar moved.

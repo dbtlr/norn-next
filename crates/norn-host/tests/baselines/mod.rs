@@ -26,20 +26,50 @@
 //! the ≥5k profile; the local readings beside them are the same case at the
 //! short default duration, which is what a developer runs.
 //!
-//! **One band here spells its calibration state.** [`SOAK_PEAK_RSS_CEILING_BYTES`]
-//! is an `Option`: `Some` bars the run, and a build that sets it back to `None`
-//! for recalibration records the reading, bars nothing, and stamps its own
-//! runs non-qualifying through the ledger's exit-bar registry
-//! (`norn_testkit::certification::ledger::NAMED_EXIT_BARS`, held to the
-//! constant by a test in `host_soak.rs`) — so a calibration window never
-//! counts toward lockdown's five.
+//! **Two bands here spell their calibration state.**
+//! [`SOAK_PEAK_RSS_CEILING_BYTES`] and [`SOAK_SETTLE_CEILING`] are `Option`s:
+//! `Some` bars the run, and `None` records the reading, bars nothing, and
+//! stamps its own runs non-qualifying through the ledger's exit-bar registry
+//! (`norn_testkit::certification::ledger::NAMED_EXIT_BARS`, held to these
+//! constants by a test in `settle.rs`) — so a calibration window never counts
+//! toward lockdown's five.
 //!
-//! Two integration binaries compile this module — `memory.rs` for the per-PR
-//! lane and `host_soak.rs` for the scheduled one — and each asserts against the
-//! values its lane owns, so the remainder being unused in either is the layout
-//! rather than a defect. The values stay in one file because the file is the
-//! trend's whole memory, and a reviewer reads it as one diff.
+//! **Every named measurement bar is in that registry, not only the `Option`s.**
+//! An always-authored value such as [`FD_BUDGET`] carries `armed: true` there
+//! and can never be otherwise; what the registry is for is the roll of what the
+//! exit contract measures, and a roll that listed only the bars mid-calibration
+//! would be a roll of the exceptions.
+//!
+//! # Platform scope
+//!
+//! **The bands below are authored against `ubuntu-latest` x86_64-glibc — the
+//! Linux measurement lane — except where a constant says otherwise, and each
+//! one says which.** A reading taken on another machine is a reading of that
+//! machine: page size, allocator and runner image move these numbers without
+//! the subject costing more. Local macos-arm64 readings stand beside the hosted
+//! ones as the band a developer sees, and nothing gates on them.
+//!
+//! **The macOS certification lane evaluates no bar here at all.** It runs the
+//! certification cases and no measurement step, which the comment over
+//! `.github/workflows/soak.yml`'s `certification-macos` job states in those
+//! words: the bars in this file are authored against `ubuntu-latest`, and a
+//! second platform reading them would judge one machine's numbers on another's.
+//! That lane's record therefore carries a watcher-backend answer and no
+//! reading, and nothing in it should be read as a measurement of the candidate.
+//!
+//! Four integration binaries compile this module — `memory.rs` for the per-PR
+//! memory lane, `fd_budget.rs` for the per-PR workspace suite, `host_soak.rs`
+//! for the scheduled lane and `settle.rs` for the scheduled lane's churn
+//! clock — and each asserts against the values its lane owns, so the remainder
+//! being unused in any one of them is the layout rather than a defect. The
+//! values stay in one file because the file is the trend's whole memory, and a
+//! reviewer reads it as one diff.
 #![allow(dead_code)]
+// The rendering helpers are re-exported for every lane at once, so a binary
+// that uses two of the four is the layout rather than a stale import.
+#![allow(unused_imports)]
+
+use std::time::Duration;
 
 /// Peak resident set attaching the `realistic` profile must stay under.
 ///
@@ -68,6 +98,11 @@
 /// and a bar that flakes teaches people to rerun rather than to look. What a
 /// vault-shaped cost would read here is multiples of the band, not the 2 MiB of
 /// spread between platforms.
+///
+/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; the
+/// macos-arm64 band above is what a developer running the same case sees, and
+/// no scheduled lane evaluates it on that platform.
 ///
 /// What it forbids is an attachment whose cost is the vault. The heal walks the
 /// tree and commits it in bounded changesets, so what stays resident is one
@@ -99,6 +134,10 @@ pub const ATTACH_PEAK_RSS_CEILING_BYTES: u64 = 40 * 1024 * 1024;
 ///
 /// The bar is 1.6, which leaves a quarter of headroom over the highest reading
 /// while staying far below the 6.7x a vault-shaped cost would show.
+///
+/// **Platform scope: the Linux measurement lane**, the same one
+/// [`ATTACH_PEAK_RSS_CEILING_BYTES`] gates in — a ratio between two readings
+/// cancels the fixed addend but not the allocator that produced both.
 pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 
 /// How many descriptors a long mixed load may add to the count taken once the
@@ -118,6 +157,10 @@ pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 /// three and 15 in the other ten. The count a load holds moves with the runner
 /// image, which is what that step from 14 to 15 is; what this bar reads is the
 /// difference across one run, which does not.
+///
+/// **Platform scope: the Linux measurement lane.** The hour-long load this
+/// reads is the scheduled lane's on `ubuntu-latest` x86_64-glibc, and the
+/// macOS certification lane runs no load at all.
 pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 
 /// How much of the first quartile's mean resident set the last quartile's mean
@@ -155,6 +198,12 @@ pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 /// price of one bar over both durations — and it is still tight enough to fail
 /// a load paying for each reconciliation, because a leak at that scale
 /// compounds over an hour rather than levelling off.
+///
+/// **Platform scope: the Linux measurement lane**, which is where the
+/// hour-long load runs — though the bar is a run against itself and the
+/// macos-arm64 short-duration readings above are the ones that set it, so this
+/// is the one band whose value a second platform argued for. It is still
+/// evaluated on `ubuntu-latest` alone.
 pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
 
 /// Peak resident set the host may reach **under** the long mixed load at the
@@ -204,7 +253,101 @@ pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
 /// read here is multiples of the band: a load that held the ≥5k profile's
 /// documents resident would clear this many times over, not by the 4 MiB
 /// between platforms.
+///
+/// **Platform scope: the Linux measurement lane.** The sixteen-run series is
+/// the scheduled lane's on `ubuntu-latest` x86_64-glibc; the macos-arm64
+/// readings are a developer's and gate nothing.
 pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
+
+/// How long a churn family's settle may take, or `None` while no ceiling is
+/// authored.
+///
+/// **The clock term of rung 1, and the reading is the wall clock from a
+/// workload's final change to the attachment publishing `Ready` again.** The
+/// churn suite's own settle budgets are runaway bounds and say so — a settle
+/// that reaches one is stuck rather than slow — so until this is authored
+/// nothing in the workspace states how long convergence after an edit may
+/// take. `settle.rs` is the instrument: it runs each churn family the
+/// certification inventory carries, times the final change to `Ready` and to
+/// semantic equivalence with a build from zero, and records both readings every
+/// run. The comparison happens only where a ceiling is authored: `Some` bars
+/// the run, `None` records the readings and bars nothing, and the qualification
+/// ledger types every such run non-qualifying, so the readings accumulate
+/// without the runs counting toward lockdown's five.
+///
+/// # The constant rules, and which of them this edit fills
+///
+/// - **Profile.** Filled. The ceiling is stated over the `small` profile's 120
+///   generated documents, which is the vault the churn families are authored
+///   against — a settle over another scale is another subject, and the claim
+///   that maintenance costs the changed set rather than the vault is the work
+///   bars' in `churn.rs` rather than this one's. `NORN_SETTLE_PROFILE` is what
+///   a calibration dispatch names another profile through, and the lane names
+///   this one explicitly so the scale a reading was taken at is workflow text.
+/// - **Observations.** *Unauthored.* The calibration commit records the runs
+///   behind the value here — the lane, the dates, the run ids, and the
+///   per-family band each reading fell in — the way
+///   [`SOAK_PEAK_RSS_CEILING_BYTES`] records its sixteen.
+/// - **Safety rationale.** *Unauthored.* The calibration commit states the
+///   multiple the ceiling stands at over the widest observed family and why
+///   that multiple is the right one for a reading whose spread is a scheduler's
+///   rather than an allocator's: a settle is a clock, so a runner under load
+///   moves it much further than a page size moves a resident set, and a bar
+///   that flakes teaches people to rerun rather than to look.
+/// - **Platform scope.** Filled. The Linux measurement lane, `ubuntu-latest`
+///   x86_64-glibc, is where this gates. The macOS certification lane runs no
+///   measurement step, so it neither takes this reading nor evaluates this bar.
+///   A local run at the default profile is a developer's reading and gates
+///   nothing.
+/// - **Review trigger.** Filled. The value moves only by a reviewed edit that
+///   states its grounds, under
+///   [ADR 0007](../../../docs/decisions/0007-authored-measurement-thresholds.md);
+///   raising it is what asks a reviewer for the claim that convergence now
+///   costs more, and lowering it needs no new argument. Un-authoring it back to
+///   `None` is the recalibration state, and the ledger stamps every run under
+///   it non-qualifying rather than letting the window count.
+pub const SOAK_SETTLE_CEILING: Option<Duration> = None;
+
+/// How many descriptors one served attachment may hold.
+///
+/// **The no-descriptor-cost-per-document term.** The count is taken in the
+/// process that attached, after the entry reaches `Ready`, so what this bounds
+/// is the steady-state cost of a served attachment rather than the high-water
+/// mark of the heal walk that got there. `fd_budget.rs` is the instrument, and
+/// the bar the vault-size claim really rests on is not this ceiling: the
+/// one-document and 2000-document deltas are asserted **equal**, which fails
+/// the moment the cost starts moving with the vault at any height under the
+/// budget.
+///
+/// Observed on macos-arm64 over two consecutive runs, identical in both: **4
+/// descriptors per attachment at 1 document and 4 at 2000** — the readings
+/// `fd_budget.rs` records beside this value. The budget is 12, three times the
+/// measured cost, so a subject that starts holding one more handle per
+/// subscription or per store file is caught while a run whose runner hands the
+/// process an extra descriptor at the sampling instant is not.
+///
+/// **Platform scope: every lane that runs the workspace suite, on both
+/// platforms.** It is the one bar in this file that is not the Linux
+/// measurement lane's, and the reason is what it reads: a descriptor count is a
+/// count rather than a clock or a resident set, so under ADR 0004 it may gate a
+/// pull request, and it says the same thing on a slow runner as on a fast one.
+/// What differs between platforms is which handles a backend holds — FSEvents
+/// and inotify are not the same subscription — and the budget is three times
+/// the measured cost so that both fit under one number rather than two.
+pub const FD_BUDGET: usize = 12;
+
+/// Whether a reading fits under an authored ceiling.
+///
+/// **The one comparison every measurement ceiling in this crate makes.** The
+/// attach and soak peak-resident-set bars, the descriptor budget and the settle
+/// ceiling all read it, so what "under the ceiling" means is one line rather
+/// than one per bar — and the negative control in `settle.rs` feeds it a
+/// reading past a ceiling of each shape and requires a refusal. A reading
+/// exactly at the ceiling fits: a bar states the most a subject may cost, and
+/// costing exactly that is not costing more.
+pub fn fits<T: PartialOrd>(reading: T, ceiling: T) -> bool {
+    reading <= ceiling
+}
 
 /// Every band above is a reading of the unoptimized build. An optimized one
 /// allocates differently enough that the bars would be measuring a subject they
@@ -227,4 +370,4 @@ pub fn assert_the_profile_the_bars_were_authored_on() {
 /// every measurement lane in the workspace writes the same table under its run.
 /// What is authored per crate is the numbers above, which is what a reviewer
 /// reads as one diff.
-pub use norn_testkit::readings::{mebibytes, multiple, per_mille, record};
+pub use norn_testkit::readings::{mebibytes, milliseconds, multiple, per_mille, record};

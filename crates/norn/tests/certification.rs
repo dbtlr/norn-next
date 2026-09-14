@@ -280,8 +280,24 @@ fn a_qualifying_record_validates_and_a_doctored_one_does_not() {
         unauthored_exit_bars: Vec::new(),
         classification: Classification::Qualifying,
     };
-    assert_eq!(sound.problems(&root), Vec::<String>::new());
-    assert!(sound.qualifies(&root));
+    // **Everything left is this build's own exit-bar registry.** A bar authored
+    // `None` refuses every qualifying record while it stands, which is a fact
+    // about the calibration window rather than about this record — so each such
+    // refusal is named here and nothing else is admitted beside them. The
+    // record's own consistency is what the rest of this case is about, and it
+    // holds whichever way the registry stands.
+    let unarmed = ledger::unauthored_exit_bars();
+    let problems = sound.problems(&root);
+    for name in &unarmed {
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains(&format!("`{name}` unauthored"))),
+            "{problems:?}"
+        );
+    }
+    assert_eq!(problems.len(), unarmed.len(), "{problems:?}");
+    assert_eq!(sound.qualifies(&root), unarmed.is_empty());
 
     let rendered = serde_json::to_string_pretty(&sound).expect("rendering the record");
     let read: Record = serde_json::from_str(&rendered).expect("reading the record back");

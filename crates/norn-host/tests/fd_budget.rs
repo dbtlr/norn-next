@@ -5,6 +5,10 @@
 // long one such look may take is a fact about this crate's host and not about
 // this suite, so it is composed where the other suites read it from.
 mod attach;
+// The descriptor budget this file is judged against sits with the crate's other
+// authored bands, because the file that holds them is the trend's whole memory
+// and a reviewer reads it as one diff.
+mod baselines;
 
 use std::fs;
 use std::path::PathBuf;
@@ -24,29 +28,6 @@ use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
 const PROBE_ENV: &str = "NORN_HOST_FD_BUDGET_PROBE";
 
-/// How many descriptors one served attachment may hold.
-///
-/// **An authored threshold, and it moves only by a reviewed edit with grounds**
-/// — the same discipline the bands in `tests/baselines/mod.rs` carry, under
-/// [ADR 0007](../../../docs/decisions/0007-authored-measurement-thresholds.md).
-/// It sits here rather than in that module because its subject is this file's
-/// probe: a count of this process's own descriptors, which no other suite
-/// takes.
-///
-/// The count is taken after the attachment reaches `Ready`, so what it bounds
-/// is the steady-state cost of a served attachment rather than the high-water
-/// mark of the heal walk that got there. Observed on macos-arm64 over two
-/// consecutive runs, identical in both: **4 descriptors per attachment at 1
-/// document and 4 at 2000** — the readings this file records through
-/// `norn_testkit::readings::record` below. The budget is 12, three times the
-/// measured cost, so a subject that starts holding one more handle per
-/// subscription or per store file is caught while a run whose runner hands the
-/// process an extra descriptor at the sampling instant is not.
-///
-/// The bar the vault-size claim rests on is not this ceiling: the two deltas
-/// are asserted **equal**, which fails the moment the cost starts moving with
-/// the vault at any height under the budget.
-const FD_BUDGET: usize = 12;
 const LARGE_VAULT_DOCUMENTS: usize = 2_000;
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
 
@@ -106,7 +87,7 @@ fn record_the_measurement(reported: &str) {
             .unwrap_or_else(|| panic!("`{measurement}` does not carry `{key}`"))
             .to_string()
     };
-    norn_testkit::readings::record(
+    baselines::record(
         "attach descriptor cost",
         &[
             ("descriptors before attaching", reading("baseline=")),
@@ -118,7 +99,7 @@ fn record_the_measurement(reported: &str) {
                 "descriptors per attachment, 2000 documents",
                 reading("large_vault="),
             ),
-            ("budget", FD_BUDGET.to_string()),
+            ("budget", baselines::FD_BUDGET.to_string()),
         ],
     );
 }
@@ -141,8 +122,9 @@ fn run_probe() {
         panic!("ready descriptor count {one_document} fell below baseline {baseline}")
     });
     assert!(
-        one_document_delta <= FD_BUDGET,
-        "one-document attachment used {one_document_delta} descriptors; budget is {FD_BUDGET}"
+        baselines::fits(one_document_delta, baselines::FD_BUDGET),
+        "one-document attachment used {one_document_delta} descriptors; budget is {}",
+        baselines::FD_BUDGET
     );
     drop(lease);
     detach_and_wait(&host, &fixture.name);
@@ -159,8 +141,9 @@ fn run_probe() {
         panic!("ready descriptor count {large_vault} fell below baseline {baseline}")
     });
     assert!(
-        large_vault_delta <= FD_BUDGET,
-        "2k-document attachment used {large_vault_delta} descriptors; budget is {FD_BUDGET}"
+        baselines::fits(large_vault_delta, baselines::FD_BUDGET),
+        "2k-document attachment used {large_vault_delta} descriptors; budget is {}",
+        baselines::FD_BUDGET
     );
     assert_eq!(
         large_vault_delta, one_document_delta,
@@ -201,7 +184,8 @@ fn run_probe() {
 fn report_the_measurement(baseline: usize, one_document: usize, large_vault: usize) {
     println!(
         "{MEASUREMENT_PREFIX}baseline={baseline} one_document={one_document} \
-         large_vault={large_vault} budget={FD_BUDGET}"
+         large_vault={large_vault} budget={}",
+        baselines::FD_BUDGET
     );
 }
 

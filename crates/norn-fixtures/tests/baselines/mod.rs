@@ -33,6 +33,19 @@
 //! the values its lane owns, so the remainder being unused in either is the
 //! layout rather than a defect. The values stay in one file because the file
 //! is the trend's whole memory, and a reviewer reads it as one diff.
+//!
+//! # Platform scope
+//!
+//! **Every band below gates on `ubuntu-latest` x86_64-glibc, and nowhere else.**
+//! The gate bands are judged by the per-PR `memory invariant` job's
+//! `norn-fixtures memory` step and the soak bands by the nightly lane's
+//! `norn-fixtures memory_soak` step, both of which run on that runner alone.
+//! The linux-arm64 and macos-arm64 readings recorded beside them are what a
+//! developer sees and what argued for the margins; no lane evaluates a bar here
+//! on either. The macOS certification lane runs the certification cases and no
+//! measurement step at all, which the comment over
+//! `.github/workflows/soak.yml`'s `certification-macos` job states in those
+//! words.
 #![allow(dead_code)]
 
 use std::time::Duration;
