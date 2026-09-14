@@ -462,7 +462,8 @@ pub const FD_BUDGET: usize = 12;
 /// fired, the entry came back inside `RECOVERY_LIMIT` of a bounded number of
 /// attempts, and across the window's wall clock the load kept churning and
 /// taking warm read-only requests at the doses its cadence owes for that much
-/// time. The last of those is a floor with slack in it, and the arranged
+/// time, charged at the tick period the load was achieving before the window
+/// opened. The last of those is a floor with slack in it, and the arranged
 /// recovery's window — two or three ticks, the re-attach over the ≥5k tree — is
 /// usually short enough to owe nothing at all. So what a passing dose proves
 /// about starvation on a typical night is that the load was *still running its

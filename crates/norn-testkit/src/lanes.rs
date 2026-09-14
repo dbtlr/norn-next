@@ -401,7 +401,11 @@ pub fn assert_lane_steps_name_the_features_their_targets_need(
     let directory = workflows_directory(manifest_dir);
     let workflows: Vec<String> = std::fs::read_dir(&directory)
         .unwrap_or_else(|e| panic!("reading {} for workflows: {e}", directory.display()))
-        .map(|entry| entry.expect("a directory entry").path())
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|e| panic!("reading {}: {e}", directory.display()))
+                .path()
+        })
         .filter(|path| path.extension().is_some_and(|e| e == "yml" || e == "yaml"))
         .map(|path| {
             std::fs::read_to_string(&path)

@@ -73,3 +73,9 @@ signature: an_armed_stream_answers_nothing_while_the_backend_establishes_itself
 class: real-FSEvents armed stream
 first-seen: 2026-08-16
 disposition: Restructured 2026-08-17, with class-b-armed-stream-discarded-delivery. The heal window that makes the arm eligible now closes on a change made after establishment and seen to arrive, so the whole of establishment is behind the assertion. A recurrence is a defect rather than a flake.
+
+id: class-a-lease-changing-hands
+signature: a_queue_that_keeps_changing_hands_outlives_the_patience_bound
+class: wall-clock starvation
+first-seen: 2026-09-14
+disposition: Opened 2026-09-14 off the hosted `build and test` job (ubuntu-latest, run 34866765125, job 104052422851), where the case's own writer thread was starved: it handed the record over 269 times, and the waiter still read one holder as unchanged for 503.726504ms against a 500ms patience, so the wait ended at the patience instead of the 2s wall. The case already guards its own gaps, and the guard passed — the writer's widest measured gap was inside the patience while the waiter's observation window, which carries the probe cadence on top of the gap, was not. Ruled with the class-A entries above: the bound is not widened and the case is not load-scaled, because a patience that absorbs a starved runner no longer states the re-arm. A recurrence in CI reopens that ruling and makes the observation-window arithmetic the subject.

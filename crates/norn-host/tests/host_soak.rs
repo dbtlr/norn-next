@@ -63,7 +63,11 @@
 //! with itself whatever the run did. What is asked instead is the rate: the
 //! stretch between losing service and getting it back is measured in real time,
 //! and over it the load must have landed at least the churn turns and warm
-//! reads its cadence owes for that much time. Every look at the entry's state
+//! reads its cadence owes for that much time, charged at the mean tick period
+//! the load achieved over the ticks before the window opened rather than at the
+//! nominal one — a uniformly slow loop owes proportionally less and cannot fail
+//! the term, and a loop that stopped inside the window is judged at the rate it
+//! was keeping up to the demand. Every look at the entry's state
 //! across the window carries the crate's own probe bound with it, so a host
 //! that stopped answering is a typed failure rather than a slow window. That
 //! term is what the other bars cannot say — a process that stopped serving to
@@ -71,7 +75,7 @@
 //!
 //! **A window has to be wide before it owes anything, and the arranged one
 //! usually is not.** The deliberate recovery comes back in two or three ticks,
-//! and the term's tolerance ([`RECOVERY_WINDOW_SLACK`]) is a tick of that — so
+//! and the term's tolerance ([`RECOVERY_WINDOW_SLACK_TICKS`]) is one of them — so
 //! what it charges the arranged recovery is nothing or one churn turn. That is
 //! the honest reading and the run records it: `recovery windows, taken/owed` in
 //! the summary carries every window's span beside the doses it charged, so a
@@ -259,25 +263,34 @@ const ATTACH_HEADROOM: Duration = Duration::from_secs(600);
 /// if it eventually came back.
 const RECOVERY_ATTEMPTS: u32 = 3;
 
-/// How much of a recovery window's wall clock the load is not charged the
+/// How many of the load's own ticks a recovery window is not charged the
 /// cadence over.
 ///
-/// **One tick, and it is the whole tolerance the no-starvation term has.** The
+/// **One, and it is the whole tolerance the no-starvation term has.** The
 /// window's ends are read on tick boundaries, so its edges hold a partial tick
-/// the cadence never owed a dose over, and the loop's period is a tick of sleep
-/// *plus* whatever the tick's own churn, read and sample cost — so a window of
-/// `n` ticks spans a little over `n - 1` of them and the load is charged for
-/// `n - 2`. Two ticks of headroom against a term whose subject is a load that
-/// stopped: what it is sized for is one slow tick inside the window, not for a
-/// window the load spent idle.
+/// the cadence never owed a dose over: a window of `n` ticks spans a little
+/// over `n - 1` of them and the load is charged for `n - 2`. Two ticks of
+/// headroom against a term whose subject is a load that stopped.
+///
+/// **What a tick is worth is measured, not assumed.** The loop's period is
+/// [`SAMPLE_INTERVAL`] of sleep *plus* whatever that tick's churn, warm read
+/// and sample cost, and the churn is capped at one turn per tick — so charging
+/// the window at one dose per `SAMPLE_INTERVAL` would hold only while per-tick
+/// work stayed well inside the interval, and a loaded nightly runner would fail
+/// a load that churned on every single tick of the window. The rule instead is:
+/// **the cadence is charged at the mean tick period the load achieved over the
+/// ticks before the window opened.** A load that is uniformly slow owes
+/// proportionally less and cannot fail this; a load that stopped *inside* the
+/// window is charged at the rate it was keeping right up to the demand, which
+/// is the comparison the term exists to make. The baseline is taken from
+/// outside the window on purpose — a stall measured inside it would widen the
+/// period that judges it.
 ///
 /// The cost of the slack is at the short end. A recovery that comes back inside
 /// two ticks is charged nothing, and that is the arranged recovery's usual
-/// shape — `attachment recovery window` in the run's summary is what says so,
-/// per run, rather than the term passing quietly. What the term then still
-/// forbids is the shape it exists for: a window that stretched in wall clock
-/// with the load not working across it.
-const RECOVERY_WINDOW_SLACK: Duration = SAMPLE_INTERVAL;
+/// shape — `recovery windows, taken/owed` in the run's summary is what says so,
+/// per run, rather than the term passing quietly.
+const RECOVERY_WINDOW_SLACK_TICKS: u32 = 1;
 
 /// How long one recovery attempt waits for the attachment to be ready again.
 ///
@@ -570,6 +583,7 @@ fn reported_recovery_windows(report: &str) -> Vec<RecoveryWindow> {
             Some(RecoveryWindow {
                 ticks: field(line, "ticks=")?.parse().ok()?,
                 window: Duration::from_millis(field(line, "window_ms=")?.parse().ok()?),
+                baseline_tick: field(line, "baseline_tick_ms=")?.to_string(),
                 churn_turns: field(line, "churn_turns=")?.parse().ok()?,
                 churn_turns_owed: field(line, "churn_turns_owed=")?.parse().ok()?,
                 warm_reads: field(line, "warm_reads=")?.parse().ok()?,
@@ -580,10 +594,13 @@ fn reported_recovery_windows(report: &str) -> Vec<RecoveryWindow> {
 }
 
 /// One recovery window, as the child reported it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct RecoveryWindow {
     ticks: u64,
     window: Duration,
+    /// The baseline tick period the doses were charged at, in milliseconds, or
+    /// `none` where the window opened before a tick had completed.
+    baseline_tick: String,
     churn_turns: u64,
     churn_turns_owed: u64,
     warm_reads: u64,
@@ -594,9 +611,10 @@ impl RecoveryWindow {
     /// The window as one summary cell: what it spanned, and what it charged.
     fn reading(&self) -> String {
         format!(
-            "{} ticks / {} ms, churn {}/{}, warm reads {}/{}",
+            "{} ticks / {} ms at a {} ms baseline tick, churn {}/{}, warm reads {}/{}",
             self.ticks,
             self.window.as_millis(),
+            self.baseline_tick,
             self.churn_turns,
             self.churn_turns_owed,
             self.warm_reads,
@@ -715,8 +733,17 @@ fn declared_duration() -> Duration {
 /// this parent wants instead.
 fn arm_record_file(sandbox: &Sandbox) -> PathBuf {
     let directory = sandbox.work_dir().join(ARM_RECORDS_DIR);
+    // Anything of another kind standing where these go is cleared first.
+    // `create_dir_all` over a file, and a write over a directory, fail with an
+    // errno rather than with the state they met.
+    if directory.is_file() {
+        std::fs::remove_file(&directory).expect("clearing a file where the arm records go");
+    }
     std::fs::create_dir_all(&directory).expect("a directory for the arm records");
     let hits = directory.join("arm-hits");
+    if hits.is_dir() {
+        std::fs::remove_dir_all(&hits).expect("clearing a directory where the arm record goes");
+    }
     std::fs::write(&hits, b"").expect("an empty arm-hit record");
     hits
 }
@@ -770,7 +797,13 @@ fn run_load(root: &Path) {
         let demanded = recovering.is_none() && !serving(&observed);
         if demanded {
             recoveries += 1;
-            recovering = Some(Recovering::demanded(&host, vault.name(), tick, &observed));
+            recovering = Some(Recovering::demanded(
+                &host,
+                vault.name(),
+                tick,
+                &observed,
+                baseline_tick_period(started, tick),
+            ));
         }
 
         let written = churn(vault.path(), tick);
@@ -856,6 +889,10 @@ struct Recovering {
     /// When the load stopped being served, which is where the window the
     /// no-starvation term is charged over begins.
     began_at: Instant,
+    /// The mean tick period the load achieved before the window opened, which
+    /// is the rate its cadences are charged over the window. `None` where no
+    /// tick had completed to measure one over.
+    baseline_tick: Option<Duration>,
     /// When the current attempt asked.
     asked: Instant,
     /// How many attempts have been spent, the current one included.
@@ -893,12 +930,14 @@ impl Recovering {
         name: &VaultName,
         tick: u64,
         observed: &Result<TrustState, ErrorEnvelope>,
+        baseline_tick: Option<Duration>,
     ) -> Recovering {
         Recovering {
             lease: host
                 .retry(name, AttachMode::Durable)
                 .expect("re-requesting the attachment"),
             began_at: Instant::now(),
+            baseline_tick,
             asked: Instant::now(),
             attempts: 1,
             began: tick,
@@ -927,11 +966,14 @@ impl Recovering {
             let window = self.began_at.elapsed();
             let charged = self.assert_the_load_was_served_across_it(window);
             println!(
-                "{RECOVERY_WINDOW_PREFIX}began_tick={} ticks={} window_ms={} attempts={} \
-                 churn_turns={} churn_turns_owed={} warm_reads={} warm_reads_owed={}",
+                "{RECOVERY_WINDOW_PREFIX}began_tick={} ticks={} window_ms={} baseline_tick_ms={} \
+                 attempts={} churn_turns={} churn_turns_owed={} warm_reads={} warm_reads_owed={}",
                 self.began,
                 tick - self.began + 1,
                 window.as_millis(),
+                charged
+                    .baseline_tick
+                    .map_or_else(|| "none".to_string(), |tick| tick.as_millis().to_string()),
                 self.attempts,
                 self.churn_turns,
                 charged.churn_turns,
@@ -974,40 +1016,45 @@ impl Recovering {
     /// COUNTER_CHECK_EVERY` warm reads, and the load must have landed at least
     /// that many.
     ///
-    /// One tick of the window is not charged ([`RECOVERY_WINDOW_SLACK`]): the
-    /// window's ends are read on tick boundaries, so its edges hold a partial
-    /// tick the cadence never owed a dose over. The comparison is a floor and
-    /// not an equality for the same reason — a load doing more than its cadence
-    /// owes is not starving.
+    /// The rate is the load's own achieved tick period, measured over the ticks
+    /// before the window opened, and one such tick of the window is not charged
+    /// ([`RECOVERY_WINDOW_SLACK_TICKS`]): the window's ends are read on tick
+    /// boundaries, so its edges hold a partial tick the cadence never owed a
+    /// dose over. The comparison is a floor and not an equality for the same
+    /// reason — a load doing more than its cadence owes is not starving.
     ///
     /// What it charged goes out to the run's summary. A window inside
-    /// [`RECOVERY_WINDOW_SLACK`] of two ticks owes nothing, which is the
+    /// [`RECOVERY_WINDOW_SLACK_TICKS`] of two ticks owes nothing, which is the
     /// arranged recovery's usual shape, and a reading of zero in the table is
     /// how a night says the term compared nothing rather than passing quietly.
     ///
     /// What this forbids is a load that recovers by stopping — every other bar
     /// in this suite is satisfied by a process that sat still.
     fn assert_the_load_was_served_across_it(&self, window: Duration) -> Charged {
-        let charged = window.saturating_sub(RECOVERY_WINDOW_SLACK);
-        let owed_churn = doses_over(charged, SAMPLE_INTERVAL);
+        let Some(period) = self.baseline_tick else {
+            return Charged::unmeasured();
+        };
+        let charged = window.saturating_sub(period * RECOVERY_WINDOW_SLACK_TICKS);
+        let owed_churn = doses_over(charged, period);
         assert!(
             self.churn_turns >= owed_churn,
             "the load took {} churn turns across the {window:?} a recovery was in flight for, \
-             where its cadence owes {owed_churn} over that stretch, so the vault stopped changing \
-             while the host came back",
+             where its cadence owes {owed_churn} at the {period:?} a tick took before the \
+             window, so the vault stopped changing while the host came back",
             self.churn_turns
         );
 
-        let owed_reads = doses_over(charged, SAMPLE_INTERVAL * COUNTER_CHECK_EVERY as u32);
+        let owed_reads = doses_over(charged, period * COUNTER_CHECK_EVERY as u32);
         assert!(
             self.warm_reads >= owed_reads,
             "the load took {} warm read-only requests across the {window:?} a recovery was in \
-             flight for, where its cadence owes {owed_reads} over that stretch, so it stopped \
-             taking requests while the host came back",
+             flight for, where its cadence owes {owed_reads} at the {period:?} a tick took \
+             before the window, so it stopped taking requests while the host came back",
             self.warm_reads
         );
 
         Charged {
+            baseline_tick: Some(period),
             churn_turns: owed_churn,
             warm_reads: owed_reads,
         }
@@ -1021,16 +1068,52 @@ impl Recovering {
 /// that is read off the night rather than assumed.
 #[derive(Clone, Copy, Debug)]
 struct Charged {
+    /// The tick period the doses below were computed at, or `None` where no
+    /// tick had completed before the window to measure one over.
+    baseline_tick: Option<Duration>,
     churn_turns: u64,
     warm_reads: u64,
+}
+
+impl Charged {
+    /// What a window with no baseline charged: nothing, and it says so.
+    ///
+    /// A recovery demanded before one tick of the load has completed has no
+    /// achieved period to be judged against, and [`SAMPLE_INTERVAL`] is the
+    /// assumption this term exists not to make.
+    fn unmeasured() -> Charged {
+        Charged {
+            baseline_tick: None,
+            churn_turns: 0,
+            warm_reads: 0,
+        }
+    }
 }
 
 /// How many doses a cadence of one per `every` owes over `span`.
 ///
 /// Whole doses only: a cadence owes its next one when the interval has passed,
-/// not part-way through it.
+/// not part-way through it. A period of no length at all charges nothing rather
+/// than dividing by it.
 fn doses_over(span: Duration, every: Duration) -> u64 {
-    (span.as_millis() / every.as_millis()) as u64
+    match every.as_millis() {
+        0 => 0,
+        millis => (span.as_millis() / millis) as u64,
+    }
+}
+
+/// The mean wall clock one tick of the load took over the `tick` ticks before
+/// this one, or nothing where none have completed.
+///
+/// **The rate the no-starvation term charges a recovery window at.** It is the
+/// load's own achieved period rather than [`SAMPLE_INTERVAL`], and it is read
+/// from before the window rather than across it — see
+/// [`RECOVERY_WINDOW_SLACK_TICKS`].
+fn baseline_tick_period(started: Instant, tick: u64) -> Option<Duration> {
+    u32::try_from(tick)
+        .ok()
+        .filter(|ticks| *ticks > 0)
+        .map(|ticks| started.elapsed() / ticks)
 }
 
 /// One look at what the entry under `name` publishes, bounded.
