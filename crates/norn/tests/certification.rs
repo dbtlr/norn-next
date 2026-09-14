@@ -280,10 +280,11 @@ fn a_qualifying_record_validates_and_a_doctored_one_does_not() {
         unauthored_exit_bars: Vec::new(),
         classification: Classification::Qualifying,
     };
-    // **Everything left is this build's own exit-bar registry.** A bar authored
+    // **Everything left is this build's own exit-bar registry.** With every bar
+    // armed this record produces no problem at all and counts; a bar authored
     // `None` refuses every qualifying record while it stands, which is a fact
-    // about the calibration window rather than about this record — so each such
-    // refusal is named here and nothing else is admitted beside them. The
+    // about that calibration window rather than about this record — so each
+    // such refusal is named here and nothing else is admitted beside them. The
     // record's own consistency is what the rest of this case is about, and it
     // holds whichever way the registry stands.
     let unarmed = ledger::unauthored_exit_bars();

@@ -480,12 +480,12 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
     ExitBar {
         name: "soak-host-high-water-rss-ceiling",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_HIGH_WATER_RSS_CEILING_BYTES",
-        armed: false,
+        armed: true,
     },
     ExitBar {
         name: "soak-settle-ceiling",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_SETTLE_CEILING",
-        armed: false,
+        armed: true,
     },
     ExitBar {
         name: "generator-gate-peak-rss-ceiling",
@@ -1162,7 +1162,7 @@ mod tests {
 
     use super::{
         CaseOutcome, Classification, DISPATCHER_IDENTITY, ExitBar, NonQualifying, Outcome,
-        Platform, Preflight, Record, RunResult, came_off_the_schedule, unauthored_exit_bars,
+        Platform, Preflight, Record, RunResult, came_off_the_schedule,
     };
     use crate::certification::inventory::{self, REQUIRED_CASES};
     use crate::certification::manifest;
@@ -1248,29 +1248,39 @@ mod tests {
         assert!(record.qualifies_against(&root, &armed));
     }
 
-    /// **A build mid-calibration refuses every qualifying record, and for
-    /// exactly the bars it names unarmed.**
+    /// **A build mid-calibration refuses every qualifying record, and names
+    /// exactly the bars it leaves unarmed.**
     ///
-    /// The record above is sound in every other way, so what is left when it is
-    /// read against this build's own registry is the bar check alone. It holds
-    /// whichever way the registry stands: a build with every bar armed counts
-    /// the record, and a build calibrating one refuses it and says which.
+    /// The registry here is a fixture rather than this build's own, so the case
+    /// states the refusal whatever this build has authored. Read against the
+    /// live registry it would state nothing at all in a build with every bar
+    /// armed: the loop over the unarmed would be empty, and the refusal the
+    /// case exists for would go unchecked in exactly the builds a campaign is
+    /// counted in. The record is sound in every other way, so what is left is
+    /// the bar check alone.
     #[test]
-    fn a_sound_record_is_refused_for_exactly_the_bars_this_build_leaves_unarmed() {
+    fn a_sound_record_is_refused_for_exactly_the_bars_a_build_leaves_unarmed() {
         let root = workspace_root();
         let record = qualifying_at(&root);
-        let problems = record.problems(&root);
-        let unarmed = unauthored_exit_bars();
-        for name in &unarmed {
-            assert!(
-                problems
-                    .iter()
-                    .any(|problem| problem.contains(&format!("`{name}` unauthored"))),
-                "{problems:?}"
-            );
-        }
-        assert_eq!(problems.len(), unarmed.len(), "{problems:?}");
-        assert_eq!(record.qualifies(&root), unarmed.is_empty());
+        let calibrating = [
+            ExitBar {
+                name: "an-armed-bar",
+                authored_at: "crates/a-crate/tests/baselines/mod.rs::AN_AUTHORED_CEILING",
+                armed: true,
+            },
+            ExitBar {
+                name: "a-calibrating-bar",
+                authored_at: "crates/a-crate/tests/baselines/mod.rs::AN_UNAUTHORED_CEILING",
+                armed: false,
+            },
+        ];
+        let problems = record.problems_against(&root, &calibrating);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("`a-calibrating-bar` unauthored"),
+            "{problems:?}"
+        );
+        assert!(!record.qualifies_against(&root, &calibrating));
     }
 
     #[test]

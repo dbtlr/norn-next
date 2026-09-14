@@ -153,9 +153,9 @@ const CONVERGING: Convergence = Convergence::new(
 ///
 /// One vault per family, so a family's reading is a settle over a tree nothing
 /// else has been churning. **Each family's readings are recorded as they
-/// land**, before the next family starts and before anything is judged: during
-/// the calibration window this step's whole product is the observations, and a
-/// run whose last family times out must still leave the six behind it.
+/// land**, before the next family starts and before anything is judged: the
+/// readings are the step's product whether or not a bar refuses one, and a run
+/// whose last family times out must still leave the six behind it.
 #[test]
 #[ignore = "soak-lane case: runs in the nightly soak lane, not the workspace suite"]
 fn every_churn_family_settles_inside_the_ceiling() {
