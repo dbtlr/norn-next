@@ -280,9 +280,12 @@ pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
 /// runs every leg of every churn family the driver's roll carries, times each
 /// from its own final act, and records the reading as it lands. Beside each
 /// reading it records one boolean — whether the attachment was publishing
-/// `Ready` at the instant equivalence was reached — because the entry does not
+/// `Ready` at the poll that confirmed the reading — because the entry does not
 /// leave `Ready` under churn and a duration to it would be the cost of a
-/// `state()` call rather than a fact about the subject.
+/// `state()` call rather than a fact about the subject. That poll is one
+/// projection read and one poll gap after the reading itself, so the boolean
+/// says the churn withdrew no trust across the settle, not that the entry held
+/// `Ready` at the reading's own instant.
 ///
 /// **The instant a calibration reads.** The clock stops where the confirming
 /// full projection read *began*, not where it returned: a read observes the
@@ -306,6 +309,20 @@ pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
 /// on that bound — it fails a settle that grew past one census read of the
 /// vault, and it says nothing finer.
 ///
+/// **What that costs the calibration commit.** The clock starts at the
+/// delivered change and the next thing the instrument does is walk the whole
+/// ≥5k tree to build the census the polls compare against, so that walk is
+/// inside every reading before the first poll. A value authored over these
+/// numbers therefore states "the settle finishes inside one filesystem walk of
+/// the vault", whose floor tracks the runner's filesystem rather than the
+/// subject and which cannot fail a regression smaller than that walk. So the
+/// commit that authors this has two ways to go and must take one: narrow the
+/// first look — the workload script already implies the tree, which is what
+/// `Census::assert_the_script_read_the_tree_the_same_way` checks, so the
+/// expected census is derivable rather than walkable and the walk can verify
+/// after the clock stops — or say in the safety rationale below that the bar
+/// is one census walk and that this is the resolution being accepted.
+///
 /// The comparison happens only where a ceiling is authored: `Some` bars the
 /// run, `None` records the readings and bars nothing, and the qualification
 /// ledger types every such run non-qualifying, so the readings accumulate
@@ -316,10 +333,11 @@ pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
 /// - **Profile.** Filled. The ceiling is stated over the `soak` profile — the
 ///   ≥5k-document scale every other soak bar in the workspace is authored over
 ///   — and the scheduled lane names it in the step's environment. The scale is
-///   load-bearing: the same instrument reads two to three times higher at ≥5k
-///   than at the 120-document `small` profile, so a ceiling calibrated at
-///   `small` would pass every scheduled run trivially and could not fail a
-///   settle that had regressed toward vault-proportional. A local run defaults
+///   load-bearing: every leg reads higher at ≥5k than at the 120-document
+///   `small` profile, and the ≥5k readings are floor-bound besides, so a
+///   ceiling calibrated at `small` would sit below the instrument's own floor
+///   at the gating scale — it would pass every scheduled run trivially and
+///   could not fail a settle that had regressed toward vault-proportional. A local run defaults
 ///   to `small`, which is a developer's reading and gates nothing.
 /// - **Observations.** *Unauthored.* The value here is authored by a commit
 ///   that records the runs behind it — the lane, the dates, the run ids, and

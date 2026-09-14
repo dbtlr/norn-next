@@ -94,10 +94,13 @@
 //! # The scale
 //!
 //! The scheduled lane names the `soak` profile, which is the ≥5k-document scale
-//! every other soak bar in the workspace is authored over, and the reading
-//! moves by two to three times between that scale and the `small` one the
-//! families are authored at. A ceiling calibrated at `small` would sit far
-//! below the scale it gates. `NORN_SETTLE_PROFILE` names the profile, the lane
+//! every other soak bar in the workspace is authored over. Every leg reads
+//! higher there than at the 120-document `small` profile the families are
+//! authored at, and by different multiples per leg — but the two bands are not
+//! the same subject read at two scales, because at ≥5k every leg is
+//! floor-bound in the sense above. So the comparison says only that a ceiling
+//! calibrated at `small` would sit far below the scale it gates, which is the
+//! reason the lane names the profile. `NORN_SETTLE_PROFILE` names the profile, the lane
 //! sets it explicitly so the scale a recorded reading was taken at is workflow
 //! text, and a local run defaults to `small` because a developer is not
 //! calibrating.

@@ -315,8 +315,8 @@ are the instrument's and not the subject's. The settle then lies between the sta
 poll that found the store unsettled and that instant, and the reading is the top of that
 window; how wide the window was is measured per leg and recorded beside the reading. **There is no second clock.** The entry does not leave `Ready` under churn, so a duration to it would measure a
 `state()` call; what is recorded beside each reading is the boolean that the attachment
-was publishing `Ready` at the instant equivalence was reached — the churn withdrew no
-trust. Readings are recorded as each family lands, and compared against
+was publishing `Ready` at the poll that confirmed the reading, one projection read and one
+poll gap after it — the churn withdrew no trust across the settle. Readings are recorded as each family lands, and compared against
 `SOAK_SETTLE_CEILING` only where one is authored. It stands `None`, so the readings
 accumulate and nothing is barred — and the ledger's exit-bar registry names it, which
 types every run taken under it non-qualifying so a calibration window never counts toward

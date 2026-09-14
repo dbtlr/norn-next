@@ -186,7 +186,7 @@ jobs:
   #
   # **120 minutes covers everything the job holds, not the load alone**:
   # checkout, a cold debug build, the five measurement steps, that worst-case 70
-  # minutes of load, and then the eight certification targets — two of which
+  # minutes of load, and then the ten certification targets — two of which
   # rebuild `norn-host` and its dependents behind `induced-failure` and back —
   # plus the two runs of the `norn` certification binary that collect the
   # outcomes and write the record. The measured shape is a wide margin: the four
@@ -326,10 +326,10 @@ jobs:
       # The profile is named rather than defaulted, so the scale a recorded
       # reading was taken at is text in this file and moves the suite digest
       # when it changes. It is `soak` — the >=5k-document profile every other
-      # bar in this lane is authored over. The reading moves by two to three
-      # times between it and the 120-document `small` profile the families are
-      # authored at, so a ceiling calibrated at `small` would pass every
-      # scheduled run trivially. The whole roll at >=5k costs about three
+      # bar in this lane is authored over. Every leg reads higher here than at
+      # the 120-document `small` profile the families are authored at, so a
+      # ceiling calibrated at `small` would sit below this scale's readings and
+      # pass every scheduled run trivially. The whole roll at >=5k costs about
       # minutes of this job's measured margin: the four nightlies that ground
       # the bars ran 61 minutes against the 120-minute timeout above.
       #
