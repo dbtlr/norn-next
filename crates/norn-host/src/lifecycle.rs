@@ -4331,6 +4331,20 @@ mod tests {
         /// verdict that was never theirs.
         damaged_reconcile_at: Mutex<Option<VaultName>>,
         damaged_maintenance_at: Mutex<Option<VaultName>>,
+        /// The vault whose next watcher poll reports damaged derived state.
+        /// The poll leg holds the entry's claim and its coverage when it meets
+        /// the verdict, so this is the damage an entry meets while it is
+        /// otherwise idle and serving reads.
+        damaged_poll_at: Mutex<Option<VaultName>>,
+        /// Report the recovery as damaged: the leg that re-installs coverage
+        /// found the database under it condemned, so the ladder the entry was
+        /// climbing is not the one that resolves what it met.
+        damaged_recover: std::sync::atomic::AtomicBool,
+        /// Report the reload as damaged: the configuration the reload activates
+        /// is applied against a database that answers the activation with a
+        /// verdict the caller is refused under. One-shot, so the rung the
+        /// verdict schedules finds the leg sound.
+        damaged_reload: std::sync::atomic::AtomicBool,
         /// Report the rebuild itself as damaged, which is rung 3 failing to
         /// resolve what it was scheduled for.
         damaged_rebuild: std::sync::atomic::AtomicBool,
@@ -4606,6 +4620,11 @@ mod tests {
             if self.environmental_recover.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::Environmental("refused".into()));
             }
+            if self.damaged_recover.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::StoreDamaged(
+                    "the recovered database reports a malformed index".into(),
+                ));
+            }
             if self.lost_recover.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::LostMaintainership);
             }
@@ -4630,6 +4649,11 @@ mod tests {
             if self.block_reload.load(Ordering::SeqCst) {
                 self.reload_started.store(true, Ordering::SeqCst);
                 wait_for_release("reload_release", &self.reload_release);
+            }
+            if self.damaged_reload.swap(false, Ordering::SeqCst) {
+                return Err(EntryReloadFailure::Runtime(JobFailure::StoreDamaged(
+                    "the reloaded database disagrees with its own schema".into(),
+                )));
             }
             if self.reload_schema_changed.load(Ordering::SeqCst) {
                 progress.begin_schema_reload();
@@ -4689,6 +4713,11 @@ mod tests {
             }
             if self.lost_poll.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::LostMaintainership);
+            }
+            if takes_the_vault(&self.damaged_poll_at, name) {
+                return Err(JobFailure::StoreDamaged(
+                    "the watcher cursor points into a truncated page".into(),
+                ));
             }
             let on_job_thread = ON_JOB_THREAD.with(Cell::get);
             if on_job_thread
@@ -9422,25 +9451,133 @@ mod tests {
         );
 
         ops.rebuild_release.store(true, Ordering::SeqCst);
-        wait_until(
-            "the entry to reach Ready through the rung the verdict schedules",
-            lifecycle_wait_budget(),
-            || {
-                if ops.rebuilds.load(Ordering::SeqCst) == 1
-                    && host.state(&name) == answered(TrustState::Ready)
-                {
-                    Observed::Met(())
-                } else {
-                    Observed::pending(format!(
-                        "{} rebuilds, standing at {:?}",
-                        ops.rebuilds.load(Ordering::SeqCst),
-                        host.state(&name)
-                    ))
-                }
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_one_rebuild_to_ready(&host, &name, &ops);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+    }
+
+    /// The verdict a watcher poll reports reaches the same rung, and the entry
+    /// withdraws trust on the way there. The poll leg meets the damage while it
+    /// holds the entry's claim and its coverage, with nothing demanded of the
+    /// entry: this is damage an otherwise idle vault meets between one client
+    /// read and the next.
+    ///
+    /// What the entry publishes while it sits inside rung 3 is the assertion.
+    /// The reason is the rebuilding one carrying the poll's own detail, so a
+    /// client reading the entry between the verdict and the rung is told the
+    /// derived state is condemned rather than served reads off it, and the
+    /// detail is what says the reason travelled from the verdict rather than
+    /// being minted at the rung.
+    #[test]
+    fn damage_a_watcher_poll_reports_reaches_rung_three() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        *ops.damaged_poll_at
+            .lock()
+            .expect("an arranged vault poisoned") = Some(name.clone());
+
+        let withdrawn = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+            "the watcher cursor points into a truncated page",
+        ));
+        wait_for_state(&host, &name, withdrawn.clone());
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(
+            host.state(&name),
+            answered(withdrawn),
+            "the entry retired the damage verdict before the rung resolving it had"
+        );
+
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_one_rebuild_to_ready(&host, &name, &ops);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+    }
+
+    /// The verdict a recovery reports reaches the same rung, and the entry
+    /// withdraws trust on the way there. The recovery leg is the one that meets
+    /// damage while the entry is already untrusted and already owes a rung, so
+    /// the withdrawal here replaces one untrusted reason with another: the
+    /// watcher loss the entry was climbing out of gives way to the database
+    /// verdict the climb uncovered.
+    ///
+    /// That replacement is the assertion. A recovery re-installs coverage over
+    /// the same database, so an entry that kept publishing the watcher reason
+    /// would be promising a ladder that cannot resolve what it just met. What
+    /// stands instead is the rebuilding reason carrying the recovery's own
+    /// detail, published before rung 3 rather than after it.
+    #[test]
+    fn damage_a_recovery_reports_reaches_rung_three() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = attached_awaiting_recovery(&ops);
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        ops.damaged_recover.store(true, Ordering::SeqCst);
+
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let withdrawn = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+            "the recovered database reports a malformed index",
+        ));
+        wait_for_state(&host, &name, withdrawn.clone());
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(
+            host.state(&name),
+            answered(withdrawn),
+            "the entry retired the damage verdict before the rung resolving it had"
+        );
+
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_one_rebuild_to_ready(&host, &name, &ops);
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            1,
+            "the entry climbed the recovery ladder again after the verdict against it"
+        );
+        drop(lease);
+    }
+
+    /// The verdict a reload reports reaches the same rung, and the entry
+    /// withdraws trust on the way there. The reload leg is the one with a
+    /// caller waiting on it, so it does two things with one verdict: the caller
+    /// is refused under the failure, and the entry publishes the withdrawal to
+    /// every client that was not the caller.
+    ///
+    /// Both halves are the assertion. A reload refused without the withdrawal
+    /// would leave an entry standing Ready over a database it has already been
+    /// told is condemned, and every reader but the caller would go on being
+    /// served off it.
+    #[test]
+    fn damage_a_reload_reports_refuses_the_caller_and_reaches_rung_three() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let detail = "the reloaded database disagrees with its own schema";
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        ops.damaged_reload.store(true, Ordering::SeqCst);
+        assert_eq!(
+            host.reload(&name),
+            Err(ReloadRefusal::Runtime(JobFailure::StoreDamaged(
+                detail.into()
+            ))),
+            "the caller was answered by something other than the verdict the reload met"
+        );
+
+        let withdrawn = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+        wait_for_state(&host, &name, withdrawn.clone());
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(
+            host.state(&name),
+            answered(withdrawn),
+            "the entry retired the damage verdict before the rung resolving it had"
+        );
+
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_one_rebuild_to_ready(&host, &name, &ops);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+        drop(lease);
     }
 
     /// **The verdict an attach reports is the one that waits for a demand, and
@@ -9798,6 +9935,35 @@ mod tests {
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
         wait_for_state(&host, &name, backend_lost());
         (host, name)
+    }
+
+    /// Wait for the rung the damage verdict scheduled to run once and leave the
+    /// entry Ready. The pair is one wait rather than two because a rebuild
+    /// count read after a separate wait for Ready would be read from the far
+    /// side of whatever ran next.
+    fn wait_for_one_rebuild_to_ready(
+        host: &Host<Arc<FakeOps>>,
+        name: &VaultName,
+        ops: &Arc<FakeOps>,
+    ) {
+        wait_until(
+            "the entry to reach Ready through the rung the verdict schedules",
+            lifecycle_wait_budget(),
+            || {
+                if ops.rebuilds.load(Ordering::SeqCst) == 1
+                    && host.state(name) == answered(TrustState::Ready)
+                {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!(
+                        "{} rebuilds, standing at {:?}",
+                        ops.rebuilds.load(Ordering::SeqCst),
+                        host.state(name)
+                    ))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
     /// Hold the entry in a watcher poll's claim, and answer once it is held.
