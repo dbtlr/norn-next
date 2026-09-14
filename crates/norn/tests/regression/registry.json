@@ -1138,7 +1138,7 @@
       "name": "vault-root-containment",
       "kind": "defect-class",
       "venue": 2,
-      "property": "Containment is per component: the descent to a target follows no component through a symlink and refuses a name that leaves the anchor, so a symlinked directory inside the vault, a parent traversal and an absolute path each refuse before anything is opened, and a lexical check ahead of the descent is not what refuses. A publication verifies its destination through the handle it holds rather than through a second open by name, so a foreign republication that keeps the bytes is refused instead of overwritten. The rename after that verification is not exclusive, and nothing here claims it is.",
+      "property": "Containment is per component: the descent to a target opens each ancestor without following a link, so a symlinked directory inside the vault is refused at the component that is the link — a required read refuses and an optional one answers nothing rather than reading through it. A name that leaves the anchor, a parent traversal or an absolute path, refuses before anything is opened. A lexical check ahead of the descent is not what refuses. A publication verifies its destination through the handle it holds rather than through a second open by name, so a foreign republication that keeps the bytes is refused instead of overwritten. The rename after that verification is not exclusive, and nothing here claims it is.",
       "sources": ["NRN-145", "NRN-160"],
       "binding": {
         "status": "bound",
