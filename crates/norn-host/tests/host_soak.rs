@@ -54,7 +54,8 @@
 //! records the reading and bars nothing — and the ledger stamps every such
 //! run's record non-qualifying, so calibration runs are never counted toward
 //! the five (`norn_testkit::certification::ledger::NAMED_EXIT_BARS`, held to
-//! the constant by a test beside it). It is the peak of the *load*: the child
+//! the constant by a test in `settle.rs`, which holds every entry of that
+//! registry to the baseline it names). It is the peak of the *load*: the child
 //! samples itself from inside the churn loop, which it reaches once the
 //! attachment is ready, so the attach and the heal over the ≥5k tree are ahead
 //! of the first sample and outside the series.
@@ -266,7 +267,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
     );
 
     assert!(
-        descriptor_growth <= baselines::SOAK_FD_GROWTH_ALLOWANCE,
+        baselines::fits(descriptor_growth, baselines::SOAK_FD_GROWTH_ALLOWANCE),
         "the load opened {descriptor_growth} descriptors it did not close, past an allowance of \
          {}: {} at the first sample and {} at the last",
         baselines::SOAK_FD_GROWTH_ALLOWANCE,
@@ -279,7 +280,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
     );
     if let Some(ceiling) = baselines::SOAK_PEAK_RSS_CEILING_BYTES {
         assert!(
-            peak <= ceiling,
+            baselines::fits(peak, ceiling),
             "the load's resident set peaked at {} MiB, past the {} MiB ceiling, over {} samples \
              at the ≥5k profile",
             baselines::mebibytes(peak),
@@ -288,7 +289,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         );
     }
     assert!(
-        slope <= baselines::SOAK_RSS_SLOPE_PER_MILLE,
+        baselines::fits(slope, baselines::SOAK_RSS_SLOPE_PER_MILLE),
         "the resident set rose by {}x across the load, past the {}x bar: the first quartile \
          averaged {} MiB and the last {} MiB over {} samples",
         baselines::multiple(slope),
@@ -296,30 +297,6 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         baselines::mebibytes(head),
         baselines::mebibytes(tail),
         samples.len()
-    );
-}
-
-/// **The ledger's armed claim is held to the constant it claims about.**
-///
-/// [`norn_testkit::certification::ledger::NAMED_EXIT_BARS`] is what stamps a
-/// run's record non-qualifying while a named exit bar is unauthored, and the
-/// value it makes that claim about lives here in
-/// [`baselines::SOAK_PEAK_RSS_CEILING_BYTES`]. Two files, one fact — so this
-/// holds them together: un-authoring the ceiling without disarming the
-/// registry, or the reverse, fails a pull request rather than letting a
-/// calibration run stamp itself qualifying.
-#[test]
-fn the_ledgers_armed_claim_matches_the_authored_ceiling() {
-    let bar = norn_testkit::certification::ledger::NAMED_EXIT_BARS
-        .iter()
-        .find(|bar| bar.name == "soak-host-peak-rss-ceiling")
-        .expect("the ledger names the soak host-peak ceiling among its exit bars");
-    assert_eq!(
-        bar.armed,
-        baselines::SOAK_PEAK_RSS_CEILING_BYTES.is_some(),
-        "the ledger claims the soak host-peak ceiling is {} and the constant reads {:?}",
-        if bar.armed { "armed" } else { "unarmed" },
-        baselines::SOAK_PEAK_RSS_CEILING_BYTES
     );
 }
 

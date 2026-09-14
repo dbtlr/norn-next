@@ -168,6 +168,19 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
         why: "the seeded workload families the churn suite applies to a live tree",
     },
     ManifestFile {
+        path: "crates/norn-testkit/src/wait.rs",
+        why: "how a bounded wait asks, and what it reports when the answer arrives: the settle \
+              reading is the elapsed time at a poll of this loop, and its recorded resolution is \
+              the gap between two of them. A wait that noticed convergence at a different \
+              moment would move every reading without moving a bar",
+    },
+    ManifestFile {
+        path: "crates/norn-testkit/src/poll.rs",
+        why: "the cadence every bounded wait polls at. It is the sleep half of the gap the \
+              settle reading's resolution is measured over, so widening it coarsens every \
+              reading the scheduled lane records",
+    },
+    ManifestFile {
         path: "crates/norn-testkit/src/work.rs",
         why: "the shape a work bar is stated in, and the row count arithmetic a caller states one \
               against",
@@ -246,8 +259,9 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
     // the candidate SHA, which moves when the file does.
     ManifestFile {
         path: "crates/norn-host/tests/churn.rs",
-        why: "the churn suite, whose authored cost bounds and settle budgets are the bars a \
-              qualifying run passes under",
+        why: "the churn suite, whose authored cost bounds are the bars a qualifying run passes \
+              under, and whose settle budgets are the runaway bounds it converges inside. How \
+              long a settle may take is a clock and is barred in `settle.rs` instead",
     },
     ManifestFile {
         path: "crates/norn-host/tests/equivalence.rs",
@@ -299,10 +313,31 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
     ManifestFile {
         path: "crates/norn-host/tests/host_soak.rs",
         why: "the scheduled lane's host workload and the comparisons that apply the soak bars: \
-              the peak ceiling, the slope ratio and the descriptor allowance are enforced here, \
-              and the test holding the ledger's armed claim to the authored ceiling sits beside \
-              them. A comparison deleted with the digest standing would count runs that \
-              evaluated less",
+              the peak ceiling, the slope ratio and the descriptor allowance are enforced here. \
+              A comparison deleted with the digest standing would count runs that evaluated \
+              less",
+    },
+    ManifestFile {
+        path: "crates/norn-host/tests/settle.rs",
+        why: "the scheduled lane's clock on rung 1: how each leg of a churn family is timed from \
+              its own final act, the comparator the clock stops on, the comparison that applies \
+              the settle ceiling, the negative control that requires an over-ceiling reading to \
+              be refused, and the test holding every entry of the ledger's exit-bar registry to \
+              the baseline it names. A reading taken by a different instrument is a different \
+              reading",
+    },
+    ManifestFile {
+        path: "crates/norn-host/tests/tree/mod.rs",
+        why: "what both churn suites read a churned tree through: the ground the workload \
+              families are built against, and the census a settle waits on. The clock and the \
+              convergence bar wait on one definition of caught up, and a suite given a second \
+              one would time a settle the other never judged",
+    },
+    ManifestFile {
+        path: "crates/norn-host/tests/fd_budget.rs",
+        why: "the probe the descriptor budget is read through, and the equality between its two \
+              scales that the vault-size claim really rests on. A bar authored in the baselines \
+              and applied here is two files, and loosening either is a run that measured less",
     },
     // The recorded baselines. A measurement lane compares against these rather
     // than against a history, so a baseline edited is a bar moved.

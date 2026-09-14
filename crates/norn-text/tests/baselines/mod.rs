@@ -27,6 +27,17 @@
 //! that grows faster than the key count does. The ceiling beside it is a sanity
 //! bar, and the wall-clock reading recorded in the job summary is what a person
 //! looks at.
+//!
+//! # Platform scope
+//!
+//! **Every band below gates on `ubuntu-latest` x86_64-glibc, and nowhere else.**
+//! The nightly soak lane's `norn-text frontmatter_cost` step is the one that
+//! judges them, and it runs on that runner alone. The macos-arm64 readings
+//! recorded beside them are what a developer sees and what argued for the
+//! margins; no lane evaluates a bar here on that platform. The macOS
+//! certification lane runs the certification cases and no measurement step at
+//! all, which the comment over `.github/workflows/certify.yml`'s
+//! `certification-macos` job states in those words.
 #![allow(dead_code)]
 
 use std::time::Duration;

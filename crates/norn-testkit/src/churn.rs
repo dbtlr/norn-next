@@ -1155,6 +1155,172 @@ pub fn external_tools(seed: u64) -> Phased {
     )
 }
 
+// ---------------------------------------------------------------------------
+// The roll
+// ---------------------------------------------------------------------------
+
+/// The facts a script cannot invent, handed to a family that needs one.
+///
+/// Each is a fact about the machine or about a layer that reads bytes, and
+/// nothing here knows either: what a volume does with two spellings, how much
+/// frontmatter the text layer reads before it gives up, and what a vault's own
+/// declaration is spelled as. A suite that knows them hands them in, the way
+/// [`SchemaGround`] is handed in.
+pub struct Ground<'a> {
+    /// What the volume the tree sits on does with two spellings that differ
+    /// only in case.
+    pub folding: Folding,
+    /// The most frontmatter bytes the text layer reads. A block past it is what
+    /// family 4 crosses out of and back into.
+    pub frontmatter_read_bound: usize,
+    /// Where the vault's declaration sits, and the bytes family 4's third phase
+    /// replaces it with.
+    pub schema: SchemaGround<'a>,
+}
+
+/// **The roll of workload families**, and the seed each one is written at.
+///
+/// One table, because two suites run these families for two different reasons —
+/// the churn suite asks whether a host converges on them and the settle
+/// instrument asks how long it takes — and a reading taken over a workload the
+/// other suite never ran is a reading of a different subject. The seed is here
+/// rather than at the call sites for the same reason: a seed changed on one
+/// side would leave the two suites churning two trees under one name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Family {
+    /// [`ordinary_editing`].
+    OrdinaryEditing,
+    /// [`atomic_replacement`].
+    AtomicReplacement,
+    /// [`case_flip`].
+    CaseFlip,
+    /// [`case_rename_parent`].
+    CaseRenamedParent,
+    /// [`burst`].
+    Burst,
+    /// [`validity_transitions`], with [`schema_replacement`] behind it.
+    ValidityTransitions,
+    /// [`external_tools`].
+    ExternalTools,
+}
+
+impl Family {
+    /// Every family, in the order the suites run them.
+    ///
+    /// The list is held exhaustive against this module's own source: a
+    /// constructor returning a [`Phased`] that no variant here names fails
+    /// the `every_phased_constructor_is_a_family` test, so a family added to the
+    /// driver reaches both suites rather than only the one whose author added
+    /// it.
+    pub const ALL: &'static [Family] = &[
+        Family::OrdinaryEditing,
+        Family::AtomicReplacement,
+        Family::CaseFlip,
+        Family::CaseRenamedParent,
+        Family::Burst,
+        Family::ValidityTransitions,
+        Family::ExternalTools,
+    ];
+
+    /// The name a reading and a failure carry.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Family::OrdinaryEditing => "ordinary editing",
+            Family::AtomicReplacement => "atomic replacement and movement",
+            Family::CaseFlip => "a case flip",
+            Family::CaseRenamedParent => "a case-renamed parent over a save",
+            Family::Burst => "a burst",
+            Family::ValidityTransitions => "validity transitions",
+            Family::ExternalTools => "an external tool's catch-up",
+        }
+    }
+
+    /// The seed the family's scripts are written at.
+    pub fn seed(&self) -> u64 {
+        match self {
+            Family::OrdinaryEditing => 41,
+            Family::AtomicReplacement => 43,
+            Family::CaseFlip => 73,
+            Family::CaseRenamedParent => 79,
+            Family::Burst => 47,
+            Family::ValidityTransitions => 53,
+            Family::ExternalTools => 59,
+        }
+    }
+
+    /// The name of the constructor that builds this family's workload, which is
+    /// what holds the roll to the driver's own source.
+    #[cfg(test)]
+    fn constructor(&self) -> &'static str {
+        match self {
+            Family::OrdinaryEditing => "ordinary_editing",
+            Family::AtomicReplacement => "atomic_replacement",
+            Family::CaseFlip => "case_flip",
+            Family::CaseRenamedParent => "case_rename_parent",
+            Family::Burst => "burst",
+            Family::ValidityTransitions => "validity_transitions",
+            Family::ExternalTools => "external_tools",
+        }
+    }
+
+    /// The family's two phases, at its own seed.
+    pub fn workload(&self, ground: &Ground<'_>) -> Phased {
+        let seed = self.seed();
+        match self {
+            Family::OrdinaryEditing => ordinary_editing(seed),
+            Family::AtomicReplacement => atomic_replacement(seed),
+            Family::CaseFlip => case_flip(seed, ground.folding),
+            Family::CaseRenamedParent => case_rename_parent(seed, ground.folding),
+            Family::Burst => burst(seed),
+            Family::ValidityTransitions => {
+                validity_transitions(seed, &oversized_frontmatter(ground.frontmatter_read_bound))
+            }
+            Family::ExternalTools => external_tools(seed),
+        }
+    }
+
+    /// **The third phase, where the family has one.** Family 4 replaces the
+    /// vault's own declaration after its crossings are settled; every other
+    /// family ends at its changing phase.
+    ///
+    /// A suite that runs the phases has to run this one too, or the leg the
+    /// family carries is a leg nothing exercises.
+    pub fn third_phase(&self, ground: &Ground<'_>) -> Option<Script> {
+        match self {
+            Family::ValidityTransitions => Some(schema_replacement(SchemaGround {
+                at: ground.schema.at,
+                replacement: ground.schema.replacement,
+            })),
+            // Listed rather than defaulted, so a family added to the roll has
+            // to say here whether it carries a third phase instead of being
+            // given `None` by a wildcard.
+            Family::OrdinaryEditing
+            | Family::AtomicReplacement
+            | Family::CaseFlip
+            | Family::CaseRenamedParent
+            | Family::Burst
+            | Family::ExternalTools => None,
+        }
+    }
+}
+
+/// A document whose frontmatter block is past `read_bound`, which is the bound
+/// the text layer gives up at.
+///
+/// The block never closes inside the bound, so the read refuses it by size: the
+/// document keeps the row the act could derive and a document-scoped finding
+/// stands beside it. Editing this document down to an ordinary one is the row
+/// flip the content size drives, and editing an ordinary one up to this is the
+/// same flip the other way.
+fn oversized_frontmatter(read_bound: usize) -> Vec<u8> {
+    let mut block = String::from("a: ");
+    while block.len() + 1 < read_bound * 2 {
+        block.push('[');
+    }
+    block.push('\n');
+    format!("---\n{block}---\n# body\n").into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1163,6 +1329,37 @@ mod tests {
     /// A tree of this module's own, removed when the handle drops.
     fn scratch(name: &str) -> Scratch {
         Scratch::new(&format!("norn-churn-{name}"))
+    }
+
+    /// **The roll of families is the driver's own source rather than a
+    /// comment.**
+    ///
+    /// [`Family::ALL`] decides which workloads both the churn suite and the
+    /// settle instrument run. A constructor handing back a [`Phased`] that no
+    /// variant names would be a family one suite could adopt and the other
+    /// would never see, so the two lists are held equal against this module's
+    /// text.
+    #[test]
+    fn every_phased_constructor_is_a_family() {
+        const SOURCE: &str = include_str!("churn.rs");
+
+        let mut built: Vec<&str> = SOURCE
+            .lines()
+            .filter_map(|line| line.strip_prefix("pub fn "))
+            .filter(|rest| rest.ends_with("-> Phased {"))
+            .filter_map(|rest| rest.split('(').next())
+            .collect();
+        built.sort_unstable();
+        let mut named: Vec<&str> = Family::ALL
+            .iter()
+            .map(|family| family.constructor())
+            .collect();
+        named.sort_unstable();
+        assert_eq!(
+            built, named,
+            "the workload constructors this module carries and the families the roll names are \
+             not the same set, so a family reaches one suite and not the other"
+        );
     }
 
     #[test]

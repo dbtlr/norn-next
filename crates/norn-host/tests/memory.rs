@@ -102,7 +102,7 @@ fn the_gate_profile_attaches_inside_its_memory_bar() {
         ],
     );
     assert!(
-        peak <= baselines::ATTACH_PEAK_RSS_CEILING_BYTES,
+        baselines::fits(peak, baselines::ATTACH_PEAK_RSS_CEILING_BYTES),
         "attaching `realistic` peaked at {} MiB against a {} MiB bar",
         baselines::mebibytes(peak),
         baselines::mebibytes(baselines::ATTACH_PEAK_RSS_CEILING_BYTES)
@@ -146,7 +146,7 @@ fn peak_memory_holds_flat_from_the_ambiguity_profile_to_the_gate_profile() {
         "an attachment reported no peak at all, so the pair compares nothing"
     );
     assert!(
-        observed <= baselines::ATTACH_PAIR_PEAK_RSS_PER_MILLE,
+        baselines::fits(observed, baselines::ATTACH_PAIR_PEAK_RSS_PER_MILLE),
         "going from `ambiguous` (300 documents) to `realistic` (2000 documents) moved the attach \
          peak by {}x, past the {}x bar: `ambiguous` peaked at {} MiB and `realistic` at {} MiB",
         baselines::multiple(observed),
