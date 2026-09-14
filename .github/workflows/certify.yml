@@ -329,7 +329,8 @@ jobs:
       # bar in this lane is authored over. Every leg reads higher here than at
       # the 120-document `small` profile the families are authored at, so a
       # ceiling calibrated at `small` would sit below this scale's readings and
-      # pass every scheduled run trivially. The whole roll at >=5k costs about
+      # fail every scheduled run — a red lane about which profile the number
+      # came from, not about the candidate. The whole roll at >=5k costs about
       # minutes of this job's measured margin: the four nightlies that ground
       # the bars ran 61 minutes against the 120-minute timeout above.
       #

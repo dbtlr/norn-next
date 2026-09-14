@@ -168,6 +168,19 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
         why: "the seeded workload families the churn suite applies to a live tree",
     },
     ManifestFile {
+        path: "crates/norn-testkit/src/wait.rs",
+        why: "how a bounded wait asks, and what it reports when the answer arrives: the settle \
+              reading is the elapsed time at a poll of this loop, and its recorded resolution is \
+              the gap between two of them. A wait that noticed convergence at a different \
+              moment would move every reading without moving a bar",
+    },
+    ManifestFile {
+        path: "crates/norn-testkit/src/poll.rs",
+        why: "the cadence every bounded wait polls at. It is the sleep half of the gap the \
+              settle reading's resolution is measured over, so widening it coarsens every \
+              reading the scheduled lane records",
+    },
+    ManifestFile {
         path: "crates/norn-testkit/src/work.rs",
         why: "the shape a work bar is stated in, and the row count arithmetic a caller states one \
               against",

@@ -336,9 +336,11 @@ pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
 ///   load-bearing: every leg reads higher at ≥5k than at the 120-document
 ///   `small` profile, and the ≥5k readings are floor-bound besides, so a
 ///   ceiling calibrated at `small` would sit below the instrument's own floor
-///   at the gating scale — it would pass every scheduled run trivially and
-///   could not fail a settle that had regressed toward vault-proportional. A local run defaults
-///   to `small`, which is a developer's reading and gates nothing.
+///   at the gating scale. [`fits`] admits a reading only at or under the
+///   ceiling, so such a value would **fail every scheduled run** — a red lane
+///   about the scale the number came from rather than about the candidate, and
+///   the failure a calibration must not manufacture. A local run defaults to
+///   `small`, which is a developer's reading and gates nothing.
 /// - **Observations.** *Unauthored.* The value here is authored by a commit
 ///   that records the runs behind it — the lane, the dates, the run ids, and
 ///   the per-leg band each reading fell in — the way
