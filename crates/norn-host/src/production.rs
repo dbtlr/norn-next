@@ -1184,6 +1184,7 @@ fn scoped_increment(
                 root,
                 exclusions,
                 skip.path().as_path(),
+                skip.reason().stands(),
                 policy,
                 progress,
                 store_order(sensitivity),
@@ -1256,6 +1257,12 @@ fn scoped_increment(
                     // the entry stands. That reading is what the row prune above
                     // acts on, and the findings in the same scope join it: a
                     // derivation from zero over this tree holds neither.
+                    //
+                    // **The path's own rendered place is outside that scope.**
+                    // Where the document grammar refuses the spelling, the name
+                    // stands at a place every sibling whose rendering lands
+                    // there names too, and this leg read one of those
+                    // spellings — so the place is the vault heal's to conclude.
                     pending
                         .account
                         .walked(HealScope::from(scope), store_order(sensitivity));
@@ -1601,15 +1608,35 @@ fn addressed_scope<'a>(
 /// device-like entry, a name below an entry — so what a derivation from zero
 /// holds beneath it is no row and no finding, and both axes are taken here.
 ///
+/// **A reason that does not stand is asked for, never assumed.** A root that
+/// merely vanished says nothing about what is at it now, so the rows beneath it
+/// converge the way they converge for any name nothing is at while the findings
+/// stay standing: this registers no scope for one. [`Vault::skip_reaching`]
+/// answers no such reason today, and `stands` is asked here rather than relied
+/// on, so a reason class added later decides at this seam instead of silently
+/// widening it.
+///
 /// **Authority follows the rows.** A spelling that addresses no range of stored
 /// paths holds no row beneath it and names no place the prune could reach, so
-/// such a root registers nothing and takes nothing.
+/// such a root registers nothing and takes nothing; the places it hides are
+/// converged by the next walk rooted above it, which reaches them as the
+/// marker-carrying places they render onto.
+///
+/// **The root's own place is outside what this leg concludes.** Where the
+/// document grammar refuses the root's spelling and the directory grammar admits
+/// it, the root stands at a rendered place and the scope registered here holds
+/// only what is under it. That place is named by every spelling that renders
+/// onto it — the root's own, and any sibling whose rendering lands there — and
+/// this leg read one of them, so the finding standing there is the vault heal's
+/// to take. The two legs agree on authority rather than on outcome: neither
+/// takes a place it did not enumerate the spellings of.
 #[allow(clippy::too_many_arguments)]
 fn prune_refused_root(
     store: &mut Store,
     vault_root: &Path,
     exclusions: &[PathBuf],
     refused: &Path,
+    stands: bool,
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
     order: StoredPathOrder,
@@ -1625,7 +1652,9 @@ fn prune_refused_root(
     prune_subtree_ordered(
         store, vault_root, exclusions, scope, policy, progress, order, account,
     )?;
-    account.walked(HealScope::from(scope), order);
+    if stands {
+        account.walked(HealScope::from(scope), order);
+    }
     Ok(())
 }
 
@@ -1878,7 +1907,7 @@ impl Vacated {
 /// scoped increment answers — and three of the things its acts learn outlive the
 /// scope that learned them, so they are held here rather than in [`Pending`]:
 /// the places its deaths owe a reading of, the places it filed a finding at, and
-/// the roots its walks did not enter. The scopes it walked cleanly are here for
+/// the roots its walks could not say what stands at. The scopes it walked cleanly are here for
 /// the same reason: the prune they license runs once, at the job's end, over
 /// rows every one of its flushes has already committed.
 #[derive(Default)]
@@ -1894,9 +1923,10 @@ impl Account {
     /// the findings that scope no longer accounts for.
     ///
     /// **A leg registers a scope only where its own reading covered that scope
-    /// whole, and absorbs every root that reading passed over.** Three legs
-    /// reach it: a merge that enumerated every entry its scope holds and
-    /// withheld each root it did not enter and each name it opened nothing at,
+    /// whole, and absorbs every root that reading could not say what stands
+    /// at.** Three legs reach it: a merge that enumerated every entry its scope
+    /// holds and withheld each root that vanished under it and each name it
+    /// opened nothing at,
     /// and the two answers the filesystem gives about a dirty path and
     /// everything under it at once — the path is not there, and the path is a
     /// regular file. The last two are the readings the row prune beside them
@@ -1912,8 +1942,9 @@ impl Account {
     /// scope on its own terms.
     ///
     /// A merge enumerated every entry its scope holds, so a place inside that
-    /// scope is one it read and filed at, one it withheld — the root that hides
-    /// it, or the name it opened nothing at — or one nothing renders onto. The
+    /// scope is one it read and filed at, one it withheld — the vanished root
+    /// that hides it, or the name it opened nothing at — or one nothing renders
+    /// onto. The
     /// two filesystem answers register a scope holding no entry at all: nothing
     /// is at a path that is not there and so nothing is under it, and a regular
     /// file holds nothing beneath it. A scope with no entry in it has no
@@ -1942,9 +1973,11 @@ impl Account {
     ///   deepest unrendered ancestor. A walk rooted below that ancestor read some
     ///   of them and never the rest, so it concludes nothing about the place; the
     ///   vault walk is rooted at the ancestor of every place.
-    /// - **A root the walk did not enter.** A subtree the walk withheld holds
-    ///   spellings nothing read, so the places they render onto are outside what
-    ///   this walk enumerated.
+    /// - **A root the walk could not say what stands at.** A subtree the walk
+    ///   withheld holds spellings nothing read, so the places they render onto
+    ///   are outside what this walk enumerated. A root the walk *refuses* is not
+    ///   one of these: the refusal stands, so the walk concludes the places
+    ///   beneath it.
     fn concluded(&self, walked: &Walked, subject: &DocumentPath) -> bool {
         folded_reaches(
             walked.scope.root(),
@@ -2006,23 +2039,28 @@ impl Filed {
     }
 }
 
-/// The roots a walk of this job read nothing under.
+/// The roots a walk of this job could not say what stands at.
 ///
-/// A walk names the roots it deliberately passes over — an excluded tree, a
-/// symbolic link, a device-like entry, norn's own mechanism paths — and reads
-/// nothing under them. A name it enumerated and then opened nothing at is the
-/// same answer reached a moment later, since what is at that name now is one of
-/// those or is gone. **A root it withheld lends no prune authority over the
-/// places beneath it**: a document there is one no act of this job read, so a
-/// finding standing at its place is one no act of this job could re-file.
+/// **A walk passes over two kinds of name, and only one of them withholds.** A
+/// root it deliberately refuses — an excluded tree, a symbolic link, a
+/// device-like entry, norn's own mechanism paths — is a fact about an entry that
+/// stands, which a derivation begun from zero refuses identically, so the walk
+/// concludes the places beneath it and nothing about it is recorded here. A root
+/// that **vanished** inside one of the walk's own windows is the other kind:
+/// nothing was read at it and what stands there now is a question this walk
+/// never asked. **Such a root lends no prune authority over the places beneath
+/// it**: a document there is one no act of this job read, so a finding standing
+/// at its place is one no act of this job could re-file. A name the walk
+/// enumerated and then opened nothing at is the same answer reached a moment
+/// later, and is recorded here too.
 ///
-/// A root the vault spells as it is stored covers the places under its own
-/// spelling, because rendering is per segment and leaves an unrefused segment
-/// as written. A root whose own spelling the grammar refuses covers places
-/// nothing here can spell instead — every path under it renders to a place
-/// carrying the marker, and which of them the root hides is unknowable from
-/// outside it — so such a root withholds authority over every rendered place
-/// this job would otherwise reach.
+/// A vanished root the vault spells as it is stored covers the places under its
+/// own spelling, because rendering is per segment and leaves an unrefused
+/// segment as written. A vanished root whose own spelling the grammar refuses
+/// covers places nothing here can spell instead — every path under it renders to
+/// a place carrying the marker, and which of them the root hid is unknowable
+/// from outside it — so such a root withholds authority over every rendered
+/// place this job would otherwise reach.
 ///
 /// **That job-wide hold belongs to roots alone.** A single entry a walk opened
 /// nothing at is a file, which hides no subtree: whatever its spelling, it
@@ -2034,8 +2072,8 @@ struct Withheld {
 }
 
 impl Withheld {
-    /// Record a root a walk passed over, under every spelling a place it holds
-    /// is addressed by.
+    /// Record a root a walk could not say what stands at, under every spelling a
+    /// place it holds is addressed by.
     ///
     /// **A root addresses its descendants and its own place under different
     /// spellings.** The two grammars differ by the leaf: a directory is refused
@@ -2075,8 +2113,8 @@ impl Withheld {
         }
     }
 
-    /// Whether a root this job withheld covers `subject`, read under the
-    /// folding this vault resolves names by.
+    /// Whether a root this job could not say what stands at covers `subject`,
+    /// read under the folding this vault resolves names by.
     ///
     /// A place is covered by its own spelling and by every ancestor of it, which
     /// is what a root reaching a place means.
@@ -2438,24 +2476,22 @@ impl<'s> Pending<'s> {
 
     /// Record a root a walk of this scope passed over and read nothing under.
     ///
-    /// **A refusal that stands is itself a reading.** A root a walk begun now
-    /// refuses too — an exclusion, a mechanism subtree, a shadow basename, a
-    /// link, a device-like entry — holds beneath it what a derivation from zero
-    /// holds there: no row, and so no finding either. The scope this walk
-    /// registers keeps its authority over that range, and the job's prune takes
-    /// the findings under such a root beside the rows the merge already killed.
-    ///
-    /// **Authority follows the rows.** A root whose own spelling the directory
-    /// grammar refuses addresses no range of stored paths, so nothing here can
-    /// name the places it hides and the prune has no range there to act on. The
-    /// job-wide hold over rendered places stands in for them, whether or not the
-    /// refusal itself stands.
+    /// **A refusal that stands is itself a reading, so it withholds nothing.** A
+    /// root a walk begun now refuses the same way — an exclusion, a mechanism
+    /// subtree, a shadow basename, a link, a device-like entry, a name below an
+    /// entry — holds beneath it what a derivation from zero holds there: no row,
+    /// and so no finding either. The scope this walk registered keeps its whole
+    /// authority over those places, and the job's prune takes the findings there
+    /// beside the rows the merge already killed. That holds however the root is
+    /// spelled: where the root's own spelling the directory grammar refuses,
+    /// the places it hides are reached as the marker-carrying places they render
+    /// onto rather than as a range of stored paths.
     ///
     /// A root that **vanished** is a name nothing here read at all: what is at
-    /// it now is a question this walk never asked, so the job's prune leaves the
-    /// findings beneath it standing.
+    /// it now is a question this walk never asked, so it is absorbed and the
+    /// job's prune leaves the findings beneath it standing.
     fn passed_over(&mut self, root: &Path, stands: bool) {
-        if stands && addressed_range(root).is_some() {
+        if stands {
             return;
         }
         self.account.withheld.absorb(root);
@@ -5454,17 +5490,20 @@ mod tests {
     }
 
     /// **A vault that resolves alternate ASCII case to one directory entry
-    /// reaches one entry however the two sides spell it.** The place a finding
+    /// withholds one entry however the two sides spell it.** The place a finding
     /// stands at keeps the spelling it was filed under, and the walk names the
-    /// root the way the directory is spelled now — so the prune reads both under
-    /// the folding this vault resolves names by, which is the folding its own
-    /// page bounded the scope of subjects by.
+    /// root that vanished the way the directory is spelled now — so a hold
+    /// matching the two bytewise would take a finding under a root this job
+    /// never read, on the same folding its own page bounded the scope of
+    /// subjects by.
+    ///
+    /// The root here is one the walk could not say what stands at, because that
+    /// is the only kind a hold is recorded for: a refusal that stands is a
+    /// reading, and the places beneath one are concluded rather than held.
     #[cfg(unix)]
     #[test]
-    fn a_refused_root_reaches_the_places_the_vault_folds_onto_it() {
-        use std::os::unix::fs::symlink;
-
-        let f = Fixture::new("withheld-root-case");
+    fn a_vanished_root_reaches_the_places_the_vault_folds_onto_it() {
+        let f = Fixture::watcherless("withheld-root-case");
         if norn_fs::PathNormalizer::detect(&f.vault())
             .unwrap()
             .case_sensitivity()
@@ -5472,36 +5511,71 @@ mod tests {
         {
             return;
         }
-        fs::create_dir(f.vault().join("Away")).unwrap();
-        fs::write(f.vault().join("Away/bad.md"), UNDECODABLE).unwrap();
-        let (ops, name) = f.ops(2);
-        let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        assert_eq!(findings_at(&mut attachment.store, "Away/bad.md").len(), 1);
+        fs::create_dir_all(f.vault().join("notes/Away")).unwrap();
+        fs::write(f.vault().join("notes/Away/bad.md"), UNDECODABLE).unwrap();
+        fs::write(f.vault().join("notes/a.md"), "a").unwrap();
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
 
-        // The document moves behind a link named in the other case, which this
-        // vault resolves to the entry the finding's place is spelled under.
-        fs::create_dir(f.vault().join("elsewhere")).unwrap();
-        fs::rename(
-            f.vault().join("Away/bad.md"),
-            f.vault().join("elsewhere/bad.md"),
+        let mut store = Store::open(f.root.join("folded-vanished-root.sqlite3")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(8, 2).unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        heal_documents(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            policy,
+            &progress.healing(),
         )
         .unwrap();
-        fs::remove_dir(f.vault().join("Away")).unwrap();
-        symlink("elsewhere", f.vault().join("away")).unwrap();
-        heal_the_vault(&ops, &name, &mut attachment, &progress);
-
-        assert!(
-            findings_at(&mut attachment.store, "Away/bad.md").is_empty(),
-            "the finding stands under a root the walk refuses to read through, which this vault \
-             resolves the spelling it was filed under onto"
-        );
         assert_eq!(
-            findings_at(&mut attachment.store, "elsewhere/bad.md").len(),
+            findings_at(&mut store, "notes/Away/bad.md").len(),
             1,
-            "the walk did not read the document at the place it can reach"
+            "the heal filed nothing under the root that leaves, so this proves nothing"
         );
-        ops.detach(&name, attachment);
+
+        // The one entry, spelled the other way. A vault that folds ASCII case
+        // resolves the place's own spelling onto it, and nothing else moved.
+        fs::rename(f.vault().join("notes/Away"), f.vault().join("notes/away")).unwrap();
+
+        // The walk yields the file that sorts ahead of the directory, and the
+        // directory goes before the walk opens it.
+        let mut walking = walk(f.vault().as_path(), &[]).unwrap();
+        let sensitivity = walking.case_sensitivity();
+        let mut enumerated = Vec::new();
+        let mut reached = false;
+        for fact in walking.by_ref() {
+            reached = fact.as_ref().unwrap().path().as_path() == Path::new("notes/a.md");
+            enumerated.push(fact);
+            if reached {
+                break;
+            }
+        }
+        assert!(reached, "the walk never yielded the file ahead of the root");
+        fs::remove_dir_all(f.vault().join("notes/away")).unwrap();
+        enumerated.extend(walking);
+
+        let mut account = Account::default();
+        merge_walk(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            enumerated.into_iter(),
+            sensitivity,
+            HealScope::Vault,
+            policy,
+            &progress.healing(),
+            &mut account,
+        )
+        .unwrap();
+        close_job(&mut store, f.vault().as_path(), &[], policy, &mut account).unwrap();
+
+        assert_eq!(
+            findings_at(&mut store, "notes/Away/bad.md").len(),
+            1,
+            "the job took a finding under a root it read nothing at, spelled the way this vault \
+             resolves the root's own name onto"
+        );
     }
 
     /// **A walk that refuses takes nothing.** Prune authority is enumeration
@@ -6126,27 +6200,34 @@ mod tests {
         assert_eq!(stored_paths(&mut store), ["steady.md"]);
     }
 
-    /// **A root the walk passed over whose own spelling the directory grammar
-    /// refuses withholds every rendered place this job would otherwise reach.**
-    /// Such a root addresses no range of stored paths, so nothing here can name
-    /// the places beneath it: every path under it renders onto a place carrying
-    /// the marker, and which of those places it hides is unknowable from outside
-    /// it. The job therefore concludes nothing about any of them, and a finding
-    /// standing at an unrelated marker-carrying place survives the walk.
+    /// **A root the walk could not say what stands at, whose own spelling the
+    /// directory grammar refuses, withholds every rendered place this job would
+    /// otherwise reach.** Such a root addresses no range of stored paths, so
+    /// nothing here can name the places beneath it: every path under it renders
+    /// onto a place carrying the marker, and which of those places it hid is
+    /// unknowable from outside it. The job therefore concludes nothing about any
+    /// of them, and a finding standing at an unrelated marker-carrying place
+    /// survives the walk.
     ///
-    /// The hold belongs to roots. A refused single name the walk opened nothing
-    /// at is a file, hides no subtree, and withholds the one place it renders
-    /// onto.
+    /// **The hold is the vanished root's alone.** A root the walk *refuses* —
+    /// a link, an exclusion, a device-like entry — is a fact about an entry that
+    /// stands, which a derivation from zero refuses the same way, so the places
+    /// it hides are concluded rather than held however it is spelled. A refused
+    /// single name the walk opened nothing at is a file, hides no subtree, and
+    /// withholds the one place it renders onto.
     #[cfg(unix)]
     #[test]
-    fn a_refused_root_the_walk_passed_over_withholds_every_rendered_place() {
-        use std::os::unix::fs::symlink;
-
-        let f = Fixture::watcherless("heal-withheld-refused-root");
+    fn a_vanished_root_no_prefix_admits_withholds_every_rendered_place() {
+        let f = Fixture::watcherless("heal-withheld-vanished-root");
         if !write_or_report(&f.vault().join("elsewhere\\name.md"), b"body") {
             return;
         }
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        // A root whose own spelling the directory grammar refuses, sorted after
+        // the file the staging below breaks on so the descent into it has not
+        // run when it goes.
+        fs::create_dir_all(f.vault().join("zhidden\\dir")).unwrap();
+        fs::write(f.vault().join("zhidden\\dir/note.md"), "note").unwrap();
         let mut store = Store::open(f.root.join("refused-root.sqlite3")).unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
@@ -6168,14 +6249,23 @@ mod tests {
         // The unrelated spelling leaves ahead of the enumeration, so nothing the
         // walk below reads renders onto the place its finding stands at.
         fs::remove_file(f.vault().join("elsewhere\\name.md")).unwrap();
-        // A root the walk names and never reads through, spelled the way the
-        // directory grammar refuses: it addresses no range of stored paths, so
-        // naming it reaches none of the places it hides.
-        symlink("away", f.vault().join("hidden\\dir")).unwrap();
 
-        let walk = walk(f.vault().as_path(), &[]).unwrap();
-        let sensitivity = walk.case_sensitivity();
-        let enumerated: Vec<_> = walk.collect();
+        // The walk yields the file that sorts ahead of the root, and the root
+        // goes before the walk descends into it.
+        let mut walking = walk(f.vault().as_path(), &[]).unwrap();
+        let sensitivity = walking.case_sensitivity();
+        let mut enumerated = Vec::new();
+        let mut reached = false;
+        for fact in walking.by_ref() {
+            reached = fact.as_ref().unwrap().path().as_path() == Path::new("steady.md");
+            enumerated.push(fact);
+            if reached {
+                break;
+            }
+        }
+        assert!(reached, "the walk never yielded the file ahead of the root");
+        fs::remove_dir_all(f.vault().join("zhidden\\dir")).unwrap();
+        enumerated.extend(walking);
 
         let mut account = Account::default();
         merge_walk(
@@ -6195,7 +6285,7 @@ mod tests {
         assert_eq!(
             findings_at(&mut store, "elsewhere\u{fffd}name.md").len(),
             1,
-            "the walk took a rendered place the refused root it passed over hides"
+            "the walk took a rendered place the vanished root it read nothing at hid"
         );
         assert_eq!(stored_paths(&mut store), ["steady.md"]);
     }
@@ -6265,8 +6355,9 @@ mod tests {
     /// **The scoped increment takes the same two axes at a refused root.** The
     /// dirty path is the root itself, the walk refuses to read through it, and
     /// the rows it addresses die. The findings in that same range are what a
-    /// build from zero over this tree holds none of, so they die in the same
-    /// recording.
+    /// build from zero over this tree holds none of, so the job's end takes
+    /// them — the rows at the prune, the findings once every scope of the job
+    /// has run, which is two recordings and one job.
     #[cfg(unix)]
     #[test]
     fn a_scoped_increment_takes_the_findings_under_a_root_it_refuses_to_read_through() {
@@ -6314,6 +6405,194 @@ mod tests {
             0,
             "the increment pruned the rows under the root it refuses and left the findings there \
              standing"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A dirty path under a refused ancestor converges the ancestor's whole
+    /// range.** The path the watcher reports is a document below a directory
+    /// that has become a symbolic link, so the walk's answer is about the link
+    /// rather than about the leaf: no walk of this vault reads through it, and
+    /// the rows and the findings beneath it are both what a derivation from
+    /// zero holds none of.
+    ///
+    /// This is the leg [`prune_refused_root`] runs, which the case rooted at
+    /// the link itself never reaches: `skip_reaching` reads ancestors and the
+    /// shadow leaf, so a dirty path that *is* the link answers with no notation
+    /// at all and lands in the kind arm instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_scoped_increment_takes_the_findings_under_a_refused_ancestor_of_a_dirty_path() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("scoped-refused-ancestor-findings");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        fs::create_dir_all(f.vault().join("away")).unwrap();
+        if !write_or_report(&f.vault().join("away/bad\\name.md"), b"body") {
+            ops.detach(&name, attachment);
+            return;
+        }
+        fs::write(f.vault().join("away/note.md"), "note").unwrap();
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        heal_the_vault(&ops, &name, &mut attachment, &progress);
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "away/bad\u{fffd}name.md"),
+            ["document/path-names-no-document"],
+            "the heal filed nothing under the root that is about to be refused, so this proves \
+             nothing"
+        );
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["away/note.md", "steady.md"]
+        );
+
+        fs::remove_dir_all(f.vault().join("away")).unwrap();
+        symlink("elsewhere", f.vault().join("away")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "away/note.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["steady.md"]);
+        assert_eq!(
+            findings_at(&mut attachment.store, "away/bad\u{fffd}name.md").len(),
+            0,
+            "the increment pruned the rows under the refused ancestor and left the findings there \
+             standing"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A refused root the directory grammar refuses converges the places it
+    /// hides, and holds nothing elsewhere.** Such a root addresses no range of
+    /// stored paths, so the places beneath it are reached as the
+    /// marker-carrying places they render onto rather than as a prefix. The
+    /// refusal stands, so a derivation from zero refuses the root the same way
+    /// and files nothing under it, and the heal takes what stood there.
+    ///
+    /// The control is the marker-carrying place outside the root. A hold that
+    /// answered this root by withdrawing authority over every rendered place in
+    /// the job would take neither — one link nobody named would freeze every
+    /// undecodable place in the vault, in every job, for as long as it stands.
+    #[cfg(unix)]
+    #[test]
+    fn a_heal_takes_the_findings_under_a_refused_root_no_prefix_admits() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::watcherless("heal-refused-unaddressable-root");
+        fs::create_dir_all(f.vault().join("hidden\\dir")).unwrap();
+        let written = write_or_report(&f.vault().join("hidden\\dir/note.md"), b"body")
+            && write_or_report(&f.vault().join("outside\\name.md"), b"body");
+        if !written {
+            return;
+        }
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        let mut store = Store::open(f.root.join("unaddressable-root.sqlite3")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(8, 2).unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        heal_documents(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+        assert_eq!(
+            sorted_kinds(&mut store, "hidden\u{fffd}dir/note.md"),
+            ["document/path-names-no-document"],
+            "the heal filed nothing under the root that is about to be refused, so this proves \
+             nothing"
+        );
+        assert_eq!(
+            sorted_kinds(&mut store, "outside\u{fffd}name.md"),
+            ["document/path-names-no-document"],
+            "the heal filed nothing at the place outside the root, so the control proves nothing"
+        );
+        assert_eq!(stored_paths(&mut store), ["steady.md"]);
+
+        fs::remove_dir_all(f.vault().join("hidden\\dir")).unwrap();
+        symlink("away", f.vault().join("hidden\\dir")).unwrap();
+        heal_documents(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+
+        assert!(
+            findings_at(&mut store, "hidden\u{fffd}dir/note.md").is_empty(),
+            "the heal left a finding standing at a place under a root it refuses, which a \
+             derivation from zero over the same tree is silent about"
+        );
+        assert_eq!(
+            findings_at(&mut store, "outside\u{fffd}name.md").len(),
+            1,
+            "the heal took a finding at a place it read and re-filed, so the refusal withdrew \
+             authority the job had earned"
+        );
+    }
+
+    /// **A scoped leg concludes the places whose spellings it enumerated, and
+    /// the root's own place is not one of them.** `..md` names no document and
+    /// still addresses the rows beneath it, so the finding about the path
+    /// itself stands at the rendered place `\u{fffd}..md` — a place every
+    /// sibling whose rendering lands there names too. A leg answering the one
+    /// dirty path read one of those spellings, so it leaves that place alone
+    /// while it converges the range below; the vault heal enumerates them all
+    /// and takes it.
+    ///
+    /// The two legs agree on authority rather than on outcome, and the store
+    /// converges on the walk that earned the place.
+    #[cfg(unix)]
+    #[test]
+    fn a_scoped_increment_leaves_the_rendered_place_its_refused_root_stands_at() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("scoped-refused-rendered-root");
+        fs::write(f.vault().join("..md"), b"body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let place = "\u{fffd}..md";
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, place),
+            ["document/path-names-no-document"]
+        );
+
+        fs::remove_file(f.vault().join("..md")).unwrap();
+        symlink("elsewhere.md", f.vault().join("..md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "..md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+        assert_eq!(
+            findings_at(&mut attachment.store, place).len(),
+            1,
+            "the increment took a place whose spellings it never enumerated"
+        );
+
+        heal_the_vault(&ops, &name, &mut attachment, &progress);
+        assert!(
+            findings_at(&mut attachment.store, place).is_empty(),
+            "the heal enumerated every spelling that renders onto the place and still left the \
+             finding standing"
         );
         ops.detach(&name, attachment);
     }

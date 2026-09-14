@@ -356,6 +356,17 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: None,
     },
     Case {
+        id: "churn-unaddressable-refused-root-takes-its-findings",
+        suite: Suite::Churn,
+        lane: Lane::RealWatcher,
+        states: "a directory whose own name no prefix admits, become a name the walk reads \
+                 nothing through, loses the findings at the marker-carrying places beneath it \
+                 and holds none of the ones it still reads",
+        carrier: "crates/norn-host/tests/churn.rs::\
+                  a_refused_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero",
+        feature: None,
+    },
+    Case {
         id: "churn-maintenance-account-moves",
         suite: Suite::Churn,
         lane: Lane::RealWatcher,

@@ -738,11 +738,17 @@ fn a_rendering_collision_that_clears_converges_on_a_build_from_zero() {
 /// silent about, and no later walk can ever reach that place to take the
 /// statement back.
 ///
-/// **The phase lands while nothing is attached**, so the attach heal is the
-/// only thing that converges it. That is what makes the case deterministic: a
-/// watcher that reported the removal and the link separately could converge the
-/// name as a path that is simply gone, which is a different leg from the one
-/// this case is about.
+/// **The phase lands on an attached, settled host**, so the watcher's own
+/// scoped increment is the leg that reads it: the dirty paths it reports all
+/// sit at or under the name that is now a link, and the increment converges the
+/// rows and the findings there together. The sibling case below lands its phase
+/// detached and puts the same tree in front of the attach heal.
+///
+/// Neither case pins one leg against a mutation of the other — a real watcher
+/// may replay reports from before an attach, so the two legs overlap on any
+/// lane. What each leg does on its own is pinned deterministically in
+/// `norn-host`'s own cases, watcherless for the heal and against
+/// `scoped_increment` for the increment.
 #[test]
 fn a_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero() {
     let sandbox = sandbox("churn-refused-root");
@@ -781,7 +787,7 @@ fn a_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero() {
     );
 
     let mut churned =
-        attach_and_churn(sandbox, &opening, When::Settled).then(&refusing, When::Before);
+        attach_and_churn(sandbox, &opening, When::Settled).then(&refusing, When::Settled);
     churned.judge("a directory replaced by a link the walk refuses", 0);
 
     let place = "churn/linked/bad\u{fffd}name.md";
@@ -792,6 +798,87 @@ fn a_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero() {
             kinds_at(&projection, place).is_empty(),
             "{label} holds {:?} at a place under a root the walk reads nothing through",
             kinds_at(&projection, place)
+        );
+    }
+}
+
+/// **A directory whose own name no prefix admits becomes a name the walk reads
+/// nothing through.**
+///
+/// The root's spelling carries a backslash, which the directory grammar
+/// refuses, so it addresses no range of stored paths at all: the places it
+/// holds are reachable only as the marker-carrying places they render onto.
+/// **A refusal that stands is still a reading.** A walk begun now names the
+/// link and never traverses it, so a derivation from zero over the final tree
+/// holds no row and no finding under that root, and the maintained store has to
+/// hold neither.
+///
+/// The forbidden shape is a store that answers such a root by withdrawing its
+/// authority over every marker-carrying place in the job. One link nobody named
+/// would then freeze every undecodable place in the vault — permanently, since
+/// a link that stands never stops standing — while a fresh derivation over the
+/// same tree is silent about the places under it.
+///
+/// **The phase lands while nothing is attached**, so the attach heal reads the
+/// final tree. A watcher replaying reports from before the attach converges the
+/// same tree through the scoped increment; both legs hold the equivalence this
+/// judges, and each is pinned on its own in `norn-host`'s unit cases.
+#[test]
+fn a_refused_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero() {
+    let sandbox = sandbox("churn-unaddressable-root");
+    declare_a_backslash_name(&sandbox);
+
+    let mut ink = churn::Ink::new(97);
+    let opening = Script::new(
+        "a directory whose own name the directory grammar refuses",
+        vec![
+            Step::new(
+                "write a document under the refused directory",
+                Act::Write {
+                    at: "churn/hidden\\dir/note.md".to_string(),
+                    bytes: ink.document("under a refused directory"),
+                },
+            ),
+            Step::new(
+                "write a document at a readable place, whose finding the case keeps",
+                Act::Write {
+                    at: "churn/outside\\name.md".to_string(),
+                    bytes: b"# a body\n".to_vec(),
+                },
+            ),
+        ],
+    )
+    .without_rows_at("churn/hidden\\dir/note.md")
+    .without_rows_at("churn/outside\\name.md");
+    let refusing = Script::new(
+        "the refused directory becomes a link the walk reads nothing through",
+        vec![Step::new(
+            "replace the refused directory with a symbolic link",
+            Act::ReplaceWithLink {
+                at: "churn/hidden\\dir".to_string(),
+                to: "away".to_string(),
+            },
+        )],
+    );
+
+    let mut churned =
+        attach_and_churn(sandbox, &opening, When::Settled).then(&refusing, When::Before);
+    churned.judge("a directory no prefix admits replaced by a refused link", 0);
+
+    let hidden = "churn/hidden\u{fffd}dir/note.md";
+    let outside = "churn/outside\u{fffd}name.md";
+    for (label, vault) in churned.both_derivations() {
+        let mut store = vault.store();
+        let projection = StoreProjection::read(&mut store).expect("projecting a store");
+        assert!(
+            kinds_at(&projection, hidden).is_empty(),
+            "{label} holds {:?} at a place under a root the walk reads nothing through",
+            kinds_at(&projection, hidden)
+        );
+        assert!(
+            !kinds_at(&projection, outside).is_empty(),
+            "{label} holds nothing at the marker-carrying place the walk still reads, so the \
+             control proves nothing"
         );
     }
 }
