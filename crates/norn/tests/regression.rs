@@ -80,7 +80,7 @@ use norn_testkit::regression::{
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 106;
+const CASE_TOTAL: usize = 109;
 
 /// The whole registry's contract, as one value.
 ///
@@ -89,13 +89,13 @@ const CASE_TOTAL: usize = 106;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "1c263a28ce3c7aef230a402ec8a28410b4aeacaf0f2de143221200db1e323235";
+const CONTRACT_DIGEST: &str = "c037dc1416dd992435a5dc7afdc1805361e5699ec416421796324149f24fe370";
 
 /// The cases carried by tests today, by name.
 ///
 /// Pinned rather than counted, because which ones are bound is the whole
-/// claim: these are the ones whose subject — the harness, and the substrate
-/// under it — already exists and is asserted over. A case that stops being
+/// claim: these are the ones whose venue is at or below [`LAYER_LANDING`], so
+/// their subject already exists and is asserted over. A case that stops being
 /// carried has to leave this list to pass, which is a diff a reviewer reads.
 /// Compared as a set, because the order cases sit in the file is the file's
 /// business.
@@ -106,6 +106,7 @@ const BOUND_CASES: &[&str] = &[
     "cache-identity-is-total",
     "cost-is-independent-of-vault-size",
     "encoding-prefix-transparency",
+    "finding-candidates-are-capped-with-a-total",
     "fixtures-carry-real-content-volume",
     "frontmatter-roundtrip-or-refuse",
     "guard-binds-executed-sql",
@@ -114,6 +115,8 @@ const BOUND_CASES: &[&str] = &[
     "harness-runs-under-isolated-state-roots",
     "harness-waits-have-deadlines",
     "one-field-edit-is-a-one-field-diff",
+    "per-file-atomicity-and-durability",
+    "vault-root-containment",
 ];
 
 /// The dormant cases at or below [`LAYER_LANDING`] whose reason states no
