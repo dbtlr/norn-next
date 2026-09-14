@@ -645,12 +645,11 @@ pub const REQUIRED_CASES: &[Case] = &[
                   a_ddl_fingerprint_this_build_did_not_write_is_rebuilt_from_zero",
         feature: None,
     },
-    // Row 7's host half is two cases, because the two legs it states are
-    // reached through different doors. The production row meets real damage in
-    // a real database and rebuilds out of it; it drives the entry operations
-    // directly, so it holds no entry whose trust could be read. The lifecycle
-    // row is where an entry meets the same verdict and publishes what a client
-    // then reads.
+    // Row 7's host half splits at the door the verdict is reached through. The
+    // production row meets real damage in a real database and rebuilds out of
+    // it; it drives the entry operations directly, so it holds no entry whose
+    // trust could be read. The lifecycle rows are where an entry meets the same
+    // verdict and publishes what a client then reads.
     Case {
         id: "induced-host-logical-damage-reaches-rung-three",
         suite: Suite::InducedFailure,
@@ -677,6 +676,63 @@ pub const REQUIRED_CASES: &[Case] = &[
                  recovery anywhere in the sequence",
         carrier: "crates/norn-host/src/lifecycle.rs::\
                   damage_found_by_scheduled_maintenance_reaches_rung_three",
+        feature: None,
+    },
+    // Row 7's lifecycle half is one case per leg that meets the verdict while
+    // it holds an attachment, because each leg withdraws trust in its own arm
+    // and a leg nothing reads is a leg whose withdrawal can be deleted with the
+    // suites green. The maintenance row above is the first of them; the three
+    // below are the rest. The attach leg is not among them: it acquired no
+    // store, so it publishes the reason that waits for a demand rather than the
+    // rebuilding one.
+    Case {
+        id: "induced-host-damage-withdraws-trust-at-the-reconcile-leg",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "an entry whose reconcile reports damage publishes the rebuilding reason and \
+                 climbs rung 3 rather than the recovery ladder, which is the ladder that would \
+                 re-install coverage over the same condemned database and meet the same verdict \
+                 every time round",
+        carrier: "crates/norn-host/src/lifecycle.rs::\
+                  a_damaged_store_reaches_rung_three_and_never_the_recovery_ladder",
+        feature: None,
+    },
+    Case {
+        id: "induced-host-damage-withdraws-trust-at-the-poll-leg",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "an entry whose watcher poll reports damage withdraws trust under the rebuilding \
+                 reason, carrying the poll's own detail, and publishes it before rung 3 rather \
+                 than after — so an idle vault that meets damage between one client read and the \
+                 next tells the next reader the derived state is condemned. Rung 3 then runs \
+                 once, with no recovery anywhere in the sequence",
+        carrier: "crates/norn-host/src/lifecycle.rs::\
+                  damage_a_watcher_poll_reports_reaches_rung_three",
+        feature: None,
+    },
+    Case {
+        id: "induced-host-damage-withdraws-trust-at-the-recovery-leg",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "an entry whose recovery reports damage replaces the untrusted reason it was \
+                 climbing out of with the rebuilding one, carrying the recovery's own detail, and \
+                 publishes it before rung 3 — so the entry stops promising a ladder that cannot \
+                 resolve what the climb uncovered. Rung 3 then runs once, and no second recovery \
+                 follows the verdict",
+        carrier: "crates/norn-host/src/lifecycle.rs::damage_a_recovery_reports_reaches_rung_three",
+        feature: None,
+    },
+    Case {
+        id: "induced-host-damage-withdraws-trust-at-the-reload-leg",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "an entry whose reload reports damage refuses the waiting caller under the \
+                 failure and withdraws trust under the rebuilding reason in the same leg, \
+                 carrying the reload's own detail — so every client that was not the caller is \
+                 told the derived state is condemned instead of being served off it. Rung 3 then \
+                 runs once, with no recovery anywhere in the sequence",
+        carrier: "crates/norn-host/src/lifecycle.rs::\
+                  damage_a_reload_reports_refuses_the_caller_and_reaches_rung_three",
         feature: None,
     },
     // ---- the operational leg ----
