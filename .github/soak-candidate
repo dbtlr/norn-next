@@ -1,0 +1,28 @@
+# The soak candidate: the commit the scheduled lanes certify.
+#
+# **What it is for.** The layer exits on five consecutive qualifying runs of
+# `.github/workflows/soak.yml` over one frozen candidate. A lane that checked
+# out the default branch's head would mint a new candidate on every merge, and
+# the count would then be held by nobody merging — a discipline no file records
+# and no run attests. So the candidate is pinned here: both scheduled jobs read
+# this pointer off the default branch, check that commit out, and stamp it into
+# the qualification record they upload.
+#
+# **Editing it starts a new count.** That is the whole point of the edit, and it
+# is a reviewed commit like any other. Nothing here retires the records already
+# written: they name the candidate they ran, so a campaign reading them sees the
+# candidate change rather than inheriting it.
+#
+# **A run whose tree is not this commit still writes a record**, classified
+# `candidate-mismatch` — the pointer unreadable, the checkout refused, or a
+# lane's `ref:` gone missing all leave a run certifying some other commit, and
+# the record says which one.
+#
+# **Format.** `#` comments, then one line holding a 40-digit lowercase commit
+# sha. The reading step in both jobs of soak.yml refuses anything else, and the
+# shape is held by `norn --test certification`.
+#
+# This file is outside the trees the suite manifest sweeps: what the suite is
+# and which commit it is run against are two values, and folding the pointer
+# into the first would restart the count every time the second advanced.
+ed25f3b1ac9884103649a1ce049451eeaa09d212

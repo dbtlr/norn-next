@@ -23,6 +23,17 @@
 # widened for a loaded runner; the run is recorded as evidence about the
 # machine instead.
 #
+# **Both lanes certify a pinned commit, not the branch they were started
+# from.** `.github/soak-candidate` on the default branch holds the candidate's
+# sha; each job reads that pointer off the ref it was triggered on, checks the
+# named commit out, and records the pin beside the commit its checkout actually
+# landed on. Five consecutive runs over one frozen candidate is what the layer
+# exits on, so a lane that ran the default branch's head would restart the count
+# on every merge with nothing saying it had — and a run that ends up in some
+# other tree records `candidate-mismatch` rather than attesting a commit it
+# never built. Advancing the candidate is an edit to that file, reviewed like
+# any other change.
+#
 # **A scheduled run advances the count only where both records qualify.** The
 # five consecutive runs Layer 2 exits on are runs of this workflow, not of one
 # job in it: a night on which the macOS lane failed and the Linux lane passed
@@ -61,7 +72,17 @@ on:
     # is post-merge evidence. Dispatch is not the same: `workflow_dispatch` is
     # already on the default branch, so a manual run may name any ref and runs
     # that ref's copy of this file — which is how a change to a job here is
-    # tried before it merges. The one exception is `certification-macos`: its
+    # tried before it merges.
+    #
+    # **A dispatch runs the named ref's step list over that ref's pinned
+    # candidate**, because the checkout below is pinned on every event rather
+    # than on the schedule alone: a pin the nightly takes and a dispatch skips
+    # is a pin nothing exercises until it is the only thing running. So trying a
+    # change to a lane script or a suite takes two commits on the branch — the
+    # change, then a pointer naming it — and what the dispatch then runs is what
+    # the nightly would.
+    #
+    # The one exception is `certification-macos`: its
     # job guard skips every ref but `main`, so a change to that job is first
     # exercised by a dispatch of `main` after it merges.
     #
@@ -143,9 +164,58 @@ jobs:
     env:
       NORN_CERTIFICATION_LOGS: ${{ github.workspace }}/certification-logs
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # **The candidate is pinned, and this reads the pin.** The count is five
+      # consecutive runs over one frozen commit; a lane that checked out the
+      # ref it was triggered on would certify the default branch's head, so
+      # every merge would mint a new candidate and the count would be held by
+      # merge discipline alone. `.github/soak-candidate` is the pointer, and it
+      # is read off the triggering ref — the default branch on the schedule —
+      # rather than out of the candidate's own tree, which would let a pinned
+      # commit repin itself.
+      #
+      # Only that one path is fetched, and into a directory of its own: the
+      # checkout below takes the workspace and removes this one, so nothing of
+      # the default branch survives into the tree the suites are built from.
+      - name: The pinned candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          sparse-checkout: .github/soak-candidate
+          sparse-checkout-cone-mode: false
+          path: soak-candidate-pointer
+      # **A pointer that does not read leaves the sha empty rather than failing
+      # the job.** An empty `ref:` checks out the triggering ref, the record
+      # then names no candidate over a tree that has a commit, and the run is
+      # recorded `candidate-mismatch` — where a failed step here would leave no
+      # workspace, no record, and a run the campaign reads as killed for time.
+      - name: Read the pinned candidate
+        id: candidate
+        run: |
+          pinned="$(grep -v '^[[:space:]]*#' soak-candidate-pointer/.github/soak-candidate | tr -d '[:space:]' || true)"
+          if ! printf '%s' "$pinned" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::.github/soak-candidate does not hold one 40-digit lowercase commit sha, so this run certifies no pinned candidate"
+            pinned=''
+          fi
+          echo "sha=$pinned" >> "$GITHUB_OUTPUT"
+      - name: Check out the candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ steps.candidate.outputs.sha }}
+      # **Both commits are recorded, and the second is read off the tree.** The
+      # pin says what this run was asked to certify and `git rev-parse` says
+      # what it is standing in; the record carries the pair, so a checkout that
+      # landed somewhere else is a typed non-qualifying reason rather than an
+      # attestation of a commit the run never had. Neither is `GITHUB_SHA`,
+      # which is the triggering ref's head — the moving value the pin replaces.
+      - name: The candidate this run certifies
+        env:
+          PINNED: ${{ steps.candidate.outputs.sha }}
+        run: |
+          {
+            echo "NORN_QUALIFICATION_CANDIDATE=$PINNED"
+            echo "NORN_QUALIFICATION_CHECKOUT=$(git rev-parse HEAD)"
+          } >> "$GITHUB_ENV"
       # Taken before anything is built, because the reading is of the machine
       # this lane landed on and a cold cargo build is minutes of every core.
       # The classification happens at the end of the job, off this line.
@@ -408,9 +478,40 @@ jobs:
     env:
       NORN_CERTIFICATION_LOGS: ${{ github.workspace }}/certification-logs
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # The same pin the lane above reads, for the same reason: the two records
+      # a run uploads are counted as one entry in the sequence, so they have to
+      # be about one commit. The pointer is read off the triggering ref — which
+      # this job's guard holds to `main` — and the candidate is checked out
+      # under it.
+      - name: The pinned candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          sparse-checkout: .github/soak-candidate
+          sparse-checkout-cone-mode: false
+          path: soak-candidate-pointer
+      - name: Read the pinned candidate
+        id: candidate
+        run: |
+          pinned="$(grep -v '^[[:space:]]*#' soak-candidate-pointer/.github/soak-candidate | tr -d '[:space:]' || true)"
+          if ! printf '%s' "$pinned" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::.github/soak-candidate does not hold one 40-digit lowercase commit sha, so this run certifies no pinned candidate"
+            pinned=''
+          fi
+          echo "sha=$pinned" >> "$GITHUB_OUTPUT"
+      - name: Check out the candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ steps.candidate.outputs.sha }}
+      - name: The candidate this run certifies
+        env:
+          PINNED: ${{ steps.candidate.outputs.sha }}
+        run: |
+          {
+            echo "NORN_QUALIFICATION_CANDIDATE=$PINNED"
+            echo "NORN_QUALIFICATION_CHECKOUT=$(git rev-parse HEAD)"
+          } >> "$GITHUB_ENV"
       # Pinned image and asserted architecture, the same way ci.yml's platform
       # job does it: a runner-label migration that changed the machine under
       # this lane would otherwise record a backend answer from somewhere else.

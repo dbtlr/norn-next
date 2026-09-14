@@ -181,19 +181,30 @@ through, the injected-failure seams, every certification suite's own source and 
 baselines — and deliberately not over the product's own source, which is what the candidate
 SHA answers for. It is a reading of the working tree, so a qualifying run is one over a
 clean checkout; neither it nor the record answers for the image a runner label resolved to
-on the day. The **qualification ledger** is what one run leaves behind: the candidate, both
+on the day. The **qualification ledger** is what one run leaves behind: the candidate it was
+pinned to and the commit its checkout landed on, both
 digests, the platform, the environmental preflight's verdict, an outcome per required case,
 the named exit bars the build had unauthored, and a classification whose non-qualifying
-reasons are a closed vocabulary — suite change, product failure, harness failure, timeout,
-manual dispatch, cancellation, unauthored exit bar, environment. **A run is qualifying when
-it ran the required suite, passed it, a preflight admitted the host, every named exit bar
-was armed, and it came off the schedule**; anything else is non-qualifying with one typed
-reason, and the check that a record's stated verdict is the one its contents imply is what
+reasons are a closed vocabulary — candidate mismatch, suite change, product failure, harness
+failure, timeout, manual dispatch, cancellation, unauthored exit bar, environment. **A run
+is qualifying when it ran the pinned candidate and the required suite, passed it, a
+preflight admitted the host, every named exit bar was armed, and it came off the
+schedule**; anything else is non-qualifying with one typed reason, and the check that a record's stated verdict is the one its contents imply is what
 a campaign counts through. The scheduled lane writes a record every run and uploads it —
 except after a `timeout-minutes` kill, which stops the step that writes one, so a scheduled
 run with no record is how the campaign reads a timeout. Counting five consecutive
 qualifying scheduled runs over one frozen candidate is read off those records, and manual
 runs never advance it.
+
+**The candidate is pinned, and the pin is a reviewed file.** `.github/soak-candidate` on the
+default branch holds the commit the scheduled lanes certify; each job reads the pointer off
+the ref it was triggered on, checks that commit out, and records the pin beside the commit
+`git rev-parse` says the checkout landed on. Lanes that took the default branch's head would
+mint a new candidate on every merge and hold the count by merge discipline alone, which
+nothing records and no run attests. The pointer is outside the trees the suite manifest
+sweeps, because what a run is and which commit it is run against are two values — folding
+one into the other would restart the count whenever the candidate advanced. A run whose tree
+is not the pinned commit still writes and uploads its record, classified `candidate-mismatch`.
 
 **Two scheduled lanes run the certification cases**, and each leaves a record of what its
 own machine did. The Linux lane carries the measurements and the hour-long load; the macOS

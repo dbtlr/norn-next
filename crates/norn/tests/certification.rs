@@ -245,6 +245,7 @@ fn a_qualifying_record_validates_and_a_doctored_one_does_not() {
     let root = workspace_root();
     let sound = Record {
         candidate_sha: "0".repeat(40),
+        checkout_sha: "0".repeat(40),
         suite_manifest_digest: manifest::digest(&root).expect("digesting the suite manifest"),
         case_inventory_digest: inventory::contract_digest(),
         scheduled: true,
@@ -459,7 +460,102 @@ fn every_lane_that_writes_a_record_runs_the_cases_and_labels_its_backend() {
         assert_backend_label_matches_the_runner(lane, body);
         assert_the_outcomes_and_the_record_are_where_the_lane_looks(lane, body);
         assert_the_preflight_reading_precedes_the_build_and_reaches_the_record(lane, body);
+        assert_the_lane_checks_out_the_pinned_candidate(lane, body);
     }
+}
+
+/// **A lane checks out the pinned candidate and records both commits.**
+///
+/// Three links, and dropping any one of them silently returns the lane to
+/// certifying whatever the default branch's head was when the schedule fired —
+/// which is a new candidate every merge, and a count held by nothing.
+///
+/// A checkout with no `ref:` takes the triggering ref. A lane that checked the
+/// candidate out and stamped no [`ledger::CANDIDATE`] would run the right tree
+/// and record no claim about it. And a lane that stamped the pin without
+/// reading the tree back could not say when the two had parted — the record's
+/// `candidate-mismatch` reason exists because a checkout can land somewhere
+/// else, and it is reachable only where both values are recorded.
+///
+/// Read off the text, like the rest of this test's claims: what the lane files
+/// say is what the runner will do.
+fn assert_the_lane_checks_out_the_pinned_candidate(lane: &str, body: &str) {
+    assert!(
+        body.contains(ledger::CANDIDATE_POINTER),
+        "`{lane}` writes a qualification record and never reads `{}`, so it certifies whichever \
+         commit the ref it was triggered on pointed at and every merge mints a new candidate",
+        ledger::CANDIDATE_POINTER
+    );
+    let pinned = settings(body, "ref");
+    assert_eq!(
+        pinned.len(),
+        1,
+        "`{lane}` names `ref:` {} times, and the one checkout of the candidate is what makes the \
+         tree the suites are built from the pinned commit: {pinned:?}",
+        pinned.len()
+    );
+    assert!(
+        pinned[0].contains("steps.") && pinned[0].contains(".outputs."),
+        "`{lane}` checks out `{}`, which is not the sha the step that read `{}` produced",
+        pinned[0],
+        ledger::CANDIDATE_POINTER
+    );
+    for (key, what) in [
+        (ledger::CANDIDATE, "the commit it was pinned to certify"),
+        (ledger::CHECKOUT, "the commit its checkout landed on"),
+    ] {
+        assert!(
+            body.contains(&format!("{key}=")),
+            "`{lane}` writes a qualification record and appends no `{key}` to the job \
+             environment, so the record carries nothing for {what}"
+        );
+    }
+}
+
+/// **The pinned candidate is one commit sha somebody can read.**
+///
+/// The pointer is the campaign's whole statement of what is being certified, so
+/// a file the lane's reading step refuses is a file whose lanes certify no
+/// candidate at all — they record the mismatch and every run of the five counts
+/// toward nothing. The shape is held here, where a pull request meets it,
+/// rather than at 04:00.
+///
+/// The sha is not resolved against the object store: a lane's own checkout is
+/// shallow and a reviewer's may be, so the file is held to its shape and the
+/// run that fetches it is what finds out whether the commit exists.
+#[test]
+fn the_pinned_candidate_is_one_commit_sha() {
+    let pointer = workspace_root().join(ledger::CANDIDATE_POINTER);
+    let text = std::fs::read_to_string(&pointer).unwrap_or_else(|problem| {
+        panic!(
+            "reading {}: {problem} — the scheduled lanes read this pointer to know which commit \
+             they certify",
+            pointer.display()
+        )
+    });
+    let named: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    assert_eq!(
+        named.len(),
+        1,
+        "`{}` holds {} lines that are not comments, and the lanes read one sha out of it: {named:?}",
+        ledger::CANDIDATE_POINTER,
+        named.len()
+    );
+    let sha = named[0];
+    assert!(
+        sha.len() == 40
+            && sha
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "`{}` names `{sha}`, which is not a 40-digit lowercase commit sha — so the lanes read no \
+         candidate and every scheduled run records a mismatch",
+        ledger::CANDIDATE_POINTER
+    );
+    eprintln!("the pinned soak candidate is {sha}");
 }
 
 /// **A lane reads its host before it builds, classifies the reading, and the
