@@ -345,6 +345,17 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: None,
     },
     Case {
+        id: "churn-refused-root-takes-its-findings",
+        suite: Suite::Churn,
+        lane: Lane::RealWatcher,
+        states: "a directory that becomes a name the walk reads nothing through loses the rows \
+                 beneath it and the findings at the places under it together, converging on a \
+                 build from zero",
+        carrier: "crates/norn-host/tests/churn.rs::\
+                  a_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero",
+        feature: None,
+    },
+    Case {
         id: "churn-maintenance-account-moves",
         suite: Suite::Churn,
         lane: Lane::RealWatcher,

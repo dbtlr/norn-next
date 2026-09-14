@@ -143,6 +143,15 @@ pub enum Act {
     RemoveDirectory { at: String },
     /// Remove the file at `at` and create a directory in its place.
     ReplaceWithDirectory { at: String },
+    /// Remove the directory at `at` and everything under it, and put a symbolic
+    /// link naming `to` where it stood.
+    ///
+    /// This is a tree that has come to hold a name norn reads nothing through:
+    /// a walk names a symbolic link and never traverses one, so every place
+    /// that stood under the directory is a place no derivation reaches now. The
+    /// target is a name rather than a tree, because what the walk refuses is the
+    /// link itself and what it resolves to changes nothing.
+    ReplaceWithLink { at: String, to: String },
 }
 
 /// The document places `act` changes, read from the tree `act` is about to run
@@ -170,7 +179,7 @@ fn document_places(root: &Path, act: &Act) -> Vec<String> {
         | Act::Remove { at }
         | Act::ReplaceWithDirectory { at } => documents([at.clone()]),
         Act::CreateDirectory { .. } => Vec::new(),
-        Act::RemoveDirectory { at } => documents_under(root, at),
+        Act::RemoveDirectory { at } | Act::ReplaceWithLink { at, .. } => documents_under(root, at),
         Act::Rename { from, to } if root.join(from).is_dir() => documents_under(root, from)
             .into_iter()
             .flat_map(|moved| {
@@ -498,6 +507,11 @@ pub fn apply_step(root: &Path, step: &Step, applied: &mut Applied) -> Result<(),
             let path = root.join(at);
             fs::remove_file(&path).map_err(|e| fail(&path, e))?;
             fs::create_dir_all(&path).map_err(|e| fail(&path, e))?;
+        }
+        Act::ReplaceWithLink { at, to } => {
+            let path = root.join(at);
+            fs::remove_dir_all(&path).map_err(|e| fail(&path, e))?;
+            std::os::unix::fs::symlink(to, &path).map_err(|e| fail(&path, e))?;
         }
     }
     applied.log.push(step.says.clone());

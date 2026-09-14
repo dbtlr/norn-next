@@ -696,6 +696,34 @@ pub enum SkipReason {
     Vanished,
 }
 
+impl SkipReason {
+    /// Whether a walk begun now reaches this root no further than this one did.
+    ///
+    /// Every reason but [`SkipReason::Vanished`] is a fact about an entry that
+    /// stands: an exclusion root, a mechanism subtree, a shadow basename, a
+    /// link, a device-like entry, a name below an entry the walk reads rather
+    /// than descends into. A derivation started from zero over this tree
+    /// refuses each of them the same way, so a consumer converging derived
+    /// state against what such a derivation holds may conclude the places
+    /// beneath one: they hold nothing, and will hold nothing for as long as the
+    /// entry stands.
+    ///
+    /// A vanished name is the other answer. Nothing was read at it, and what
+    /// stands there now is a question this walk never asked — so a consumer
+    /// owes the places beneath it the hold [`SkipReason::Vanished`] states.
+    pub fn stands(self) -> bool {
+        match self {
+            Self::HostExclusion
+            | Self::Mechanism
+            | Self::Shadow
+            | Self::SymbolicLink(_)
+            | Self::SpecialFile(_)
+            | Self::UnderAnEntry => true,
+            Self::Vanished => false,
+        }
+    }
+}
+
 impl From<Excluded> for SkipReason {
     fn from(excluded: Excluded) -> Self {
         match excluded {
