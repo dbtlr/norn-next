@@ -118,13 +118,3 @@ class, and accept that a typo removes a document from the index. If the prune pr
 untrustworthy — findings deleted that a withheld or unreadable scope still owed — the
 revisit is toward narrower authority, never toward a stamp: shrink what a walk may
 vouch for before spending a write per converged document.
-
-## Status
-
-Superseded by [ADR 0023](0023-a-walk-refusal-that-stands-is-a-reading.md).
-
-## Changelog
-
-- 2026-09-14 — Superseded by [ADR 0023](0023-a-walk-refusal-that-stands-is-a-reading.md), which
-  splits this decision's "a root the walk did not enter" withholder into a refusal that
-  stands and a name the walk could not look at, and prunes the places beneath the first.
