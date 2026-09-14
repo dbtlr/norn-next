@@ -63,8 +63,8 @@
 //!
 //! One stage of widening is taken and no more: under the `induced-failure`
 //! feature, watch establishment arms itself from this process's environment
-//! rather than passing an empty arm. Two variables carry it, both read once per
-//! process:
+//! rather than passing an empty arm. Three variables carry it, each read once
+//! per process:
 //!
 //! - `NORN_FS_WATCH_ARMED_STAGES` — the arm, as comma-separated `stage=answer`
 //!   pairs, spelled `install`, `stream`, `barrier` and `refuses`, `fails`,
@@ -108,7 +108,7 @@
 //! condition met and the rest of the run served.
 //!
 //! Nothing outside this crate arms anything without the feature, and a shipped
-//! build has no reader for either variable.
+//! build has no reader for any of the three.
 //!
 //! # What consumes it
 //!
