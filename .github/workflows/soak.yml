@@ -85,11 +85,15 @@ jobs:
       - name: The pinned candidate
         id: candidate
         shell: bash
+        # The branch name reaches the script through the environment, quoted at
+        # the call site, so it is an argument and never shell text.
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: >-
           .github/scripts/soak-candidate.sh
           .github/soak-candidate
           .github/workflows/certify.yml
-          ${{ github.event.repository.default_branch }}
+          "$DEFAULT_BRANCH"
 
   # **The first of the two attestations, and the only job that runs the
   # candidate's code.** The digest is computed off the candidate's own tree and
