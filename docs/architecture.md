@@ -409,11 +409,17 @@ included — has been read.
 
 **A name reached that way is stated, never passed over in silence.** The walk yields it as a
 root it read nothing under, the same notation it yields for a root it deliberately does not
-enter, and the heal holds that root the way it holds every other one. The two axes part
+enter, and the heal reads the reason rather than the notation alone. The two axes part
 there: the rows stored beneath it converge on what a walk begun now holds — no document is
 at that name, so they are pruned — while the findings under it stay **withheld**, because
-nothing in this job read a place under a name it never entered, and a job that took them
-would be claiming an enumeration it never made. What stands at the name now, where an edit
+nothing in this job read a place under a name it never entered, what is at that name now is
+a question this walk never asked, and a job that took them would be claiming an enumeration
+it never made. **A root the walk deliberately does not enter is the other answer**, and the
+two axes stay together there: an exclusion root, a mechanism subtree, a shadow basename, a
+link, a device-like entry, a name below an entry the walk reads rather than descends into —
+each is a fact about an entry that stands, so a derivation begun from zero over the same
+tree refuses it the same way and holds nothing beneath it. The findings under such a root go
+with the rows, in the recording the prune already runs. What stands at the name now, where an edit
 replaced it rather than removing it, is a change of the vault's own and nothing here
 describes it. A page holding a vanished name still covers the run of names it listed, so the
 rest of the directory is paged exactly once and no name between that one and the page
@@ -505,9 +511,12 @@ and no discard reaches it — and a walk that enumerated a scope cleanly knows s
 path does: that nothing under that scope stands there at all. So a walk ends by taking, on each
 side, the findings whose subject its own scope holds and that nothing it read concluded — the same
 scope, in the same job-end recording that files what it did read, on the axis the rows are pruned
-on. **What licenses that is enumeration rather than absence.** Three things withhold it, and each
-of them leaves the finding standing: a walk that refused ends its job ahead of its own prune; a
-root the walk did not enter covers the places beneath it, so a finding under a withheld subtree
+on. **What licenses that is enumeration, or a refusal that stands, rather than absence.** Three things
+withhold it, and each of them leaves the finding standing: a walk that refused ends its job ahead
+of its own prune; a root the walk read nothing under and cannot state a standing refusal for —
+a name that vanished inside one of the walk's own windows, or a root whose own spelling the
+directory grammar refuses and which therefore addresses no range of stored paths and holds no row
+for a prune to follow — covers the places beneath it, so a finding under a withheld subtree
 survives whatever else the walk read; and a place is named by every spelling that renders onto it,
 so a walk rooted below that place's deepest unrendered ancestor read some of those spellings and
 never the rest and concludes nothing there. The collision is where the sides tell apart most
