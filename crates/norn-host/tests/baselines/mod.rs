@@ -22,17 +22,20 @@
 //! [`assert_the_profile_the_bars_were_authored_on`]. Repeated local readings
 //! cover **macos-arm64** natively.
 //!
-//! **The platform that gates is `ubuntu-latest` x86_64-glibc.** Every band
-//! below carries its hosted readings beside the local ones, the same way the
-//! generator's baselines carry both architectures they were measured on. The
-//! soak bands' hosted readings come off the nightly lane's hour-long load at
-//! the ≥5k profile; the local readings beside them are the same case at the
-//! short default duration, which is what a developer runs.
+//! **The platform that gates is `ubuntu-latest` x86_64-glibc.** Every authored
+//! band below carries its hosted readings beside the local ones, the same way
+//! the generator's baselines carry both architectures they were measured on. A
+//! band still in the calibration state below carries none, because its readings
+//! are what the calibration runs are gathering. The soak bands' hosted readings
+//! come off the nightly lane's hour-long load at the ≥5k profile; the local
+//! readings beside them are the same case at the short default duration, which
+//! is what a developer runs.
 //!
-//! **Two bands here spell their calibration state.**
-//! [`SOAK_PEAK_RSS_CEILING_BYTES`] and [`SOAK_SETTLE_CEILING`] are `Option`s:
-//! `Some` bars the run, and `None` records the reading, bars nothing, and
-//! stamps its own runs non-qualifying through the ledger's exit-bar registry
+//! **Three bands here spell their calibration state.**
+//! [`SOAK_PEAK_RSS_CEILING_BYTES`], [`SOAK_HIGH_WATER_RSS_CEILING_BYTES`] and
+//! [`SOAK_SETTLE_CEILING`] are `Option`s: `Some` bars the run, and `None`
+//! records the reading, bars nothing, and stamps its own runs non-qualifying
+//! through the ledger's exit-bar registry
 //! (`norn_testkit::certification::ledger::NAMED_EXIT_BARS`, held to these
 //! constants by a test in `settle.rs`) — so a calibration window never counts
 //! toward lockdown's five.
@@ -249,9 +252,10 @@ pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
 /// inside them: it re-walks and content-hash heals the same tree while the
 /// series is being sampled, so that walk's own high-water mark is a candidate
 /// for this maximum on every run. [`ATTACH_PEAK_RSS_CEILING_BYTES`] bars the
-/// first-attach phase at the 2k profile and nothing bars it at ≥5k — an attach
-/// peak at soak scale is a third reading, needing an instrument that survives
-/// the phase rather than samples it, and it is not taken yet.
+/// first-attach phase at the 2k profile, and at ≥5k that phase is
+/// [`SOAK_HIGH_WATER_RSS_CEILING_BYTES`]'s: the kernel's mark for the whole
+/// run, which survives the phase rather than sampling it. The two are read as
+/// a pair.
 ///
 /// **The readings below are the load without that walk, so this calibration is
 /// stale until a hosted run re-reads it.** They were taken before the load
@@ -296,6 +300,70 @@ pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
 /// the scheduled lane's on `ubuntu-latest` x86_64-glibc; the macos-arm64
 /// readings are a developer's and gate nothing.
 pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
+
+/// The highest resident set the **whole** soak run may reach — the first attach
+/// and its heal included — or `None` while no ceiling is authored.
+///
+/// **The attach-and-heal term of the memory invariant at soak scale.**
+/// [`SOAK_PEAK_RSS_CEILING_BYTES`] is the maximum of a sampled series that
+/// begins once the attachment reads ready, so the first attach's walk over the
+/// ≥5k tree finishes before its first sample and a cost paid there and released
+/// is outside it. This band is the kernel's own high-water mark for that same
+/// process, read once at the end of the run, so what it covers is the phase the
+/// series cannot. [`ATTACH_PEAK_RSS_CEILING_BYTES`] bars that phase at 2k, and
+/// the reading this band judges covers it at the profile the soak lane runs —
+/// barred here once a value is authored, and recorded meanwhile.
+///
+/// # Profile
+///
+/// The soak lane's ≥5k `soak` tree under the long mixed load, `induced-failure`
+/// on, which is the subject the soak bands above judge. **The deliberate
+/// recovery is inside the mark as well.** The re-attach re-walks and
+/// content-hash heals the same tree mid-run, so the mark covers the first
+/// attach, that re-attach and every tick between them; the sampled peak beside
+/// this covers the re-attach only where a tick lands inside it. The mark is
+/// therefore never below the sampled peak, and the pair is read together: a
+/// mark far above the peak is an attach or a re-attach, which is the cost this
+/// band exists to see.
+///
+/// # Platform scope
+///
+/// **The Linux measurement lane**, which is the lane that gates. The reading is
+/// `VmHWM` from `/proc/self/status`, beside the `VmRSS` every sample is taken
+/// from, and the kernel keeps it for the life of the process. macOS publishes
+/// no equivalent through the accounting that lane uses, so a run there records
+/// no high-water reading and this ceiling judges nothing on it.
+///
+/// # Observations
+///
+/// **None yet — this band is in its calibration state.** The instrument is
+/// landed and the ceiling is unauthored, so every run records the reading and
+/// nothing is held against it, and the registry types every such run
+/// non-qualifying. The readings are gathered by `workflow_dispatch` runs of the
+/// certification lane; the commit that authors a value states the runs it read,
+/// the band they hold, and the local readings beside them, the way every
+/// authored band above does.
+///
+/// # Safety rationale
+///
+/// **Unwritten until the band exists**, and authored in the same commit as the
+/// value. The stance the bands above take is the one to argue from: the reading
+/// is a whole-process high-water mark, so it carries the binary and its runtime
+/// as a fixed addend that a runner image, a page size or an allocator moves
+/// without the attach costing more, and a bar that flakes on such a step
+/// teaches people to rerun rather than to look. What a vault-shaped attach
+/// would read here is multiples of the band rather than the megabytes between
+/// platforms.
+///
+/// # Review trigger
+///
+/// A run past this ceiling is a claim that attaching and healing the ≥5k
+/// profile now costs more, and it is answered by reading the attach rather than
+/// by rerunning. Moving the value is a reviewed edit carrying that claim beside
+/// it; lowering it needs no new argument. Un-authoring it back to `None`
+/// reopens the calibration window, and the registry entry naming this constant
+/// keeps those runs from counting toward lockdown's five.
+pub const SOAK_HIGH_WATER_RSS_CEILING_BYTES: Option<u64> = None;
 
 /// How long a churn family's settle may take, or `None` while no ceiling is
 /// authored.
@@ -499,7 +567,7 @@ pub const SOAK_RECOVERY_DOSE: u32 = 1;
 /// Whether a reading fits under an authored ceiling.
 ///
 /// **The one comparison every measurement bar in this crate makes**, and all
-/// eight of them make it: the two attach bars, the three soak bars, the
+/// nine of them make it: the two attach bars, the four soak bars, the
 /// descriptor budget, the settle ceiling, and the recovery dose — which reads
 /// the dose as the reading and the run's count as the ceiling, so a floor and a
 /// ceiling are the same comparison with the arguments in the order each states

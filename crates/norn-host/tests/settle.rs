@@ -269,6 +269,9 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
         };
         let authored = match constant {
             "SOAK_PEAK_RSS_CEILING_BYTES" => baselines::SOAK_PEAK_RSS_CEILING_BYTES.is_some(),
+            "SOAK_HIGH_WATER_RSS_CEILING_BYTES" => {
+                baselines::SOAK_HIGH_WATER_RSS_CEILING_BYTES.is_some()
+            }
             "SOAK_SETTLE_CEILING" => baselines::SOAK_SETTLE_CEILING.is_some(),
             "ATTACH_PEAK_RSS_CEILING_BYTES" => {
                 always_authored(baselines::ATTACH_PEAK_RSS_CEILING_BYTES)

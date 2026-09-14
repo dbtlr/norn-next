@@ -478,6 +478,11 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
+        name: "soak-host-high-water-rss-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_HIGH_WATER_RSS_CEILING_BYTES",
+        armed: false,
+    },
+    ExitBar {
         name: "soak-settle-ceiling",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_SETTLE_CEILING",
         armed: false,
