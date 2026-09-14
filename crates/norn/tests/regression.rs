@@ -80,7 +80,7 @@ use norn_testkit::regression::{
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 106;
+const CASE_TOTAL: usize = 109;
 
 /// The whole registry's contract, as one value.
 ///
@@ -89,13 +89,13 @@ const CASE_TOTAL: usize = 106;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "f03702341d40daac2a2a07c1b898145e87c29355f29ffdf271c86886c384acb3";
+const CONTRACT_DIGEST: &str = "0a20beb7845732f860f378743b6e2bba04b367083e3cda94df53b36cd4282872";
 
 /// The cases carried by tests today, by name.
 ///
 /// Pinned rather than counted, because which ones are bound is the whole
-/// claim: these are the ones whose subject — the harness, and the substrate
-/// under it — already exists and is asserted over. A case that stops being
+/// claim: these are the ones whose venue is at or below [`LAYER_LANDING`], so
+/// their subject already exists and is asserted over. A case that stops being
 /// carried has to leave this list to pass, which is a diff a reviewer reads.
 /// Compared as a set, because the order cases sit in the file is the file's
 /// business.
@@ -106,6 +106,7 @@ const BOUND_CASES: &[&str] = &[
     "cache-identity-is-total",
     "cost-is-independent-of-vault-size",
     "encoding-prefix-transparency",
+    "finding-candidates-are-capped-with-a-total",
     "fixtures-carry-real-content-volume",
     "frontmatter-roundtrip-or-refuse",
     "guard-binds-executed-sql",
@@ -114,6 +115,8 @@ const BOUND_CASES: &[&str] = &[
     "harness-runs-under-isolated-state-roots",
     "harness-waits-have-deadlines",
     "one-field-edit-is-a-one-field-diff",
+    "per-file-atomicity-and-durability",
+    "vault-root-containment",
 ];
 
 /// The dormant cases at or below [`LAYER_LANDING`] whose reason states no
@@ -212,8 +215,8 @@ fn the_registry_is_structurally_sound() {
 /// to catch: it says no database is opened, while `crates/norn-store/src/store.rs`
 /// is in the tree opening one. Nothing about the prose says it is out of date —
 /// prose never does — so the check is over the grounds beside it, and it is the
-/// reason the registry's own layer-0 and layer-1 entries can be trusted to
-/// describe the workspace as it is rather than as it was.
+/// reason the registry's own entries at and below [`LAYER_LANDING`] can be
+/// trusted to describe the workspace as it is rather than as it was.
 ///
 /// The audit runs against an empty test index here, because what a bound case's
 /// carriers compiled into is a different question and asking cargo about it

@@ -95,7 +95,7 @@ pub const MANDATORY_CASES: &[&str] = &[
 /// requires every dormant case at or below this layer to say why. Raising it is
 /// a reviewed edit made when the next layer starts landing, and it raises the
 /// bar on every case that was already sitting there.
-pub const LAYER_LANDING: u8 = 1;
+pub const LAYER_LANDING: u8 = 2;
 
 /// The layers a case's venue names, indexed by layer number.
 ///
@@ -198,13 +198,17 @@ pub enum Ground {
     /// subject's absence.
     ///
     /// The path is the shallowest one the absence turns on: the crate directory
-    /// while the crate is unbuilt, a module inside it once the crate is there.
-    /// [`Registry::audit`] holds it to that by requiring the parent to resolve,
-    /// because a deeper path guessed ahead of the tree is a spelling the tree
-    /// may never use, and an absence nothing can satisfy is an absence that
-    /// never ends. The cost of the shallow claim is that a case flips when the
-    /// directory lands rather than when its own subject does, which is the
-    /// moment the reason has to be re-derived against real code anyway.
+    /// while the crate is unbuilt, a directory inside it once the crate is
+    /// there. [`Registry::audit`] holds it to that from both sides. The parent
+    /// has to resolve, so a claim under a directory that is not there is
+    /// refused; and a Rust source file under a directory the tree holds is
+    /// refused too, because at that grain the tree answers by name — which is
+    /// what [`Ground::SymbolAbsent`] claims, against a file that exists. A file
+    /// name guessed inside a live directory is a spelling the tree may never
+    /// use, and an absence nothing can satisfy is an absence that never ends.
+    /// The cost of the shallow claim is that a case flips when the directory
+    /// lands rather than when its own subject does, which is the moment the
+    /// reason has to be re-derived against real code anyway.
     Absent(String),
     /// A path the reason cites as a subject that did land, which is what a
     /// reason for a case still dormant beside a built subject has to name. The
@@ -1168,11 +1172,17 @@ impl Registry {
     /// what the audit reads and the reason is what a person reads, and a reason
     /// that never names its own subject leaves the two free to disagree.
     ///
-    /// Grounds are required exactly where a reason is — at or below
-    /// [`LAYER_LANDING`], the layers whose subjects exist. Above it a case is
-    /// waiting on a layer nobody has built, and there is no path to point at.
+    /// Grounds are required of every reason at or below [`LAYER_LANDING`], the
+    /// layers whose subjects exist — and of any reason, at any venue, that
+    /// argues from code the tree already holds. A venue above the landing is a
+    /// statement that nobody has built the layer yet, so a reason there normally
+    /// has no path to point at; the moment it cites one, it is reading built
+    /// code, and the audit reads the same code with it. Otherwise a case moved
+    /// up the scale takes its prose out of the gate's reach, which is the one
+    /// edit a falsifiability gate must not have.
     fn audit_grounds(&self, workspace_root: &Path, case: &Case, problems: &mut Vec<String>) {
         let name = case.name.as_str();
+        let reason = case.binding.reason.as_deref().unwrap_or_default();
         if case.binding.grounds.is_empty() {
             if case.venue <= LAYER_LANDING {
                 problems.push(format!(
@@ -1181,10 +1191,17 @@ impl Registry {
                      so the audit fails when its subject lands",
                     case.venue
                 ));
+            } else if let Some(cited) = cited_path_the_tree_holds(workspace_root, reason) {
+                problems.push(format!(
+                    "`{name}` is dormant at layer {}, above the layer that exists, and its reason \
+                     cites `{cited}`, which the workspace holds, while stating no grounds: a \
+                     reason arguing from built code is held to that code whatever venue it sits \
+                     at",
+                    case.venue
+                ));
             }
             return;
         }
-        let reason = case.binding.reason.as_deref().unwrap_or_default();
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         for ground in &case.binding.grounds {
             let subject = ground.subject();
@@ -1448,6 +1465,31 @@ fn declares_module(source: &str, name: &str) -> bool {
     })
 }
 
+/// The first workspace path a reason cites that the tree really holds, if it
+/// cites one.
+///
+/// A reason names its subjects in prose, and a path-shaped word is the part of
+/// that prose the tree can answer. This reads the words as the audit reads a
+/// ground's subject — trimmed of the punctuation prose puts around a path,
+/// including the full stop a path at the end of a sentence carries — so a
+/// reason that argues from a file the workspace holds is recognizable whatever
+/// venue the case sits at.
+fn cited_path_the_tree_holds(workspace_root: &Path, reason: &str) -> Option<String> {
+    reason
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.'))
+        .map(|word| word.trim_end_matches('.'))
+        .filter(|word| word.contains('/') && ill_spelled(word).is_none())
+        .find(|word| {
+            resolve(
+                workspace_root,
+                Path::new(word),
+                LastComponent::FileOrDirectory,
+            ) == Resolution::Held
+        })
+        .map(str::to_string)
+}
+
 /// What is wrong with one ground claiming a whole path, or nothing. `absent` is
 /// the claim: the path is one the tree is required not to hold, or one it is
 /// required to hold.
@@ -1499,6 +1541,13 @@ fn audit_path_ground(
                  never use is a claim its subject's landing does not touch"
             ));
         }
+        (true, Resolution::MissingLeaf) if subject.ends_with(".rs") => problems.push(format!(
+            "`{name}` stands on `{subject}` being absent, and the directory holding it is in the \
+             workspace. An absence is claimed at the shallowest path that is not there, and a \
+             Rust file guessed inside a directory the tree holds is not one: claim the directory \
+             that is missing, or pre-commit the name as a `symbol-absent` ground on a file the \
+             tree has"
+        )),
         (true, Resolution::MissingLeaf) => {}
         (false, Resolution::Held) => {}
         (false, _) => problems.push(format!(
@@ -1891,22 +1940,26 @@ fn is_rust_identifier(name: &str) -> bool {
 
 /// The words spelled like an identifier that a declaration cannot be named.
 ///
-/// Strict keywords and reserved ones together. A keyword passes
+/// Strict keywords and reserved ones together, for the edition this workspace
+/// compiles under — `gen` among them, reserved in 2024. A keyword passes
 /// [`is_rust_identifier`] and names nothing, so `counters.rs::fn` would be an
 /// absence no landing could ever end — and the raw spelling `r#fn` is a
 /// different string, which this grammar does not read either.
 const RUST_KEYWORDS: &[&str] = &[
     "Self", "abstract", "as", "async", "await", "become", "box", "break", "const", "continue",
-    "crate", "do", "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "if", "impl",
-    "in", "let", "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref",
-    "return", "self", "static", "struct", "super", "trait", "true", "try", "type", "typeof",
+    "crate", "do", "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if",
+    "impl", "in", "let", "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub",
+    "ref", "return", "self", "static", "struct", "super", "trait", "true", "try", "type", "typeof",
     "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
 ];
 
 /// The bare words a declaration may carry ahead of its keyword, in any order
 /// and any number. `pub` and `extern` are read by [`past_qualifiers`] instead,
 /// because each may carry a group after it.
-const BARE_QUALIFIERS: &[&str] = &["async", "unsafe", "const", "static", "default"];
+///
+/// `mut` is here because `static mut NAME` is one of the two spellings of a
+/// static, and a spelling the scan skips is a declaration it under-reads.
+const BARE_QUALIFIERS: &[&str] = &["async", "unsafe", "const", "static", "default", "mut"];
 
 /// The keywords that name a declaration whose name follows them.
 ///
@@ -1920,10 +1973,14 @@ const DECLARATION_KEYWORDS: &[&str] = &["struct ", "enum ", "union ", "trait ", 
 ///
 /// This is a scan of declaration lines, not a parse: the grammar reads the
 /// shapes a pre-committed name lands in — a function, a struct, an enum, a
-/// union, a trait, a type alias, a module, a constant, a static — and reads **a
-/// line segment that opens with the name itself** as a declaration too, which is
-/// how an enum member and a struct field are named. A line is cut at its commas
-/// and opening braces first, so members sharing one line are each read.
+/// union, a trait, a type alias, a module, a constant, a static in either
+/// spelling — and reads **a line segment that opens with the name itself** as a
+/// declaration too, which is how an enum member and a struct field are named. A
+/// line is cut at its commas and opening braces first, so members sharing one
+/// line are each read. A `use` item counts as a declaration of the name it
+/// brings: a file that re-exports a name offers that name, and a carrier lifted
+/// out of a module into the file the ground names is the carrier that was
+/// pre-committed.
 ///
 /// **Under-reading is the failure this grammar must not have.** A declaration
 /// the scan misses leaves a `symbol-absent` claim standing after its subject
@@ -1950,7 +2007,7 @@ fn declares_symbol(source: &str, name: &str) -> bool {
 
 /// Whether one trimmed line declares `name`.
 fn declares_symbol_here(line: &str, name: &str) -> bool {
-    if opens_fn(line, name) {
+    if opens_fn(line, name) || reexports(line, name) {
         return true;
     }
     let rest = past_qualifiers(line);
@@ -1967,6 +2024,33 @@ fn declares_symbol_here(line: &str, name: &str) -> bool {
     // follower is allowed, so `Foo ,` and `Foo = 1,` read the same as `Foo,`.
     rest.split([',', '{'])
         .any(|segment| named_before(segment.trim_start(), name, ",({:=}"))
+}
+
+/// Whether one trimmed line offers `name` by re-exporting it.
+///
+/// A `use` item is a declaration of the name at the file that writes it:
+/// `pub(crate) use stall::Stalled;` makes `Stalled` a name this file offers,
+/// and a carrier that lands in a module beside its parent and is lifted with a
+/// re-export is the carrier the pre-commitment asked for. The name an item
+/// brings is its alias where it renames, and the last path segment otherwise;
+/// a glob and a discarded import name nothing the scan can read.
+fn reexports(line: &str, name: &str) -> bool {
+    let Some(rest) = past_word(past_qualifiers(line), "use") else {
+        return false;
+    };
+    let items = rest.split(';').next().unwrap_or(rest);
+    items
+        .split([',', '{', '}'])
+        .any(|item| reexported_name(item.trim()) == Some(name))
+}
+
+/// The name one item of a `use` tree brings into scope, where it brings one.
+fn reexported_name(item: &str) -> Option<&str> {
+    let named = match item.rsplit_once(" as ") {
+        Some((_, alias)) => alias.trim(),
+        None => item.rsplit_once("::").map_or(item, |(_, last)| last).trim(),
+    };
+    (is_rust_identifier(named) && named != "self").then_some(named)
 }
 
 /// `line` with every leading declaration qualifier removed, in whatever order
@@ -2020,8 +2104,12 @@ fn past_attribute(line: &str) -> Option<&str> {
 
 /// What follows a leading `pub`, with its parenthesised restriction if it has
 /// one.
+///
+/// The restriction may stand off from its `pub`: `pub (crate) fn` is the same
+/// declaration `pub(crate) fn` is, so the space is passed over before the group
+/// is read.
 fn past_visibility(line: &str) -> Option<&str> {
-    let rest = past_word(line, "pub")?;
+    let rest = past_word(line, "pub")?.trim_start();
     let Some(opened) = rest.strip_prefix('(') else {
         return Some(rest);
     };
@@ -2086,6 +2174,10 @@ fn opens_fn(line: &str, name: &str) -> bool {
     let Some(rest) = rest.trim_start().strip_prefix(name) else {
         return false;
     };
+    // `fn name ()` is the declaration `fn name()` is: the space between the
+    // name and its parameter list is legal Rust, so it is passed over rather
+    // than read as a different name.
+    let rest = rest.trim_start();
     rest.starts_with('(') || rest.starts_with('<')
 }
 
@@ -2290,12 +2382,12 @@ fn a_carrier() {}
         let case = find(&mut registry, "a-dormant-layer-zero-case");
         case.binding.reason = Some(
             "crates/demo/tests/suite/inner.rs holds the recognition half, and the half this case \
-             waits on has no subject: crates/demo/src/absent.rs is not in the workspace"
+             waits on has no subject: crates/demo/src/verbs is not in the workspace"
                 .to_string(),
         );
         case.binding.grounds = vec![
             Ground::Present("crates/demo/tests/suite/inner.rs".to_string()),
-            Ground::Absent("crates/demo/src/absent.rs".to_string()),
+            Ground::Absent("crates/demo/src/verbs".to_string()),
         ];
         let listed = TestIndex::from_cargo(root.root(), registry.cited_targets());
         registry.audit(root.root(), &listed)
@@ -2580,8 +2672,9 @@ fn a_carrier() {}
     }
 
     /// A dormant case at any layer whose subject exists has to say why. The
-    /// requirement is not layer 0's alone: layer 1 has landed, so a case
-    /// sitting there dormant and silent is an obligation nobody wrote down.
+    /// requirement reaches every layer at or below [`LAYER_LANDING`], not layer
+    /// 0 alone: a case sitting at a landed layer dormant and silent is an
+    /// obligation nobody wrote down.
     #[test]
     fn a_dormant_case_at_a_landed_layer_with_no_reason_is_caught() {
         for venue in 0..=LAYER_LANDING {
@@ -2758,6 +2851,71 @@ fn a_carrier() {}
         }
     }
 
+    /// **A venue above the landing is not a way out of the gate.** A case moved
+    /// up the scale states no grounds — until its reason argues from code the
+    /// tree holds, which is the shape a re-venue would otherwise use to take
+    /// prose out of the audit's reach.
+    #[test]
+    fn a_reason_above_the_landing_citing_built_code_needs_grounds() {
+        let above = LAYER_LANDING + 1;
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.venue = above;
+                case.binding.reason = Some(
+                    "crates/demo/tests/suite.rs closes its own window, and the layer above it has \
+                     no home yet."
+                        .to_string(),
+                );
+                case.binding.grounds.clear();
+            },
+            "which the workspace holds, while stating no grounds",
+        );
+        // A path ending a sentence is the same citation: the full stop prose
+        // puts after it is not part of the name.
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.venue = above;
+                case.binding.reason = Some(
+                    "the recognition half is held by crates/demo/tests/suite.rs. What has no \
+                     subject is the verb."
+                        .to_string(),
+                );
+                case.binding.grounds.clear();
+            },
+            "which the workspace holds, while stating no grounds",
+        );
+        // A reason at the same venue naming no subject the tree holds is a case
+        // waiting on a layer nobody built, which owes nothing.
+        assert_eq!(
+            problems(|registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.venue = above;
+                case.binding.reason = Some("no apply layer exists to contain".to_string());
+                case.binding.grounds.clear();
+            }),
+            Vec::<String>::new()
+        );
+    }
+
+    /// An absence is claimed at the shallowest path that is not there. A Rust
+    /// file named inside a directory the tree holds is a spelling the tree may
+    /// never use, so it is refused the way a claim under an absent parent is.
+    #[test]
+    fn an_absent_ground_naming_a_file_under_a_live_directory_is_caught() {
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.binding.reason =
+                    Some("crates/demo/tests/verb.rs is not in the workspace".to_string());
+                case.binding.grounds =
+                    vec![Ground::Absent("crates/demo/tests/verb.rs".to_string())];
+            },
+            "the directory holding it is in the workspace",
+        );
+    }
+
     /// The reason and the grounds are one claim, so the reason names every path
     /// the audit checks for it.
     #[test]
@@ -2900,6 +3058,11 @@ fn a_carrier() {}
             "pub(super) fn collect_statistics(connection: &Connection) {",
             "pub(self) fn collect_statistics() {}",
             "pub(in crate::db) fn collect_statistics() {",
+            // A restriction standing off from its `pub` is the same
+            // declaration the tight spelling is.
+            "pub (crate) fn collect_statistics() {",
+            "pub (super) fn collect_statistics() {",
+            "pub (in crate::db) fn collect_statistics() {",
             "pub extern \"C\" fn collect_statistics() {",
             "extern \"C\" fn collect_statistics() {",
             "#[rustfmt::skip] pub fn collect_statistics() {",
@@ -2924,6 +3087,7 @@ fn a_carrier() {}
             "wanted"
         ));
         assert!(!opens_fn("pub(super) fn wanted_more()", "wanted"));
+        assert!(opens_fn("pub (crate) fn wanted()", "wanted"));
     }
 
     /// A Rust keyword is not a name a file can declare, so an absence claimed
@@ -2931,7 +3095,9 @@ fn a_carrier() {}
     /// this grammar reads neither.
     #[test]
     fn a_symbol_ground_naming_a_keyword_is_caught() {
-        for keyword in ["fn", "crate", "self", "Self", "struct", "mod", "yield"] {
+        for keyword in [
+            "fn", "crate", "self", "Self", "struct", "mod", "yield", "gen",
+        ] {
             let subject = format!("crates/demo/tests/vocabulary.rs::{keyword}");
             refused(
                 |registry| {
@@ -3062,6 +3228,16 @@ fn a_carrier() {}
             ("mod counters;", "counters"),
             ("pub const LIMIT: u64 = 1;", "LIMIT"),
             ("static REGISTRY: u64 = 1;", "REGISTRY"),
+            // Both spellings of a static, and a parameter list standing off
+            // from the name it belongs to.
+            ("pub static mut REGISTRY: u64 = 1;", "REGISTRY"),
+            ("fn foo () {}", "foo"),
+            ("pub fn foo <T>(count: T) {}", "foo"),
+            // A re-export offers the name at the file that writes it.
+            ("pub(crate) use stall::Stalled;", "Stalled"),
+            ("use std::io::Error as Stalled;", "Stalled"),
+            ("pub use crate::stall::{Idle, Stalled};", "Stalled"),
+            ("pub use stall::Stalled as Quiet;", "Quiet"),
             ("    StatementsPrepared,", "StatementsPrepared"),
             ("    documents: u64,", "documents"),
             ("    Held", "Held"),
@@ -3085,6 +3261,10 @@ fn a_carrier() {}
             ("let _ = Counter::Foo;", "Foo"),
             ("//   Foo,", "Foo"),
             ("    StatementsPrepared plus one", "StatementsPrepared"),
+            // A re-export declares the name it brings, not the one it renames
+            // away from, and a glob brings no name the scan can read.
+            ("pub use stall::Stalled as Quiet;", "Stalled"),
+            ("pub use stall::*;", "Stalled"),
         ] {
             assert!(
                 !declares_symbol(source, name),

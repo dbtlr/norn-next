@@ -933,7 +933,7 @@
     {
       "name": "audit-stream-integrity",
       "kind": "defect-class",
-      "venue": 2,
+      "venue": 4,
       "property": "Every filesystem effect appears in the plan, in the forecast, and in the audit stream; audit records survive failure paths; every mutation on every surface lands in a real sink rather than a discard; trace ids are real or absent, never fabricated from a seeded generator; and every log line is time-correlatable.",
       "sources": ["NRN-234", "NRN-104", "NRN-148", "NRN-488", "NRN-479", "NRN-395", "norn-legacy engineering learnings"],
       "binding": {
@@ -949,7 +949,12 @@
       "sources": ["NRN-266", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "no barrier exists to fail either way."
+        "reason": "the refusals this substrate makes are already held in both directions: crates/norn-host/tests/lockdown.rs injects a full disk and a revoked permission, asserts the heal refuses with every committed row standing and the rebuild rung never reached, and asserts the recovery after it admits the withheld work again — so neither the direction that lets something through nor the direction that refuses too much is tested alone. What has no subject is a barrier in this property's sense, a guard deciding what is admitted to a request. The only thing this workspace spells barrier is the watcher's synchronization boundary in crates/norn-fs/src/watch/faults.rs, which is a deadline rather than an admission decision, and the guards the property is stated over arrive with the request surface: crates/norn-serve is not in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-host/tests/lockdown.rs" },
+          { "present": "crates/norn-fs/src/watch/faults.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -960,7 +965,11 @@
       "sources": ["NRN-46", "NRN-305", "NRN-287", "NRN-482", "NRN-480", "NRN-522", "NRN-29", "norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "nothing creates a derived-state entry to own."
+        "reason": "the ownership and the reclamation are built: crates/norn-host/src/lifecycle.rs holds each vault's derived state behind that entry's own gate, re-reads the entry's classification under the same gate the teardown deletes with, and runs an idle entry's detach and its scheduled maintenance as jobs on the worker pool rather than on a caller's thread; harness traffic is isolated by construction, because every run crates/norn-testkit/src/process.rs starts gets a sandbox of its own and inherits nothing else. What has no subject is the liveness signal. The progress an entry publishes says how much has been done, never that nothing has been done for a while, so a sweep gone quiet behind a backlog still reads as a sweep that is working. The carrier is pre-committed as crates/norn-wire/src/trust.rs::Stalled — the typed reading, beside the warming phases an operator already reads, that a duration or a count of work passed with no progress under it.",
+        "grounds": [
+          { "present": "crates/norn-testkit/src/process.rs" },
+          { "symbol-absent": "crates/norn-wire/src/trust.rs::Stalled" }
+        ]
       }
     },
     {
@@ -971,18 +980,41 @@
       "sources": ["NRN-257", "NRN-258", "NRN-215", "NRN-503", "NRN-250", "NRN-s17"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no routed path that could degrade."
+        "reason": "the operator state this protects is computed and kept: crates/norn-host/src/production.rs types a vault whose derivation is degraded and re-files the finding beside that reading, so a schema re-pin leaves the degraded row standing with its finding rather than discarding either. What has no subject is the caller's channel. Nothing emits a signal at the moment a fallback engages, and nothing names the component at fault to an operator, because there is no channel to say it on: crates/norn-serve is not in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-host/src/production.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
+      }
+    },
+    {
+      "name": "finding-candidates-are-capped-with-a-total",
+      "kind": "defect-class",
+      "venue": 1,
+      "property": "A finding's candidate list is bounded by a cap and carries the total it heads. A head longer than the cap is refused rather than truncated, and a total below the head it heads is refused, because a truncated payload that reads as a complete one describes no vault.",
+      "sources": ["NRN-a61"],
+      "binding": {
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/pillars.rs::a_finding_keeps_a_bounded_head_and_the_total",
+          "crates/norn-store/tests/store/pillars.rs::a_candidate_head_beyond_the_bound_is_refused",
+          "crates/norn-store/tests/store/pillars.rs::a_candidate_total_below_the_head_it_heads_is_refused"
+        ]
       }
     },
     {
       "name": "finding-payload-is-bounded",
       "kind": "defect-class",
-      "venue": 2,
-      "property": "Finding payload grows at most linearly with vault size at fixed defect density, and per-finding candidate lists are bounded by a cap with a total alongside. No ambiguity class yields payload quadratic in its own size: 55 KB becoming 8.4 MB across three times the documents is the shape this forbids.",
+      "venue": 6,
+      "property": "Finding payload grows at most linearly with vault size at fixed defect density. No ambiguity class yields payload quadratic in its own size: 55 KB becoming 8.4 MB across three times the documents is the shape this forbids.",
       "sources": ["NRN-a61"],
       "binding": {
         "status": "dormant",
-        "reason": "no finding is produced or serialized."
+        "reason": "a finding is produced and stored today: crates/norn-host/src/derivation.rs plans one for every document it could not read whole. What has no subject is the payload. This property is stated over what a caller is handed and how that answer grows with the vault at a fixed defect density, and nothing hands a finding to a caller — crates/norn-serve is not in the workspace — so there is no answer to measure at two scales, and no ambiguity class whose own payload could be shown not to square.",
+        "grounds": [
+          { "present": "crates/norn-host/src/derivation.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -993,24 +1025,49 @@
       "sources": ["NRN-466", "NRN-488", "NRN-487", "NRN-303", "NRN-475"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no owner to summon."
+        "reason": "the snapshot clause is built and holds: crates/norn-host/src/reload.rs reads each authored control file once and hashes the bytes it read, so the bytes it parses are the bytes it fingerprints, and a reload decides against those fingerprints rather than against a value remembered from the attach. The owner the rest of the property is stated over does not exist. Nothing is summoned, nothing resolves an input per request, and there is no request for a registration or a configuration change to become visible to: crates/norn-serve is not in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-host/src/reload.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
       "name": "per-file-atomicity-and-durability",
       "kind": "defect-class",
       "venue": 2,
-      "property": "Every file written goes through temp, rename, fsync of the file and fsync of the parent, and every document-mutating path routes through that one primitive. An interrupted run leaves each document fully old or fully new with no orphaned temp; a cross-device placement fails closed rather than falling back to copy-then-unlink; and destructive ordering is gated, so no redirect is committed before the removal it redirects away from.",
+      "property": "Every file written goes through temp, rename, fsync of the file and fsync of the parent, and every document-mutating path — a write, a vacate and a move — routes through that one primitive. An interrupted run leaves each document fully old or fully new with no orphaned temp, and a placement that would cross a filesystem boundary stages inside the vault instead of falling back to copy-then-unlink.",
       "sources": ["NRN-139", "NRN-146", "NRN-159", "NRN-162", "NRN-217", "NRN-442", "norn-legacy engineering learnings"],
       "binding": {
+        "status": "bound",
+        "tests": [
+          "crates/norn-fs/tests/kernel/publication.rs::a_replacement_publishes_a_new_file_rather_than_editing_the_old_one",
+          "crates/norn-fs/tests/kernel/adjacent.rs::a_removal_under_its_precondition_reports_what_it_took",
+          "crates/norn-fs/tests/kernel/adjacent.rs::a_move_lands_the_destination_and_takes_the_source",
+          "crates/norn-fs/tests/lockdown.rs::process_death_at_every_checkpoint_leaves_one_whole_document",
+          "crates/norn-fs/tests/kernel/shadows.rs::a_landed_write_leaves_no_shadow",
+          "crates/norn-fs/src/shadow.rs::two_filesystems_fall_back_inside_the_vault"
+        ]
+      }
+    },
+    {
+      "name": "destructive-ordering-is-gated",
+      "kind": "defect-class",
+      "venue": 4,
+      "property": "No redirect is committed before the removal it redirects away from: a cascade that rewrites the links into a document orders every rewrite ahead of the destructive step, so no reader reaches a redirect whose target is already gone.",
+      "sources": ["NRN-139", "NRN-162", "norn-legacy engineering learnings"],
+      "binding": {
         "status": "dormant",
-        "reason": "the write primitive exists and carries two of this case's clauses — shadow, rename, fsync of the file and fsync of the parent, and a cross-device placement that refuses rather than copying. The rest have no subject: an interrupted run needs process-kill injection, no orphaned staging file needs the sweep that clears one, and there is no document-mutating path to route or destructive ordering to gate. A binding names tests for the whole property, so this stays dormant until those land."
+        "reason": "the write kernel takes one document at a time and rewrites no links, so nothing in the tree composes a cascade to order. The cascade is composed and run by the host's single applier, and that applier is not built: the name it takes is pre-committed as crates/norn-host/src/lib.rs::Applier, the crate root being where norn-host publishes every type it owns.",
+        "grounds": [
+          { "symbol-absent": "crates/norn-host/src/lib.rs::Applier" }
+        ]
       }
     },
     {
       "name": "plan-level-atomicity-and-truthful-partial-reporting",
       "kind": "defect-class",
-      "venue": 2,
+      "venue": 4,
       "property": "The whole plan validates before the first write — containment, collision, preconditions, every pass — and two operations targeting one path are rejected. On failure a machine-readable per-operation report persists, naming what committed and what remains, including every unmoved or skipped file by name; shared report fields accumulate across passes rather than being overwritten by a later one; recovery is a regenerable plan; and no declared plan field goes unread by the applier.",
       "sources": ["NRN-147", "NRN-148", "NRN-149", "NRN-107", "NRN-153", "norn-legacy annoyances log", "norn-legacy engineering learnings"],
       "binding": {
@@ -1026,13 +1083,19 @@
       "sources": ["NRN-323", "NRN-325", "NRN-337", "NRN-465", "NRN-483", "NRN-s29", "NRN-55", "norn-legacy annoyances log", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "no resident process holds state that could be poisoned."
+        "reason": "the poisoned half is built and exercised: crates/norn-db/src/ceremony.rs types a database it cannot read as damage at the statement that met it, crates/norn-host/src/production.rs reads that verdict as the rebuild rung and derives the vault again with nobody asking it to, and creation is exclusive because an attach takes the maintainer lock before it opens anything. The unambiguous-write half has no subject. Applied or not applied, the bounded time a client learns which of the two it was, and a liveness verdict issued against a request the server already completed are all stated over a client and a server: neither crates/norn-client nor crates/norn-serve is in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-db/src/ceremony.rs" },
+          { "present": "crates/norn-host/src/production.rs" },
+          { "absent": "crates/norn-client" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
       "name": "preconditions-come-from-plan-time",
       "kind": "defect-class",
-      "venue": 2,
+      "venue": 4,
       "property": "Preconditions are captured at plan or forecast time and never re-derived at apply, so a hash hydrated from apply-time state is tautological. What the operator confirmed is what applies, or the operation refuses; a confirmation is accepted only against a still-valid anchor the caller observed; and precondition comparison uses the query layer's typing rules rather than its own coercion.",
       "sources": ["NRN-151", "NRN-398", "NRN-443", "norn-legacy engineering learnings"],
       "binding": {
@@ -1048,18 +1111,42 @@
       "sources": ["NRN-530", "NRN-55"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no serving surface on which reads and writes could contend."
+        "reason": "the shape this forbids is refused by construction: crates/norn-store/src/store.rs keeps no pool, no internal lock and no second connection, so nothing here holds a session mutex across anything, and crates/norn-host/src/lifecycle.rs answers concurrent reads of one entry through the single reader that entry holds rather than opening another. One write-side operation does reach the read surface: a schema reload withdraws that entry's reader for the length of the reload, and a read asked for inside that window is answered as no reader rather than queued behind the write. What has no subject is the contention this property is stated against. A read's wait is neither bounded nor reported anywhere, and the long apply that would hold the surface is the host's single applier, which is not built: the name it takes is pre-committed as crates/norn-host/src/lib.rs::Applier.",
+        "grounds": [
+          { "present": "crates/norn-store/src/store.rs" },
+          { "present": "crates/norn-host/src/lifecycle.rs" },
+          { "symbol-absent": "crates/norn-host/src/lib.rs::Applier" }
+        ]
+      }
+    },
+    {
+      "name": "containment-is-checked-once-for-every-operation",
+      "kind": "defect-class",
+      "venue": 4,
+      "property": "Every operation target's parent canonicalizes under the canonical vault root once, in the layer every verb applies through, so a verb added later inherits containment instead of re-deriving it.",
+      "sources": ["NRN-145", "NRN-160"],
+      "binding": {
+        "status": "dormant",
+        "reason": "the check is the kernel's own: crates/norn-fs/src/open.rs descends into the vault root one component at a time and refuses what leaves it, once per operation the kernel runs. No layer above it holds one check for every verb, because that layer is the host's single applier and it is not built: the name it takes is pre-committed as crates/norn-host/src/lib.rs::Applier.",
+        "grounds": [
+          { "present": "crates/norn-fs/src/open.rs" },
+          { "symbol-absent": "crates/norn-host/src/lib.rs::Applier" }
+        ]
       }
     },
     {
       "name": "vault-root-containment",
       "kind": "defect-class",
       "venue": 2,
-      "property": "Every operation target's parent canonicalizes under the canonical vault root, checked once in the shared apply layer, with the check-to-write window closed by handle pinning. A lexical guard is not containment: parent traversal, absolute paths and a symlinked directory inside the vault each escape one.",
+      "property": "Containment is per component: the descent to a target opens each ancestor without following a link, so a symlinked directory inside the vault is refused at the component that is the link — a required read refuses and an optional one answers nothing rather than reading through it. A name that leaves the anchor, a parent traversal or an absolute path, refuses before anything is opened. A lexical check ahead of the descent is not what refuses. A publication verifies its destination through the handle it holds rather than through a second open by name, so a foreign republication that keeps the bytes is refused instead of overwritten. The rename after that verification is not exclusive, and nothing here claims it is.",
       "sources": ["NRN-145", "NRN-160"],
       "binding": {
-        "status": "dormant",
-        "reason": "no apply layer exists to contain."
+        "status": "bound",
+        "tests": [
+          "crates/norn-fs/tests/observations.rs::no_component_below_the_anchor_is_followed_through_a_link",
+          "crates/norn-fs/tests/observations.rs::a_name_that_leaves_the_anchor_is_refused_rather_than_resolved",
+          "crates/norn-fs/src/write.rs::a_foreign_replacement_that_keeps_the_bytes_is_still_refused"
+        ]
       }
     },
     {
@@ -1070,7 +1157,12 @@
       "sources": ["NORN-a1", "NRN-a59", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no warm request to count."
+        "reason": "the derivation half of the bar runs today: crates/norn-host/tests/counter_gate.rs attaches a real host over a generated tree and reads every member of the vocabulary crates/norn-store/src/counters.rs declares back at zero on a warm read, once over the rows an attachment left behind and once under a live attachment. What the case still waits on is the verb. Every substrate input the handler does not read, and the round-trip floor a verb costs and nothing more, are stated over a handler and a round trip: crates/norn-serve is not in the workspace, so there is no floor to measure against and no closure whose unread inputs could be enumerated.",
+        "grounds": [
+          { "present": "crates/norn-host/tests/counter_gate.rs" },
+          { "present": "crates/norn-store/src/counters.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -1092,7 +1184,10 @@
       "sources": ["NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "no substrate stores document content."
+        "reason": "the substrate stores the content: the documents table in crates/norn-store/src/ddl/documents.rs carries a body column that is TEXT NOT NULL, and the full-text pillar indexes it. What has no subject is the reader — no read verb exists to bill a warm filesystem read to, and no file is settled to declare one, so the name of that verb is not pre-committed here.",
+        "grounds": [
+          { "present": "crates/norn-store/src/ddl/documents.rs" }
+        ]
       }
     },
     {
