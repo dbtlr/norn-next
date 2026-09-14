@@ -179,8 +179,14 @@ pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 
 /// How many descriptors a host may still hold once its load has stopped, above
-/// the count taken when the attachment first became ready — or `None` while no
-/// ceiling is authored.
+/// the load's first sample — or `None` while no ceiling is authored.
+///
+/// The baseline is the first sample of the load loop, which the harness takes
+/// after tick 0 has churned and read, not a reading at the instant the
+/// attachment became ready. Anything tick 0 opened and later handed back is
+/// therefore inside the baseline and cancels out of the retention, which biases
+/// the term low. [`SOAK_FD_GROWTH_ALLOWANCE`] reads the same sample, so the two
+/// descriptor bars are stated over one baseline.
 ///
 /// **The post-quiescence retention term of lockdown**, and the second of the
 /// two descriptor bars the exit contract names.
@@ -197,8 +203,8 @@ pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 /// **It is not an idle detach.** The entry stays attached and stays watched:
 /// the reap interval the soak harness configures is deliberately longer than
 /// any load it runs, so what this measures is a host at rest under coverage
-/// rather than a host taken down. A run whose count comes back to the ready
-/// reading has handed back everything the hour acquired.
+/// rather than a host taken down. A run whose count comes back to the first
+/// sample has handed back everything the hour acquired past it.
 ///
 /// # Platform scope
 ///
@@ -207,7 +213,7 @@ pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 /// x86_64-glibc, and the macOS certification lane runs no load at all. The
 /// count itself is the process's own open-descriptor table, which is a
 /// different number on every runner image — so the bar is stated as a
-/// retention above this run's own ready reading rather than as a count.
+/// retention above this run's own first sample rather than as a count.
 ///
 /// # Observations
 ///
@@ -223,7 +229,7 @@ pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 ///
 /// **Pending calibration.** The rationale is owed with the value: what the
 /// reading is expected to be is zero — a host at rest holding exactly what it
-/// held when it became ready — and what the headroom is for is a descriptor a
+/// held at the load's first sample — and what the headroom is for is a descriptor a
 /// run legitimately holds at the sampling instant, the same allowance
 /// [`SOAK_FD_GROWTH_ALLOWANCE`] states. Whether that allowance is the right one
 /// here is a question the first readings answer rather than one this comment

@@ -362,10 +362,11 @@ const RECONCILE_LIMIT: Duration = Duration::from_secs(120);
 /// the recovery waits.
 ///
 /// **It is not long enough to reap the entry, and deliberately so.**
-/// [`attach::IDLE_AFTER`] is longer than any load this suite runs, so the
-/// attachment is still standing and still watched across this window. What the
-/// reading after it is of is a host at rest under coverage, which is the state
-/// a vault sits in between a user's edits — not a host taken down.
+/// [`attach::IDLE_AFTER`] is longer than the load plus this window, which
+/// [`run_load`] asserts, so the attachment is still standing and still watched
+/// across it. What the reading after it is of is a host at rest under coverage,
+/// which is the state a vault sits in between a user's edits — not a host taken
+/// down.
 const QUIESCENCE: Duration = Duration::from_secs(30);
 
 /// The fewest samples a judgment is made over.
@@ -534,7 +535,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
                 quiescent_fds.to_string(),
             ),
             (
-                "descriptors retained past quiescence",
+                "descriptors retained past quiescence, above the first sample",
                 quiescent_retention.to_string(),
             ),
             (
@@ -614,9 +615,9 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
     if let Some(ceiling) = baselines::SOAK_QUIESCENT_FD_RETENTION {
         assert!(
             baselines::fits(quiescent_retention, ceiling),
-            "the host still held {quiescent_retention} descriptors above its ready reading after \
-             {QUIESCENCE:?} of doing nothing, past a retention ceiling of {ceiling}: {} when the \
-             attachment became ready, {} at the last sample and {quiescent_fds} at rest",
+            "the host still held {quiescent_retention} descriptors above the load's first sample \
+             after {QUIESCENCE:?} of doing nothing, past a retention ceiling of {ceiling}: {} at \
+             the first sample, {} at the last and {quiescent_fds} at rest",
             first.open_fds,
             last.open_fds
         );
@@ -1072,13 +1073,17 @@ fn run_load(root: &Path) {
     let duration = declared_duration();
     // The lease below is what keeps the attachment: an entry nothing demands is
     // reaped once the idle interval passes. The interval is the second guard
-    // behind it, and an interval inside the load's own duration would make a
-    // future edit that stopped holding the lease read as a host that stopped
-    // serving rather than as the policy it is.
+    // behind it, and an interval inside the span the child holds the attachment
+    // across would make a future edit that stopped holding the lease read as a
+    // host that stopped serving rather than as the policy it is. That span is
+    // the load plus the quiescent window, which the lease is dropped for and
+    // the attachment is deliberately kept across.
     assert!(
-        attach::IDLE_AFTER > duration,
-        "the load runs for {duration:?} against an idle interval of {:?}, so an attachment nothing \
-         demanded would be reaped part-way through it",
+        attach::IDLE_AFTER > duration + QUIESCENCE,
+        "the child holds the attachment for {:?} of load and {QUIESCENCE:?} of quiescence against \
+         an idle interval of {:?}, so an attachment nothing demanded would be reaped part-way \
+         through it",
+        duration,
         attach::IDLE_AFTER
     );
 
