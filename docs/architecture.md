@@ -328,8 +328,9 @@ poll gap after it — the churn withdrew no trust across the settle. Readings ar
 widest leg of the calibration series rounded up to a whole second. **What that bar is, is
 one census walk**: the instrument walks the whole tree to build the census its polls
 compare against, and that walk is inside every reading, so the ceiling says the settle
-finishes inside one vault walk with headroom and cannot fail a regression smaller than the
-walk. Deriving the census from the workload script instead of walking it is what sharpens
+finishes inside one vault walk with headroom: at 5 seconds the smallest regression it
+catches is about 3.5 seconds on the slowest observed runner and about 4.2 on the fastest.
+The constant's safety rationale states why three times the widest leg is the multiple. Deriving the census from the workload script instead of walking it is what sharpens
 the bar, and re-authoring the value is part of that change. Un-authoring a ceiling back to
 `None` is the recalibration state, and the ledger's exit-bar registry names every bar, which
 types every run taken under an unauthored one non-qualifying so a calibration window never

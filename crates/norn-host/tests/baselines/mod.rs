@@ -295,8 +295,8 @@ pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
 /// 4 KiB predict, with a spread six times the hosted one, which is what a
 /// short run's cache-filling first minute does.
 ///
-/// The ceiling is 40 MiB, unmoved by the feature-on re-read: 2.02x the highest
-/// hosted reading and 1.72x the highest local one, the stance
+/// The ceiling is 40 MiB, read against the feature-on series above: 2.02x its
+/// highest hosted reading and 1.72x the highest local one, the stance
 /// [`ATTACH_PEAK_RSS_CEILING_BYTES`] takes and for the same reason. The readings are whole-process peaks, so each carries
 /// the binary and its runtime as a fixed addend that a runner image, a page
 /// size or an allocator moves without the load costing more — the sixteen-run
@@ -379,6 +379,14 @@ pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
 /// this ceiling**, because what rose is an attach or a re-attach rather than
 /// the load, and the pair is what says which.
 ///
+/// **The consequence of the two ceilings being equal: the sampled peak can no
+/// longer fail alone.** The mark is at or above every sample by construction,
+/// so any run that fails the peak fails this bar too. What the pair splits is
+/// the subject — the sampled series against the whole run — rather than the
+/// threshold, and the two failure messages are what say which phase reached the
+/// height. A run where only this bar fails is the attach, the heal or the
+/// re-attach; there is no run where only the peak fails.
+///
 /// # Review trigger
 ///
 /// A run past this ceiling is a claim that attaching and healing the ≥5k
@@ -437,8 +445,10 @@ pub const SOAK_HIGH_WATER_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024
 /// polls compare against, so that walk is inside every reading before the first
 /// poll. The value below therefore states "the settle finishes inside one
 /// filesystem walk of the vault, with headroom": its floor tracks the runner's
-/// filesystem rather than the subject, and it cannot fail a regression smaller
-/// than that walk. Sharpening it means narrowing the first look — the workload
+/// filesystem rather than the subject, so what it can fail is a regression
+/// large against that walk rather than against the settle. The safety
+/// rationale below states the sensitivity in seconds. Sharpening it means
+/// narrowing the first look — the workload
 /// script already implies the tree, which is what
 /// `Census::assert_the_script_read_the_tree_the_same_way` checks, so the
 /// expected census is derivable rather than walkable and the walk can verify
@@ -479,16 +489,21 @@ pub const SOAK_HIGH_WATER_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024
 /// - **Safety rationale.** Filled. The ceiling is 5 s: three times the widest
 ///   observed leg — 1470 ms, so 4.41 s — rounded up to a whole second. **The
 ///   floor under every one of those readings is one census walk of the
-///   6000-document `soak` tree**, so what the bar admits is a settle that
-///   finishes inside one vault walk with headroom, and it says nothing finer
-///   until the first look is narrowed. The multiple is three rather than the
-///   doubling a resident set takes because the reading is a clock: the same
-///   subject read 796 ms on one hosted runner and 1470 ms on another an hour
-///   later, a 1.8x spread between runs that no allocator produces and a
-///   scheduler produces routinely, so a 2x bar would flake on a busy runner and
-///   teach people to rerun rather than to look. Rounding 4.41 s up to 5 s
-///   rather than to 4.5 s keeps the value in the unit it is argued in, and the
-///   0.6 s it adds is smaller than the run-to-run spread already in the series.
+///   6000-document `soak` tree**, so a reading is that walk plus whatever
+///   settle ran past it. **What the bar's sensitivity is, exactly**: at 5 s the
+///   smallest settle regression it catches is about 3.5 s on the slowest
+///   observed runner, whose walk is 1.47 s, and about 4.2 s on the fastest,
+///   whose walk is 0.8 s. A 2x bar — 3 s — would catch a 1.5 s regression on
+///   two of the three runners, and a slow night inside the observed 1.8x spread
+///   would sit at 2.6–2.9 s against it. Three is chosen anyway, for three
+///   reasons: a false failure resets a five-night count, so the cost of
+///   flaking is a campaign rather than a rerun; the subject this bar is stated
+///   over is a vault-proportional settle regression, which at the ≥5k profile
+///   is multiple seconds rather than one; and sensitivity under one walk is the
+///   census-from-script sharpening's to give, which is the review trigger
+///   below. Rounding 4.41 s up to 5 s rather than to 4.5 s keeps the value in
+///   the unit it is argued in, and the 0.6 s it adds is smaller than the
+///   run-to-run spread already in the series.
 /// - **Platform scope.** Filled. The Linux measurement lane, `ubuntu-latest`
 ///   x86_64-glibc, is where this gates. The macOS certification lane runs no
 ///   measurement step, so it neither takes this reading nor evaluates this bar.
