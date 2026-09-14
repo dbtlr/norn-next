@@ -25,15 +25,16 @@
 //! **The platform that gates is `ubuntu-latest` x86_64-glibc.** Every authored
 //! band below carries its hosted readings beside the local ones, the same way
 //! the generator's baselines carry both architectures they were measured on. A
-//! band still in the calibration state below carries none, because its readings
-//! are what the calibration runs are gathering. The soak bands' hosted readings
-//! come off the nightly lane's hour-long load at the ≥5k profile; the local
+//! band un-authored back to `None` for recalibration carries the readings it
+//! had, because what a recalibration window gathers is the next set. The soak
+//! bands' hosted readings come off the nightly lane's hour-long load at the
+//! ≥5k profile; the local
 //! readings beside them are the same case at the short default duration, which
 //! is what a developer runs.
 //!
-//! **Three bands here spell their calibration state.**
-//! [`SOAK_PEAK_RSS_CEILING_BYTES`], [`SOAK_HIGH_WATER_RSS_CEILING_BYTES`] and
-//! [`SOAK_SETTLE_CEILING`] are `Option`s: `Some` bars the run, and `None`
+//! **Three bands here can spell a calibration state, and none of them is in
+//! one.** [`SOAK_PEAK_RSS_CEILING_BYTES`], [`SOAK_HIGH_WATER_RSS_CEILING_BYTES`]
+//! and [`SOAK_SETTLE_CEILING`] are `Option`s: `Some` bars the run, and `None`
 //! records the reading, bars nothing, and stamps its own runs non-qualifying
 //! through the ledger's exit-bar registry
 //! (`norn_testkit::certification::ledger::NAMED_EXIT_BARS`, held to these
@@ -210,6 +211,13 @@ pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 /// than a rise inside any one of them, which is exactly the distinction a
 /// run-against-itself comparison exists to make.
 ///
+/// Observed feature-on, with the deliberate recovery in the load, over the
+/// three calibration runs of 2026-09-14 (runs 34877528262, 34877987791 and
+/// 34884665687): **1.00 in each**, against first-quartile means of 19.48–19.68
+/// MiB and last-quartile means of 19.49–19.69. Each is read over the samples
+/// outside the one recovery window the run trips — 3586–3596 of the 3590–3599
+/// samples the run took — which is the series this bar is stated over.
+///
 /// Observed on macos-arm64 at the short default duration: **1.04–1.07 over
 /// three 90-second runs, and 0.96 over a 300-second one**, against
 /// first-quartile means of 21.50–22.31 MiB. A short run reads higher because
@@ -257,16 +265,15 @@ pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
 /// run, which survives the phase rather than sampling it. The two are read as
 /// a pair.
 ///
-/// **The readings below are the load without that walk, so this calibration is
-/// stale until a hosted run re-reads it.** They were taken before the load
-/// armed a recovery, and what the ceiling is authored over must be the series
-/// the bar now sees: the next `workflow_dispatch` of the certification lane is
-/// what re-reads the peak at the ≥5k profile with the re-attach in the series,
-/// and the value here is re-authored off that reading before it is trusted as
-/// a band of the current subject. The local reading at the short duration with
-/// the recovery in the series is **22.84 MiB**, inside the 22.31–23.20 band
-/// below, which says the move is small on macos-arm64 and says nothing about
-/// the hosted lane's ≥5k walk.
+/// **The band the bar stands on is the feature-on series, and the re-attach is
+/// inside it.** The sixteen nightlies below were taken before the load armed a
+/// recovery; the three calibration runs of 2026-09-14 are the first hosted
+/// readings under the `induced-failure` build the lane now runs, whose load
+/// trips one deliberate recovery and re-walks the ≥5k tree while the series is
+/// being sampled. The step between the two sets is 0.4 MiB, so at this profile
+/// the re-attach's walk reaches no higher than the height the load already
+/// holds. The local reading at the short duration with the recovery in the
+/// series is **22.84 MiB**, inside the 22.31–23.20 band below.
 ///
 /// Observed on `ubuntu-latest` x86_64-glibc at the scheduled hour, which is the
 /// lane that gates: the peak has been recorded on **every nightly since the
@@ -278,15 +285,19 @@ pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
 /// 2026-09-02, after the engine crates merged — read **19.17–19.32 MiB** (runs
 /// 33085019370, 33187194082, 33248400528, 33304650396, 33382242484,
 /// 33490462147 and 33608123948), each with a displayed slope of 1.00 against
-/// first-quartile means of 18.86–19.09. Observed on macos-arm64 at the
+/// first-quartile means of 18.86–19.09. **The three feature-on runs the value
+/// is re-read on** — 2026-09-14, runs 34877528262 (b2c2e84), 34877987791 and
+/// 34884665687 (b8f56b5), each an hour of load that recovered once — read
+/// **19.71, 19.76 and 19.78 MiB**, with a displayed slope of 1.00 against
+/// first-quartile means of 19.48–19.68. Observed on macos-arm64 at the
 /// 90-second default duration a developer runs: **22.31–23.20 MiB over three
 /// runs** — three to four MiB above the hosted band, as 16 KiB pages against
 /// 4 KiB predict, with a spread six times the hosted one, which is what a
 /// short run's cache-filling first minute does.
 ///
-/// The ceiling is 40 MiB: 2.07x the highest hosted reading and 1.72x the
-/// highest local one, the stance [`ATTACH_PEAK_RSS_CEILING_BYTES`] takes and
-/// for the same reason. The readings are whole-process peaks, so each carries
+/// The ceiling is 40 MiB, unmoved by the feature-on re-read: 2.02x the highest
+/// hosted reading and 1.72x the highest local one, the stance
+/// [`ATTACH_PEAK_RSS_CEILING_BYTES`] takes and for the same reason. The readings are whole-process peaks, so each carries
 /// the binary and its runtime as a fixed addend that a runner image, a page
 /// size or an allocator moves without the load costing more — the sixteen-run
 /// series has already stepped 0.72 MiB overnight once, with the slope flat
@@ -336,24 +347,37 @@ pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
 ///
 /// # Observations
 ///
-/// **None yet — this band is in its calibration state.** The instrument is
-/// landed and the ceiling is unauthored, so every run records the reading and
-/// nothing is held against it, and the registry types every such run
-/// non-qualifying. The readings are gathered by `workflow_dispatch` runs of the
-/// certification lane; the commit that authors a value states the runs it read,
-/// the band they hold, and the local readings beside them, the way every
-/// authored band above does.
+/// Observed on `ubuntu-latest` x86_64-glibc, the lane that gates, over the
+/// three hour-long `workflow_dispatch` runs of the certification lane this
+/// value is authored from — 2026-09-14, runs 34877528262 (b2c2e84),
+/// 34877987791 and 34884665687 (b8f56b5), `induced-failure` on, one deliberate
+/// recovery in each: **19.71, 19.76 and 19.78 MiB**.
+///
+/// **The mark equalled the sampled peak in every one of the three.** The run's
+/// whole-process high-water mark is therefore a height the load reached again
+/// inside the sampled window: neither the first attach's walk over the ≥5k tree
+/// nor the recovery's re-attach cost more than the load's own working set at
+/// this profile. That is the reading the pair exists to make visible, and it
+/// reads the same on each of the three.
+///
+/// macOS publishes no equivalent mark through the accounting this lane uses, so
+/// there are no local readings to stand beside these.
 ///
 /// # Safety rationale
 ///
-/// **Unwritten until the band exists**, and authored in the same commit as the
-/// value. The stance the bands above take is the one to argue from: the reading
-/// is a whole-process high-water mark, so it carries the binary and its runtime
-/// as a fixed addend that a runner image, a page size or an allocator moves
-/// without the attach costing more, and a bar that flakes on such a step
-/// teaches people to rerun rather than to look. What a vault-shaped attach
-/// would read here is multiples of the band rather than the megabytes between
-/// platforms.
+/// The ceiling is 40 MiB — 2.02x the highest of the three readings — which is
+/// [`SOAK_PEAK_RSS_CEILING_BYTES`]'s value and its headroom rule, and the two
+/// coincide because the readings do. The reading is a whole-process high-water
+/// mark, so it carries the binary and its runtime as a fixed addend that a
+/// runner image, a page size or an allocator moves without the attach costing
+/// more — the sampled peak beside it has already stepped 0.72 MiB overnight
+/// once — and a bar that flakes on such a step teaches people to rerun rather
+/// than to look. What a vault-shaped attach would read here is multiples of the
+/// band rather than the megabytes between runner images.
+///
+/// **A mark that rises above the sampled peak is a reading to chase even under
+/// this ceiling**, because what rose is an attach or a re-attach rather than
+/// the load, and the pair is what says which.
 ///
 /// # Review trigger
 ///
@@ -363,7 +387,7 @@ pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
 /// it; lowering it needs no new argument. Un-authoring it back to `None`
 /// reopens the calibration window, and the registry entry naming this constant
 /// keeps those runs from counting toward lockdown's five.
-pub const SOAK_HIGH_WATER_RSS_CEILING_BYTES: Option<u64> = None;
+pub const SOAK_HIGH_WATER_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
 
 /// How long a churn family's settle may take, or `None` while no ceiling is
 /// authored.
@@ -407,19 +431,20 @@ pub const SOAK_HIGH_WATER_RSS_CEILING_BYTES: Option<u64> = None;
 /// on that bound — it fails a settle that grew past one census read of the
 /// vault, and it says nothing finer.
 ///
-/// **What that costs the calibration commit.** The clock starts at the
-/// delivered change and the next thing the instrument does is walk the whole
-/// ≥5k tree to build the census the polls compare against, so that walk is
-/// inside every reading before the first poll. A value authored over these
-/// numbers therefore states "the settle finishes inside one filesystem walk of
-/// the vault", whose floor tracks the runner's filesystem rather than the
-/// subject and which cannot fail a regression smaller than that walk. So the
-/// commit that authors this has two ways to go and must take one: narrow the
-/// first look — the workload script already implies the tree, which is what
+/// **What the bar is, then, is one census walk, and that is the resolution
+/// this value accepts.** The clock starts at the delivered change and the next
+/// thing the instrument does is walk the whole ≥5k tree to build the census the
+/// polls compare against, so that walk is inside every reading before the first
+/// poll. The value below therefore states "the settle finishes inside one
+/// filesystem walk of the vault, with headroom": its floor tracks the runner's
+/// filesystem rather than the subject, and it cannot fail a regression smaller
+/// than that walk. Sharpening it means narrowing the first look — the workload
+/// script already implies the tree, which is what
 /// `Census::assert_the_script_read_the_tree_the_same_way` checks, so the
 /// expected census is derivable rather than walkable and the walk can verify
-/// after the clock stops — or say in the safety rationale below that the bar
-/// is one census walk and that this is the resolution being accepted.
+/// after the clock stops. The review trigger below names that work as what this
+/// value is re-authored under, because a narrower first look moves the floor
+/// rather than the subject.
 ///
 /// The comparison happens only where a ceiling is authored: `Some` bars the
 /// run, `None` records the readings and bars nothing, and the qualification
@@ -439,17 +464,31 @@ pub const SOAK_HIGH_WATER_RSS_CEILING_BYTES: Option<u64> = None;
 ///   about the scale the number came from rather than about the candidate, and
 ///   the failure a calibration must not manufacture. A local run defaults to
 ///   `small`, which is a developer's reading and gates nothing.
-/// - **Observations.** *Unauthored.* The value here is authored by a commit
-///   that records the runs behind it — the lane, the dates, the run ids, and
-///   the per-leg band each reading fell in — the way
-///   [`SOAK_PEAK_RSS_CEILING_BYTES`] records its sixteen. Those runs come off
-///   the scheduled platform at the scheduled duration, under ADR 0007.
-/// - **Safety rationale.** *Unauthored.* The same commit states the multiple
-///   the ceiling stands at over the widest observed leg and why that multiple
-///   is the right one for a reading whose spread is a scheduler's rather than
-///   an allocator's: a settle is a clock, so a runner under load moves it much
-///   further than a page size moves a resident set, and a bar that flakes
-///   teaches people to rerun rather than to look.
+/// - **Observations.** Filled. Three `workflow_dispatch` runs of the
+///   certification lane on `ubuntu-latest` x86_64-glibc at the `soak` profile,
+///   2026-09-14, every leg of every family timed in each: run **34877528262**
+///   (b2c2e84) read **1415–1470 ms** over its eight legs, run **34877987791**
+///   (b8f56b5) **796–824 ms**, and run **34884665687** (b8f56b5)
+///   **1104–1130 ms**. The widest leg of the series is `a burst` at 1470 ms and
+///   the narrowest `a case-renamed parent over a save` at 796 ms. **Every leg
+///   of every run recorded a resolution equal to its reading**, which is the
+///   instrument reporting that its first look already found the store agreeing:
+///   each number is a bound on a settle that had happened somewhere inside one
+///   census walk, not a measurement of it. A local run defaults to `small` and
+///   is a developer's reading, so no band stands beside these.
+/// - **Safety rationale.** Filled. The ceiling is 5 s: three times the widest
+///   observed leg — 1470 ms, so 4.41 s — rounded up to a whole second. **The
+///   floor under every one of those readings is one census walk of the
+///   6000-document `soak` tree**, so what the bar admits is a settle that
+///   finishes inside one vault walk with headroom, and it says nothing finer
+///   until the first look is narrowed. The multiple is three rather than the
+///   doubling a resident set takes because the reading is a clock: the same
+///   subject read 796 ms on one hosted runner and 1470 ms on another an hour
+///   later, a 1.8x spread between runs that no allocator produces and a
+///   scheduler produces routinely, so a 2x bar would flake on a busy runner and
+///   teach people to rerun rather than to look. Rounding 4.41 s up to 5 s
+///   rather than to 4.5 s keeps the value in the unit it is argued in, and the
+///   0.6 s it adds is smaller than the run-to-run spread already in the series.
 /// - **Platform scope.** Filled. The Linux measurement lane, `ubuntu-latest`
 ///   x86_64-glibc, is where this gates. The macOS certification lane runs no
 ///   measurement step, so it neither takes this reading nor evaluates this bar.
@@ -461,8 +500,13 @@ pub const SOAK_HIGH_WATER_RSS_CEILING_BYTES: Option<u64> = None;
 ///   raising it is what asks a reviewer for the claim that convergence now
 ///   costs more, and lowering it needs no new argument. Un-authoring it back to
 ///   `None` is the recalibration state, and the ledger stamps every run under
-///   it non-qualifying rather than letting the window count.
-pub const SOAK_SETTLE_CEILING: Option<Duration> = None;
+///   it non-qualifying rather than letting the window count. **The other
+///   trigger is the sharpening above.** A census derived from the workload
+///   script rather than walked drops the instrument's floor from one vault walk
+///   to the settle itself, and a value authored over walk-bound readings is
+///   then a bar over a floor that no longer exists — so that change re-authors
+///   this number over readings of the subject.
+pub const SOAK_SETTLE_CEILING: Option<Duration> = Some(Duration::from_secs(5));
 
 /// How many descriptors one served attachment may hold.
 ///

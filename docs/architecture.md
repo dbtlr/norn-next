@@ -58,10 +58,10 @@ The invariant is *measured*, not asserted:
   0007](decisions/0007-authored-measurement-thresholds.md), and the
   qualification ledger refuses a qualifying verdict while any named exit bar
   sits unauthored — so a lane running under an unauthored ceiling records its
-  readings without its green runs counting toward lockdown's five. The
-  high-water ceiling is in exactly that state: registered, unauthored, and
-  gathering the readings a reviewed edit will author it from. A baseline moves
-  only by a reviewed edit, and the downward direction of that movement is
+  readings without its green runs counting toward lockdown's five. Every named
+  exit bar is authored: the high-water ceiling is 40 MiB, read off three
+  hour-long hosted runs whose mark equalled the sampled peak in each. A
+  baseline moves only by a reviewed edit, and the downward direction of that movement is
   review-held rather than mechanized — nothing here fails a raised baseline, so
   this is a place this section's own rule applies: a review-held invariant rots
   quietly.
@@ -324,10 +324,16 @@ window; how wide the window was is measured per leg and recorded beside the read
 `state()` call; what is recorded beside each reading is the boolean that the attachment
 was publishing `Ready` at the poll that confirmed the reading, one projection read and one
 poll gap after it — the churn withdrew no trust across the settle. Readings are recorded as each family lands, and compared against
-`SOAK_SETTLE_CEILING` only where one is authored. It stands `None`, so the readings
-accumulate and nothing is barred — and the ledger's exit-bar registry names it, which
-types every run taken under it non-qualifying so a calibration window never counts toward
-lockdown's five.
+`SOAK_SETTLE_CEILING` only where one is authored. It stands at 5 seconds, three times the
+widest leg of the calibration series rounded up to a whole second. **What that bar is, is
+one census walk**: the instrument walks the whole tree to build the census its polls
+compare against, and that walk is inside every reading, so the ceiling says the settle
+finishes inside one vault walk with headroom and cannot fail a regression smaller than the
+walk. Deriving the census from the workload script instead of walking it is what sharpens
+the bar, and re-authoring the value is part of that change. Un-authoring a ceiling back to
+`None` is the recalibration state, and the ledger's exit-bar registry names every bar, which
+types every run taken under an unauthored one non-qualifying so a calibration window never
+counts toward lockdown's five.
 
 Rungs 2 and 3 are the **induced-failure suite**'s, whose lane runs per PR. The table below
 is its contract — each row an injection and the outcome required of it — and **every row of
