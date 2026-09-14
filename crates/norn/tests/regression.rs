@@ -89,7 +89,7 @@ const CASE_TOTAL: usize = 106;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "f03702341d40daac2a2a07c1b898145e87c29355f29ffdf271c86886c384acb3";
+const CONTRACT_DIGEST: &str = "1c263a28ce3c7aef230a402ec8a28410b4aeacaf0f2de143221200db1e323235";
 
 /// The cases carried by tests today, by name.
 ///
@@ -212,8 +212,8 @@ fn the_registry_is_structurally_sound() {
 /// to catch: it says no database is opened, while `crates/norn-store/src/store.rs`
 /// is in the tree opening one. Nothing about the prose says it is out of date —
 /// prose never does — so the check is over the grounds beside it, and it is the
-/// reason the registry's own layer-0 and layer-1 entries can be trusted to
-/// describe the workspace as it is rather than as it was.
+/// reason the registry's own entries at and below [`LAYER_LANDING`] can be
+/// trusted to describe the workspace as it is rather than as it was.
 ///
 /// The audit runs against an empty test index here, because what a bound case's
 /// carriers compiled into is a different question and asking cargo about it

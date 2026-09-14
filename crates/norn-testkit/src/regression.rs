@@ -95,7 +95,7 @@ pub const MANDATORY_CASES: &[&str] = &[
 /// requires every dormant case at or below this layer to say why. Raising it is
 /// a reviewed edit made when the next layer starts landing, and it raises the
 /// bar on every case that was already sitting there.
-pub const LAYER_LANDING: u8 = 1;
+pub const LAYER_LANDING: u8 = 2;
 
 /// The layers a case's venue names, indexed by layer number.
 ///
