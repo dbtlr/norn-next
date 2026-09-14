@@ -321,15 +321,21 @@
 //! its behalf, and `EntryState::pinned_leg` is what says such a pin is
 //! standing: every pinning leg takes the coverage and the pin under one hold of
 //! the entry's lock, records itself there as it takes them, and clears the
-//! record at the lock that ends it. A pin is therefore given back for a leg
-//! exactly where the leg is the one the entry is pinned for — never on a
-//! reading of what the leg was holding, which stands over legs that pin nothing
-//! and over legs already past their own end. Pinned by
-//! `a_pinning_leg_that_unwinds_gives_its_own_pin_back_and_no_other`, which is
-//! the case that fails where it stops reaching the leg that took one.
+//! record at the lock that ends it. The record names the leg — [`Leg`], kind
+//! and epoch both — rather than the epoch alone, because a job and a poll may
+//! stand at one epoch and either may unwind while the other runs. A pin is
+//! therefore given back for a leg exactly where the leg is the one the entry is
+//! pinned for — never on a reading of what the leg was holding, which stands
+//! over legs that pin nothing and over legs already past their own end. Pinned
+//! by `a_pinning_leg_that_unwinds_gives_its_own_pin_back_and_no_other`, which
+//! is the case that fails where it stops reaching the leg that took one, and by
+//! the two takeover cases that hold the kind in the record:
+//! `a_poll_whose_registration_was_taken_over_gives_its_pin_back_when_it_unwinds`
+//! and
+//! `a_job_that_unwinds_after_a_poll_took_its_registration_over_leaves_the_polls_pin`.
 //!
 //! The counterpart case — a non-pinning leg's unwind reaching this while a
-//! read's pin stands beside it — is reached, and the epoch check above is what
+//! read's pin stands beside it — is reached, and the owner check above is what
 //! carries it rather than a call graph that keeps the two apart. `Job::Detach`
 //! calls `EntryOps::detach` through `give_back`, which catches its panic before
 //! this is ever reached, so a detach panic completes the release it was part of
@@ -338,7 +344,7 @@
 //! makes calls of its own outside the entry's lock — `EntryOps::attach`,
 //! `drain_observed`, `entries.recheck` — that panic reaches this the ordinary
 //! way, with `pinned_leg` never set for it: a read's pin standing beside such an
-//! unwind is what `unpin_leg`'s `pinned_leg == Some(epoch)` check is for, and
+//! unwind is what `unpin_leg`'s `pinned_leg == Some(leg)` check is for, and
 //! reading `self.pinned_leg` rather than widening past it is what keeps the
 //! reclaim from taking a pin the attach leg never took. Pinned by
 //! `an_attach_that_unwinds_gives_back_no_pin_it_never_took`.
