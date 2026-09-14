@@ -258,14 +258,7 @@ Rung 1 is the **churn suite**'s — bursts, atomic replaces, branch flips, mid-m
 edits — whose bar is convergence-to-equivalence with a from-scratch build. Its settle
 budgets, proportional to the changed set, are runaway bounds rather than bars: a settle
 that reaches one is stuck, and how long one really takes is a clock the per-PR lane does
-not read. **What reads that clock is an instrument in the scheduled lane and a ceiling
-that is not yet authored.** `norn-host`'s settle suite times every churn family from its
-workload's final change to the derived store holding what the tree implies and to the
-attachment publishing `Ready` again, records both readings under every run, and compares
-them against `SOAK_SETTLE_CEILING` only where one is authored. It stands `None`, so the
-readings accumulate and nothing is barred — and the ledger's exit-bar registry names it,
-which types every run taken under it non-qualifying so a calibration window never counts
-toward lockdown's five. It is the warm path, so it is reached by ordinary
+not read. It is the warm path, so it is reached by ordinary
 operation rather than by injected failure. **That suite is built**, and it is two halves:
 `norn-testkit`'s churn driver holds the workload families as seeded scripts, each step
 saying in words what it does to a tree, and `norn-host`'s churn suite applies them to a
@@ -305,6 +298,25 @@ host. What says those counters move at all is a seeded control: one document, se
 edited once, and the account required to show it. What the suite does not state is a
 wall-clock ceiling on settling — its budget grows with the changed set and is a runaway
 bound, and a ceiling tight enough to fail a slow convergence stays the scheduled lane's.
+
+**What reads that clock is an instrument in the scheduled lane and a ceiling that is not
+yet authored.** `norn-host`'s settle suite runs the churn driver's whole roll of families
+at the ≥5k profile, including family 4's schema-replacement leg, and times each leg from
+its own final act to the derived store holding what a build from zero over the same tree
+holds. The stopping condition is that full comparator and not a cheaper stand-in: one
+flush is a changeset plus the findings recorded after it, so a clock stopped when paths
+and hashes agreed would systematically under-report by the findings tail. Each poll
+therefore asks the cheap census first and, once it agrees, reads the whole projection; the
+reading is taken when a second read of it finds nothing moved, and what the clock stopped
+on is then held to the projection the equivalence bar is taken over. **There is no second
+clock.** The entry does not leave `Ready` under churn, so a duration to it would measure a
+`state()` call; what is recorded beside each reading is the boolean that the attachment
+was publishing `Ready` at the instant equivalence was reached — the churn withdrew no
+trust. Readings are recorded as each family lands, and compared against
+`SOAK_SETTLE_CEILING` only where one is authored. It stands `None`, so the readings
+accumulate and nothing is barred — and the ledger's exit-bar registry names it, which
+types every run taken under it non-qualifying so a calibration window never counts toward
+lockdown's five.
 
 Rungs 2 and 3 are the **induced-failure suite**'s, whose lane runs per PR. The table below
 is its contract — each row an injection and the outcome required of it — and **every row of
