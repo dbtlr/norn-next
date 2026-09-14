@@ -232,32 +232,36 @@ pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 ///
 /// # Observations
 ///
-/// **None yet: this bar is in its calibration window.** The instrument landed
-/// after the three `workflow_dispatch` calibration runs the bars above are
-/// authored from, so no run has taken the reading. `None` is what says so, and
-/// the registry entry naming this constant stamps every run under it
-/// non-qualifying, which keeps a calibration night from counting toward
-/// lockdown's five. The value is authored in a second, reviewed edit once a
-/// dispatched run has published the reading.
+/// Observed on `ubuntu-latest` x86_64-glibc, the `workflow_dispatch` reading
+/// run (run 34905110033, at 974dd86): 16 descriptors at the load's first
+/// sample, 15 at the last, 15 read once the host was observed quiet 30 s after
+/// the load stopped — a retention of **0** above the first sample. The same
+/// run's peak and high-water resident-set readings (19.50 MiB each), its
+/// slope (1.00) and its recovery dose (1, tripped in 4 ticks / 3003 ms against
+/// a 1000 ms baseline tick) sit inside the bands the three prior calibration
+/// runs of 2026-09-14 set, so this run adds a fourth data point to those bars
+/// rather than moving any of them.
 ///
 /// # Safety rationale
 ///
-/// **Pending calibration.** The rationale is owed with the value: what the
-/// reading is expected to be is zero — a host at rest holding exactly what it
-/// held at the load's first sample — and what the headroom is for is a descriptor a
-/// run legitimately holds at the sampling instant, the same allowance
-/// [`SOAK_FD_GROWTH_ALLOWANCE`] states. Whether that allowance is the right one
-/// here is a question the first readings answer rather than one this comment
-/// can.
+/// The observed retention is zero: a host at rest holds exactly what it held
+/// at the load's first sample, with nothing left open for work that has
+/// finished. The ceiling is authored at 4 rather than 0, the same allowance
+/// [`SOAK_FD_GROWTH_ALLOWANCE`] carries for a descriptor a run legitimately
+/// holds at the sampling instant — a watcher re-subscribing, a store file
+/// mid-reopen — so that a transient caught at rest does not reset the count
+/// this bar builds toward lockdown's five. The allowance is headroom for the
+/// sampling instant, not for a leak: a leak grows with the load and a
+/// four-descriptor allowance passes none of that growth.
 ///
 /// # Review trigger
 ///
-/// A run past this ceiling, once it is authored, is a claim that the host now
-/// keeps descriptors past the work that needed them, and it is answered by
-/// reading what still holds them rather than by rerunning. Moving the value is
-/// a reviewed edit carrying that claim beside it; lowering it needs no new
-/// argument. Un-authoring it back to `None` reopens the calibration window.
-pub const SOAK_QUIESCENT_FD_RETENTION: Option<usize> = None;
+/// A run past this ceiling is a claim that the host now keeps descriptors past
+/// the work that needed them, and it is answered by reading what still holds
+/// them rather than by rerunning. Moving the value is a reviewed edit carrying
+/// that claim beside it; lowering it needs no new argument. Un-authoring it
+/// back to `None` reopens the calibration window.
+pub const SOAK_QUIESCENT_FD_RETENTION: Option<usize> = Some(4);
 
 /// How much of the first quartile's mean resident set the last quartile's mean
 /// may reach, per mille.
