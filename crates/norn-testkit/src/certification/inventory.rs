@@ -184,11 +184,21 @@ const INDUCED_FAILURE: &str = "induced-failure";
 /// feature: each crate is its own dev-dependency with the fault seam on, so the
 /// suites compile with it whether or not a caller asks. `norn-host`'s armed
 /// suites do name it: nothing turns it on for that crate but a lane that says
-/// so, and without it those files compile to zero tests. `norn-host`'s churn,
-/// equivalence and coverage suites name none, because none of them arms
-/// anything — the last of those meets its condition with a directory removal
-/// rather than through a seam, so gating it would leave a case a lane could
-/// skip while certifying the layer.
+/// so, and without it those files compile to zero tests.
+///
+/// **The churn suite names it for a different reason: it reads an account
+/// rather than arming a seam.** Its cost bars, its prune bar and its
+/// seeded-work control all read `EvidenceReading`, which is behind that
+/// feature, and without it those three assertions compile to empty bodies while
+/// every churn test still runs and passes. A lane running the featureless build
+/// would record `passed` for cases whose `states` text names a structural bound
+/// the build did not evaluate, so the feature travels with the cases here and
+/// the lane step names it.
+///
+/// `norn-host`'s equivalence and coverage suites name none: neither arms
+/// anything nor reads the account, and coverage meets its condition with a
+/// directory removal rather than through a seam, so gating it would leave a
+/// case a lane could skip while certifying the layer.
 ///
 /// **Three targets are named by entries and deliberately not claimed.**
 /// `norn-host`'s library, `norn-store`'s `store` target and `norn-fs`'s
@@ -204,7 +214,7 @@ pub const CLAIMED_TARGETS: &[ClaimedTarget] = &[
     ClaimedTarget {
         package: "norn-host",
         stem: "churn",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     ClaimedTarget {
         package: "norn-host",
@@ -247,7 +257,7 @@ pub const REQUIRED_CASES: &[Case] = &[
         lane: Lane::RealWatcher,
         states: "editing across nested directories converges on a build from zero",
         carrier: "crates/norn-host/tests/churn.rs::ordinary_editing_converges_on_a_build_from_zero",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-edits-while-detached",
@@ -257,7 +267,7 @@ pub const REQUIRED_CASES: &[Case] = &[
                  heal rather than through a watcher report",
         carrier: "crates/norn-host/tests/churn.rs::\
                   edits_made_while_nothing_was_attached_converge_on_a_build_from_zero",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-atomic-replacement-and-movement",
@@ -267,7 +277,7 @@ pub const REQUIRED_CASES: &[Case] = &[
                  moving, both converge on a build from zero",
         carrier: "crates/norn-host/tests/churn.rs::\
                   atomic_replacement_and_movement_converge_on_a_build_from_zero",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-case-flip",
@@ -276,7 +286,7 @@ pub const REQUIRED_CASES: &[Case] = &[
         states: "a name whose case flips leaves one row at the identity the volume resolves it to, \
                  spelled the way the directory renders it",
         carrier: "crates/norn-host/tests/churn.rs::a_case_flip_converges_on_a_build_from_zero",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-case-renamed-parent-over-a-save",
@@ -287,7 +297,7 @@ pub const REQUIRED_CASES: &[Case] = &[
                  way the renamed directory renders it",
         carrier: "crates/norn-host/tests/churn.rs::\
                   a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-burst-and-coalescing",
@@ -295,7 +305,7 @@ pub const REQUIRED_CASES: &[Case] = &[
         lane: Lane::RealWatcher,
         states: "a burst of writes to one path converges on the last bytes written",
         carrier: "crates/norn-host/tests/churn.rs::a_burst_converges_on_the_last_bytes_written",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-validity-boundaries",
@@ -305,7 +315,7 @@ pub const REQUIRED_CASES: &[Case] = &[
                  replacement converge on a build from zero",
         carrier: "crates/norn-host/tests/churn.rs::\
                   documents_crossing_validity_boundaries_converge_on_a_build_from_zero",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-external-tool-catch-up",
@@ -314,7 +324,7 @@ pub const REQUIRED_CASES: &[Case] = &[
         states: "an editor's saves and a sleep's catch-up batch converge on a build from zero",
         carrier: "crates/norn-host/tests/churn.rs::\
                   an_external_tools_catch_up_converges_on_a_build_from_zero",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-edits-during-an-active-heal",
@@ -324,7 +334,7 @@ pub const REQUIRED_CASES: &[Case] = &[
                  records its deaths under the provenance that says so",
         carrier: "crates/norn-host/tests/churn.rs::\
                   edits_during_an_active_heal_converge_on_a_build_from_zero",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-ambiguity-class-membership",
@@ -333,7 +343,7 @@ pub const REQUIRED_CASES: &[Case] = &[
         states: "a change to an ambiguity class's membership converges on a build from zero",
         carrier: "crates/norn-host/tests/churn.rs::\
                   an_ambiguity_classs_membership_change_converges_on_a_build_from_zero",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-rendering-collision-clears",
@@ -342,7 +352,7 @@ pub const REQUIRED_CASES: &[Case] = &[
         states: "a rendering collision that clears releases the finding it withheld",
         carrier: "crates/norn-host/tests/churn.rs::\
                   a_rendering_collision_that_clears_converges_on_a_build_from_zero",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-refused-root-takes-its-findings",
@@ -353,7 +363,7 @@ pub const REQUIRED_CASES: &[Case] = &[
                  build from zero",
         carrier: "crates/norn-host/tests/churn.rs::\
                   a_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-unaddressable-refused-root-takes-its-findings",
@@ -364,7 +374,7 @@ pub const REQUIRED_CASES: &[Case] = &[
                  and holds none of the ones it still reads",
         carrier: "crates/norn-host/tests/churn.rs::\
                   a_refused_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-maintenance-account-moves",
@@ -373,7 +383,7 @@ pub const REQUIRED_CASES: &[Case] = &[
         states: "one seeded edit moves the maintenance account, which is what says the cost bars \
                  beside every other case are reading a counter that counts",
         carrier: "crates/norn-host/tests/churn.rs::one_seeded_edit_moves_the_maintenance_account",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     Case {
         id: "churn-work-bound-arithmetic",
@@ -382,7 +392,7 @@ pub const REQUIRED_CASES: &[Case] = &[
         states: "the churn cost bound admits its ceiling and refuses one step past it",
         carrier: "crates/norn-host/tests/churn.rs::\
                   the_work_bound_arithmetic_admits_its_ceiling_and_refuses_one_past_it",
-        feature: None,
+        feature: Some(INDUCED_FAILURE),
     },
     // ---- the induced-failure suite: rungs 2 and 3 ----
     Case {

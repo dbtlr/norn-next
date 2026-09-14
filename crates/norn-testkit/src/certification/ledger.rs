@@ -473,6 +473,11 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
+        name: "soak-host-quiescent-fd-retention",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_QUIESCENT_FD_RETENTION",
+        armed: false,
+    },
+    ExitBar {
         name: "soak-host-recovery-dose",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_RECOVERY_DOSE",
         armed: true,

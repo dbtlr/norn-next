@@ -1410,7 +1410,11 @@ fn release_identity_claims<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultNam
 /// registered, or none is, the entry has already moved past the leg that
 /// unwound: what holds the entry then is that other leg or the work it handed
 /// on, and taking anything here would take it out from under work that is
-/// running. Nothing is given back and nothing is published.
+/// running. Nothing is published and nothing is reclaimed — **except the pin**,
+/// which is given back on both routes because it is named by epoch rather than
+/// by registration: a later leg's pin names a later epoch and is untouched,
+/// and a pin still naming this one is this leg's however the registration
+/// moved.
 ///
 /// That the registration is exclusive is a property of the call graph rather
 /// than of the registration itself. [`Claim::begin_job_leg`] and
@@ -1420,8 +1424,12 @@ fn release_identity_claims<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultNam
 /// against an unheld gate, and the moves that revoke a claim raise the epoch
 /// under the same lock. The one interleaving that reaches a takeover is a job
 /// dispatched at the epoch a poll is standing at, and the guard reads that
-/// exactly as it reads any other moved-on entry: it reclaims nothing, and what
-/// the poll left stands until the leg that took its registration ends.
+/// exactly as it reads any other moved-on entry: the coverage, the claim and
+/// the identity stand until the leg that took the registration ends. The pin
+/// does not, because that leg never took one and [`end_job_leg`] gives none
+/// back — a pin left standing there would be left standing forever, and
+/// [`EntryState::pinned`] is what keeps an entry from being reaped or served
+/// again.
 ///
 /// **The pin the entry names for this leg is the one it gets back.** A pinning
 /// leg records itself at [`EntryState::pinned_leg`] under the lock that hands
@@ -1477,6 +1485,13 @@ fn reclaim_unwound_leg<O: EntryOps>(
     let attachment = {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         if state.claim.leg() != Some(leg) {
+            // The pin is the one thing a moved-on entry does not answer for.
+            // A leg registered at a later epoch pinned at that epoch, so this
+            // gives back nothing of its. A job that took this epoch's
+            // registration over took no pin — one leg holds the coverage at a
+            // time — and its end gives none back, so a pin still naming this
+            // epoch is the unwound leg's and no later lock will reach it.
+            state.unpin_leg(epoch);
             return;
         }
         state.unpin_leg(epoch);
@@ -8833,6 +8848,76 @@ mod tests {
         assert_eq!(state.trust, TrustState::Unattached);
         assert!(!state.detach_in_flight, "the release window is still open");
         assert!(!state.coverage.out_with_leg());
+    }
+
+    /// **A poll that unwound after a job took its registration over still gives
+    /// its pin back.**
+    ///
+    /// The takeover is the one interleaving [`reclaim_unwound_leg`] names as
+    /// reachable: a job dispatched at the epoch a poll is standing at writes its
+    /// own leg over the poll's registration while the poll holds the coverage
+    /// and the pin. The guard there reclaims nothing — what the poll left is the
+    /// taking leg's to answer for — but the pin is not among those things: a job
+    /// leg takes no pin of its own at that epoch and [`end_job_leg`] gives none
+    /// back, so a pin left standing here is left standing forever.
+    ///
+    /// What a stuck pin costs is the entry, not a reading:
+    /// [`EntryState::pinned`] is what `schedule_due_detach` and
+    /// `schedule_demanded_work` read, so an entry carrying one is never reaped
+    /// and never served again.
+    #[test]
+    fn a_poll_whose_registration_was_taken_over_gives_its_pin_back_when_it_unwinds() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let shared = Arc::clone(&host.shared);
+        let entry = shared.entries.get(&name).expect("the vault is registered");
+
+        // The poll, holding the entry's coverage and pinned for it.
+        let holder = {
+            let mut state = entry.gate.lock().unwrap();
+            let holder = state.claim.epoch();
+            assert!(state.coverage.take(holder).is_some(), "the coverage is out");
+            state.pin_for_leg(holder);
+            state.claim.begin_poll(holder);
+            holder
+        };
+
+        // The job dispatched at that same epoch, writing its leg over the
+        // poll's registration. It takes no pin: the poll's still stands.
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state.claim.begin_job_leg(holder);
+        }
+
+        reclaim_unwound_leg(
+            &shared,
+            &name,
+            Leg::Poll(holder),
+            "the poll panicked".to_string(),
+        );
+
+        // Read out from under the lock: an assertion that unwound while holding
+        // the entry's gate would poison it, and the host's own teardown is what
+        // would then fail rather than the claim under test.
+        let (registered, pinned_leg, pinned) = {
+            let state = entry.gate.lock().unwrap();
+            (state.claim.leg(), state.pinned_leg, state.pinned())
+        };
+        assert!(
+            registered == Some(Leg::Job(holder)),
+            "the guard reclaimed the entry out from under the leg that took it over"
+        );
+        assert!(
+            pinned_leg.is_none(),
+            "the unwound poll's pin still names it, and no lock of that poll's will ever run again"
+        );
+        assert!(
+            !pinned,
+            "the entry stands pinned for work that unwound, so nothing will reap it or serve it \
+             again"
+        );
     }
 
     /// A job the joins wait for may have given its attachment back to the entry

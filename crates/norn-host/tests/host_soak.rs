@@ -344,6 +344,30 @@ const RECOVERY_LIMIT: Duration = Duration::from_secs(60);
 /// quickly: a reconcile that lands late still says the watcher saw the write.
 const RECONCILE_LIMIT: Duration = Duration::from_secs(120);
 
+/// How long the load leaves the host alone before it reads descriptors again.
+///
+/// **The quiescent window.** The descriptor growth bar reads the count while
+/// the load is still working, so a descriptor held *for* the work sits in both
+/// of its readings and cancels; what it cannot see is a descriptor the work
+/// acquired and the host never handed back. This window is what separates
+/// them: the loop ends, the lease is dropped, nothing churns and nothing reads,
+/// and the count taken at the end of it is of a host holding descriptors for no
+/// work at all.
+///
+/// Thirty seconds, and it is a bound rather than a wait for an event. The
+/// host's watch poll runs every 50 ms and the load samples itself every
+/// [`SAMPLE_INTERVAL`], so the window is six hundred polls and thirty sampling
+/// periods — long enough that anything a drain was going to hand back has been
+/// handed back, and short enough to sit inside the child's own deadline beside
+/// the recovery waits.
+///
+/// **It is not long enough to reap the entry, and deliberately so.**
+/// [`attach::IDLE_AFTER`] is longer than any load this suite runs, so the
+/// attachment is still standing and still watched across this window. What the
+/// reading after it is of is a host at rest under coverage, which is the state
+/// a vault sits in between a user's edits — not a host taken down.
+const QUIESCENCE: Duration = Duration::from_secs(30);
+
 /// The fewest samples a judgment is made over.
 ///
 /// The slope is a comparison of quartile means, so a series too short to have
@@ -388,7 +412,10 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         .env(WATCH_ARMED_STAGES, format!("{ARMED_STAGE}={ARMED_ANSWER}"))
         .env(WATCH_ARMED_WATCHES, ARMED_WATCHES)
         .env(ARM_HITS, &hits)
-        .deadline(duration + ATTACH_HEADROOM)
+        // The quiescent window is the child's, after its loop ends, so it is
+        // added to the declared duration rather than taken out of the headroom
+        // the bounded attach, recovery and reconcile waits need.
+        .deadline(duration + QUIESCENCE + ATTACH_HEADROOM)
         .wait()
         .expect("running the load harness");
     // The counter-violation term is carried by the child: a warm request that
@@ -408,6 +435,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
     let recoveries = reported_recoveries(&outcome.stdout_text());
     let windows = reported_recovery_windows(&outcome.stdout_text());
     let high_water = reported_high_water(&outcome.stdout_text());
+    let quiescent_fds = reported_quiescent_fds(&outcome.stdout_text());
     let attested = Attestation::read(&hits);
     // **The slope's series is the load at rest.** A recovery re-installs
     // coverage, and the walk that heals the ≥5k tree behind it is attach cost
@@ -434,6 +462,10 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
     let slope = baselines::per_mille(tail, head);
     let peak = peak_resident_set(&samples);
     let descriptor_growth = last.open_fds.saturating_sub(first.open_fds);
+    // Above the ready reading, not above the last sample: what the term asks is
+    // what the hour acquired and never handed back, and the last sample is
+    // taken with the load's own work still in flight.
+    let quiescent_retention = quiescent_fds.saturating_sub(first.open_fds);
 
     baselines::record(
         "host mixed load",
@@ -495,6 +527,22 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
             (
                 "descriptor growth allowance",
                 baselines::SOAK_FD_GROWTH_ALLOWANCE.to_string(),
+            ),
+            ("quiescent window (s)", QUIESCENCE.as_secs().to_string()),
+            (
+                "open descriptors, post-quiescence",
+                quiescent_fds.to_string(),
+            ),
+            (
+                "descriptors retained past quiescence",
+                quiescent_retention.to_string(),
+            ),
+            (
+                "quiescent retention ceiling",
+                match baselines::SOAK_QUIESCENT_FD_RETENTION {
+                    Some(ceiling) => ceiling.to_string(),
+                    None => "unauthored".to_string(),
+                },
             ),
         ],
     );
@@ -563,6 +611,16 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         first.open_fds,
         last.open_fds
     );
+    if let Some(ceiling) = baselines::SOAK_QUIESCENT_FD_RETENTION {
+        assert!(
+            baselines::fits(quiescent_retention, ceiling),
+            "the host still held {quiescent_retention} descriptors above its ready reading after \
+             {QUIESCENCE:?} of doing nothing, past a retention ceiling of {ceiling}: {} when the \
+             attachment became ready, {} at the last sample and {quiescent_fds} at rest",
+            first.open_fds,
+            last.open_fds
+        );
+    }
     assert!(
         head > 0,
         "the load reported no resident set at all, so the slope compares nothing"
@@ -872,6 +930,28 @@ fn reported_high_water(report: &str) -> Option<u64> {
     )
 }
 
+/// The descriptors the child still held after its quiescent window.
+///
+/// Required rather than optional: the reading is a plain count of this
+/// process's own descriptor table, which every platform this lane runs on
+/// publishes. A missing line is a child that ended before its window did, and
+/// judging the run without the reading would report a bar as met that nothing
+/// took.
+fn reported_quiescent_fds(report: &str) -> usize {
+    let line = report
+        .lines()
+        .find(|line| line.starts_with(QUIESCENT_LINE_PREFIX))
+        .unwrap_or_else(|| {
+            panic!(
+                "the load printed no `{QUIESCENT_LINE_PREFIX}` line, so it never sat idle for \
+                 {QUIESCENCE:?} and the descriptors it holds at rest went unread"
+            )
+        });
+    field(line, "open_fds=")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("`{line}` does not carry a descriptor count"))
+}
+
 /// The highest resident set the series holds.
 ///
 /// **The peak term of the memory invariant at this profile.** The slope reads
@@ -977,6 +1057,14 @@ const RECOVERY_WINDOW_PREFIX: &str = "recovery ";
 /// the parent's reading is an `Option` rather than a required field.
 const HIGH_WATER_LINE_PREFIX: &str = "high water ";
 
+/// What the child prints once it has sat idle for [`QUIESCENCE`], and what the
+/// parent reads the post-quiescence descriptor count off.
+///
+/// A run that ends without this line ended before its quiescent window did, so
+/// the parent requires it rather than treating its absence as a platform that
+/// publishes nothing.
+const QUIESCENT_LINE_PREFIX: &str = "quiescent ";
+
 /// The harness: attach the tree at `root`, work it until the deadline, and
 /// report a sample of this process on every tick.
 #[allow(clippy::disallowed_macros)] // The child's samples are a machine-consumed stream its parent reads.
@@ -1080,6 +1168,15 @@ fn run_load(root: &Path) {
             if let Some(high_water) = high_water_rss_bytes() {
                 println!("{HIGH_WATER_LINE_PREFIX}rss_bytes={high_water}");
             }
+            // **The quiescent reading.** The lease is gone and the loop has
+            // stopped, so nothing above touches the host across this sleep: no
+            // churn, no warm read, no demand. The entry stays attached and
+            // stays watched — [`attach::IDLE_AFTER`] is longer than any load
+            // here — so what the count below is of is a host at rest under
+            // coverage rather than one being torn down.
+            std::thread::sleep(QUIESCENCE);
+            let quiescent = open_fd_count().expect("this process's descriptor count at rest");
+            println!("{QUIESCENT_LINE_PREFIX}open_fds={quiescent}");
             return;
         }
         // Semantic: the interval is the sampling cadence. What the run

@@ -246,6 +246,32 @@ run's harness output, and reads the case lines off those logs rather than off a 
 verdict of the suite. A scheduled run is one entry in the five, and it counts when every
 record that run uploaded qualifies.
 
+**The macOS lane runs on a machine the campaign controls.** Its jobs take
+`macos-norn-soak`, a runner registered to this repository alone inside a pinned macOS 15
+virtual machine, and the qualification record's platform fields carry that runner label
+beside the operating system, the architecture, the watcher backend and the volume's
+case-folding answer — so a reader of a record knows which class of machine produced it.
+The lane carries no measurement bar: every ceiling in `norn-host/tests/baselines/` is
+authored against the Linux lane's hosted runner, and a second platform reading them would
+judge one machine's numbers on another's. What the two lanes share is the suite, which is
+what makes the pair one obligation's coverage on two backends.
+
+**Every soak run trips exactly one recovery, deliberately.** The load's child arms the
+watcher seam so a single watch establishment fails, and the run asserts that the arm fired
+once — budgeted to the one establishment its attach makes — before it reads the count the
+arm explains, so a run that recovered from a hiccup rather than from the arrangement fails
+instead of meeting the bar. The recovery is a window, and the load is judged across it at
+its own rate: the stretch between losing service and getting it back is measured in wall
+clock, and the churn turns and warm reads the load owes over it are charged at the mean
+tick period it achieved in the ticks before the window opened, not at a nominal one. A
+uniformly slow loop therefore owes proportionally less and cannot fail the term, and a
+window that reports no measured baseline period fails the run rather than passing on an
+uncharged comparison. The resident-set slope is taken over the samples outside every
+recovery window, so a re-attach's walk never enters the trend it would otherwise tilt. The
+count itself is an armed exit bar — `soak-host-recovery-dose`, a floor of one — and a run
+that arranged no recovery is a run whose other readings are of a load nothing ever
+disturbed.
+
 **The host-health preflight decides which machines are evidence sources.** The suites'
 authored work bounds are bounds on work, sized for a machine with a core free for the work it
 is given; a machine that does not have one measures its own queue at the bound, and a run
@@ -306,8 +332,9 @@ edited once, and the account required to show it. What the suite does not state 
 wall-clock ceiling on settling — its budget grows with the changed set and is a runaway
 bound, and a ceiling tight enough to fail a slow convergence stays the scheduled lane's.
 
-**What reads that clock is an instrument in the scheduled lane and a ceiling that is not
-yet authored.** `norn-host`'s settle suite runs the churn driver's whole roll of families
+**What reads that clock is an instrument in the scheduled lane under an authored ceiling of
+5 seconds — one vault walk with headroom — and every reading carries the resolution it was
+taken at, per leg.** `norn-host`'s settle suite runs the churn driver's whole roll of families
 at the ≥5k profile, including family 4's schema-replacement leg, and times each leg from
 its own final act to the derived store holding what a build from zero over the same tree
 holds. The stopping condition is that full comparator and not a cheaper stand-in: one

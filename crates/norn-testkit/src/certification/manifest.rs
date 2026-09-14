@@ -298,6 +298,13 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
         why: "the work bar's authored floor, coefficient and row count",
     },
     ManifestFile {
+        path: "crates/norn-store/tests/store/equivalence.rs",
+        why: "the comparator's mutation pins — one per projected field, each changing that field \
+              alone and requiring two projections to stop being equal. A pin deleted here leaves \
+              the comparator free to stop reading a field, and every churn and equivalence case \
+              that stops on the comparator would still be green",
+    },
+    ManifestFile {
         path: "crates/norn-store/tests/store/lifecycle.rs",
         why: "the rung-3 trigger an open reaches on its own: a database recording a statement \
               list this build did not write is discarded and derived again, and what the \

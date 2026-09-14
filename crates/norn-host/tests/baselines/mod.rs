@@ -178,6 +178,66 @@ pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 /// macOS certification lane runs no load at all.
 pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 
+/// How many descriptors a host may still hold once its load has stopped, above
+/// the count taken when the attachment first became ready — or `None` while no
+/// ceiling is authored.
+///
+/// **The post-quiescence retention term of lockdown**, and the second of the
+/// two descriptor bars the exit contract names.
+/// [`SOAK_FD_GROWTH_ALLOWANCE`] beside this reads the count while the load is
+/// still working, so a descriptor the host legitimately holds *for* the work —
+/// a store file open for a changeset, a watch re-subscribing — sits inside
+/// both the first reading and the last and cancels out of the difference. What
+/// that bar cannot see is a descriptor the work acquired and the host never
+/// handed back, because under a continuous load the two are the same number.
+/// This is the reading that separates them: the load stops churning and stops
+/// reading, the process sits idle for a bounded window, and the descriptors
+/// still open then are the ones held for no work at all.
+///
+/// **It is not an idle detach.** The entry stays attached and stays watched:
+/// the reap interval the soak harness configures is deliberately longer than
+/// any load it runs, so what this measures is a host at rest under coverage
+/// rather than a host taken down. A run whose count comes back to the ready
+/// reading has handed back everything the hour acquired.
+///
+/// # Platform scope
+///
+/// **The Linux measurement lane**, the same one [`SOAK_FD_GROWTH_ALLOWANCE`]
+/// gates in: the hour-long load is the scheduled lane's on `ubuntu-latest`
+/// x86_64-glibc, and the macOS certification lane runs no load at all. The
+/// count itself is the process's own open-descriptor table, which is a
+/// different number on every runner image — so the bar is stated as a
+/// retention above this run's own ready reading rather than as a count.
+///
+/// # Observations
+///
+/// **None yet: this bar is in its calibration window.** The instrument landed
+/// after the three `workflow_dispatch` calibration runs the bars above are
+/// authored from, so no run has taken the reading. `None` is what says so, and
+/// the registry entry naming this constant stamps every run under it
+/// non-qualifying, which keeps a calibration night from counting toward
+/// lockdown's five. The value is authored in a second, reviewed edit once a
+/// dispatched run has published the reading.
+///
+/// # Safety rationale
+///
+/// **Pending calibration.** The rationale is owed with the value: what the
+/// reading is expected to be is zero — a host at rest holding exactly what it
+/// held when it became ready — and what the headroom is for is a descriptor a
+/// run legitimately holds at the sampling instant, the same allowance
+/// [`SOAK_FD_GROWTH_ALLOWANCE`] states. Whether that allowance is the right one
+/// here is a question the first readings answer rather than one this comment
+/// can.
+///
+/// # Review trigger
+///
+/// A run past this ceiling, once it is authored, is a claim that the host now
+/// keeps descriptors past the work that needed them, and it is answered by
+/// reading what still holds them rather than by rerunning. Moving the value is
+/// a reviewed edit carrying that claim beside it; lowering it needs no new
+/// argument. Un-authoring it back to `None` reopens the calibration window.
+pub const SOAK_QUIESCENT_FD_RETENTION: Option<usize> = None;
+
 /// How much of the first quartile's mean resident set the last quartile's mean
 /// may reach, per mille.
 ///

@@ -273,6 +273,7 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
                 baselines::SOAK_HIGH_WATER_RSS_CEILING_BYTES.is_some()
             }
             "SOAK_SETTLE_CEILING" => baselines::SOAK_SETTLE_CEILING.is_some(),
+            "SOAK_QUIESCENT_FD_RETENTION" => baselines::SOAK_QUIESCENT_FD_RETENTION.is_some(),
             "ATTACH_PEAK_RSS_CEILING_BYTES" => {
                 always_authored(baselines::ATTACH_PEAK_RSS_CEILING_BYTES)
             }
@@ -314,6 +315,12 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
 /// ratio the two slope bars read — and a reading at the ceiling is required to
 /// pass beside each one, because a bar states the most a subject may cost and
 /// costing exactly that is not costing more.
+///
+/// **The recovery dose is the one bar stated as a floor**, and it makes the
+/// same comparison with the arguments the other way round: the dose is the
+/// reading and the run's count is the ceiling. Its control is therefore a run
+/// that recovered nothing — `fits(SOAK_RECOVERY_DOSE, 0)` must refuse — which
+/// is what says the dose is a bound and not a number the summary prints.
 #[test]
 fn a_reading_past_a_ceiling_is_refused_by_the_comparison_every_bar_makes() {
     let bytes = baselines::ATTACH_PEAK_RSS_CEILING_BYTES;
@@ -334,6 +341,23 @@ fn a_reading_past_a_ceiling_is_refused_by_the_comparison_every_bar_makes() {
     let ratio = baselines::SOAK_RSS_SLOPE_PER_MILLE;
     assert!(baselines::fits(ratio, ratio));
     assert!(!baselines::fits(ratio + 1, ratio));
+
+    // The quiescent-retention bar is in its calibration window, so what stands
+    // here while it is `None` is the comparison its reading will be made
+    // through — a descriptor count, the shape the budget above is stated in —
+    // and the arming test beside this is what holds the `None` to the
+    // registry's unarmed claim. Authoring the ceiling puts the authored value
+    // itself under this control with no edit here.
+    let retention = baselines::SOAK_QUIESCENT_FD_RETENTION.unwrap_or(baselines::FD_BUDGET);
+    assert!(baselines::fits(retention, retention));
+    assert!(!baselines::fits(retention + 1, retention));
+
+    let dose = baselines::SOAK_RECOVERY_DOSE;
+    assert!(baselines::fits(dose, dose));
+    assert!(
+        !baselines::fits(dose, 0),
+        "a run that recovered nothing meets the dose, so the dose bounds no run"
+    );
 }
 
 /// What one leg's settle cost, from its final change.
