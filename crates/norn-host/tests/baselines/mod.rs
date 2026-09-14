@@ -394,11 +394,70 @@ pub const SOAK_SETTLE_CEILING: Option<Duration> = None;
 /// the measured cost so that both fit under one number rather than two.
 pub const FD_BUDGET: usize = 12;
 
+/// How many recoveries the long mixed load must trip, at the fewest, per run.
+///
+/// **The deliberate-recovery term of lockdown, and the only authored value here
+/// that is a floor rather than a ceiling.** The other bands bound a cost; this
+/// one bounds a *dose* — the condition the run is required to have met, so that
+/// "the host kept serving under load" is a claim about a load that met one
+/// rather than about a load nothing ever disturbed. The load arms `norn-fs`'s
+/// watcher fault seam at the stream stage, budgeted to the one establishment
+/// its attach makes, so the entry loses coverage once mid-load and the demand
+/// the load already holds is what brings it back.
+///
+/// **The floor is compared with the same [`fits`] every ceiling here uses**, by
+/// reading the dose as what the run's count must reach: `fits(dose, count)` is
+/// the floor the way `fits(reading, ceiling)` is the ceiling, so the negative
+/// control covers this bar's comparison too.
+///
+/// **It is a count and not a clock**, which is what lets it be authored ahead
+/// of any reading: a run that trips no recovery measured nothing about
+/// recovering, on a fast runner as on a slow one. What the load bounds with a
+/// clock is elsewhere and unchanged — a recovery attempt has `RECOVERY_LIMIT`
+/// to bring the entry back, and a run that needs more than `RECOVERY_ATTEMPTS`
+/// of them fails as a host that will not come back.
+///
+/// Observed on `ubuntu-latest` x86_64-glibc at the scheduled hour, which is the
+/// lane that gates: **zero on each of the six scheduled runs at ed25f3b**, the
+/// suite as it stood before the injection landed — the load recovered only
+/// where the host was observed not serving and never arranged for that, so
+/// every one of those runs reported `attachment recoveries | 0`. There is no
+/// band to read here and there will not be one: the injection is arranged
+/// rather than observed, so what the value tracks is what the load arms, and
+/// the platform scope is the Linux measurement lane the same way the bands
+/// above are scoped, with a local macOS run at the default duration reading the
+/// same count because a count does not move with the machine.
+///
+/// The dose is 1: the fewest that makes the term measured, and exactly what the
+/// load arms. The run's count is recorded either way, so a run that reports
+/// more has recovered from something it did not arrange — which stands in the
+/// summary as the reading it is, beside the one record the seam's own arm
+/// wrote.
+///
+/// **A window this dose admits can be narrow.** One recovery is one window, and
+/// the arranged window is about two ticks wide, so the no-starvation term it
+/// carries charges one churn turn or none and no warm read at all. What the
+/// dose makes true is that the run recovered and kept ticking through it; what
+/// it does not make true is that a long stretch of load was served across a
+/// recovery. Each run's window prints the doses it charged, so the strength of
+/// that night's evidence is read off the summary rather than assumed from the
+/// bar.
+///
+/// **Withdrawing the dose takes a reviewed edit to the value here**, under
+/// [ADR 0007](../../../docs/decisions/0007-authored-measurement-thresholds.md).
+/// A count has no unauthored state to sit in — the injection is arranged, not
+/// measured — so the registry holds this bar `armed` and there is no
+/// calibration window for it to open.
+pub const SOAK_RECOVERY_DOSE: u32 = 1;
+
 /// Whether a reading fits under an authored ceiling.
 ///
-/// **The one comparison every measurement ceiling in this crate makes**, and
-/// all seven of them make it: the two attach bars, the three soak bars, the
-/// descriptor budget and the settle ceiling. What "under the ceiling" means is
+/// **The one comparison every measurement bar in this crate makes**, and all
+/// eight of them make it: the two attach bars, the three soak bars, the
+/// descriptor budget, the settle ceiling, and the recovery dose — which reads
+/// the dose as the reading and the run's count as the ceiling, so a floor and a
+/// ceiling are the same comparison with the arguments in the order each states
+/// its bound in. What "under the ceiling" means is
 /// therefore one line rather than one per bar, and the negative control in
 /// `settle.rs` feeds that line a reading past a ceiling of each shape the bars
 /// are stated in — bytes, a duration, a count and a per-mille ratio — and
