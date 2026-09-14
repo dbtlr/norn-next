@@ -458,6 +458,21 @@ pub const FD_BUDGET: usize = 12;
 /// above are scoped, with a local macOS run at the default duration reading the
 /// same count because a count does not move with the machine.
 ///
+/// **What one dose buys, exactly.** A run that met it recovered once: the arm
+/// fired, the entry came back inside `RECOVERY_LIMIT` of a bounded number of
+/// attempts, and across the window's wall clock the load kept churning and
+/// taking warm read-only requests at the doses its cadence owes for that much
+/// time. The last of those is a floor with slack in it, and the arranged
+/// recovery's window — two or three ticks, the re-attach over the ≥5k tree — is
+/// usually short enough to owe nothing at all. So what a passing dose proves
+/// about starvation on a typical night is that the load was *still running its
+/// cadence across the window*, not that a stalled load would have been caught
+/// by this window; `recovery windows, taken/owed` in the run's summary carries
+/// what each window actually charged, and a night whose term compared nothing
+/// says so there. The shape the term does catch is a window that stretched in
+/// wall clock with the load not working across it, which is what starvation
+/// looks like when it is real.
+///
 /// The dose is 1: the fewest that makes the term measured, and exactly what the
 /// load arms. The run's count is recorded either way, so a run that reports
 /// more has recovered from something it did not arrange — which stands in the

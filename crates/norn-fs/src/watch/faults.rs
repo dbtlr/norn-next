@@ -766,7 +766,8 @@ mod armed {
         REFUSED.get_or_init(|| {
             assert!(
                 std::env::var_os(ARMED_WATCHES).is_none(),
-                "{ARMED_WATCHES} budgets an arm and {ARMED_STAGES} arms no stage, so the budget                  bounds a condition nothing meets"
+                "{ARMED_WATCHES} budgets an arm and {ARMED_STAGES} arms no stage, so the \
+                 budget bounds a condition nothing meets"
             );
         });
     }
