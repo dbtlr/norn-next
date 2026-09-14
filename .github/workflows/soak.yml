@@ -200,11 +200,12 @@ jobs:
       # lane runs fails a pull request rather than the fifth nightly.
       #
       # The library target is one of them: five of the trust-transition cases
-      # are unit tests of the host's lifecycle, and the host half of logical
-      # damage reaching rung 3 is a unit test of its production ops, rather than
-      # integration suites — a lane that ran only the suites would record those
-      # six not-run. Its log holds every unit test the crate has, and the
-      # collector reads the ones the inventory names.
+      # and the trust a damaged entry publishes are unit tests of the host's
+      # lifecycle, and the host half of logical damage reaching rung 3 is a unit
+      # test of its production ops, rather than integration suites — a lane that
+      # ran only the suites would record those seven not-run. Its log holds
+      # every unit test the crate has, and the collector reads the ones the
+      # inventory names.
       #
       # Two of the targets below are not certification suites whole: `norn-store
       # store` is the store's black-box contract suite and `norn-fs
@@ -439,11 +440,12 @@ jobs:
         with:
           cache-bin: "false"
       # The library target is one of them: five of the trust-transition cases
-      # are unit tests of the host's lifecycle, and the host half of logical
-      # damage reaching rung 3 is a unit test of its production ops, rather than
-      # integration suites — a lane that ran only the suites would record those
-      # six not-run. Its log holds every unit test the crate has, and the
-      # collector reads the ones the inventory names.
+      # and the trust a damaged entry publishes are unit tests of the host's
+      # lifecycle, and the host half of logical damage reaching rung 3 is a unit
+      # test of its production ops, rather than integration suites — a lane that
+      # ran only the suites would record those seven not-run. Its log holds
+      # every unit test the crate has, and the collector reads the ones the
+      # inventory names.
       #
       # Two of the targets below are not certification suites whole: `norn-store
       # store` is the store's black-box contract suite and `norn-fs

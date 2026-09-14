@@ -529,12 +529,24 @@ pub const REQUIRED_CASES: &[Case] = &[
         id: "induced-contained-read-follows-no-link-below-the-anchor",
         suite: Suite::InducedFailure,
         lane: Lane::Any,
-        states: "no component below the anchor is resolved through a symbolic link — an ancestor \
-                 as well as the last name — so the contained spelling reads the document and the \
-                 linked spelling is absence to the optional read and a refusal naming the link to \
-                 the required one",
+        states: "no component below the anchor is resolved through a symbolic link, an ancestor \
+                 component as well as the last name: the contained spelling reads the document and \
+                 the spelling through a linked ancestor is absence to the optional read and a \
+                 refusal naming the link to the required one",
         carrier: "crates/norn-fs/tests/observations.rs::\
                   no_component_below_the_anchor_is_followed_through_a_link",
+        feature: None,
+    },
+    Case {
+        id: "induced-contained-read-refuses-a-link-at-the-name-itself",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a symbolic link standing at the configured name itself is refused whether or not \
+                 it resolves, and the refusal names the link rather than reporting the target's \
+                 absence — so a link there is distinct from a missing name, which refuses as not \
+                 found at the name asked for",
+        carrier: "crates/norn-fs/tests/observations.rs::\
+                  a_missing_name_and_a_linked_name_are_distinct_refusals",
         feature: None,
     },
     Case {
@@ -610,18 +622,38 @@ pub const REQUIRED_CASES: &[Case] = &[
                   a_ddl_fingerprint_this_build_did_not_write_is_rebuilt_from_zero",
         feature: None,
     },
+    // Row 7's host half is two cases, because the two legs it states are
+    // reached through different doors. The production row meets real damage in
+    // a real database and rebuilds out of it; it drives the entry operations
+    // directly, so it holds no entry whose trust could be read. The lifecycle
+    // row is where an entry meets the same verdict and publishes what a client
+    // then reads.
     Case {
-        id: "induced-host-logical-damage-withdraws-trust-and-rebuilds",
+        id: "induced-host-logical-damage-reaches-rung-three",
         suite: Suite::InducedFailure,
         lane: Lane::RealWatcher,
         states: "a full-text index that stopped agreeing with the column it indexes is damage no \
                  read reports, so the scheduled verification is what meets it: the maintenance leg \
-                 carries the verdict out rather than swallowing it, the entry withdraws trust \
-                 under the reason that says it discards its own database, and rung 3 run as the \
+                 carries the verdict out rather than swallowing it, and rung 3 run as the \
                  lifecycle runs it — over coverage that stands — derives the vault again to what a \
-                 build from zero holds, findings included",
+                 build from zero holds, findings included. The trust the verdict withdraws is \
+                 `induced-host-damage-withdraws-trust-at-the-maintenance-leg`'s claim",
         carrier: "crates/norn-host/src/production.rs::\
                   scheduled_maintenance_reports_a_full_text_index_that_stopped_agreeing_as_damage",
+        feature: None,
+    },
+    Case {
+        id: "induced-host-damage-withdraws-trust-at-the-maintenance-leg",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "an entry whose scheduled maintenance reports damage withdraws trust under the \
+                 reason that says it discards its own database, carrying the detail the \
+                 verification named, and it publishes that before rung 3 rather than after — so a \
+                 client reading the entry while the rebuild runs is told the derived state is \
+                 condemned rather than served reads off it. Rung 3 then runs once, with no \
+                 recovery anywhere in the sequence",
+        carrier: "crates/norn-host/src/lifecycle.rs::\
+                  damage_found_by_scheduled_maintenance_reaches_rung_three",
         feature: None,
     },
     // ---- the operational leg ----

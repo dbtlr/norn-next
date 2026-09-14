@@ -232,6 +232,18 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
     // executes is authored in one of these files, so an assertion loosened is
     // a run that certified less: the id and the carrier would not move, and
     // the reconciliation would not either.
+    //
+    // **The cases carried in library targets are the exception, and they stay
+    // out.** The host's lifecycle and production carriers are unit tests inside
+    // `crates/norn-host/src/`, in files that are otherwise the behavior a
+    // candidate is certified *for* — entering them here would fold that
+    // behavior into the suite's identity and move this digest on every product
+    // change, which is the same rule the module doc states for a product module
+    // a seam is merely read at. The cost is real and is the one this list
+    // cannot close: an assertion in one of those carriers can be loosened with
+    // the digest standing. What stands against it is the reconciliation, which
+    // still requires the carrier to exist under its own name and to run, and
+    // the candidate SHA, which moves when the file does.
     ManifestFile {
         path: "crates/norn-host/tests/churn.rs",
         why: "the churn suite, whose authored cost bounds and settle budgets are the bars a \

@@ -273,6 +273,12 @@ fn a_directory_cannot_masquerade_as_configured_file_bytes() {
 /// a name no file is at, so both are the answer the optional read promises for
 /// a name that is not a regular file — not the machine's failure.
 ///
+/// The required read refuses both as the environment's answer about the name,
+/// and the two refusals say different things: the socket is not the bytes a
+/// required read is for, and the over-long name is a name the filesystem will
+/// not hold. Either read reporting the machine's failure is the shape barred
+/// here.
+///
 /// The reachable shape is a race: a document replaced by a socket between the
 /// kind a caller stated and the read it then makes. Reporting that as a fault
 /// fails a whole reconcile over one path that a walk would simply not yield.
@@ -303,6 +309,13 @@ fn a_socket_and_an_unnameable_length_are_answers_rather_than_faults() {
             .expect("a name no file can have is an answer rather than a fault")
             .is_none(),
         "a name too long to exist was read as a document"
+    );
+    let refusal = read_and_hash(scratch.anchor(), Path::new(&unnameable))
+        .expect_err("a name no file can have must refuse");
+    assert!(
+        matches!(&refusal, Refusal::Environment { kind, .. }
+            if *kind == std::io::ErrorKind::InvalidFilename),
+        "{refusal:?}"
     );
 }
 

@@ -946,7 +946,7 @@ fn watcher_lost(error: WatchError) -> UntrustedReason {
 /// [`UntrustedReason::StoreDamagedAwaitingDemand`], which an attach that
 /// acquired no store publishes and which promises nothing until a demand opens
 /// a file to discard.
-pub(crate) fn trust_withdrawn_for_damage(detail: impl Into<String>) -> TrustState {
+fn trust_withdrawn_for_damage(detail: impl Into<String>) -> TrustState {
     TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail))
 }
 
@@ -9384,9 +9384,19 @@ mod tests {
         );
     }
 
-    /// The verdict maintenance reports reaches the same rung. Maintenance is
-    /// where the verification the warm path never runs asks the database about
-    /// itself, so it is the leg silent damage arrives through.
+    /// The verdict maintenance reports reaches the same rung, and the entry
+    /// withdraws trust on the way there. Maintenance is where the verification
+    /// the warm path never runs asks the database about itself, so it is the
+    /// leg silent damage arrives through.
+    ///
+    /// The withdrawal is the middle of the sequence rather than a detail of its
+    /// end. The entry blocks inside rung 3 here, and what it publishes while it
+    /// is in there is the rebuilding reason carrying the damage the
+    /// verification named — so a client reading the entry between the verdict
+    /// and the rung is told the derived state is condemned rather than served
+    /// reads off it. The detail is the maintenance leg's own, which is what
+    /// says the reason travelled from the verdict rather than being minted at
+    /// the rung.
     #[test]
     fn damage_found_by_scheduled_maintenance_reaches_rung_three() {
         let ops = Arc::new(FakeOps::default());
@@ -9397,7 +9407,21 @@ mod tests {
         *ops.damaged_maintenance_at
             .lock()
             .expect("an arranged vault poisoned") = Some(name.clone());
+        ops.block_rebuild.store(true, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
+
+        let withdrawn = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+            "the full-text index disagrees with the documents it indexes",
+        ));
+        wait_for_state(&host, &name, withdrawn.clone());
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(
+            host.state(&name),
+            answered(withdrawn),
+            "the entry retired the damage verdict before the rung resolving it had"
+        );
+
+        ops.rebuild_release.store(true, Ordering::SeqCst);
         wait_until(
             "the entry to reach Ready through the rung the verdict schedules",
             lifecycle_wait_budget(),
