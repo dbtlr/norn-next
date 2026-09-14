@@ -58,6 +58,16 @@
 //! than the cadence alone would say. A ceiling authored over these numbers is
 //! authored against the resolutions recorded with them.
 //!
+//! **A leg whose resolution equals its reading was settled before the
+//! instrument first looked.** That leg's first poll found the store already
+//! agreeing, so no poll ever saw it unsettled and the window is the whole
+//! elapsed time: the reading bounds the settle from above and does not measure
+//! it. At the ≥5k profile every leg currently reads that way — the census of a
+//! ≥5k tree takes longer than the settle it is looking for — which is why the
+//! legs there read within a fifth of each other while the same legs at `small`
+//! spread more than tenfold. The readings are sound as bounds, and a ceiling
+//! authored over them bounds what they bound.
+//!
 //! # `Ready` is a property, not a second clock
 //!
 //! The entry is already publishing `Ready` when the final change lands, and

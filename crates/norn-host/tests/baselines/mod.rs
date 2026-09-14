@@ -297,6 +297,15 @@ pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
 /// every reading, so the commit that authors this value states its multiple
 /// over the widest observed leg with each leg's resolution in view.
 ///
+/// **At the `soak` profile the readings are bounds rather than measurements**,
+/// and they say so: every leg's recorded resolution equals its reading, which
+/// is `settle.rs` reporting that its first look already found the store
+/// agreeing. A census of a ≥5k tree takes longer than the settle it is looking
+/// for, so what the readings there bound is a settle that had already happened
+/// somewhere inside the first look. A ceiling authored over them is a ceiling
+/// on that bound — it fails a settle that grew past one census read of the
+/// vault, and it says nothing finer.
+///
 /// The comparison happens only where a ceiling is authored: `Some` bars the
 /// run, `None` records the readings and bars nothing, and the qualification
 /// ledger types every such run non-qualifying, so the readings accumulate
