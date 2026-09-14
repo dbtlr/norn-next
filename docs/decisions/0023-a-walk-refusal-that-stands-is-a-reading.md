@@ -81,9 +81,10 @@ root's own spelling defeats the address grammar, the places it hides are named o
 marker-carrying places they render onto, and a scope that enumerated every spelling
 rendering onto those places — the vault heal — reaches them that way, by the marker the
 places carry rather than by a prefix the store cannot name. A leg answering one dirty path
-enumerated one such spelling and never its siblings, so it converges the rows the root
-addresses and leaves those places to the next heal. The two legs agree on authority, not on
-outcome.
+enumerated one such spelling and never its siblings, so it leaves those places to the next
+heal; where the root's spelling admits no prefix at all there is no row beneath it for that
+leg to converge either, since the spelling poisons every path under it. The two legs agree
+on authority, not on outcome.
 
 **Two withholders remain, and both are the walk saying it could not look.** A walk that
 cannot read concludes nothing: its error ends the job ahead of its own prune, so every

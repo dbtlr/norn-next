@@ -6488,7 +6488,10 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let f = Fixture::watcherless("heal-refused-unaddressable-root");
-        fs::create_dir_all(f.vault().join("hidden\\dir")).unwrap();
+        if fs::create_dir_all(f.vault().join("hidden\\dir")).is_err() {
+            eprintln!("skipped: this filesystem does not create a directory named `hidden\\dir`");
+            return;
+        }
         let written = write_or_report(&f.vault().join("hidden\\dir/note.md"), b"body")
             && write_or_report(&f.vault().join("outside\\name.md"), b"body");
         if !written {
@@ -6566,7 +6569,11 @@ mod tests {
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
-        fs::create_dir_all(f.vault().join("hidden\\dir")).unwrap();
+        if fs::create_dir_all(f.vault().join("hidden\\dir")).is_err() {
+            eprintln!("skipped: this filesystem does not create a directory named `hidden\\dir`");
+            ops.detach(&name, attachment);
+            return;
+        }
         if !write_or_report(&f.vault().join("hidden\\dir/note.md"), b"body") {
             ops.detach(&name, attachment);
             return;

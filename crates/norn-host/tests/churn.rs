@@ -824,9 +824,11 @@ fn a_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero() {
 /// increment answering a dirty path under such a root has no range of stored
 /// paths to register — the spelling admits no prefix — so it never reaches the
 /// places the root hides, and it enumerated one of the spellings rendering onto
-/// them rather than all of them. It converges the rows and leaves the findings
-/// to the heal that follows. A phase landing on an attached host would judge a
-/// store that still held them.
+/// them rather than all of them. There is no row beneath such a root for it to
+/// converge — the spelling poisons every path under it, so the store holds none
+/// — and the findings at the places it hides are left to the heal that follows.
+/// A phase landing on an attached host would judge a store that still held
+/// them.
 #[test]
 fn a_refused_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero() {
     let sandbox = sandbox("churn-unaddressable-root");
