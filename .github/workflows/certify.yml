@@ -315,8 +315,8 @@ jobs:
       # is armed at `norn-fs`'s watcher fault seam so that the load loses its
       # attachment once and gets it back through a demand, and that seam has a
       # reader only behind `induced-failure` — without it this suite compiles to
-      # zero tests and the step reports having measured nothing. `norn --test
-      # certification` holds this step to naming it.
+      # zero tests and the step reports having measured nothing. `norn-host
+      # --test lanes` holds this step to naming it.
       - name: Host mixed load
         run: .github/scripts/lane-suite.sh norn-host host_soak --nocapture --test-threads=1
         env:
