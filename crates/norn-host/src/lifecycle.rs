@@ -555,12 +555,18 @@ struct EntryState<A: SnapshotSource> {
     /// therefore work deciding whether to wait, and what reads the coverage is
     /// work deciding whether it may be taken.
     safety_pins: usize,
-    /// The leg the entry holds a pin for, named by the epoch it stands at.
+    /// The leg the entry holds a pin for, named by its kind and its epoch.
     ///
     /// A pinning leg takes the coverage and the pin under one hold of the
     /// entry's lock and gives the pin back under the lock that ends it, so
     /// between those two locks this names the one pin among
     /// [`EntryState::safety_pins`] that is a leg's rather than a read's.
+    ///
+    /// The kind is carried beside the epoch because a poll and a job leg may
+    /// both stand at one epoch: a job dispatched at the epoch a poll holds
+    /// takes the registration over, and either of the two may unwind while the
+    /// other runs. An epoch alone would let the unwinding one give back the
+    /// running one's pin.
     ///
     /// [`reclaim_unwound_leg`] is the one reader, and it needs the pin named
     /// rather than derived. Custody says which leg holds the coverage, which is
@@ -573,7 +579,7 @@ struct EntryState<A: SnapshotSource> {
     /// Reads pin the entry too, and are recorded nowhere: a read's pin ends
     /// with its own [`ReadHold`], whose drop runs on a panicking thread as
     /// surely as on a returning one.
-    pinned_leg: Option<u64>,
+    pinned_leg: Option<Leg>,
     detach_due: bool,
     detach_scheduled: bool,
     detach_in_flight: bool,
@@ -750,26 +756,28 @@ impl<A: SnapshotSource> EntryState<A> {
         self.safety_pins = self.safety_pins.saturating_sub(1);
     }
 
-    /// Pin the entry for the leg at this epoch, and record whose pin it is.
+    /// Pin the entry for this leg, and record whose pin it is.
     ///
     /// Every pinning leg reaches this under the same hold of the entry's lock
     /// that handed it the coverage, and one leg holds the coverage at a time,
     /// so one pin at a time is a leg's.
-    fn pin_for_leg(&mut self, epoch: u64) {
+    fn pin_for_leg(&mut self, leg: Leg) {
         debug_assert!(
             self.pinned_leg.is_none(),
             "a leg took the entry's coverage while another leg's pin still stood"
         );
-        self.pinned_leg = Some(epoch);
+        self.pinned_leg = Some(leg);
         self.pin();
     }
 
-    /// Give back the pin the leg at this epoch took, where it is still
-    /// standing. A leg that gave its pin back already, and a leg that took
-    /// none, each leave the entry's pins alone: what stands then is a read's or
-    /// another leg's, and neither is this leg's to give back.
-    fn unpin_leg(&mut self, epoch: u64) {
-        if self.pinned_leg == Some(epoch) {
+    /// Give back the pin this leg took, where it is still standing. A leg that
+    /// gave its pin back already, and a leg that took none, each leave the
+    /// entry's pins alone: what stands then is a read's or another leg's, and
+    /// neither is this leg's to give back. The record names the kind as well as
+    /// the epoch, so a poll and a job leg standing at one epoch give back only
+    /// their own.
+    fn unpin_leg(&mut self, leg: Leg) {
+        if self.pinned_leg == Some(leg) {
             self.pinned_leg = None;
             self.unpin();
         }
@@ -1410,7 +1418,11 @@ fn release_identity_claims<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultNam
 /// registered, or none is, the entry has already moved past the leg that
 /// unwound: what holds the entry then is that other leg or the work it handed
 /// on, and taking anything here would take it out from under work that is
-/// running. Nothing is given back and nothing is published.
+/// running. Nothing is published and nothing is reclaimed — **except the pin**,
+/// which is given back on both routes because it is named by the leg rather
+/// than by the registration: [`EntryState::unpin_leg`] gives a pin back only
+/// where the record names this very leg, kind and epoch both, so a pin another
+/// leg is standing on is untouched however the registration moved.
 ///
 /// That the registration is exclusive is a property of the call graph rather
 /// than of the registration itself. [`Claim::begin_job_leg`] and
@@ -1419,14 +1431,23 @@ fn release_identity_claims<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultNam
 /// leg is that every production opener supersedes first — a producer schedules
 /// against an unheld gate, and the moves that revoke a claim raise the epoch
 /// under the same lock. The one interleaving that reaches a takeover is a job
-/// dispatched at the epoch a poll is standing at, and the guard reads that
-/// exactly as it reads any other moved-on entry: it reclaims nothing, and what
-/// the poll left stands until the leg that took its registration ends.
+/// and a poll standing at one epoch, and it runs in both directions: a job
+/// dispatched at the epoch a poll holds takes the registration over, and a poll
+/// taking the parked coverage in the window a job leg opens by giving the gate
+/// back before it ends takes it over the other way. The guard reads either as
+/// it reads any other moved-on entry: the coverage, the claim and the identity
+/// stand until the leg that holds the registration ends. The pin does not,
+/// because the leg that unwound is the only lock that would ever give its own
+/// pin back — a pin left standing there would be left standing forever, and
+/// [`EntryState::pinned`] is read by [`EntryState::held_by_anything`],
+/// [`schedule_due_detach`], [`restore_lost_claim`] and [`reap_idle_shared`], so
+/// a stuck pin refuses every later teardown and keeps the entry in the serving
+/// set for good.
 ///
 /// **The pin the entry names for this leg is the one it gets back.** A pinning
 /// leg records itself at [`EntryState::pinned_leg`] under the lock that hands
 /// it the coverage and clears it under the lock that ends it, so a record still
-/// naming this epoch is a pin no lock of this leg's will ever give back. A
+/// naming this leg is a pin no lock of this leg's will ever give back. A
 /// custody record would say something wider and wrong: the attach and
 /// [`Job::Detach`] pin nothing, every leg past its epilogue is still recorded
 /// as holding what it is handing to [`EntryOps::detach`], and a give-back at
@@ -1477,9 +1498,15 @@ fn reclaim_unwound_leg<O: EntryOps>(
     let attachment = {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         if state.claim.leg() != Some(leg) {
+            // The pin is the one thing a moved-on entry does not answer for.
+            // The record names the leg, so this gives back a pin only where it
+            // is this leg's own: a pin another leg took — at a later epoch, or
+            // at this one under the other kind — stands untouched, and a pin
+            // this leg took is one no later lock would ever reach.
+            state.unpin_leg(leg);
             return;
         }
-        state.unpin_leg(epoch);
+        state.unpin_leg(leg);
         // Every leg carrying an earlier epoch answers for itself alone from
         // here, so the gate the release below puts back is put back over an
         // entry nothing else can write a verdict into.
@@ -1507,6 +1534,42 @@ fn reclaim_unwound_leg<O: EntryOps>(
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     if state.trust == TrustState::Unattached && state.parked().is_none() {
         state.trust = TrustState::untrusted(UntrustedReason::leg_unwound(detail));
+    }
+}
+
+/// What is running against an entry at the instant it was read.
+///
+/// Each field is one of the holds [`EntryState::held_by_anything`] answers for
+/// that says a leg is in flight. Three of its limbs are not fields here: coverage
+/// in the entry's own hand and the demand leases a client holds over it, which an
+/// at-rest entry carries anyway, and coverage out with a leg, which every taker
+/// moves under the same hold of the gate that registers the leg or opens the
+/// release, so it is never out while the five fields all read false.
+#[cfg(feature = "induced-failure")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WorkInFlight {
+    /// A claim stands on the entry's scheduling gate.
+    pub claim_held: bool,
+    /// A leg is registered against the entry.
+    pub leg_registered: bool,
+    /// A job is waiting in the entry's queue slot for a worker.
+    pub job_queued: bool,
+    /// A release is on its way to [`EntryOps::detach`].
+    pub detach_in_flight: bool,
+    /// Work running outside the entry's lock is coming back to a lock of its
+    /// own, a read included.
+    pub pinned: bool,
+}
+
+#[cfg(feature = "induced-failure")]
+impl WorkInFlight {
+    /// Whether nothing at all is running against the entry.
+    pub fn is_quiet(&self) -> bool {
+        !self.claim_held
+            && !self.leg_registered
+            && !self.job_queued
+            && !self.detach_in_flight
+            && !self.pinned
     }
 }
 
@@ -2317,6 +2380,41 @@ impl<O: EntryOps> Host<O> {
         self.shared.entries.classifications()
     }
 
+    /// What the entry `name` still has running against it, and nothing where the
+    /// host serves no such name.
+    ///
+    /// Every hold that says a leg is between the lock that started it and the
+    /// lock that ends it is named here, and no hold that merely says the entry
+    /// is being served: coverage the entry holds in its own hand and the demand
+    /// leases standing over it are what an attached, at-rest entry looks like,
+    /// so neither is in flight, and coverage out with a leg is taken under the
+    /// same lock that registers the leg or opens the release, so one of the five
+    /// holds below is always up while it is out. What is in flight is the claim on the gate, the
+    /// leg registration, a job waiting in the queue slot, a release, and a pin —
+    /// and [`WorkInFlight::is_quiet`] is all five standing down.
+    ///
+    /// A reading is of one instant. An entry a watcher polls is briefly held on
+    /// every pass, so a caller that wants "the host went quiet" reads this under
+    /// a bounded wait rather than once.
+    ///
+    /// **Behind `induced-failure`.** A client asks [`Host::state`] what an entry
+    /// is; what is running against it is internal bookkeeping, opened here for
+    /// the suites that have to know the host stopped working before they measure
+    /// it at rest.
+    #[cfg(feature = "induced-failure")]
+    pub fn work_in_flight(&self, name: &VaultName) -> Option<WorkInFlight> {
+        self.shared.entries.get(name).map(|entry| {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            WorkInFlight {
+                claim_held: state.claim.is_held(),
+                leg_registered: state.claim.leg().is_some(),
+                job_queued: state.claim.slot_taken(),
+                detach_in_flight: state.detach_in_flight,
+                pinned: state.pinned(),
+            }
+        })
+    }
+
     /// How many live demand leases are waiting on the recovery `name`'s entry
     /// owes, and nothing where the host serves no such name.
     ///
@@ -2574,7 +2672,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             let Some(attachment) = state.coverage.take(epoch) else {
                 continue;
             };
-            state.pin_for_leg(epoch);
+            state.pin_for_leg(Leg::Poll(epoch));
             state.claim.begin_poll(epoch);
             (attachment, epoch)
         };
@@ -2617,7 +2715,7 @@ fn poll_claimed_entry<O: EntryOps>(
     let mut reclassify = false;
     {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
-        state.unpin_leg(epoch);
+        state.unpin_leg(Leg::Poll(epoch));
         if !state.claim.stands_at(epoch) {
             stale = Some(attachment);
         } else {
@@ -3224,7 +3322,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     }
                     return None;
                 };
-                state.pin_for_leg(epoch);
+                state.pin_for_leg(Leg::Job(epoch));
                 attachment
             };
             drop(attach_claims);
@@ -3252,7 +3350,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         .gate
                         .lock()
                         .expect("entry gate poisoned")
-                        .unpin_leg(epoch);
+                        .unpin_leg(Leg::Job(epoch));
                     drop(attach_claims);
                     refuse_identity_error(shared, &name, refusal.to_string());
                     return Some(attachment);
@@ -3270,14 +3368,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     .gate
                     .lock()
                     .expect("entry gate poisoned")
-                    .unpin_leg(epoch);
+                    .unpin_leg(Leg::Job(epoch));
                 drop(attach_claims);
                 refuse_conflict(shared, &conflict);
                 return Some(attachment);
             }
             if post_reading.identity != claim_identity {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
-                state.unpin_leg(epoch);
+                state.unpin_leg(Leg::Job(epoch));
                 if !state.claim.stands_at(epoch) {
                     drop(state);
                     drop(attach_claims);
@@ -3293,7 +3391,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 return Some(attachment);
             }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.unpin_leg(epoch);
+            state.unpin_leg(Leg::Job(epoch));
             if !state.claim.stands_at(epoch) {
                 // The entry moved on while this leg ran, so the coverage it
                 // took goes back where the leg ends: the release the entry
@@ -3416,7 +3514,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     restore_lost_claim(&mut state, Job::Rebuild(name.clone(), epoch));
                     return None;
                 };
-                state.pin_for_leg(epoch);
+                state.pin_for_leg(Leg::Job(epoch));
                 attachment
             };
             let mut observed = Batch::default();
@@ -3438,7 +3536,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(_) => Err(None),
             };
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.unpin_leg(epoch);
+            state.unpin_leg(Leg::Job(epoch));
             if !state.claim.stands_at(epoch) {
                 // The entry moved on while this leg ran. Coverage it still has
                 // goes back where the leg ends; coverage the rebuild consumed
@@ -3512,7 +3610,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     restore_lost_claim(&mut state, Job::Reconcile(name.clone(), epoch));
                     return None;
                 };
-                state.pin_for_leg(epoch);
+                state.pin_for_leg(Leg::Job(epoch));
                 let work = ReconcileWork {
                     batch: std::mem::take(&mut state.pending),
                 };
@@ -3545,7 +3643,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             // past, so this is the only place its clocks are read.
             let maintenance_due = result.is_ok() && shared.ops.maintenance_due(&name, &attachment);
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.unpin_leg(epoch);
+            state.unpin_leg(Leg::Job(epoch));
             if !state.claim.stands_at(epoch) {
                 // The entry moved on while this leg ran, so the coverage it
                 // took goes back where the leg ends: the release the entry
@@ -3707,7 +3805,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     restore_lost_claim(&mut state, Job::Maintenance(name.clone(), epoch));
                     return None;
                 };
-                state.pin_for_leg(epoch);
+                state.pin_for_leg(Leg::Job(epoch));
                 attachment
             };
             let mut result = shared.ops.maintain(&name, &mut attachment);
@@ -3723,7 +3821,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 }
             }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.unpin_leg(epoch);
+            state.unpin_leg(Leg::Job(epoch));
             if !state.claim.stands_at(epoch) {
                 // The entry moved on while this leg ran, so the coverage it
                 // took goes back where the leg ends: the release the entry
@@ -3890,7 +3988,7 @@ fn run_reload_job<O: EntryOps>(
             let _ = reply.send(Err(ReloadRefusal::Unavailable(state.trust.clone())));
             return None;
         };
-        state.pin_for_leg(epoch);
+        state.pin_for_leg(Leg::Job(epoch));
         let work = match step {
             ReloadStep::Activate => Batch::default(),
             ReloadStep::Reconcile => std::mem::take(&mut state.pending),
@@ -3937,7 +4035,7 @@ fn run_reload_job<O: EntryOps>(
     }
 
     let mut state = entry.gate.lock().expect("entry gate poisoned");
-    state.unpin_leg(epoch);
+    state.unpin_leg(Leg::Job(epoch));
     if !state.claim.stands_at(epoch) {
         drop(state);
         let _ = reply.send(Err(ReloadRefusal::Unavailable(TrustState::Unattached)));
@@ -6788,7 +6886,7 @@ mod tests {
     }
 
     /// An attach leg takes the entry's coverage never — it pins nothing of its
-    /// own — so where it unwinds, [`EntryState::unpin_leg`]'s epoch check is
+    /// own — so where it unwinds, [`EntryState::unpin_leg`]'s owner check is
     /// what keeps the reclaim from touching a pin standing for other reasons.
     /// This binds that with a read: the read's pin survives an idle release
     /// first, stands untouched while a fresh demand's attach leg panics, and
@@ -8833,6 +8931,166 @@ mod tests {
         assert_eq!(state.trust, TrustState::Unattached);
         assert!(!state.detach_in_flight, "the release window is still open");
         assert!(!state.coverage.out_with_leg());
+    }
+
+    /// **A poll that unwound after a job took its registration over still gives
+    /// its pin back.**
+    ///
+    /// A job and a poll standing at one epoch is the one interleaving
+    /// [`reclaim_unwound_leg`] names as reachable. In this direction the job is
+    /// dispatched at the epoch a poll is standing at and writes its own leg over
+    /// the poll's registration while the poll holds the coverage and the pin.
+    /// The guard there reclaims nothing — what the poll left is the taking leg's
+    /// to answer for — but the pin is not among those things: the unwound poll
+    /// is the only lock that would ever give its own pin back, so a pin left
+    /// standing here is left standing forever.
+    ///
+    /// What a stuck pin costs is the entry, not a reading:
+    /// [`EntryState::pinned`] is read by [`EntryState::held_by_anything`],
+    /// [`schedule_due_detach`], [`restore_lost_claim`] and
+    /// [`reap_idle_shared`], so an entry carrying one refuses every later
+    /// teardown and never leaves the serving set.
+    #[test]
+    fn a_poll_whose_registration_was_taken_over_gives_its_pin_back_when_it_unwinds() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let shared = Arc::clone(&host.shared);
+        let entry = shared.entries.get(&name).expect("the vault is registered");
+
+        // The poll, holding the entry's coverage and pinned for it.
+        let holder = {
+            let mut state = entry.gate.lock().unwrap();
+            let holder = state.claim.epoch();
+            assert!(state.coverage.take(holder).is_some(), "the coverage is out");
+            state.pin_for_leg(Leg::Poll(holder));
+            state.claim.begin_poll(holder);
+            holder
+        };
+
+        // The job dispatched at that same epoch, writing its leg over the
+        // poll's registration. It takes no pin: the poll's still stands.
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state.claim.begin_job_leg(holder);
+        }
+
+        reclaim_unwound_leg(
+            &shared,
+            &name,
+            Leg::Poll(holder),
+            "the poll panicked".to_string(),
+        );
+
+        // Read out from under the lock: an assertion that unwound while holding
+        // the entry's gate would poison it, and the host's own teardown is what
+        // would then fail rather than the claim under test.
+        let (registered, pinned_leg, pinned) = {
+            let state = entry.gate.lock().unwrap();
+            (state.claim.leg(), state.pinned_leg, state.pinned())
+        };
+        assert!(
+            registered == Some(Leg::Job(holder)),
+            "the guard reclaimed the entry out from under the leg that took it over"
+        );
+        assert!(
+            pinned_leg.is_none(),
+            "the unwound poll's pin still names it, and no lock of that poll's will ever run again"
+        );
+        assert!(
+            !pinned,
+            "the entry stands pinned for work that unwound, so nothing will reap it or serve it \
+             again"
+        );
+    }
+
+    /// **A job leg that unwinds after a poll took its registration over leaves
+    /// the poll's pin standing, and the job it was carrying is restored.**
+    ///
+    /// This is the other direction of the one reachable takeover. A job leg
+    /// gives the entry's gate back at its own epoch while it is still the
+    /// registered leg and the coverage is parked there; `poll_watchers` gates
+    /// only on an unheld gate, so in that window a poll takes the parked
+    /// coverage, pins for itself and writes `Leg::Poll` over the job's
+    /// registration. The job's off-lock tail then unwinds into
+    /// [`reclaim_unwound_leg`], which finds the entry moved on.
+    ///
+    /// The pin standing there is the running poll's, not the unwound job's, so
+    /// the guard must leave it: [`restore_lost_claim`] reads
+    /// [`EntryState::pinned`] to decide whether a claim will hand the coverage
+    /// back, and a job reaching it with the poll's pin given away is dropped
+    /// rather than put back on its marker.
+    #[test]
+    fn a_job_that_unwinds_after_a_poll_took_its_registration_over_leaves_the_polls_pin() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let shared = Arc::clone(&host.shared);
+        let entry = shared.entries.get(&name).expect("the vault is registered");
+
+        // The job leg registered at this epoch, which has already given the
+        // gate back and parked the coverage: its pin is gone with that lock.
+        let holder = {
+            let mut state = entry.gate.lock().unwrap();
+            let holder = state.claim.epoch();
+            state.claim.begin_job_leg(holder);
+            state.claim.release();
+            holder
+        };
+
+        // The poll taking the parked coverage through that open gate. It pins
+        // for itself and writes its leg over the job's registration.
+        {
+            let mut state = entry.gate.lock().unwrap();
+            let attachment = state.coverage.take(holder).expect("the coverage is parked");
+            state.pin_for_leg(Leg::Poll(holder));
+            state.claim.begin_poll(holder);
+            state.coverage.park_by(holder, attachment);
+        }
+
+        reclaim_unwound_leg(
+            &shared,
+            &name,
+            Leg::Job(holder),
+            "the job panicked".to_string(),
+        );
+
+        // Read out from under the lock: an assertion that unwound while holding
+        // the entry's gate would poison it, and the host's own teardown is what
+        // would then fail rather than the claim under test.
+        let (registered, pinned_leg, pinned) = {
+            let state = entry.gate.lock().unwrap();
+            (state.claim.leg(), state.pinned_leg, state.pinned())
+        };
+        assert!(
+            registered == Some(Leg::Poll(holder)),
+            "the guard reclaimed the entry out from under the poll that took it over"
+        );
+        assert!(
+            pinned_leg == Some(Leg::Poll(holder)),
+            "the unwinding job gave back the running poll's pin"
+        );
+        assert!(
+            pinned,
+            "the entry no longer stands pinned for the live poll"
+        );
+
+        // What the stolen pin would cost: a job reaching the entry at this
+        // epoch finds the coverage out and asks whether any claim will give it
+        // back. With the poll's pin standing it is restored to its marker.
+        {
+            let mut state = entry.gate.lock().unwrap();
+            let job = Job::Reconcile(name.clone(), holder);
+            assert!(state.coverage.take(holder).is_some(), "the coverage is out");
+            restore_lost_claim(&mut state, job);
+            assert!(
+                state.claim.marker().map(Job::epoch) == Some(holder),
+                "the job was dropped rather than restored to its marker"
+            );
+            assert!(state.claim.is_held(), "the marker did not hold the gate");
+        }
     }
 
     /// A job the joins wait for may have given its attachment back to the entry

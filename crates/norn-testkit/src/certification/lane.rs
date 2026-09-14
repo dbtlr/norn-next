@@ -413,9 +413,10 @@ mod tests {
             invocations.contains(&Invocation {
                 package: "norn-host".to_string(),
                 target: Target::Integration("churn".to_string()),
-                feature: None,
+                feature: Some("induced-failure".to_string()),
             }),
-            "the churn suite is a required target: {invocations:?}"
+            "the churn suite is a required target, behind the feature its cost bars read the \
+             account through: {invocations:?}"
         );
         assert!(
             invocations.contains(&Invocation {

@@ -949,10 +949,11 @@
       "sources": ["NRN-266", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "the refusals this substrate makes are already held in both directions: crates/norn-host/tests/lockdown.rs injects a full disk and a revoked permission, asserts the heal refuses with every committed row standing and the rebuild rung never reached, and asserts the recovery after it admits the withheld work again — so neither the direction that lets something through nor the direction that refuses too much is tested alone. What has no subject is a barrier in this property's sense, a guard deciding what is admitted to a request. The only thing this workspace spells barrier is the watcher's synchronization boundary in crates/norn-fs/src/watch/faults.rs, which is a deadline rather than an admission decision, and the guards the property is stated over arrive with the request surface: crates/norn-serve is not in the workspace.",
+        "reason": "the refusals this substrate makes are already held in both directions: crates/norn-host/tests/lockdown.rs injects a full disk and a revoked permission, asserts the heal refuses with every committed row standing and the rebuild rung never reached, and asserts the recovery after it admits the withheld work again — so neither the direction that lets something through nor the direction that refuses too much is tested alone. What has no subject is a barrier in this property's sense, a guard deciding what is admitted to a request. This workspace spells barrier in two other senses and neither is that one: the watcher's synchronization boundary in crates/norn-fs/src/watch/faults.rs is a deadline, and the two durability barriers in crates/norn-fs/src/write.rs are the fsyncs that order a replacement's bytes against its name. A deadline and an fsync have no admit-or-refuse direction to be tested in, so neither can fail closed in the sense this property means, and the guards the property is stated over arrive with the request surface: crates/norn-serve is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-host/tests/lockdown.rs" },
           { "present": "crates/norn-fs/src/watch/faults.rs" },
+          { "present": "crates/norn-fs/src/write.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }

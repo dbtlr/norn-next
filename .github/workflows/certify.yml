@@ -177,17 +177,20 @@ jobs:
   #
   # The timeout is the outer runaway guard, and it is set so the inner one is
   # what fires. The host load's child carries its own deadline — the declared
-  # hour plus ten minutes of headroom for its bounded attach, recovery, and
-  # reconcile waits, so 70 minutes at worst — and the samples this job judges
+  # hour, plus the half-minute it then sits idle for its post-quiescence
+  # descriptor reading, plus ten minutes of headroom for its bounded attach,
+  # recovery, and reconcile waits, so 71 minutes at worst — and the samples this
+  # job judges
   # are read off that child's output only once it has ended. A job killed while
   # the child is still running loses every sample of the run, so the timeout
   # leaves the worst-case child room to reach its own deadline and still
   # report.
   #
   # **120 minutes covers everything the job holds, not the load alone**:
-  # checkout, a cold debug build, the five measurement steps, that worst-case 70
-  # minutes of load, and then the ten certification targets — two of which
-  # rebuild `norn-host` and its dependents behind `induced-failure` and back —
+  # checkout, a cold debug build, the five measurement steps, that worst-case 71
+  # minutes of load, and then the ten certification targets — three of which
+  # build `norn-host` and its dependents behind `induced-failure`, and which run
+  # consecutively so the lane pays that rebuild once rather than per step —
   # plus the two runs of the `norn` certification binary that collect the
   # outcomes and write the record. The measured shape is a wide margin: the four
   # nightlies whose readings ground the bars ran 61 minutes end to end, and the
@@ -358,10 +361,15 @@ jobs:
       # classifies as a suite change rather than as the product failure it was.
       #
       # The targets are the ones the inventory's carriers compile into, and a
-      # feature beside a target is the one that target's cases sit behind:
-      # without it the file compiles to zero tests. That pairing is held to the
-      # inventory by `norn --test certification`, so a case added to a target no
-      # lane runs fails a pull request rather than the fifth nightly.
+      # feature beside a target is the one that target's cases declare. For the
+      # armed suites that is what makes them exist at all: without it the file
+      # compiles to zero tests. For `churn` it is what makes them mean what
+      # their inventory text says — the cost bars, the prune bar and the
+      # seeded-work control read an account that is behind the feature, and
+      # without it those three assertions compile to empty bodies while every
+      # test still runs and passes. That pairing is held to the inventory by
+      # `norn --test certification`, so a case added to a target no lane runs
+      # fails a pull request rather than the fifth nightly.
       #
       # The library target is one of them: five of the trust-transition cases
       # and the trust a damaged entry publishes are unit tests of the host's
@@ -380,15 +388,15 @@ jobs:
       - name: Host lifecycle certification cases
         if: ${{ !cancelled() }}
         run: .github/scripts/certification-suite.sh norn-host lib
-      - name: Churn certification cases
-        if: ${{ !cancelled() }}
-        run: .github/scripts/certification-suite.sh norn-host churn
       - name: Coverage certification cases
         if: ${{ !cancelled() }}
         run: .github/scripts/certification-suite.sh norn-host coverage
       - name: Equivalence certification cases
         if: ${{ !cancelled() }}
         run: .github/scripts/certification-suite.sh norn-host equivalence
+      - name: Churn certification cases
+        if: ${{ !cancelled() }}
+        run: .github/scripts/certification-suite.sh norn-host churn induced-failure
       - name: Host induced-failure certification cases
         if: ${{ !cancelled() }}
         run: .github/scripts/certification-suite.sh norn-host lockdown induced-failure
@@ -682,15 +690,15 @@ jobs:
       - name: Host lifecycle certification cases
         if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-host lib
-      - name: Churn certification cases
-        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
-        run: .github/scripts/certification-suite.sh norn-host churn
       - name: Coverage certification cases
         if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-host coverage
       - name: Equivalence certification cases
         if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-host equivalence
+      - name: Churn certification cases
+        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
+        run: .github/scripts/certification-suite.sh norn-host churn induced-failure
       - name: Host induced-failure certification cases
         if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-host lockdown induced-failure

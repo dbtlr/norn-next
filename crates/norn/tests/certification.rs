@@ -197,6 +197,7 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
         "crates/norn-store/tests/environment.rs",
         "crates/norn-store/tests/store/pillars.rs",
         "crates/norn-store/tests/store/lifecycle.rs",
+        "crates/norn-store/tests/store/equivalence.rs",
         // The soak workload whose comparisons apply the authored soak bars.
         "crates/norn-host/tests/host_soak.rs",
         // The recorded baselines a measurement step is judged against.

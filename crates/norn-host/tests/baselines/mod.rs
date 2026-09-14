@@ -178,6 +178,87 @@ pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 /// macOS certification lane runs no load at all.
 pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 
+/// How many descriptors a host may still hold once its load has stopped, above
+/// the load's first sample — or `None` while no ceiling is authored.
+///
+/// The baseline is the first sample of the load loop, which the harness takes
+/// after tick 0 has churned and read, not a reading at the instant the
+/// attachment became ready. Anything tick 0 opened and later handed back is
+/// therefore inside the baseline and cancels out of the retention, which biases
+/// the term low. [`SOAK_FD_GROWTH_ALLOWANCE`] reads the same sample, so the two
+/// descriptor bars are stated over one baseline.
+///
+/// **The post-quiescence retention term of lockdown**, and the second of the
+/// two descriptor bars the exit contract names.
+/// [`SOAK_FD_GROWTH_ALLOWANCE`] beside this reads the count while the load is
+/// still working, so a descriptor the host legitimately holds *for* the work —
+/// a store file open for a changeset, a watch re-subscribing — sits inside
+/// both the first reading and the last and cancels out of the difference. What
+/// that bar cannot see is a descriptor the work acquired and the host never
+/// handed back, because under a continuous load the two are the same number.
+/// This is the reading that separates them: the load stops churning and stops
+/// reading, and the descriptors still open once the host has nothing left to do
+/// are the ones held for no work at all.
+///
+/// **The reading is taken when the host is observed quiet, never after a fixed
+/// sleep.** The harness waits on the host's own account of what is running
+/// against the entry — nothing claimed, no leg registered, no job queued, no
+/// release in flight, nothing pinned — and reads the descriptors the moment that
+/// holds. A fixed sleep states the wrong thing in both directions: a drain that
+/// outruns it on a loaded runner is counted as descriptors the host kept, which
+/// fails this bar and resets the five-run count over a machine that was merely
+/// busy, and a host that settles at once still pays the rest of the window. The
+/// quiescent window is therefore a **bound** on that wait, and a wait that
+/// reaches it is a typed failure naming what was still in flight rather than a
+/// reading taken mid-drain. How long the host took to go quiet is recorded in
+/// the run's summary beside the count, so a bar met by a host that settled in
+/// two seconds and one met by a host that took twenty-nine are not the same
+/// record.
+///
+/// **It is not an idle detach.** The entry stays attached and stays watched:
+/// the reap interval the soak harness configures is deliberately longer than
+/// any load it runs, so what this measures is a host at rest under coverage
+/// rather than a host taken down. A run whose count comes back to the first
+/// sample has handed back everything the hour acquired past it.
+///
+/// # Platform scope
+///
+/// **The Linux measurement lane**, the same one [`SOAK_FD_GROWTH_ALLOWANCE`]
+/// gates in: the hour-long load is the scheduled lane's on `ubuntu-latest`
+/// x86_64-glibc, and the macOS certification lane runs no load at all. The
+/// count itself is the process's own open-descriptor table, which is a
+/// different number on every runner image — so the bar is stated as a
+/// retention above this run's own first sample rather than as a count.
+///
+/// # Observations
+///
+/// **None yet: this bar is in its calibration window.** The instrument landed
+/// after the three `workflow_dispatch` calibration runs the bars above are
+/// authored from, so no run has taken the reading. `None` is what says so, and
+/// the registry entry naming this constant stamps every run under it
+/// non-qualifying, which keeps a calibration night from counting toward
+/// lockdown's five. The value is authored in a second, reviewed edit once a
+/// dispatched run has published the reading.
+///
+/// # Safety rationale
+///
+/// **Pending calibration.** The rationale is owed with the value: what the
+/// reading is expected to be is zero — a host at rest holding exactly what it
+/// held at the load's first sample — and what the headroom is for is a descriptor a
+/// run legitimately holds at the sampling instant, the same allowance
+/// [`SOAK_FD_GROWTH_ALLOWANCE`] states. Whether that allowance is the right one
+/// here is a question the first readings answer rather than one this comment
+/// can.
+///
+/// # Review trigger
+///
+/// A run past this ceiling, once it is authored, is a claim that the host now
+/// keeps descriptors past the work that needed them, and it is answered by
+/// reading what still holds them rather than by rerunning. Moving the value is
+/// a reviewed edit carrying that claim beside it; lowering it needs no new
+/// argument. Un-authoring it back to `None` reopens the calibration window.
+pub const SOAK_QUIESCENT_FD_RETENTION: Option<usize> = None;
+
 /// How much of the first quartile's mean resident set the last quartile's mean
 /// may reach, per mille.
 ///
