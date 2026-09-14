@@ -309,7 +309,8 @@ jobs:
       # certification steps below each carry `!cancelled()` and therefore run
       # whatever this one did, where a load placed after them would be skipped
       # outright by one flaking case and cost the night its slope, its
-      # descriptor delta and its peak.
+      # descriptor delta, its sampled peak and the high-water mark that covers
+      # the attach and the heal.
       #
       # **The feature is what makes the load's recovery deliberate.** The child
       # is armed at `norn-fs`'s watcher fault seam so that the load loses its

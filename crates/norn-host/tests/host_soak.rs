@@ -121,6 +121,22 @@
 //! failed by a large one. The peak keeps every sample and the slope drops the
 //! window: the two bars read the run they each describe.
 //!
+//! **The first attach and its heal are read by a third memory bar, and that one
+//! reads the whole run.** The kernel keeps a high-water mark of the process's
+//! resident set for the life of the process, so the child reads it once when
+//! its load ends and reports it. What the mark covers is everything the
+//! process did: the attach the load starts with and its walk over the ≥5k
+//! tree, which are ahead of the first sample; the deliberate recovery's
+//! re-attach, which the sampled peak holds only where a tick landed inside it;
+//! and every tick between them. So the mark is never below the sampled peak,
+//! and the pair is read together — a mark far above the peak is an attach or a
+//! re-attach, which is the cost this bar exists to see. The reading is `VmHWM`
+//! in `/proc/self/status`, beside the `VmRSS` the samples come from, so this
+//! term is the Linux measurement lane's — the lane that gates — and a macOS run
+//! reports no high-water line and is judged on the sampled terms alone.
+//! [`baselines::SOAK_HIGH_WATER_RSS_CEILING_BYTES`] carries its ceiling, spelt
+//! the same `Option` way and registered as its own named exit bar.
+//!
 //! Running this needs `/proc` or its BSD equivalent, so the case is present on
 //! Linux and macOS and absent elsewhere. The scheduled lane runs it on Linux.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
@@ -391,6 +407,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
     let samples = Sample::parse_all(&outcome.stdout_text());
     let recoveries = reported_recoveries(&outcome.stdout_text());
     let windows = reported_recovery_windows(&outcome.stdout_text());
+    let high_water = reported_high_water(&outcome.stdout_text());
     let attested = Attestation::read(&hits);
     // **The slope's series is the load at rest.** A recovery re-installs
     // coverage, and the walk that heals the ≥5k tree behind it is attach cost
@@ -450,6 +467,20 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
             (
                 "peak ceiling (MiB)",
                 match baselines::SOAK_PEAK_RSS_CEILING_BYTES {
+                    Some(ceiling) => baselines::mebibytes(ceiling),
+                    None => "unauthored".to_string(),
+                },
+            ),
+            (
+                "whole-run high-water resident set (MiB)",
+                match high_water {
+                    Some(high_water) => baselines::mebibytes(high_water),
+                    None => "unpublished on this platform".to_string(),
+                },
+            ),
+            (
+                "high-water ceiling (MiB)",
+                match baselines::SOAK_HIGH_WATER_RSS_CEILING_BYTES {
                     Some(ceiling) => baselines::mebibytes(ceiling),
                     None => "unauthored".to_string(),
                 },
@@ -546,6 +577,26 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
             samples.len()
         );
     }
+    if let Some(high_water) = high_water {
+        // One process, two instruments: the mark the kernel keeps for the life
+        // of the child cannot sit below a sample the child took of itself, so a
+        // reading that does is two processes' numbers or a misread field rather
+        // than a run to judge.
+        assert!(
+            baselines::fits(peak, high_water),
+            "the run's high-water mark reads {} MiB and the highest sample of the same process \
+             reads {} MiB, so the two are not readings of one process",
+            baselines::mebibytes(high_water),
+            baselines::mebibytes(peak)
+        );
+        if let Some(ceiling) = baselines::SOAK_HIGH_WATER_RSS_CEILING_BYTES {
+            assert!(
+                baselines::fits(high_water, ceiling),
+                "{}",
+                high_water_refusal(high_water, ceiling)
+            );
+        }
+    }
     assert!(
         baselines::fits(slope, baselines::SOAK_RSS_SLOPE_PER_MILLE),
         "the resident set rose by {}x across the load, past the {}x bar: the first quartile \
@@ -556,6 +607,88 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         baselines::mebibytes(tail),
         samples.len()
     );
+}
+
+/// **The high-water instrument reads the kernel's mark, and it bounds a reading
+/// of now.**
+///
+/// The hour-long case is the only place the mark is read under a load, so what
+/// a fast test can state is the relation every such reading holds: the mark is
+/// kept for the life of the process, so it is never below the resident set the
+/// same process reports at the same instant. A reading that fails this is the
+/// wrong field rather than a subject that grew.
+#[test]
+#[allow(clippy::assertions_on_constants)] // The constant is the platform, and the point is to fail on the one that publishes a mark.
+fn the_high_water_reading_is_never_below_the_current_resident_set() {
+    // The sample first and the mark second: each reading is its own read of
+    // `/proc/self/status`, and reading it allocates, so a mark taken before a
+    // sample legitimately sits a page below it. Every comparison of the two in
+    // this file reads the mark last, which is what the load does — the mark is
+    // read once the sampling loop has ended.
+    let current = current_rss_bytes();
+    assert!(
+        current > 0,
+        "this process reports no resident set at all, so neither reading means anything"
+    );
+    match high_water_rss_bytes() {
+        Some(high_water) => assert!(
+            baselines::fits(current, high_water),
+            "the high-water mark reads {} MiB and the current resident set {} MiB, so the mark is \
+             not the kernel's high-water mark for this process",
+            baselines::mebibytes(high_water),
+            baselines::mebibytes(current)
+        ),
+        None => assert!(
+            !cfg!(target_os = "linux"),
+            "Linux publishes the high-water mark in `/proc/self/status`, and it is the lane this \
+             bar gates on, so an absent reading there is the instrument failing"
+        ),
+    }
+}
+
+/// **The high-water bar refuses a reading past its ceiling, and its refusal
+/// names both values.**
+///
+/// The comparison is [`baselines::fits`], which `settle.rs`'s negative control
+/// already feeds a reading past a ceiling of each shape the bars are stated in.
+/// What is this bar's own is the sentence a reader gets, and a message naming
+/// one value twice reads as a bar that refused something else — so the reading
+/// here is a whole mebibyte over, and both rendered values are held.
+#[test]
+fn the_high_water_refusal_names_the_reading_and_the_ceiling() {
+    let ceiling = 40 * 1024 * 1024;
+    assert!(
+        baselines::fits(ceiling, ceiling),
+        "a reading at the ceiling fits under it"
+    );
+    assert!(
+        !baselines::fits(ceiling + 1, ceiling),
+        "a reading one byte past the ceiling does not fit under it"
+    );
+
+    let refusal = high_water_refusal(41 * 1024 * 1024, ceiling);
+    assert!(
+        refusal.contains("a high-water 41.00 MiB"),
+        "the refusal does not name the reading it refused: {refusal}"
+    );
+    assert!(
+        refusal.contains("past the 40.00 MiB ceiling"),
+        "the refusal does not name the ceiling it refused against: {refusal}"
+    );
+}
+
+/// What a reader gets where the high-water mark is past an authored ceiling.
+///
+/// The sentence is a function rather than an inline format so the case's bar
+/// and the test above render the same one.
+fn high_water_refusal(reading: u64, ceiling: u64) -> String {
+    format!(
+        "the run's resident set reached a high-water {} MiB, past the {} MiB ceiling, over the \
+         first attach, the heal, the deliberate recovery's re-attach and the whole load at the \
+         ≥5k profile",
+        baselines::mebibytes(reading),
+        baselines::mebibytes(ceiling)
+    )
 }
 
 /// One reading the child took of itself.
@@ -713,6 +846,32 @@ fn at_rest(samples: &[Sample]) -> Vec<Sample> {
         .collect()
 }
 
+/// The kernel's high-water mark for the child, as the child reported it.
+///
+/// `None` is a platform that publishes no such mark, and it is the only reason
+/// the line is allowed to be absent: the lane that gates is Linux, which
+/// publishes it, so an absent line there is a load whose reading was never
+/// taken rather than a platform without one.
+#[allow(clippy::assertions_on_constants)] // The constant is the platform, and the point is to fail a Linux run that reported no mark.
+fn reported_high_water(report: &str) -> Option<u64> {
+    let Some(line) = report
+        .lines()
+        .find(|line| line.starts_with(HIGH_WATER_LINE_PREFIX))
+    else {
+        assert!(
+            !cfg!(target_os = "linux"),
+            "the load printed no `{HIGH_WATER_LINE_PREFIX}` line, and Linux publishes the \
+             high-water mark this bar reads"
+        );
+        return None;
+    };
+    Some(
+        field(line, "rss_bytes=")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("`{line}` does not carry a high-water resident set")),
+    )
+}
+
 /// The highest resident set the series holds.
 ///
 /// **The peak term of the memory invariant at this profile.** The slope reads
@@ -723,16 +882,17 @@ fn at_rest(samples: &[Sample]) -> Vec<Sample> {
 /// One thing it is not: the samples are of the current resident set on a
 /// one-second cadence, so this is the highest sampled value and not the
 /// kernel's high-water mark — an allocation that lands and is released between
-/// two ticks is not in it.
+/// two ticks is not in it. [`reported_high_water`] is that mark, and it is read
+/// beside this one.
 ///
 /// **The first attach is outside the series and the re-attach is inside it.**
 /// The series begins once the attachment reads ready, so the cost of the attach
-/// the load starts with is before the first sample. The deliberate recovery's
-/// re-attach is not: it walks and content-hash heals the same ≥5k tree from
-/// inside the run, and every sample it spans is in this maximum. So what the
-/// peak is the height of is the load *and* one re-attach over the profile —
-/// which is the whole series, by the same rule as before, now that the series
-/// holds one.
+/// the load starts with is before the first sample; the mark beside this one
+/// carries it. The deliberate recovery's re-attach is not outside: it walks and
+/// content-hash heals the same ≥5k tree from inside the run, and every sample
+/// it spans is in this maximum. So what the peak is the height of is the load
+/// *and* one re-attach over the profile — which is the whole series, by the
+/// same rule as before, now that the series holds one.
 fn peak_resident_set(samples: &[Sample]) -> u64 {
     samples
         .iter()
@@ -809,6 +969,13 @@ const RECOVERY_LINE_PREFIX: &str = "load ";
 /// What the child prints for each recovery that came back, and what the parent
 /// reads the window's own readings off.
 const RECOVERY_WINDOW_PREFIX: &str = "recovery ";
+
+/// What the child prints once its loop ends where the kernel publishes a
+/// high-water mark, and what the parent reads that mark off.
+///
+/// A run on a platform that publishes none prints no such line, which is why
+/// the parent's reading is an `Option` rather than a required field.
+const HIGH_WATER_LINE_PREFIX: &str = "high water ";
 
 /// The harness: attach the tree at `root`, work it until the deadline, and
 /// report a sample of this process on every tick.
@@ -907,6 +1074,12 @@ fn run_load(root: &Path) {
             assert_the_churn_reached_the_store(&mut store, &written);
             drop(lease);
             println!("{RECOVERY_LINE_PREFIX}ticks={tick} recoveries={recoveries}");
+            // Read after the load rather than sampled during it: the mark is
+            // the kernel's own and never falls, so one read at the end is the
+            // whole run's — the attach and the heal included.
+            if let Some(high_water) = high_water_rss_bytes() {
+                println!("{HIGH_WATER_LINE_PREFIX}rss_bytes={high_water}");
+            }
             return;
         }
         // Semantic: the interval is the sampling cadence. What the run
@@ -1343,17 +1516,7 @@ fn churn(vault: &Path, tick: u64) -> Written {
 fn current_rss_bytes() -> u64 {
     #[cfg(target_os = "linux")]
     {
-        let status = std::fs::read_to_string("/proc/self/status").expect("this process's status");
-        let line = status
-            .lines()
-            .find(|line| line.starts_with("VmRSS:"))
-            .expect("a resident-set line in this process's status");
-        let kibibytes: u64 = line
-            .split_whitespace()
-            .nth(1)
-            .and_then(|value| value.parse().ok())
-            .unwrap_or_else(|| panic!("`{line}` does not carry a resident set"));
-        kibibytes * 1024
+        status_bytes("VmRSS:")
     }
     #[cfg(target_os = "macos")]
     {
@@ -1369,4 +1532,44 @@ fn current_rss_bytes() -> u64 {
             .unwrap_or_else(|_| panic!("`{text}` is not a resident set in kibibytes"));
         kibibytes * 1024
     }
+}
+
+/// This process's high-water resident set, in bytes, or `None` where the
+/// platform publishes no such mark.
+///
+/// Linux keeps it in `/proc/self/status` as `VmHWM`, beside the `VmRSS`
+/// [`current_rss_bytes`] reads, and the kernel holds it for the life of the
+/// process — so one read at the end of a run answers for the whole run, the
+/// attach and the heal included, which is what no series of samples can do. The
+/// macOS accounting this suite uses reports the current resident set alone, so
+/// a run there has no such reading and this term's ceiling is the Linux lane's.
+fn high_water_rss_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(status_bytes("VmHWM:"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// The value of the `/proc/self/status` line starting with `key`, in bytes.
+///
+/// Every line this reads is published in kibibytes, and an absent one is a
+/// kernel that does not publish what the caller asked for rather than a reading
+/// of zero.
+#[cfg(target_os = "linux")]
+fn status_bytes(key: &str) -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").expect("this process's status");
+    let line = status
+        .lines()
+        .find(|line| line.starts_with(key))
+        .unwrap_or_else(|| panic!("no `{key}` line in this process's status"));
+    let kibibytes: u64 = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("`{line}` does not carry a size in kibibytes"));
+    kibibytes * 1024
 }

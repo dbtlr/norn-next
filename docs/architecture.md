@@ -41,23 +41,30 @@ The invariant is *measured*, not asserted:
 
 - Per-PR CI asserts peak memory at a realistic ~2k-document profile, alongside
   size-independence pairs expressed as counts rather than clocks.
-- The scheduled soak lane records two peak-memory readings each run, and they
+- The scheduled soak lane records three peak-memory readings each run, and they
   are separate gates with separate ceilings. One is what generating the ≥5k
-  profile's tree costs, and its ceiling is authored. The other is the host's
+  profile's tree costs, and its ceiling is authored. The second is the host's
   own: the highest resident set the load's process reaches while working that
   tree, sampled from the moment the attachment is ready, so it is the peak the
-  hour sustains and not the attach's. Its ceiling is authored off calibration
-  runs of the scheduled lane per [ADR
+  hour sustains and not the attach's. **The third covers the attach and the
+  heal**, which are ahead of that first sample and which the per-PR attach
+  ceiling bars only at 2k: the kernel's high-water mark for the whole run, read
+  once when the load ends, so it answers for the run from its first instruction
+  rather than for the ticks a sampler happened to take — the first attach, its
+  heal, and the deliberate recovery's re-attach alike. That third reading is
+  the Linux measurement lane's, which is the lane that gates, because the mark
+  is published there beside the resident set the samples come from. Each
+  ceiling is authored off calibration runs of the scheduled lane per [ADR
   0007](decisions/0007-authored-measurement-thresholds.md), and the
   qualification ledger refuses a qualifying verdict while any named exit bar
-  sits unauthored — so a recalibration window records readings without its
-  green runs counting toward lockdown's five. **A third reading is missing
-  rather than deferred**: the attach and heal at ≥5k are ahead of the first
-  sample, and the per-PR attach ceiling covers that phase only at 2k. A
-  baseline moves only by a reviewed edit, and the downward direction of that
-  movement is review-held rather than mechanized — nothing here fails a raised
-  baseline, so this is a place this section's own rule applies: a review-held
-  invariant rots quietly.
+  sits unauthored — so a lane running under an unauthored ceiling records its
+  readings without its green runs counting toward lockdown's five. The
+  high-water ceiling is in exactly that state: registered, unauthored, and
+  gathering the readings a reviewed edit will author it from. A baseline moves
+  only by a reviewed edit, and the downward direction of that movement is
+  review-held rather than mechanized — nothing here fails a raised baseline, so
+  this is a place this section's own rule applies: a review-held invariant rots
+  quietly.
 - The mechanized form is a flat-slope requirement, and it runs in the same
   lane: a host attaches the ≥5k profile's vault and works it under a nightly
   mixed load while sampling its own resident set, and the run compares the
