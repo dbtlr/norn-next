@@ -267,7 +267,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
     );
 
     assert!(
-        descriptor_growth <= baselines::SOAK_FD_GROWTH_ALLOWANCE,
+        baselines::fits(descriptor_growth, baselines::SOAK_FD_GROWTH_ALLOWANCE),
         "the load opened {descriptor_growth} descriptors it did not close, past an allowance of \
          {}: {} at the first sample and {} at the last",
         baselines::SOAK_FD_GROWTH_ALLOWANCE,
@@ -289,7 +289,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         );
     }
     assert!(
-        slope <= baselines::SOAK_RSS_SLOPE_PER_MILLE,
+        baselines::fits(slope, baselines::SOAK_RSS_SLOPE_PER_MILLE),
         "the resident set rose by {}x across the load, past the {}x bar: the first quartile \
          averaged {} MiB and the last {} MiB over {} samples",
         baselines::multiple(slope),

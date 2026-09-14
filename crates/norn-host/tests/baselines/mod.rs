@@ -34,11 +34,15 @@
 //! constants by a test in `settle.rs`) — so a calibration window never counts
 //! toward lockdown's five.
 //!
-//! **Every named measurement bar is in that registry, not only the `Option`s.**
-//! An always-authored value such as [`FD_BUDGET`] carries `armed: true` there
-//! and can never be otherwise; what the registry is for is the roll of what the
-//! exit contract measures, and a roll that listed only the bars mid-calibration
-//! would be a roll of the exceptions.
+//! **Every constant in this file is in that registry, and so is every constant
+//! in the other crates' baselines files.** A value here is a value a
+//! measurement suite asserts a reading against, which is what an exit bar is,
+//! and the registry's sweep refuses one it does not name — so a bar cannot
+//! escape the roll by being always-authored or by being declared somewhere the
+//! sweep does not read. An always-authored value such as [`FD_BUDGET`] carries
+//! `armed: true` and is held to it; what the registry is for is the roll of
+//! what the exit contract measures, and a roll that listed only the bars
+//! mid-calibration would be a roll of the exceptions.
 //!
 //! # Platform scope
 //!
@@ -262,38 +266,46 @@ pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
 /// How long a churn family's settle may take, or `None` while no ceiling is
 /// authored.
 ///
-/// **The clock term of rung 1, and the reading is the wall clock from a
-/// workload's final change to the attachment publishing `Ready` again.** The
-/// churn suite's own settle budgets are runaway bounds and say so — a settle
-/// that reaches one is stuck rather than slow — so until this is authored
-/// nothing in the workspace states how long convergence after an edit may
-/// take. `settle.rs` is the instrument: it runs each churn family the
-/// certification inventory carries, times the final change to `Ready` and to
-/// semantic equivalence with a build from zero, and records both readings every
-/// run. The comparison happens only where a ceiling is authored: `Some` bars
-/// the run, `None` records the readings and bars nothing, and the qualification
+/// **The clock term of rung 1. The reading is the wall clock from a workload's
+/// final change to the derived store holding what a build from zero over the
+/// same tree holds** — the full equivalence comparator, findings included,
+/// rather than a cheaper projection of it. The churn suite's own settle budgets
+/// are runaway bounds and say so — a settle that reaches one is stuck rather
+/// than slow — so until this is authored nothing in the workspace states how
+/// long convergence after an edit may take. `settle.rs` is the instrument: it
+/// runs every leg of every churn family the driver's roll carries, times each
+/// from its own final act, and records the reading as it lands. Beside each
+/// reading it records one boolean — whether the attachment was publishing
+/// `Ready` at the instant equivalence was reached — because the entry does not
+/// leave `Ready` under churn and a duration to it would be the cost of a
+/// `state()` call rather than a fact about the subject.
+///
+/// The comparison happens only where a ceiling is authored: `Some` bars the
+/// run, `None` records the readings and bars nothing, and the qualification
 /// ledger types every such run non-qualifying, so the readings accumulate
 /// without the runs counting toward lockdown's five.
 ///
-/// # The constant rules, and which of them this edit fills
+/// # The constant rules
 ///
-/// - **Profile.** Filled. The ceiling is stated over the `small` profile's 120
-///   generated documents, which is the vault the churn families are authored
-///   against — a settle over another scale is another subject, and the claim
-///   that maintenance costs the changed set rather than the vault is the work
-///   bars' in `churn.rs` rather than this one's. `NORN_SETTLE_PROFILE` is what
-///   a calibration dispatch names another profile through, and the lane names
-///   this one explicitly so the scale a reading was taken at is workflow text.
-/// - **Observations.** *Unauthored.* The calibration commit records the runs
-///   behind the value here — the lane, the dates, the run ids, and the
-///   per-family band each reading fell in — the way
-///   [`SOAK_PEAK_RSS_CEILING_BYTES`] records its sixteen.
-/// - **Safety rationale.** *Unauthored.* The calibration commit states the
-///   multiple the ceiling stands at over the widest observed family and why
-///   that multiple is the right one for a reading whose spread is a scheduler's
-///   rather than an allocator's: a settle is a clock, so a runner under load
-///   moves it much further than a page size moves a resident set, and a bar
-///   that flakes teaches people to rerun rather than to look.
+/// - **Profile.** Filled. The ceiling is stated over the `soak` profile — the
+///   ≥5k-document scale every other soak bar in the workspace is authored over
+///   — and the scheduled lane names it in the step's environment. The scale is
+///   load-bearing: the same instrument reads two to three times higher at ≥5k
+///   than at the 120-document `small` profile, so a ceiling calibrated at
+///   `small` would pass every scheduled run trivially and could not fail a
+///   settle that had regressed toward vault-proportional. A local run defaults
+///   to `small`, which is a developer's reading and gates nothing.
+/// - **Observations.** *Unauthored.* The value here is authored by a commit
+///   that records the runs behind it — the lane, the dates, the run ids, and
+///   the per-leg band each reading fell in — the way
+///   [`SOAK_PEAK_RSS_CEILING_BYTES`] records its sixteen. Those runs come off
+///   the scheduled platform at the scheduled duration, under ADR 0007.
+/// - **Safety rationale.** *Unauthored.* The same commit states the multiple
+///   the ceiling stands at over the widest observed leg and why that multiple
+///   is the right one for a reading whose spread is a scheduler's rather than
+///   an allocator's: a settle is a clock, so a runner under load moves it much
+///   further than a page size moves a resident set, and a bar that flakes
+///   teaches people to rerun rather than to look.
 /// - **Platform scope.** Filled. The Linux measurement lane, `ubuntu-latest`
 ///   x86_64-glibc, is where this gates. The macOS certification lane runs no
 ///   measurement step, so it neither takes this reading nor evaluates this bar.
@@ -338,13 +350,22 @@ pub const FD_BUDGET: usize = 12;
 
 /// Whether a reading fits under an authored ceiling.
 ///
-/// **The one comparison every measurement ceiling in this crate makes.** The
-/// attach and soak peak-resident-set bars, the descriptor budget and the settle
-/// ceiling all read it, so what "under the ceiling" means is one line rather
-/// than one per bar — and the negative control in `settle.rs` feeds it a
-/// reading past a ceiling of each shape and requires a refusal. A reading
-/// exactly at the ceiling fits: a bar states the most a subject may cost, and
-/// costing exactly that is not costing more.
+/// **The one comparison every measurement ceiling in this crate makes**, and
+/// all seven of them make it: the two attach bars, the three soak bars, the
+/// descriptor budget and the settle ceiling. What "under the ceiling" means is
+/// therefore one line rather than one per bar, and the negative control in
+/// `settle.rs` feeds that line a reading past a ceiling of each shape the bars
+/// are stated in — bytes, a duration, a count and a per-mille ratio — and
+/// requires a refusal. A bar that compared with a bare operator would be a bar
+/// the control says nothing about, so the coverage claim and the routing are
+/// one fact.
+///
+/// A reading exactly at the ceiling fits: a bar states the most a subject may
+/// cost, and costing exactly that is not costing more.
+///
+/// The two arguments share one type, so a duration is never compared against a
+/// count. What this adds over the operator is not arithmetic; it is being the
+/// seam a control can grab.
 pub fn fits<T: PartialOrd>(reading: T, ceiling: T) -> bool {
     reading <= ceiling
 }

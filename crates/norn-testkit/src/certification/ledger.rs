@@ -418,21 +418,50 @@ pub struct ExitBar {
 /// The refusal below only reaches the bars this list names, so a bar nobody
 /// registered would fail open — green runs under it would qualify. What holds
 /// the list exhaustive is a test that scans every crate's baselines file for
-/// public constants: every `Option`-typed one must have an entry here whose
-/// pointer names it, because an `Option` band *is* the authored-or-calibrating
-/// spelling and an unregistered one is the fail-open direction.
+/// public constants: **every one of them must have an entry here.** A constant
+/// in a baselines file is a value a measurement suite asserts a reading
+/// against, which is what an exit bar is; there is no third kind of number in
+/// those files, and a bar that lived outside the registry is a bar the
+/// classification cannot see.
 ///
-/// **A bar that is not `Option`-typed belongs here too, always armed.** The
-/// list is the roll of what the exit contract measures rather than the roll of
-/// what is mid-calibration, so an always-authored value such as the descriptor
-/// budget carries `armed: true` and is held to that by the same sweep: a
-/// non-`Option` constant has no unauthored state to be in, and an entry
-/// claiming otherwise would stamp every run non-qualifying over a bar that is
-/// in fact armed.
+/// **An `Option`-typed constant is the calibrating spelling**, and it may be
+/// registered either way: `Some` is armed and `None` is the calibration state
+/// the runs under it are stamped non-qualifying for. **Every other constant is
+/// registered `armed: true` and held to it**, because a value that is not an
+/// `Option` has no unauthored state to be in, and an entry claiming otherwise
+/// would stamp every run non-qualifying over a bar nothing is calibrating.
+///
+/// The `authored_at` pointer is what the sweep matches on, so a bar that moves
+/// to another file moves its entry with it or fails.
 pub const NAMED_EXIT_BARS: &[ExitBar] = &[
+    ExitBar {
+        name: "attach-peak-rss-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::ATTACH_PEAK_RSS_CEILING_BYTES",
+        armed: true,
+    },
+    ExitBar {
+        name: "attach-pair-peak-rss-ratio",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::ATTACH_PAIR_PEAK_RSS_PER_MILLE",
+        armed: true,
+    },
+    ExitBar {
+        name: "attach-fd-budget",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::FD_BUDGET",
+        armed: true,
+    },
     ExitBar {
         name: "soak-host-peak-rss-ceiling",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_PEAK_RSS_CEILING_BYTES",
+        armed: true,
+    },
+    ExitBar {
+        name: "soak-host-rss-slope-ratio",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_RSS_SLOPE_PER_MILLE",
+        armed: true,
+    },
+    ExitBar {
+        name: "soak-host-fd-growth-allowance",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_FD_GROWTH_ALLOWANCE",
         armed: true,
     },
     ExitBar {
@@ -441,8 +470,43 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: false,
     },
     ExitBar {
-        name: "attach-fd-budget",
-        authored_at: "crates/norn-host/tests/baselines/mod.rs::FD_BUDGET",
+        name: "generator-gate-peak-rss-ceiling",
+        authored_at: "crates/norn-fixtures/tests/baselines/mod.rs::GATE_PEAK_RSS_CEILING_BYTES",
+        armed: true,
+    },
+    ExitBar {
+        name: "generator-gate-pair-peak-rss-ratio",
+        authored_at: "crates/norn-fixtures/tests/baselines/mod.rs::GATE_PAIR_PEAK_RSS_PER_MILLE",
+        armed: true,
+    },
+    ExitBar {
+        name: "generator-soak-peak-rss-ceiling",
+        authored_at: "crates/norn-fixtures/tests/baselines/mod.rs::SOAK_PEAK_RSS_CEILING_BYTES",
+        armed: true,
+    },
+    ExitBar {
+        name: "generator-soak-to-gate-peak-rss-ratio",
+        authored_at: "crates/norn-fixtures/tests/baselines/mod.rs::SOAK_TO_GATE_PEAK_RSS_PER_MILLE",
+        armed: true,
+    },
+    ExitBar {
+        name: "generator-soak-wall-clock-ceiling",
+        authored_at: "crates/norn-fixtures/tests/baselines/mod.rs::SOAK_WALL_CLOCK_CEILING",
+        armed: true,
+    },
+    ExitBar {
+        name: "text-whole-against-split-ratio",
+        authored_at: "crates/norn-text/tests/baselines/mod.rs::WHOLE_AGAINST_SPLIT_PER_MILLE",
+        armed: true,
+    },
+    ExitBar {
+        name: "text-derive-whole-against-split-ratio",
+        authored_at: "crates/norn-text/tests/baselines/mod.rs::DERIVE_WHOLE_AGAINST_SPLIT_PER_MILLE",
+        armed: true,
+    },
+    ExitBar {
+        name: "text-bound-parse-ceiling",
+        authored_at: "crates/norn-text/tests/baselines/mod.rs::BOUND_PARSE_CEILING",
         armed: true,
     },
 ];
@@ -690,8 +754,8 @@ impl Record {
     }
 
     /// The same reading over an explicit bar registry, which is what lets a
-    /// test say what a sound record looks like under a build with every bar
-    /// armed while this build is mid-calibration on one of them.
+    /// test state what a sound record looks like under a build with every bar
+    /// armed, whatever this build has armed.
     fn problems_against(&self, workspace_root: &Path, bars: &[ExitBar]) -> Vec<String> {
         let mut problems = Vec::new();
         if self.candidate_sha.trim().is_empty() {
@@ -841,9 +905,22 @@ impl Record {
     /// would count a record whose digests, candidate or case lines had come
     /// apart from what it claims.
     pub fn qualifies(&self, workspace_root: &Path) -> bool {
+        self.qualifies_against(workspace_root, NAMED_EXIT_BARS)
+    }
+
+    /// The same verdict over an explicit bar registry, which is what lets a
+    /// test say that a sound record *counts* under a build with every bar
+    /// armed.
+    ///
+    /// [`Record::problems`] has such a seam and this one needs the same, or the
+    /// positive direction is unstatable while any bar is calibrating: every
+    /// assertion in the workspace would read `qualifies` as `false`, and a
+    /// condition added here — or a divergence between the two readings — would
+    /// land green.
+    fn qualifies_against(&self, workspace_root: &Path, bars: &[ExitBar]) -> bool {
         self.scheduled
             && self.classification == Classification::Qualifying
-            && self.problems(workspace_root).is_empty()
+            && self.problems_against(workspace_root, bars).is_empty()
     }
 }
 
@@ -1137,14 +1214,20 @@ mod tests {
             .collect()
     }
 
+    /// **A sound record counts, under a build with nothing calibrating.**
+    ///
+    /// Both directions of the verdict are here. The fail-closed one is the test
+    /// below; this is the fail-open one, and it is the direction a calibration
+    /// window would otherwise leave unstated — with a bar unarmed, every
+    /// `qualifies` reading in the workspace is `false`, so a condition added to
+    /// it would never be caught by a run that should have passed.
     #[test]
-    fn a_sound_qualifying_record_produces_no_problem() {
+    fn a_sound_qualifying_record_produces_no_problem_and_counts() {
         let root = workspace_root();
         let record = qualifying_at(&root);
-        assert_eq!(
-            record.problems_against(&root, &every_bar_armed()),
-            Vec::<String>::new()
-        );
+        let armed = every_bar_armed();
+        assert_eq!(record.problems_against(&root, &armed), Vec::<String>::new());
+        assert!(record.qualifies_against(&root, &armed));
     }
 
     /// **A build mid-calibration refuses every qualifying record, and for
@@ -1647,15 +1730,24 @@ mod tests {
         );
     }
 
-    /// **An `Option`-typed baseline is an exit bar, every one is registered,
-    /// and no registered pointer names nothing.** A band authored `None` that
-    /// nobody added to [`super::NAMED_EXIT_BARS`] would stamp nothing into any
-    /// record and its green runs would qualify — the fail-open direction — so
-    /// the registry is held exhaustive against the baselines files themselves,
-    /// and each entry's pointer is held to a constant that exists. The files
-    /// are found rather than listed — every crate's `tests/baselines/mod.rs` or
-    /// `tests/baselines.rs` — and the sweep reads public constants, which is
-    /// what a band asserted by more than one binary is.
+    /// **Every baseline constant is a registered exit bar, and no registered
+    /// pointer names nothing.**
+    ///
+    /// A constant in a baselines file is a value a measurement suite asserts a
+    /// reading against, which is what an exit bar is — so the roll is held to
+    /// the files rather than to what somebody remembered to add. An
+    /// unregistered bar is the fail-open direction twice over: a band authored
+    /// `None` that nobody registered stamps nothing into any record and its
+    /// green runs qualify, and an always-authored one that nobody registered
+    /// leaves the exit contract's own roll short of what it measures. The
+    /// second escape is the one a threshold declared in its own suite file used
+    /// to take, and it is closed by the rule that a bar lives in a baselines
+    /// file and every constant there is registered.
+    ///
+    /// The files are found rather than listed — every crate's
+    /// `tests/baselines/mod.rs` or `tests/baselines.rs` — and the sweep reads
+    /// public constants, which is what a band asserted by more than one binary
+    /// is.
     ///
     /// **A registered bar that is not `Option`-typed is held to `armed`.** Such
     /// a constant has no unauthored state to be in, so an entry calling it
@@ -1663,7 +1755,7 @@ mod tests {
     /// calibrating.
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: reads the checkout's own baselines files.
-    fn every_option_typed_baseline_is_a_registered_exit_bar() {
+    fn every_baseline_constant_is_a_registered_exit_bar() {
         let root = workspace_root();
         let mut option_bars = Vec::new();
         let mut every_bar = Vec::new();
@@ -1714,13 +1806,14 @@ mod tests {
             !option_bars.is_empty(),
             "the sweep found no Option-typed baseline at all, so it is reading the wrong tree"
         );
-        for pointer in &option_bars {
+        for pointer in &every_bar {
             assert!(
                 super::NAMED_EXIT_BARS
                     .iter()
                     .any(|bar| bar.authored_at == pointer.as_str()),
-                "`{pointer}` is an Option-typed baseline with no exit-bar entry; a bar nobody \
-                 registered fails open — its calibration runs would qualify"
+                "`{pointer}` is a baseline constant with no exit-bar entry. Every constant in a \
+                 baselines file is a value a suite asserts a reading against, and one the \
+                 registry does not name is outside the roll the exit contract is counted over"
             );
         }
         for bar in super::NAMED_EXIT_BARS {
