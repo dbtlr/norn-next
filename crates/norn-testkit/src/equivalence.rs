@@ -636,7 +636,7 @@ impl StoreProjection {
 ///   the row it is about and is meaningless without one. So the pairing is
 ///   two-directional and this leg reads it both ways, over every finding the
 ///   store holds rather than over the ones a case thought to ask about. See
-///   [ADR 0020]; the vocabulary is `norn-wire`'s `FindingKind::scope`.
+///   [ADR 0023]; the vocabulary is `norn-wire`'s `FindingKind::scope`.
 ///
 ///   **Nothing structural holds this.** The findings table keys by path and
 ///   carries no foreign key to `documents` — deliberately, because a
@@ -645,7 +645,7 @@ impl StoreProjection {
 ///   re-derivation condition on the heal. A store at rest is where the two meet,
 ///   which is why the claim is asked here.
 ///
-///   [ADR 0020]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0020-a-walk-prunes-what-its-scope-no-longer-accounts-for.md
+///   [ADR 0023]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0023-a-walk-refusal-that-stands-is-a-reading.md
 /// - Every stored suffix key is the key its own path produces. The column is a
 ///   derived one the resolution ladder ranges over, and no read that answers a
 ///   caller's question compares it with the path beside it, so a row whose key

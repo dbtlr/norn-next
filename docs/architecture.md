@@ -523,10 +523,13 @@ place in the job where the vanished root's own spelling the directory grammar re
 root addresses no range of stored paths and which of the places it hid is unknowable from outside
 it; and a place is named by every spelling that renders onto it,
 so a walk rooted below that place's deepest unrendered ancestor read some of those spellings and
-never the rest and concludes nothing there. That last one is what keeps a scoped leg off the
-rendered place its own refused root stands at: the leg read one of the spellings rendering there
-and the vault heal reads them all, so the two legs agree on authority and the heal is what
-converges the place. The collision is where the sides tell apart most
+never the rest and concludes nothing there. That last one is what keeps a scoped leg off the places
+its own refused root hides: the leg read one of the spellings rendering there and the vault heal
+reads them all, so the two legs agree on authority and the heal is what converges the places. It
+bites twice — on the rendered place a refused root stands at where the document grammar refuses its
+spelling, and on every marker-carrying place beneath a refused root whose spelling no prefix admits,
+which the leg has no range of stored paths to register for at all. Both are bounded by the next
+heal, and until it runs the maintained store holds findings a build from zero does not. The collision is where the sides tell apart most
 clearly — the document whose bytes were refused can leave while a refused spelling still renders
 onto its place, and the walk that still reads that spelling ends the content findings there and
 leaves the spelling ones. **A

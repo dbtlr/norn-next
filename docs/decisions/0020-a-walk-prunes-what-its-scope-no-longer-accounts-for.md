@@ -1,6 +1,6 @@
 ---
 status: superseded
-superseded_by: ADR-0023
+superseded-by: 0023-a-walk-refusal-that-stands-is-a-reading.md
 date: 2026-08-13
 ---
 
@@ -121,10 +121,10 @@ vouch for before spending a write per converged document.
 
 ## Status
 
-Superseded by [ADR 0023](0023-a-refusal-that-stands-is-a-reading.md).
+Superseded by [ADR 0023](0023-a-walk-refusal-that-stands-is-a-reading.md).
 
 ## Changelog
 
-- 2026-09-14 — Superseded by [ADR 0023](0023-a-refusal-that-stands-is-a-reading.md), which
+- 2026-09-14 — Superseded by [ADR 0023](0023-a-walk-refusal-that-stands-is-a-reading.md), which
   splits this decision's "a root the walk did not enter" withholder into a refusal that
   stands and a name the walk could not look at, and prunes the places beneath the first.

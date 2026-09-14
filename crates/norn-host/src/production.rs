@@ -6544,6 +6544,69 @@ mod tests {
         );
     }
 
+    /// **A scoped leg leaves the places a refused root no prefix admits hides,
+    /// and the heal takes them.** Such a root addresses no range of stored
+    /// paths, so the leg answering one dirty path under it has nothing to
+    /// register and no way to name the marker-carrying places the root's
+    /// spelling poisons — and it read one of the spellings rendering onto them
+    /// rather than all of them. The vault heal enumerates them all and reaches
+    /// the places by the marker they carry.
+    ///
+    /// The store converges on the walk that earned the places. Until that heal
+    /// runs, the maintained store holds a finding a derivation from zero does
+    /// not, which is the bound this pins rather than a shape the increment can
+    /// close.
+    #[cfg(unix)]
+    #[test]
+    fn a_scoped_increment_leaves_the_places_a_refused_root_no_prefix_admits_hides() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("scoped-refused-unaddressable-root");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        fs::create_dir_all(f.vault().join("hidden\\dir")).unwrap();
+        if !write_or_report(&f.vault().join("hidden\\dir/note.md"), b"body") {
+            ops.detach(&name, attachment);
+            return;
+        }
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        heal_the_vault(&ops, &name, &mut attachment, &progress);
+        let place = "hidden\u{fffd}dir/note.md";
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, place),
+            ["document/path-names-no-document"],
+            "the heal filed nothing under the root that is about to be refused, so this proves \
+             nothing"
+        );
+
+        fs::remove_dir_all(f.vault().join("hidden\\dir")).unwrap();
+        symlink("away", f.vault().join("hidden\\dir")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "hidden\\dir/note.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+        assert_eq!(
+            findings_at(&mut attachment.store, place).len(),
+            1,
+            "the increment took a place it could neither address nor enumerate the spellings of"
+        );
+
+        heal_the_vault(&ops, &name, &mut attachment, &progress);
+        assert!(
+            findings_at(&mut attachment.store, place).is_empty(),
+            "the heal reached the place by the marker it carries and still left the finding \
+             standing"
+        );
+        ops.detach(&name, attachment);
+    }
+
     /// **A scoped leg concludes the places whose spellings it enumerated, and
     /// the root's own place is not one of them.** `..md` names no document and
     /// still addresses the rows beneath it, so the finding about the path

@@ -819,10 +819,14 @@ fn a_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero() {
 /// a link that stands never stops standing — while a fresh derivation over the
 /// same tree is silent about the places under it.
 ///
-/// **The phase lands while nothing is attached**, so the attach heal reads the
-/// final tree. A watcher replaying reports from before the attach converges the
-/// same tree through the scoped increment; both legs hold the equivalence this
-/// judges, and each is pinned on its own in `norn-host`'s unit cases.
+/// **The heal is the only leg that converges this, so the phase lands while
+/// nothing is attached** and the attach heal reads the final tree. A scoped
+/// increment answering a dirty path under such a root has no range of stored
+/// paths to register — the spelling admits no prefix — so it never reaches the
+/// places the root hides, and it enumerated one of the spellings rendering onto
+/// them rather than all of them. It converges the rows and leaves the findings
+/// to the heal that follows. A phase landing on an attached host would judge a
+/// store that still held them.
 #[test]
 fn a_refused_directory_replaced_by_a_refused_link_converges_on_a_build_from_zero() {
     let sandbox = sandbox("churn-unaddressable-root");
