@@ -272,6 +272,19 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
         why: "the work bar's authored floor, coefficient and row count",
     },
     ManifestFile {
+        path: "crates/norn-store/tests/store/lifecycle.rs",
+        why: "the rung-3 trigger an open reaches on its own: a database recording a statement \
+              list this build did not write is discarded and derived again, and what the \
+              discarded database held goes with it",
+    },
+    ManifestFile {
+        path: "crates/norn-fs/tests/observations.rs",
+        why: "the contained read path's refusals — a pipe answered without waiting on a writer, \
+              no component resolved through a symbolic link, and a socket answered rather than \
+              reported as the machine's failure. These are the reads every derivation and every \
+              reload takes, so a bar loosened here is a case that certified less",
+    },
+    ManifestFile {
         path: "crates/norn-host/tests/host_soak.rs",
         why: "the scheduled lane's host workload and the comparisons that apply the soak bars: \
               the peak ceiling, the slope ratio and the descriptor allowance are enforced here, \

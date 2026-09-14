@@ -6340,6 +6340,11 @@ mod tests {
     /// The maintenance leg serves two cadences, so this also pins that the
     /// store is asked only on its own: a leg the shadow clock brought round
     /// inside the store interval reads no page of the database.
+    ///
+    /// Between the verdict and the rung, the trust the entry publishes is
+    /// asserted: damaged derived state is a state a client reads, and an entry
+    /// that kept answering reads while it rebuilt would serve the state the
+    /// verification condemned.
     #[test]
     fn scheduled_maintenance_reports_a_full_text_index_that_stopped_agreeing_as_damage() {
         let f = Fixture::new("silent-damage");
@@ -6377,6 +6382,28 @@ mod tests {
             panic!("the damage was reported as {failure:?} rather than as damaged state");
         };
         assert!(!detail.is_empty(), "the damage was not named");
+
+        // The trust the entry holding this database publishes, taken through
+        // the one function every lifecycle leg sets `state.trust` from. A
+        // verdict that left the entry trusted would keep serving reads off
+        // derived state the verification just called damaged, and the
+        // awaiting-demand reason would promise a client that nothing resumes
+        // until it asks — where the rung below is the entry's own work.
+        let withdrawn = crate::lifecycle::trust_withdrawn_for_damage(detail);
+        let norn_wire::TrustState::Untrusted {
+            reason:
+                norn_wire::UntrustedReason::StoreDamagedRebuilding {
+                    detail: published, ..
+                },
+            ..
+        } = &withdrawn
+        else {
+            panic!("the damage verdict withdraws trust as {withdrawn:?}");
+        };
+        assert_eq!(
+            published, detail,
+            "the withdrawal published none of the damage the verification named"
+        );
 
         // Rung 3, run as the lifecycle runs it, over coverage that stands.
         let mut attachment = ops

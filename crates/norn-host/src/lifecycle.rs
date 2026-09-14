@@ -937,6 +937,19 @@ fn watcher_lost(error: WatchError) -> UntrustedReason {
     UntrustedReason::watcher_lost(cause, detail)
 }
 
+/// The trust an entry holding a damaged database publishes.
+///
+/// Every leg that meets [`JobFailure::StoreDamaged`] while it holds an
+/// attachment withdraws trust here, so what a client reads does not depend on
+/// which leg met the damage. The reason is the rebuilding one — the entry holds
+/// the database and discards it on its own — rather than
+/// [`UntrustedReason::StoreDamagedAwaitingDemand`], which an attach that
+/// acquired no store publishes and which promises nothing until a demand opens
+/// a file to discard.
+pub(crate) fn trust_withdrawn_for_damage(detail: impl Into<String>) -> TrustState {
+    TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail))
+}
+
 /// Whether a terminal watch failure says the ground under the entry moved.
 ///
 /// Coverage that ended because the root stopped being covered is the one
@@ -2723,8 +2736,7 @@ fn poll_claimed_entry<O: EntryOps>(
                     state.claim.drop_marker();
                     state.claim.end_poll(epoch);
                     state.require_rebuild();
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+                    state.trust = trust_withdrawn_for_damage(detail);
                     state.coverage.park_by(epoch, attachment);
                     schedule = Some(
                         state
@@ -3369,8 +3381,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.require_rebuild();
                     state.coverage.park_by(epoch, attachment);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+                    state.trust = trust_withdrawn_for_damage(detail);
                     next = Some(
                         state
                             .claim
@@ -3670,8 +3681,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
                     state.require_rebuild();
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+                    state.trust = trust_withdrawn_for_damage(detail);
                     let next = state
                         .claim
                         .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
@@ -3807,8 +3817,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
                     state.require_rebuild();
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+                    state.trust = trust_withdrawn_for_damage(detail);
                     next = Some(
                         state
                             .claim
@@ -4048,7 +4057,7 @@ fn run_reload_job<O: EntryOps>(
             state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
             state.coverage.park_by(epoch, attachment);
             state.require_rebuild();
-            state.trust = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+            state.trust = trust_withdrawn_for_damage(detail);
             let next = state
                 .claim
                 .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));

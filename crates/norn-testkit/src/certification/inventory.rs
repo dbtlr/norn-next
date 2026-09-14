@@ -189,6 +189,17 @@ const INDUCED_FAILURE: &str = "induced-failure";
 /// anything — the last of those meets its condition with a directory removal
 /// rather than through a seam, so gating it would leave a case a lane could
 /// skip while certifying the layer.
+///
+/// **Three targets are named by entries and deliberately not claimed.**
+/// `norn-host`'s library, `norn-store`'s `store` target and `norn-fs`'s
+/// observations suite each hold their crate's own contract surface, of which
+/// the layer requires a handful of cases: the library holds every unit test the
+/// host has, the `store` target is the store's whole black-box suite, and the
+/// observations suite states the contained read path's answers as well as its
+/// refusals. Claiming any of them whole would make every test in it a Layer 2
+/// obligation, which is the inventory becoming a copy of the workspace. The
+/// cost is that a case added to one of them and not here is not caught, and
+/// what stands against that is the forward direction plus the contract digest.
 pub const CLAIMED_TARGETS: &[ClaimedTarget] = &[
     ClaimedTarget {
         package: "norn-host",
@@ -498,6 +509,46 @@ pub const REQUIRED_CASES: &[Case] = &[
                   the_child_role_publishes_under_whatever_it_was_armed_at",
         feature: None,
     },
+    // The contained read path, which every derivation reads a document and
+    // every reload reads a control file through. Its conditions need no arm:
+    // a pipe, a socket and a symbolic link are entry kinds a case makes with
+    // the filesystem it is given, so the three rows sit behind no feature and
+    // run wherever `norn-fs`'s suites run.
+    Case {
+        id: "induced-contained-read-refuses-a-pipe-without-waiting",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a named pipe at a name the contained read opens is answered inside a budget \
+                 rather than holding the caller inside `open` until a writer arrives: the \
+                 required read refuses it as data and the optional read answers absence",
+        carrier: "crates/norn-fs/tests/observations.rs::\
+                  a_pipe_at_a_name_is_refused_without_waiting_for_a_writer",
+        feature: None,
+    },
+    Case {
+        id: "induced-contained-read-follows-no-link-below-the-anchor",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "no component below the anchor is resolved through a symbolic link — an ancestor \
+                 as well as the last name — so the contained spelling reads the document and the \
+                 linked spelling is absence to the optional read and a refusal naming the link to \
+                 the required one",
+        carrier: "crates/norn-fs/tests/observations.rs::\
+                  no_component_below_the_anchor_is_followed_through_a_link",
+        feature: None,
+    },
+    Case {
+        id: "induced-contained-read-answers-for-a-socket",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a socket standing where a document's name is, and a name longer than the \
+                 filesystem holds names, are absence to the optional read and a refusal to the \
+                 required one rather than the machine's failure — so a document a writer replaced \
+                 with a socket costs one path rather than the whole reconcile",
+        carrier: "crates/norn-fs/tests/observations.rs::\
+                  a_socket_and_an_unnameable_length_are_answers_rather_than_faults",
+        feature: None,
+    },
     Case {
         id: "induced-store-full-disk-is-not-damage",
         suite: Suite::InducedFailure,
@@ -545,6 +596,32 @@ pub const REQUIRED_CASES: &[Case] = &[
         states: "every committed changeset moves the count a tear is armed against, so an arm \
                  neither fires immediately nor never",
         carrier: "crates/norn-store/tests/environment.rs::every_committed_changeset_is_counted",
+        feature: None,
+    },
+    Case {
+        id: "induced-store-ddl-fingerprint-is-rebuilt-from-zero",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a database recording a statement list this build did not write is discarded at \
+                 the open and derived again from zero, reporting the fingerprint it expected \
+                 beside the one it found, keeping none of the rows it held, and standing sound \
+                 afterwards — which is rung 3 reached by a store the environment never touched",
+        carrier: "crates/norn-store/tests/store/lifecycle.rs::\
+                  a_ddl_fingerprint_this_build_did_not_write_is_rebuilt_from_zero",
+        feature: None,
+    },
+    Case {
+        id: "induced-host-logical-damage-withdraws-trust-and-rebuilds",
+        suite: Suite::InducedFailure,
+        lane: Lane::RealWatcher,
+        states: "a full-text index that stopped agreeing with the column it indexes is damage no \
+                 read reports, so the scheduled verification is what meets it: the maintenance leg \
+                 carries the verdict out rather than swallowing it, the entry withdraws trust \
+                 under the reason that says it discards its own database, and rung 3 run as the \
+                 lifecycle runs it — over coverage that stands — derives the vault again to what a \
+                 build from zero holds, findings included",
+        carrier: "crates/norn-host/src/production.rs::\
+                  scheduled_maintenance_reports_a_full_text_index_that_stopped_agreeing_as_damage",
         feature: None,
     },
     // ---- the operational leg ----
