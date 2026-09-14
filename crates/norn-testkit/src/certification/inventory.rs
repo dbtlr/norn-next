@@ -529,10 +529,11 @@ pub const REQUIRED_CASES: &[Case] = &[
         id: "induced-contained-read-follows-no-link-below-the-anchor",
         suite: Suite::InducedFailure,
         lane: Lane::Any,
-        states: "no component below the anchor is resolved through a symbolic link, an ancestor \
-                 component as well as the last name: the contained spelling reads the document and \
-                 the spelling through a linked ancestor is absence to the optional read and a \
-                 refusal naming the link to the required one",
+        states: "an ancestor component below the anchor is resolved through no symbolic link: the \
+                 contained spelling reads the document and the spelling through a linked ancestor \
+                 is absence to the optional read and a refusal naming the link to the required \
+                 one. The last name is \
+                 `induced-contained-read-refuses-a-link-at-the-name-itself`'s claim",
         carrier: "crates/norn-fs/tests/observations.rs::\
                   no_component_below_the_anchor_is_followed_through_a_link",
         feature: None,
