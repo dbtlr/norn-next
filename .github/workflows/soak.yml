@@ -200,6 +200,8 @@ jobs:
           DIGEST: ${{ needs.digest.outputs.digest }}
           SCHEDULED: ${{ github.event_name == 'schedule' }}
         run: |
-          gh workflow run certify.yml --ref "soak-candidate/${SHA}" \
+          # The repository is named outright: this job checks out no tree, and
+          # `gh` infers a repository only from a git checkout.
+          gh workflow run certify.yml --repo "${GITHUB_REPOSITORY}" --ref "soak-candidate/${SHA}" \
             -f "scheduled=${SCHEDULED}" -f "dispatcher_digest=${DIGEST}"
           echo "dispatched certify.yml at soak-candidate/${SHA} (scheduled=${SCHEDULED})"
