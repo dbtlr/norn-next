@@ -342,12 +342,12 @@ fn a_reading_past_a_ceiling_is_refused_by_the_comparison_every_bar_makes() {
     assert!(baselines::fits(ratio, ratio));
     assert!(!baselines::fits(ratio + 1, ratio));
 
-    // The quiescent-retention bar is in its calibration window, so what stands
-    // here while it is `None` is the comparison its reading will be made
-    // through — a descriptor count, the shape the budget above is stated in —
-    // and the arming test beside this is what holds the `None` to the
-    // registry's unarmed claim. Authoring the ceiling puts the authored value
-    // itself under this control with no edit here.
+    // The quiescent-retention bar is a descriptor count, the same shape the
+    // budget above is stated in, so this control falls back to that shape
+    // while the bar is unauthored; an authored value stands on its own under
+    // this control with no edit here. The arming test beside this holds
+    // `SOAK_QUIESCENT_FD_RETENTION`'s authored state to the registry's armed
+    // claim.
     let retention = baselines::SOAK_QUIESCENT_FD_RETENTION.unwrap_or(baselines::FD_BUDGET);
     assert!(baselines::fits(retention, retention));
     assert!(!baselines::fits(retention + 1, retention));
