@@ -171,16 +171,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.pin.outputs.sha }}
         run: |
-          standing=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/soak-candidate/${SHA}" --jq .object.sha 2>/dev/null || true)
-          if [ -z "$standing" ]; then
+          # The lookup is decided by its exit status and, on failure, by the
+          # status `gh` reports on stderr — never by stdout: on a missing tag
+          # `gh api` prints the 404 body to stdout before it exits non-zero, so
+          # "no output" is not the shape an absent tag takes. Only a 404 is an
+          # absent tag; any other failure is the lookup's, and ends here.
+          lookup_err=$(mktemp)
+          if standing=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/soak-candidate/${SHA}" --jq .object.sha 2>"$lookup_err"); then
+            if [ "$standing" != "$SHA" ]; then
+              echo "::error::the tag soak-candidate/${SHA} names ${standing}. A tag naming a commit other than the one in its name is a ref nothing can read, and this never moves one." >&2
+              exit 1
+            fi
+            echo "soak-candidate/${SHA} already names ${SHA}"
+          elif grep -q "HTTP 404" "$lookup_err"; then
             gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
               -f "ref=refs/tags/soak-candidate/${SHA}" -f "sha=${SHA}" >/dev/null
             echo "tagged ${SHA} as soak-candidate/${SHA}"
-          elif [ "$standing" != "$SHA" ]; then
-            echo "::error::the tag soak-candidate/${SHA} names ${standing}. A tag naming a commit other than the one in its name is a ref nothing can read, and this never moves one." >&2
-            exit 1
           else
-            echo "soak-candidate/${SHA} already names ${SHA}"
+            echo "::error::the lookup of soak-candidate/${SHA} failed for a reason other than absence: $(cat "$lookup_err")" >&2
+            exit 1
           fi
       # **`scheduled` is asserted here and decided there.** The certification run
       # cannot tell a nightly from a typed dispatch — every run of that file is a
@@ -197,6 +206,8 @@ jobs:
           DIGEST: ${{ needs.digest.outputs.digest }}
           SCHEDULED: ${{ github.event_name == 'schedule' }}
         run: |
-          gh workflow run certify.yml --ref "soak-candidate/${SHA}" \
+          # The repository is named outright: this job checks out no tree, and
+          # `gh` infers a repository only from a git checkout.
+          gh workflow run certify.yml --repo "${GITHUB_REPOSITORY}" --ref "soak-candidate/${SHA}" \
             -f "scheduled=${SCHEDULED}" -f "dispatcher_digest=${DIGEST}"
           echo "dispatched certify.yml at soak-candidate/${SHA} (scheduled=${SCHEDULED})"
