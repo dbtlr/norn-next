@@ -124,32 +124,97 @@ impl<'a> LineCursor<'a> {
 /// folds a lone-`\r` line into the one after it, handing its caller a chunk
 /// that spans a break. A per-line test then answers for two lines at once —
 /// masking or matching the pair on whichever one the test happens to read.
-pub(crate) fn split_lines_inclusive(content: &str) -> impl Iterator<Item = &str> {
-    let bytes = content.as_bytes();
-    let mut start = 0;
-    std::iter::from_fn(move || {
-        if start >= bytes.len() {
+pub(crate) fn split_lines_inclusive(content: &str) -> LinesInclusive<'_> {
+    LinesInclusive {
+        content,
+        start: 0,
+        end: content.len(),
+    }
+}
+
+/// The lines of a string, terminator included, walkable from either end.
+///
+/// Both ends exist because trimming a run of blank lines off the back of a
+/// slice is as ordinary a question as reading one off the front, and a caller
+/// that has to collect the whole slice to ask it backwards pays the slice in
+/// memory to answer a question about its last few bytes.
+///
+/// The two directions cut at the same places. `next` and `next_back` each
+/// consume a whole line with its whole terminator, so the unconsumed middle is
+/// always a run of whole lines and neither end can leave the other standing
+/// inside a `\r\n` pair.
+pub(crate) struct LinesInclusive<'a> {
+    content: &'a str,
+    /// The unconsumed range, `[start, end)`. Both bounds sit on a line
+    /// boundary.
+    start: usize,
+    end: usize,
+}
+
+impl<'a> LinesInclusive<'a> {
+    /// Where the break at `at` ends, given that `at` is a break byte inside
+    /// the unconsumed range.
+    fn past_break(&self, at: usize) -> usize {
+        let bytes = self.content.as_bytes();
+        // `\r\n` is one break, so it terminates one line rather than opening
+        // an empty second one.
+        if bytes[at] == b'\r' && at + 1 < self.end && bytes[at + 1] == b'\n' {
+            at + 2
+        } else {
+            at + 1
+        }
+    }
+}
+
+impl<'a> Iterator for LinesInclusive<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        if self.start >= self.end {
             return None;
         }
-        let end = match bytes[start..]
+        let bytes = self.content.as_bytes();
+        let stop = match bytes[self.start..self.end]
             .iter()
-            .position(|&b| b == b'\n' || b == b'\r')
+            .position(|&byte| byte == b'\n' || byte == b'\r')
         {
-            // `\r\n` is one break, so it terminates one line rather than
-            // opening an empty second one.
-            Some(offset) => {
-                let brk = start + offset;
-                match bytes[brk] {
-                    b'\r' if bytes.get(brk + 1) == Some(&b'\n') => brk + 2,
-                    _ => brk + 1,
-                }
-            }
-            None => bytes.len(),
+            Some(offset) => self.past_break(self.start + offset),
+            None => self.end,
         };
-        let line = &content[start..end];
-        start = end;
+        let line = &self.content[self.start..stop];
+        self.start = stop;
         Some(line)
-    })
+    }
+}
+
+impl<'a> DoubleEndedIterator for LinesInclusive<'a> {
+    fn next_back(&mut self) -> Option<&'a str> {
+        if self.start >= self.end {
+            return None;
+        }
+        let bytes = self.content.as_bytes();
+        // The last line runs to `end`. Step onto the first byte of whatever
+        // terminates it, if anything does: the `\r` of a pair rather than its
+        // `\n`, so the pair is not mistaken for two breaks.
+        let mut last = self.end - 1;
+        if bytes[last] == b'\n' && last > self.start && bytes[last - 1] == b'\r' {
+            last -= 1;
+        }
+        // A line the slice ends inside carries no terminator, so the search
+        // for the break above it covers those bytes too.
+        let above = if bytes[last] == b'\n' || bytes[last] == b'\r' {
+            last
+        } else {
+            self.end
+        };
+        let begin = bytes[self.start..above]
+            .iter()
+            .rposition(|&byte| byte == b'\n' || byte == b'\r')
+            .map_or(self.start, |offset| self.past_break(self.start + offset));
+        let line = &self.content[begin..self.end];
+        self.end = begin;
+        Some(line)
+    }
 }
 
 /// `content` with every lone `\r` rewritten to `\n`, for a reader whose own
@@ -166,20 +231,25 @@ pub(crate) fn split_lines_inclusive(content: &str) -> impl Iterator<Item = &str>
 /// Content carrying no lone `\r` is returned borrowed, so the common document
 /// costs one scan and no allocation.
 pub(crate) fn lf_normalized(content: &str) -> Cow<'_, str> {
-    let bytes = content.as_bytes();
-    let is_lone_cr = |index: usize| bytes[index] == b'\r' && bytes.get(index + 1) != Some(&b'\n');
-    if !(0..bytes.len()).any(is_lone_cr) {
+    let lone_cr_at =
+        |bytes: &[u8], index: usize| bytes[index] == b'\r' && bytes.get(index + 1) != Some(&b'\n');
+    // The scan that decides whether to copy is the whole cost a document with
+    // no lone `\r` pays.
+    if !(0..content.len()).any(|index| lone_cr_at(content.as_bytes(), index)) {
         return Cow::Borrowed(content);
     }
-    let mut out = bytes.to_vec();
-    for (index, byte) in out.iter_mut().enumerate() {
-        if is_lone_cr(index) {
-            *byte = b'\n';
+    // One buffer from here on: the test and the write read the same bytes, so
+    // a rewritten `\r` cannot change the answer for the byte after it — the
+    // test looks at `bytes[index + 1]`, which the loop has not reached.
+    let mut bytes = content.as_bytes().to_vec();
+    for index in 0..bytes.len() {
+        if lone_cr_at(&bytes, index) {
+            bytes[index] = b'\n';
         }
     }
     // One ASCII byte swapped for another leaves every multi-byte sequence
     // untouched, so the bytes are still the UTF-8 they arrived as.
-    Cow::Owned(String::from_utf8(out).expect("swapping ASCII for ASCII preserves UTF-8"))
+    Cow::Owned(String::from_utf8(bytes).expect("swapping ASCII for ASCII preserves UTF-8"))
 }
 
 #[cfg(test)]
@@ -210,6 +280,67 @@ mod tests {
                 "{owned:?} was not copied"
             );
         }
+    }
+
+    /// The two ends cut at the same places, so a caller that walks a slice
+    /// backwards sees the lines a caller walking forwards sees, reversed.
+    ///
+    /// The pair is what makes a backwards walk safe to trust: `next_back`
+    /// standing inside a `\r\n` would report a line the forward walk never
+    /// produced, and nothing at a call site would show it.
+    #[test]
+    fn the_two_directions_cut_a_slice_at_the_same_places() {
+        for content in [
+            "",
+            "abc",
+            "a\nb\n",
+            "a\r\nb\r\n",
+            "a\rb\r",
+            "\r\n",
+            "\n\n",
+            "\r\r",
+            "a\r\nb\rc\nd",
+            "\r\n\r\n\r",
+            "é\rß\r\n",
+        ] {
+            let forward: Vec<&str> = split_lines_inclusive(content).collect();
+            let mut backward: Vec<&str> = split_lines_inclusive(content).rev().collect();
+            backward.reverse();
+            assert_eq!(forward, backward, "{content:?}");
+            // The lines partition the content: nothing duplicated, nothing
+            // dropped, in order.
+            assert_eq!(forward.concat(), content, "{content:?}");
+        }
+    }
+
+    /// Cutting from both ends at once meets in the middle without either end
+    /// producing a line the other already did.
+    #[test]
+    fn walking_from_both_ends_partitions_the_content_once() {
+        let content = "one\ntwo\r\nthree\rfour";
+        let mut lines = split_lines_inclusive(content);
+        assert_eq!(lines.next(), Some("one\n"));
+        assert_eq!(lines.next_back(), Some("four"));
+        assert_eq!(lines.next(), Some("two\r\n"));
+        assert_eq!(lines.next_back(), Some("three\r"));
+        assert_eq!(lines.next(), None);
+        assert_eq!(lines.next_back(), None);
+    }
+
+    /// A `\r\n` is one break from either direction, so it terminates one line
+    /// rather than opening an empty second one.
+    #[test]
+    fn a_crlf_pair_is_one_break_from_either_end() {
+        assert_eq!(
+            split_lines_inclusive("a\r\n\r\nb").collect::<Vec<_>>(),
+            ["a\r\n", "\r\n", "b"]
+        );
+        assert_eq!(
+            split_lines_inclusive("a\r\n\r\nb")
+                .rev()
+                .collect::<Vec<_>>(),
+            ["b", "\r\n", "a\r\n"]
+        );
     }
 
     /// The rewrite is one byte wide and touches lone `\r` alone, so lengths

@@ -613,9 +613,18 @@ impl<'a> Document<'a> {
     ///
     /// The heading and the blank lines separating it from its neighbours are
     /// not the section's content and are left where they are. An empty
-    /// `content` empties the section without touching its heading. Every line
-    /// the splice writes uses the document's own terminator, `content`'s own
-    /// lines included.
+    /// `content` empties the section without touching its heading.
+    ///
+    /// **Every line the splice writes carries the document's terminator**,
+    /// `content`'s own lines included: each break in `content` — `\n`, `\r\n`
+    /// or a lone `\r` — is rewritten to [`LineEnding::of`]'s classification of
+    /// the document, which is `Crlf` or `Lf` and nothing else. A document
+    /// holding no `\n` at all classifies as `Lf`, so a `\r`-broken document's
+    /// replaced section is written with `\n`.
+    ///
+    /// **Bytes outside the addressed range keep their spelling**, whatever
+    /// they are broken by. The splice rewrites the section's content and
+    /// nothing above or below it.
     ///
     /// The result is re-read before it is returned. A replace that moved the
     /// frontmatter, lost a heading the body already had, or produced a section
@@ -646,8 +655,11 @@ impl<'a> Document<'a> {
         if !content.is_empty() {
             // A splice into a point that is not at the start of a line — a
             // heading at end of file with no trailing newline — needs one, or
-            // the content welds onto the heading.
-            if start > 0 && !self.source[..start].ends_with('\n') {
+            // the content welds onto the heading. Whether the byte before the
+            // splice ends a line is the crate's break rule: a lone `\r` ends
+            // one, so a document written with them already has its separator
+            // and gains no second one.
+            if start > 0 && !self.source[..start].ends_with(['\n', '\r']) {
                 replacement.push_str(terminator);
             }
             append_with_terminator(&mut replacement, content, self.line_ending);

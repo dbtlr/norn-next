@@ -308,8 +308,7 @@ pub(crate) fn field_spans(
 /// it.
 fn trailing_separator_run(slice: &str) -> Vec<&str> {
     let mut lines: Vec<&str> = Vec::new();
-    let cut: Vec<&str> = split_lines_inclusive(slice).collect();
-    for line in cut.into_iter().rev() {
+    for line in split_lines_inclusive(slice).rev() {
         let text = line.trim_end_matches(['\r', '\n']);
         if text.trim().is_empty() || text.starts_with('#') {
             lines.push(line);

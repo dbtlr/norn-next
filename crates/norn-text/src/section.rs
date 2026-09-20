@@ -191,10 +191,9 @@ pub(crate) fn resolve_section_in(
 /// test, and the separators stay inside the content an edit then writes over.
 fn content_bounds(body: &str, body_start: usize, end: usize) -> (usize, usize) {
     let slice = &body[body_start..end];
-    let lines: Vec<&str> = split_lines_inclusive(slice).collect();
 
     let mut start = body_start;
-    for line in &lines {
+    for line in split_lines_inclusive(slice) {
         if !line.trim().is_empty() {
             break;
         }
@@ -202,7 +201,7 @@ fn content_bounds(body: &str, body_start: usize, end: usize) -> (usize, usize) {
     }
 
     let mut stop = end;
-    for line in lines.iter().rev() {
+    for line in split_lines_inclusive(slice).rev() {
         if !line.trim().is_empty() {
             break;
         }

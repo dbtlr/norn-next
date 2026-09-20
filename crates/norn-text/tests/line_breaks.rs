@@ -11,7 +11,7 @@
 //! addresses the bytes the caller handed in. The editing half is one case per
 //! site that used to cut on `\n` alone, each stating what the site now does.
 
-use norn_text::{BodyScan, Document, SectionAddress, Value};
+use norn_text::{BodyScan, Document, LineEnding, Mapping, SectionAddress, Value, render_document};
 
 // ── The offset property ──────────────────────────────────────────────────
 
@@ -168,6 +168,32 @@ fn removing_a_field_keeps_a_comment_standing_after_a_lone_cr_break() {
     assert!(!edited.contains("tags:"));
 }
 
+/// The comment survives whatever mix of blank lines and `\r` breaks stands
+/// between the field and it.
+///
+/// Three shapes, because the trailing-separator run is walked backwards and
+/// each shape stops it at a different place: a blank `\r` line above the
+/// comment, the same above a block sequence, and the comment directly after a
+/// sequence item. Each deletes the comment when the run cuts on `\n` alone.
+#[test]
+fn a_comment_survives_every_lone_cr_separator_shape() {
+    for source in [
+        "---\ntags: y\r\r# keep me\rkeep: z\n---\nbody\n",
+        "---\ntags:\r  - a\r\r# keep me\rkeep: z\n---\nbody\n",
+        "---\ntags:\r  - a\r# keep me\rkeep: z\n---\nbody\n",
+    ] {
+        let edited = Document::parse(source)
+            .remove_field("tags")
+            .unwrap_or_else(|error| panic!("{source:?} refused: {error:?}"));
+        assert!(
+            edited.contains("# keep me"),
+            "the comment was deleted from {source:?}: {edited:?}"
+        );
+        assert!(edited.contains("keep: z"), "{edited:?}");
+        assert!(!edited.contains("tags:"), "{edited:?}");
+    }
+}
+
 /// The document's own terminator wins a splice. `content` arrives written
 /// however its author wrote it — `\n`, `\r\n` or a lone `\r` — and every line
 /// the splice writes carries the terminator the document already uses.
@@ -200,6 +226,30 @@ fn the_replace_post_image_check_reads_a_lone_cr_as_a_break() {
         .resolve_section(SectionAddress::from("A"))
         .expect("the section resolves");
     assert_eq!(&edited[span.content_start..span.content_end], "one\ntwo\n");
+}
+
+/// Bytes outside the addressed range keep their spelling. A `\r`-broken
+/// document's heading line is `\r`-terminated before the replace and
+/// `\r`-terminated after it.
+///
+/// The separator the splice adds where the byte above it does not end a line
+/// is decided by the crate's break rule. Under a `\n`-only test that byte does
+/// not end a line, so the splice writes a terminator the heading did not ask
+/// for and the heading's own bytes move — the one-construct-diff promise
+/// broken by the edit that was supposed to keep it.
+#[test]
+fn a_replace_leaves_a_lone_cr_heading_line_byte_identical() {
+    let source = "# A\rold\r";
+    let edited = Document::parse(source)
+        .replace_section("A", "one\rtwo")
+        .expect("the replace holds");
+    assert!(
+        edited.starts_with("# A\r"),
+        "the heading line was respelled: {edited:?}"
+    );
+    // The document holds no `\n` before the edit, so it classifies as `Lf` and
+    // the replaced content is written with `\n`. Only the content changed.
+    assert_eq!(edited, "# A\rone\ntwo\n");
 }
 
 /// Blank lines separated by a lone `\r` are blank, so a section's content
@@ -299,6 +349,24 @@ fn a_lone_cr_frontmatter_block_splits_into_its_fields() {
     assert!(edited.contains("b: 9"), "{edited:?}");
     assert!(edited.contains("a: 1"), "{edited:?}");
     assert!(edited.contains("c: 3"), "{edited:?}");
+}
+
+/// A body whose last line is terminated gets no second terminator, whichever
+/// break terminated it.
+///
+/// Under a `\n`-only test a `\r`-terminated body reads as unterminated and the
+/// render welds a terminator onto a line that already ended, adding a blank
+/// line the caller's bytes never had.
+#[test]
+fn rendering_adds_no_terminator_to_a_body_that_already_ends_a_line() {
+    let fields = Mapping::default();
+    let rendered = |body: &str| {
+        render_document(&fields, body, LineEnding::Lf).expect("an empty mapping renders")
+    };
+    assert_eq!(rendered("prose\n"), "---\n---\nprose\n");
+    assert_eq!(rendered("prose\r"), "---\n---\nprose\r");
+    // A body that really does not end a line still gets one.
+    assert_eq!(rendered("prose"), "---\n---\nprose\n");
 }
 
 // ── One definition, and no seventh site ──────────────────────────────────
