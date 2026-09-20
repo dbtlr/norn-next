@@ -48,6 +48,7 @@ mod attach;
 
 use std::path::Path;
 
+use norn_host::Demand;
 use norn_store::{
     Change, DocumentFacts, DocumentPath, ExplainedStatement, IncrementProvenance, Store,
     StoredDocument, StoredPathOrder, class_probe,
@@ -119,8 +120,30 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     assert_the_attachment_derived_the_profile(&mut store, &profile);
     let subject = a_derived_document(&mut store);
 
+    // **The passes run under a production read hold**, which is the handle the
+    // entry minted and the snapshot a read is answered from. The hold is what
+    // makes the zeroes below readings of the production read path rather than
+    // of a store a case opened beside it: the reader is opened `query_only`,
+    // so derivation through it is impossible by construction, and a store this
+    // case opens for itself is strictly more derivation-capable than the read
+    // path it stands for.
+    let hold = host
+        .begin_read(vault.name())
+        .expect("a live attachment answers a read");
+    assert_eq!(
+        hold.reading().published(),
+        &Demand::State(TrustState::Ready),
+        "the read ran under a demand the entry does not publish"
+    );
+    assert_eq!(
+        hold.reading().store().epoch(),
+        store.epoch(),
+        "the read answered from a database this attachment did not derive"
+    );
+
     let first = a_warm_pass(&mut store, &subject);
     let second = a_warm_pass(&mut store, &subject);
+    drop(hold);
     record_the_counters("a warm request under a live attachment, first pass", &first);
     record_the_counters(
         "a warm request under a live attachment, second pass",

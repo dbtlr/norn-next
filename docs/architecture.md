@@ -946,7 +946,8 @@ authoritative mapping of invariant to mechanism is the harness's code, not this 
      `norn-store`'s own API, which exposes what they need, so testkit opens no connection
      itself.
    - **Among product crates, `norn-host` and `norn-semantic` alone link `norn-store`** — the
-     host as the lane-1 writer, the engine as a feed reader through the read-only feed-read
+     host as the lane-1 writer and the holder of the read-only snapshot handles its reads
+     answer from, the engine as a feed reader through the read-only feed-read
      handle — and `norn-host` is `norn-semantic`'s one dependent, so in the shipped
      artifact everything that reaches the substrate reaches it under the host's
      composition. `norn-testkit` also depends on `norn-store`, but it never ships.
@@ -1317,40 +1318,38 @@ shed at the `norn-mcp` boundary); the host resolves the vault entry; a `norn-sto
 emits SQL; SQLite answers; rows become a wire report. No repository tier, no domain-object
 hydration. Warm requests assert zero derivation counters.
 
-**The snapshot-read seam is carved, and production mints no reader through it.**
-`norn-store`'s reader type is uninhabited and the production attachment answers no handle,
-so no read reaches a database today; what the seam states is carried by the entry's moves
-and by the ops the suites install, and it is this. Reads reach the database independently of
-orchestration, on a read-only snapshot handle `norn-store` mints from the live `Store` —
-held in entry state beside the attachment, never inside it, so a read proceeds while a warm
-lifecycle job holds the store. The snapshot is established under the entry gate lock in the
-same critical section that reads trust — established by a read statement, since a bare
-deferred `BEGIN` takes no snapshot — so the trust label and the snapshot describe the same
-instant, and the read runs outside the lock: it sees the last committed increment, never
-blocks the writer (checkpointing stays passive — an aggressive checkpoint mode would trade
-that guarantee away), and may trail in-flight derivation. Concurrent reads serialize against
-each other on the one reader per entry, and **no acquisition waits for that reader while it
-holds the entry gate**: a lock held across a wait for a connection that only another holder
-of the same lock can give back hangs the entry rather than slowing it. Under the gate an
-acquisition tries for the entry's connection without blocking, and establishes its snapshot
-there where the connection is free. Where another read holds it, the acquisition gives the
-gate back and waits outside it — the demand it has already recorded holds the entry across
-that wait — then takes the gate again and reads the published demand afresh before it
-establishes, because the instant it first read is not the instant it answers under; an entry
-that has stopped serving, or whose reader is no longer the one the acquisition waited for,
-takes the connection back and the read refuses with what the entry now publishes. The priced
-cost of contention is that second reading, and measured contention is still what mints more
-readers through the carved pool seam. The reader is torn down before the store closes on
-every closing path, and a read's hold is demand on the entry: it holds the entry's demand
-for as long as the read runs, restarts the idle interval when it ends, and withdraws an idle
-detach that is scheduled and not yet in flight — so **an idle teardown neither runs under a
-read nor precedes one into the entry.** The hold buys nothing beyond that deferral. A
-refusal, a host destruction, and a job leg failing its way into a release each reach the
-entry without consulting a read, and a read in flight stops none of them. Through such a
-teardown the read keeps answering from the handle it holds until it completes, and nothing
-promises the database file outlives the teardown for it: that is the contract the read path
-states, and its price is the accepted one: a read holds no coverage, so no teardown waits on
-it. [ADR 0025](decisions/0025-a-reads-hold-is-demand.md) records the rationale and the
+**The production attachment mints a reader, and reads reach the database through it.** Reads
+reach the database independently of orchestration, on a read-only snapshot handle `norn-store`
+mints from the live `Store` — a second connection beside the writer, opened read-only with
+`query_only` set, so nothing run on it derives — held in entry state beside the attachment,
+never inside it, so a read proceeds while a warm lifecycle job holds the store. The snapshot is
+established under the entry gate lock in the same critical section that reads trust —
+established by a read statement, since a bare deferred `BEGIN` takes no snapshot — so the trust
+label and the snapshot describe the same instant, and the read runs outside the lock: it sees
+the last committed increment, never blocks the writer (checkpointing stays passive — an
+aggressive checkpoint mode would trade that guarantee away), and may trail in-flight
+derivation. Concurrent reads serialize against each other on the one reader per entry, and **no
+acquisition waits for that reader while it holds the entry gate**: a lock held across a wait
+for a connection that only another holder of the same lock can give back hangs the entry rather
+than slowing it. Under the gate an acquisition tries for the entry's connection without
+blocking, and establishes its snapshot there where the connection is free. Where another read
+holds it, the acquisition gives the gate back and waits outside it — the demand it has already
+recorded holds the entry across that wait — then takes the gate again and reads the published
+demand afresh before it establishes, because the instant it first read is not the instant it
+answers under; an entry that has stopped serving, or whose reader is no longer the one the
+acquisition waited for, takes the connection back and the read refuses with what the entry now
+publishes. The priced cost of contention is that second reading, and measured contention is
+still what mints more readers through the carved pool seam. The reader is torn down before the
+store closes on every closing path, and a read's hold is demand on the entry: it holds the
+entry's demand for as long as the read runs, restarts the idle interval when it ends, and
+withdraws an idle detach that is scheduled and not yet in flight — so **an idle teardown
+neither runs under a read nor precedes one into the entry.** The hold buys nothing beyond that
+deferral. A refusal, a host destruction, and a job leg failing its way into a release each
+reach the entry without consulting a read, and a read in flight stops none of them. Through
+such a teardown the read keeps answering from the handle it holds until it completes, and
+nothing promises the database file outlives the teardown for it: that is the contract the read
+path states, and its price is the accepted one: a read holds no coverage, so no teardown waits
+on it. [ADR 0025](decisions/0025-a-reads-hold-is-demand.md) records the rationale and the
 priced costs.
 
 **Hold acquisition is the read path's one adjudication, and the handle is its proof.** A

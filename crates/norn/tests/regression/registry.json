@@ -1114,9 +1114,9 @@
       "sources": ["NRN-530", "NRN-55"],
       "binding": {
         "status": "dormant",
-        "reason": "the shape this forbids is refused by construction: crates/norn-store/src/store.rs keeps no pool, no internal lock and no second connection, so nothing here holds a session mutex across anything, and crates/norn-host/src/lifecycle.rs answers concurrent reads of one entry through the single reader that entry holds rather than opening another. One write-side operation does reach the read surface: a schema reload withdraws that entry's reader for the length of the reload, and a read asked for inside that window is answered as no reader rather than queued behind the write. What has no subject is the contention this property is stated against. A read's wait is neither bounded nor reported anywhere, and the long apply that would hold the surface is the host's single applier, which is not built: the name it takes is pre-committed as crates/norn-host/src/lib.rs::Applier.",
+        "reason": "the shape this forbids is refused by construction: an entry's reads run on the handle its coverage minted, crates/norn-store/src/store.rs::SnapshotReader — a second connection opened read-only with query_only beside the one writer connection a store holds behind &mut — so no session mutex is held across anything and no read borrows the writer; crates/norn-host/src/lifecycle.rs answers concurrent reads of one entry through that single handle rather than opening another, and what those reads serialize on is the handle rather than the write. One write-side operation does reach the read surface: a schema reload withdraws that entry's reader for the length of the reload, and a read asked for inside that window is answered as the reader-unavailable refusal rather than queued behind the write. What has no subject is the contention this property is stated against. A read's wait is reported, as the gate-wait count each read carries, and is bounded nowhere; and the long apply that would hold the surface is the host's single applier, which is not built: the name it takes is pre-committed as crates/norn-host/src/lib.rs::Applier.",
         "grounds": [
-          { "present": "crates/norn-store/src/store.rs" },
+          { "symbol-present": "crates/norn-store/src/store.rs::SnapshotReader" },
           { "present": "crates/norn-host/src/lifecycle.rs" },
           { "symbol-absent": "crates/norn-host/src/lib.rs::Applier" }
         ]
@@ -1370,7 +1370,7 @@
       "sources": ["NRN-a62", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "nothing acquires a snapshot."
+        "reason": "half of this property now has a subject and half does not. A request acquires exactly one substrate snapshot: crates/norn-store/src/store.rs::SnapshotReader establishes one per read hold, by the one statement that establishes it, and counts it on the snapshot reading the read carries. The other half — the commit consuming the same snapshot the verb read — has no subject and is structurally refused rather than merely unbuilt: readers live beside the lifecycle-held writer connection precisely so a read never touches it, so no commit can consume a read's snapshot. What the mutation seam does guarantee is ruled with the apply seam this venue's layer lands."
       }
     },
     {
