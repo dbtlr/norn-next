@@ -11,7 +11,12 @@ fact: work running outside the entry's lock is coming back. Read where a detach 
 scheduled and nowhere after, it left a read that began behind a scheduled detach to be torn
 down under its own live hold, and it left a workload of reads alone with no way back to an
 attached entry, because a pin is not demand. **A read's hold is demand on the entry, and it
-is the lifecycle's own demand lease that says so.**
+is the lifecycle's own demand lease that says so.** One further ruling arrives here that
+ADR 0015 does not carry: the reader's open is a **fallible mint** that answers a reason
+rather than an absence, and that never panics under the entry gate. ADR 0015 itself
+superseded [0014](0014-snapshot-readers.md), which recorded the same reader and priced the
+same costs; what 0015 corrected was the reach of the lifetime rule, and what this record
+corrects is what a read's hold is.
 
 The store's one writer connection sits behind `&mut`, inside the attachment that every
 lifecycle job holds for its whole duration — so a wire read borrowing it would serialize
@@ -53,11 +58,16 @@ slot closes no handle a read is running on, and no new read begins once the slot
 the published demand and clones the handle.** What the lease buys is what it buys every
 other caller: it holds the entry's idle interval open for as long as the read runs and
 restarts it when the hold drops, it clears the idle deadline, it withdraws an idle detach
-that is scheduled and not yet in flight, and over an entry holding no coverage it schedules
-the attach the read then refuses under. So an idle teardown neither runs under a read nor
-precedes one into the entry, and a workload of reads alone keeps the vault it reads
-attached. **Teardown never waits for a read**, and the lease changes nothing about that: a
-refusal or a destruction moves first and consults no read, and a job leg failing its way
+that is scheduled and not yet in flight, it raises the recovery the entry owes and gives
+that demand back with the hold, and where the entry is free to run it, it schedules the
+work the entry owes — the attach an entry holding no coverage owes, and the rebuild, the
+recovery or the reconcile an untrusted entry owes — with the read refusing under the state
+that work runs beneath. A read asks for the owed recovery because what a read wants from an
+untrusted vault is exactly that it become answerable again; a read workload that never
+healed the vault it reads would be a dead end. So an idle teardown neither runs under a
+read nor precedes one into the entry, and a workload of reads alone keeps an attached vault
+attached and an untrusted one converging. **Teardown never waits for a read**, and the
+lease changes nothing about that: a refusal or a destruction moves first and consults no read, and a job leg failing its way
 into a release consults none either. Through any of them the read keeps answering from the
 handle it holds and from nothing else — no move states that the file behind that handle
 outlives the teardown, and nothing pins one that would. The read path states that absence
@@ -67,9 +77,11 @@ narrow job, which is to say that the entry is held by work outside its lock.
 
 **A read's demand differs from every other demand in exactly one step: it withdraws no
 park.** An ordinary demand retires the registry's parks — a duplicate root, a root the
-registry could not read — because withdrawing them is how a caller asks for the acquisition
-that classifies those roots again. A read asks for no such acquisition; it asks for an
-answer, and a vault the registry has parked has none to give. A read against a parked
+registry could not read — where maintainer contention is not already answering it, because
+withdrawing them is how a caller asks for the acquisition that classifies those roots
+again; a contended entry keeps every park it stands on, since no acquisition follows a
+demand the contention answers. A read asks for no such acquisition under any condition; it
+asks for an answer, and a vault the registry has parked has none to give. A read against a parked
 entry therefore refuses with the park's own code — identity refused, duplicate root and
 maintainer contention alike — and schedules nothing.
 

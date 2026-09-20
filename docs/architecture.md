@@ -1360,26 +1360,30 @@ reader-unavailable, which is an entry serving every surface but this one.
 A read's hold is a demand lease, and it does what a lease does: it holds the entry's idle
 interval open for as long as the read runs and restarts it when the hold drops, it clears
 the idle deadline, it withdraws an idle detach that is scheduled and not yet in flight, and
-over an entry holding no coverage it schedules the attach. That is the whole of it. A read
-withdraws no park — the registry's parks are withdrawn by a caller asking for the
-acquisition that classifies those roots again, and a read asks for an answer — so a read
-against a parked entry refuses with the park's own code, a refused identity and a duplicate
-root alike with a contended maintainer, and schedules nothing. Over an entry holding no
-coverage the read refuses with the warming state the attach it scheduled runs under, so an
-unattached entry is not a rendering a read produces and a workload of reads alone keeps the
-vault it reads attached. A refused acquisition records its demand the way a served one
-does.
+it raises the recovery the entry owes, giving that demand back with the hold. Where the
+entry is free to run it, the read's demand also schedules the work the entry owes — the
+attach an entry holding no coverage owes, and the rebuild, the recovery or the reconcile an
+untrusted entry owes — and the read then refuses under the state that work runs beneath
+rather than the one it found, so a workload of reads alone keeps an attached vault attached
+and asks an untrusted vault to become answerable again. The one move a read's demand leaves
+out is the park retirement: a read withdraws no park — the registry's parks are withdrawn
+by a caller asking for the acquisition that classifies those roots again, and a read asks
+for an answer — so a read against a parked entry refuses with the park's own code, a
+refused identity and a duplicate root alike with a contended maintainer, and schedules
+nothing. A refused acquisition records its demand the way a served one does. A read names
+no attach mode, so the unsupported-mode rendering is one no read produces.
 
 The attachment mints the reader under the gate hold that publishes the trust label beside
 it, as one move at one epoch, so the handle an entry holds belongs to the coverage that
 entry holds. The mint is fallible and cannot panic — an unwind under that gate poisons it —
 and its blocking open is the priced cost of a hold every other holder of the entry waits
 behind. A mint that fails changes no trust label and publishes no refusal of its own: the
-reason is retained beside the entry's published demand, the way a reload's
-diagnostic and an engine's are, `vault status` reports it beside trust and engine state,
-and a read refuses with it as reader-unavailable's detail. A mint may fail at a publication
-that is not serving, and then the demand renders and the retained fact stays silent until
-the entry serves again. The next publication mints again and re-derives the fact.
+reason is retained beside the entry's published demand, the way a reload's diagnostic and
+an engine's are, `vault status` reports it beside trust and engine state, and a read
+refuses with it as reader-unavailable's detail. A mint may fail at a publication
+that is not serving, and then the read renders that demand and leaves the retained fact
+unsaid until the entry serves again; `vault status` reports it either way. The next
+publication mints again and re-derives the fact.
 
 **A request is answered from one snapshot.** Every lane-1 statement a request runs takes
 its rows from the snapshot its hold established — the store counts the snapshots
