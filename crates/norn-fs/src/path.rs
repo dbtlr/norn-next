@@ -7,10 +7,33 @@
 //! entry proves that the root treats alternate case spellings as the same
 //! entry. No platform-name or mount-type guess is made.
 //!
-//! Case folding is deliberately ASCII-only. Unix path names are byte strings,
-//! not necessarily UTF-8; preserving non-ASCII bytes avoids inventing a lossy
-//! Unicode policy while still covering the case behavior Norn currently
-//! promises.
+//! # Where case is folded, and what "case-insensitive" means
+//!
+//! **This module is the workspace's one case-folding point for paths.** A path
+//! is folded here, once, at the filesystem boundary, and nowhere else
+//! re-derives the rule: every surface that compares, orders, resolves or pages
+//! paths case-insensitively is stating the fold this module defines. Other
+//! crates may *apply* it — `norn-store` orders a page under SQLite's `NOCASE`,
+//! which is the same ASCII fold — but none of them decides it, and none of
+//! them rewrites a path's spelling. The spelling a vault's tree carries is the
+//! spelling that is stored, reported and written back; folding produces a
+//! comparison key beside it, never a replacement for it.
+//!
+//! **"Case-insensitive" means ASCII case, and only ASCII case.** `A`–`Z` fold
+//! onto `a`–`z`; every other byte compares as itself. Unix path names are byte
+//! strings, not necessarily UTF-8, so preserving non-ASCII bytes avoids
+//! inventing a lossy Unicode policy while still covering the case behavior
+//! Norn promises. The limit that buys is exact and worth naming: a volume that
+//! folds case in Unicode resolves `café.md` and `CAFÉ.md` to one entry while
+//! this fold reads them as two, so on such a root the two spellings are one
+//! file the vault sees under two keys. Widening the fold is a change to this
+//! module and to the stored keys derived from it, never a local choice made at
+//! a comparison site.
+//!
+//! **Whether the fold is applied at all is proven, not assumed.** The key
+//! folds only where an existing directory entry demonstrates that the root
+//! treats alternate case spellings as the same entry — see [`CaseSensitivity`]
+//! — and no platform-name or mount-type guess is made.
 
 use std::cmp::Ordering;
 use std::collections::HashSet;

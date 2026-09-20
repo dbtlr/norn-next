@@ -267,11 +267,22 @@ pub struct StoredDocument {
 }
 
 /// Ordering used by a bounded stored-document scan.
+///
+/// The variant is the case behavior the vault's root was **proven** to have at
+/// the filesystem seam, carried into the store so a scan compares paths the way
+/// the root resolves them. It selects a collation and an index; it never
+/// rewrites a path. A stored path keeps the spelling the tree carries, and
+/// folding it is a comparison the seam defines rather than a normalization the
+/// store performs — `norn_fs::path` is the workspace's one case-folding point
+/// and states what "case-insensitive" covers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoredPathOrder {
     /// Preserve bytewise UTF-8 path order.
     Sensitive,
-    /// Fold ASCII case, matching SQLite's `NOCASE` collation.
+    /// Fold ASCII case — `A`–`Z` onto `a`–`z`, every other byte as itself —
+    /// which is exactly SQLite's `NOCASE` collation and exactly the seam's
+    /// fold. Order under it is made total by a bytewise tie-break, so two paths
+    /// that fold together still page in one fixed order.
     AsciiCaseInsensitive,
 }
 
