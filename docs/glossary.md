@@ -53,6 +53,23 @@ _Avoid_: Candidate (unqualified)
 **Ambiguity class**:
 The set of vault documents satisfying the same resolution target when that target does not identify exactly one document.
 
+**Reading**:
+The trust label and store epoch under which a report was answered, carried on every report so a consumer judges the answer without a second request. When a model ran, the reading also names the rungs that ran, each model's identity, and how far the semantic state trails the epoch.
+
+**Search ladder**:
+The ordered rungs a ranked search may answer from: a model-free lexical floor, then vector nearest, query expansion, and reranking. A vault enables rungs above the floor; a request may run fewer.
+_Avoid_: Mode (for the ladder as a whole), tier
+
+**Field universe**:
+The exact set of field names a vault can be asked about: the keys its vault schema declares united with the keys its documents actually carry.
+
+**Vault request**:
+A request about one registered vault, answered by the host. Every read, registry mutation, status reading, and reload is a vault request.
+
+**Machine-local verb**:
+A verb that acts on the installation rather than on a vault and never reaches the host: service management, shell completions, manual pages, self-update, and model weight acquisition.
+_Avoid_: Local command, offline verb
+
 ## Engineering language
 
 **Store schema**:
