@@ -410,6 +410,7 @@ dependencies = [
  "libc",
  "norn-testkit",
  "norn-wire",
+ "serde_yaml",
  "toml",
 ]
 
