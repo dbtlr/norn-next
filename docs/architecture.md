@@ -1329,12 +1329,14 @@ deferred `BEGIN` takes no snapshot — so the trust label and the snapshot descr
 instant, and the read runs outside the lock: it sees the last committed increment, never
 blocks the writer (checkpointing stays passive — an aggressive checkpoint mode would trade
 that guarantee away), and may trail in-flight derivation. Concurrent reads serialize against
-each other on the one reader per entry; measured reader contention is what mints more
-through the same seam. The reader is torn down before the store closes on every closing
+each other on the one reader per entry: while one read holds the reader, the entry gate
+rides the other's wait for the snapshot-establishing statement. That wait is the priced
+cost — the read-concurrency bar authors the ceiling it stays under, and measured contention
+past that ceiling is what mints more readers through the carved pool seam. The reader is torn down before the store closes on every closing
 path, and a read's hold is demand on the entry: it holds the entry's demand for as long as
 the read runs, restarts the idle interval when it ends, and withdraws an idle detach that
 is scheduled and not yet in flight — so **an idle teardown neither runs under a read nor
-precedes one into the entry.** It buys no more than that. A refusal, a host destruction,
+precedes one into the entry.** The hold buys nothing beyond that deferral. A refusal, a host destruction,
 and a job leg failing its way into a release each reach the entry without consulting a
 read, and a read in flight stops none of them. Through such a teardown the read keeps
 answering from the handle it holds until it completes, and nothing promises the database
@@ -1344,29 +1346,49 @@ price is the one ADR 0015 accepted: a read holds no coverage, so no teardown wai
 costs.
 
 **Hold acquisition is the read path's one adjudication, and the handle is its proof.** A
-read reaches a reader only through a hold, and a hold is minted only over an entry whose
-published demand is a serving state; what the hold carries beside the handle is that
-published demand, never the trust label a park outranks. An acquisition that mints no hold
-refuses in one of two shapes, both read under the same hold of the entry gate a successful
-acquisition takes its handle under: the published demand itself — an unknown vault, an
-entry holding no coverage, a warming entry with its phase, an untrusted state, coverage on
-its way back, or a park under its own code — rendered through the one mapping every surface
-renders a demand through; or reader-unavailable, which is an entry serving while its read
-seam does not. A refused read is demand the way a served one is.
+read reaches a reader only through a hold. A name the serving set does not hold is decided
+at that lookup, before any entry gate is taken: the acquisition refuses as an unknown vault
+and records nothing against anything. Over an entry, the acquisition reads the published
+demand and the entry's retained reader fact under one hold of that entry's gate, and mints
+a hold only where the demand is a serving state and a reader stands beside it; what the
+hold carries with the handle is that published demand, never the trust label a park
+outranks. An acquisition that mints no hold refuses in one of two shapes, and the demand
+takes precedence: the published demand itself — a warming entry with its phase, an
+untrusted state, coverage on its way back, or a park under its own code — rendered through
+the one mapping every surface renders a demand through; or, where the demand is serving,
+reader-unavailable, which is an entry serving every surface but this one.
 
-The attachment mints the reader fallibly, at the publication that installs the coverage the
-reader reads and under the lock that publishes the trust label beside it, so the handle an
-entry holds belongs to the coverage that entry holds, and a reader minted for coverage the
-entry has moved on from is closed rather than installed. A mint that fails leaves the entry
-serving every surface but this one and publishes the reason its reads refuse with, so no
-entry answers no reads without saying why; the next publication mints again and re-derives
-the reason.
+A read's hold is a demand lease, so the acquisition does everything a demand does before it
+answers. Over an entry holding no coverage it schedules the attach and refuses with the
+warming state that attach runs under, so an unattached entry is not a rendering a read
+produces, and a workload of reads alone re-attaches the vault it reads. It withdraws the
+registry's own parks — a duplicate root, a root the registry could not read — because both
+are statements about roots and the acquisition it schedules is the read that classifies
+those roots again; the park a read therefore renders is the one no acquisition adjudicates,
+maintainer contention. A refused acquisition records demand the way a served one does: it
+holds the entry's idle interval open for as long as it runs and restarts it when it ends,
+and over an unattached entry it is what schedules the attach.
 
-**A request is answered from one snapshot.** Every statement a request runs takes its rows
-from the snapshot its hold established, and the reading the request carries names the trust
-state and the store's write generation at that snapshot. The guarantee is the request's
-own: the reader is a second connection beside the writer, so no write consumes the snapshot
-a request read, and a request reads nothing that binds a later write.
+The attachment opens the reader off the entry gate, so the open's blocking I/O and its
+panic path stay outside the lock, and installs it under the gate hold that publishes the
+trust label beside it — the handle an entry holds belongs to the coverage that entry holds,
+and a reader whose coverage the entry moved on from before the install is closed rather
+than installed. A mint that fails changes no trust label and publishes no refusal of its
+own: the reason is retained beside the entry's published demand, the way a reload's
+diagnostic and an engine's are, `vault status` reports it beside trust and engine state,
+and a read refuses with it as reader-unavailable's detail. A mint may fail at a publication
+that is not serving, and then the demand renders and the retained fact stays silent until
+the entry serves again. The next publication mints again and re-derives the fact.
+
+**A request is answered from one snapshot.** Every lane-1 statement a request runs takes
+its rows from the snapshot its hold established — the store counts the snapshots
+established through a reader, and an acquired request establishes exactly one — and the
+reading the request carries names the trust state and the store generation at that
+snapshot; a semantic rung reads its engine's sidecar instead and carries its own freshness
+in that same reading. The guarantee is one of transaction ownership: the reader is a second
+connection beside the writer, so no write consumes the snapshot a request read and no later
+write executes inside the request's snapshot transaction. A precondition a read observed is
+the applier's to check again at the write.
 
 The suffix-resolution ladder follows the same split. Targets resolve by **right-to-left,
 segment-aligned path suffix** — `glossary` matches any `**/glossary.md`; `norn/glossary`
