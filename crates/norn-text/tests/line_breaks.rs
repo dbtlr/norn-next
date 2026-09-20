@@ -374,8 +374,8 @@ fn rendering_adds_no_terminator_to_a_body_that_already_ends_a_line() {
 /// Every `.rs` file of the crate, pinned at compile time.
 ///
 /// The list is pinned rather than walked so the scan below cannot quietly read
-/// zero files; `the_pinned_sources_are_every_source_file` is what keeps the
-/// pin honest when a module is added.
+/// zero files; `the_pinned_sources_are_every_module_the_crate_declares` is what
+/// keeps the pin honest when a module is added.
 const SOURCES: &[(&str, &str)] = &[
     ("src/body.rs", include_str!("../src/body.rs")),
     ("src/diagnostic.rs", include_str!("../src/diagnostic.rs")),
@@ -406,75 +406,163 @@ const SOURCES: &[(&str, &str)] = &[
     ("src/value.rs", include_str!("../src/value.rs")),
 ];
 
-/// The shapes that cut text into lines on `\n` alone, or on whatever the
-/// standard library's `lines` calls a line.
+/// The two files allowed to decide what a line break is, each for a stated
+/// reason.
 ///
-/// Each one is a line rule, and a second line rule is a second answer to
-/// *where does this line end* that nothing reconciles with the first. The
-/// crate's answer is `span::split_lines_inclusive` and `span::LineCursor`.
-const FORBIDDEN: &[&str] = &[
-    "split_inclusive('\\n')",
-    "split_inclusive(\"\\n\")",
-    "split('\\n')",
-    "split(\"\\n\")",
-    "split_terminator('\\n')",
-    "split_terminator(\"\\n\")",
-    ".lines()",
-    ".lines_any()",
+/// `span.rs` defines the rule. `line_ending.rs` classifies a document into the
+/// two terminator spellings a synthesis path can write, which is a question
+/// about `\n` by construction — see its own documentation for why that is not
+/// the break rule.
+const RULE_OWNERS: &[(&str, &str)] = &[
+    ("src/span.rs", "defines the crate's line break rule"),
+    (
+        "src/line_ending.rs",
+        "classifies a document's terminator spelling, which is a question about \\n",
+    ),
 ];
 
-/// The one file allowed to spell them: the module that defines the break rule,
-/// whose own prose names the shape it exists in place of.
-const DEFINITION: &str = "src/span.rs";
-
-/// The crate has one definition of a line break, so no file outside
-/// `span.rs` cuts text into lines by any other rule.
+/// A `\n` literal that is not a line rule, by the exact source line carrying
+/// it and why it is exempt.
 ///
-/// A seventh site returning silently is the failure this stands against: every
-/// site fixed here was correct-looking, locally reasonable, and wrong only
-/// about a break style its own author never wrote.
+/// Matching on the line's text rather than its number keeps an exemption
+/// attached to the code it excuses: moving the code carries it, and rewriting
+/// the code loses it and has to be re-argued.
+const NOT_A_LINE_RULE: &[(&str, &str, &str)] = &[
+    (
+        "src/frontmatter/render.rs",
+        r#"'\n' => out.push_str("\\n"),"#,
+        "an escape table entry: it spells a newline into a quoted scalar",
+    ),
+    (
+        "src/frontmatter/fields.rs",
+        r"'n' => '\n',",
+        "an unescape table entry: it reads \\n back out of a quoted scalar",
+    ),
+    (
+        "src/frontmatter/fields.rs",
+        r"let trailing = text.bytes().rev().take_while(|byte| *byte == b'\n').count();",
+        "counts breaks in a value YAML already decoded, where every break is \\n",
+    ),
+    (
+        "src/frontmatter/extract.rs",
+        r"rest.strip_prefix('\n')",
+        "the opening-fence rule, which admits \\n and \\r\\n and not a lone \\r",
+    ),
+];
+
+/// The `\n` literals a line rule is written with.
+const NEWLINE_LITERALS: &[&str] = &[r"'\n'", r#""\n""#, r"b'\n'"];
+
+/// The line rules that carry no `\n` literal at all, so the scan cannot see
+/// them by their bytes and names them instead.
+const NAMED_RULES: &[&str] = &[".lines()", ".lines_any()", ".split_lines()"];
+
+/// Whether `line` also names `\r`, which is what makes a `\n` literal on it
+/// half of the crate's rule rather than a rule of its own.
+fn reconciles_with_carriage_return(line: &str) -> bool {
+    line.contains(r"\r")
+}
+
+/// `line` with every run of whitespace removed, so a rule spelled
+/// `text . lines ()` is the rule spelled `text.lines()`.
+fn despaced(line: &str) -> String {
+    line.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+/// Outside the two files that own the rule, no source line decides what a line
+/// is on `\n` alone.
+///
+/// The scan is keyed on the rule rather than on a list of function names: a
+/// `\n` literal standing on a line that never mentions `\r` is a line rule
+/// with half the rule missing, however it is spelled — `split_inclusive`,
+/// `split_once`, `splitn`, `ends_with`, `find`, a byte-slice `split`, or a
+/// hand-rolled loop. That is why the four exemptions below are exemptions
+/// rather than a longer ban list: each is a `\n` literal that is not deciding
+/// where a line ends.
+///
+/// **What it does not see.** A rule written with no `\n` literal and no name
+/// this test knows — `split(char::is_whitespace)`, a `char` constant defined
+/// elsewhere and used here — passes. The scan narrows the ways a seventh site
+/// can return; it does not close them.
 #[test]
-fn no_source_outside_the_definition_cuts_lines_by_its_own_rule() {
+fn no_source_outside_the_rule_owners_decides_a_line_on_lf_alone() {
     let mut found = Vec::new();
+    let mut excused: Vec<(&str, &str)> = Vec::new();
     for (file, source) in SOURCES {
-        if *file == DEFINITION {
+        if RULE_OWNERS.iter().any(|(owner, _)| owner == file) {
             continue;
         }
-        for shape in FORBIDDEN {
-            if source.contains(shape) {
-                found.push(format!("`{shape}` in {file}"));
+        for line in source.lines() {
+            let text = line.trim();
+            let named = NAMED_RULES.iter().any(|rule| despaced(line).contains(rule));
+            let literal = NEWLINE_LITERALS.iter().any(|shape| line.contains(shape))
+                && !reconciles_with_carriage_return(line);
+            if !(named || literal) {
+                continue;
+            }
+            match NOT_A_LINE_RULE
+                .iter()
+                .find(|(excused_file, excused_line, _)| {
+                    excused_file == file && *excused_line == text
+                }) {
+                Some((excused_file, excused_line, _)) => excused.push((excused_file, excused_line)),
+                None => found.push(format!("{text}   in {file}")),
             }
         }
     }
     assert_eq!(
         found,
         Vec::<String>::new(),
-        "use `span::split_lines_inclusive` or `span::LineCursor` instead"
+        "decide the line with `span::split_lines_inclusive` or `span::LineCursor`, \
+         or add the line to NOT_A_LINE_RULE with the reason it is not one"
     );
+    // A stale exemption is an exemption nobody re-argued, so every one of them
+    // has to be earning its place right now.
+    for (file, line, _) in NOT_A_LINE_RULE {
+        assert!(
+            excused.contains(&(file, line)),
+            "NOT_A_LINE_RULE excuses `{line}` in {file}, which is no longer there"
+        );
+    }
 }
 
 /// The negative control for the scan above: the shapes it bans are shapes it
 /// can actually see, so a clean result means *absent* rather than *unread*.
 #[test]
-fn the_forbidden_shapes_are_findable_in_source_text() {
-    let planted = "for line in text.split_inclusive('\\n') { drop(line); }";
-    assert!(FORBIDDEN.iter().any(|shape| planted.contains(shape)));
-    // And the definition file, the one exemption, really does spell one —
-    // so the exemption is load-bearing and not a leftover.
-    let definition = SOURCES
-        .iter()
-        .find(|(file, _)| *file == DEFINITION)
-        .expect("the definition file is pinned");
-    assert!(FORBIDDEN.iter().any(|shape| definition.1.contains(shape)));
+fn the_scan_sees_a_line_rule_however_it_is_spelled() {
+    let sees = |planted: &str| {
+        let named = NAMED_RULES
+            .iter()
+            .any(|rule| despaced(planted).contains(rule));
+        let literal = NEWLINE_LITERALS.iter().any(|shape| planted.contains(shape))
+            && !reconciles_with_carriage_return(planted);
+        named || literal
+    };
+    for planted in [
+        r"for line in text.split_inclusive('\n') { drop(line); }",
+        r#"let (head, tail) = text.split_once("\n")?;"#,
+        r"let mut parts = text.splitn(2, '\n');",
+        r"for chunk in text.as_bytes().split(|byte| *byte == b'\n') { drop(chunk); }",
+        r"if !text.ends_with('\n') { out.push('x'); }",
+        r"while let Some(at) = text[from..].find('\n') { from += at + 1; }",
+        r"for line in text.lines() { drop(line); }",
+        r"for line in text . lines () { drop(line); }",
+    ] {
+        assert!(sees(planted), "the scan is blind to {planted:?}");
+    }
+    // And the reconciliation really reconciles: the crate's own three-way
+    // trim is not a finding.
+    assert!(!sees(r"let text = line.trim_end_matches(['\r', '\n']);"));
 }
 
 /// The pin covers the crate: `SOURCES` is exactly the set of files the crate's
-/// own `mod` declarations reach, and nothing else.
+/// `mod` declarations reach, walked through **every** pinned file rather than
+/// through the crate root alone.
 ///
-/// Without this, adding a module is how a new site escapes the scan — the scan
-/// would keep passing, over the files it was told about in the diff before.
-/// The declarations are read out of the pinned text rather than off the disk,
-/// so the check needs no filesystem and cannot drift from what was compiled.
+/// A module declared in a leaf file — `mod sneaky;` in `link.rs`, resolving to
+/// `src/link/sneaky.rs` — is how a new site escapes a scan that only reads the
+/// root: the file is never pinned, so it is never scanned, and every test keeps
+/// passing. Walking the declarations transitively is what closes that.
 #[test]
 fn the_pinned_sources_are_every_module_the_crate_declares() {
     /// The module names a file declares. Rust source is `\n`-terminated here,
@@ -487,7 +575,8 @@ fn the_pinned_sources_are_every_module_the_crate_declares() {
                 let rest = line
                     .strip_prefix("mod ")
                     .or_else(|| line.strip_prefix("pub mod "))
-                    .or_else(|| line.strip_prefix("pub(crate) mod "))?;
+                    .or_else(|| line.strip_prefix("pub(crate) mod "))
+                    .or_else(|| line.strip_prefix("pub(super) mod "))?;
                 rest.strip_suffix(';').map(str::to_string)
             })
             .collect()
@@ -496,31 +585,55 @@ fn the_pinned_sources_are_every_module_the_crate_declares() {
         SOURCES
             .iter()
             .find(|(pinned, _)| *pinned == file)
-            .unwrap_or_else(|| panic!("{file} is declared but not pinned in SOURCES"))
-            .1
+            .map(|(_, source)| *source)
     };
-
-    let mut reached = vec!["src/lib.rs".to_string()];
-    for module in declared(text("src/lib.rs")) {
-        let leaf = format!("src/{module}.rs");
-        let directory = format!("src/{module}/mod.rs");
-        if SOURCES.iter().any(|(file, _)| *file == directory) {
-            reached.push(directory.clone());
-            for child in declared(text(&directory)) {
-                reached.push(format!("src/{module}/{child}.rs"));
-                let _ = text(&reached[reached.len() - 1]);
-            }
+    /// Where a file's submodule files live: beside `lib.rs` and `mod.rs`, and
+    /// in a directory named after any other file.
+    fn module_directory(file: &str) -> String {
+        if file == "src/lib.rs" || file.ends_with("/mod.rs") {
+            file.rsplit_once('/')
+                .expect("a pinned path has a parent")
+                .0
+                .to_string()
         } else {
-            reached.push(leaf.clone());
-            let _ = text(&leaf);
+            file.strip_suffix(".rs")
+                .expect("a pinned path is a .rs file")
+                .to_string()
         }
     }
-    reached.sort();
-    let mut pinned: Vec<String> = SOURCES
+
+    let mut reached = std::collections::BTreeSet::from(["src/lib.rs".to_string()]);
+    let mut pending = vec!["src/lib.rs".to_string()];
+    while let Some(file) = pending.pop() {
+        let source = text(&file).expect("a reached file is pinned");
+        // `#[path]` moves a module's file somewhere this walk does not look,
+        // so the walk would go on claiming coverage it no longer has.
+        assert!(
+            !source.contains("#[path"),
+            "{file} moves a module with #[path]; the coverage walk cannot follow it"
+        );
+        let directory = module_directory(&file);
+        for module in declared(source) {
+            let leaf = format!("{directory}/{module}.rs");
+            let nested = format!("{directory}/{module}/mod.rs");
+            let resolved = if text(&leaf).is_some() {
+                leaf
+            } else if text(&nested).is_some() {
+                nested
+            } else {
+                panic!(
+                    "`mod {module};` in {file} is pinned in SOURCES as neither {leaf} nor {nested}"
+                )
+            };
+            if reached.insert(resolved.clone()) {
+                pending.push(resolved);
+            }
+        }
+    }
+    let pinned: std::collections::BTreeSet<String> = SOURCES
         .iter()
         .map(|(file, _)| (*file).to_string())
         .collect();
-    pinned.sort();
     assert_eq!(
         pinned, reached,
         "SOURCES and the crate's module declarations name different files"
