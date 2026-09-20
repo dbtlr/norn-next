@@ -17,8 +17,9 @@ the in-binary manifest, enabled per vault by configuration, with weights acquire
 explicit installation-scope act and never by a query. The vault's enabled set is a
 request's default; a request subtracts rungs or forces one, and a forced rung the vault
 has not enabled refuses with a typed reason. Every report declares the rungs that ran and
-each model's identity, and states how far model-derived state trails the store, so
-repeatability is stated on the answer rather than assumed. The firewall is carried per
+each model's identity, and for each rung that holds state it states how far that state
+trails the store; a request-time rung holds none and reports no lag. Repeatability is
+stated on the answer rather than assumed. The firewall is carried per
 rung: a rung that holds state reaches lane 1 only through the store's feed-read partition,
 as [ADR 0021](0021-derived-indexes-split-into-two-lanes.md) already requires of an engine;
 a rung that runs at request time holds no state and reaches only a report type. A

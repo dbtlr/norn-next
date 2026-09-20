@@ -54,7 +54,7 @@ _Avoid_: Candidate (unqualified)
 The set of vault documents satisfying the same resolution target when that target does not identify exactly one document.
 
 **Answer reading**:
-The trust state and store generation a vault report was answered under, carried on the report so a consumer judges the answer without a second request. When a model contributed, it also names each model and how far model-derived state trailed the store.
+The trust state and store generation a vault report was answered under, carried on the report so a consumer judges the answer without a second request. When a model contributed, it also names each model and, for a model that holds derived state, how far that state trailed the store; a model applied at request time holds none and reports no lag.
 _Avoid_: Reading (unqualified; a walk refusal that stands is also a reading)
 
 **Search ladder**:
@@ -70,7 +70,7 @@ A request addressed to one vault and answered by the host from that vault's entr
 A request addressed to the host's serving set as a whole: registering, unregistering, listing, resolving, or editing registrations, and the status roll-up over every vault.
 
 **Installation request**:
-A request that acts on the norn installation itself: it names no vault, carries no answer reading, and is the only kind of request permitted to reach the network.
+A request that acts on the norn installation itself: it names no vault, carries no answer reading, and is the only kind of request permitted to reach the external network beyond the loopback every routed request crosses.
 _Avoid_: Local command, offline verb
 
 ## Engineering language
