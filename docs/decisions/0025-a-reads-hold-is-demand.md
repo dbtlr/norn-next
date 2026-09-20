@@ -11,9 +11,11 @@ fact: work running outside the entry's lock is coming back. Read where a detach 
 scheduled and nowhere after, it left a read that began behind a scheduled detach to be torn
 down under its own live hold, and it left a workload of reads alone with no way back to an
 attached entry, because a pin is not demand. **A read's hold is demand on the entry, and it
-is the lifecycle's own demand lease that says so.** One further ruling arrives here that
+is the lifecycle's own demand lease that says so.** Two further rulings arrive here that
 ADR 0015 does not carry: the reader's open is a **fallible mint** that answers a reason
-rather than an absence, and that never panics under the entry gate. ADR 0015 itself
+rather than an absence and never panics under the entry gate; and **no acquisition waits
+for the entry's connection while it holds the entry gate**, because the price ADR 0015 put
+on contention was not a slow path but a deadlock. ADR 0015 itself
 superseded [0014](0014-snapshot-readers.md), which recorded the same reader and priced the
 same costs; what 0015 corrected was the reach of the lifetime rule, and what this record
 corrects is what a read's hold is.
@@ -34,9 +36,28 @@ handle in entry state **beside the attachment, never inside it**.
 Each read is one WAL snapshot transaction, **established under the entry gate lock in the
 same critical section that reads trust** — established by a read statement, because a bare
 deferred `BEGIN` takes no snapshot — so the trust label and the snapshot describe the same
-instant; the read itself runs outside the lock, at the priced cost of the hot per-entry
-lock riding across that one statement — a cheap read alone, a wait where a concurrent read
-still holds the one reader. A snapshot sees the last committed increment, never a torn one,
+instant; the read itself runs outside the lock. **No acquisition waits for the entry's
+connection while it holds that lock.** Under the gate it tries for the connection without
+blocking and establishes the snapshot there where it is free; where another read holds the
+connection, the acquisition gives the gate back, waits outside it under the demand it has
+already recorded, takes the gate again and reads the published demand afresh before it
+establishes, and — where the entry has stopped serving, or its reader is no longer the one
+waited for — gives the connection back and refuses with what the entry now publishes.
+
+ADR 0015 priced that contention as "the hot per-entry lock riding across that one
+statement — a cheap read alone, a wait where a concurrent read still holds the one reader",
+and it priced it wrong. A lock held across a wait for a resource that only another holder
+of the same lock can release is not a slow path: one read in flight and one concurrent
+acquisition freeze every gate-taking surface of that entry — status, demand, the reap loop
+and job-leg completion among them — with no mutation and no second vault needed to reach
+it. That price is withdrawn. What contention costs instead is the second reading a
+contended acquisition takes, and what the withdrawal keeps is the coupling itself: every
+snapshot is still established under the entry gate, in the same critical section that reads
+the published demand, so the state a read answers under and the snapshot it answers from
+still describe one instant. The uninterrupted critical section per read that the old
+pricing bought was buying the deadlock.
+
+A snapshot sees the last committed increment, never a torn one,
 never blocks the writer, and may trail in-flight derivation; trust state, not the
 connection, is what buys the right to answer. On the one reader, concurrent reads serialize
 against each other, and that measured contention — not an assumption — is what mints more
