@@ -71,7 +71,7 @@ A request addressed to the host's serving set as a whole: registering, unregiste
 
 **Installation request**:
 A request that acts on the norn installation itself: it names no vault, carries no answer reading, and is the only kind of request permitted to reach the network.
-_Avoid_: Local command, offline verb, machine-local verb
+_Avoid_: Local command, offline verb
 
 ## Engineering language
 
