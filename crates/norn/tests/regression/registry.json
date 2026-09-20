@@ -667,6 +667,8 @@
           "crates/norn-text/tests/editing.rs::an_edit_moves_only_the_bytes_of_the_construct_it_addresses",
           "crates/norn-text/tests/editing.rs::removing_a_field_leaves_the_comments_and_blank_lines_around_it",
           "crates/norn-text/tests/editing.rs::a_crlf_document_stays_crlf_through_every_synthesis_path",
+          "crates/norn-text/tests/line_breaks.rs::removing_a_field_keeps_a_comment_standing_after_a_lone_cr_break",
+          "crates/norn-text/tests/line_breaks.rs::a_section_replace_writes_the_documents_terminator_over_every_caller_break",
           "crates/norn-text/tests/round_trip.rs::adversarial_document_edits_are_one_construct_diffs",
           "crates/norn-text/tests/sections.rs::a_setext_headings_underline_belongs_to_the_heading",
           "crates/norn-text/tests/sections.rs::a_heading_at_end_of_file_without_a_newline_reads_as_an_empty_section"
