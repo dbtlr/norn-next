@@ -15,6 +15,7 @@ mod registry;
 mod reload;
 mod semantic;
 
+pub use evidence::ReadReading;
 /// **The harness-reachable readers of a host's own account.** Every job writes
 /// the account whatever features are on; reading it is what this feature opens,
 /// beside [`ProductionEntryOps::account`], [`Host::classifications`] and
@@ -27,9 +28,9 @@ pub use evidence::{EvidenceReading, JobEvidence};
 #[cfg(feature = "induced-failure")]
 pub use lifecycle::WorkInFlight;
 pub use lifecycle::{
-    Demand, DemandLease, EntryOps, EntryReloadFailure, Healing, Host, HostError, JobFailure,
-    LifecyclePolicy, LifecyclePolicyError, ProgressReporter, ReadHold, ReconcileWork,
-    SnapshotSource,
+    AnswerReading, Demand, DemandLease, EntryOps, EntryReloadFailure, Established, Healing, Host,
+    HostError, JobFailure, LifecyclePolicy, LifecyclePolicyError, ProgressReporter, ReadHold,
+    ReadRefusal, ReadSource, ReaderUnavailable, ReconcileWork, SnapshotSource,
 };
 /// One vault's registration: the name it is served under, its root, and where
 /// its schema is read from.

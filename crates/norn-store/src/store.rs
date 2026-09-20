@@ -319,6 +319,18 @@ pub struct StoreReading {
 }
 
 impl StoreReading {
+    /// The reading a snapshot established at `write_generation` in `epoch`.
+    ///
+    /// The establishment mints its own, and this is the spelling a caller
+    /// standing in for one uses: a test double for a reader answers under a
+    /// reading the same shape a store's own answers under.
+    pub fn of(epoch: impl Into<String>, write_generation: i64) -> Self {
+        StoreReading {
+            epoch: epoch.into(),
+            write_generation,
+        }
+    }
+
     /// The database this reading names.
     pub fn epoch(&self) -> &str {
         &self.epoch

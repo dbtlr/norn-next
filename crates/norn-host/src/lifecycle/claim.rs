@@ -339,7 +339,7 @@
 //! carries it rather than a call graph that keeps the two apart. `Job::Detach`
 //! calls `EntryOps::detach` through `give_back`, which catches its panic before
 //! this is ever reached, so a detach panic completes the release it was part of
-//! instead of unwinding here — `a_detach_panic_on_an_idle_leg_completes_the_release_with_a_reads_pin_standing`
+//! instead of unwinding here — `a_detach_panic_under_a_read_completes_the_release_with_the_reads_pin_standing`
 //! pins that a read's pin survives such a panic through the give-back. `Job::Attach`
 //! makes calls of its own outside the entry's lock — `EntryOps::attach`,
 //! `drain_observed`, `entries.recheck` — that panic reaches this the ordinary
@@ -353,7 +353,13 @@
 //! the discipline covers rather than work beside it: `Host::begin_read` takes
 //! the pin under the lock it reads the entry's handle in, and `ReadHold`'s drop
 //! gives it back. Pinned by
-//! `a_read_in_flight_holds_the_entry_against_an_idle_teardown`.
+//! `a_read_in_flight_holds_the_entry_against_an_idle_teardown`. A read holds
+//! the entry's demand beside the pin, so the idle teardown a read would
+//! otherwise be racing is withdrawn where it is scheduled and not yet running
+//! — pinned by
+//! `a_read_withdraws_an_idle_detach_that_is_scheduled_and_not_yet_running`,
+//! with `a_read_does_not_withdraw_a_release_already_in_flight` as its
+//! control.
 //!
 //! **The reader slot.** `EntryState::reader`, with `install_coverage`,
 //! `close_reader` and `Host::begin_read` beside it, lives in the entry state
@@ -375,10 +381,10 @@
 //! `an_attach_publishes_a_reader_beside_the_coverage_it_installs`; and no mint
 //! where nothing is installed, by
 //! `an_attach_the_entry_moved_on_from_mints_no_reader` and
-//! `an_attach_that_installs_no_coverage_mints_no_reader`. Coverage that mints
-//! no handle of its own leaves the slot empty and the entry answering no read,
-//! which is the production configuration today and is pinned by
-//! `coverage_that_mints_no_reader_leaves_an_entry_no_read_reaches`.
+//! `an_attach_that_installs_no_coverage_mints_no_reader`. A mint that refuses
+//! leaves the slot empty and the reason beside it, and the entry goes on
+//! serving every surface but its reads, which is pinned by
+//! `a_mint_that_fails_leaves_an_entry_serving_and_its_reads_refusing`.
 //!
 //! *A reader goes back before the store it was minted from closes.* Carried by
 //! `begin_release`, which lets go of the handle at the window's start, so the

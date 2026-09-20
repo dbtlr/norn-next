@@ -25,8 +25,8 @@ use crate::derivation::{
 use crate::evidence::{JobEvidence, count_changeset};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
-    EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, ReloadError, ReloadOutcome,
-    SnapshotSource,
+    EntryOps, Established, Healing, JobFailure, ProgressReporter, ReadSource, ReaderUnavailable,
+    ReconcileWork, ReloadError, ReloadOutcome, SnapshotSource,
 };
 
 /// Maximum number of document changes materialized for one store transaction.
@@ -188,12 +188,34 @@ impl SnapshotSource for ProductionAttachment {
     /// never one composed out here.
     type Reader = norn_store::SnapshotReader;
 
-    /// [`norn_store::SnapshotReader`] is uninhabited, so an attachment holding
-    /// a live store mints no reader and the entry beside it serves no reads.
-    /// The connection this answers with arrives with the store's read
-    /// builders; what stands here is the seam it arrives through.
-    fn open_reader(&self) -> Option<Self::Reader> {
-        None
+    /// The store mints the handle, over the file it is holding open.
+    ///
+    /// It is fallible because the mint is a second open of that file: the
+    /// environment can refuse it, and a refusal is an entry that serves every
+    /// surface but this one rather than an entry that silently answers no
+    /// reads. The refusal is the store's own account of what it met.
+    fn open_reader(&self) -> Result<Self::Reader, ReaderUnavailable> {
+        self.store
+            .open_reader()
+            .map_err(|error| ReaderUnavailable::new(error.to_string()))
+    }
+}
+
+impl ReadSource for norn_store::SnapshotReader {
+    type Snapshot = norn_store::Snapshot;
+
+    /// The store establishes the snapshot and reports what it cost: the
+    /// reading it was established at, the one statement that established it,
+    /// and the waits the one handle an entry shares cost this read.
+    fn establish(self: Arc<Self>) -> Result<Established<Self::Snapshot>, ReaderUnavailable> {
+        let snapshot = norn_store::SnapshotReader::establish(self)
+            .map_err(|error| ReaderUnavailable::new(error.to_string()))?;
+        Ok(Established {
+            reading: snapshot.reading().clone(),
+            statements: snapshot.counters().statements_executed(),
+            waits: snapshot.waits(),
+            snapshot,
+        })
     }
 }
 

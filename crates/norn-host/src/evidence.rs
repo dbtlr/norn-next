@@ -35,13 +35,14 @@
 //!
 //! [window]: norn_fs::reads::ReadWindow
 //!
-//! # What is not here
+//! # The read account is beside it, and is not the same subject
 //!
-//! **Snapshot reads.** `norn_store::SnapshotReader` is an uninhabited type: no
-//! value of it exists, [`crate::EntryOps`] mints none, and no read is answered
-//! from one. There is nothing to observe, so there is no field for it here — an
-//! always-zero count would read as a snapshot surface that is quiet rather than
-//! as one that is not built.
+//! [`ReadEvidence`] keeps what this host's **reads** cost, and it is separate
+//! for the reason this account is separate from a derivation counter: a read
+//! is not a job. It runs on the caller's thread rather than on a worker, it
+//! opens no attribution window, and what is asked of it is what it did while
+//! it held the entry gate rather than what it read off the filesystem. Folding
+//! the two would make a job's reading move when a client read a vault.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -385,5 +386,92 @@ mod tests {
             ),
             (1, 2, 3, 1)
         );
+    }
+}
+
+/// What a host's reads have cost, kept rather than discarded.
+///
+/// **Not the job account, and not a derivation counter.** A job's account says
+/// what a lifecycle job spent; a derivation counter says what one request
+/// derived, and a read derives nothing by construction. What this counts is
+/// the read path's own shape: how many reads were served, what each ran while
+/// it held the entry gate, and what concurrent reads of one entry paid for
+/// sharing the one handle that entry holds.
+///
+/// Every field is a running total, read by subtracting two readings — with one
+/// exception stated by its own name: the widest gate-held statement count and
+/// the widest wait a single read paid are maxima, because a per-read bar is a
+/// statement about the worst read rather than about the mean of a run.
+#[derive(Debug, Default)]
+pub(crate) struct ReadEvidence {
+    reads_served: AtomicU64,
+    statements_under_the_gate: AtomicU64,
+    widest_statements_under_the_gate: AtomicU64,
+    reader_waits: AtomicU64,
+    widest_reader_wait: AtomicU64,
+}
+
+/// One reading of a host's read account.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReadReading {
+    /// Reads that took a hold, over every entry.
+    pub reads_served: u64,
+    /// Statements run against a database while the entry gate was held. One
+    /// per read — the snapshot-establishing statement — so this moves with
+    /// `reads_served` and any other number is a read that ran work under the
+    /// lock every other holder of that entry waits behind.
+    pub statements_under_the_gate: u64,
+    /// The most statements any one read ran under the gate, which is the
+    /// value a per-read bar is stated against.
+    pub widest_statements_under_the_gate: u64,
+    /// Times a read waited for the one handle its entry holds. Nonzero is
+    /// reader contention, measured rather than assumed.
+    pub reader_waits: u64,
+    /// The most waits any one read paid.
+    pub widest_reader_wait: u64,
+}
+
+impl ReadReading {
+    /// What happened between an earlier reading and this one.
+    ///
+    /// The cumulative fields subtract; the maxima do not — a widest read is
+    /// not a difference, so each is reported as it stands.
+    pub fn since(self, earlier: ReadReading) -> ReadReading {
+        ReadReading {
+            reads_served: self.reads_served.saturating_sub(earlier.reads_served),
+            statements_under_the_gate: self
+                .statements_under_the_gate
+                .saturating_sub(earlier.statements_under_the_gate),
+            widest_statements_under_the_gate: self.widest_statements_under_the_gate,
+            reader_waits: self.reader_waits.saturating_sub(earlier.reader_waits),
+            widest_reader_wait: self.widest_reader_wait,
+        }
+    }
+}
+
+impl ReadEvidence {
+    /// This host's read account as it stands.
+    pub(crate) fn read(&self) -> ReadReading {
+        let get = |field: &AtomicU64| field.load(Ordering::Relaxed);
+        ReadReading {
+            reads_served: get(&self.reads_served),
+            statements_under_the_gate: get(&self.statements_under_the_gate),
+            widest_statements_under_the_gate: get(&self.widest_statements_under_the_gate),
+            reader_waits: get(&self.reader_waits),
+            widest_reader_wait: get(&self.widest_reader_wait),
+        }
+    }
+
+    /// Record what one read's snapshot establishment ran and waited for.
+    pub(crate) fn count_read<S>(&self, established: &crate::Established<S>) {
+        self.reads_served.fetch_add(1, Ordering::Relaxed);
+        self.statements_under_the_gate
+            .fetch_add(established.statements, Ordering::Relaxed);
+        self.reader_waits
+            .fetch_add(established.waits, Ordering::Relaxed);
+        self.widest_statements_under_the_gate
+            .fetch_max(established.statements, Ordering::Relaxed);
+        self.widest_reader_wait
+            .fetch_max(established.waits, Ordering::Relaxed);
     }
 }
