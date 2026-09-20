@@ -110,6 +110,98 @@ fn stored_document_pages_share_ascii_folded_order_without_changing_sensitive_ord
     );
 }
 
+/// The sample the folded page order is pinned over, shared verbatim with
+/// `norn-fs`'s test of `CaseSensitivity::compare`.
+///
+/// It is deliberately awkward: ASCII case pairs, the punctuation sitting
+/// between the two ASCII case ranges, and non-ASCII letters that do have case.
+/// A fold widened to Unicode reorders the last group and a fold narrowed
+/// reorders the first, so neither change can pass quietly on one side alone.
+const FOLD_CONTRACT_SAMPLE: &[&str] = &[
+    "B.md",
+    "a.md",
+    "A.md",
+    "_x.md",
+    "[y.md",
+    "Zeta.md",
+    "zeta.md",
+    "Éclair.md",
+    "éclair.md",
+    "Straße.md",
+    "STRASSE.md",
+    "Éb.md",
+    "éa.md",
+    "a/Z.md",
+    "A/b.md",
+    "ab/no.md",
+];
+
+/// The written contract both implementations of the fold are held to: ASCII
+/// lowercase, then the raw bytes to break a fold's ties.
+///
+/// Computed here rather than read out of the seam, because this crate depends
+/// on nothing in the seam — the two are one contract implemented twice, and a
+/// test that asked the other implementation would only assert that it equals
+/// itself.
+fn contract_order(sample: &[&str]) -> Vec<String> {
+    let mut ordered: Vec<String> = sample.iter().map(|path| (*path).to_string()).collect();
+    ordered.sort_by(|left, right| {
+        left.bytes()
+            .map(|byte| byte.to_ascii_lowercase())
+            .cmp(right.bytes().map(|byte| byte.to_ascii_lowercase()))
+            .then_with(|| left.as_bytes().cmp(right.as_bytes()))
+    });
+    ordered
+}
+
+/// The order a folded page states is the written ASCII-fold contract, read
+/// through the statement the store really emits.
+///
+/// The page is the store's own shape — the collation, the index it seeks, and
+/// the bytewise tie-break that keeps the order total — so this judges what a
+/// caller gets rather than a formula repeated beside it. Swapping `NOCASE` for
+/// a Unicode-folding collation, or dropping the tie-break, fails here.
+#[test]
+fn a_folded_page_states_the_written_ascii_fold_contract() {
+    let scratch = Scratch::new("document-page-fold-contract");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let rows: Vec<_> = FOLD_CONTRACT_SAMPLE
+        .iter()
+        .enumerate()
+        .map(|(index, at)| document(at, &format!("hash-{index}"), "body\n"))
+        .collect();
+    write_documents(&mut request, &rows);
+
+    let paged: Vec<String> = request
+        .stored_documents_after_ordered(
+            None,
+            FOLD_CONTRACT_SAMPLE.len(),
+            StoredPathOrder::AsciiCaseInsensitive,
+        )
+        .expect("the folded page")
+        .iter()
+        .map(|row| row.path.as_str().to_string())
+        .collect();
+    assert_eq!(paged, contract_order(FOLD_CONTRACT_SAMPLE));
+
+    // The contract really orders the awkward parts: a case pair folds together
+    // and breaks on bytes, and a non-ASCII case pair does not fold at all.
+    let at = |path: &str| {
+        paged
+            .iter()
+            .position(|held| held == path)
+            .expect("the sample holds it")
+    };
+    assert!(at("A.md") < at("a.md"));
+    assert!(at("Éclair.md") < at("éclair.md"));
+    assert!(at("STRASSE.md") < at("Straße.md"));
+    // The pair that tells an ASCII fold from a Unicode one: folding É onto é
+    // would put "éa.md" first, and the ASCII fold leaves É where its bytes
+    // put it.
+    assert!(at("Éb.md") < at("éa.md"));
+}
+
 #[test]
 fn ascii_folded_subtree_pages_are_segment_safe_and_cursor_stable() {
     let scratch = Scratch::new("document-subtree-case-order");

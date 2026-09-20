@@ -40,9 +40,9 @@
 //!   normalized path and refuses one that is obviously not — but it spells no
 //!   path differently from the way it arrived, so nothing here can disagree
 //!   with the seam about what two paths are. Where a read has to compare
-//!   case-insensitively it applies the seam's ASCII fold as a collation on the
-//!   way past — see [`crate::StoredPathOrder`] — which changes an order and a
-//!   key range, never a stored byte. **`BINARY` collation is load-bearing**:
+//!   case-insensitively it applies the same ASCII fold the seam is held to,
+//!   spelled here as a collation — see [`crate::StoredPathOrder`] — which
+//!   changes an order and a key range, never a stored byte. **`BINARY` collation is load-bearing**:
 //!   it is what makes the exclusive upper bound below exact, and a
 //!   case-insensitive collation on `suffix_key` would silently change which
 //!   keys a range holds.

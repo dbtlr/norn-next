@@ -271,10 +271,14 @@ pub struct StoredDocument {
 /// The variant is the case behavior the vault's root was **proven** to have at
 /// the filesystem seam, carried into the store so a scan compares paths the way
 /// the root resolves them. It selects a collation and an index; it never
-/// rewrites a path. A stored path keeps the spelling the tree carries, and
-/// folding it is a comparison the seam defines rather than a normalization the
-/// store performs — `norn_fs::path` is the workspace's one case-folding point
-/// and states what "case-insensitive" covers.
+/// rewrites a path. A stored path keeps the spelling the tree carries.
+///
+/// This crate depends on nothing in the filesystem seam, so the fold below is
+/// **a second implementation of the seam's rule, not a derivation of it**. The
+/// contract both are held to is written once — ASCII lowercase, then bytes,
+/// with the byte comparison breaking a fold's ties — and each side carries a
+/// test against it over the same sample, so widening one implementation and
+/// not the other fails.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoredPathOrder {
     /// Preserve bytewise UTF-8 path order.
