@@ -60,7 +60,7 @@ use crate::link::{
     BlockId, Link, markdown_link, parse_block_ids_in, parse_tokens, splice_tokens, wikilink_ranges,
 };
 use crate::section::{SectionAddress, SectionError, SectionSpan, resolve_section_in};
-use crate::span::{LineCursor, split_lines_inclusive};
+use crate::span::{LineCursor, lf_normalized, split_lines_inclusive};
 use crate::tag::{Tag as TagFact, scan_tags};
 
 /// One CommonMark reading of a document body: its headings, the inline
@@ -97,7 +97,19 @@ impl<'a> BodyScan<'a> {
         let mut slugs = SlugCounter::default();
         let mut container_depth: usize = 0;
 
-        for (event, range) in Parser::new(body).into_offset_iter() {
+        // The parse reads a narrower line rule than the rest of the crate: it
+        // opens a backtick fence on `\n` and on `\r\n` and not on a lone
+        // `\r`, so a CR-only document's code is not code and every construct
+        // this scan extracts leaks out of it. Normalizing lone `\r` to `\n`
+        // gives the parse the break rule CommonMark states and the cursor
+        // already counts. The rewrite is byte-length preserving, so every
+        // range the parse reports indexes the original `body` unchanged, and
+        // every offset below — heading starts, link ranges, code ranges — is
+        // an offset into the bytes the caller handed in. A document carrying
+        // no lone `\r` is parsed from the caller's own bytes.
+        let source = lf_normalized(body);
+
+        for (event, range) in Parser::new(&source).into_offset_iter() {
             // Every link, image and span of raw HTML the parse recognizes is
             // opaque to the tag scan, whichever family it belongs to and
             // whether or not it produces a link fact: the `#` in

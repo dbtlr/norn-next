@@ -3,6 +3,15 @@
 //! The text layer's single position type — headings and wikilink tokens both
 //! carry one so a caller can point a human (or a diagnostic) at the exact byte
 //! a construct begins.
+//!
+//! This module also owns the crate's one definition of a line break: `\n`,
+//! `\r\n`, or a lone `\r`. [`LineCursor`] counts positions by it,
+//! [`split_lines_inclusive`] cuts lines by it, and [`lf_normalized`] presents
+//! it to a parser that reads a narrower rule. Every line-shaped question in
+//! the crate goes through one of the three, so no two answers can disagree
+//! about where a line ends.
+
+use std::borrow::Cow;
 
 /// A location in a source string: 1-based `line` and `column`, 0-based
 /// `byte_offset`. Column counts bytes from the start of the line — an
@@ -141,4 +150,84 @@ pub(crate) fn split_lines_inclusive(content: &str) -> impl Iterator<Item = &str>
         start = end;
         Some(line)
     })
+}
+
+/// `content` with every lone `\r` rewritten to `\n`, for a reader whose own
+/// line rule is narrower than [`LineCursor`]'s.
+///
+/// The rewrite is **byte-length preserving and one byte wide**: `\r` and `\n`
+/// are both single ASCII bytes, a `\r\n` pair is left alone, and nothing is
+/// inserted or removed. So every byte offset into the returned string is the
+/// same byte offset into `content`, and a range a reader reports over the copy
+/// slices the original to the same text. That is the whole reason the
+/// normalization is admissible: it changes what a narrower reader sees a line
+/// break as, and changes no position.
+///
+/// Content carrying no lone `\r` is returned borrowed, so the common document
+/// costs one scan and no allocation.
+pub(crate) fn lf_normalized(content: &str) -> Cow<'_, str> {
+    let bytes = content.as_bytes();
+    let is_lone_cr = |index: usize| bytes[index] == b'\r' && bytes.get(index + 1) != Some(&b'\n');
+    if !(0..bytes.len()).any(is_lone_cr) {
+        return Cow::Borrowed(content);
+    }
+    let mut out = bytes.to_vec();
+    for index in 0..out.len() {
+        if is_lone_cr(index) {
+            out[index] = b'\n';
+        }
+    }
+    // One ASCII byte swapped for another leaves every multi-byte sequence
+    // untouched, so the bytes are still the UTF-8 they arrived as.
+    Cow::Owned(String::from_utf8(out).expect("swapping ASCII for ASCII preserves UTF-8"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The allocation is the thing being contracted, so the test reads the
+    /// variant rather than the text: content with no lone `\r` is handed back
+    /// borrowed, and only content that has one is copied.
+    #[test]
+    fn content_without_a_lone_cr_is_borrowed_rather_than_copied() {
+        for borrowed in [
+            "",
+            "plain",
+            "a\nb\n",
+            "a\r\nb\r\n",
+            "a\r\n\r\nb",
+            "trailing\r\n",
+        ] {
+            assert!(
+                matches!(lf_normalized(borrowed), Cow::Borrowed(_)),
+                "{borrowed:?} was copied"
+            );
+        }
+        for owned in ["a\rb", "a\r", "\r", "a\r\nb\rc"] {
+            assert!(
+                matches!(lf_normalized(owned), Cow::Owned(_)),
+                "{owned:?} was not copied"
+            );
+        }
+    }
+
+    /// The rewrite is one byte wide and touches lone `\r` alone, so lengths
+    /// match, `\r\n` survives, and every other byte is where it was.
+    #[test]
+    fn the_rewrite_preserves_every_byte_position() {
+        for content in ["a\rb\r\nc\rd", "\r\r\r", "é\rß\r\n", "no breaks at all"] {
+            let normalized = lf_normalized(content);
+            assert_eq!(normalized.len(), content.len(), "{content:?}");
+            for (index, (was, now)) in content.bytes().zip(normalized.bytes()).enumerate() {
+                let expected = if was == b'\r' && content.as_bytes().get(index + 1) != Some(&b'\n')
+                {
+                    b'\n'
+                } else {
+                    was
+                };
+                assert_eq!(now, expected, "byte {index} of {content:?}");
+            }
+        }
+    }
 }
