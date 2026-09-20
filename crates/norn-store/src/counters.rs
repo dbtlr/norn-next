@@ -170,7 +170,7 @@ impl DerivationCounters {
 
 /// What one read's snapshot cost, which is not derivation.
 ///
-/// These sit beside [`Counter`] and deliberately outside it. A derivation
+/// These sit beside the derivation vocabulary and deliberately outside it. A derivation
 /// counter says what a request derived, every read leaves all of them at zero,
 /// and the zero-on-warm bar is read off exactly that; a read that opened a
 /// snapshot derived nothing, so a snapshot counted among them would fail that

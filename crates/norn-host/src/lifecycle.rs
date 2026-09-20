@@ -2197,9 +2197,8 @@ impl<O: EntryOps> Drop for ReadHold<O> {
 ///
 /// **The demand, never the label underneath it.** A park outranks the trust
 /// state an entry publishes, so a reading taken off the raw label would say
-/// `Ready` across a park; this carries what
-/// [`EntryState::published_demand`] answered, which is the one value every
-/// other surface renders too.
+/// `Ready` across a park; this carries the demand the entry published, which
+/// is the one value every other surface renders too.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnswerReading {
     published: Demand,

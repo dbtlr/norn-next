@@ -132,26 +132,6 @@ fn overlapping_reads_run_one_statement_each_under_the_gate_and_attest_contention
         overlapped.reader_waits >= 1,
         "four overlapping reads of one entry reported no wait for the one handle they share"
     );
-    norn_testkit::readings::record(
-        "overlapping reads on one entry",
-        &[
-            ("reads_served", overlapped.reads_served.to_string()),
-            (
-                "statements_under_the_gate",
-                overlapped.statements_under_the_gate.to_string(),
-            ),
-            (
-                "widest_statements_under_the_gate",
-                overlapped.widest_statements_under_the_gate.to_string(),
-            ),
-            ("reader_waits", overlapped.reader_waits.to_string()),
-            (
-                "widest_reader_wait",
-                overlapped.widest_reader_wait.to_string(),
-            ),
-        ],
-    );
-
     // **The control.** The same reads without the overlap wait for nothing:
     // a contention reading that stood whether or not the reads overlapped
     // would attest nothing about sharing the handle.
