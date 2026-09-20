@@ -32,7 +32,7 @@ A declarative proposed vault mutation, including its intended effects and the co
 A report of what a plan would do against a particular observed vault state.
 
 **Refusal**:
-A resolved outcome in which Norn performs no requested mutation because safety, trust, or preconditions are not satisfied.
+A resolved outcome in which Norn performs no requested mutation or answers no requested read because safety, trust, or preconditions are not satisfied.
 _Avoid_: Error, failure (when the distinction matters)
 
 **Finding**:
@@ -52,6 +52,26 @@ _Avoid_: Candidate (unqualified)
 
 **Ambiguity class**:
 The set of vault documents satisfying the same resolution target when that target does not identify exactly one document.
+
+**Answer reading**:
+The trust state and store generation a vault report was answered under, carried on the report so a consumer judges the answer without a second request. When a model contributed, it also names each model and, for a model that holds derived state, how far that state trailed the store; a model applied at request time holds none and reports no lag.
+_Avoid_: Reading (unqualified; a walk refusal that stands is also a reading)
+
+**Search ladder**:
+The ordered rungs a ranked search may answer from: a model-free lexical floor, then model-backed rungs a vault enables. A request may run fewer rungs than the vault enables.
+
+**Field universe**:
+The exact set of field names a vault can be asked about: the keys its vault schema declares united with the keys its documents actually carry.
+
+**Vault request**:
+A request addressed to one vault and answered by the host from that vault's entry. Every read and reload is a vault request, and so is a status reading that names a vault.
+
+**Registry request**:
+A request addressed to the host's serving set as a whole: registering, unregistering, listing, resolving, or editing registrations, and the status roll-up over every vault.
+
+**Installation request**:
+A request that acts on the norn installation itself: it names no vault, carries no answer reading, and is the only kind of request permitted to reach the external network beyond the loopback every routed request crosses.
+_Avoid_: Local command, offline verb
 
 ## Engineering language
 
