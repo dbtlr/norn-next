@@ -1351,22 +1351,27 @@ and records nothing against anything. Over an entry, the acquisition reads the p
 demand and the entry's retained reader fact under one hold of that entry's gate, and mints
 a hold only where the demand is a serving state and a reader stands beside it; what the
 hold carries with the handle is that published demand, never the trust label a park
-outranks. An acquisition that mints no hold refuses in one of two shapes, and the demand
-takes precedence: the published demand itself — a warming entry with its phase, an
-untrusted state, coverage on its way back, or a park under its own code — rendered through
-the one mapping every surface renders a demand through; or, where the demand is serving,
-reader-unavailable, which is an entry serving every surface but this one.
+outranks. An acquisition that mints no hold serves nothing and hands back one of two
+shapes, and the demand takes precedence: the published demand itself — a warming entry with
+its phase, coverage on its way back, an untrusted state, or a park under its own code —
+rendered as that demand's own answer, which is a state a caller polls for a warming entry,
+the untrusted reading where trust is withdrawn, and a refusal under its own code for a
+park, the same rendering every other surface gives that demand; or, where the demand is
+serving, reader-unavailable, which is an entry serving every surface but this one.
 
 A read's hold is a demand lease, and it does what a lease does: it holds the entry's idle
 interval open for as long as the read runs and restarts it when the hold drops, it clears
 the idle deadline, it withdraws an idle detach that is scheduled and not yet in flight, and
 it raises the recovery the entry owes, giving that demand back with the hold. Where the
-entry is free to run it, the read's demand also schedules the work the entry owes — the
-attach an entry holding no coverage owes, and the rebuild, the recovery or the reconcile an
-untrusted entry owes — and the read then refuses under the state that work runs beneath
-rather than the one it found, so a workload of reads alone keeps an attached vault attached
-and asks an untrusted vault to become answerable again. The one move a read's demand leaves
-out is the park retirement: a read withdraws no park — the registry's parks are withdrawn
+entry is free to run it, the read's demand also schedules the work the entry owes, read as
+a chain: the attach where the entry holds no coverage, and under that the rebuild it owes,
+the recovery beneath that, and the reconcile where it owes neither. The read then answers
+under the state that work publishes, or under the state it found where the work publishes
+none — an entry holding no coverage answers a read with the warming state of the attach the
+read asked for, so the unattached state is one no read renders — and a workload of reads
+alone keeps an attached vault attached and asks an untrusted vault to become answerable
+again. The one move a read's demand leaves out is the park retirement: a read withdraws no
+park — the registry's parks are withdrawn
 by a caller asking for the acquisition that classifies those roots again, and a read asks
 for an answer — so a read against a parked entry refuses with the park's own code, a
 refused identity and a duplicate root alike with a contended maintainer, and schedules
@@ -1379,11 +1384,12 @@ entry holds. The mint is fallible and cannot panic — an unwind under that gate
 and its blocking open is the priced cost of a hold every other holder of the entry waits
 behind. A mint that fails changes no trust label and publishes no refusal of its own: the
 reason is retained beside the entry's published demand, the way a reload's diagnostic and
-an engine's are, `vault status` reports it beside trust and engine state, and a read
-refuses with it as reader-unavailable's detail. A mint may fail at a publication
-that is not serving, and then the read renders that demand and leaves the retained fact
-unsaid until the entry serves again; `vault status` reports it either way. The next
-publication mints again and re-derives the fact.
+an engine's are, and a read refuses with it as reader-unavailable's detail. The vault
+status verb reports it beside trust and engine state; that verb is not built, and what the
+host retains for it today is the trust label, the active fingerprints and the last reload
+error. A mint may fail at a publication that is not serving, and then the read renders that
+demand and leaves the retained fact unsaid; the fact stands until the next publication
+mints again and re-derives it.
 
 **A request is answered from one snapshot.** Every lane-1 statement a request runs takes
 its rows from the snapshot its hold established — the store counts the snapshots

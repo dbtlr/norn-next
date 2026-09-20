@@ -60,9 +60,10 @@ other caller: it holds the entry's idle interval open for as long as the read ru
 restarts it when the hold drops, it clears the idle deadline, it withdraws an idle detach
 that is scheduled and not yet in flight, it raises the recovery the entry owes and gives
 that demand back with the hold, and where the entry is free to run it, it schedules the
-work the entry owes — the attach an entry holding no coverage owes, and the rebuild, the
-recovery or the reconcile an untrusted entry owes — with the read refusing under the state
-that work runs beneath. A read asks for the owed recovery because what a read wants from an
+work the entry owes, read as a chain: the attach where the entry holds no coverage, and
+under that the rebuild it owes, the recovery beneath that, and the reconcile where it owes
+neither — with the read answering under what that work publishes, and under the state it
+found where the work publishes none. A read asks for the owed recovery because what a read wants from an
 untrusted vault is exactly that it become answerable again; a read workload that never
 healed the vault it reads would be a dead end. So an idle teardown neither runs under a
 read nor precedes one into the entry, and a workload of reads alone keeps an attached vault
