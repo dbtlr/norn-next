@@ -3337,6 +3337,57 @@ mod tests {
         assert_eq!(inspection.last_reload_error, Some(error));
     }
 
+    /// **A schema that reads as YAML and declares something this grammar does
+    /// not hold is refused on the same path invalid YAML is.** The candidate
+    /// never reaches a pin, so the vault keeps the declaration it was serving
+    /// under and stays `Ready` with the refusal retained — the content model
+    /// widens what the reload validates and changes nothing about what it does
+    /// when validation fails.
+    #[test]
+    fn a_schema_that_declares_no_content_model_refuses_the_reload_and_keeps_ready() {
+        let f = Fixture::new("undeclarable-schema-reload");
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        let active = host.inspect(&name).unwrap().active_fingerprints;
+
+        for declaration in [
+            // A grammar this build does not read.
+            "version: 9\n",
+            // A field type nothing declares.
+            "version: 1\nfields:\n  created:\n    type: instant\n",
+            // A pattern naming no set.
+            "version: 1\npaths:\n  ambiguity_ignore: [\"\"]\n",
+        ] {
+            fs::write(f.vault().join(".norn/schema.yaml"), declaration).unwrap();
+            let refusal = host
+                .reload(&name)
+                .expect_err("a schema this build cannot act on reloaded");
+            let crate::ReloadRefusal::Core(error) = refusal else {
+                panic!("`{declaration}` returned {refusal:?}");
+            };
+            assert_eq!(error.file(), crate::ReloadFile::Schema);
+            assert_eq!(error.stage(), crate::ReloadStage::Parse);
+            let inspection = host.inspect(&name).expect("the served vault");
+            assert_eq!(inspection.trust, norn_wire::TrustState::Ready);
+            assert_eq!(inspection.active_fingerprints, active);
+            assert_eq!(inspection.last_reload_error, Some(error));
+        }
+    }
+
     #[test]
     fn config_only_reload_dispatches_without_lane_one_derivation() {
         let f = Fixture::new("config-only-reload");
