@@ -67,7 +67,7 @@ impl CaseSensitivity {
     /// Compare two UTF-8 vault-relative spellings with this root's proven
     /// lookup semantics: the fold, then the bytes to break a fold's ties.
     ///
-    /// The fold is [`fold_onto`]'s, the same one every comparison key in this
+    /// The fold is `fold_onto`'s, the same one every comparison key in this
     /// module is built by. Spelling it again here is how the ordering and the
     /// keys drift apart, so this builds the keys rather than re-deriving them.
     pub fn compare(self, left: &str, right: &str) -> Ordering {

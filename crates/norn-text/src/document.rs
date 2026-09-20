@@ -383,13 +383,10 @@ impl<'a> Document<'a> {
     /// the parsed one reports none either — a disagreement is refused, never
     /// guessed at.
     ///
-    /// The scan cuts lines on the crate's break rule, so a `\r`-separated
-    /// sequence is scanned item by item and reports the same ranges its `\n`
-    /// twin does. A chunking rule that only sees `\n` hands the scan one chunk
-    /// holding several items, finds one dash in it, and disagrees with the
-    /// parse about the count — which is the refusal above, reached for a
-    /// sequence that is not actually ambiguous, and every splice point in it
-    /// is lost.
+    /// The scan cuts lines on [`crate::span`]'s break rule, so a
+    /// `\r`-separated sequence is scanned item by item and agrees with the
+    /// parse about how many items it holds, rather than reaching the refusal
+    /// above for a sequence that is not ambiguous.
     fn sequence_item_ranges(&self, field: &Field, items: &[Value]) -> Vec<Option<Range<usize>>> {
         let absent = vec![None; items.len()];
         if field.style != ValueStyle::BlockSequence {
@@ -981,11 +978,9 @@ fn same_heading(left: &Heading, right: &Heading) -> bool {
 /// terminated whether or not it asked to be. Neither is a difference in what
 /// the section says, so neither is a mismatch.
 ///
-/// Both sides are cut on the crate's break rule, the same rule the splice
-/// writes by, so the comparison asks about the same lines the splice produced.
-/// A comparison that only cut on `\n` would hold a `\r`-broken run as one
-/// line on both sides and pass without having compared anything the splice
-/// rewrote.
+/// Both sides are cut on [`crate::span`]'s break rule, the same rule the splice
+/// writes by, so the comparison is over the lines the splice produced rather
+/// than over a run it held whole.
 fn same_lines(left: &str, right: &str) -> bool {
     fn lines(text: &str) -> impl Iterator<Item = &str> {
         split_lines_inclusive(text.trim_end_matches(['\n', '\r']))
@@ -1002,10 +997,8 @@ fn same_lines(left: &str, right: &str) -> bool {
 /// `\r` — is rewritten to `line_ending` on the way in. Splicing it verbatim
 /// is how a CRLF document ends up with LF lines in the middle of it, which is
 /// the same defect as a synthesized line with the wrong terminator and is
-/// caught by nothing downstream. Cutting lines on the crate's break rule is
-/// what makes the promise cover all three: a rule that only saw `\n` would
-/// carry a lone `\r` through untouched, inside a line it never knew had
-/// ended.
+/// caught by nothing downstream. Cutting lines on [`crate::span`]'s break rule
+/// is what makes the promise cover all three.
 fn append_with_terminator(out: &mut String, content: &str, line_ending: LineEnding) {
     let terminator = line_ending.as_str();
     for line in split_lines_inclusive(content) {

@@ -185,10 +185,9 @@ pub(crate) fn resolve_section_in(
 /// `end`, so an insert lands below the separators the heading already has
 /// rather than crowding the heading.
 ///
-/// Lines are cut on the crate's break rule, so a `\r`-separated blank line is
-/// blank. On a chunking rule that only sees `\n` it is not: the blank run
-/// arrives welded to the prose line after it, the whole chunk fails the blank
-/// test, and the separators stay inside the content an edit then writes over.
+/// Lines are cut on [`crate::span`]'s break rule, so a `\r`-separated blank
+/// line is blank and the separators it makes stay outside the content an edit
+/// writes over.
 fn content_bounds(body: &str, body_start: usize, end: usize) -> (usize, usize) {
     let slice = &body[body_start..end];
 

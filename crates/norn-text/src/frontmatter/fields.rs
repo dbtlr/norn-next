@@ -300,12 +300,9 @@ pub(crate) fn field_spans(
 /// The trailing lines of `slice` that are whole blank lines or column-0
 /// comment lines, in document order.
 ///
-/// Lines are cut on the crate's break rule, so a comment standing after a
-/// `\r` break is one line and is the document's. A rule that only saw `\n`
-/// hands this a chunk opening with the `\r` and holding the comment behind
-/// it, which is neither blank nor column-0 — so the run stops short, the
-/// comment falls inside the field's own bytes, and removing the field deletes
-/// it.
+/// Lines are cut on [`crate::span`]'s break rule, so a comment standing after
+/// a `\r` break is one line and is the document's. Under a narrower rule the
+/// run stops short of it and removing the field deletes it.
 fn trailing_separator_run(slice: &str) -> Vec<&str> {
     let mut lines: Vec<&str> = Vec::new();
     for line in split_lines_inclusive(slice).rev() {
@@ -477,9 +474,8 @@ fn scan_key_lines(
 ) -> Result<Vec<RawKeyLine>, SplitRefusal> {
     let yaml = &content[frontmatter_range.clone()];
     // Lines are cut on the crate's break rule, the same rule the YAML behind
-    // the seam reads. A rule that only saw `\n` hands this one chunk holding
-    // several entries, so all but the first go unlocated and every edit over
-    // the block refuses — a safe refusal, and a silent one.
+    // the seam reads, so a `\r`-broken block locates every key rather than its
+    // first — which refuses every edit over the block, safely and silently.
     let lines: Vec<&str> = split_lines_inclusive(yaml).collect();
     let mut line_starts: Vec<usize> = Vec::with_capacity(lines.len() + 1);
     let mut accumulated = frontmatter_range.start;

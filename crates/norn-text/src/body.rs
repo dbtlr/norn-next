@@ -102,11 +102,21 @@ impl<'a> BodyScan<'a> {
         // `\r`, so a CR-only document's code is not code and every construct
         // this scan extracts leaks out of it. Normalizing lone `\r` to `\n`
         // gives the parse the break rule CommonMark states and the cursor
-        // already counts. The rewrite is byte-length preserving, so every
-        // range the parse reports indexes the original `body` unchanged, and
-        // every offset below — heading starts, link ranges, code ranges — is
-        // an offset into the bytes the caller handed in. A document carrying
-        // no lone `\r` is parsed from the caller's own bytes.
+        // already counts. A document carrying no lone `\r` is parsed from the
+        // caller's own bytes.
+        //
+        // Two things come out of the parse, and the normalization is sound for
+        // both. **Offsets**: the rewrite is byte-length preserving, so every
+        // range the parse reports — heading starts, link ranges, code ranges —
+        // indexes the original `body` unchanged. **Decoded text**: the heading
+        // text, the link text and `dest_url` are built from the copy's bytes,
+        // and no rewritten byte can reach one. A line ending inside inline
+        // content arrives as `SoftBreak` or `HardBreak`, which this loop
+        // flattens to a space without reading the break's bytes at all; and
+        // CommonMark forbids a line ending inside a link destination, in the
+        // angle-bracket form and outside it, so `dest_url` spans no break in
+        // the first place. What is left is a code span's text, where a `\r`
+        // the copy holds as `\n` is a line ending either way.
         let source = lf_normalized(body);
 
         for (event, range) in Parser::new(&source).into_offset_iter() {
