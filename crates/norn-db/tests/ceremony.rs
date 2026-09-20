@@ -397,3 +397,96 @@ fn an_environment_that_holds_no_database_is_refused_through_the_client_s_error()
     };
     assert!(operation.contains("opening"), "{operation}");
 }
+
+/// A read-only handle answers from the database the writer wrote, and refuses
+/// every write: the file is opened without the write flag and `query_only` is
+/// set on top of it, so nothing a client composes can derive through one.
+#[test]
+fn a_read_only_connection_answers_reads_and_refuses_writes() {
+    let scratch = Scratch::new("read-only");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 7_i64).expect("a writer writes");
+
+    let reader = norn_db::connect_read_only(&database).expect("a read-only handle");
+    assert_eq!(
+        meta::get_meta::<i64>(&reader, meta::WRITE_GENERATION).expect("a pinned scalar"),
+        Some(7),
+        "the read-only handle answers from another database"
+    );
+    let refused = meta::put_meta(&reader, meta::WRITE_GENERATION, 8_i64)
+        .expect_err("a read-only handle refuses a write");
+    assert!(
+        matches!(refused, DbError::Sql { .. }),
+        "a refused write is reported as the statement it was: {refused:?}"
+    );
+    assert_eq!(
+        meta::get_meta::<i64>(&writer, meta::WRITE_GENERATION).expect("a pinned scalar"),
+        Some(7),
+        "the refused write reached the database"
+    );
+}
+
+/// A read-only open creates nothing. Without it a reader over a path whose
+/// database is gone would answer every read with no rows instead of saying the
+/// file is not there.
+#[test]
+fn a_read_only_open_of_a_path_with_no_database_refuses() {
+    let scratch = Scratch::new("read-only-absent");
+    let error = norn_db::connect_read_only(&scratch.database())
+        .expect_err("a read-only open of a path with no database refuses");
+    assert!(
+        matches!(error, DbError::Lifecycle { .. }),
+        "an absent database is reported as the open it refused: {error:?}"
+    );
+    assert!(
+        !scratch.database().exists(),
+        "the refused open left a database behind"
+    );
+}
+
+/// The snapshot spelling holds one transaction open past the call that opened
+/// it, and refuses a second over the same handle: a handle in a snapshot is a
+/// handle nothing else begins a transaction on.
+#[test]
+fn a_snapshot_is_one_transaction_and_ends_where_it_is_closed() {
+    let scratch = Scratch::new("snapshot");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 1_i64).expect("a writer writes");
+
+    let mut reader = norn_db::Database::adopt(
+        norn_db::connect_read_only(&database).expect("a read-only handle"),
+        &database,
+    )
+    .expect("a read-only handle binds to its file");
+    reader.open_snapshot().expect("a snapshot opens");
+    // The statement that makes the snapshot real, and the reading it takes.
+    assert_eq!(
+        meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
+        Some(1)
+    );
+    let refused = reader
+        .open_snapshot()
+        .expect_err("a second snapshot over one handle refuses");
+    assert!(matches!(refused, DbError::Lifecycle { .. }), "{refused:?}");
+
+    // The writer moves on, and the snapshot still answers at the reading it
+    // was established at.
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 2_i64).expect("a writer writes");
+    assert_eq!(
+        meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
+        Some(1),
+        "the snapshot read a write that landed after it was established"
+    );
+
+    reader.close_snapshot().expect("a snapshot ends");
+    reader
+        .close_snapshot()
+        .expect("ending an ended snapshot is no act");
+    assert_eq!(
+        meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
+        Some(2),
+        "the handle is still inside the snapshot it closed"
+    );
+}

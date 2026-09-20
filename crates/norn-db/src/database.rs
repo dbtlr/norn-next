@@ -57,6 +57,15 @@ const OPEN_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
     .union(OpenFlags::SQLITE_OPEN_CREATE)
     .union(OpenFlags::SQLITE_OPEN_NO_MUTEX);
 
+/// The flags a read-only connection is opened with.
+///
+/// Create is absent as well as write: a read-only open answers for a database
+/// that is already there, so a path that names no file is a refusal rather
+/// than an empty database nothing wrote. `SQLITE_OPEN_URI` is absent for the
+/// reason it is absent above.
+const READ_ONLY_FLAGS: OpenFlags =
+    OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_NO_MUTEX);
+
 /// The two names SQLite reads as something other than a file, whatever the URI
 /// flag says: the in-memory database, and the anonymous temporary one.
 const NOT_A_FILE: &[&str] = &[":memory:", ""];
@@ -179,6 +188,53 @@ impl Database {
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|error| error::sql(operation, error))
     }
+
+    /// Open the deferred transaction a snapshot read answers from, without
+    /// borrowing the handle for its length.
+    ///
+    /// [`Database::deferred_transaction`] is the same `BEGIN DEFERRED` and is
+    /// the spelling a read that ends inside one statement scope takes; this is
+    /// the spelling a read that **outlives its caller's stack frame** takes —
+    /// a snapshot established under one lock and read under none. The mutable
+    /// borrow is what rules out a second live transaction either way: a
+    /// handle in a snapshot is a handle nothing else can begin a transaction
+    /// on, and beginning one over a transaction that is already open is
+    /// refused here rather than reported by the driver.
+    ///
+    /// **A deferred `BEGIN` takes no snapshot.** The transaction is open when
+    /// this returns and the first statement run on the connection is what
+    /// establishes the write-ahead-log snapshot every later statement reads
+    /// from, which is why the caller runs one and why where it runs it is a
+    /// contract rather than an ordering detail.
+    pub fn open_snapshot(&mut self) -> Result<(), DbError> {
+        if !self.connection.is_autocommit() {
+            return Err(DbError::Lifecycle {
+                operation: "opening a read snapshot",
+                path: self.path.clone(),
+                message: "a transaction is already open on this handle".to_string(),
+            });
+        }
+        self.connection
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(|error| error::sql("opening a read snapshot", error))
+    }
+
+    /// End the snapshot [`Database::open_snapshot`] opened, by rolling it
+    /// back.
+    ///
+    /// A snapshot writes nothing, so rolling back and committing leave the
+    /// database in the same state and the rollback is the one that says so. A
+    /// handle with no transaction open ends nothing and reports success: the
+    /// call is what a reader runs on its way out, and a reader that already
+    /// closed its snapshot is in the state this leaves it in.
+    pub fn close_snapshot(&mut self) -> Result<(), DbError> {
+        if self.connection.is_autocommit() {
+            return Ok(());
+        }
+        self.connection
+            .execute_batch("ROLLBACK")
+            .map_err(|error| error::sql("ending a read snapshot", error))
+    }
 }
 
 /// Refuse a name SQLite would read as something other than the file it spells.
@@ -252,6 +308,54 @@ pub fn connect(path: &Path) -> Result<Attempt, DbError> {
     #[cfg(feature = "induced-failure")]
     crate::faults::cap_the_pages(&connection)?;
     Ok(Attempt::Connected(connection))
+}
+
+/// Open a **read-only** connection to a database that is already there.
+///
+/// This is the shape a snapshot reader is opened in, beside the writer its
+/// client holds: the connection is opened without the write and create flags,
+/// and `query_only` is set on top of them, so a write is refused by the
+/// connection as well as by the file mode and nothing on it can derive.
+/// Write-ahead logging is **read back rather than set** — setting the journal
+/// mode is a write — so a database in any other mode is refused here instead
+/// of being read under settings its writer is not using.
+///
+/// A path that names no database is a refusal: without the create flag there
+/// is nothing to open, and a reader that created an empty database would
+/// answer every read with no rows rather than saying the file is gone.
+#[allow(clippy::disallowed_methods)] // The substrate seam: this is the one place a SQLite connection is opened.
+pub fn connect_read_only(path: &Path) -> Result<Connection, DbError> {
+    refuse_a_name_that_is_not_a_file("opening the database read-only", path)?;
+    let connection =
+        Connection::open_with_flags(path, READ_ONLY_FLAGS).map_err(|error| DbError::Lifecycle {
+            operation: "opening the database read-only",
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    connection
+        .busy_timeout(BUSY_TIMEOUT)
+        .map_err(|error| error::sql("setting the busy timeout", error))?;
+    connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE);
+
+    let journal: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(|error| error::sql("reading the journal mode", error))?;
+    if !journal.eq_ignore_ascii_case("wal") {
+        return Err(DbError::Damaged {
+            what: format!(
+                "a read-only handle needs write-ahead logging and the database reports `{journal}`"
+            ),
+        });
+    }
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .map_err(|error| error::sql("turning foreign keys on", error))?;
+    // Last, because it is what makes every statement after it a read: a
+    // pragma this function still had to set would be refused by it too.
+    connection
+        .pragma_update(None, "query_only", true)
+        .map_err(|error| error::sql("making the connection read-only", error))?;
+    Ok(connection)
 }
 
 /// Mint an epoch for a database being created.
