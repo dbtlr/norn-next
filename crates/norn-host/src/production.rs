@@ -3470,6 +3470,178 @@ mod tests {
         );
     }
 
+    use norn_store::TagSource;
+    use norn_wire::Severity;
+
+    /// A schema declaring a tag vocabulary and reporting anything outside it.
+    const REPORTING_SCHEMA: &str =
+        "version: 1\ntags:\n  declared: [project]\n  undeclared: report\n";
+
+    /// **The tag facet is derived from the tag rows the document already has.**
+    /// A document carrying a tag the vault does not declare keeps every tag row
+    /// it wrote — those are parse facts — and gains the finding that says the
+    /// vault's own vocabulary does not hold one of them.
+    #[test]
+    fn a_declared_facet_derives_tag_rows_and_the_undeclared_tag_finding() {
+        let f = Fixture::new("facet-derives");
+        fs::write(f.vault().join(".norn/schema.yaml"), REPORTING_SCHEMA).unwrap();
+        fs::write(
+            f.vault().join("note.md"),
+            "---\ntags: [project]\n---\n# body\n#draft\n",
+        )
+        .unwrap();
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        let facts = attachment
+            .store
+            .begin_request()
+            .stored_facts(&DocumentPath::new("note.md").unwrap())
+            .unwrap()
+            .expect("the document derives whole");
+        let tags: Vec<(&str, TagSource)> = facts
+            .tags
+            .iter()
+            .map(|tag| (tag.name.as_str(), tag.source))
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                ("draft", TagSource::Body),
+                ("project", TagSource::Frontmatter)
+            ],
+            "the facet took a tag row away, or added one"
+        );
+
+        let findings = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].kind, FindingKind::UndeclaredTag.as_str());
+        assert_eq!(findings[0].target.as_deref(), Some("draft"));
+        assert_eq!(findings[0].severity, Severity::Warning.as_str());
+        ops.detach(&name, attachment);
+    }
+
+    /// **A schema edit re-derives a document whose bytes never moved.** The pin
+    /// discards every finding keyed by the fingerprint it replaced, and the
+    /// heal after it is what records them again — so a vault that starts
+    /// declaring a tag vocabulary reports the documents already in it, and a
+    /// vault whose declaration merely moves keeps reporting them, with no
+    /// document edited either time.
+    #[test]
+    fn a_schema_pin_rederives_a_document_whose_bytes_never_moved() {
+        let f = Fixture::new("facet-rederives");
+        fs::write(f.vault().join("note.md"), "# body\n#draft\n").unwrap();
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        // The vault declares nothing, so nothing is reported about it.
+        assert!(findings_at(&mut attachment.store, "note.md").is_empty());
+        let before = stored(&mut attachment, "note.md").expect("the document's row");
+
+        fs::write(f.vault().join(".norn/schema.yaml"), REPORTING_SCHEMA).unwrap();
+        assert_eq!(
+            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ReloadOutcome::SchemaChanged
+        );
+
+        let after = stored(&mut attachment, "note.md").expect("the document's row");
+        assert_eq!(
+            before.content_hash, after.content_hash,
+            "the document's bytes moved, so a hash-gated heal would have re-derived it anyway"
+        );
+        assert!(
+            after.generation > before.generation,
+            "the row was not derived again under the schema that now judges it"
+        );
+        let findings = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].target.as_deref(), Some("draft"));
+        let pinned = attachment
+            .store
+            .begin_request()
+            .vault_schema_pin()
+            .unwrap()
+            .expect("a pinned schema");
+        assert_eq!(findings[0].vault_schema_fingerprint, pinned.fingerprint);
+
+        // A second declaration that judges the same way still moves the
+        // fingerprint, so the finding is discarded and has to be recorded
+        // again — with the document still untouched.
+        let before = after;
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            format!("{REPORTING_SCHEMA}# a second declaration\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ReloadOutcome::SchemaChanged
+        );
+        let after = stored(&mut attachment, "note.md").expect("the document's row");
+        assert_eq!(before.content_hash, after.content_hash);
+        let findings = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].target.as_deref(), Some("draft"));
+        ops.detach(&name, attachment);
+    }
+
+    /// **The control on the case above.** What re-derives a row whose bytes did
+    /// not move is the declaration judging it, not the pin moving: a vault that
+    /// declares nothing pins a new schema, discards nothing it can record
+    /// again, and leaves every row exactly where it stood. Without that half
+    /// every schema edit would re-derive the whole vault.
+    #[test]
+    fn a_pin_under_a_vault_that_declares_nothing_rederives_no_row() {
+        let f = Fixture::new("facet-control");
+        fs::write(f.vault().join("note.md"), "# body\n#draft\n").unwrap();
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let before = stored(&mut attachment, "note.md").expect("the document's row");
+
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\n# a second declaration\n",
+        )
+        .unwrap();
+        assert_eq!(
+            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ReloadOutcome::SchemaChanged
+        );
+
+        let after = stored(&mut attachment, "note.md").expect("the document's row");
+        assert_eq!(
+            before.generation, after.generation,
+            "a schema that judges no document re-derived one anyway"
+        );
+        assert!(findings_at(&mut attachment.store, "note.md").is_empty());
+        ops.detach(&name, attachment);
+    }
+
+    /// The declaration's own rule, stated directly: a row stamped at or below
+    /// the pin's generation owes its judgment again, and one stamped above it
+    /// carries the judgment the standing schema asks for. A declaration that
+    /// judges nothing answers yes for every row, whatever generation it holds.
+    #[test]
+    fn a_row_below_the_pins_generation_owes_its_judgment_again() {
+        let judging = Declaration {
+            model: VaultSchema::parse(REPORTING_SCHEMA.as_bytes()).unwrap(),
+            floor: 7,
+        };
+        assert!(!judging.judged(6));
+        assert!(!judging.judged(7));
+        assert!(judging.judged(8));
+
+        let silent = Declaration {
+            model: VaultSchema::default(),
+            floor: 7,
+        };
+        assert!(silent.judged(6));
+        assert!(silent.judged(8));
+    }
+
     #[test]
     fn authored_drift_is_fingerprinted_on_demand_without_parsing() {
         let f = Fixture::new("authored-drift");
