@@ -1341,9 +1341,8 @@ and a job leg failing its way into a release each reach the entry without consul
 read, and a read in flight stops none of them. Through such a teardown the read keeps
 answering from the handle it holds until it completes, and nothing promises the database
 file outlives the teardown for it: that is the contract the read path states, and its
-price is the one ADR 0015 accepted: a read holds no coverage, so no teardown waits on it.
-[ADR 0015](decisions/0015-snapshot-reader-lifetime.md) records the rationale and the priced
-costs.
+price is the accepted one: a read holds no coverage, so no teardown waits on it. [ADR
+0025](decisions/0025-a-reads-hold-is-demand.md) records the rationale and the priced costs.
 
 **Hold acquisition is the read path's one adjudication, and the handle is its proof.** A
 read reaches a reader only through a hold. A name the serving set does not hold is decided
@@ -1358,23 +1357,25 @@ untrusted state, coverage on its way back, or a park under its own code — rend
 the one mapping every surface renders a demand through; or, where the demand is serving,
 reader-unavailable, which is an entry serving every surface but this one.
 
-A read's hold is a demand lease, so the acquisition does everything a demand does before it
-answers. Over an entry holding no coverage it schedules the attach and refuses with the
-warming state that attach runs under, so an unattached entry is not a rendering a read
-produces, and a workload of reads alone re-attaches the vault it reads. It withdraws the
-registry's own parks — a duplicate root, a root the registry could not read — because both
-are statements about roots and the acquisition it schedules is the read that classifies
-those roots again; the park a read therefore renders is the one no acquisition adjudicates,
-maintainer contention. A refused acquisition records demand the way a served one does: it
-holds the entry's idle interval open for as long as it runs and restarts it when it ends,
-and over an unattached entry it is what schedules the attach.
+A read's hold is a demand lease, and it does what a lease does: it holds the entry's idle
+interval open for as long as the read runs and restarts it when the hold drops, it clears
+the idle deadline, it withdraws an idle detach that is scheduled and not yet in flight, and
+over an entry holding no coverage it schedules the attach. That is the whole of it. A read
+withdraws no park — the registry's parks are withdrawn by a caller asking for the
+acquisition that classifies those roots again, and a read asks for an answer — so a read
+against a parked entry refuses with the park's own code, a refused identity and a duplicate
+root alike with a contended maintainer, and schedules nothing. Over an entry holding no
+coverage the read refuses with the warming state the attach it scheduled runs under, so an
+unattached entry is not a rendering a read produces and a workload of reads alone keeps the
+vault it reads attached. A refused acquisition records its demand the way a served one
+does.
 
-The attachment opens the reader off the entry gate, so the open's blocking I/O and its
-panic path stay outside the lock, and installs it under the gate hold that publishes the
-trust label beside it — the handle an entry holds belongs to the coverage that entry holds,
-and a reader whose coverage the entry moved on from before the install is closed rather
-than installed. A mint that fails changes no trust label and publishes no refusal of its
-own: the reason is retained beside the entry's published demand, the way a reload's
+The attachment mints the reader under the gate hold that publishes the trust label beside
+it, as one move at one epoch, so the handle an entry holds belongs to the coverage that
+entry holds. The mint is fallible and cannot panic — an unwind under that gate poisons it —
+and its blocking open is the priced cost of a hold every other holder of the entry waits
+behind. A mint that fails changes no trust label and publishes no refusal of its own: the
+reason is retained beside the entry's published demand, the way a reload's
 diagnostic and an engine's are, `vault status` reports it beside trust and engine state,
 and a read refuses with it as reader-unavailable's detail. A mint may fail at a publication
 that is not serving, and then the demand renders and the retained fact stays silent until
