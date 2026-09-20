@@ -3,6 +3,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use norn_config::schema::VaultSchema;
 use norn_config::vault::{VaultConfig, VaultConfigError};
 use norn_config::{IN_VAULT_CONFIG_PATH, IN_VAULT_SCHEMA_PATH};
 use norn_fs::{ContentHash, Refusal};
@@ -165,9 +166,12 @@ impl ReloadCandidate {
         let (schema_anchor, schema_name) = schema_anchor_at(registration, covered_root)?;
         let schema = norn_fs::read_and_hash(&schema_anchor, &schema_name)
             .map_err(ReloadError::SchemaRead)?;
-        let schema_text = std::str::from_utf8(schema.bytes())
-            .map_err(|error| ReloadError::SchemaParse(error.to_string()))?;
-        serde_yaml::from_str::<serde_yaml::Value>(schema_text)
+        // The schema is read into its content model here and nowhere else on
+        // this path: a candidate that becomes the active schema is one whose
+        // declaration this build can act on, so bytes that read as YAML and
+        // declare something this grammar does not hold are refused before they
+        // are pinned rather than judged as an empty declaration afterwards.
+        VaultSchema::parse(schema.bytes())
             .map_err(|error| ReloadError::SchemaParse(error.to_string()))?;
 
         let config =

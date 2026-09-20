@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use norn_config::registry::{Entry as Registration, PollBackend};
+use norn_config::schema::VaultSchema;
 use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH};
 use norn_fs::{
     Acquisition, Maintainership, MaintainershipKey, OwnWrites, Placement, RescanScope, ShadowHome,
@@ -15,7 +16,7 @@ use norn_store::{
     Change, DirectoryPrefix, DocumentPath, FindingFacts, IncrementProvenance, Provenance,
     SchemaPin, Store, StoreError, StoredDocument, StoredPathOrder, SubjectScope,
 };
-use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, Severity, VaultName};
+use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, VaultName};
 
 use crate::derivation::{
     Cause, Decided, Plan, PlannedFinding, Quarantine, SIDES, WALKED_KINDS, document_path,
@@ -334,8 +335,9 @@ impl ProductionEntryOps {
             &attachment._shadows,
             &attachment.covered_root,
         );
-        // The caller pins the candidate before this walk. Every finding below
-        // therefore records the active schema fingerprint.
+        // The caller pins the candidate before this walk, so every finding
+        // below records the active schema fingerprint and every document is
+        // judged under the declaration that fingerprint names.
         heal_documents(
             &mut attachment.store,
             &attachment.covered_root,
@@ -1002,7 +1004,7 @@ where
     let mut stored = Vec::new();
     let mut index = 0usize;
     let mut exhausted = false;
-    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, account);
+    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, account)?;
     let mut healed = 0;
     loop {
         if index == stored.len() && !exhausted {
@@ -1019,7 +1021,17 @@ where
                 match read {
                     Some(read) => {
                         let hash = read.content_hash().to_string();
+                        // Three things make a row worth deriving again: its
+                        // bytes moved, the declaration judging it moved, or a
+                        // document-scoped finding left the table without its
+                        // row. The middle one is what makes a heal after a
+                        // schema pin converge a document whose bytes never
+                        // changed — the pin discarded its findings, and only
+                        // a re-derivation under the new declaration records
+                        // them again.
+                        let schema_stale = !pending.declared.judged(stored[index].generation);
                         if hash != stored[index].content_hash
+                            || schema_stale
                             || stands_without_its_finding(pending.store, &stored[index])?
                         {
                             pending.rederive(
@@ -1085,10 +1097,11 @@ where
 /// only when its bytes moved. That reaches a **place-scoped** finding whatever
 /// happened to it, because no row stands where one sits — but a
 /// **document-scoped** finding sits beside a row, so a heal that only compared
-/// hashes would never restore one that left the table. Two things take one:
-/// a vault-schema re-pin, which discards every finding keyed by the fingerprint
-/// it replaced, and a process killed between a flush's increment and the
-/// recording after it. Either leaves the row asserting an absent frontmatter
+/// hashes would never restore one that left the table. What takes one here is a
+/// process killed between a flush's increment and the recording after it — the
+/// other taker, a vault-schema re-pin, is converged by [`Declaration::judged`],
+/// which reads every row derived below the pin as owing its judgment again.
+/// The kill leaves the row asserting an absent frontmatter
 /// with nothing stating that the fields were never read, which is the answer
 /// the degradation exists to prevent.
 ///
@@ -1159,7 +1172,7 @@ fn scoped_increment(
     let sensitivity = vault.case_sensitivity();
     let mut account = Account::default();
     let mut refused: Vec<norn_fs::SkipFact> = Vec::new();
-    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, &mut account);
+    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, &mut account)?;
     for (index, relative) in dirty.iter().enumerate() {
         let path = relative.as_path();
         // **A refusal belongs to the root the walk stops at, and this leg takes
@@ -1327,7 +1340,9 @@ fn scoped_increment(
                 let stale = match standing.as_ref() {
                     None => true,
                     Some(row) => {
-                        row.content_hash != hash || stands_without_its_finding(pending.store, row)?
+                        row.content_hash != hash
+                            || !pending.declared.judged(row.generation)
+                            || stands_without_its_finding(pending.store, row)?
                     }
                 };
                 if stale {
@@ -1402,7 +1417,7 @@ fn quarantine_subtree(
         vault_root,
         exclusions,
         account,
-    );
+    )?;
     let mut healed = 0;
     for fact in walk {
         let norn_fs::WalkFact::File(file) = fact.map_err(effect)? else {
@@ -1678,7 +1693,7 @@ fn prune_subtree_ordered(
         vault_root,
         exclusions,
         account,
-    );
+    )?;
     loop {
         let page = scope.page(pending.store, after.as_ref(), policy, order)?;
         if page.is_empty() {
@@ -1720,7 +1735,7 @@ fn prune_descendants_and_aliases(
         vault_root,
         exclusions,
         account,
-    );
+    )?;
     loop {
         let page = pending
             .store
@@ -1822,11 +1837,6 @@ fn store_order(sensitivity: norn_fs::CaseSensitivity) -> StoredPathOrder {
         norn_fs::CaseSensitivity::Insensitive => StoredPathOrder::AsciiCaseInsensitive,
     }
 }
-
-/// The severity a finding this crate records carries. A document the vault
-/// holds and norn cannot read — wholly, or only as far as its frontmatter
-/// block — is a defect in the vault, not an advisory about it.
-const FINDING_SEVERITY: Severity = Severity::Error;
 
 /// The roots one job's deaths owe a reading of.
 ///
@@ -2312,9 +2322,63 @@ fn revisit_vacated(
     }
     // The reading files findings and pushes no change, so the accumulator it
     // carries — this job's own, emptied above — is one nothing adds to.
-    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, account);
+    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, account)?;
     pending.revisit(&readings)?;
     pending.record_findings()
+}
+
+/// The vault's standing declaration, as a deriving act reads it.
+///
+/// **It is read off the store's own pin rather than handed in**, so the content
+/// model a document is judged under and the fingerprint its findings are
+/// stamped with come from one set of bytes. A leg that re-pins before it
+/// derives therefore judges under the schema it just pinned, with nothing to
+/// keep in step.
+struct Declaration {
+    model: VaultSchema,
+    /// The write generation the standing pin was taken at, which is the floor a
+    /// row's own generation is schema-stale below.
+    floor: i64,
+}
+
+impl Declaration {
+    fn read(store: &mut Store) -> Result<Self, JobFailure> {
+        let pinned = store
+            .begin_request()
+            .vault_schema_pin()
+            .map_err(store_effect)?;
+        let Some(pinned) = pinned else {
+            return Ok(Declaration {
+                model: VaultSchema::default(),
+                floor: 0,
+            });
+        };
+        Ok(Declaration {
+            // **Bytes that do not read declare nothing.** A schema that does
+            // not parse never reaches a pin through a reload or an attach, so
+            // this arm is a store written under another grammar; judging its
+            // documents under a model nothing could read would mint findings
+            // stating a rule the vault never wrote. The author hears about the
+            // file from the reload that refuses it.
+            model: VaultSchema::parse(&pinned.bytes).unwrap_or_default(),
+            floor: pinned.generation,
+        })
+    }
+
+    /// Whether a row derived at `generation` was judged under this declaration.
+    ///
+    /// **The pin's generation is the invalidation key.** A schema pin takes a
+    /// generation of its own and discards every finding keyed by the
+    /// fingerprint it replaced, so a row stamped below that generation carries
+    /// no judgment under the schema standing now, whatever its content hash
+    /// says. The store is single-writer, so a row stamped above the pin was
+    /// derived after it and is judged.
+    ///
+    /// A declaration that judges no document answers yes for every row: there
+    /// is no finding to restore, so re-reading the vault would buy nothing.
+    fn judged(&self, generation: i64) -> bool {
+        !self.model.judges_documents() || generation > self.floor
+    }
 }
 
 /// What one heal scope has derived and not yet committed: the changeset being
@@ -2343,6 +2407,8 @@ struct Pending<'s> {
     /// increment runs several scopes, and the reading their deaths owe and the
     /// prune their walks license are both one act after the last of them.
     account: &'s mut Account,
+    /// The declaration every document this scope derives is judged under.
+    declared: Declaration,
     changes: Vec<Change>,
     queued: Vec<Queued>,
     /// The places this scope has already re-derived a **place-scoped** finding
@@ -2384,17 +2450,19 @@ impl<'s> Pending<'s> {
         root: &'s Path,
         exclusions: &'s [PathBuf],
         account: &'s mut Account,
-    ) -> Self {
-        Pending {
+    ) -> Result<Self, JobFailure> {
+        let declared = Declaration::read(store)?;
+        Ok(Pending {
             store,
             root,
             exclusions,
             account,
+            declared,
             changes: Vec::with_capacity(bound),
             queued: Vec::new(),
             replaced: BTreeSet::new(),
             bound,
-        }
+        })
     }
 
     fn push(&mut self, change: Change) {
@@ -2419,11 +2487,12 @@ impl<'s> Pending<'s> {
         hash: String,
         stored: Option<&DocumentPath>,
     ) {
-        let Plan { change, finding } = plan_document(path, spelling, bytes, hash, stored);
+        let Plan { change, findings } =
+            plan_document(path, spelling, bytes, hash, stored, &self.declared.model);
         if let Some(change) = change {
             self.push(change);
         }
-        if let Some(finding) = finding {
+        for finding in findings {
             self.file(finding);
         }
     }
@@ -2450,21 +2519,27 @@ impl<'s> Pending<'s> {
     /// there. A document-scoped finding accounts for nothing this way — the row
     /// its act wrote at the same subject is what a walk reads it by.
     fn file(&mut self, planned: PlannedFinding) {
-        let (subject, cause, detail) = planned.into_parts();
+        let PlannedFinding {
+            subject,
+            cause,
+            detail,
+            target,
+        } = planned;
         if cause.kind().scope() == FindingScope::Place {
             self.account.filed.insert(&subject, cause.decided());
         }
         self.queued.push(Queued {
             finding: FindingFacts {
                 kind: cause.kind(),
-                severity: FINDING_SEVERITY,
+                severity: cause.severity(),
                 message: cause.message(&subject),
                 path: subject,
-                // Neither cause is a reading of a resolution target, so the
+                // No cause here is a reading of a resolution target, so the
                 // finding belongs to no ambiguity class and no class-scoped
-                // maintenance owns it.
+                // maintenance owns it. A tag breach names a tag rather than a
+                // link target, and a tag is not a path anything resolves.
                 class_keys: BTreeSet::new(),
-                target: None,
+                target,
                 span: None,
                 candidates: Vec::new(),
                 candidates_total: 0,
@@ -3967,7 +4042,7 @@ mod tests {
             fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
             fs::write(
                 f.vault().join(".norn/schema.yaml"),
-                "version: 1\nfields:\n  status:\n    type: string\n",
+                "version: 1\nfields:\n  status:\n    type: text\n",
             )
             .unwrap();
             let outcome = ops
@@ -9582,7 +9657,7 @@ mod tests {
     fn explicit_reload_never_indexes_a_configured_markdown_schema() {
         let f = Fixture::new("schema-markdown");
         let schema = f.vault().join(".norn/schema.md");
-        fs::write(&schema, "version: one").unwrap();
+        fs::write(&schema, "version: 1\n").unwrap();
         fs::write(f.vault().join("note.md"), "note").unwrap();
         let name = VaultName::new("notes").unwrap();
         let mut registration = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
@@ -9591,7 +9666,7 @@ mod tests {
         let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap());
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&registration, &progress).unwrap();
-        fs::write(&schema, "version: two").unwrap();
+        fs::write(&schema, "version: 1\n# a second declaration\n").unwrap();
         assert_eq!(
             ops.reload(&name, &mut attachment, &progress).unwrap(),
             ReloadOutcome::SchemaChanged

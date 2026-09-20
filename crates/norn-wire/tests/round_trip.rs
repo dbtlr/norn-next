@@ -549,6 +549,7 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         "document/frontmatter-too-large",
         "document/frontmatter-unclosed",
         "document/frontmatter-unreadable",
+        "document/undeclared-tag",
     ];
     assert_eq!(finding_kinds().len(), strings.len());
     for (kind, string) in finding_kinds().into_iter().zip(strings) {
@@ -594,6 +595,7 @@ fn the_two_scopes_partition_the_finding_kinds() {
             "document/frontmatter-too-large",
             "document/frontmatter-unclosed",
             "document/frontmatter-unreadable",
+            "document/undeclared-tag",
         ]
     );
     assert_eq!(place.len() + document.len(), FindingKind::ALL.len());
