@@ -12,6 +12,7 @@
 use std::ops::Range;
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
+use crate::span::split_lines_inclusive;
 use crate::value::{StripReport, Value, from_yaml};
 
 /// The byte length of a UTF-8 byte-order mark.
@@ -150,7 +151,11 @@ pub(crate) fn closed_block(content: &str) -> Option<ClosedBlock> {
 
     let yaml_start = content.len() - after_open.len();
     let mut offset = yaml_start;
-    for line in after_open.split_inclusive('\n') {
+    // Lines are cut on the crate's break rule, so a closing fence after a
+    // `\r` break closes the block. A rule that only saw `\n` would weld the
+    // fence onto the YAML line above it, fail the fence test, and report a
+    // block that never closes — for a document that closed it.
+    for line in split_lines_inclusive(after_open) {
         if is_fence(line) {
             return Some(ClosedBlock {
                 yaml: yaml_start..offset,

@@ -19,7 +19,7 @@ use crate::heading::Heading;
 use crate::line_ending::LineEnding;
 use crate::link::{Link, parse_wikilinks_in_text};
 use crate::section::{SectionAddress, SectionError, SectionSpan};
-use crate::span::LineCursor;
+use crate::span::{LineCursor, split_lines_inclusive};
 use crate::tag::{Tag, frontmatter_tag_name};
 use crate::value::{KeyIndex, Mapping, Value};
 
@@ -382,6 +382,14 @@ impl<'a> Document<'a> {
     /// value span. A block sequence whose scanned item count disagrees with
     /// the parsed one reports none either — a disagreement is refused, never
     /// guessed at.
+    ///
+    /// The scan cuts lines on the crate's break rule, so a `\r`-separated
+    /// sequence is scanned item by item and reports the same ranges its `\n`
+    /// twin does. A chunking rule that only sees `\n` hands the scan one chunk
+    /// holding several items, finds one dash in it, and disagrees with the
+    /// parse about the count — which is the refusal above, reached for a
+    /// sequence that is not actually ambiguous, and every splice point in it
+    /// is lost.
     fn sequence_item_ranges(&self, field: &Field, items: &[Value]) -> Vec<Option<Range<usize>>> {
         let absent = vec![None; items.len()];
         if field.style != ValueStyle::BlockSequence {
@@ -389,7 +397,7 @@ impl<'a> Document<'a> {
         }
         let mut scanned = Vec::new();
         let mut line_start = field.line_range.start;
-        for line in self.source[field.line_range.clone()].split_inclusive('\n') {
+        for line in split_lines_inclusive(&self.source[field.line_range.clone()]) {
             let trimmed = line.trim_end_matches(['\r', '\n']);
             let indent = trimmed.len() - trimmed.trim_start().len();
             if trimmed.trim_start().starts_with("- ") || trimmed.trim_start() == "-" {
@@ -960,11 +968,16 @@ fn same_heading(left: &Heading, right: &Heading) -> bool {
 /// document's whatever the content arrived with, and the last line is
 /// terminated whether or not it asked to be. Neither is a difference in what
 /// the section says, so neither is a mismatch.
+///
+/// Both sides are cut on the crate's break rule, the same rule the splice
+/// writes by, so the comparison asks about the same lines the splice produced.
+/// A comparison that only cut on `\n` would hold a `\r`-broken run as one
+/// line on both sides and pass without having compared anything the splice
+/// rewrote.
 fn same_lines(left: &str, right: &str) -> bool {
     fn lines(text: &str) -> impl Iterator<Item = &str> {
-        text.trim_end_matches(['\n', '\r'])
-            .split('\n')
-            .map(|line| line.trim_end_matches('\r'))
+        split_lines_inclusive(text.trim_end_matches(['\n', '\r']))
+            .map(|line| line.trim_end_matches(['\n', '\r']))
     }
     lines(left).eq(lines(right))
 }
@@ -972,13 +985,18 @@ fn same_lines(left: &str, right: &str) -> bool {
 /// Append `content` with every line terminated by `line_ending`, and terminate
 /// the last line too.
 ///
-/// Content arrives written however its author wrote it. Splicing it verbatim
+/// Content arrives written however its author wrote it, and **the document's
+/// own terminator wins**: every break in `content` — `\n`, `\r\n` or a lone
+/// `\r` — is rewritten to `line_ending` on the way in. Splicing it verbatim
 /// is how a CRLF document ends up with LF lines in the middle of it, which is
 /// the same defect as a synthesized line with the wrong terminator and is
-/// caught by nothing downstream.
+/// caught by nothing downstream. Cutting lines on the crate's break rule is
+/// what makes the promise cover all three: a rule that only saw `\n` would
+/// carry a lone `\r` through untouched, inside a line it never knew had
+/// ended.
 fn append_with_terminator(out: &mut String, content: &str, line_ending: LineEnding) {
     let terminator = line_ending.as_str();
-    for line in content.split_inclusive('\n') {
+    for line in split_lines_inclusive(content) {
         out.push_str(line.trim_end_matches(['\r', '\n']));
         out.push_str(terminator);
     }

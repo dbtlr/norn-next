@@ -8,9 +8,10 @@
 //! on the one break rule rather than on `\n` alone.
 //!
 //! The reading half is the offset property — what a scan reports still
-//! addresses the bytes the caller handed in.
+//! addresses the bytes the caller handed in. The editing half is one case per
+//! site that used to cut on `\n` alone, each stating what the site now does.
 
-use norn_text::BodyScan;
+use norn_text::{BodyScan, Document, SectionAddress, Value};
 
 // ── The offset property ──────────────────────────────────────────────────
 
@@ -141,4 +142,290 @@ fn a_fenced_sample_reaches_no_family_on_any_break_style() {
             );
         }
     }
+}
+
+// ── The sites that cut lines ─────────────────────────────────────────────
+
+/// A standalone comment is the document's, not the field's above it, so
+/// removing that field leaves it standing — and the break above the comment
+/// may be a lone `\r`.
+///
+/// This is a data-loss case: a scan that cut on `\n` alone read `\r# keep me`
+/// as one chunk, found it neither blank nor column-0, and stopped the trailing
+/// separator run short — putting the comment inside the removed field's own
+/// bytes.
+#[test]
+fn removing_a_field_keeps_a_comment_standing_after_a_lone_cr_break() {
+    let source = "---\ntitle: x\ntags: y\r# keep me\nkeep: z\n---\nbody\n";
+    let edited = Document::parse(source)
+        .remove_field("tags")
+        .expect("the field splits and removes");
+    assert!(
+        edited.contains("# keep me"),
+        "the comment was deleted: {edited:?}"
+    );
+    assert!(edited.contains("keep: z"));
+    assert!(!edited.contains("tags:"));
+}
+
+/// The document's own terminator wins a splice. `content` arrives written
+/// however its author wrote it — `\n`, `\r\n` or a lone `\r` — and every line
+/// the splice writes carries the terminator the document already uses.
+#[test]
+fn a_section_replace_writes_the_documents_terminator_over_every_caller_break() {
+    let lf = Document::parse("# A\nold\n")
+        .replace_section("A", "one\rtwo\r\nthree")
+        .expect("the replace holds");
+    assert_eq!(lf, "# A\none\ntwo\nthree\n");
+
+    let crlf = Document::parse("# A\r\nold\r\n")
+        .replace_section("A", "one\rtwo\nthree")
+        .expect("the replace holds");
+    assert_eq!(crlf, "# A\r\none\r\ntwo\r\nthree\r\n");
+}
+
+/// The post-image check the replace makes compares lines on the same rule the
+/// splice writes by, so it is comparing what the splice produced.
+///
+/// A comparison cutting on `\n` alone held `one\rtwo` as a single line on both
+/// sides: it approved the splice without having looked at either break.
+#[test]
+fn the_replace_post_image_check_reads_a_lone_cr_as_a_break() {
+    let edited = Document::parse("# A\nold\n")
+        .replace_section("A", "one\rtwo")
+        .expect("the replace holds");
+    // Two lines went in and two lines came out, on the document's terminator.
+    let scan = Document::parse(&edited);
+    let span = scan
+        .resolve_section(SectionAddress::from("A"))
+        .expect("the section resolves");
+    assert_eq!(&edited[span.content_start..span.content_end], "one\ntwo\n");
+}
+
+/// Blank lines separated by a lone `\r` are blank, so a section's content
+/// starts and stops where the prose does.
+#[test]
+fn section_content_bounds_trim_blank_lines_broken_by_a_lone_cr() {
+    let content_of = |body: &str, expected: &str| {
+        let span = BodyScan::new(body)
+            .resolve_section(SectionAddress::from("A"))
+            .expect("the section resolves");
+        assert_eq!(&body[span.content_start..span.content_end], expected);
+    };
+    content_of("## A\n\nc1\n\n\n## B\n", "c1\n");
+    content_of("## A\r\rc1\r\r\r## B\r", "c1\r");
+}
+
+/// A block sequence broken by lone `\r` reports one byte range per item, the
+/// same ranges its `\n` twin reports.
+///
+/// The site refuses when its scanned item count disagrees with the parsed one.
+/// Cutting on `\n` alone handed it one chunk holding every item, so the counts
+/// disagreed for a sequence that was never ambiguous and every splice point in
+/// it was lost.
+#[test]
+fn a_lone_cr_block_sequence_reports_a_range_for_every_item() {
+    let ranges_of = |source: &str| {
+        let document = Document::parse(source);
+        assert!(document.split_refusal().is_none(), "{source:?} refused");
+        document
+            .field_texts()
+            .into_iter()
+            .map(|text| {
+                let range = text.range.clone().expect("the item names its bytes");
+                source[range].to_string()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ranges_of("---\ntags:\n  - one\n  - two\n---\nbody\n"),
+        ["one", "two"]
+    );
+    assert_eq!(
+        ranges_of("---\ntags:\r  - one\r  - two\n---\nbody\n"),
+        ["one", "two"]
+    );
+}
+
+/// A closing `---` fence after a lone `\r` closes the block.
+///
+/// The opening fence is terminated by `\n` or `\r\n`, so the document that
+/// reaches this site is a mixed one — which is exactly the document an editor
+/// that rewrites one line produces.
+#[test]
+fn a_closing_fence_after_a_lone_cr_closes_the_block() {
+    let document = Document::parse("---\ntitle: x\r---\nbody\n");
+    assert!(
+        document.frontmatter_refusal().is_none(),
+        "{:?}",
+        document.frontmatter_refusal()
+    );
+    assert_eq!(
+        document.frontmatter().and_then(|value| match value {
+            Value::Map(map) => map.get("title").cloned(),
+            _ => None,
+        }),
+        Some(Value::String("x".to_string()))
+    );
+    assert_eq!(document.body(), "body\n");
+}
+
+/// Every key of a `\r`-broken block is located, so the block splits and its
+/// fields are editable.
+///
+/// Cutting on `\n` alone located only the first key of such a block; the rest
+/// went unlocated, the split refused, and every field edit over the document
+/// was disabled — safely, and without saying so anywhere a caller reads.
+#[test]
+fn a_lone_cr_frontmatter_block_splits_into_its_fields() {
+    let source = "---\na: 1\rb: 2\nc: 3\n---\nbody\n";
+    let document = Document::parse(source);
+    assert!(
+        document.split_refusal().is_none(),
+        "{:?}",
+        document.split_refusal()
+    );
+    assert_eq!(
+        document
+            .fields()
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    let edited = document
+        .set_field("b", &Value::Int(9))
+        .expect("the field is editable");
+    assert!(edited.contains("b: 9"), "{edited:?}");
+    assert!(edited.contains("a: 1"), "{edited:?}");
+    assert!(edited.contains("c: 3"), "{edited:?}");
+}
+
+// ── One definition, and no seventh site ──────────────────────────────────
+
+/// Every `.rs` file of the crate, pinned at compile time.
+///
+/// The list is pinned rather than walked so the scan below cannot quietly read
+/// zero files; `the_pinned_sources_are_every_source_file` is what keeps the
+/// pin honest when a module is added.
+const SOURCES: &[(&str, &str)] = &[
+    ("src/body.rs", include_str!("../src/body.rs")),
+    ("src/diagnostic.rs", include_str!("../src/diagnostic.rs")),
+    ("src/document.rs", include_str!("../src/document.rs")),
+    (
+        "src/frontmatter/extract.rs",
+        include_str!("../src/frontmatter/extract.rs"),
+    ),
+    (
+        "src/frontmatter/fields.rs",
+        include_str!("../src/frontmatter/fields.rs"),
+    ),
+    (
+        "src/frontmatter/mod.rs",
+        include_str!("../src/frontmatter/mod.rs"),
+    ),
+    (
+        "src/frontmatter/render.rs",
+        include_str!("../src/frontmatter/render.rs"),
+    ),
+    ("src/heading.rs", include_str!("../src/heading.rs")),
+    ("src/lib.rs", include_str!("../src/lib.rs")),
+    ("src/line_ending.rs", include_str!("../src/line_ending.rs")),
+    ("src/link.rs", include_str!("../src/link.rs")),
+    ("src/section.rs", include_str!("../src/section.rs")),
+    ("src/span.rs", include_str!("../src/span.rs")),
+    ("src/tag.rs", include_str!("../src/tag.rs")),
+    ("src/value.rs", include_str!("../src/value.rs")),
+];
+
+/// The shapes that cut text into lines on `\n` alone, or on whatever the
+/// standard library's `lines` calls a line.
+///
+/// Each one is a line rule, and a second line rule is a second answer to
+/// *where does this line end* that nothing reconciles with the first. The
+/// crate's answer is `span::split_lines_inclusive` and `span::LineCursor`.
+const FORBIDDEN: &[&str] = &[
+    "split_inclusive('\\n')",
+    "split_inclusive(\"\\n\")",
+    "split('\\n')",
+    "split(\"\\n\")",
+    "split_terminator('\\n')",
+    "split_terminator(\"\\n\")",
+    ".lines()",
+    ".lines_any()",
+];
+
+/// The one file allowed to spell them: the module that defines the break rule,
+/// whose own prose names the shape it exists in place of.
+const DEFINITION: &str = "src/span.rs";
+
+/// The crate has one definition of a line break, so no file outside
+/// `span.rs` cuts text into lines by any other rule.
+///
+/// A seventh site returning silently is the failure this stands against: every
+/// site fixed here was correct-looking, locally reasonable, and wrong only
+/// about a break style its own author never wrote.
+#[test]
+fn no_source_outside_the_definition_cuts_lines_by_its_own_rule() {
+    let mut found = Vec::new();
+    for (file, source) in SOURCES {
+        if *file == DEFINITION {
+            continue;
+        }
+        for shape in FORBIDDEN {
+            if source.contains(shape) {
+                found.push(format!("`{shape}` in {file}"));
+            }
+        }
+    }
+    assert_eq!(
+        found,
+        Vec::<String>::new(),
+        "use `span::split_lines_inclusive` or `span::LineCursor` instead"
+    );
+}
+
+/// The negative control for the scan above: the shapes it bans are shapes it
+/// can actually see, so a clean result means *absent* rather than *unread*.
+#[test]
+fn the_forbidden_shapes_are_findable_in_source_text() {
+    let planted = "for line in text.split_inclusive('\\n') { drop(line); }";
+    assert!(FORBIDDEN.iter().any(|shape| planted.contains(shape)));
+    // And the definition file, the one exemption, really does spell one —
+    // so the exemption is load-bearing and not a leftover.
+    let definition = SOURCES
+        .iter()
+        .find(|(file, _)| *file == DEFINITION)
+        .expect("the definition file is pinned");
+    assert!(FORBIDDEN.iter().any(|shape| definition.1.contains(shape)));
+}
+
+/// The pin covers the crate: every `.rs` file under `src/` is in `SOURCES`.
+///
+/// Without this, adding a module is how a new site escapes the scan — the
+/// scan would keep passing, over the files it was told about in the diff
+/// before.
+#[test]
+fn the_pinned_sources_are_every_source_file() {
+    fn walk(directory: &std::path::Path, root: &std::path::Path, found: &mut Vec<String>) {
+        for entry in std::fs::read_dir(directory).expect("the source directory is readable") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.is_dir() {
+                walk(&path, root, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let relative = path.strip_prefix(root).expect("a path under the crate");
+                found.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut found = Vec::new();
+    walk(&root.join("src"), root, &mut found);
+    found.sort();
+    let mut pinned: Vec<String> = SOURCES
+        .iter()
+        .map(|(file, _)| (*file).to_string())
+        .collect();
+    pinned.sort();
+    assert_eq!(found, pinned, "pin every source file in SOURCES");
 }
