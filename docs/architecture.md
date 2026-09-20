@@ -1331,14 +1331,42 @@ blocks the writer (checkpointing stays passive — an aggressive checkpoint mode
 that guarantee away), and may trail in-flight derivation. Concurrent reads serialize against
 each other on the one reader per entry; measured reader contention is what mints more
 through the same seam. The reader is torn down before the store closes on every closing
-path, and an in-flight read pins the entry — which buys the read deferral alone: **no idle
-detach is scheduled while a read is running.** It buys no more than that. A refusal,
-a host destruction, a detach already scheduled when the read began, and a job leg failing
-its way into a release each reach the entry without reading a pin, and a read in flight
-stops none of them. Through such a teardown the read keeps answering from the handle it
-holds until it completes, and nothing promises the database file outlives the teardown for it:
-that is the contract the read path states, and its price is the one ADR 0015 accepted: a read holds no coverage, so no teardown waits on it. [ADR
-0015](decisions/0015-snapshot-reader-lifetime.md) records the rationale and the priced costs.
+path, and a read's hold is demand on the entry: it holds the entry's demand for as long as
+the read runs, restarts the idle interval when it ends, and withdraws an idle detach that
+is scheduled and not yet in flight — so **an idle teardown neither runs under a read nor
+precedes one into the entry.** It buys no more than that. A refusal, a host destruction,
+and a job leg failing its way into a release each reach the entry without consulting a
+read, and a read in flight stops none of them. Through such a teardown the read keeps
+answering from the handle it holds until it completes, and nothing promises the database
+file outlives the teardown for it: that is the contract the read path states, and its
+price is the one ADR 0015 accepted: a read holds no coverage, so no teardown waits on it.
+[ADR 0015](decisions/0015-snapshot-reader-lifetime.md) records the rationale and the priced
+costs.
+
+**Hold acquisition is the read path's one adjudication, and the handle is its proof.** A
+read reaches a reader only through a hold, and a hold is minted only over an entry whose
+published demand is a serving state; what the hold carries beside the handle is that
+published demand, never the trust label a park outranks. An acquisition that mints no hold
+refuses in one of two shapes, both read under the same hold of the entry gate a successful
+acquisition takes its handle under: the published demand itself — an unknown vault, an
+entry holding no coverage, a warming entry with its phase, an untrusted state, coverage on
+its way back, or a park under its own code — rendered through the one mapping every surface
+renders a demand through; or reader-unavailable, which is an entry serving while its read
+seam does not. A refused read is demand the way a served one is.
+
+The attachment mints the reader fallibly, at the publication that installs the coverage the
+reader reads and under the lock that publishes the trust label beside it, so the handle an
+entry holds belongs to the coverage that entry holds, and a reader minted for coverage the
+entry has moved on from is closed rather than installed. A mint that fails leaves the entry
+serving every surface but this one and publishes the reason its reads refuse with, so no
+entry answers no reads without saying why; the next publication mints again and re-derives
+the reason.
+
+**A request is answered from one snapshot.** Every statement a request runs takes its rows
+from the snapshot its hold established, and the reading the request carries names the trust
+state and the store's write generation at that snapshot. The guarantee is the request's
+own: the reader is a second connection beside the writer, so no write consumes the snapshot
+a request read, and a request reads nothing that binds a later write.
 
 The suffix-resolution ladder follows the same split. Targets resolve by **right-to-left,
 segment-aligned path suffix** — `glossary` matches any `**/glossary.md`; `norn/glossary`
