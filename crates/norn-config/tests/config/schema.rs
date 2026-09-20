@@ -114,7 +114,7 @@ fn a_schema_that_declares_only_its_version_judges_no_document() {
     assert_eq!(schema.tags().declared().count(), 0);
     assert!(schema.folders().is_empty());
     assert!(schema.ambiguity_ignore().is_empty());
-    assert!(!schema.judges_documents());
+    assert!(!schema.rederives_documents());
 }
 
 /// A vault that lists its tags without saying what an unlisted one means has
@@ -127,7 +127,7 @@ fn a_declared_vocabulary_alone_judges_no_document() {
     assert!(schema.tags().admits("area"));
     assert!(!schema.tags().admits("project"));
     assert!(!schema.tags().reports_undeclared());
-    assert!(!schema.judges_documents());
+    assert!(!schema.rederives_documents());
 }
 
 /// The other direction of the same rule: `report` over an empty vocabulary
@@ -139,7 +139,7 @@ fn reporting_over_an_empty_vocabulary_judges_no_document() {
         VaultSchema::parse(b"version: 1\ntags:\n  undeclared: report\n").expect("an empty facet");
 
     assert!(!schema.tags().reports_undeclared());
-    assert!(!schema.judges_documents());
+    assert!(!schema.rederives_documents());
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn a_reporting_facet_admits_its_names_and_its_patterns() {
     // Case is compared as written.
     assert!(!facet.admits("Area"));
     assert!(facet.reports_undeclared());
-    assert!(schema.judges_documents());
+    assert!(schema.rederives_documents());
 }
 
 #[test]
@@ -226,6 +226,63 @@ fn a_section_of_the_wrong_shape_names_itself() {
             found: "a string".to_string(),
         }
     );
+}
+
+/// **An unknown key is a schema this build cannot act on.** A misspelled
+/// section or a misspelled key would otherwise read as a valid schema that
+/// declares nothing, so `undecalred: report` would turn a vault's reporting
+/// posture off without saying so. Each case names the key and the section
+/// holding it.
+#[test]
+fn a_key_this_grammar_does_not_hold_is_refused() {
+    let cases: &[(&[u8], &str, &str)] = &[
+        (b"version: 1\nunknown_section: {}\n", "", "unknown_section"),
+        (b"version: 1\ntagz:\n  declared: [area]\n", "", "tagz"),
+        (
+            b"version: 1\ntags:\n  declared: [area]\n  undecalred: report\n",
+            "tags",
+            "undecalred",
+        ),
+        (
+            b"version: 1\nfields:\n  title:\n    typo: true\n",
+            "fields.title",
+            "typo",
+        ),
+        (
+            b"version: 1\nfolders:\n  - path: journal\n    purpose: notes\n",
+            "folders",
+            "purpose",
+        ),
+        (
+            b"version: 1\npaths:\n  ambiguity_ignor: [\"archive/**\"]\n",
+            "paths",
+            "ambiguity_ignor",
+        ),
+    ];
+
+    for (bytes, section, key) in cases {
+        let error = VaultSchema::parse(bytes).expect_err("a key the grammar does not hold");
+        let VaultSchemaError::UnknownKey {
+            section: refused_section,
+            key: refused_key,
+            ..
+        } = &error
+        else {
+            panic!("{error}");
+        };
+        assert_eq!(
+            (refused_section.as_str(), refused_key.as_str()),
+            (*section, *key)
+        );
+        assert!(error.to_string().contains(key), "{error}");
+    }
+}
+
+/// The control on the case above: every key the grammar does hold still reads,
+/// so the refusal is about the key rather than about there being a check.
+#[test]
+fn every_key_the_grammar_holds_still_reads() {
+    VaultSchema::parse(WHOLE).expect("a whole schema");
 }
 
 #[test]
@@ -485,4 +542,135 @@ fn a_pattern_folds_no_case() {
 
     assert!(pattern.matches("Archive/notes.md"));
     assert!(!pattern.matches("archive/notes.md"));
+}
+
+/// **`-0` and `0` are one number, and equality is the order.** Rust requires
+/// `a == b` exactly where `cmp` answers `Equal`; a type whose two relations
+/// disagree makes a `BTreeMap`, a `binary_search` and a `sort_by_key` over it
+/// free to misbehave, and an equality predicate disagree with a range
+/// predicate over the same field.
+#[test]
+fn equality_ordering_and_the_sort_key_are_one_relation() {
+    let schema = VaultSchema::parse(WHOLE).expect("a whole schema");
+    let read = |raw: &str| schema.typed("rating", raw).expect("a number");
+
+    let zero = read("0");
+    let negative_zero = read("-0");
+    assert_eq!(zero, negative_zero);
+    assert_eq!(zero.cmp(&negative_zero), Ordering::Equal);
+    assert_eq!(zero.sort_key(), negative_zero.sort_key());
+
+    // The law, over a sample that mixes the variants and the spellings.
+    let values: Vec<TypedValue> = [
+        read("-0"),
+        read("0"),
+        read("0.0"),
+        read("1e3"),
+        read("1000"),
+        read("-12.5"),
+        schema.typed("title", "note").expect("text"),
+        schema.typed("draft", "true").expect("a boolean"),
+        schema.typed("created", "2026-03-04").expect("a date"),
+    ]
+    .into_iter()
+    .collect();
+    for left in &values {
+        for right in &values {
+            assert_eq!(
+                left == right,
+                left.cmp(right) == Ordering::Equal,
+                "{left:?} against {right:?}"
+            );
+            assert_eq!(
+                left.cmp(right),
+                left.sort_key().cmp(&right.sort_key()),
+                "{left:?} against {right:?}"
+            );
+        }
+    }
+    // The exponent spelling and the digit spelling are one number, which the
+    // normalization above must not have cost.
+    assert_eq!(read("1e3"), read("1000"));
+}
+
+/// **A day the calendar does not have is refused, never aliased.** The
+/// arithmetic behind a date carries an overlong month into the next one, which
+/// would read `2026-02-30` as `2026-03-02` — a value that is not a date
+/// becoming a different date that is one.
+#[test]
+fn a_calendar_day_no_month_has_is_refused_rather_than_rolled() {
+    let schema = VaultSchema::parse(WHOLE).expect("a whole schema");
+    let read = |raw: &str| schema.typed("created", raw);
+
+    for written in [
+        "2026-02-29", // 2026 is not a leap year
+        "2026-02-30",
+        "2026-04-31",
+        "2026-06-31",
+        "2026-09-31",
+        "2026-11-31",
+        "2026-01-32",
+        // These already refused and must go on refusing.
+        "2026-13-01",
+        "2026-01-00",
+        "20261-01-01",
+        "2026-1-1",
+    ] {
+        assert!(read(written).is_err(), "{written} read as a date");
+    }
+
+    // The days those months do have, and the leap years February's 29th has.
+    for written in [
+        "2026-02-28",
+        "2024-02-29",
+        "2000-02-29",
+        "2026-04-30",
+        "2026-01-31",
+        "2026-12-31",
+    ] {
+        assert!(read(written).is_ok(), "{written} refused as a date");
+    }
+    assert!(read("1900-02-29").is_err(), "1900 is not a leap year");
+}
+
+/// A day here is exactly 86,400 seconds, so `23:59:60` names a second no day
+/// has: admitting it would read one written time as the midnight after it.
+#[test]
+fn a_leap_second_is_refused_rather_than_rolled_into_the_next_day() {
+    let schema = VaultSchema::parse(WHOLE).expect("a whole schema");
+
+    assert!(schema.typed("created", "2026-01-01T23:59:60Z").is_err());
+    assert!(schema.typed("created", "2026-01-01T23:59:59Z").is_ok());
+    // The clock's other bounds are unchanged.
+    assert!(schema.typed("created", "2026-01-01T24:00:00").is_err());
+    assert!(schema.typed("created", "2026-01-01T23:60:00").is_err());
+}
+
+/// **A pattern an author writes cannot hang an attach.** Matching is linear in
+/// the subject times the pattern, so a pattern whose stars would each be an
+/// independent choice — twelve of them, against a subject that matches every
+/// literal and fails at the end — answers at once rather than in exponential
+/// time. The bound is generous by two orders of magnitude: what it catches is
+/// a matcher whose cost is `2^stars`, which does not finish at these sizes at
+/// all.
+#[test]
+fn a_pathological_pattern_matches_in_bounded_time() {
+    let pattern = Pattern::parse(&format!("{}b", "a*".repeat(12))).expect("a pattern");
+    let subject = "a".repeat(64);
+    let segments = Pattern::parse(&format!("{}b", "a/**/".repeat(12))).expect("a pattern");
+    let deep = vec!["a"; 64].join("/");
+
+    let started = std::time::Instant::now();
+    assert!(!pattern.matches(&subject));
+    assert!(!segments.matches(&deep));
+    // The same shapes that do match, so the bound covers the answering half
+    // as well as the refusing one.
+    assert!(pattern.matches(&format!("{subject}b")));
+    assert!(segments.matches(&format!("{deep}/b")));
+    let spent = started.elapsed();
+
+    assert!(
+        spent < std::time::Duration::from_secs(1),
+        "matching took {spent:?}"
+    );
 }

@@ -40,22 +40,40 @@
 //!
 //! Every section is optional. A schema that declares nothing — which is what
 //! `version: 1` alone is — is a valid schema that judges no document, and
-//! [`VaultSchema::judges_documents`] is how a caller asks whether it is worth
-//! re-deriving anything under it.
+//! [`VaultSchema::rederives_documents`] is how a caller asks whether it is
+//! worth re-deriving anything under it.
+//!
+//! **A key this grammar does not hold is a refusal.** `tagz:` or
+//! `undecalred: report` would otherwise read as a valid schema that quietly
+//! declares nothing — turning a vault's whole reporting posture off with one
+//! typo — so an unknown key is refused exactly as a version this build does
+//! not read is.
 //!
 //! # What the model does not express, and why
 //!
 //! **Graph-relationship constraints are not declarable.** A rule of the form
 //! *a document of type X must link to a document of type Y* is evaluated over
 //! the resolved link graph, and its truth moves when a document the rule is not
-//! about is added, renamed or deleted. Every rule this model declares is a
-//! function of one document's own facts plus the schema, so its derived
-//! findings are invalidated by exactly two things: that document's content hash
-//! and the schema fingerprint. A graph rule is invalidated by neither, and
-//! admitting its declaration without the third invalidation key would mint
-//! findings that nothing revisits — which is the defect class the findings
-//! pillar's class-scoped maintenance exists to prevent. The declaration arrives
-//! with the invalidation key that can carry it, not before.
+//! about is added, renamed or deleted.
+//!
+//! Every rule this model declares is a function of one document's own facts
+//! plus the schema, so the two keys derivation already maintains — that
+//! document's content hash and the schema fingerprint — reach every finding
+//! the rule can mint. The findings pillar does carry a third axis for rules
+//! whose truth moves with another document: class-scoped maintenance, which is
+//! how an ambiguity finding written in one document is revisited when a second
+//! document joins or leaves its resolution class. That axis is keyed by a
+//! resolution class, and a graph rule's dependency is not one: the documents
+//! whose changes can falsify *X links to Y* are those the rule's own link
+//! resolved to and those a later edit makes it resolve to instead, which is
+//! not the set any suffix class opens.
+//!
+//! So the refusal is narrow and it is about this model as shipped: nothing
+//! here declares a rule whose invalidation the two document-level keys miss,
+//! and the ambiguity-ignore set this model *does* declare is not such a rule —
+//! it narrows which paths the resolution ladder counts, which is the read
+//! surface's to apply, and it mints no finding of its own. A graph rule
+//! arrives with the maintenance that revisits it, not before.
 //!
 //! # Where the model is consumed
 //!
@@ -83,6 +101,21 @@ pub use typed::{FieldType, TypedValue};
 /// this one's meanings: a declaration written for a grammar this build does
 /// not have is not a declaration this build can honour.
 pub const SCHEMA_VERSION: i64 = 1;
+
+/// The sections a schema declares, which is every key its root holds.
+const ROOT_KEYS: &[&str] = &["version", "fields", "tags", "folders", "paths"];
+
+/// The keys one field's declaration holds.
+const FIELD_KEYS: &[&str] = &["type", "required", "one_of"];
+
+/// The keys the tag facet holds.
+const TAG_KEYS: &[&str] = &["declared", "patterns", "undeclared"];
+
+/// The keys one folder's declaration holds.
+const FOLDER_KEYS: &[&str] = &["path", "description"];
+
+/// The keys the path rules hold.
+const PATH_KEYS: &[&str] = &["ambiguity_ignore"];
 
 /// One vault's declaration about itself.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -115,6 +148,7 @@ impl VaultSchema {
             }
         };
         read_version(&document)?;
+        known_keys_only("", &document, ROOT_KEYS)?;
         Ok(VaultSchema {
             fields: read_fields(&document)?,
             tags: read_tags(&document)?,
@@ -148,13 +182,23 @@ impl VaultSchema {
         &self.ambiguity_ignore
     }
 
-    /// Whether this schema states anything a document can be judged against.
+    /// Whether a pin of this schema obliges a re-derivation of the documents
+    /// standing under it.
     ///
     /// The re-derivation a schema change implies costs the vault, so the
-    /// question is asked before it is paid: a schema that judges no document
-    /// produces no finding under any document, so a pin that replaces one
-    /// schema with another that judges nothing leaves nothing to re-derive.
-    pub fn judges_documents(&self) -> bool {
+    /// question is asked before it is paid. The answer is the disjunction over
+    /// the declarations some derived state reads, and **today that set holds
+    /// the tag facet alone**: it is the one declaration a derivation consults,
+    /// so a schema whose facet reports nothing leaves every row with the same
+    /// derived state under the new pin as under the old.
+    ///
+    /// **A declaration gaining a consumer joins this disjunction in the same
+    /// change.** The typed column the field projection pillar stores under the
+    /// active schema fingerprint is the next one: once it exists, a re-pin that
+    /// moves only a field's declared type changes what that column holds, and a
+    /// schema answering `false` here would leave the column derived under a
+    /// type the vault no longer declares.
+    pub fn rederives_documents(&self) -> bool {
         self.tags.reports_undeclared()
     }
 
@@ -193,12 +237,26 @@ impl DeclaredField {
     }
 
     /// Whether every document is declared to carry this field.
+    ///
+    /// **Read by `describe` and by the field-rule finding kinds, neither of
+    /// which is built.** `describe` answers the declared field universe,
+    /// declarations and all, and a missing required field is a finding a
+    /// derivation mints under the schema fingerprint the way the tag facet's
+    /// is. The current call graph reaches neither, because the only finding
+    /// kind a schema keys today is the tag facet's: the declaration is parsed
+    /// and exposed here so the verb and the kind land against a model that
+    /// already holds them, rather than widening the grammar at the same time.
     pub fn required(&self) -> bool {
         self.required
     }
 
     /// The closed set of values the field is declared to hold, where it is
     /// declared closed.
+    ///
+    /// **Read by the same two unbuilt consumers as [`DeclaredField::required`]**
+    /// — `describe`, which reports the closed set as part of the declaration,
+    /// and the finding a value outside it mints. Nothing in the current call
+    /// graph reads it for the same reason.
     pub fn one_of(&self) -> Option<impl Iterator<Item = &str>> {
         self.one_of
             .as_ref()
@@ -319,6 +377,16 @@ pub enum VaultSchemaError {
         /// What is there instead.
         found: String,
     },
+    /// A key this grammar does not hold. A schema carrying one states
+    /// something this build cannot act on, exactly as a later version does.
+    UnknownKey {
+        /// The dotted path to the section holding it, empty at the root.
+        section: String,
+        /// The key itself, as it is written.
+        key: String,
+        /// The keys the section does hold, in grammar order.
+        known: &'static [&'static str],
+    },
 }
 
 impl fmt::Display for VaultSchemaError {
@@ -340,7 +408,31 @@ impl fmt::Display for VaultSchemaError {
             VaultSchemaError::Section { at, wanted, found } => {
                 write!(formatter, "`{at}` is {found}, and it must be {wanted}")
             }
+            VaultSchemaError::UnknownKey {
+                section,
+                key,
+                known,
+            } => write!(
+                formatter,
+                "`{}` is not a key the vault schema grammar holds; {} holds {}",
+                dotted(section, key),
+                if section.is_empty() {
+                    "the schema"
+                } else {
+                    section.as_str()
+                },
+                known.join(", ")
+            ),
         }
+    }
+}
+
+/// One node's dotted path, which at the root is the key alone.
+fn dotted(section: &str, key: &str) -> String {
+    if section.is_empty() {
+        key.to_string()
+    } else {
+        format!("{section}.{key}")
     }
 }
 
@@ -359,12 +451,39 @@ fn type_name(value: &Value) -> &'static str {
     }
 }
 
-fn section(at: &str, wanted: &'static str, found: &Value) -> VaultSchemaError {
+fn section_error(at: &str, wanted: &'static str, found: &Value) -> VaultSchemaError {
     VaultSchemaError::Section {
         at: at.to_string(),
         wanted,
         found: type_name(found).to_string(),
     }
+}
+
+/// Refuse every key of `mapping` the grammar does not hold at `section`.
+///
+/// **Unknown is refused rather than ignored.** A key nothing reads is a
+/// declaration the author believes is in force, and the ones this grammar is
+/// most likely to meet — a misspelled section, a misspelled disposition — turn
+/// a vault's reporting posture off in silence. `section` is the dotted path to
+/// the mapping, empty at the root.
+fn known_keys_only(
+    section: &str,
+    mapping: &serde_yaml::Mapping,
+    known: &'static [&'static str],
+) -> Result<(), VaultSchemaError> {
+    for key in mapping.keys() {
+        let Some(key) = key.as_str() else {
+            return Err(section_error(section, "a mapping keyed by name", key));
+        };
+        if !known.contains(&key) {
+            return Err(VaultSchemaError::UnknownKey {
+                section: section.to_string(),
+                key: key.to_string(),
+                known,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn at<'a>(document: &'a serde_yaml::Mapping, key: &str) -> Option<&'a Value> {
@@ -404,7 +523,7 @@ fn read_fields(
         return Ok(BTreeMap::new());
     };
     let Value::Mapping(fields) = value else {
-        return Err(section(
+        return Err(section_error(
             "fields",
             "a mapping of field name to declaration",
             value,
@@ -415,7 +534,7 @@ fn read_fields(
         .map(|(key, declaration)| {
             let key = key
                 .as_str()
-                .ok_or_else(|| section("fields", "a mapping keyed by field name", key))?;
+                .ok_or_else(|| section_error("fields", "a mapping keyed by field name", key))?;
             Ok((key.to_string(), read_field(key, declaration)?))
         })
         .collect()
@@ -423,20 +542,24 @@ fn read_fields(
 
 fn read_field(key: &str, declaration: &Value) -> Result<DeclaredField, VaultSchemaError> {
     let Value::Mapping(declaration) = declaration else {
-        return Err(section(&format!("fields.{key}"), "a mapping", declaration));
+        return Err(section_error(
+            &format!("fields.{key}"),
+            "a mapping",
+            declaration,
+        ));
     };
+    known_keys_only(&format!("fields.{key}"), declaration, FIELD_KEYS)?;
     let kind = match at(declaration, "type") {
         None => FieldType::Text,
-        Some(value) => value
-            .as_str()
-            .and_then(FieldType::named)
-            .ok_or_else(|| section(&format!("fields.{key}.type"), "a declared type", value))?,
+        Some(value) => value.as_str().and_then(FieldType::named).ok_or_else(|| {
+            section_error(&format!("fields.{key}.type"), "a declared type", value)
+        })?,
     };
     let required = match at(declaration, "required") {
         None => false,
         Some(value) => value
             .as_bool()
-            .ok_or_else(|| section(&format!("fields.{key}.required"), "a boolean", value))?,
+            .ok_or_else(|| section_error(&format!("fields.{key}.required"), "a boolean", value))?,
     };
     let one_of = match at(declaration, "one_of") {
         None => None,
@@ -454,8 +577,9 @@ fn read_tags(document: &serde_yaml::Mapping) -> Result<TagFacet, VaultSchemaErro
         return Ok(TagFacet::default());
     };
     let Value::Mapping(tags) = value else {
-        return Err(section("tags", "a mapping", value));
+        return Err(section_error("tags", "a mapping", value));
     };
+    known_keys_only("tags", tags, TAG_KEYS)?;
     let declared = match at(tags, "declared") {
         None => BTreeSet::new(),
         Some(value) => read_strings("tags.declared", value)?,
@@ -469,7 +593,13 @@ fn read_tags(document: &serde_yaml::Mapping) -> Result<TagFacet, VaultSchemaErro
         Some(value) => match value.as_str() {
             Some("allow") => UndeclaredTags::Allow,
             Some("report") => UndeclaredTags::Report,
-            _ => return Err(section("tags.undeclared", "`allow` or `report`", value)),
+            _ => {
+                return Err(section_error(
+                    "tags.undeclared",
+                    "`allow` or `report`",
+                    value,
+                ));
+            }
         },
     };
     Ok(TagFacet {
@@ -484,14 +614,15 @@ fn read_folders(document: &serde_yaml::Mapping) -> Result<Vec<DeclaredFolder>, V
         return Ok(Vec::new());
     };
     let Value::Sequence(folders) = value else {
-        return Err(section("folders", "a sequence", value));
+        return Err(section_error("folders", "a sequence", value));
     };
     folders
         .iter()
         .map(|folder| {
             let Value::Mapping(folder) = folder else {
-                return Err(section("folders", "a sequence of mappings", folder));
+                return Err(section_error("folders", "a sequence of mappings", folder));
             };
+            known_keys_only("folders", folder, FOLDER_KEYS)?;
             let path = at(folder, "path").and_then(Value::as_str).ok_or_else(|| {
                 VaultSchemaError::Section {
                     at: "folders.path".to_string(),
@@ -504,7 +635,7 @@ fn read_folders(document: &serde_yaml::Mapping) -> Result<Vec<DeclaredFolder>, V
                 Some(value) => Some(
                     value
                         .as_str()
-                        .ok_or_else(|| section("folders.description", "a string", value))?
+                        .ok_or_else(|| section_error("folders.description", "a string", value))?
                         .to_string(),
                 ),
             };
@@ -521,8 +652,9 @@ fn read_ambiguity_ignore(document: &serde_yaml::Mapping) -> Result<Vec<Pattern>,
         return Ok(Vec::new());
     };
     let Value::Mapping(paths) = value else {
-        return Err(section("paths", "a mapping", value));
+        return Err(section_error("paths", "a mapping", value));
     };
+    known_keys_only("paths", paths, PATH_KEYS)?;
     match at(paths, "ambiguity_ignore") {
         None => Ok(Vec::new()),
         Some(value) => read_patterns("paths.ambiguity_ignore", value),
@@ -531,28 +663,28 @@ fn read_ambiguity_ignore(document: &serde_yaml::Mapping) -> Result<Vec<Pattern>,
 
 fn read_strings(at_path: &str, value: &Value) -> Result<BTreeSet<String>, VaultSchemaError> {
     let Value::Sequence(items) = value else {
-        return Err(section(at_path, "a sequence of strings", value));
+        return Err(section_error(at_path, "a sequence of strings", value));
     };
     items
         .iter()
         .map(|item| {
             item.as_str()
                 .map(str::to_string)
-                .ok_or_else(|| section(at_path, "a sequence of strings", item))
+                .ok_or_else(|| section_error(at_path, "a sequence of strings", item))
         })
         .collect()
 }
 
 fn read_patterns(at_path: &str, value: &Value) -> Result<Vec<Pattern>, VaultSchemaError> {
     let Value::Sequence(items) = value else {
-        return Err(section(at_path, "a sequence of patterns", value));
+        return Err(section_error(at_path, "a sequence of patterns", value));
     };
     items
         .iter()
         .map(|item| {
             let source = item
                 .as_str()
-                .ok_or_else(|| section(at_path, "a sequence of patterns", item))?;
+                .ok_or_else(|| section_error(at_path, "a sequence of patterns", item))?;
             Pattern::parse(source).map_err(|error| VaultSchemaError::Section {
                 at: at_path.to_string(),
                 wanted: "a pattern",

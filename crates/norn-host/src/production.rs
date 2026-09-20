@@ -2374,10 +2374,10 @@ impl Declaration {
     /// says. The store is single-writer, so a row stamped above the pin was
     /// derived after it and is judged.
     ///
-    /// A declaration that judges no document answers yes for every row: there
-    /// is no finding to restore, so re-reading the vault would buy nothing.
+    /// A declaration no re-derivation is owed under answers yes for every row:
+    /// there is nothing to restore, so re-reading the vault would buy nothing.
     fn judged(&self, generation: i64) -> bool {
-        !self.model.judges_documents() || generation > self.floor
+        !self.model.rederives_documents() || generation > self.floor
     }
 }
 

@@ -9,12 +9,22 @@
 //!
 //! # The typed value is a projection, and it carries a sort key
 //!
-//! [`TypedValue`] is totally ordered, and [`TypedValue::sort_key`] is a text
-//! encoding whose bytewise order is that same order. Derivation writes the key
-//! beside the raw value so that a typed sort is a seek along an index rather
-//! than a per-row re-parse, and a reader that already holds the value compares
-//! it directly. The two agree by construction, and the suite holds them equal
-//! over a mixed sample.
+//! [`TypedValue`] is totally ordered: equality, [`Ord`] and
+//! [`TypedValue::sort_key`] are one relation, so `a == b` exactly where `cmp`
+//! answers `Equal` and exactly where the two keys are the same bytes. A
+//! `BTreeMap`, a `binary_search` and a `sort_by_key` over this type therefore
+//! agree with an equality predicate over the same field. [`TypedValue::cmp`]
+//! is what equality is defined from, which is what keeps the three from
+//! drifting apart as variants are added.
+//!
+//! [`TypedValue::sort_key`] is a text encoding whose bytewise order is that
+//! same order. **Nothing writes it beside a raw value yet**: it is the key the
+//! field projection pillar's typed column stores so that a typed sort is a
+//! seek along an index rather than a per-row re-parse, and that column lands
+//! with the read surface's typed comparison. Until then the only reader is one
+//! that already holds the value, and it compares directly; the suite holds the
+//! key and the comparison equal over a mixed sample so the two cannot part
+//! before the column arrives.
 //!
 //! # The mixed-offset signal
 //!
@@ -97,6 +107,12 @@ impl FieldType {
                 .parse::<f64>()
                 .ok()
                 .filter(|number| number.is_finite())
+                // **`-0` and `0` are one number.** They are two spellings a
+                // vault author writes for the same quantity, and the bit
+                // patterns behind them are distinct under the total order
+                // below — so the reading normalizes here and the order never
+                // has to decide between them.
+                .map(|number| if number == 0.0 { 0.0 } else { number })
                 .map(TypedValue::Number)
                 .ok_or(NotThisType { declared: self }),
             FieldType::Boolean => match raw.trim() {
@@ -171,12 +187,24 @@ impl DateValue {
 /// it is the declaration order below, which matters only for a field whose
 /// declaration moved under rows derived before the move: within one declared
 /// type every value is one variant.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum TypedValue {
     Text(String),
     Number(f64),
     Boolean(bool),
     Date(DateValue),
+}
+
+/// **Equality is [`Ord`], not a second opinion about it.** Rust requires
+/// `a == b` exactly where `cmp` answers `Equal`, and a derived `PartialEq`
+/// would not hold that over [`TypedValue::Number`]: IEEE equality calls `-0.0`
+/// and `0.0` equal while the total order below separates them. A `BTreeMap`, a
+/// `binary_search` or a `sort_by_key` over a type whose two relations disagree
+/// is entitled to misbehave, so there is one relation and this is it.
+impl PartialEq for TypedValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
 }
 
 impl Eq for TypedValue {}
@@ -186,8 +214,11 @@ impl Ord for TypedValue {
         match (self, other) {
             (TypedValue::Text(left), TypedValue::Text(right)) => left.cmp(right),
             // `total_cmp` rather than `partial_cmp`: the order has to be total
-            // for a sort to be a seek, and the parse already refuses the
-            // non-finite values that make it partial.
+            // for a sort to be a seek, and for equality to be defined from it.
+            // The parse refuses the non-finite values that make `partial_cmp`
+            // partial and normalizes the negative zero the two orders disagree
+            // about, so over every value a reading produces the two answer
+            // alike.
             (TypedValue::Number(left), TypedValue::Number(right)) => left.total_cmp(right),
             (TypedValue::Boolean(left), TypedValue::Boolean(right)) => left.cmp(right),
             (TypedValue::Date(left), TypedValue::Date(right)) => left.seconds.cmp(&right.seconds),
@@ -331,12 +362,21 @@ fn split_zone(rest: &str) -> (&str, &str) {
 ///
 /// Howard Hinnant's `days_from_civil`, which is exact for every proleptic
 /// Gregorian date and needs no table.
+///
+/// **A day the calendar does not have is refused rather than rolled.** The
+/// arithmetic below happily carries `2026-02-30` into `2026-03-02`, which would
+/// make a value that is not a date silently become a different date that is
+/// one; the reading's contract is that a value which is not its declared type
+/// is a refusal the caller decides about.
 fn civil_days(day: &str) -> Option<i64> {
     let mut parts = day.split('-');
     let year: i64 = parts.next()?.parse().ok()?;
     let month: i64 = two_digits(parts.next()?)?;
     let calendar_day: i64 = two_digits(parts.next()?)?;
-    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&calendar_day) {
+    if parts.next().is_some()
+        || !(1..=12).contains(&month)
+        || !(1..=days_in_month(year, month)).contains(&calendar_day)
+    {
         return None;
     }
     let year = year - i64::from(month <= 2);
@@ -347,7 +387,28 @@ fn civil_days(day: &str) -> Option<i64> {
     Some(era * 146_097 + day_of_era - 719_468)
 }
 
+/// How many days the month has, in the proleptic Gregorian calendar a
+/// `YYYY-MM-DD` is read under. `month` is already known to be 1..=12.
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// Whether February has twenty-nine days in `year`.
+fn is_leap_year(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
 /// The seconds into the day that `clock` names, reading `hh:mm[:ss[.fff]]`.
+///
+/// **A leap second is refused.** `23:59:60` names a second no day in this
+/// arithmetic has — every day here is exactly 86,400 seconds — so admitting it
+/// would read one written time as the midnight after it, which is the same
+/// aliasing a non-existent calendar day would be.
 fn clock_seconds(clock: &str) -> Option<i64> {
     let clock = clock.split('.').next()?;
     let mut parts = clock.split(':');
@@ -357,7 +418,7 @@ fn clock_seconds(clock: &str) -> Option<i64> {
         Some(field) => two_digits(field)?,
         None => 0,
     };
-    if parts.next().is_some() || hours > 23 || minutes > 59 || seconds > 60 {
+    if parts.next().is_some() || hours > 23 || minutes > 59 || seconds > 59 {
         return None;
     }
     Some(hours * 3_600 + minutes * 60 + seconds)
