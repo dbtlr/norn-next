@@ -400,32 +400,61 @@ fn the_forbidden_shapes_are_findable_in_source_text() {
     assert!(FORBIDDEN.iter().any(|shape| definition.1.contains(shape)));
 }
 
-/// The pin covers the crate: every `.rs` file under `src/` is in `SOURCES`.
+/// The pin covers the crate: `SOURCES` is exactly the set of files the crate's
+/// own `mod` declarations reach, and nothing else.
 ///
-/// Without this, adding a module is how a new site escapes the scan — the
-/// scan would keep passing, over the files it was told about in the diff
-/// before.
+/// Without this, adding a module is how a new site escapes the scan — the scan
+/// would keep passing, over the files it was told about in the diff before.
+/// The declarations are read out of the pinned text rather than off the disk,
+/// so the check needs no filesystem and cannot drift from what was compiled.
 #[test]
-fn the_pinned_sources_are_every_source_file() {
-    fn walk(directory: &std::path::Path, root: &std::path::Path, found: &mut Vec<String>) {
-        for entry in std::fs::read_dir(directory).expect("the source directory is readable") {
-            let path = entry.expect("a readable directory entry").path();
-            if path.is_dir() {
-                walk(&path, root, found);
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                let relative = path.strip_prefix(root).expect("a path under the crate");
-                found.push(relative.to_string_lossy().replace('\\', "/"));
+fn the_pinned_sources_are_every_module_the_crate_declares() {
+    /// The module names a file declares. Rust source is `\n`-terminated here,
+    /// and this file is not one the scan above reads.
+    fn declared(source: &str) -> Vec<String> {
+        source
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| {
+                let rest = line
+                    .strip_prefix("mod ")
+                    .or_else(|| line.strip_prefix("pub mod "))
+                    .or_else(|| line.strip_prefix("pub(crate) mod "))?;
+                rest.strip_suffix(';').map(str::to_string)
+            })
+            .collect()
+    }
+    let text = |file: &str| {
+        SOURCES
+            .iter()
+            .find(|(pinned, _)| *pinned == file)
+            .unwrap_or_else(|| panic!("{file} is declared but not pinned in SOURCES"))
+            .1
+    };
+
+    let mut reached = vec!["src/lib.rs".to_string()];
+    for module in declared(text("src/lib.rs")) {
+        let leaf = format!("src/{module}.rs");
+        let directory = format!("src/{module}/mod.rs");
+        if SOURCES.iter().any(|(file, _)| *file == directory) {
+            reached.push(directory.clone());
+            for child in declared(text(&directory)) {
+                reached.push(format!("src/{module}/{child}.rs"));
+                let _ = text(&reached[reached.len() - 1]);
             }
+        } else {
+            reached.push(leaf.clone());
+            let _ = text(&leaf);
         }
     }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut found = Vec::new();
-    walk(&root.join("src"), root, &mut found);
-    found.sort();
+    reached.sort();
     let mut pinned: Vec<String> = SOURCES
         .iter()
         .map(|(file, _)| (*file).to_string())
         .collect();
     pinned.sort();
-    assert_eq!(found, pinned, "pin every source file in SOURCES");
+    assert_eq!(
+        pinned, reached,
+        "SOURCES and the crate's module declarations name different files"
+    );
 }

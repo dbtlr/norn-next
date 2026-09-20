@@ -172,9 +172,9 @@ pub(crate) fn lf_normalized(content: &str) -> Cow<'_, str> {
         return Cow::Borrowed(content);
     }
     let mut out = bytes.to_vec();
-    for index in 0..out.len() {
+    for (index, byte) in out.iter_mut().enumerate() {
         if is_lone_cr(index) {
-            out[index] = b'\n';
+            *byte = b'\n';
         }
     }
     // One ASCII byte swapped for another leaves every multi-byte sequence
