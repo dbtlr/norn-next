@@ -2129,7 +2129,10 @@ pub struct Host<O: EntryOps> {
 pub struct ReadHold<O: EntryOps> {
     entry: Arc<Entry<O::Attachment>>,
     reader: Arc<<O::Attachment as SnapshotSource>::Reader>,
-    snapshot: <<O::Attachment as SnapshotSource>::Reader as ReadSource>::Snapshot,
+    /// The snapshot this read answers from. It is taken out of the option by
+    /// the drop that ends the read, which is the one place it is taken: a
+    /// snapshot stands from the hold's making to the hold's end.
+    snapshot: Option<<<O::Attachment as SnapshotSource>::Reader as ReadSource>::Snapshot>,
     reading: AnswerReading,
     /// The demand this read holds on the entry for its own length. Declared
     /// last because fields drop in declaration order: the pin goes back in
@@ -2157,7 +2160,9 @@ impl<O: EntryOps> ReadHold<O> {
     /// The snapshot this read answers from, established under the gate hold
     /// that granted this hold.
     pub fn snapshot(&self) -> &<<O::Attachment as SnapshotSource>::Reader as ReadSource>::Snapshot {
-        &self.snapshot
+        self.snapshot
+            .as_ref()
+            .expect("a hold holds its snapshot until it is dropped")
     }
 }
 
@@ -2174,7 +2179,15 @@ impl<O: EntryOps> fmt::Debug for ReadHold<O> {
 }
 
 impl<O: EntryOps> Drop for ReadHold<O> {
+    /// **The snapshot ends before the gate is taken, and that order is what
+    /// keeps the two waits from meeting.** A read that is waiting for the one
+    /// handle its entry holds waits under the entry gate, so a read that ended
+    /// and then asked for the gate before giving the handle back would be
+    /// waiting for the very lock the read waiting for its handle is holding.
+    /// Giving the handle back first is what wakes that read, and only then is
+    /// the pin given back.
     fn drop(&mut self) {
+        drop(self.snapshot.take());
         let mut state = self.entry.gate.lock().expect("entry gate poisoned");
         state.unpin();
     }
@@ -2936,7 +2949,7 @@ impl<O: EntryOps> Host<O> {
         Ok(ReadHold {
             entry,
             reader,
-            snapshot: established.snapshot,
+            snapshot: Some(established.snapshot),
             reading: AnswerReading {
                 published,
                 store: established.reading,
