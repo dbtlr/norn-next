@@ -10,13 +10,17 @@
 //! it to a parser that reads a narrower rule.
 //!
 //! The rest of the crate decides where a line ends by asking one of the three,
-//! or by a `\n` test written beside a `\r` test — never by `\n` alone. That
-//! is a checked property rather than a claim: a test walks every source file
-//! of the crate for a `\n` literal standing without a `\r`, and the
-//! exemptions it grants are named one by one with the reason each is not a
-//! line rule. [`crate::line_ending::LineEnding`] is the one other module that
-//! decides anything about `\n`, and what it decides is which of two
-//! terminator spellings an edit writes, not where a line ends.
+//! or by a `\n` test written beside a `\r` test — never by `\n` alone. A
+//! test holds that: it walks every source file of the crate for a `\n`
+//! literal standing without a `\r`, and each exemption it grants is named
+//! with its reason. That narrows the ways a rule of its own can appear
+//! without closing them — a rule written with no `\n` literal at all is
+//! outside what a scan over source text can see, and the test says so.
+//!
+//! [`crate::line_ending::LineEnding`] is the one other module the scan
+//! exempts wholesale, because what it decides is which of two terminator
+//! spellings an edit writes rather than where a line ends. Individual `\n`
+//! literals elsewhere are exempted one at a time, each with its own reason.
 
 use std::borrow::Cow;
 

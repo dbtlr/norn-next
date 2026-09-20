@@ -421,13 +421,18 @@ const RULE_OWNERS: &[(&str, &str)] = &[
     ),
 ];
 
-/// A `\n` literal that is not a line rule, by the exact source line carrying
+/// A `\n` literal the scan does not report, by the exact source line carrying
 /// it and why it is exempt.
+///
+/// Three of the four are not line rules at all — two escape-table entries and
+/// a count over text a decoder already normalized. The fourth is a line rule,
+/// a deliberately narrower one than the crate's, carried here so it is visible
+/// rather than invisible; its reason says which.
 ///
 /// Matching on the line's text rather than its number keeps an exemption
 /// attached to the code it excuses: moving the code carries it, and rewriting
 /// the code loses it and has to be re-argued.
-const NOT_A_LINE_RULE: &[(&str, &str, &str)] = &[
+const EXEMPT_LINES: &[(&str, &str, &str)] = &[
     (
         "src/frontmatter/render.rs",
         r#"'\n' => out.push_str("\\n"),"#,
@@ -500,11 +505,9 @@ fn no_source_outside_the_rule_owners_decides_a_line_on_lf_alone() {
             if !(named || literal) {
                 continue;
             }
-            match NOT_A_LINE_RULE
-                .iter()
-                .find(|(excused_file, excused_line, _)| {
-                    excused_file == file && *excused_line == text
-                }) {
+            match EXEMPT_LINES.iter().find(|(excused_file, excused_line, _)| {
+                excused_file == file && *excused_line == text
+            }) {
                 Some((excused_file, excused_line, _)) => excused.push((excused_file, excused_line)),
                 None => found.push(format!("{text}   in {file}")),
             }
@@ -514,14 +517,14 @@ fn no_source_outside_the_rule_owners_decides_a_line_on_lf_alone() {
         found,
         Vec::<String>::new(),
         "decide the line with `span::split_lines_inclusive` or `span::LineCursor`, \
-         or add the line to NOT_A_LINE_RULE with the reason it is not one"
+         or add the line to EXEMPT_LINES with the reason it is exempt"
     );
     // A stale exemption is an exemption nobody re-argued, so every one of them
     // has to be earning its place right now.
-    for (file, line, _) in NOT_A_LINE_RULE {
+    for (file, line, _) in EXEMPT_LINES {
         assert!(
             excused.contains(&(file, line)),
-            "NOT_A_LINE_RULE excuses `{line}` in {file}, which is no longer there"
+            "EXEMPT_LINES excuses `{line}` in {file}, which is no longer there"
         );
     }
 }
@@ -567,19 +570,63 @@ fn the_scan_sees_a_line_rule_however_it_is_spelled() {
 fn the_pinned_sources_are_every_module_the_crate_declares() {
     /// The module names a file declares. Rust source is `\n`-terminated here,
     /// and this file is not one the scan above reads.
-    fn declared(source: &str) -> Vec<String> {
-        source
-            .lines()
-            .map(str::trim)
-            .filter_map(|line| {
-                let rest = line
-                    .strip_prefix("mod ")
-                    .or_else(|| line.strip_prefix("pub mod "))
-                    .or_else(|| line.strip_prefix("pub(crate) mod "))
-                    .or_else(|| line.strip_prefix("pub(super) mod "))?;
-                rest.strip_suffix(';').map(str::to_string)
-            })
-            .collect()
+    fn declared(file: &str, source: &str) -> Vec<String> {
+        let mut modules = Vec::new();
+        for line in source.lines().map(str::trim) {
+            let read = line
+                .strip_prefix("mod ")
+                .or_else(|| line.strip_prefix("pub mod "))
+                .or_else(|| line.strip_prefix("pub(crate) mod "))
+                .or_else(|| line.strip_prefix("pub(super) mod "))
+                .and_then(|rest| rest.strip_suffix(';'));
+            match read {
+                Some(module) => modules.push(module.to_string()),
+                // Fail closed. A declaration spelled in a way this reader does
+                // not know — `pub(in path) mod`, `pub(self) mod`, whatever
+                // arrives next — is the one thing that must not be skipped:
+                // skipping it drops a whole file out of the walk, and every
+                // test here goes on passing over the files it was told about.
+                // Refusing to read it is the same posture the walk takes to
+                // `#[path]`.
+                None => assert!(
+                    !declares_a_module(line),
+                    "{file} declares a module as `{line}`, a spelling the coverage \
+                     walk cannot read. Teach `declared` the spelling rather than \
+                     leaving the file it names unwalked"
+                ),
+            }
+        }
+        modules
+    }
+
+    /// Whether `line` declares a module in **any** spelling.
+    ///
+    /// Read loosely on purpose: this is the test `declared` fails closed on, so
+    /// it has to recognize the declarations the strict reader above cannot. A
+    /// declaration is an optional run of attributes, an optional visibility,
+    /// then `mod`, a name, and the semicolon that makes it a file rather than a
+    /// block.
+    fn declares_a_module(line: &str) -> bool {
+        let Some(rest) = line.strip_suffix(';') else {
+            return false;
+        };
+        let Some(at) = rest.find("mod ") else {
+            return false;
+        };
+        let name = rest[at + "mod ".len()..].trim();
+        if name.is_empty() || !name.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
+            return false;
+        }
+        let mut before = rest[..at].trim();
+        while let Some(attribute) = before.strip_prefix("#[") {
+            let Some(close) = attribute.find(']') else {
+                return false;
+            };
+            before = attribute[close + 1..].trim();
+        }
+        before.is_empty()
+            || before == "pub"
+            || (before.starts_with("pub(") && before.ends_with(')'))
     }
     let text = |file: &str| {
         SOURCES
@@ -613,7 +660,7 @@ fn the_pinned_sources_are_every_module_the_crate_declares() {
             "{file} moves a module with #[path]; the coverage walk cannot follow it"
         );
         let directory = module_directory(&file);
-        for module in declared(source) {
+        for module in declared(&file, source) {
             let leaf = format!("{directory}/{module}.rs");
             let nested = format!("{directory}/{module}/mod.rs");
             let resolved = if text(&leaf).is_some() {
