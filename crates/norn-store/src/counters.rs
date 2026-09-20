@@ -167,3 +167,59 @@ impl DerivationCounters {
         self.values[index] = self.values[index].saturating_add(amount);
     }
 }
+
+/// What one read's snapshot cost, which is not derivation.
+///
+/// These sit beside [`Counter`] and deliberately outside it. A derivation
+/// counter says what a request derived, every read leaves all of them at zero,
+/// and the zero-on-warm bar is read off exactly that; a read that opened a
+/// snapshot derived nothing, so a snapshot counted among them would fail that
+/// bar for every warm read while saying nothing about derivation. What these
+/// count is the read's own act.
+///
+/// The scope is one snapshot, for the reason a derivation counter's scope is
+/// one request: a reading that accumulated across reads would attribute
+/// concurrent work to whoever read it last. **One snapshot answers one
+/// request**, so `snapshots_opened` reads one on every request that reached a
+/// database and zero on every request that did not.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SnapshotCounters {
+    snapshots_opened: u64,
+    statements_executed: u64,
+}
+
+impl SnapshotCounters {
+    /// The whole reading, name by name, every counter present — the shape a
+    /// harness compares, for the reason [`DerivationCounters::readings`] gives.
+    pub fn readings(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
+        [
+            ("snapshots_opened", self.snapshots_opened),
+            ("statements_executed", self.statements_executed),
+        ]
+        .into_iter()
+    }
+
+    /// Snapshots this reading opened, which is one per request that reached a
+    /// database.
+    pub fn snapshots_opened(&self) -> u64 {
+        self.snapshots_opened
+    }
+
+    /// Statements run against the vault's rows on the snapshot's connection.
+    ///
+    /// The transaction control that opens and ends the snapshot is not one:
+    /// `BEGIN DEFERRED` takes no snapshot and reads no row, which is why the
+    /// establishing statement exists at all, and a reading that counted the
+    /// `BEGIN` could not state how many statements a read ran.
+    pub fn statements_executed(&self) -> u64 {
+        self.statements_executed
+    }
+
+    pub(crate) fn count_snapshot(&mut self) {
+        self.snapshots_opened = self.snapshots_opened.saturating_add(1);
+    }
+
+    pub(crate) fn count_statement(&mut self) {
+        self.statements_executed = self.statements_executed.saturating_add(1);
+    }
+}

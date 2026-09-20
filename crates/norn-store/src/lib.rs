@@ -81,7 +81,7 @@ mod path;
 mod request;
 mod store;
 
-pub use counters::DerivationCounters;
+pub use counters::{DerivationCounters, SnapshotCounters};
 pub use error::StoreError;
 pub use facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, DocumentFacts, FeedDocument, FeedTombstone,
@@ -106,4 +106,4 @@ pub use request::{
     DiscardScope, ExplainedStatement, FeedCursor, FindingCursor, MAX_PAGE, POINT_READS, Request,
     STATEMENTS, SubjectScope,
 };
-pub use store::{RecordedStoreSchema, SnapshotReader, Store, StoreMode};
+pub use store::{RecordedStoreSchema, Snapshot, SnapshotReader, Store, StoreMode, StoreReading};

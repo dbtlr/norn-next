@@ -440,8 +440,8 @@ fn a_read_only_open_of_a_path_with_no_database_refuses() {
         "an absent database is reported as the open it refused: {error:?}"
     );
     assert!(
-        !scratch.database().exists(),
-        "the refused open left a database behind"
+        norn_db::connect_read_only(&scratch.database()).is_err(),
+        "the refused open left a database behind for the next one to adopt"
     );
 }
 
