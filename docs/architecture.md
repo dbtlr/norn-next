@@ -1336,8 +1336,8 @@ detach is scheduled while a read is running.** It buys no more than that. A refu
 a host destruction, a detach already scheduled when the read began, and a job leg failing
 its way into a release each reach the entry without reading a pin, and a read in flight
 stops none of them. Through such a teardown the read keeps answering from the handle it
-holds, and that a database file outlives the teardown for it is carried by nothing: no move
-states it, and it is read-path residue rather than a contract this document states. [ADR
+holds until it completes, and nothing promises the database file outlives the teardown for it:
+that is the contract the read path states, and the Layer 3 verb charter is where it was priced. [ADR
 0015](decisions/0015-snapshot-reader-lifetime.md) records the rationale and the priced costs.
 
 The suffix-resolution ladder follows the same split. Targets resolve by **right-to-left,

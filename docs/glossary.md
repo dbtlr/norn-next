@@ -64,13 +64,13 @@ The ordered rungs a ranked search may answer from: a model-free lexical floor, t
 The exact set of field names a vault can be asked about: the keys its vault schema declares united with the keys its documents actually carry.
 
 **Vault request**:
-A request addressed to one vault and answered by the host. Every read, status reading, and reload is a vault request.
+A request addressed to one vault and answered by the host from that vault's entry. Every read and reload is a vault request, and so is a status reading that names a vault.
 
 **Registry request**:
-A request addressed to the host's serving set as a whole: registering, unregistering, listing, or editing registrations.
+A request addressed to the host's serving set as a whole: registering, unregistering, listing, resolving, or editing registrations, and the status roll-up over every vault.
 
 **Installation request**:
-A request that acts on the norn installation itself and never reaches the host.
+A request that acts on the norn installation itself: it names no vault, carries no answer reading, and is the only kind of request permitted to reach the network.
 _Avoid_: Local command, offline verb, machine-local verb
 
 ## Engineering language
