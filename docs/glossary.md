@@ -16,6 +16,10 @@ _Avoid_: Note, file (when the distinction matters)
 User-authored rules defining the valid structure and values of vault documents.
 _Avoid_: Doctrine, schema (unqualified)
 
+**Schema content model**:
+The typed reading of a vault schema's bytes — the declared fields with their types and rules, the declared tag facet, the declared folders, and the path rules. It is a pure function of those bytes, so its identity is the schema fingerprint, and it is what derivation and the read surface act on rather than the bytes themselves.
+_Avoid_: Parsed schema
+
 **Derived state**:
 Rebuildable state computed from vault documents. It is never the source of truth.
 

@@ -32,11 +32,12 @@ use crate::attach;
 /// The bytes family 4's third phase replaces the vault's schema declaration
 /// with.
 ///
-/// A schema is opaque to derivation — it is read, hashed and pinned, and no
-/// document is judged against it — so what makes this a schema *change* is that
-/// the bytes differ from the ones the attachment pinned. The pin is what
-/// discards every finding derived under the old fingerprint, and the heal that
-/// follows it is what derives them again.
+/// **Both declarations judge no document**, so what makes this a schema
+/// *change* is the bytes differing from the ones the attachment pinned and
+/// nothing else: the pin discards every finding derived under the old
+/// fingerprint, and the heal that follows it derives them again from the same
+/// documents. That is what keeps this family a test of the pin-and-re-derive
+/// path rather than of any rule's own judgment.
 pub const REPLACEMENT_SCHEMA: &[u8] = b"version: 1\n# a second declaration\n";
 
 /// Where a vault's own declaration sits, and what replaces it.
