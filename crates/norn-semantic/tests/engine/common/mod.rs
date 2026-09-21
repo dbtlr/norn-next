@@ -220,6 +220,7 @@ pub fn write_document(store: &mut Store, facts: &DocumentFacts) {
         .apply_increment(
             IncrementProvenance::Derived,
             [Change::Upsert(facts.clone())],
+            &[],
         )
         .expect("applying a document upsert");
 }
@@ -234,6 +235,7 @@ pub fn record_death(store: &mut Store, at: &str) {
                 path: path(at),
                 provenance: Provenance::PlanDelete,
             }],
+            &[],
         )
         .expect("applying a death");
 }

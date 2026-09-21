@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 //! Configuration shapes with no vault I/O.
 //!
-//! This crate owns machine-local state and the pure parser for the optional
-//! per-vault config envelope. The host supplies the bytes to that parser.
+//! This crate owns machine-local state and the pure parsers for the two
+//! per-vault control files: the optional config envelope, and the vault schema
+//! whose content model says what the vault declares about itself. The host
+//! supplies the bytes to both parsers.
 //! Machine-local state includes the config and data directories, the registry,
 //! bearer tokens, the weights directory, and each vault's derived-state path.
 //!
@@ -16,7 +18,8 @@
 //!
 //! **This crate never touches a vault.** It does not read vault content, walk a
 //! tree, or watch files. [`vault`] parses only bytes that a caller supplies. The
-//! registry records a vault name and root path, but this crate opens neither.
+//! registry records a vault name and root path, but this crate opens neither,
+//! and [`schema`] is handed schema bytes the host already read and pinned.
 //!
 //! # Where to start
 //!
@@ -28,6 +31,8 @@
 //! - [`machine`] — the surface both sides of the client/host seam share: the
 //!   bearer tokens, and the loopback endpoint.
 //! - [`vault`] — the generic per-vault config envelope.
+//! - [`schema`] — the vault schema's content model: the declared fields with
+//!   their types, the declared tag facet, the folders, and the path rules.
 //!
 //! # The two surfaces
 //!
@@ -44,6 +49,10 @@
 //! Nothing from either module is re-exported here. A caller naming a registry
 //! type names it through [`registry`], which is what makes "no registry
 //! surface outside the orchestrator" a thing a symbol-level rule can say.
+//! [`schema`] is host-only on the same terms as [`registry`]: what a vault
+//! declares is read where derivation and the read surface run, and a client
+//! reaches it through an answer rather than through these bytes.
+//!
 //! What lives at the root is what both surfaces are expressed over: the
 //! directories, the channel, the layout conventions, the vault name, and the
 //! one error type.
@@ -75,6 +84,7 @@ mod file;
 
 pub mod machine;
 pub mod registry;
+pub mod schema;
 pub mod vault;
 
 use std::ffi::OsString;

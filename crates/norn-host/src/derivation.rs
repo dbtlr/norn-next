@@ -16,11 +16,12 @@
 //! read off it — which finding kinds a re-derivation by spelling or by bytes
 //! takes.
 //!
-//! **The end-state input set is wider than this one.** A lane-1 projection
-//! keyed on the vault schema derives under the pinned schema, so the planner
-//! takes that pin beside the document. The vault schema's content model — the
-//! layer the `#tag` facet graduates into — adds the parameter when it lands.
-//! Until then a plan is a function of the observation alone.
+//! **A plan is a function of the observation and the vault's declaration.**
+//! [`plan_document`] takes the content model of the pinned vault schema beside
+//! the document, because a finding keyed by the schema fingerprint is derived
+//! under the declaration that fingerprint names. The declaration is read off
+//! the store's own pin, so the model a plan derives under and the fingerprint
+//! its findings are stamped with come from one set of bytes.
 //!
 //! **Findings are minted here and nowhere else.** [`plan_document`] and
 //! [`plan_quarantine`] are [`PlannedFinding`]'s two constructors, and they are
@@ -36,14 +37,16 @@
 //! ([`Provenance::WatcherRemoval`]) — is concluded where the tree is read,
 //! which is orchestration.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
+use norn_config::schema::VaultSchema;
 use norn_store::{
     BlockFact, Change, DiscardScope, DocumentFacts, DocumentPath, FrontmatterValue, HeadingFact,
     LinkFact, LinkFamily, Provenance, Span, TagFact, TagSource,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
-use norn_wire::{FindingKind, FindingScope};
+use norn_wire::{FindingKind, FindingScope, Severity};
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -160,6 +163,33 @@ impl UnreadBlock {
     }
 }
 
+/// How a document disagrees with the vault's declared tag facet.
+///
+/// The document derives whole: every tag it carries is on its row, and the
+/// finding is the judgment beside them. One variant per way a facet can be
+/// broken, which today is the only one the facet declares.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TagBreach {
+    /// The document carries a tag the declared vocabulary does not admit.
+    Undeclared,
+}
+
+impl TagBreach {
+    /// The finding kind, which is the cause class a reader dispatches on.
+    const fn kind(self) -> FindingKind {
+        match self {
+            TagBreach::Undeclared => FindingKind::UndeclaredTag,
+        }
+    }
+
+    /// The cause as the finding's message states it.
+    const fn statement(self) -> &'static str {
+        match self {
+            TagBreach::Undeclared => "the vault does not declare it",
+        }
+    }
+}
+
 /// Why a finding this crate records stands where it stands.
 ///
 /// The two families differ in what the deriving act left behind, which is what
@@ -173,6 +203,9 @@ pub(crate) enum Cause {
     Undecodable(Undecodable),
     /// The document derives and its frontmatter block was read by nothing.
     UnreadBlock(UnreadBlock),
+    /// The document derives whole and disagrees with the vault's declared tag
+    /// facet.
+    TagBreach(TagBreach),
 }
 
 impl Cause {
@@ -181,6 +214,21 @@ impl Cause {
         match self {
             Cause::Undecodable(cause) => cause.kind(),
             Cause::UnreadBlock(cause) => cause.kind(),
+            Cause::TagBreach(cause) => cause.kind(),
+        }
+    }
+
+    /// How urgently a finding of this cause is reported.
+    ///
+    /// The two derivation defects are errors: derived state is missing
+    /// something the vault holds, and a reader of that state gets a wrong
+    /// answer until it is fixed. A facet breach is a warning: the document
+    /// derived whole, every fact it holds is on its row, and what stands is a
+    /// disagreement between the vault's own declaration and its contents.
+    pub(crate) const fn severity(self) -> Severity {
+        match self {
+            Cause::Undecodable(_) | Cause::UnreadBlock(_) => Severity::Error,
+            Cause::TagBreach(_) => Severity::Warning,
         }
     }
 
@@ -189,8 +237,9 @@ impl Cause {
         match self {
             Cause::Undecodable(cause) => cause.decided(),
             // A block is read out of the document's own bytes, so concluding
-            // that nothing read it means having opened them.
-            Cause::UnreadBlock(_) => Decided::ByBytes,
+            // that nothing read it means having opened them. So is a tag: the
+            // facts a facet judges are read from the document itself.
+            Cause::UnreadBlock(_) | Cause::TagBreach(_) => Decided::ByBytes,
         }
     }
 
@@ -204,6 +253,14 @@ impl Cause {
             ),
             Cause::UnreadBlock(cause) => format!(
                 "`{}` derives without its frontmatter: {}",
+                subject.as_str(),
+                cause.statement()
+            ),
+            // The tag itself is the finding's target rather than part of its
+            // message, so a reader filters the class by the name without
+            // parsing prose.
+            Cause::TagBreach(cause) => format!(
+                "`{}` carries a tag the vault's schema does not admit: {}",
                 subject.as_str(),
                 cause.statement()
             ),
@@ -271,20 +328,21 @@ impl Decided {
 /// leaves none. A cause minted under a kind an older cause already carries is
 /// reached by neither side, and the ADR that closes both cause sets is what
 /// stands in front of one.
-const CAUSES: [Cause; 6] = [
+const CAUSES: [Cause; 7] = [
     Cause::Undecodable(Undecodable::PathBytes),
     Cause::Undecodable(Undecodable::PathSpelling),
     Cause::Undecodable(Undecodable::BodyBytes),
     Cause::UnreadBlock(UnreadBlock::Unclosed),
     Cause::UnreadBlock(UnreadBlock::Unreadable),
     Cause::UnreadBlock(UnreadBlock::TooLarge),
+    Cause::TagBreach(TagBreach::Undeclared),
 ];
 
 /// The finding kinds no cause above carries.
 ///
-/// Quarantine and the unread block are the only producers recording findings
-/// today, so the list is empty. A kind minted for another producer — an
-/// ambiguity a resolution reads, a field a schema refuses — is named here, which
+/// Quarantine, the unread block and the tag facet are the producers recording
+/// findings today, so the list is empty. A kind minted for another producer —
+/// an ambiguity a resolution reads, a field a schema refuses — is named here, which
 /// is the one line that keeps the classification below a reading of the registry
 /// rather than a claim that every kind the registry holds is this crate's.
 const KINDS_NO_CAUSE_CARRIES: [FindingKind; 0] = [];
@@ -329,6 +387,7 @@ const fn scope_agrees(cause: Cause) -> bool {
         (cause, cause.kind().scope()),
         (Cause::Undecodable(_), FindingScope::Place)
             | (Cause::UnreadBlock(_), FindingScope::Document)
+            | (Cause::TagBreach(_), FindingScope::Document)
     )
 }
 
@@ -417,6 +476,45 @@ const SPELLING_KINDS: [FindingKind; decided_count(Decided::BySpelling)] =
 /// them replaces at the place those bytes are read at.
 const CONTENT_KINDS: [FindingKind; decided_count(Decided::ByBytes)] =
     decided_kinds(Decided::ByBytes);
+
+/// The kinds an unread frontmatter block is stated under, which is what a row
+/// asserting that defect implies stands beside it.
+///
+/// **This is what makes the pair check kind-precise.** A row carrying an absent
+/// frontmatter projection beside a nonzero frontmatter-diagnostic count owes a
+/// finding of one of these kinds and of no other: a document-scoped finding of
+/// some other kind — a facet breach, say — can stand at the same path about
+/// something else entirely, and reading its presence as the pair being whole
+/// would leave the block's own finding lost.
+pub(crate) const UNREAD_BLOCK_KINDS: [FindingKind; unread_block_count()] = unread_block_kinds();
+
+/// How many causes in [`CAUSES`] are an unread frontmatter block.
+const fn unread_block_count() -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < CAUSES.len() {
+        if matches!(CAUSES[index], Cause::UnreadBlock(_)) {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+/// [`CAUSES`]' unread-block members, read as the kinds they record under.
+const fn unread_block_kinds() -> [FindingKind; unread_block_count()] {
+    let mut kinds = [FindingKind::FrontmatterUnreadable; unread_block_count()];
+    let mut filled = 0;
+    let mut index = 0;
+    while index < CAUSES.len() {
+        if matches!(CAUSES[index], Cause::UnreadBlock(_)) {
+            kinds[filled] = CAUSES[index].kind();
+            filled += 1;
+        }
+        index += 1;
+    }
+    kinds
+}
 
 /// Every side a place is read on, which is what a prune asks its account for one
 /// at a time.
@@ -611,16 +709,14 @@ pub(crate) fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<Der
 /// records them; it does not assemble them.
 #[derive(Debug, PartialEq)]
 pub(crate) struct PlannedFinding {
-    subject: DocumentPath,
-    cause: Cause,
-    detail: String,
-}
-
-impl PlannedFinding {
-    /// Splits the finding into its subject, its cause, and its formatted detail.
-    pub(crate) fn into_parts(self) -> (DocumentPath, Cause, String) {
-        (self.subject, self.cause, self.detail)
-    }
+    pub(crate) subject: DocumentPath,
+    pub(crate) cause: Cause,
+    pub(crate) detail: String,
+    /// What the finding is about inside its subject, where the cause is about
+    /// one named thing on the document rather than the document itself. A tag
+    /// breach carries the tag; a derivation defect carries nothing, because the
+    /// subject is the whole of what it is about.
+    pub(crate) target: Option<String>,
 }
 
 /// One document's planned outcome: a change and a finding, each present when
@@ -631,7 +727,11 @@ impl PlannedFinding {
 #[derive(Debug, PartialEq)]
 pub(crate) struct Plan {
     pub(crate) change: Option<Change>,
-    pub(crate) finding: Option<PlannedFinding>,
+    /// Every finding the observation implies, in the order a reader meets them:
+    /// the derivation defect the act concluded, then the facet breaches the
+    /// declaration judges. A document can break a facet once per tag, so this
+    /// is a list rather than the single answer a derivation defect is.
+    pub(crate) findings: Vec<PlannedFinding>,
 }
 
 /// Plan what one document's bytes write, taking with them the row they can no
@@ -652,29 +752,39 @@ pub(crate) struct Plan {
 ///
 /// `path` is the spelling as the vault holds it, which is what a quarantine's
 /// subject is rendered from where the grammar admits no document path.
+///
+/// `declared` is the content model of the pinned vault schema. It decides the
+/// facet findings alone: a document that does not decode is judged against
+/// nothing, because a vault declaration says what a document's facts must be
+/// and there are no facts.
 pub(crate) fn plan_document(
     path: &Path,
     spelling: &str,
     bytes: &[u8],
     hash: String,
     stored: Option<&DocumentPath>,
+    declared: &VaultSchema,
 ) -> Plan {
     match map_document(spelling, bytes, hash) {
         Ok(derived) => {
             let subject = derived.facts.path.clone();
+            let mut findings = Vec::new();
+            if let Some(unread) = derived.unread_frontmatter {
+                let detail = match unread.problem {
+                    Some(problem) => format!("{path:?}: {problem}"),
+                    None => format!("{path:?}"),
+                };
+                findings.push(PlannedFinding {
+                    subject: subject.clone(),
+                    cause: Cause::UnreadBlock(unread.cause),
+                    detail,
+                    target: None,
+                });
+            }
+            findings.extend(plan_tag_facet(&subject, &derived.facts, declared));
             Plan {
                 change: Some(Change::Upsert(derived.facts)),
-                finding: derived.unread_frontmatter.map(|unread| {
-                    let detail = match unread.problem {
-                        Some(problem) => format!("{path:?}: {problem}"),
-                        None => format!("{path:?}"),
-                    };
-                    PlannedFinding {
-                        subject,
-                        cause: Cause::UnreadBlock(unread.cause),
-                        detail,
-                    }
-                }),
+                findings,
             }
         }
         Err(quarantine) => Plan {
@@ -682,8 +792,55 @@ pub(crate) fn plan_document(
                 path: row.clone(),
                 provenance: Provenance::Quarantine,
             }),
-            finding: Some(plan_quarantine(path, quarantine)),
+            findings: vec![plan_quarantine(path, quarantine)],
         },
+    }
+}
+
+/// Judge a document's tags against the vault's declared tag facet.
+///
+/// The tags are the ones already on the facts: the facet is a judgment over
+/// what the document says rather than a second reading of it, which is what
+/// makes the tag rows schema-independent parse facts and these findings the
+/// schema-keyed answer about them.
+///
+/// **One finding per distinct undeclared name, not one per token.** A document
+/// that writes `#draft` in its frontmatter and three more times in its body has
+/// one thing wrong with it, and a reader paging the class wants the names.
+/// Order is the order the names are first written, so equal documents plan
+/// equal writes.
+///
+/// A facet that reports nothing yields nothing here, which includes every vault
+/// that has not declared a tag vocabulary at all.
+fn plan_tag_facet(
+    subject: &DocumentPath,
+    facts: &DocumentFacts,
+    declared: &VaultSchema,
+) -> Vec<PlannedFinding> {
+    let facet = declared.tags();
+    if !facet.reports_undeclared() {
+        return Vec::new();
+    }
+    let mut seen = BTreeSet::new();
+    facts
+        .tags
+        .iter()
+        .filter(|tag| !facet.admits(&tag.name))
+        .filter(|tag| seen.insert(tag.name.clone()))
+        .map(|tag| PlannedFinding {
+            subject: subject.clone(),
+            cause: Cause::TagBreach(TagBreach::Undeclared),
+            detail: format!("`#{}`, written in the {}", tag.name, source(tag.source)),
+            target: Some(tag.name.clone()),
+        })
+        .collect()
+}
+
+/// Where a tag was written, as the finding's detail names it.
+const fn source(source: TagSource) -> &'static str {
+    match source {
+        TagSource::Body => "body",
+        TagSource::Frontmatter => "frontmatter",
     }
 }
 
@@ -696,6 +853,7 @@ pub(crate) fn plan_quarantine(path: &Path, quarantine: Quarantine) -> PlannedFin
         subject: DocumentPath::rendered(path),
         cause: Cause::Undecodable(quarantine.cause),
         detail: format!("{path:?}: {}", quarantine.problem),
+        target: None,
     }
 }
 
@@ -744,6 +902,21 @@ fn map_value(value: &Value) -> FrontmatterValue {
 mod tests {
     use super::*;
 
+    /// A vault that has declared nothing, which is what most cases here plan
+    /// under: the observation alone decides the plan.
+    fn undeclaring() -> VaultSchema {
+        VaultSchema::default()
+    }
+
+    /// A vault whose declared tag vocabulary is `front` and everything under
+    /// `area/`, and which reports anything else.
+    fn reporting() -> VaultSchema {
+        VaultSchema::parse(
+            b"version: 1\ntags:\n  declared: [front]\n  patterns: [\"area/**\"]\n  undeclared: report\n",
+        )
+        .expect("a schema declaring a tag facet")
+    }
+
     /// **The two discard sides partition the causes.** The sides are read off
     /// [`CAUSES`] through [`Cause::decided`], so a cause whose kind falls out of
     /// both is a cause no act re-derives — which is a copy of that finding per
@@ -790,7 +963,7 @@ mod tests {
         for cause in CAUSES {
             let expected = match cause {
                 Cause::Undecodable(_) => FindingScope::Place,
-                Cause::UnreadBlock(_) => FindingScope::Document,
+                Cause::UnreadBlock(_) | Cause::TagBreach(_) => FindingScope::Document,
             };
             assert_eq!(
                 cause.kind().scope(),
@@ -825,10 +998,10 @@ mod tests {
             let path = Path::new(spelling);
             let hash = || norn_fs::ContentHash::of(bytes).to_string();
 
-            let unheld = plan_document(path, spelling, bytes, hash(), None);
-            let finding = unheld
-                .finding
-                .expect("a refused document states why it contributes no facts");
+            let unheld = plan_document(path, spelling, bytes, hash(), None, &undeclaring());
+            let [finding] = &unheld.findings[..] else {
+                panic!("a refused document states why it contributes no facts");
+            };
             assert_eq!(finding.cause, Cause::Undecodable(cause));
             assert_eq!(
                 finding.subject,
@@ -841,7 +1014,7 @@ mod tests {
             );
 
             let stored = DocumentPath::new("note.md").expect("a document path");
-            let held = plan_document(path, spelling, bytes, hash(), Some(&stored));
+            let held = plan_document(path, spelling, bytes, hash(), Some(&stored), &undeclaring());
             assert_eq!(
                 held.change,
                 Some(Change::Death {
@@ -911,12 +1084,21 @@ mod tests {
                 "{cause:?} accounts for its refusal another way"
             );
 
-            let plan = plan_document(Path::new("note.md"), "note.md", bytes, hash(), None);
+            let plan = plan_document(
+                Path::new("note.md"),
+                "note.md",
+                bytes,
+                hash(),
+                None,
+                &undeclaring(),
+            );
             assert!(
                 matches!(plan.change, Some(Change::Upsert(_))),
                 "{cause:?} cost the document the row it derives"
             );
-            let finding = plan.finding.expect("the unknown fields are stated");
+            let [finding] = &plan.findings[..] else {
+                panic!("the unknown fields are stated");
+            };
             assert_eq!(finding.cause, Cause::UnreadBlock(cause));
             let expected = match &problem {
                 Some(problem) => format!("\"note.md\": {problem}"),
@@ -947,19 +1129,27 @@ mod tests {
             whole,
             hash.clone(),
             Some(&stored),
+            &undeclaring(),
         );
         assert_eq!(
             plan.change,
             Some(Change::Upsert(derived.facts)),
             "the upsert carries something other than the facts the act derived"
         );
-        assert_eq!(
-            plan.finding, None,
-            "a document that derives whole states a cause"
+        assert!(
+            plan.findings.is_empty(),
+            "a document that derives whole under a vault that declares nothing states a cause"
         );
         assert_eq!(
             plan,
-            plan_document(Path::new("note.md"), "note.md", whole, hash, None),
+            plan_document(
+                Path::new("note.md"),
+                "note.md",
+                whole,
+                hash,
+                None,
+                &undeclaring()
+            ),
             "the row the observation replaces changed a plan that still derives"
         );
 
@@ -972,22 +1162,29 @@ mod tests {
             unread,
             hash.clone(),
             Some(&stored),
+            &undeclaring(),
         );
         assert!(
             matches!(plan.change, Some(Change::Upsert(_))),
             "a block nothing read cost the document its row"
         );
+        let [finding] = &plan.findings[..] else {
+            panic!("the unknown fields are stated");
+        };
         assert_eq!(
-            plan.finding
-                .as_ref()
-                .expect("the unknown fields are stated")
-                .subject,
-            derived.facts.path,
+            finding.subject, derived.facts.path,
             "a derived document's finding stands at another identity"
         );
         assert_eq!(
             plan,
-            plan_document(Path::new("note.md"), "note.md", unread, hash, None),
+            plan_document(
+                Path::new("note.md"),
+                "note.md",
+                unread,
+                hash,
+                None,
+                &undeclaring()
+            ),
             "the row the observation replaces changed a plan that still derives"
         );
     }
@@ -1021,7 +1218,8 @@ mod tests {
                 "document/body-bytes-not-utf8",
                 "document/frontmatter-too-large",
                 "document/frontmatter-unclosed",
-                "document/frontmatter-unreadable"
+                "document/frontmatter-unreadable",
+                "document/undeclared-tag"
             ]
         );
     }
@@ -1047,6 +1245,7 @@ mod tests {
                     source,
                     norn_fs::ContentHash::of(source).to_string(),
                     Some(&stored),
+                    &reporting(),
                 )
             };
             assert_eq!(
@@ -1264,6 +1463,114 @@ mod tests {
                 facts.frontmatter_diagnostic_count, notes,
                 "`{read}` raised another count of block-scoped notes"
             );
+        }
+    }
+
+    /// **The facet judges the tags the document already put on its row.** A
+    /// document carrying names the declared vocabulary does not admit plans one
+    /// finding per distinct name, each targeted at the name so a reader filters
+    /// the class without reading prose, and the admitted names plan nothing.
+    #[test]
+    fn a_reporting_facet_plans_one_finding_per_undeclared_name() {
+        let source = b"---\ntags: [front, ephemeral]\n---\n# Heading\n#area/work #draft #draft\n";
+        let hash = norn_fs::ContentHash::of(source).to_string();
+
+        let plan = plan_document(
+            Path::new("note.md"),
+            "note.md",
+            source,
+            hash,
+            None,
+            &reporting(),
+        );
+
+        assert!(
+            matches!(plan.change, Some(Change::Upsert(_))),
+            "a facet breach cost the document the row it derives"
+        );
+        let targets: Vec<Option<&str>> = plan
+            .findings
+            .iter()
+            .map(|finding| finding.target.as_deref())
+            .collect();
+        // Body tags come before frontmatter tags on the row, and a repeated
+        // name is one finding.
+        assert_eq!(targets, vec![Some("draft"), Some("ephemeral")]);
+        for finding in &plan.findings {
+            assert_eq!(finding.cause, Cause::TagBreach(TagBreach::Undeclared));
+            assert_eq!(finding.cause.severity(), Severity::Warning);
+            assert_eq!(
+                finding.subject,
+                DocumentPath::new("note.md").expect("a document path")
+            );
+        }
+        assert_eq!(plan.findings[0].detail, "`#draft`, written in the body");
+        assert_eq!(
+            plan.findings[1].detail,
+            "`#ephemeral`, written in the frontmatter"
+        );
+    }
+
+    /// The control on the case above: the same bytes under a vault that has
+    /// declared no tag vocabulary plan the upsert and nothing else. A facet
+    /// finding is the schema's judgment, so a vault that judges nothing has
+    /// none.
+    #[test]
+    fn the_same_document_plans_no_facet_finding_where_nothing_is_declared() {
+        let source = b"---\ntags: [front, ephemeral]\n---\n# Heading\n#area/work #draft #draft\n";
+        let hash = norn_fs::ContentHash::of(source).to_string();
+
+        let plan = plan_document(
+            Path::new("note.md"),
+            "note.md",
+            source,
+            hash,
+            None,
+            &undeclaring(),
+        );
+
+        assert!(matches!(plan.change, Some(Change::Upsert(_))));
+        assert!(plan.findings.is_empty());
+    }
+
+    /// **A document with no facts is judged against nothing.** A declaration
+    /// says what a document's facts must be, and a path that does not decode
+    /// has none — so the plan is the quarantine alone, whatever the facet
+    /// declares.
+    #[test]
+    fn a_document_that_does_not_decode_is_judged_against_no_facet() {
+        let source = b"# heading\n\xff".as_slice();
+        let hash = norn_fs::ContentHash::of(source).to_string();
+
+        let plan = plan_document(
+            Path::new("note.md"),
+            "note.md",
+            source,
+            hash,
+            None,
+            &reporting(),
+        );
+
+        let [finding] = &plan.findings[..] else {
+            panic!("a refused document plans its quarantine and nothing else");
+        };
+        assert_eq!(
+            finding.cause,
+            Cause::Undecodable(Undecodable::BodyBytes),
+            "a document with no facts was judged against the vault's declaration"
+        );
+    }
+
+    /// A facet breach leaves the document whole, so it is reported as a warning
+    /// rather than as the error a derivation defect is.
+    #[test]
+    fn the_two_finding_families_carry_the_severity_their_effect_on_derived_state_has() {
+        for cause in CAUSES {
+            let expected = match cause {
+                Cause::Undecodable(_) | Cause::UnreadBlock(_) => Severity::Error,
+                Cause::TagBreach(_) => Severity::Warning,
+            };
+            assert_eq!(cause.severity(), expected, "`{}`", cause.kind());
         }
     }
 }

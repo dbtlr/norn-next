@@ -78,7 +78,7 @@ use crate::facts::{
     SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone,
     TagFact, TagSource, VaultSchemaPin,
 };
-use crate::increment::{self, Change, IncrementOutcome, IncrementProvenance};
+use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
 use crate::store::Store;
 
@@ -171,21 +171,31 @@ impl<'a> Request<'a> {
 
     // ---- writes ----
 
-    /// Apply one changeset — document upserts and deaths — and report what it
-    /// did.
+    /// Apply one changeset — document upserts and deaths — with the findings
+    /// the same act derived, and report what it did.
     ///
     /// This is the store's one way in for document facts, and the whole of the
     /// increment's contract is stated here.
     ///
-    /// # The changeset is the unit of atomicity
+    /// # The changeset is the unit of atomicity, and its findings are in it
     ///
-    /// Every entry lands, or none of them does. There is no scope to open and
-    /// add writes to, because this entry point's granularity *is* the
-    /// guarantee: a caller that needs two changes to land together hands them
-    /// over together, and a caller that needs them to land separately calls
-    /// twice. Internally it is one `IMMEDIATE` transaction, so the write lock is
-    /// held from the first statement — a deferred transaction that upgrades
-    /// halfway through can fail after fact rows have already been discarded.
+    /// Every entry lands, or none of them does — and so does every finding
+    /// handed over beside them. There is no scope to open and add writes to,
+    /// because this entry point's granularity *is* the guarantee: a caller that
+    /// needs two changes to land together hands them over together, and a
+    /// caller that needs them to land separately calls twice. Internally it is
+    /// one `IMMEDIATE` transaction, so the write lock is held from the first
+    /// statement — a deferred transaction that upgrades halfway through can
+    /// fail after fact rows have already been discarded.
+    ///
+    /// **A finding belongs in the act that derived it.** The act that writes a
+    /// document's row is the act that concluded what is wrong with it, and a
+    /// finding recorded in a second transaction is one a process killed between
+    /// the two loses, with a row standing above it saying nothing. Findings
+    /// therefore arrive here rather than through [`Request::record_finding`],
+    /// which is the door for a producer whose act writes no document row at
+    /// all. An empty changeset carrying findings still opens the transaction:
+    /// the findings are writes.
     ///
     /// What that buys is the rung-2 story: a process that dies partway through
     /// leaves the previous generation whole, so nothing is ever at rest saying a
@@ -204,10 +214,11 @@ impl<'a> Request<'a> {
     /// comparing generations sees it arrive at an instant rather than as a run
     /// of numbers it has to recognize as one act.
     ///
-    /// An **empty changeset takes no generation.** It writes nothing, so moving
-    /// the store's write sequence for it would make the sequence report an act
-    /// that never happened; the outcome says so by carrying no generation at
-    /// all.
+    /// An **empty changeset takes no generation.** It writes no document row,
+    /// so moving the store's write sequence for one would make the sequence
+    /// report an act that never happened; the outcome says so by carrying no
+    /// generation at all. A finding takes a generation of its own either way,
+    /// exactly as it does through [`Request::record_finding`].
     ///
     /// # Entries apply in order, and the last entry for a path decides
     ///
@@ -284,11 +295,17 @@ impl<'a> Request<'a> {
         &mut self,
         _provenance: IncrementProvenance,
         changes: impl IntoIterator<Item = Change>,
+        findings: &[DerivedFinding<'_>],
     ) -> Result<IncrementOutcome, StoreError> {
-        increment::apply(self.store, &mut self.counters, changes)
+        increment::apply(self.store, &mut self.counters, changes, findings)
     }
 
     /// Record one finding, with the head of its candidates.
+    ///
+    /// **The door for a finding whose act writes no document row.** A finding
+    /// a changeset's own act derived is handed to
+    /// [`Request::apply_increment`] instead, so that the rows and what is
+    /// wrong with them land in one transaction.
     ///
     /// The finding is stamped with the vault-schema fingerprint currently
     /// pinned, which is what a schema change invalidates it by. A store with no
@@ -306,84 +323,12 @@ impl<'a> Request<'a> {
     /// filed under one of them is invisible to the other's maintenance. A finding
     /// that is not about resolution carries no class and writes no such row.
     pub fn record_finding(&mut self, finding: &FindingFacts) -> Result<(), StoreError> {
-        if finding.candidates.len() > CANDIDATE_HEAD {
-            return Err(StoreError::Bound {
-                what: "a finding's candidate head",
-                limit: CANDIDATE_HEAD,
-                given: finding.candidates.len(),
-            });
-        }
-        if finding.candidates_total < finding.candidates.len() as u64 {
-            return Err(StoreError::Bound {
-                what: "a finding's candidate total, against the head it heads",
-                limit: finding.candidates_total as usize,
-                given: finding.candidates.len(),
-            });
-        }
+        check_finding_bounds(finding)?;
         let transaction = self
             .store
             .database
             .immediate_transaction("opening the finding transaction")?;
-        let generation = norn_db::meta::next_generation(&transaction)?;
-        let fingerprint: String =
-            norn_db::meta::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
-                .unwrap_or_default();
-
-        let id: i64 = transaction
-            .query_row(
-                "INSERT INTO findings (
-                     vault_schema_fingerprint, generation, kind, severity, path, target,
-                     span_line, span_column, span_offset, candidates_total, message, detail
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                 RETURNING id",
-                params![
-                    fingerprint,
-                    generation,
-                    finding.kind.as_str(),
-                    finding.severity.as_str(),
-                    finding.path.as_str(),
-                    finding.target,
-                    finding.span.map(|span| span.line),
-                    finding.span.map(|span| span.column),
-                    finding.span.map(|span| span.byte_offset),
-                    finding.candidates_total,
-                    finding.message,
-                    finding.detail,
-                ],
-                |row| row.get(0),
-            )
-            .map_err(|error| error::sql("writing a finding", error))?;
-
-        {
-            let mut insert = transaction
-                .prepare(
-                    "INSERT INTO finding_candidates (finding, rank, path, suffix)
-                     VALUES (?1, ?2, ?3, ?4)",
-                )
-                .map_err(|error| error::sql("preparing a candidate write", error))?;
-            for (rank, candidate) in finding.candidates.iter().enumerate() {
-                insert
-                    .execute(params![
-                        id,
-                        rank as i64,
-                        candidate.path.as_str(),
-                        candidate.suffix,
-                    ])
-                    .map_err(|error| error::sql("writing a finding candidate", error))?;
-            }
-        }
-
-        {
-            let mut insert = transaction
-                .prepare("INSERT INTO finding_classes (finding, class_key) VALUES (?1, ?2)")
-                .map_err(|error| error::sql("preparing a finding class write", error))?;
-            for class_key in &finding.class_keys {
-                insert
-                    .execute(params![id, class_key.as_str()])
-                    .map_err(|error| error::sql("writing a finding's class", error))?;
-            }
-        }
-
+        write_finding(&transaction, finding)?;
         transaction
             .commit()
             .map_err(|error| error::sql("committing a finding", error))?;
@@ -1399,6 +1344,123 @@ pub enum DiscardScope<'a> {
     EveryKind,
     /// The findings of these kinds and no others.
     Kinds(&'a [FindingKind]),
+}
+
+/// Refuse a finding whose candidate head is not a head.
+///
+/// Two shapes are refused rather than stored: one longer than
+/// [`CANDIDATE_HEAD`], and one longer than the total it claims to be the head
+/// of. The total is what makes the head a head, so a total below the head's own
+/// length describes no vault.
+pub(crate) fn check_finding_bounds(finding: &FindingFacts) -> Result<(), StoreError> {
+    if finding.candidates.len() > CANDIDATE_HEAD {
+        return Err(StoreError::Bound {
+            what: "a finding's candidate head",
+            limit: CANDIDATE_HEAD,
+            given: finding.candidates.len(),
+        });
+    }
+    if finding.candidates_total < finding.candidates.len() as u64 {
+        return Err(StoreError::Bound {
+            what: "a finding's candidate total, against the head it heads",
+            limit: finding.candidates_total as usize,
+            given: finding.candidates.len(),
+        });
+    }
+    Ok(())
+}
+
+/// Write one finding, its candidate head and its class memberships, inside the
+/// transaction the caller is composing.
+///
+/// **The transaction is the caller's**, which is what lets a finding be written
+/// in the same act as the changeset that derived it. The generation and the
+/// pinned schema fingerprint are read inside it, so a finding is stamped with
+/// the key standing at the instant it lands.
+pub(crate) fn write_finding(
+    transaction: &rusqlite::Transaction<'_>,
+    finding: &FindingFacts,
+) -> Result<(), StoreError> {
+    let generation = norn_db::meta::next_generation(transaction)?;
+    let fingerprint: String =
+        norn_db::meta::get_meta(transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
+            .unwrap_or_default();
+
+    let id: i64 = transaction
+        .query_row(
+            "INSERT INTO findings (
+                 vault_schema_fingerprint, generation, kind, severity, path, target,
+                 span_line, span_column, span_offset, candidates_total, message, detail
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             RETURNING id",
+            params![
+                fingerprint,
+                generation,
+                finding.kind.as_str(),
+                finding.severity.as_str(),
+                finding.path.as_str(),
+                finding.target,
+                finding.span.map(|span| span.line),
+                finding.span.map(|span| span.column),
+                finding.span.map(|span| span.byte_offset),
+                finding.candidates_total,
+                finding.message,
+                finding.detail,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| error::sql("writing a finding", error))?;
+
+    {
+        let mut insert = transaction
+            .prepare(
+                "INSERT INTO finding_candidates (finding, rank, path, suffix)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .map_err(|error| error::sql("preparing a candidate write", error))?;
+        for (rank, candidate) in finding.candidates.iter().enumerate() {
+            insert
+                .execute(params![
+                    id,
+                    rank as i64,
+                    candidate.path.as_str(),
+                    candidate.suffix,
+                ])
+                .map_err(|error| error::sql("writing a finding candidate", error))?;
+        }
+    }
+
+    {
+        let mut insert = transaction
+            .prepare("INSERT INTO finding_classes (finding, class_key) VALUES (?1, ?2)")
+            .map_err(|error| error::sql("preparing a finding class write", error))?;
+        for class_key in &finding.class_keys {
+            insert
+                .execute(params![id, class_key.as_str()])
+                .map_err(|error| error::sql("writing a finding's class", error))?;
+        }
+    }
+    Ok(())
+}
+
+/// Discard the findings of `scope` about `path`, inside the caller's
+/// transaction, and report how many went.
+///
+/// The same statement [`Request::discard_findings_about`] emits, reached
+/// through a transaction a caller is composing rather than through the
+/// connection's autocommit.
+pub(crate) fn discard_about_in(
+    transaction: &rusqlite::Transaction<'_>,
+    path: &DocumentPath,
+    scope: DiscardScope<'_>,
+) -> Result<u64, StoreError> {
+    transaction
+        .execute(
+            &subject_discard_sql(scope),
+            params_from_iter(subject_discard_parameters(path, scope)),
+        )
+        .map(|discarded| discarded as u64)
+        .map_err(|error| error::sql("discarding a path's findings", error))
 }
 
 /// Where the next page of [`Request::stored_findings_after`] starts.

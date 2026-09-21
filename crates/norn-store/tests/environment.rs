@@ -86,7 +86,7 @@ fn document(path: &str, hash: &str, body: &str) -> DocumentFacts {
 fn write_document(store: &mut Store, facts: DocumentFacts) {
     store
         .begin_request()
-        .apply_increment(IncrementProvenance::Derived, [Change::Upsert(facts)])
+        .apply_increment(IncrementProvenance::Derived, [Change::Upsert(facts)], &[])
         .expect("applying a document upsert");
 }
 
@@ -121,7 +121,7 @@ fn a_full_disk_refuses_the_increment_and_is_never_typed_as_damage() {
     let mut store = scratch.open();
     let error = store
         .begin_request()
-        .apply_increment(IncrementProvenance::Derived, growth())
+        .apply_increment(IncrementProvenance::Derived, growth(), &[])
         .expect_err("an increment with no room to land in");
     assert_eq!(
         error.damage(),
@@ -146,7 +146,7 @@ fn a_full_disk_refuses_the_increment_and_is_never_typed_as_damage() {
     let mut store = scratch.open();
     store
         .begin_request()
-        .apply_increment(IncrementProvenance::Derived, growth())
+        .apply_increment(IncrementProvenance::Derived, growth(), &[])
         .expect("the same increment, with room for it");
     assert!(
         store
@@ -275,7 +275,7 @@ fn every_committed_changeset_is_counted() {
     // a boundary anything can be torn at.
     store
         .begin_request()
-        .apply_increment(IncrementProvenance::Derived, [])
+        .apply_increment(IncrementProvenance::Derived, [], &[])
         .expect("an empty changeset");
     assert_eq!(induced_failure::changesets_committed(), before + 1);
 }

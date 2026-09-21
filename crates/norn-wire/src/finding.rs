@@ -9,7 +9,10 @@
 //!
 //! The set is `document/…` because each member is a fact about one document:
 //! a vault holding a document norn cannot fully read stays serviceable, and the
-//! finding is where what is missing from derived state is stated.
+//! finding is where what is missing from derived state is stated. A kind may
+//! also state that a document derived *whole* and disagrees with what the vault
+//! declares about itself, which is what the vault schema's content model
+//! judges.
 //!
 //! **A kind also says where its findings may stand**, as [`FindingScope`]. A
 //! kind whose cause leaves nothing derivable is about the *place* and stands
@@ -114,6 +117,12 @@ pub enum FindingKind {
     /// well-formed, so nothing parsed it and the document's fields are unknown.
     #[serde(rename = "document/frontmatter-unreadable")]
     FrontmatterUnreadable,
+    /// `document/undeclared-tag` — the document carries a tag the vault's
+    /// declared tag facet does not admit. The document derives whole; what the
+    /// finding states is that the vault's own vocabulary does not hold this
+    /// name. The tag is the finding's `target`.
+    #[serde(rename = "document/undeclared-tag")]
+    UndeclaredTag,
 }
 
 /// Where the findings of a kind may stand.
@@ -144,13 +153,14 @@ impl FindingKind {
     /// Reading a kind back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [FindingKind; 6] = [
+    pub const ALL: [FindingKind; 7] = [
         FindingKind::PathBytesNotUtf8,
         FindingKind::PathNamesNoDocument,
         FindingKind::BodyBytesNotUtf8,
         FindingKind::FrontmatterTooLarge,
         FindingKind::FrontmatterUnclosed,
         FindingKind::FrontmatterUnreadable,
+        FindingKind::UndeclaredTag,
     ];
 
     /// The kind as the string it is on the wire.
@@ -162,6 +172,7 @@ impl FindingKind {
             FindingKind::FrontmatterTooLarge => "document/frontmatter-too-large",
             FindingKind::FrontmatterUnclosed => "document/frontmatter-unclosed",
             FindingKind::FrontmatterUnreadable => "document/frontmatter-unreadable",
+            FindingKind::UndeclaredTag => "document/undeclared-tag",
         }
     }
 
@@ -182,7 +193,10 @@ impl FindingKind {
             // nothing, so the finding stands beside the row it is about.
             FindingKind::FrontmatterTooLarge
             | FindingKind::FrontmatterUnclosed
-            | FindingKind::FrontmatterUnreadable => FindingScope::Document,
+            | FindingKind::FrontmatterUnreadable
+            // The document is derived whole, and what the finding states is a
+            // judgment about one of the facts on its row.
+            | FindingKind::UndeclaredTag => FindingScope::Document,
         }
     }
 }

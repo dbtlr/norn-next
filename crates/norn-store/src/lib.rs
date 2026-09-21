@@ -92,7 +92,7 @@ pub use facts::{
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
 pub use feed::FeedRead;
-pub use increment::{Change, IncrementOutcome, IncrementProvenance};
+pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 // The open ceremony's own vocabulary, which is this crate's too: a store is
 // one client of that ceremony, and the rung a disagreement names is the same

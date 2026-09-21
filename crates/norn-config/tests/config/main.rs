@@ -16,6 +16,7 @@ mod concurrency;
 mod layout;
 mod names;
 mod registry;
+mod schema;
 mod tokens;
 mod tolerance;
 mod vault;

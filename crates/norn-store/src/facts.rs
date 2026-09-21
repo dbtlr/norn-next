@@ -441,7 +441,18 @@ pub struct FindingFacts {
     /// maintenance that names the other. Validated keys, because a key no probe's
     /// range opens is the same invisibility by another route.
     pub class_keys: BTreeSet<ClassKey>,
-    /// The resolution target, as written.
+    /// What the finding is about **inside** its subject, as written, and
+    /// `None` where the subject is the whole of what it is about.
+    ///
+    /// **Not always a path.** A resolution finding carries the resolution
+    /// target it could not resolve, which is a document reference; a finding
+    /// about one named thing on a document that derived whole carries that
+    /// thing's own name — a tag, a field key. The column is text a reader
+    /// filters a class by, and nothing reads it as a path: the class-scoped
+    /// maintenance a resolution finding needs is keyed by
+    /// [`FindingFacts::class_keys`], which its producer computes from the probe
+    /// it read, and the candidate head is [`CandidateFact`] rows carrying their
+    /// own validated paths.
     pub target: Option<String>,
     pub span: Option<Span>,
     /// The candidates, in deterministic resolution-ladder order, bounded at

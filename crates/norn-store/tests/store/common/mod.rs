@@ -60,6 +60,7 @@ pub fn write_document(request: &mut Request<'_>, facts: &DocumentFacts) -> Incre
         .apply_increment(
             IncrementProvenance::Derived,
             [Change::Upsert(facts.clone())],
+            &[],
         )
         .expect("applying a document upsert")
 }
@@ -77,6 +78,7 @@ pub fn record_death(
                 path: at.clone(),
                 provenance,
             }],
+            &[],
         )
         .expect("applying a death")
 }
@@ -92,6 +94,7 @@ pub fn write_documents(request: &mut Request<'_>, facts: &[DocumentFacts]) -> In
                 .cloned()
                 .map(Change::Upsert)
                 .collect::<Vec<_>>(),
+            &[],
         )
         .expect("applying a changeset")
 }

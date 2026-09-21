@@ -134,6 +134,7 @@ fn an_untrusted_reason_advertises_its_kind_tag() {
             "environmental_refusal",
             "store_damaged_rebuilding",
             "store_damaged_awaiting_demand",
+            "schema_unreadable",
             "leg_unwound",
         ])
     );
@@ -364,7 +365,8 @@ fn a_finding_kind_advertises_its_flat_namespaced_string() {
             "document/body-bytes-not-utf8",
             "document/frontmatter-too-large",
             "document/frontmatter-unclosed",
-            "document/frontmatter-unreadable"
+            "document/frontmatter-unreadable",
+            "document/undeclared-tag"
         ])
     );
     // The derived schema enumerates the enum itself, so holding ALL equal to
