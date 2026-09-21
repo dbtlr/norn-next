@@ -1407,10 +1407,14 @@ that failed on the environment heals under read traffic rather than waiting for 
 the read's own demand keeps withdrawing. That mint opens the database file, and it opens it
 under the entry gate, so it is priced the way the publication's mint is: every other holder
 of that entry — its state, its inspection, its demand, its reap, and every other read of it
-— waits behind the open. **The bound is the read-only open's own busy timeout, five
-seconds**, because the open reads the journal mode back before it hands the connection over
-and that read waits on the timeout wherever the database is locked against it. Five seconds
-under the gate is accepted on the read path rather than shortened for it. The read that pays
+— waits behind the open. **The bound is the read-only open's busy timeout, five seconds, and
+it is per statement rather than per open**: the open sets that timeout and then runs two
+statements that read the database — the journal-mode read that refuses a database not in
+write-ahead logging, and the store-epoch read that binds the connection to its file — so a
+mint that met a busy at each stalls the gate for a multiple of five seconds rather than for
+five. A reader in write-ahead logging is almost never the one that takes a busy, which is
+what makes the multiple a ceiling rather than a cost. That ceiling is accepted on the read
+path rather than shortened for it. The read that pays
 it is a read that would otherwise be refused, the entry it stalls is one whose read seam is
 already down, and the reads queued behind it get the healed handle instead of the refusal
 they were headed for; a shorter bound would buy a faster refusal by trading the heal away,
