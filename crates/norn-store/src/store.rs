@@ -277,14 +277,19 @@ impl ConnectionTurn {
     ///
     /// The connection goes back to the handle when the [`Snapshot`] is
     /// dropped, or here where the establishment refuses.
-    pub fn establish(mut self) -> Result<Snapshot, StoreError> {
+    ///
+    /// **It reports what it ran whichever way it ended.** An establishment
+    /// that refused ran the statement that refused it, rolled the transaction
+    /// back and gave the connection up, and a caller holding a lock across all
+    /// of that waited for every part of it.
+    pub fn establish(mut self) -> SnapshotAttempt {
         let mut database = self
             .database
             .take()
             .expect("a turn holds the connection until it establishes or drops");
         let reader = Arc::clone(&self.reader);
         let mut counters = SnapshotCounters::default();
-        match establish_on(&mut database, &reader.epoch, &mut counters) {
+        let snapshot = match establish_on(&mut database, &reader.epoch, &mut counters) {
             Ok(reading) => Ok(Snapshot {
                 reader,
                 database: Some(database),
@@ -296,7 +301,8 @@ impl ConnectionTurn {
                 reader.give_the_connection_back(database);
                 Err(error)
             }
-        }
+        };
+        SnapshotAttempt { snapshot, counters }
     }
 }
 
@@ -309,6 +315,13 @@ impl Drop for ConnectionTurn {
 }
 
 /// Open the snapshot and run the one statement that establishes it.
+///
+/// The two counts are taken at different moments, because they answer
+/// different questions. A snapshot either opened or it did not, so it is
+/// counted where the open succeeded. A statement is a cost the caller paid
+/// whether or not it answered — a read that waited out the busy timeout and
+/// then failed held the connection for that wait — so it is counted as it is
+/// run.
 fn establish_on(
     database: &mut Database,
     epoch: &str,
@@ -316,17 +329,37 @@ fn establish_on(
 ) -> Result<StoreReading, StoreError> {
     database.open_snapshot()?;
     counters.count_snapshot();
+    counters.count_statement();
     let write_generation =
         norn_db::meta::get_meta::<i64>(database.connection(), norn_db::meta::WRITE_GENERATION)?
             .ok_or_else(|| StoreError::Damaged {
                 what: "the database records no write generation, so no read can say what it read"
                     .to_string(),
             })?;
-    counters.count_statement();
     Ok(StoreReading {
         epoch: epoch.to_string(),
         write_generation,
     })
+}
+
+/// One read's attempt to establish its snapshot, and what that attempt ran.
+///
+/// **The counters are reported on both answers**, because the caller holding a
+/// lock across the attempt paid for the statements either way: an attempt that
+/// refused opened its transaction, ran the statement that refused it and
+/// rolled back, all inside that lock.
+///
+/// On the snapshot arm these are the reading [`Snapshot::counters`] starts
+/// from. The two stop being equal as soon as a read builder runs a statement
+/// on the snapshot: this reading is what establishing cost, and the snapshot's
+/// own is what that snapshot has cost so far.
+#[derive(Debug)]
+pub struct SnapshotAttempt {
+    /// The snapshot the read answers from, or why there is none.
+    pub snapshot: Result<Snapshot, StoreError>,
+    /// What the attempt ran: the snapshot it opened, and the statements it ran
+    /// against the database.
+    pub counters: SnapshotCounters,
 }
 
 /// One read's snapshot: the connection it answers on, the reading it was
@@ -1081,6 +1114,7 @@ mod tests {
             .try_take()
             .expect("a handle nothing is reading holds its connection")
             .establish()
+            .snapshot
             .expect("a snapshot");
         assert!(
             snapshot
@@ -1130,6 +1164,7 @@ mod tests {
             .try_take()
             .expect("the dropped turn kept the connection")
             .establish()
+            .snapshot
             .expect("a snapshot");
         assert!(
             reader.try_take().is_none(),
@@ -1161,6 +1196,7 @@ mod tests {
             .try_take()
             .expect("a free handle hands out its turn")
             .establish()
+            .snapshot
             .expect("a snapshot");
         assert_eq!(snapshot.counters().snapshots_opened(), 1);
         assert_eq!(
@@ -1206,6 +1242,7 @@ mod tests {
             .try_take()
             .expect("the unwound turn kept the handle's connection")
             .establish()
+            .snapshot
             .expect("a snapshot");
         assert_eq!(
             snapshot.counters().snapshots_opened(),
@@ -1262,6 +1299,7 @@ mod tests {
             .try_take()
             .expect("a handle nothing is reading holds its connection")
             .establish()
+            .snapshot
             .expect("a snapshot");
         let connection = snapshot.connection();
 
@@ -1328,6 +1366,7 @@ mod tests {
             .try_take()
             .expect("a handle nothing is reading holds its connection")
             .establish()
+            .snapshot
             .expect("a snapshot");
         let connection = snapshot.connection();
 

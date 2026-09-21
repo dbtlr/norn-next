@@ -28,9 +28,10 @@ pub use evidence::{ReadReading, ReadsSince};
 #[cfg(feature = "induced-failure")]
 pub use lifecycle::WorkInFlight;
 pub use lifecycle::{
-    AnswerReading, Demand, DemandLease, EntryOps, EntryReloadFailure, Established, Healing, Host,
-    HostError, JobFailure, LifecyclePolicy, LifecyclePolicyError, MintedReader, ProgressReporter,
-    ReadHold, ReadRefusal, ReadSource, ReaderUnavailable, ReconcileWork, SnapshotSource,
+    AnswerReading, Demand, DemandLease, EntryOps, EntryReloadFailure, Established, Establishment,
+    Healing, Host, HostError, JobFailure, LifecyclePolicy, LifecyclePolicyError, MintedReader,
+    ProgressReporter, ReadHold, ReadRefusal, ReadSource, ReaderUnavailable, ReconcileWork,
+    SnapshotSource,
 };
 /// One vault's registration: the name it is served under, its root, and where
 /// its schema is read from.

@@ -25,8 +25,8 @@ use crate::derivation::{
 use crate::evidence::{JobEvidence, count_changeset};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
-    EntryOps, Established, Healing, JobFailure, MintedReader, ProgressReporter, ReadSource,
-    ReaderUnavailable, ReconcileWork, ReloadError, ReloadOutcome, SnapshotSource,
+    EntryOps, Established, Establishment, Healing, JobFailure, MintedReader, ProgressReporter,
+    ReadSource, ReaderUnavailable, ReconcileWork, ReloadError, ReloadOutcome, SnapshotSource,
 };
 
 /// Maximum number of document changes materialized for one store transaction.
@@ -225,15 +225,22 @@ impl ReadSource for norn_store::SnapshotReader {
     /// The store establishes the snapshot and reports what it cost: the
     /// reading it was established at, and the one statement that established
     /// it.
-    fn establish(turn: Self::Turn) -> Result<Established<Self::Snapshot>, ReaderUnavailable> {
-        let snapshot = turn
-            .establish()
-            .map_err(|error| ReaderUnavailable::new(error.to_string()))?;
-        Ok(Established {
-            reading: snapshot.reading().clone(),
-            statements: snapshot.counters().statements_executed(),
-            snapshot,
-        })
+    ///
+    /// The statements come from the attempt's own counters rather than the
+    /// snapshot's, because an attempt that refused has no snapshot to read
+    /// them off and ran the statement all the same.
+    fn establish(turn: Self::Turn) -> Establishment<Self::Snapshot> {
+        let attempt = turn.establish();
+        Establishment {
+            established: attempt
+                .snapshot
+                .map(|snapshot| Established {
+                    reading: snapshot.reading().clone(),
+                    snapshot,
+                })
+                .map_err(|error| ReaderUnavailable::new(error.to_string())),
+            statements: attempt.counters.statements_executed(),
+        }
     }
 }
 

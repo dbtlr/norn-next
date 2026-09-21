@@ -1422,15 +1422,21 @@ and it would make the read path a second spelling of an open the substrate has o
 of. A read pays it at most once: one open per read that meets an empty slot, no retry inside
 it, and a mint that fails there leaves the reason that read refuses with.
 
-**The read account reports that mint apart from the establishment, and reports it whichever
-way the read left.** The host keeps two readings of what its reads run under the entry gate:
-the snapshot-establishing statements, which are exactly one per read served and are what the
-structural bar on gate-held query work is stated against, and the statements the read path's
-mints ran, which are the repair's own cost and are zero on a host whose reads all found a
-handle standing. A mint that refused is counted there too, because the gate was held for
-what it ran before it refused. Beside them the account keeps the widest reading any one
-acquisition produced, the mint and the establishment together, which is the number a ceiling
-over one read is stated against.
+**The read account reports what an acquisition runs under the gate act by act, and reports
+it whichever way the acquisition left.** The host keeps three readings: the
+snapshot-establishing statements of the reads it served, which are exactly one each and are
+what the structural bar on gate-held query work is stated against; the statements the read
+path's mints ran, which are the repair's own cost and are zero on a host whose reads all
+found a handle standing; and the statements establishments ran before refusing, which served
+no read and held the gate all the same. The refusals are in the account for the same reason
+the answers are — a mint or an establishment that met a busy database held the gate for the
+statement it waited on, which is precisely the case a ceiling exists to catch — and they are
+kept apart from the served reading so that reading stays exactly the reads it served. Beside
+them the account keeps the widest reading any one acquisition produced, its mint and its
+establishment together, which is the number a ceiling over one read is stated against.
+**No path out of an acquisition runs a statement under the gate and reports nothing**: the
+mint is accounted where the mint returns and the establishment where the establishment
+returns, both before the branch that decides how the read leaves.
 
 **A request is answered from one snapshot.** Every lane-1 statement a request runs takes its
 rows from the snapshot its hold established — the store counts the snapshots established

@@ -88,10 +88,11 @@ fn a_read_over_an_entry_that_is_not_serving_refuses_with_its_published_demand() 
 }
 
 /// **The per-read gate discipline, over a real attachment.** Each read here
-/// finds the entry's handle standing, so each runs exactly one statement while
-/// it holds the entry gate — the statement that establishes its snapshot,
-/// with no mint beside it — and a read that found the entry's connection free
-/// waited for nothing on its way to it.
+/// finds the entry's handle standing and is served, so each runs exactly one
+/// statement while it holds the entry gate — the statement that establishes
+/// its snapshot, with no mint and no refused attempt beside it — and a read
+/// that found the entry's connection free waited for nothing on its way to
+/// it.
 ///
 /// **The contention half of the instrument is not asserted here, because it
 /// cannot be asserted here without a race.** Saying "a read waited" requires
@@ -134,13 +135,18 @@ fn reads_over_one_entry_each_run_one_statement_under_the_gate() {
         reading.statements_under_the_gate, readers,
         "a read ran something other than one statement under the gate"
     );
-    // Every one of these reads found the entry's handle standing, so none of
-    // them healed and none of them paid for a mint under the gate. Without
-    // this the establishing reading above would stand for everything a read
-    // ran there, which is the claim it cannot make on its own.
+    // Every one of these reads found the entry's handle standing and was
+    // served, so none of them healed and none of them had an establishment
+    // refuse. Without this the served-read reading above would stand for
+    // everything a read ran under the gate, which is a claim it cannot make on
+    // its own.
     assert_eq!(
-        reading.mint_statements_under_the_gate, 0,
-        "a read over an entry holding its handle ran a mint under the gate"
+        (
+            reading.mint_statements_under_the_gate,
+            reading.refused_establishment_statements_under_the_gate
+        ),
+        (0, 0),
+        "a read over an entry holding its handle ran something else under the gate"
     );
     assert_eq!(
         host.read_evidence().widest_statements_under_the_gate,

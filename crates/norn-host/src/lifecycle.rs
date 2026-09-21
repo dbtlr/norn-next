@@ -105,7 +105,7 @@ pub struct MintedReader<R> {
     pub reader: Result<R, ReaderUnavailable>,
     /// Statements the mint ran against the database. The establishment a read
     /// runs afterwards is not among them: that runs on the minted handle and
-    /// reports itself through [`Established::statements`].
+    /// reports itself through [`Establishment::statements`].
     pub statements: u64,
 }
 
@@ -153,7 +153,29 @@ pub trait ReadSource: Send + Sync + 'static {
     /// same critical section that reads the entry's published demand, so the
     /// demand the answer carries and the snapshot the answer comes from
     /// describe one instant; everything after it runs outside the lock.
-    fn establish(turn: Self::Turn) -> Result<Established<Self::Snapshot>, ReaderUnavailable>;
+    ///
+    /// **It reports what it ran whichever way it ended**, for the reason
+    /// [`SnapshotSource::open_reader`] does: an attempt that refused ran the
+    /// statement that refused it under the caller's gate hold, and the gate
+    /// was held for it exactly as for one that answered.
+    fn establish(turn: Self::Turn) -> Establishment<Self::Snapshot>;
+}
+
+/// One read's attempt to establish its snapshot, and what that attempt ran
+/// under the entry gate.
+///
+/// [`Established`] is what an attempt that answered produced; this is the
+/// attempt, and it carries the cost on both answers because the gate was held
+/// for both.
+pub struct Establishment<S> {
+    /// The snapshot and the reading it carries, or why the read has neither.
+    pub established: Result<Established<S>, ReaderUnavailable>,
+    /// Statements run against the database by the attempt. **One**, the
+    /// establishing statement — a deferred `BEGIN` takes no snapshot and reads
+    /// no row, and neither does the rollback a refused attempt ends with — so
+    /// this is the count the gate-held statement bar is read off, and an
+    /// attempt that refused reports the one it refused in.
+    pub statements: u64,
 }
 
 /// What establishing one read's snapshot produced.
@@ -162,11 +184,6 @@ pub struct Established<S> {
     pub snapshot: S,
     /// Which database the snapshot is of, and how far its writes had got.
     pub reading: StoreReading,
-    /// Statements run against the database while the snapshot was established.
-    /// Exactly one — the establishing statement — because a deferred `BEGIN`
-    /// takes no snapshot, and this is the count the gate-held statement bar is
-    /// read off.
-    pub statements: u64,
 }
 
 /// Why an entry's reads cannot be served.
@@ -3038,11 +3055,17 @@ impl<O: EntryOps> Host<O> {
     /// The one state a read is served under is `Ready`. Every other published
     /// demand refuses as itself, and an entry serving with no handle mints one
     /// again from the coverage it holds and refuses as
-    /// [`ReadRefusal::ReaderUnavailable`] where that mint refuses too. That
-    /// mint runs under this same hold, so what it ran against the database is
-    /// the read's own cost under the gate and is accounted as that — beside
-    /// the establishing statement rather than inside it, and whichever way the
-    /// read leaves.
+    /// [`ReadRefusal::ReaderUnavailable`] where that mint refuses too.
+    ///
+    /// **Both acts this runs against a database — the mint and the
+    /// establishment — run under a hold of the entry gate, and each is
+    /// accounted where it returns rather than where the read leaves.** So no
+    /// exit from here runs a statement under the gate and reports nothing: the
+    /// two exits above the mint took none, the mint's own refusal and the two
+    /// refusals a waiting read can take report the mint and no establishment,
+    /// and the establishment's refusal reports both. Each act lands in its own
+    /// reading, so the reading that claims one statement per read is the reads
+    /// this served and nothing else.
     pub fn begin_read(&self, name: &VaultName) -> Result<ReadHold<O>, ReadRefusal> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Err(ReadRefusal::NotServing(Demand::UnknownVault));
@@ -3152,18 +3175,23 @@ impl<O: EntryOps> Host<O> {
                 (turn, 1, published)
             }
         };
-        let established = match <O::Attachment as SnapshotSource>::Reader::establish(turn) {
+        // The establishment is accounted where it returns, for the reason the
+        // mint above is: it ran under this hold either way, and the refusal
+        // below is a path that paid for it.
+        let establishment = <O::Attachment as SnapshotSource>::Reader::establish(turn);
+        self.shared
+            .reads
+            .count_establishment_under_the_gate(&establishment, minted.statements);
+        let established = match establishment.established {
             Ok(established) => established,
             Err(unavailable) => {
                 drop(state);
                 return Err(ReadRefusal::ReaderUnavailable(unavailable));
             }
         };
+        self.shared.reads.count_read(waits);
         state.pin();
         drop(state);
-        self.shared
-            .reads
-            .count_read(&established, waits, minted.statements);
         Ok(ReadHold {
             entry,
             reader,
@@ -4936,7 +4964,12 @@ mod tests {
     /// coverage mints the handle, one close where the last holder of that
     /// handle drops it, one establishment per read served, and the reads that
     /// waited for a connection another read was holding.
-    #[derive(Default)]
+    ///
+    /// The two statement knobs are what a mint and an establishment on these
+    /// handles report having run against a database. A fake runs no statement,
+    /// so a mint reports nothing until a case sets it; an establishment
+    /// reports one, which is what the account's per-read reading is stated
+    /// against, and a case asserting either reading sets its own number.
     struct ReaderLedger {
         opened: AtomicUsize,
         closed: AtomicUsize,
@@ -4963,6 +4996,25 @@ mod tests {
         /// Woken when a parked establishment arrives, and when one is
         /// released.
         establishment_moved: Condvar,
+        /// What an establishment on a handle from this ledger reports having
+        /// run against the database, whichever way it ends.
+        establish_statements: AtomicU64,
+    }
+
+    impl Default for ReaderLedger {
+        fn default() -> Self {
+            ReaderLedger {
+                opened: AtomicUsize::default(),
+                closed: AtomicUsize::default(),
+                established: AtomicUsize::default(),
+                waiting: AtomicUsize::default(),
+                establish_fails: std::sync::atomic::AtomicBool::default(),
+                establishing: Mutex::default(),
+                establishment_moved: Condvar::default(),
+                mint_statements: AtomicU64::default(),
+                establish_statements: AtomicU64::new(1),
+            }
+        }
     }
 
     /// Whether establishments park, and whether one is parked now.
@@ -5076,16 +5128,22 @@ mod tests {
             }
         }
 
-        fn establish(mut turn: FakeTurn) -> Result<Established<Self::Snapshot>, ReaderUnavailable> {
+        fn establish(mut turn: FakeTurn) -> Establishment<Self::Snapshot> {
             let ledger = Arc::clone(&turn.reader.ledger);
             park_here_if_the_case_asked(&ledger);
+            // Reported on both answers, the way a real establishment reports
+            // it: an attempt that refused ran the statement it refused in.
+            let statements = ledger.establish_statements.load(Ordering::SeqCst);
             if ledger.establish_fails.load(Ordering::SeqCst) {
                 // The turn goes back with the refusal, which is the drop
                 // below: a refused establishment leaves the handle where the
                 // next read finds it.
-                return Err(ReaderUnavailable::new(
-                    "this handle establishes no snapshot",
-                ));
+                return Establishment {
+                    established: Err(ReaderUnavailable::new(
+                        "this handle establishes no snapshot",
+                    )),
+                    statements,
+                };
             }
             let established = ledger.established.fetch_add(1, Ordering::SeqCst) + 1;
             turn.holds_the_connection = false;
@@ -5093,11 +5151,13 @@ mod tests {
                 reader: Arc::clone(&turn.reader),
                 holds_the_connection: true,
             };
-            Ok(Established {
-                reading: fake_reading(established as i64),
-                statements: 1,
-                snapshot: FakeSnapshot(held),
-            })
+            Establishment {
+                established: Ok(Established {
+                    reading: fake_reading(established as i64),
+                    snapshot: FakeSnapshot(held),
+                }),
+                statements,
+            }
         }
     }
 
@@ -13138,9 +13198,10 @@ mod tests {
     /// account below is four reads, four establishing statements, nothing
     /// minted and nothing contended.
     ///
-    /// The mint reading is asserted here and not left implied: the claim is
-    /// that one statement is all these reads ran under the gate, and the
-    /// establishing reading alone cannot say that.
+    /// The other two readings are asserted here and not left implied: the
+    /// claim is that one statement is all these reads ran under the gate, and
+    /// the served-read reading alone cannot say that — a mint or a refused
+    /// establishment would be gate-held work it does not carry.
     #[test]
     fn a_read_runs_one_statement_under_the_gate() {
         let ops = Arc::new(FakeOps::default());
@@ -13163,8 +13224,12 @@ mod tests {
             "four reads ran something other than one statement each under the gate"
         );
         assert_eq!(
-            reading.mint_statements_under_the_gate, 0,
-            "reads that each found a handle standing ran a mint under the gate"
+            (
+                reading.mint_statements_under_the_gate,
+                reading.refused_establishment_statements_under_the_gate
+            ),
+            (0, 0),
+            "reads that each found a handle standing and were served ran something else under the gate"
         );
         assert_eq!(
             reading.reader_waits, 0,
@@ -13243,6 +13308,69 @@ mod tests {
                 .mint_statements_under_the_gate,
             0,
             "a read that found a handle standing was charged for a mint"
+        );
+    }
+
+    /// **An establishment that refuses held the gate for what it ran.** The
+    /// acquisition took the connection, opened its transaction, ran the
+    /// statement that refused it and rolled back, all under the gate, and was
+    /// served nothing — so `reads_served` and the served-read reading stay
+    /// where they were while what it ran is in the account beside them. This
+    /// is the same claim the mint gets, in the arm the mint's report does not
+    /// reach.
+    ///
+    /// The acquisition heals first, so the reading below is a mint and a
+    /// refused establishment together: the widest is what this one acquisition
+    /// ran, which is the number a ceiling is stated against and the number an
+    /// account that stopped at the refusal would under-report.
+    #[test]
+    fn a_read_refused_by_its_establishment_accounts_for_what_that_establishment_ran() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+
+        ops.readers.mint_statements.store(3, Ordering::SeqCst);
+        ops.readers.establish_statements.store(2, Ordering::SeqCst);
+        ops.readers.establish_fails.store(true, Ordering::SeqCst);
+        entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .close_reader();
+
+        let before = host.read_evidence();
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a handle that establishes nothing answered a read");
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "the refused establishment was rendered as something other than the read seam: {refusal:?}"
+        );
+        let reading = host.read_evidence().since(before);
+
+        assert_eq!(
+            (reading.reads_served, reading.statements_under_the_gate),
+            (0, 0),
+            "a read that was never served moved the served-read reading"
+        );
+        assert_eq!(
+            reading.mint_statements_under_the_gate, 3,
+            "the mint this acquisition healed with is missing from the account"
+        );
+        assert_eq!(
+            reading.refused_establishment_statements_under_the_gate, 2,
+            "the establishment that refused ran under the gate uncounted"
+        );
+        assert_eq!(
+            host.read_evidence().widest_statements_under_the_gate,
+            5,
+            "the widest reading stopped at the refusal instead of holding what this acquisition ran"
         );
     }
 
