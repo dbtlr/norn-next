@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0025-a-reads-hold-is-demand.md
 date: 2026-08-09
 ---
 

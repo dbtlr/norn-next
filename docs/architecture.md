@@ -1329,17 +1329,87 @@ deferred `BEGIN` takes no snapshot — so the trust label and the snapshot descr
 instant, and the read runs outside the lock: it sees the last committed increment, never
 blocks the writer (checkpointing stays passive — an aggressive checkpoint mode would trade
 that guarantee away), and may trail in-flight derivation. Concurrent reads serialize against
-each other on the one reader per entry; measured reader contention is what mints more
-through the same seam. The reader is torn down before the store closes on every closing
-path, and an in-flight read pins the entry — which buys the read deferral alone: **no idle
-detach is scheduled while a read is running.** It buys no more than that. A refusal,
-a host destruction, a detach already scheduled when the read began, and a job leg failing
-its way into a release each reach the entry without reading a pin, and a read in flight
-stops none of them. Through such a teardown the read keeps answering from the handle it
-holds until it completes, and nothing promises the database file outlives the teardown for it:
-that is the contract the read path states, and its price is the one ADR 0015 accepted: a read holds no coverage, so no teardown waits on it. [ADR
-0015](decisions/0015-snapshot-reader-lifetime.md) records the rationale and the priced costs.
+each other on the one reader per entry, and **no acquisition waits for that reader while it
+holds the entry gate**: a lock held across a wait for a connection that only another holder
+of the same lock can give back hangs the entry rather than slowing it. Under the gate an
+acquisition tries for the entry's connection without blocking, and establishes its snapshot
+there where the connection is free. Where another read holds it, the acquisition gives the
+gate back and waits outside it — the demand it has already recorded holds the entry across
+that wait — then takes the gate again and reads the published demand afresh before it
+establishes, because the instant it first read is not the instant it answers under; an entry
+that has stopped serving, or whose reader is no longer the one the acquisition waited for,
+takes the connection back and the read refuses with what the entry now publishes. The priced
+cost of contention is that second reading, and measured contention is still what mints more
+readers through the carved pool seam. The reader is torn down before the store closes on
+every closing path, and a read's hold is demand on the entry: it holds the entry's demand
+for as long as the read runs, restarts the idle interval when it ends, and withdraws an idle
+detach that is scheduled and not yet in flight — so **an idle teardown neither runs under a
+read nor precedes one into the entry.** The hold buys nothing beyond that deferral. A
+refusal, a host destruction, and a job leg failing its way into a release each reach the
+entry without consulting a read, and a read in flight stops none of them. Through such a
+teardown the read keeps answering from the handle it holds until it completes, and nothing
+promises the database file outlives the teardown for it: that is the contract the read path
+states, and its price is the accepted one: a read holds no coverage, so no teardown waits on
+it. [ADR 0025](decisions/0025-a-reads-hold-is-demand.md) records the rationale and the
+priced costs.
 
+**Hold acquisition is the read path's one adjudication, and the handle is its proof.** A
+read reaches a reader only through a hold. A name the serving set does not hold is decided
+at that lookup, before any entry gate is taken: the acquisition refuses as an unknown vault
+and records nothing against anything. Over an entry, the acquisition reads the published
+demand and the entry's retained reader fact under a hold of that entry's gate, and mints a
+hold only where the demand is a serving state and a reader stands beside it; what the hold
+carries with the handle is the published demand read in the gate hold that established its
+snapshot, never the trust label a park outranks. An acquisition that mints no hold serves
+nothing and hands back one of two shapes, and the demand takes precedence: the published
+demand itself — a warming entry with its phase, coverage on its way back, an untrusted
+state, or a park under its own code — rendered as that demand's own answer, which is a state
+a caller polls for a warming entry, the untrusted reading where trust is withdrawn, and a
+refusal under its own code for a park, the same rendering every other surface gives that
+demand; or, where the demand is serving, reader-unavailable, which is an entry serving every
+surface but this one.
+
+A read's hold is a demand lease, and it does what a lease does: it holds the entry's idle
+interval open for as long as the read runs and restarts it when the hold drops, it clears
+the idle deadline, it withdraws an idle detach that is scheduled and not yet in flight, and
+it raises the recovery the entry owes, giving that demand back with the hold. Where the
+entry is free to run it, the read's demand also schedules the work the entry owes, read as a
+chain: the attach where the entry holds no coverage, and under that the rebuild it owes, the
+recovery beneath that, and the reconcile where it owes neither. The read then answers under
+the state that work publishes, or under the state it found where the work publishes none —
+an entry holding no coverage answers a read with the warming state of the attach the read
+asked for, so the unattached state is one no read renders — and a workload of reads alone
+keeps an attached vault attached and asks an untrusted vault to become answerable again. The
+one move a read's demand leaves out is the park retirement: a read withdraws no park — the
+registry's parks are withdrawn by a caller asking for the acquisition that classifies those
+roots again, and a read asks for an answer — so a read against a parked entry refuses with
+the park's own code, a refused identity and a duplicate root alike with a contended
+maintainer, and schedules nothing. A refused acquisition records its demand the way a served
+one does. A read names no attach mode, so the unsupported-mode rendering is one no read
+produces.
+
+The attachment mints the reader under the gate hold that publishes the trust label beside
+it, as one move at one epoch, so the handle an entry holds belongs to the coverage that
+entry holds. The mint is fallible and cannot panic — an unwind under that gate poisons it —
+and its blocking open is the priced cost of a hold every other holder of the entry waits
+behind. A mint that fails changes no trust label and publishes no refusal of its own: the
+reason is retained beside the entry's published demand, the way a reload's diagnostic and an
+engine's are, and a read refuses with it as reader-unavailable's detail. The vault status
+verb reports it beside trust and engine state; that verb is not built, and what the host
+retains for it today is the trust label, the active fingerprints and the last reload error.
+A mint may fail at a publication that is not serving, and then the read renders that demand
+and leaves the retained fact unsaid; the fact stands until the next publication mints again
+and re-derives it.
+
+**A request is answered from one snapshot.** Every lane-1 statement a request runs takes its
+rows from the snapshot its hold established — the store counts the snapshots established
+through a reader, and an acquired request establishes exactly one — and the reading the
+request carries names the trust state and the store generation at that snapshot; a semantic
+rung reads its engine's sidecar instead and carries its own freshness in that same reading.
+The guarantee is one of transaction ownership: the reader is a second connection beside the
+writer, so no write consumes the snapshot a request read and no later write executes inside
+the request's snapshot transaction. A precondition a read observed is the applier's to check
+again at the write.
 The suffix-resolution ladder follows the same split. Targets resolve by **right-to-left,
 segment-aligned path suffix** — `glossary` matches any `**/glossary.md`; `norn/glossary`
 matches only `**/norn/glossary.md`; stem resolution is the one-segment case. This is *the*
