@@ -5430,15 +5430,16 @@ mod tests {
         poll_gate: Mutex<Option<VaultName>>,
         poll_started: std::sync::atomic::AtomicBool,
         poll_release: std::sync::atomic::AtomicBool,
-        /// The vault whose next watcher poll finds maintenance due, and the
-        /// vault whose maintenance blocks until the case releases it. Each
-        /// names one vault: the host serves every registered vault off one
-        /// ledger, and a due flag every served vault could take would be taken
-        /// by whichever one the dispatcher polls first — which is not the one
+        /// The vault whose next watcher poll finds maintenance due. It names
+        /// one vault: the host serves every registered vault off one ledger,
+        /// and a due flag every served vault could take would be taken by
+        /// whichever one the dispatcher polls first — which is not the one
         /// the case arranged for whenever that one is skipped on the tick, its
         /// claim held or its coverage out with a leg.
         maintenance_due_at: Mutex<Option<VaultName>>,
         maintenances: AtomicUsize,
+        /// The vault whose maintenance waits at the gate until the case sets
+        /// `maintenance_release`.
         block_maintenance_at: Mutex<Option<VaultName>>,
         maintenance_started: std::sync::atomic::AtomicBool,
         maintenance_release: std::sync::atomic::AtomicBool,
@@ -6329,15 +6330,8 @@ mod tests {
         wait_for_marker(label, flag, lifecycle_wait_budget())
     }
 
-    /// Hold a fake's job at a gate until the case releases it.
-    ///
-    /// This is the wait a case's own sequence runs inside, so it obeys
-    /// [`held_open_wait_budget`] rather than the budget those waits obey: a
-    /// gate that expired first would let the job run on under a case still
-    /// asserting it is parked, and the failure would land on whatever the job
-    /// touched next rather than here.
     /// Arrange for one vault: the leg that reads the arrangement finds this
-    /// vault named, and no other.
+    /// vault named, and no other. A vault already arranged is replaced.
     fn arrange_for(arranged: &Mutex<Option<VaultName>>, name: &VaultName) {
         *arranged.lock().expect("an arranged vault poisoned") = Some(name.clone());
     }
@@ -6357,12 +6351,14 @@ mod tests {
     /// Whether an arrangement naming one vault names this one, leaving the
     /// arrangement standing.
     ///
-    /// The panic armings read through this rather than through the one-shot
-    /// above. A case that arms a panic is asking what the entry settles at
-    /// under work that keeps failing, and an arming spent by the first leg
-    /// would let a second run succeed and carry the entry somewhere the case
-    /// never asked about. A case that wants the operation to succeed again
-    /// takes the arming down itself.
+    /// The panic armings and the maintenance block read through this rather
+    /// than through the one-shot above. A case that arms a panic is asking
+    /// what the entry settles at under work that keeps failing, and an arming
+    /// spent by the first leg would let a second run succeed and carry the
+    /// entry somewhere the case never asked about. A block stands for the
+    /// same reason: every maintenance of the named vault waits at the gate
+    /// until the case releases it. A case that wants the operation to
+    /// succeed again takes the arming down itself.
     fn stands_for_the_vault(arranged: &Mutex<Option<VaultName>>, name: &VaultName) -> bool {
         arranged
             .lock()
@@ -6371,6 +6367,13 @@ mod tests {
             == Some(name)
     }
 
+    /// Hold a fake's job at a gate until the case releases it.
+    ///
+    /// This is the wait a case's own sequence runs inside, so it obeys
+    /// [`held_open_wait_budget`] rather than the budget those waits obey: a
+    /// gate that expired first would let the job run on under a case still
+    /// asserting it is parked, and the failure would land on whatever the job
+    /// touched next rather than here.
     fn wait_for_release(label: &str, flag: &std::sync::atomic::AtomicBool) -> Budget {
         wait_for_marker(label, flag, held_open_wait_budget())
     }
