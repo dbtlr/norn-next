@@ -339,7 +339,7 @@
 //! carries it rather than a call graph that keeps the two apart. `Job::Detach`
 //! calls `EntryOps::detach` through `give_back`, which catches its panic before
 //! this is ever reached, so a detach panic completes the release it was part of
-//! instead of unwinding here — `a_detach_panic_on_an_idle_leg_completes_the_release_with_a_reads_pin_standing`
+//! instead of unwinding here — `a_detach_panic_under_a_read_completes_the_release_with_the_reads_pin_standing`
 //! pins that a read's pin survives such a panic through the give-back. `Job::Attach`
 //! makes calls of its own outside the entry's lock — `EntryOps::attach`,
 //! `drain_observed`, `entries.recheck` — that panic reaches this the ordinary
@@ -353,7 +353,13 @@
 //! the discipline covers rather than work beside it: `Host::begin_read` takes
 //! the pin under the lock it reads the entry's handle in, and `ReadHold`'s drop
 //! gives it back. Pinned by
-//! `a_read_in_flight_holds_the_entry_against_an_idle_teardown`.
+//! `a_read_in_flight_holds_the_entry_against_an_idle_teardown`. A read holds
+//! the entry's demand beside the pin, so the idle teardown a read would
+//! otherwise be racing is withdrawn where it is scheduled and not yet running
+//! — pinned by
+//! `a_read_withdraws_an_idle_detach_that_is_scheduled_and_not_yet_running`,
+//! with `a_read_does_not_withdraw_a_release_already_in_flight` as its
+//! control.
 //!
 //! **The reader slot.** `EntryState::reader`, with `install_coverage`,
 //! `close_reader` and `Host::begin_read` beside it, lives in the entry state
@@ -365,20 +371,30 @@
 //! coverage as one move, under the lock that publishes the trust label beside
 //! them: an attach that installs nothing mints nothing, and a handle minted
 //! under a later lock is one minted from coverage the entry may have given back
-//! already. The fusion of the two moves is carried by construction rather than
-//! by a test: [`Coverage`] hands out no borrow of what it holds, so no mint
-//! beside the install can read the attachment in place, and a test that
-//! watched the two land together would pass unchanged over a mint moved to a
-//! lock of its own. What the tests pin is the rest of the row — one mint per
-//! install, published where the entry publishes its trust label and readable
-//! there, by
+//! already. What the tests pin is one mint per install, published where the
+//! entry publishes its trust label and readable there, by
 //! `an_attach_publishes_a_reader_beside_the_coverage_it_installs`; and no mint
 //! where nothing is installed, by
 //! `an_attach_the_entry_moved_on_from_mints_no_reader` and
-//! `an_attach_that_installs_no_coverage_mints_no_reader`. Coverage that mints
-//! no handle of its own leaves the slot empty and the entry answering no read,
-//! which is the production configuration today and is pinned by
-//! `coverage_that_mints_no_reader_leaves_an_entry_no_read_reaches`.
+//! `an_attach_that_installs_no_coverage_mints_no_reader`. A mint that refuses
+//! leaves the slot empty and the reason beside it, and the entry goes on
+//! serving every surface but its reads, which is pinned by
+//! `a_mint_that_fails_leaves_an_entry_serving_and_its_reads_refusing`; every
+//! leg that parks coverage answers for the slot the same way, pinned by
+//! `a_leg_that_parks_coverage_publishes_the_reason_its_mint_refused_with` and
+//! `a_leg_that_remints_coverage_publishes_the_reason_its_mint_refused_with`.
+//!
+//! *A mint is one open, and a read is what asks for the next one.* [`Coverage`]
+//! hands out a borrow of what the entry itself holds — `Coverage::held` — and
+//! `EntryState::remint_for_a_read` is its one reader: an entry serving with an
+//! empty slot mints again over that coverage when a read meets it, so a read
+//! seam that failed on the environment heals without a teardown. Coverage out
+//! with a leg is not borrowed, so the mint never reads a store on its way
+//! somewhere. Pinned by
+//! `a_read_seam_that_failed_heals_on_the_next_read_after_the_environment_recovers`,
+//! with
+//! `a_read_over_a_seam_the_environment_still_refuses_is_refused_with_the_mint_s_own_reason`
+//! as its control.
 //!
 //! *A reader goes back before the store it was minted from closes.* Carried by
 //! `begin_release`, which lets go of the handle at the window's start, so the
@@ -522,6 +538,19 @@ impl<A> Coverage<A> {
     /// the leg ends.
     pub(super) fn out_with_leg(&self) -> bool {
         matches!(self.0, Custody::OnLeg(_))
+    }
+
+    /// The coverage the entry itself holds, borrowed rather than taken.
+    ///
+    /// The reader mint is what reads it: a handle is minted from the store
+    /// inside the coverage, and minting takes nothing out of the entry's hand.
+    /// Coverage out with a leg is not borrowed here — it is that leg's until
+    /// it ends, and a mint over it would read a store on its way somewhere.
+    pub(super) fn held(&self) -> Option<&A> {
+        match &self.0 {
+            Custody::Parked(coverage) => Some(coverage),
+            _ => None,
+        }
     }
 
     /// Take the coverage the entry holds, for the leg at this epoch. An entry

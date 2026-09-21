@@ -4,9 +4,11 @@
 //!
 //! Both are **per-connection** settings in SQLite rather than properties of the
 //! file — foreign keys are off by default in every new connection — and the
-//! cascade a client's wholesale row replacement depends on needs them on. One
-//! function opens every connection this workspace ever holds, so there is no
-//! reading of a schema under settings the schema was not designed for.
+//! cascade a client's wholesale row replacement depends on needs them on. Two
+//! functions open every connection this workspace ever holds — [`connect`] for
+//! the one writer of a database, [`connect_read_only`] for a reader beside it —
+//! so there is no reading of a schema under settings the schema was not
+//! designed for.
 //!
 //! The open flags are named rather than defaulted, and the one that is left out
 //! is the point: **URI filenames are off**. With them on, a path is a
@@ -35,8 +37,11 @@
 //! and removes; the verdicts are read one layer up.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 
 use crate::error::{self, DbError};
@@ -56,6 +61,15 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const OPEN_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
     .union(OpenFlags::SQLITE_OPEN_CREATE)
     .union(OpenFlags::SQLITE_OPEN_NO_MUTEX);
+
+/// The flags a read-only connection is opened with.
+///
+/// Create is absent as well as write: a read-only open answers for a database
+/// that is already there, so a path that names no file is a refusal rather
+/// than an empty database nothing wrote. `SQLITE_OPEN_URI` is absent for the
+/// reason it is absent above.
+const READ_ONLY_FLAGS: OpenFlags =
+    OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_NO_MUTEX);
 
 /// The two names SQLite reads as something other than a file, whatever the URI
 /// flag says: the in-memory database, and the anonymous temporary one.
@@ -88,6 +102,11 @@ pub struct Database {
     connection: Connection,
     path: PathBuf,
     epoch: String,
+    /// Raised while this handle runs its own transaction control, and down
+    /// everywhere else. A sealed read-only connection reads it through its
+    /// authorizer; a writable one has no authorizer and is unaffected by it.
+    /// See [`arm_the_snapshot_control`].
+    snapshot_control: Arc<AtomicBool>,
 }
 
 impl Database {
@@ -99,6 +118,19 @@ impl Database {
     /// consumer's record of progress is keyed by, so adopting it absent would
     /// let a cursor into a discarded database read as a position in this one.
     pub fn adopt(connection: Connection, path: &Path) -> Result<Self, DbError> {
+        Self::adopt_counting(connection, path, &mut 0)
+    }
+
+    /// [`Database::adopt`], reporting what it ran against the database.
+    ///
+    /// The count is taken beside the epoch read and before it is run, for the
+    /// reason [`connect_read_only_counting`] gives.
+    fn adopt_counting(
+        connection: Connection,
+        path: &Path,
+        statements: &mut u64,
+    ) -> Result<Self, DbError> {
+        *statements += 1;
         let epoch = meta::get_meta::<String>(&connection, meta::STORE_EPOCH)?.ok_or_else(|| {
             DbError::Damaged {
                 what: "the database records no store epoch, so nothing it holds can be progressed \
@@ -106,10 +138,18 @@ impl Database {
                     .to_string(),
             }
         })?;
+        let snapshot_control = Arc::new(AtomicBool::new(false));
+        if connection
+            .is_readonly(rusqlite::MAIN_DB)
+            .map_err(|error| error::sql("reading the mode the database is open in", error))?
+        {
+            arm_the_snapshot_control(&connection, Arc::clone(&snapshot_control))?;
+        }
         Ok(Database {
             connection,
             path: path.to_path_buf(),
             epoch,
+            snapshot_control,
         })
     }
 
@@ -178,6 +218,55 @@ impl Database {
         self.connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|error| error::sql(operation, error))
+    }
+
+    /// Open the deferred transaction a snapshot read answers from, without
+    /// borrowing the handle for its length.
+    ///
+    /// [`Database::deferred_transaction`] is the same `BEGIN DEFERRED` and is
+    /// the spelling a read that ends inside one statement scope takes; this is
+    /// the spelling a read that **outlives its caller's stack frame** takes —
+    /// a snapshot established under one lock and read under none. The mutable
+    /// borrow is what rules out a second live transaction either way: a
+    /// handle in a snapshot is a handle nothing else can begin a transaction
+    /// on, and beginning one over a transaction that is already open is
+    /// refused here rather than reported by the driver.
+    ///
+    /// **A deferred `BEGIN` takes no snapshot.** The transaction is open when
+    /// this returns and the first statement run on the connection is what
+    /// establishes the write-ahead-log snapshot every later statement reads
+    /// from, which is why the caller runs one and why where it runs it is a
+    /// contract rather than an ordering detail.
+    pub fn open_snapshot(&mut self) -> Result<(), DbError> {
+        if !self.connection.is_autocommit() {
+            return Err(DbError::Lifecycle {
+                operation: "opening a read snapshot",
+                path: self.path.clone(),
+                message: "a transaction is already open on this handle".to_string(),
+            });
+        }
+        let _control = SnapshotControl::raise(&self.snapshot_control);
+        self.connection
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(|error| error::sql("opening a read snapshot", error))
+    }
+
+    /// End the snapshot [`Database::open_snapshot`] opened, by rolling it
+    /// back.
+    ///
+    /// A snapshot writes nothing, so rolling back and committing leave the
+    /// database in the same state and the rollback is the one that says so. A
+    /// handle with no transaction open ends nothing and reports success: the
+    /// call is what a reader runs on its way out, and a reader that already
+    /// closed its snapshot is in the state this leaves it in.
+    pub fn close_snapshot(&mut self) -> Result<(), DbError> {
+        if self.connection.is_autocommit() {
+            return Ok(());
+        }
+        let _control = SnapshotControl::raise(&self.snapshot_control);
+        self.connection
+            .execute_batch("ROLLBACK")
+            .map_err(|error| error::sql("ending a read snapshot", error))
     }
 }
 
@@ -252,6 +341,231 @@ pub fn connect(path: &Path) -> Result<Attempt, DbError> {
     #[cfg(feature = "induced-failure")]
     crate::faults::cap_the_pages(&connection)?;
     Ok(Attempt::Connected(connection))
+}
+
+/// Open a **read-only** connection to a database that is already there.
+///
+/// This is the shape a snapshot reader is opened in, beside the writer its
+/// client holds.
+///
+/// **The read-only open flag is what refuses every write.** It is a property
+/// of the connection that no statement run on the connection can withdraw, and
+/// it covers the main database and every database attached to it: a write to
+/// either is refused by SQLite before the statement runs. That is the
+/// guarantee a caller composing statements here may rely on.
+///
+/// Two settings stand on top of it, and neither is that guarantee. `query_only`
+/// is a pragma, and a pragma is defeasible: `PRAGMA query_only = 0` on this
+/// connection would succeed on its own. What it buys is a second refusal for
+/// statements the file mode does not reach — a write to a temporary table, for
+/// one — stated at the connection rather than left to the read paths. The
+/// authorizer is what makes the pair stand: it refuses every action but
+/// reading rows, planning them, the transaction control a snapshot runs on,
+/// and the one read-only pragma FTS5 issues for itself, so every setting
+/// `PRAGMA`, `ATTACH`, and temporary-object creation are refused at statement
+/// preparation and the connection cannot disarm itself. The authorizer states
+/// which pragma passes and why it is not a pragma opening.
+///
+/// Write-ahead logging is **read back rather than set** — setting the journal
+/// mode is a write — so a database in any other mode is refused here instead
+/// of being read under settings its writer is not using. The refusal is an
+/// environmental one: the mode is a fact about how the file is being used
+/// rather than about the contents of its pages, and discarding a sound
+/// database over it would destroy work to fix nothing.
+///
+/// A path that names no database is a refusal: without the create flag there
+/// is nothing to open, and a reader that created an empty database would
+/// answer every read with no rows rather than saying the file is gone.
+pub fn connect_read_only(path: &Path) -> Result<Connection, DbError> {
+    connect_read_only_counting(path, &mut 0)
+}
+
+/// [`connect_read_only`], reporting what it ran against the database.
+///
+/// The count is taken beside each statement and before it is run, so a
+/// statement that waited out the busy timeout and then failed is one of these:
+/// the caller paid for it. `statements` is added to rather than assigned, so a
+/// caller counting a whole open passes one tally through every step of it.
+#[allow(clippy::disallowed_methods)] // The substrate seam: this is the one place a SQLite connection is opened.
+fn connect_read_only_counting(path: &Path, statements: &mut u64) -> Result<Connection, DbError> {
+    refuse_a_name_that_is_not_a_file("opening the database read-only", path)?;
+    let connection =
+        Connection::open_with_flags(path, READ_ONLY_FLAGS).map_err(|error| DbError::Lifecycle {
+            operation: "opening the database read-only",
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    connection
+        .busy_timeout(BUSY_TIMEOUT)
+        .map_err(|error| error::sql("setting the busy timeout", error))?;
+    connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE);
+
+    *statements += 1;
+    let journal: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(|error| error::sql("reading the journal mode", error))?;
+    if !journal.eq_ignore_ascii_case("wal") {
+        return Err(DbError::Lifecycle {
+            operation: "opening the database read-only",
+            path: path.to_path_buf(),
+            message: format!(
+                "a read-only handle needs write-ahead logging and the database reports `{journal}`"
+            ),
+        });
+    }
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .map_err(|error| error::sql("turning foreign keys on", error))?;
+    connection
+        .pragma_update(None, "query_only", true)
+        .map_err(|error| error::sql("making the connection read-only", error))?;
+    // Last, because it refuses the pragmas above: everything this function had
+    // to set is set before the connection stops accepting settings at all.
+    connection
+        .authorizer(Some(refuse_everything_but_reading))
+        .map_err(|error| error::sql("sealing the read-only connection", error))?;
+    Ok(connection)
+}
+
+/// A read-only open of a database, and what that open ran against it.
+///
+/// **The statements are reported whichever way the open ended.** A caller that
+/// holds a lock across the open waits for a statement that took the busy
+/// timeout and then failed exactly as it waits for one that answered, so a
+/// report only a successful open made would leave the expensive failures
+/// unaccounted.
+#[derive(Debug)]
+pub struct ReadOnlyOpen {
+    /// The database this open bound to its file, or why there is none.
+    pub adopted: Result<Database, DbError>,
+    /// Statements this open ran against the database: the journal-mode read
+    /// that checks the file is in write-ahead logging, and the store-epoch
+    /// read that binds the connection to the file it was opened on. The
+    /// settings the open applies read no rows and are not among them, and a
+    /// refusal reports the statements that ran before it.
+    pub statements: u64,
+}
+
+/// Open a read-only connection over a database and bind it to its file,
+/// reporting what the open ran against that database.
+///
+/// This is the spelling a caller takes where the cost of the open is part of
+/// what it answers for — a mint under a lock every other holder of the thing
+/// being minted for waits behind. [`connect_read_only`] and
+/// [`Database::adopt`] are the same two acts for a caller that answers for
+/// neither.
+pub fn open_read_only(path: &Path) -> ReadOnlyOpen {
+    let mut statements = 0;
+    let adopted = connect_read_only_counting(path, &mut statements)
+        .and_then(|connection| Database::adopt_counting(connection, path, &mut statements));
+    ReadOnlyOpen {
+        adopted,
+        statements,
+    }
+}
+
+/// Permission for one act of transaction control on a sealed read-only
+/// connection, withdrawn where it drops.
+///
+/// The permission covers the one statement the handle runs under it. That
+/// statement runs on a connection the caller borrows mutably, so nothing else
+/// can be running inside the window, and the withdrawal is a destructor so an
+/// unwind out of the statement closes it too.
+struct SnapshotControl<'a>(&'a AtomicBool);
+
+impl<'a> SnapshotControl<'a> {
+    fn raise(control: &'a AtomicBool) -> Self {
+        control.store(true, Ordering::SeqCst);
+        SnapshotControl(control)
+    }
+}
+
+impl Drop for SnapshotControl<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Bind a sealed read-only connection's transaction control to the handle that
+/// owns it.
+///
+/// **A request is answered from one snapshot, and this is what makes that
+/// structural.** The authorizer below denies transaction control outright, so
+/// the only `BEGIN`, `COMMIT` or `ROLLBACK` that reaches such a connection is
+/// one [`Database::open_snapshot`] or [`Database::close_snapshot`] issues:
+/// those two raise `control` around their own statement and lower it again,
+/// and it is down everywhere else. Without it a caller composing SQL over a
+/// snapshot's connection could run `ROLLBACK`, end the snapshot the read was
+/// adjudicated for, and go on reading whatever is committed next — while the
+/// reading that read carries still named the generation it started at.
+///
+/// A writable connection has no authorizer, so nothing consults the flag on
+/// one and a writer's transactions are unaffected.
+fn arm_the_snapshot_control(
+    connection: &Connection,
+    control: Arc<AtomicBool>,
+) -> Result<(), DbError> {
+    connection
+        .authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(context.action, AuthAction::Transaction { .. })
+                && control.load(Ordering::SeqCst)
+            {
+                return Authorization::Allow;
+            }
+            refuse_everything_but_reading(context)
+        }))
+        .map_err(|error| error::sql("binding the snapshot control to its handle", error))
+}
+
+/// The one thing a read-only connection may do: read rows.
+///
+/// **Deny by default.** The allowed set is reading a column, the `SELECT` that
+/// reads it, the functions a predicate applies, and the one pragma named
+/// below. Everything else is refused at statement preparation — the writes the
+/// file mode already refuses, and, past those, every setting `PRAGMA` so the
+/// connection cannot relax its own settings, `ATTACH` so it cannot reach a
+/// database that is writable, and temporary objects so there is no writable
+/// table inside the connection either.
+///
+/// **Transaction control is denied here**, so the snapshot a read is
+/// adjudicated for cannot be ended by a statement composed over its
+/// connection. The handle's own `BEGIN` and `ROLLBACK` are what
+/// [`arm_the_snapshot_control`] admits, for the length of one statement each.
+///
+/// **The one pragma is `data_version`, asked with no value.** It reports
+/// whether another connection has committed to this file since this one last
+/// looked; it sets nothing and it takes no value. It is also the pragma FTS5
+/// runs on the connection for itself, once for every `MATCH` and every
+/// `fts5vocab` read, so refusing it does not narrow a read surface — it
+/// removes one. On a connection that refuses it every full-text statement
+/// fails with an authorization refusal while `EXPLAIN QUERY PLAN` over that
+/// same statement still returns a clean plan, because explaining a virtual
+/// table never runs it. The entry is that one name with that one shape, so it
+/// opens no pragma surface: `PRAGMA query_only = 0`, `PRAGMA foreign_keys =
+/// OFF` and every other setting are refused exactly as they were.
+///
+/// **The table-valued pragma form is a pragma here, and is refused.** `SELECT
+/// ... FROM pragma_table_info('documents')` reaches this as the pragma it
+/// spells rather than as a read of a table, so it is denied with the rest.
+/// Nothing a read answers needs it: a read answers about a client's rows, and
+/// the schema facts a read reports are rows of the client's own meta table and
+/// of `sqlite_master`, both of which this connection reads.
+///
+/// A new action SQLite gains arrives as an action this refuses, which is the
+/// direction an allow-list is chosen for: a read builder that needs one is
+/// refused loudly here rather than served through a hole nobody added.
+fn refuse_everything_but_reading(context: AuthContext<'_>) -> Authorization {
+    match context.action {
+        AuthAction::Read { .. }
+        | AuthAction::Select
+        | AuthAction::Function { .. }
+        | AuthAction::Recursive
+        | AuthAction::Pragma {
+            pragma_name: "data_version",
+            pragma_value: None,
+        } => Authorization::Allow,
+        _ => Authorization::Deny,
+    }
 }
 
 /// Mint an epoch for a database being created.

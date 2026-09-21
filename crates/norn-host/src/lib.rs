@@ -21,14 +21,16 @@ mod semantic;
 /// [`Host::recovery_demands`].
 #[cfg(feature = "induced-failure")]
 pub use evidence::{EvidenceReading, JobEvidence};
+pub use evidence::{ReadReading, ReadsSince};
 /// **What is running against an entry**, read by the harness that has to know
 /// the host stopped working before it measures one at rest. Behind the same
 /// feature as the rest of [`Host`]'s harness-reachable readers.
 #[cfg(feature = "induced-failure")]
 pub use lifecycle::WorkInFlight;
 pub use lifecycle::{
-    Demand, DemandLease, EntryOps, EntryReloadFailure, Healing, Host, HostError, JobFailure,
-    LifecyclePolicy, LifecyclePolicyError, ProgressReporter, ReadHold, ReconcileWork,
+    AnswerReading, Demand, DemandLease, EntryOps, EntryReloadFailure, Established, Establishment,
+    Healing, Host, HostError, JobFailure, LifecyclePolicy, LifecyclePolicyError, MintedReader,
+    ProgressReporter, ReadHold, ReadRefusal, ReadSource, ReaderUnavailable, ReconcileWork,
     SnapshotSource,
 };
 /// One vault's registration: the name it is served under, its root, and where

@@ -25,8 +25,8 @@ use crate::derivation::{
 use crate::evidence::{JobEvidence, count_changeset};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
-    EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, ReloadError, ReloadOutcome,
-    SnapshotSource,
+    EntryOps, Established, Establishment, Healing, JobFailure, MintedReader, ProgressReporter,
+    ReadSource, ReaderUnavailable, ReconcileWork, ReloadError, ReloadOutcome, SnapshotSource,
 };
 
 /// Maximum number of document changes materialized for one store transaction.
@@ -188,12 +188,79 @@ impl SnapshotSource for ProductionAttachment {
     /// never one composed out here.
     type Reader = norn_store::SnapshotReader;
 
-    /// [`norn_store::SnapshotReader`] is uninhabited, so an attachment holding
-    /// a live store mints no reader and the entry beside it serves no reads.
-    /// The connection this answers with arrives with the store's read
-    /// builders; what stands here is the seam it arrives through.
-    fn open_reader(&self) -> Option<Self::Reader> {
-        None
+    /// The store mints the handle, over the file it is holding open.
+    ///
+    /// It is fallible because the mint is a second open of that file: the
+    /// environment can refuse it, and a refusal is an entry that serves every
+    /// surface but this one rather than an entry that silently answers no
+    /// reads. The refusal is the store's own account of what it met.
+    ///
+    /// The statements are the store's own count of what the open ran against
+    /// the database, carried through rather than restated here: the read-only
+    /// open is the store's act, and a number this seam declared for it would
+    /// stop being true the moment that open changed.
+    fn open_reader(&self) -> MintedReader<Self::Reader> {
+        let minted = self.store.open_reader();
+        MintedReader {
+            reader: minted.reader.map_err(|error| reader_unavailable(&error)),
+            statements: minted.statements,
+        }
+    }
+}
+
+impl ReadSource for norn_store::SnapshotReader {
+    type Snapshot = norn_store::Snapshot;
+    type Turn = norn_store::ConnectionTurn;
+
+    fn try_take(self: &Arc<Self>) -> Option<Self::Turn> {
+        norn_store::SnapshotReader::try_take(self)
+    }
+
+    fn wait_for_the_connection(self: &Arc<Self>) -> Self::Turn {
+        norn_store::SnapshotReader::wait_for_the_connection(self)
+    }
+
+    /// The store establishes the snapshot and reports what it cost: the
+    /// reading it was established at, and the one statement that established
+    /// it.
+    ///
+    /// The statements come from the attempt's own counters rather than the
+    /// snapshot's, because an attempt that refused has no snapshot to read
+    /// them off and ran the statement all the same.
+    fn establish(turn: Self::Turn) -> Establishment<Self::Snapshot> {
+        let attempt = turn.establish();
+        Establishment {
+            established: attempt
+                .snapshot
+                .map(|snapshot| Established {
+                    reading: snapshot.reading().clone(),
+                    snapshot,
+                })
+                .map_err(|error| reader_unavailable(&error)),
+            statements: attempt.counters.statements_executed(),
+        }
+    }
+}
+
+/// Render a store refusal as the reason a read is refused with.
+///
+/// **The inspection surface names no file.** The reason a mint or an
+/// establishment left behind is retained beside the entry's published demand
+/// and is rendered into the vault inspection and into a read's refusal detail,
+/// both of which answer a caller holding no hold — while `StoreError` renders
+/// its file-lifecycle refusals with the derived database's path in them. A
+/// caller reading that path opens its own connection over the same database
+/// and answers from it under no adjudication, which is the escape the reader
+/// type carries no route to. So the path is dropped here and the refusal keeps
+/// what a caller can act on: what was being done, and what the driver said.
+/// The path stays on the `StoreError` itself, where a log line that needs it
+/// reads it.
+fn reader_unavailable(error: &StoreError) -> ReaderUnavailable {
+    match error {
+        StoreError::Lifecycle {
+            operation, message, ..
+        } => ReaderUnavailable::new(format!("{operation} failed: {message}")),
+        named => ReaderUnavailable::new(named.to_string()),
     }
 }
 
@@ -2936,6 +3003,44 @@ mod tests {
     use norn_testkit::wait::{Budget, Observed, wait_until};
     use std::fs;
     use std::thread;
+
+    /// **The read seam's refusal names no file.** The reason a refused mint or
+    /// establishment leaves is retained beside the entry's published demand and
+    /// is rendered into the vault inspection and into a read's refusal detail,
+    /// both of which answer a caller holding no hold. The store's own rendering
+    /// of a file-lifecycle refusal carries the derived database's path; what
+    /// crosses into the read seam keeps the act and the driver's message and
+    /// drops the path, because a caller holding it opens its own connection
+    /// over the same database and answers from it under no adjudication.
+    #[test]
+    fn a_reader_refusal_carries_what_failed_and_never_the_database_file() {
+        let derived = PathBuf::from("/machine-local/derived/a-vault");
+        let refused = StoreError::Lifecycle {
+            operation: "opening the database read-only",
+            path: derived.join("store.db"),
+            message: "a read-only handle needs write-ahead logging and the database reports \
+                      `delete`"
+                .to_string(),
+        };
+        assert!(
+            refused.to_string().contains("/machine-local/derived"),
+            "the store's own rendering dropped the path a log line reads: {refused}"
+        );
+
+        let detail = reader_unavailable(&refused).detail().to_string();
+        assert!(
+            !detail.contains("/machine-local/derived"),
+            "the read seam's refusal names the database directory: {detail}"
+        );
+        assert!(
+            detail.contains("opening the database read-only failed"),
+            "the refusal dropped the act that failed: {detail}"
+        );
+        assert!(
+            detail.contains("write-ahead logging"),
+            "the refusal dropped what the driver said: {detail}"
+        );
+    }
 
     /// **The maintainer lock is the last thing an attachment gives back**, and
     /// this file states that twice: [`release`] hands the resources back in

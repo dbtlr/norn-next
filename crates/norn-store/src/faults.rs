@@ -163,6 +163,19 @@ pub mod induced_failure {
         norn_db::faults::fail_next_meta_read_as_busy();
     }
 
+    /// Take the busy arm back off the calling thread, consumed or not.
+    ///
+    /// **This is the arm's own disarm, and it is the one a caller that armed
+    /// only this takes.** [`disarm`] resets it too, along with every
+    /// process-wide arrangement in this module — a caller that reaches for
+    /// that to put back a per-thread one-shot also clears a page cap and an
+    /// armed creation it never made, for whatever else in the process is
+    /// relying on them. So the pair a case arms with is the pair it puts back
+    /// with, and the sweep is for a case that armed the sweep's subjects.
+    pub fn clear_the_meta_read_arm() {
+        norn_db::faults::clear_the_meta_read_arm();
+    }
+
     /// Kill this process partway through the next changeset, once `entries` of
     /// its entries have been applied.
     ///

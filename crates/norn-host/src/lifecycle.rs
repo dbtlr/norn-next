@@ -10,11 +10,13 @@ use std::time::{Duration, Instant};
 
 use norn_config::registry::Entry as Registration;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
+use norn_store::StoreReading;
 use norn_wire::{
     AttachMode, ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, VaultName,
     WarmingPhase, WatcherLossCause,
 };
 
+use crate::evidence::{ReadEvidence, ReadReading};
 use crate::registry::{AliasConflict, RegistryRead};
 use crate::reload::ReloadCandidate;
 use crate::{
@@ -55,16 +57,28 @@ pub trait SnapshotSource: Send + 'static {
     /// The read-only snapshot handle one entry's reads run on. The entry holds
     /// one and every read against that entry shares it, so what concurrent
     /// reads serialize against is inside the handle rather than around it.
-    type Reader: Send + Sync + 'static;
+    type Reader: ReadSource;
 
-    /// Open the handle this coverage serves reads from. Coverage that mints
-    /// none is coverage no read reaches.
+    /// Open the handle this coverage serves reads from.
     ///
-    /// This runs under the entry gate lock, on the attach leg's publication,
-    /// and the lock is what the contract here is about. It blocks on no I/O
-    /// beyond the open the attach has already paid for: every other holder of
-    /// that entry — every demand, every reap, every read — waits behind it. And
-    /// it does not panic: an unwind here poisons the gate, and every later
+    /// **The mint is fallible and has no third answer.** Coverage either
+    /// carries a handle its reads run on or names why it does not, so an entry
+    /// that answers no read says so with a reason rather than with an empty
+    /// slot nothing accounts for.
+    ///
+    /// This runs under the entry gate lock on both of its occasions — the
+    /// attach leg's publication, and the read path's repair of an entry that
+    /// serves with an empty slot — and the lock is what the contract here is
+    /// about. **The mint's own I/O
+    /// runs there**: the production mint opens a second connection to the
+    /// database the coverage is holding and runs the statements that settle
+    /// its mode, and every other holder of that entry — every demand, every
+    /// reap, every read — waits behind that open. It is the priced cost of the
+    /// coupling: the handle and the trust label a read pairs it with are
+    /// published together or not at all. What the gate may not ride is a wait
+    /// for another holder of the same entry, which is why no acquisition waits
+    /// for this entry's connection under it. And the mint does not panic: an
+    /// unwind here poisons the gate, and every later
     /// holder of that entry meets the poison rather than the entry. What the
     /// unwind takes with it is the whole of the lifecycle's account of the
     /// vault — the trust label it publishes, the claim on its work, the reader
@@ -72,9 +86,143 @@ pub trait SnapshotSource: Send + 'static {
     /// reaches the ops by `Drop` rather than through [`EntryOps::detach`]: an
     /// implementation is free to arrange those to release in the same order,
     /// and the one this host composes does, but the entry the resources
-    /// belonged to is unreachable from there on.
-    fn open_reader(&self) -> Option<Self::Reader>;
+    /// belonged to is unreachable from there on. A mint that cannot answer
+    /// reports [`ReaderUnavailable`] rather than unwinding.
+    ///
+    /// **It reports what it ran against the database beside its answer**, so
+    /// the caller holding the gate can account for what the gate paid for. A
+    /// mint that refused reports what it ran before it refused, because the
+    /// gate was held for those statements too.
+    fn open_reader(&self) -> MintedReader<Self::Reader>;
 }
+
+/// A minted read handle, and what minting it ran against the database.
+///
+/// **Both answers carry the cost**, because the mint runs under the entry gate
+/// either way: a mint that refused held that gate for the statements it ran
+/// before it refused, and a report only a successful mint made would leave the
+/// expensive refusals unaccounted.
+pub struct MintedReader<R> {
+    /// The handle this coverage's reads run on, or why it serves none.
+    pub reader: Result<R, ReaderUnavailable>,
+    /// Statements the mint ran against the database. The establishment a read
+    /// runs afterwards is not among them: that runs on the minted handle and
+    /// reports itself through [`Establishment::statements`].
+    pub statements: u64,
+}
+
+/// The handle an entry's reads run on, and the snapshot one read establishes on
+/// it.
+///
+/// **Taking the handle's connection and establishing on it are two acts**,
+/// because the caller holds the entry gate across the second and may not hold
+/// it across the first. An entry's reads share one connection, and the read
+/// that holds it gives it back only when it ends — so an acquisition that
+/// waited for it under the entry gate would be waiting for a lock the holding
+/// read needs in order to let go. [`ReadSource::try_take`] is the act a caller
+/// under the gate performs; [`ReadSource::wait_for_the_connection`] is the act
+/// it performs with the gate given back.
+pub trait ReadSource: Send + Sync + 'static {
+    /// One read's established snapshot. It holds the handle it was established
+    /// on, so a read outlives the entry's own hold on that handle: the entry
+    /// lets go at its teardown window and the read goes on answering.
+    type Snapshot: Send + 'static;
+
+    /// One read's turn on the one connection this handle holds.
+    ///
+    /// A turn that establishes nothing gives the connection back where it
+    /// drops, an unwind included, so a refusal between taking the turn and
+    /// establishing on it leaves no handle empty.
+    type Turn: Send;
+
+    /// Take this handle's connection where no read holds it. **Never waits**:
+    /// the answer is the turn, or nothing because another read is answering
+    /// on it.
+    fn try_take(self: &Arc<Self>) -> Option<Self::Turn>;
+
+    /// Wait for this handle's connection, and take it.
+    ///
+    /// **Never called under the entry gate.** It blocks until the read holding
+    /// the connection ends, and that read asks for the entry gate on its way
+    /// out.
+    fn wait_for_the_connection(self: &Arc<Self>) -> Self::Turn;
+
+    /// Establish the snapshot this read answers from, on a turn already taken,
+    /// and report the reading it was established at.
+    ///
+    /// **This is the one establishing statement a read runs under the entry
+    /// gate**, and it waits for nothing: the connection is already the turn's.
+    /// It is the only statement a read that found its entry's handle standing
+    /// runs under that gate; a read that healed an empty slot first also ran
+    /// its mint's statements there, and the account keeps the two apart. It
+    /// runs in the
+    /// same critical section that reads the entry's published demand, so the
+    /// demand the answer carries and the snapshot the answer comes from
+    /// describe one instant; everything after it runs outside the lock.
+    ///
+    /// **It reports what it ran whichever way it ended**, for the reason
+    /// [`SnapshotSource::open_reader`] does: an attempt that refused ran the
+    /// statement that refused it under the caller's gate hold, and the gate
+    /// was held for it exactly as for one that answered.
+    fn establish(turn: Self::Turn) -> Establishment<Self::Snapshot>;
+}
+
+/// One read's attempt to establish its snapshot, and what that attempt ran
+/// under the entry gate.
+///
+/// [`Established`] is what an attempt that answered produced; this is the
+/// attempt, and it carries the cost on both answers because the gate was held
+/// for both.
+pub struct Establishment<S> {
+    /// The snapshot and the reading it carries, or why the read has neither.
+    pub established: Result<Established<S>, ReaderUnavailable>,
+    /// Statements run against the database by the attempt. **One**, the
+    /// establishing statement — a deferred `BEGIN` takes no snapshot and reads
+    /// no row, and neither does the rollback a refused attempt ends with — so
+    /// this is the count the gate-held statement bar is read off, and an
+    /// attempt that refused reports the one it refused in.
+    pub statements: u64,
+}
+
+/// What establishing one read's snapshot produced.
+pub struct Established<S> {
+    /// The snapshot the read answers from.
+    pub snapshot: S,
+    /// Which database the snapshot is of, and how far its writes had got.
+    pub reading: StoreReading,
+}
+
+/// Why an entry's reads cannot be served.
+///
+/// It is the mint's refusal and the establishment's alike, because a caller
+/// asking for a read is told the same thing either way: the entry is serving
+/// and its read seam is not. The detail is the diagnostic the act that failed
+/// produced, for a person reading a message; nothing branches on it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReaderUnavailable {
+    detail: String,
+}
+
+impl ReaderUnavailable {
+    pub fn new(detail: impl Into<String>) -> Self {
+        ReaderUnavailable {
+            detail: detail.into(),
+        }
+    }
+
+    /// The refusal in words.
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl fmt::Display for ReaderUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for ReaderUnavailable {}
 
 /// The effectful half of an entry lifecycle.
 pub trait EntryOps: Send + Sync + 'static {
@@ -450,6 +598,7 @@ impl<A: SnapshotSource> Entry<A> {
                 trust: TrustState::Unattached,
                 coverage: Coverage::none(),
                 reader: None,
+                reader_unavailable: None,
                 pending: Batch::default(),
                 active_fingerprints: None,
                 control_root: None,
@@ -502,6 +651,18 @@ struct EntryState<A: SnapshotSource> {
     /// defers only the scheduling of an idle detach, and a teardown already
     /// moving runs under the read.
     reader: Option<Arc<A::Reader>>,
+    /// Why this entry's coverage minted no handle, where the mint failed.
+    ///
+    /// It stands beside the empty slot and is what a read is refused with, so
+    /// an entry that answers no read says why rather than answering nothing.
+    /// The entry goes on serving every other surface: a mint that failed is a
+    /// fact about the read seam and not about the derived state, so the trust
+    /// label the publication writes is the one the work earned.
+    ///
+    /// It is re-derived at every publication that mints, and at the read that
+    /// meets it: a reason kept past the mint that replaced it would name an
+    /// open nothing ran.
+    reader_unavailable: Option<ReaderUnavailable>,
     pending: Batch,
     /// The core fingerprints active in the attached runtime.
     active_fingerprints: Option<ActiveFingerprints>,
@@ -598,6 +759,21 @@ struct EntryState<A: SnapshotSource> {
     detach_due: bool,
     detach_scheduled: bool,
     detach_in_flight: bool,
+}
+
+/// What a read's re-mint left: the handle the read runs on, and what the mint
+/// ran against the database while that read held the entry gate.
+///
+/// The statements are the read's to account for whichever way it leaves. A
+/// mint that refused ran what it ran before it refused, and the read it
+/// refuses held the gate for all of it.
+struct ReadMint<R> {
+    /// The handle the entry now serves reads from, or nothing where the mint
+    /// produced none.
+    handle: Option<Arc<R>>,
+    /// Statements the mint ran against the database, and zero where there was
+    /// no mint to run.
+    statements: u64,
 }
 
 impl<A: SnapshotSource> EntryState<A> {
@@ -718,8 +894,86 @@ impl<A: SnapshotSource> EntryState<A> {
             self.reader.is_none(),
             "a reader stands over coverage the entry never installed"
         );
-        self.reader = attachment.open_reader().map(Arc::new);
+        self.mint_reader(&attachment);
         self.coverage.install(attachment);
+    }
+
+    /// Mint the handle `attachment` serves reads from, recording the reason a
+    /// failed mint gives in place of it.
+    ///
+    /// Both answers are published: a handle the entry holds, or the reason its
+    /// reads refuse. Neither leaves the other standing, so the slot and the
+    /// reason always describe one mint — the one the coverage beside them was
+    /// installed by.
+    fn mint_reader(&mut self, attachment: &A) {
+        // What the mint ran is not carried out of here. The account that reads
+        // a mint's statements is the read path's, and this mint belongs to a
+        // publication: it runs on the leg that installs or parks the coverage,
+        // and no read is waiting on the handle it produces.
+        match attachment.open_reader().reader {
+            Ok(reader) => {
+                self.reader = Some(Arc::new(reader));
+                self.reader_unavailable = None;
+            }
+            Err(unavailable) => {
+                self.reader = None;
+                self.reader_unavailable = Some(unavailable);
+            }
+        }
+    }
+
+    /// Mint this entry's handle again, over the coverage it is already
+    /// holding, for a read that found the slot empty.
+    ///
+    /// **A read is what asks for this, because a read is what the failure is a
+    /// fact about.** A mint fails on the environment — the file was not there,
+    /// the open was refused — and the entry goes on serving every other
+    /// surface, so nothing it publishes afterwards would mint again. Without
+    /// this the seam stays down until the entry is torn down and attached
+    /// afresh, and a read stream is what keeps that teardown from arriving.
+    ///
+    /// Coverage out with a leg mints nothing: the store the handle would read
+    /// is that leg's until it ends, and the leg's own give-back is what mints
+    /// over it. The cost is one open of the database file under the entry
+    /// gate, so every other holder of that entry waits behind it. The bound is
+    /// the read-only open's busy timeout, and it is per statement rather than
+    /// per open: the open runs two statements that read the database — the
+    /// journal-mode read and the store-epoch read that binds the connection to
+    /// its file — so a mint that met a busy at each waits that timeout twice.
+    /// It is paid by a read that is otherwise about to be refused, and there
+    /// is no retry inside it: one attempt per read, and the reason it leaves
+    /// is what that read refuses with.
+    ///
+    /// Those statements are reported back rather than spent unseen: they run
+    /// under the read's gate hold, and the read account keeps them apart from
+    /// the establishing statement so neither reading has to stand for the
+    /// other.
+    ///
+    /// Answers the handle the read now runs on, and what this cost the gate.
+    fn remint_for_a_read(&mut self) -> ReadMint<A::Reader> {
+        // A slot that already holds a handle mints nothing, and neither does
+        // an entry whose coverage is out with a leg. Both run no statement,
+        // and the read reports that zero rather than reporting nothing.
+        let mut statements = 0;
+        if self.reader.is_none()
+            && let Some(attachment) = self.coverage.held()
+        {
+            let minted = attachment.open_reader();
+            statements = minted.statements;
+            match minted.reader {
+                Ok(reader) => {
+                    self.reader = Some(Arc::new(reader));
+                    self.reader_unavailable = None;
+                }
+                Err(unavailable) => {
+                    self.reader_unavailable = Some(unavailable);
+                }
+            }
+        }
+        ReadMint {
+            handle: self.reader.as_ref().map(Arc::clone),
+            statements,
+        }
     }
 
     /// Park the coverage a rung-3 rebuild handed back, and mint the reader that
@@ -734,16 +988,21 @@ impl<A: SnapshotSource> EntryState<A> {
     /// handle with.
     fn remint_coverage(&mut self, leg: u64, attachment: A) {
         self.close_reader();
-        self.reader = attachment.open_reader().map(Arc::new);
+        self.mint_reader(&attachment);
         self.coverage.park_by(leg, attachment);
     }
 
-    /// Park coverage retained after a reload failure, restoring the reader if
-    /// schema activation closed it. A validation failure leaves the old reader
-    /// standing, so that handle is preserved instead of minted again.
-    fn park_failed_reload(&mut self, leg: u64, attachment: A) {
+    /// Park the coverage a leg is handing back, minting the handle again where
+    /// the slot is empty.
+    ///
+    /// A leg that kept the entry's store leaves the standing handle alone —
+    /// that handle reads the store the coverage still holds. A leg that meets
+    /// an empty slot mints from the coverage it is parking, which is how an
+    /// entry whose mint failed, and an entry whose schema activation closed
+    /// its handle, get one again.
+    fn park_coverage(&mut self, leg: u64, attachment: A) {
         if self.reader.is_none() {
-            self.reader = attachment.open_reader().map(Arc::new);
+            self.mint_reader(&attachment);
         }
         self.coverage.park_by(leg, attachment);
     }
@@ -757,6 +1016,10 @@ impl<A: SnapshotSource> EntryState<A> {
     /// the read's.
     fn close_reader(&mut self) {
         self.reader = None;
+        // The reason belongs to the mint over the coverage that is going
+        // back. An entry holding no coverage makes no claim about a handle it
+        // never had, and the next publication mints and re-derives one.
+        self.reader_unavailable = None;
     }
 
     /// Pin the entry for a leg that is about to run outside its lock. The leg
@@ -1191,6 +1454,40 @@ fn schedule_demanded_work<A: SnapshotSource>(
 /// resources reach the ops: this is the instant the entry stops being readable,
 /// and the store the handle was minted from closes inside the window. Every
 /// teardown enters here, so one site is what carries the rule for all of them.
+/// Record one caller's demand on an entry, and answer the recovery demand it
+/// raised.
+///
+/// **Every door that holds demand comes through here**: a client demand and a
+/// read alike, because what demand does to an entry is one fact and two
+/// spellings of it are two predicates to keep in step. The lease is counted,
+/// the idle interval is restarted, and an idle detach that is scheduled and
+/// not yet dispatched is withdrawn — the claim it was scheduled under is
+/// invalidated and re-opened, so the work this demand asks for is what the
+/// entry does next.
+///
+/// A detach already in flight is not withdrawn. It has run [`begin_release`],
+/// which emptied the reader slot and published the releasing phase, so what a
+/// caller meets is an entry giving its resources back.
+///
+/// **What answers the lease this call records is the lease still standing when
+/// the release ends.** A caller holding one — a client's demand — is what
+/// [`finish_release`] re-arms an attach for. A read refused by that release
+/// gives its lease back at the refusal, so by the time the release ends there
+/// is nothing standing for it to answer and no attach is re-armed: the read
+/// asked once, was told the entry is giving its resources back, and the read
+/// after it is what asks again.
+fn record_demand<A: SnapshotSource>(state: &mut EntryState<A>) -> Option<u64> {
+    state.demand_leases += 1;
+    let recovery_demand = state.demand_recovery();
+    state.detach_due = false;
+    if state.detach_scheduled && !state.detach_in_flight {
+        state.claim.invalidate();
+        state.claim.open();
+        state.detach_scheduled = false;
+    }
+    recovery_demand
+}
+
 fn begin_release<A: SnapshotSource>(state: &mut EntryState<A>) {
     // A job that lost the attachment to this leg left its marker behind for a
     // later tick, and the resources it was scheduled against are going back:
@@ -1554,7 +1851,7 @@ fn reclaim_unwound_leg<O: EntryOps>(
 
 /// What is running against an entry at the instant it was read.
 ///
-/// Each field is one of the holds [`EntryState::held_by_anything`] answers for
+/// Each field is one of the holds `EntryState::held_by_anything` answers for
 /// that says a leg is in flight. Three of its limbs are not fields here: coverage
 /// in the entry's own hand and the demand leases a client holds over it, which an
 /// at-rest entry carries anyway, and coverage out with a leg, which every taker
@@ -1949,6 +2246,9 @@ struct Shared<O: EntryOps> {
     /// both — in that order, the set and then the gate.
     entries: ServingSet<O::Attachment>,
     ops: Arc<O>,
+    /// What this host's reads have cost, kept rather than discarded. It is the
+    /// host's own account and outlives every read it records.
+    reads: Arc<ReadEvidence>,
     jobs: Mutex<Option<mpsc::SyncSender<Job>>>,
     shutting_down: AtomicBool,
     idle_after: Duration,
@@ -1966,41 +2266,159 @@ pub struct Host<O: EntryOps> {
 
 /// One read's hold on a vault entry.
 ///
-/// The handle and the trust label come out of one hold of the entry gate lock,
-/// so the label a read answers under and the snapshot it answers from describe
-/// one instant. Which labels answer and which refuse is
-/// [`TrustState::refusal`]'s answer, given beside the states themselves in
-/// `norn-wire`, and it is read there rather than restated here.
+/// **The hold is the proof.** A handle is reachable only through one, and one
+/// is minted only over an entry whose published demand is `Ready`, so a read
+/// that skipped the adjudication is a read that has no handle to run on.
 ///
-/// The hold pins the entry the way a leg running outside the lock does, so a
-/// teardown that reads the pin schedules nothing while a read is in flight, and
-/// the pin goes back where the hold is dropped — a read that ends, and a read
-/// that unwinds, end their hold on the entry alike.
-pub struct ReadHold<A: SnapshotSource> {
-    entry: Arc<Entry<A>>,
-    reader: Arc<A::Reader>,
-    trust: TrustState,
+/// The published demand, the handle and the snapshot come out of one hold of
+/// the entry gate lock, so the demand a read answers under and the snapshot it
+/// answers from describe one instant.
+///
+/// The hold is demand on the entry as well as a pin on it: it holds a lease
+/// for as long as the read runs, so a pure read workload is not reaped between
+/// its reads, and the pin is what keeps an idle teardown from being scheduled
+/// while one is in flight. Both go back where the hold is dropped — a read
+/// that ends, and a read that unwinds, end their hold alike.
+pub struct ReadHold<O: EntryOps> {
+    entry: Arc<Entry<O::Attachment>>,
+    reader: Arc<<O::Attachment as SnapshotSource>::Reader>,
+    /// The snapshot this read answers from. It is taken out of the option by
+    /// the drop that ends the read, which is the one place it is taken: a
+    /// snapshot stands from the hold's making to the hold's end.
+    snapshot: Option<<<O::Attachment as SnapshotSource>::Reader as ReadSource>::Snapshot>,
+    reading: AnswerReading,
+    /// The demand this read holds on the entry for its own length. Declared
+    /// last because fields drop in declaration order: the pin goes back in
+    /// this type's own drop, under the gate, and the lease takes the gate
+    /// again afterwards — sequenced, never nested. It is held rather than
+    /// read, which is the whole of what a lease is.
+    _lease: DemandLease<O>,
 }
 
-impl<A: SnapshotSource> ReadHold<A> {
-    /// The trust label the entry stood at when this read took its hold.
-    pub fn trust(&self) -> &TrustState {
-        &self.trust
+impl<O: EntryOps> ReadHold<O> {
+    /// The reading this read is answered under: the demand the entry published
+    /// when the hold was taken, and the store reading its snapshot was
+    /// established at.
+    pub fn reading(&self) -> &AnswerReading {
+        &self.reading
     }
 
     /// The handle this read runs on. It is the entry's own, shared with every
     /// other read against that entry, and it stays open for as long as this
     /// hold does.
-    pub fn reader(&self) -> &A::Reader {
+    ///
+    /// **A borrow, and never the handle's own counted reference.** The hold is
+    /// the proof, so the handle may not outlive one: a caller that could clone
+    /// the entry's handle out of a hold could end the hold and go on
+    /// establishing snapshots on the entry's one connection under no
+    /// adjudication at all — un-pinned, holding no lease, and invisible to the
+    /// read account. The signature is what refuses it:
+    ///
+    /// What the borrow hands out has to refuse the same escape one
+    /// indirection along, so a handle carries no route to the database file it
+    /// reads: a caller holding that path opens its own connection over the
+    /// same database and answers from it under no hold. The reader type is
+    /// where that absence is stated and pinned.
+    ///
+    /// ```compile_fail,E0308
+    /// use std::sync::Arc;
+    /// use norn_host::{EntryOps, ReadHold, SnapshotSource};
+    ///
+    /// fn the_handle_escapes<O: EntryOps>(
+    ///     hold: &ReadHold<O>,
+    /// ) -> Arc<<O::Attachment as SnapshotSource>::Reader> {
+    ///     let handle: &Arc<<O::Attachment as SnapshotSource>::Reader> = hold.reader();
+    ///     Arc::clone(handle)
+    /// }
+    /// ```
+    pub fn reader(&self) -> &<O::Attachment as SnapshotSource>::Reader {
         &self.reader
+    }
+
+    /// The snapshot this read answers from, established under the gate hold
+    /// that granted this hold.
+    pub fn snapshot(&self) -> &<<O::Attachment as SnapshotSource>::Reader as ReadSource>::Snapshot {
+        self.snapshot
+            .as_ref()
+            .expect("a hold holds its snapshot until it is dropped")
     }
 }
 
-impl<A: SnapshotSource> Drop for ReadHold<A> {
+impl<O: EntryOps> fmt::Debug for ReadHold<O> {
+    /// The reading and nothing else: a handle and a snapshot are resources
+    /// rather than values, and what a reader of a hold is told is what the
+    /// read was answered under.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReadHold")
+            .field("reading", &self.reading)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<O: EntryOps> Drop for ReadHold<O> {
+    /// **The snapshot ends before the gate is taken.** Giving the connection
+    /// back is what wakes an acquisition waiting for it, and that acquisition
+    /// waits outside the entry gate and takes the gate for itself once it has
+    /// the connection — so ending the snapshot first hands it on while this
+    /// hold is still outside the gate, rather than making it wait out this
+    /// hold's own unpinning behind the lock as well.
     fn drop(&mut self) {
+        drop(self.snapshot.take());
         let mut state = self.entry.gate.lock().expect("entry gate poisoned");
         state.unpin();
     }
+}
+
+/// The reading one read was answered under.
+///
+/// **The demand, never the label underneath it.** A park outranks the trust
+/// state an entry publishes, so a reading taken off the raw label would say
+/// `Ready` across a park; this carries the demand the entry published, which
+/// is the one value every other surface renders too.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnswerReading {
+    published: Demand,
+    store: StoreReading,
+}
+
+impl AnswerReading {
+    /// What the entry published at the instant the hold was taken.
+    pub fn published(&self) -> &Demand {
+        &self.published
+    }
+
+    /// Which database the answer came from, and how far its writes had got.
+    pub fn store(&self) -> &StoreReading {
+        &self.store
+    }
+}
+
+/// Why a read was not served.
+///
+/// Two shapes. The first is a demand: a name the serving set does not hold,
+/// decided at that lookup before any entry gate is taken; or, under a hold of
+/// the entry's gate, the demand that entry publishes — a warming entry with
+/// its phase, an untrusted state, coverage on its way back, or a park under
+/// its own code. An entry holding no coverage is not among them: the read's
+/// own demand schedules the attach it owes, so what such an entry refuses
+/// with is the warming state of that attach. The second shape is an entry
+/// serving every surface but this one.
+///
+/// **No wire rendering is written here.** A demand renders through
+/// [`Demand::answer`], the one mapping every surface renders a demand
+/// through; what code a read refusal takes on the wire, and what typed detail
+/// it carries, is the Layer 3 wire vocabulary's to settle rather than this
+/// type's — and an entry that is serving while its read seam is not is
+/// exactly the case a rendering borrowed from the trust vocabulary would
+/// describe wrongly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReadRefusal {
+    /// The entry is not serving reads, and this is what it publishes instead.
+    NotServing(Demand),
+    /// The entry is serving and its read seam is not: the mint that would have
+    /// given it a handle failed, or the snapshot could not be established.
+    ReaderUnavailable(ReaderUnavailable),
 }
 
 /// One client operation's lifecycle guard and immediate trust answer.
@@ -2084,6 +2502,57 @@ impl<O: EntryOps> Drop for DemandLease<O> {
             state.last_demand = Instant::now();
             state.detach_due = false;
         }
+    }
+}
+
+/// A demand lease an acquisition holds while it also holds that entry's gate.
+///
+/// **It takes no entry gate when the thread holding it is unwinding**, and
+/// that is the whole of what it is for. A read records its lease under the
+/// first hold of the entry gate and keeps it across the gate being given back
+/// and taken again, so the lease and a live `MutexGuard` over the same
+/// non-reentrant gate are both on the acquisition's stack. An unwind out of
+/// that frame drops both: the guard releases the gate and poisons it, and a
+/// bare [`DemandLease`] would then ask for the gate it just poisoned and panic
+/// a second time inside a drop, which aborts the process. A lease dropped
+/// before the guard would block on the gate the guard still holds, and the
+/// entry would never answer again.
+///
+/// So an unwind leaks the lease instead. The entry keeps a demand no hold is
+/// behind — it never detaches for idleness again — which is the state an entry
+/// whose gate is poisoned is in either way: every later take of that gate
+/// panics on the poison, so its account of itself is already unreadable. That
+/// is the priced cost of an unwind under the entry gate, and it is paid
+/// without blocking and without a second panic.
+struct AcquisitionLease<O: EntryOps>(Option<DemandLease<O>>);
+
+impl<O: EntryOps> AcquisitionLease<O> {
+    fn new(lease: DemandLease<O>) -> Self {
+        AcquisitionLease(Some(lease))
+    }
+
+    /// Hand the lease on to the hold that keeps it for the length of the read.
+    /// The wrapper's own drop runs over an empty option from here, so the
+    /// lease is given back by the hold and by nothing else.
+    fn into_lease(mut self) -> DemandLease<O> {
+        self.0
+            .take()
+            .expect("an acquisition holds its lease until the hold it grants takes it")
+    }
+}
+
+impl<O: EntryOps> Drop for AcquisitionLease<O> {
+    fn drop(&mut self) {
+        let Some(lease) = self.0.take() else {
+            return;
+        };
+        if thread::panicking() {
+            std::mem::forget(lease);
+            return;
+        }
+        // Every ordinary way out of an acquisition gives the gate back before
+        // this runs, so the lease's own drop takes a free gate here.
+        drop(lease);
     }
 }
 
@@ -2205,6 +2674,7 @@ impl<O: EntryOps> Host<O> {
         let shared = Arc::new(Shared {
             entries,
             ops: Arc::new(ops),
+            reads: Arc::new(ReadEvidence::default()),
             jobs: Mutex::new(Some(jobs)),
             shutting_down: AtomicBool::new(false),
             idle_after: policy.idle_after,
@@ -2314,6 +2784,7 @@ impl<O: EntryOps> Host<O> {
                 trust: state.trust.clone(),
                 active_fingerprints: state.active_fingerprints,
                 last_reload_error: state.last_reload_error.clone(),
+                reader_unavailable: state.reader_unavailable.clone(),
             }
         })
     }
@@ -2505,14 +2976,7 @@ impl<O: EntryOps> Host<O> {
             });
         };
         let mut state = entry.gate.lock().expect("entry gate poisoned");
-        state.demand_leases += 1;
-        let recovery_demand = state.demand_recovery();
-        state.detach_due = false;
-        if state.detach_scheduled && !state.detach_in_flight {
-            state.claim.invalidate();
-            state.claim.open();
-            state.detach_scheduled = false;
-        }
+        let recovery_demand = record_demand(&mut state);
         // A release in flight is the entry's resources on their way back, and
         // the flag says so whatever label stands beside it: the lease is
         // recorded here and honored by the release, so nothing is scheduled
@@ -2610,32 +3074,202 @@ impl<O: EntryOps> Host<O> {
     }
 
     /// Take one read's hold on an entry: the handle its reads run on, the
-    /// trust label it answers under, and the pin that keeps the entry standing
-    /// while it runs.
+    /// snapshot it answers from, the demand it holds while it runs, and the
+    /// pin that keeps an idle teardown from being scheduled under it.
     ///
-    /// All three come out of one hold of the entry gate lock. That is what
-    /// couples the label to the handle — a label read under a second lock
-    /// describes a different instant from the snapshot beside it — and what
-    /// makes the pin cover the whole of the read: the hold is taken before the
-    /// lock goes back, so no teardown reads an unpinned entry between the two.
+    /// **The snapshot is established under a hold of the entry gate, in the
+    /// same critical section that reads the demand the answer carries.** That
+    /// is what couples the reading to the snapshot: a demand read under a
+    /// second lock describes a different instant from the snapshot beside it.
+    /// The pin is taken under that same hold, so no teardown reads an unpinned
+    /// entry between the two.
     ///
-    /// An entry with no handle in its slot answers none. It is holding no
-    /// coverage, its coverage is on its way back, or the coverage it holds
-    /// mints no reader.
-    pub fn begin_read(&self, name: &VaultName) -> Option<ReadHold<O::Attachment>> {
-        let entry = self.shared.entries.get(name)?;
-        let (reader, trust) = {
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
-            let reader = Arc::clone(state.reader.as_ref()?);
-            let trust = state.trust.clone();
-            state.pin();
-            (reader, trust)
+    /// **No acquisition waits for the entry's connection while it holds the
+    /// entry gate.** An entry's reads share one connection and the read
+    /// holding it gives it back only when it ends, asking for the entry gate
+    /// on its way out — so a gate held across that wait is a gate no holder
+    /// can take again. Under the gate this tries for the connection without
+    /// blocking and establishes there where it is free. Where another read
+    /// holds it, the gate is given back, the connection is waited for and
+    /// taken outside it, and the gate is taken again: the acquisition then
+    /// reads the published demand afresh, because the instant it first read is
+    /// not the instant it answers under. That second hold does not contend —
+    /// this read is holding the connection by then, so nothing else can be
+    /// establishing — and it ends either in the establishment or in the
+    /// connection going back with a refusal. There is no third outcome, so
+    /// there is no round after it.
+    ///
+    /// **A read is demand the way a client's demand is**, served or refused.
+    /// It records a lease, restarts the idle interval, withdraws an idle
+    /// detach that is scheduled and not yet dispatched, and schedules the work
+    /// an entry holding nothing owes — so a vault that is only ever read is
+    /// attached by the first read and kept by the ones after it. What the read
+    /// is answered with meanwhile is the published demand: an entry that has
+    /// to be attached first refuses with the warming state that attach runs
+    /// under.
+    ///
+    /// The one state a read is served under is `Ready`. Every other published
+    /// demand refuses as itself, and an entry serving with no handle mints one
+    /// again from the coverage it holds and refuses as
+    /// [`ReadRefusal::ReaderUnavailable`] where that mint refuses too.
+    ///
+    /// **Both acts this runs against a database — the mint and the
+    /// establishment — run under a hold of the entry gate, and each is
+    /// accounted where it returns rather than where the read leaves.** So no
+    /// exit from here runs a statement under the gate and reports nothing: the
+    /// two exits above the mint took none, the mint's own refusal and the two
+    /// refusals a waiting read can take report the mint and no establishment,
+    /// and the establishment's refusal reports both. Each act lands in its own
+    /// reading, so the reading that claims one statement per read is the reads
+    /// this served and nothing else.
+    pub fn begin_read(&self, name: &VaultName) -> Result<ReadHold<O>, ReadRefusal> {
+        let Some(entry) = self.shared.entries.get(name) else {
+            return Err(ReadRefusal::NotServing(Demand::UnknownVault));
         };
-        Some(ReadHold {
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        let recovery_demand = record_demand(&mut state);
+        // The registry's parks are not withdrawn here. Withdrawing one is
+        // asking for the acquisition that adjudicates it, and a read asks for
+        // an answer from derived state rather than for a root to be read
+        // again; the park is what the read is refused with, under its own
+        // code.
+        //
+        // The lease is recorded under this first hold and is held across the
+        // gate being given back and taken again, so a hold of this gate is
+        // live for part of the lease's life here. Its own drop takes that same
+        // gate and the gate is not reentrant, which is why it is carried in an
+        // [`AcquisitionLease`]: that wrapper is what keeps an unwind out of
+        // this acquisition from asking for the gate this frame is holding.
+        let lease = AcquisitionLease::new(DemandLease {
+            outcome: state.published_demand(),
+            name: name.clone(),
+            held: Some(Arc::clone(&self.shared)),
+            recovery_demand,
+        });
+        // The work an entry holding nothing owes is scheduled on the same
+        // terms a client demand schedules it, so a read is what attaches a
+        // vault nothing else has asked for.
+        let scheduled = matches!(
+            state.trust,
+            TrustState::Unattached | TrustState::Untrusted { .. }
+        ) && !state.claim.is_held()
+            && !state.detach_in_flight
+            && state.parked().is_none();
+        if scheduled {
+            schedule_demand(&mut state, name);
+        }
+        let published = state.published_demand();
+        if published != Demand::State(TrustState::Ready) {
+            drop(state);
+            if scheduled {
+                // The dispatch is the demand's, and its one failure is the
+                // worker pool being gone — which is the host coming down, and
+                // is not something this read is refused for: the entry's own
+                // published demand is what answers it either way.
+                let _ = dispatch_pending(&self.shared, &entry);
+            }
+            return Err(ReadRefusal::NotServing(published));
+        }
+        // An entry serving with an empty slot is one whose mint met the
+        // environment and lost. The read asks for the mint again before it
+        // refuses, because nothing else this entry does will.
+        //
+        // What that mint ran, it ran under this hold of the entry gate, so it
+        // is accounted here rather than on the way out: every path below this
+        // line is a path that already paid for it, the refusals included.
+        let minted = state.remint_for_a_read();
+        self.shared
+            .reads
+            .count_mint_under_the_gate(minted.statements);
+        let Some(reader) = minted.handle else {
+            let unavailable = state.reader_unavailable.clone().unwrap_or_else(|| {
+                ReaderUnavailable::new("this entry's coverage holds no read handle")
+            });
+            drop(state);
+            return Err(ReadRefusal::ReaderUnavailable(unavailable));
+        };
+        let (turn, published) = match reader.try_take() {
+            // The connection is free, so this hold is the hold that
+            // establishes and the demand above is the demand the answer
+            // carries.
+            Some(turn) => (turn, published),
+            None => {
+                // Another read is answering on the entry's one connection.
+                // The gate goes back before the wait, and the demand recorded
+                // above is what holds the entry across it.
+                drop(state);
+                let turn = reader.wait_for_the_connection();
+                // Accounted where the wait ended, before the re-validation
+                // below decides how this acquisition leaves: the wait was paid
+                // either way.
+                self.shared.reads.count_reader_wait();
+                state = entry.gate.lock().expect("entry gate poisoned");
+                // The connection is this read's from here, so this hold is the
+                // hold that establishes and nothing else can be establishing
+                // under it. What may have moved is the entry: re-read what it
+                // publishes, and check that the handle waited for is still the
+                // handle its reads run on — a rung-3 rebuild swaps one for
+                // another while the entry goes on serving, and a teardown
+                // takes the entry out of service while the handle stands.
+                let published = state.published_demand();
+                if published != Demand::State(TrustState::Ready) {
+                    // The connection goes back with the turn, before the gate
+                    // does: the read waiting for it is woken by that and takes
+                    // the gate after this one lets go.
+                    drop(turn);
+                    drop(state);
+                    return Err(ReadRefusal::NotServing(published));
+                }
+                let still_the_entrys = state
+                    .reader
+                    .as_ref()
+                    .is_some_and(|standing| Arc::ptr_eq(standing, &reader));
+                if !still_the_entrys {
+                    let unavailable = state.reader_unavailable.clone().unwrap_or_else(|| {
+                        ReaderUnavailable::new(
+                            "this entry's reads moved to another handle while this read waited",
+                        )
+                    });
+                    drop(turn);
+                    drop(state);
+                    return Err(ReadRefusal::ReaderUnavailable(unavailable));
+                }
+                (turn, published)
+            }
+        };
+        // The establishment is accounted where it returns, for the reason the
+        // mint above is: it ran under this hold either way, and the refusal
+        // below is a path that paid for it.
+        let establishment = <O::Attachment as SnapshotSource>::Reader::establish(turn);
+        self.shared
+            .reads
+            .count_establishment_under_the_gate(&establishment, minted.statements);
+        let established = match establishment.established {
+            Ok(established) => established,
+            Err(unavailable) => {
+                drop(state);
+                return Err(ReadRefusal::ReaderUnavailable(unavailable));
+            }
+        };
+        self.shared.reads.count_read();
+        state.pin();
+        drop(state);
+        Ok(ReadHold {
             entry,
             reader,
-            trust,
+            snapshot: Some(established.snapshot),
+            reading: AnswerReading {
+                published,
+                store: established.reading,
+            },
+            _lease: lease.into_lease(),
         })
+    }
+
+    /// What this host's reads have cost: how many were served, what they ran
+    /// under the entry gate, and what they waited for the handles they share.
+    pub fn read_evidence(&self) -> ReadReading {
+        self.shared.reads.read()
     }
 
     /// Schedule expired entries for teardown. Safety-pinned work is allowed to
@@ -3433,7 +4067,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
                     state.last_reload_error = None;
                     let withheld = shared.ops.withheld_trust(&attachment);
-                    state.coverage.park_by(epoch, attachment);
+                    // The handle is minted again where the slot is empty: a
+                    // recovery is the leg that puts an entry back into
+                    // service, and an entry serving without a reader is one
+                    // whose reads refuse.
+                    state.park_coverage(epoch, attachment);
                     state.clear_recovery();
                     if let Some(reason) = withheld {
                         // The recovery re-read a declaration this build still
@@ -4108,7 +4746,13 @@ fn run_reload_job<O: EntryOps>(
             state.clear_rung_requirements();
             match outcome {
                 ReloadOutcome::ConfigOnly => {
-                    state.coverage.park_by(epoch, attachment);
+                    // A config-only reload closed no handle, so the slot is
+                    // full and this mints nothing. It is spelled as the
+                    // parking that answers for the slot all the same: a leg
+                    // that parks coverage answers for the handle over it, and
+                    // an arm that did not would be the one place the
+                    // invariant is unenforced.
+                    state.park_coverage(epoch, attachment);
                 }
                 ReloadOutcome::SchemaChanged => {
                     state.remint_coverage(epoch, attachment);
@@ -4119,7 +4763,7 @@ fn run_reload_job<O: EntryOps>(
         }
         Err(JobFailure::Reload(error)) => {
             state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
-            state.park_failed_reload(epoch, attachment);
+            state.park_coverage(epoch, attachment);
             let ready = state.trust == TrustState::Ready;
             let detail = state.record_reload_error(error.clone());
             if !ready {
@@ -4163,7 +4807,7 @@ fn run_reload_job<O: EntryOps>(
             let failure = JobFailure::WatcherTerminal(error.clone());
             let reclassify = root_moved(&error);
             state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
-            state.park_failed_reload(epoch, attachment);
+            state.park_coverage(epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.trust = TrustState::untrusted(watcher_lost(error));
@@ -4178,7 +4822,7 @@ fn run_reload_job<O: EntryOps>(
         Err(JobFailure::Environmental(detail)) => {
             let failure = JobFailure::Environmental(detail.clone());
             state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
-            state.park_failed_reload(epoch, attachment);
+            state.park_coverage(epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
@@ -4187,7 +4831,13 @@ fn run_reload_job<O: EntryOps>(
         Err(JobFailure::StoreDamaged(detail)) => {
             let failure = JobFailure::StoreDamaged(detail.clone());
             state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
-            state.coverage.park_by(epoch, attachment);
+            // The schema half of this reload may have closed the handle before
+            // the damage was met, so the slot is answered for here rather than
+            // left empty with nothing beside it. The entry publishes a
+            // withdrawn label either way and no read is served under one; what
+            // the mint settles is which of a handle and a reason stands when
+            // the rebuild puts the entry back.
+            state.park_coverage(epoch, attachment);
             state.require_rebuild();
             state.trust = trust_withdrawn_for_damage(detail);
             let next = state
@@ -4333,7 +4983,8 @@ mod tests {
     use norn_testkit::wait::{Budget, Observed, wait_until};
     use norn_wire::ErrorDetail;
     use std::cell::Cell;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Condvar;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     thread_local! {
         /// Whether `poll` on this thread runs inside a job's own handoff drain
@@ -4358,50 +5009,296 @@ mod tests {
     /// reads both ends of the handle's life off it; a fake with no such
     /// subject installs a ledger nothing reads. Coverage minting a reader is
     /// the default here, so the slot an entry publishes is occupied wherever a
-    /// case looks at it; `mints` false is the other configuration a coverage
-    /// can be in, and the one production stands in today.
+    /// case looks at it. `mint_fails` is the other configuration a coverage
+    /// can be in: the mint refuses, which is the one shape a coverage that
+    /// serves no reads takes — there is no third answer to give.
+    #[derive(Default)]
     struct FakeCoverage {
         readers: Arc<ReaderLedger>,
-        mints: bool,
-    }
-
-    impl Default for FakeCoverage {
-        fn default() -> Self {
-            Self {
-                readers: Arc::default(),
-                mints: true,
-            }
-        }
+        /// Whether a mint over this coverage refuses, read at the mint rather
+        /// than fixed when the coverage was built: a case moves it between an
+        /// attach and the leg that mints again, and a real mint answers for
+        /// the environment as it stands at the open.
+        mint_fails: Arc<AtomicBool>,
     }
 
     /// What a case reads about an entry's readers: one open counted where the
     /// coverage mints the handle, one close where the last holder of that
-    /// handle drops it.
-    #[derive(Default)]
+    /// handle drops it, one establishment per read served, and the reads that
+    /// waited for a connection another read was holding.
+    ///
+    /// The two statement knobs are what a mint and an establishment on these
+    /// handles report having run against a database. A fake runs no statement,
+    /// so a mint reports nothing until a case sets it; an establishment
+    /// reports one, which is what the account's per-read reading is stated
+    /// against, and a case asserting either reading sets its own number.
     struct ReaderLedger {
         opened: AtomicUsize,
         closed: AtomicUsize,
+        established: AtomicUsize,
+        /// Reads that found the connection taken and waited for it. A case
+        /// reads this to know a second read has reached the wait, which is
+        /// the state the entry has to go on answering every other surface in.
+        waiting: AtomicUsize,
+        /// Whether establishing a snapshot on a handle from this ledger
+        /// refuses, which is the read seam failing under an entry that holds
+        /// its handle and is otherwise serving.
+        establish_fails: std::sync::atomic::AtomicBool,
+        /// What a mint over a coverage holding this ledger reports having run
+        /// against the database.
+        ///
+        /// A fake mint runs no statement, so the default is the truth about
+        /// this fake and zero is what every case that is not about the
+        /// accounting reads. A case that asserts what a healing read reports
+        /// sets it, and the number it sets is that case's own.
+        mint_statements: AtomicU64,
+        /// Where an establishment is held, so a case can observe what the
+        /// acquisition holds while the one statement runs.
+        establishing: Mutex<EstablishGate>,
+        /// Woken when a parked establishment arrives, and when one is
+        /// released.
+        establishment_moved: Condvar,
+        /// What an establishment on a handle from this ledger reports having
+        /// run against the database, whichever way it ends.
+        establish_statements: AtomicU64,
+        /// Whether a mint over a coverage holding this ledger panics instead
+        /// of answering. The real mint states that it does not, and the case
+        /// that reads this is the one that holds the read path to what happens
+        /// when something under the entry gate does.
+        mint_panics: std::sync::atomic::AtomicBool,
+    }
+
+    impl Default for ReaderLedger {
+        fn default() -> Self {
+            ReaderLedger {
+                opened: AtomicUsize::default(),
+                closed: AtomicUsize::default(),
+                established: AtomicUsize::default(),
+                waiting: AtomicUsize::default(),
+                establish_fails: std::sync::atomic::AtomicBool::default(),
+                establishing: Mutex::default(),
+                establishment_moved: Condvar::default(),
+                mint_statements: AtomicU64::default(),
+                establish_statements: AtomicU64::new(1),
+                mint_panics: std::sync::atomic::AtomicBool::default(),
+            }
+        }
+    }
+
+    /// Whether establishments park, and whether one is parked now.
+    #[derive(Default)]
+    struct EstablishGate {
+        /// A case asked for establishments to park.
+        parks: bool,
+        /// An establishment is parked and waiting to be let go.
+        parked: bool,
+        /// The case let it go.
+        released: bool,
     }
 
     /// The snapshot handle a fake coverage mints. It reads nothing; what it
-    /// carries is its own open and close.
-    struct FakeReader(Arc<ReaderLedger>);
+    /// carries is its own open, its own close, the establishments it answered,
+    /// and **one connection**, the way a real handle does: a read holds it for
+    /// as long as its snapshot stands, and the read after it waits.
+    struct FakeReader {
+        ledger: Arc<ReaderLedger>,
+        /// Whether the connection is in the handle. A read holding it makes
+        /// this false, and the read that ends makes it true again.
+        free: Mutex<bool>,
+        returned: Condvar,
+    }
+
+    impl FakeReader {
+        fn give_the_connection_back(&self) {
+            *self.free.lock().expect("a fake reader's connection") = true;
+            self.returned.notify_one();
+        }
+    }
+
+    /// One read's turn on a fake handle's one connection. It gives the
+    /// connection back where it drops without establishing, which is the
+    /// refusal path out of the wait.
+    struct FakeTurn {
+        reader: Arc<FakeReader>,
+        /// Taken by the establishment, so the snapshot owns the give-back from
+        /// there on.
+        holds_the_connection: bool,
+    }
+
+    impl Drop for FakeTurn {
+        fn drop(&mut self) {
+            if self.holds_the_connection {
+                self.reader.give_the_connection_back();
+            }
+        }
+    }
+
+    /// The snapshot a fake handle establishes. It holds the turn, the way a
+    /// real one holds the connection, so a read outlives the entry's own hold
+    /// on the handle and the connection goes back where the read ends.
+    struct FakeSnapshot(#[allow(dead_code)] FakeTurn);
 
     impl SnapshotSource for FakeCoverage {
         type Reader = FakeReader;
 
-        fn open_reader(&self) -> Option<FakeReader> {
-            if !self.mints {
-                return None;
+        fn open_reader(&self) -> MintedReader<FakeReader> {
+            assert!(
+                !self.readers.mint_panics.load(Ordering::SeqCst),
+                "the case asked this mint to unwind under the entry gate"
+            );
+            // Reported on both answers, the way a real mint reports it: the
+            // statements a mint runs before it refuses are statements its
+            // caller held the gate for.
+            let statements = self.readers.mint_statements.load(Ordering::SeqCst);
+            if self.mint_fails.load(Ordering::SeqCst) {
+                return MintedReader {
+                    reader: Err(ReaderUnavailable::new("this coverage mints no read handle")),
+                    statements,
+                };
             }
             self.readers.opened.fetch_add(1, Ordering::SeqCst);
-            Some(FakeReader(Arc::clone(&self.readers)))
+            MintedReader {
+                reader: Ok(FakeReader {
+                    ledger: Arc::clone(&self.readers),
+                    free: Mutex::new(true),
+                    returned: Condvar::new(),
+                }),
+                statements,
+            }
         }
+    }
+
+    impl ReadSource for FakeReader {
+        type Snapshot = FakeSnapshot;
+        type Turn = FakeTurn;
+
+        fn try_take(self: &Arc<Self>) -> Option<FakeTurn> {
+            let mut free = self.free.lock().expect("a fake reader's connection");
+            if !*free {
+                return None;
+            }
+            *free = false;
+            Some(FakeTurn {
+                reader: Arc::clone(self),
+                holds_the_connection: true,
+            })
+        }
+
+        fn wait_for_the_connection(self: &Arc<Self>) -> FakeTurn {
+            self.ledger.waiting.fetch_add(1, Ordering::SeqCst);
+            let mut free = self.free.lock().expect("a fake reader's connection");
+            while !*free {
+                free = self
+                    .returned
+                    .wait(free)
+                    .expect("a fake reader's connection");
+            }
+            *free = false;
+            FakeTurn {
+                reader: Arc::clone(self),
+                holds_the_connection: true,
+            }
+        }
+
+        fn establish(mut turn: FakeTurn) -> Establishment<Self::Snapshot> {
+            let ledger = Arc::clone(&turn.reader.ledger);
+            park_here_if_the_case_asked(&ledger);
+            // Reported on both answers, the way a real establishment reports
+            // it: an attempt that refused ran the statement it refused in.
+            let statements = ledger.establish_statements.load(Ordering::SeqCst);
+            if ledger.establish_fails.load(Ordering::SeqCst) {
+                // The turn goes back with the refusal, which is the drop
+                // below: a refused establishment leaves the handle where the
+                // next read finds it.
+                return Establishment {
+                    established: Err(ReaderUnavailable::new(
+                        "this handle establishes no snapshot",
+                    )),
+                    statements,
+                };
+            }
+            let established = ledger.established.fetch_add(1, Ordering::SeqCst) + 1;
+            turn.holds_the_connection = false;
+            let held = FakeTurn {
+                reader: Arc::clone(&turn.reader),
+                holds_the_connection: true,
+            };
+            Establishment {
+                established: Ok(Established {
+                    reading: fake_reading(established as i64),
+                    snapshot: FakeSnapshot(held),
+                }),
+                statements,
+            }
+        }
+    }
+
+    /// Hold the establishment here while a case looks at what the acquisition
+    /// is holding around it.
+    fn park_here_if_the_case_asked(ledger: &ReaderLedger) {
+        let mut gate = ledger
+            .establishing
+            .lock()
+            .expect("a fake reader's establishments");
+        if !gate.parks {
+            return;
+        }
+        gate.parked = true;
+        ledger.establishment_moved.notify_all();
+        while !gate.released {
+            gate = ledger
+                .establishment_moved
+                .wait(gate)
+                .expect("a fake reader's establishments");
+        }
+    }
+
+    /// Ask every establishment on this ledger's handles to park until it is
+    /// released.
+    fn park_establishments(ledger: &ReaderLedger) {
+        ledger
+            .establishing
+            .lock()
+            .expect("a fake reader's establishments")
+            .parks = true;
+    }
+
+    /// Wait for an establishment to reach the park.
+    fn wait_for_a_parked_establishment(ledger: &ReaderLedger) {
+        let mut gate = ledger
+            .establishing
+            .lock()
+            .expect("a fake reader's establishments");
+        while !gate.parked {
+            gate = ledger
+                .establishment_moved
+                .wait(gate)
+                .expect("a fake reader's establishments");
+        }
+    }
+
+    /// Let the parked establishment finish, and let every later one through.
+    fn release_establishments(ledger: &ReaderLedger) {
+        let mut gate = ledger
+            .establishing
+            .lock()
+            .expect("a fake reader's establishments");
+        gate.parks = false;
+        gate.released = true;
+        drop(gate);
+        ledger.establishment_moved.notify_all();
+    }
+
+    /// The store reading a fake establishment answers under. The epoch is one
+    /// database's for the length of a case, and the generation moves with the
+    /// establishments, so a reading a case compares is one it can tell apart.
+    fn fake_reading(generation: i64) -> norn_store::StoreReading {
+        norn_store::StoreReading::of("fake-epoch", generation)
     }
 
     impl Drop for FakeReader {
         fn drop(&mut self) {
-            self.0.closed.fetch_add(1, Ordering::SeqCst);
+            self.ledger.closed.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -4424,10 +5321,18 @@ mod tests {
         /// through, so a case reads the readers of every entry the fake serves
         /// off one place.
         readers: Arc<ReaderLedger>,
-        /// Install coverage that mints no reader, which is the configuration
-        /// production stands in: a store is attached and the entry beside it
-        /// serves no reads.
-        coverage_mints_no_reader: std::sync::atomic::AtomicBool,
+        /// Whether a reader mint over this fake's coverage refuses, which is
+        /// an entry that serves every surface but its read seam. Every
+        /// coverage this fake hands out reads it at the mint, so a case moves
+        /// it between an attach and a later mint the way an environment
+        /// breaks and recovers.
+        reader_mint_fails: Arc<AtomicBool>,
+        /// Whether this fake's coverage withholds trust, which is an
+        /// attachment that holds everything a read would run on and still
+        /// cannot be derived under. Read at the publication rather than fixed
+        /// when the coverage was built, the way an implementation reads the
+        /// vault's own declaration.
+        withholds_trust: Arc<AtomicBool>,
         attaches: AtomicUsize,
         /// The root every attach was handed, filed under the name the
         /// registration it was handed carries.
@@ -4606,13 +5511,19 @@ mod tests {
         fn coverage(&self) -> FakeCoverage {
             FakeCoverage {
                 readers: Arc::clone(&self.readers),
-                mints: !self.coverage_mints_no_reader.load(Ordering::SeqCst),
+                mint_fails: Arc::clone(&self.reader_mint_fails),
             }
         }
     }
 
     impl EntryOps for Arc<FakeOps> {
         type Attachment = FakeCoverage;
+
+        fn withheld_trust(&self, _: &FakeCoverage) -> Option<UntrustedReason> {
+            self.withholds_trust
+                .load(Ordering::SeqCst)
+                .then(|| UntrustedReason::schema_unreadable("this fake withholds trust"))
+        }
 
         fn attach(
             &self,
@@ -5761,8 +6672,15 @@ mod tests {
         let failure = ReloadError::SchemaApply("the candidate could not be pinned".into());
         assert_eq!(host.reload(&name), Err(ReloadRefusal::Core(failure)));
         assert!(
-            host.begin_read(&name).is_some(),
+            reader_stands(&host, &name),
             "retained coverage lost its reader after schema reload failed"
+        );
+        // The handle standing is not the right to answer: the entry is
+        // untrusted until the recovery below, and a read is adjudicated on
+        // what the entry publishes rather than on the slot being full.
+        assert!(
+            matches!(host.begin_read(&name), Err(ReadRefusal::NotServing(_))),
+            "an untrusted entry answered a read from the handle it kept"
         );
 
         let _recovery_lease = host.demand(&name, AttachMode::Durable).unwrap();
@@ -5770,7 +6688,10 @@ mod tests {
         let read = host
             .begin_read(&name)
             .expect("recovery to leave the retained coverage readable");
-        assert_eq!(read.trust(), &TrustState::Ready);
+        assert_eq!(
+            read.reading().published(),
+            &Demand::State(TrustState::Ready)
+        );
     }
 
     /// A contended attach parks the entry and schedules nothing behind it.
@@ -6852,50 +7773,34 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
-    /// An idle detach leg whose call into `EntryOps::detach` panics is a
-    /// normal teardown all the same: [`give_back`] absorbs the panic, so the
-    /// release it is part of completes in the same call rather than
-    /// unwinding — the entry reaches `Unattached` instead of an unwind
-    /// reason, and a fresh demand re-attaches it. An idle detach leg takes the
-    /// entry's coverage and pins nothing of its own, so a read in flight
-    /// beside it holds the only pin over the entry throughout: neither the
-    /// panic nor the release it completes touches a pin that was never the
+    /// A detach leg whose call into `EntryOps::detach` panics is a normal
+    /// teardown all the same: [`give_back`] absorbs the panic, so the release
+    /// it is part of completes in the same call rather than unwinding — the
+    /// entry publishes `Unattached` instead of an unwind reason. A detach leg
+    /// takes the entry's coverage and pins nothing of its own, so a read in
+    /// flight beside it holds the only pin over the entry throughout: neither
+    /// the panic nor the release it completes touches a pin that was never the
     /// leg's.
+    ///
+    /// **The teardown is one a read does not hold back.** A read holds the
+    /// entry's demand, so an idle reap does not reach an entry a read is
+    /// running against; an identity refusal consults neither the pin nor the
+    /// lease, which is what puts a detach under a live read at all.
     #[test]
-    fn a_detach_panic_on_an_idle_leg_completes_the_release_with_a_reads_pin_standing() {
+    fn a_detach_panic_under_a_read_completes_the_release_with_the_reads_pin_standing() {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("z").unwrap();
-        let holding = VaultName::new("a").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding], 1);
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject], 1);
         drop(host.demand(&subject, AttachMode::Durable).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
-        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
-        wait_for_state(&host, &holding, TrustState::Ready);
         let entry = host.shared.entries.get(&subject).unwrap();
 
-        // The one worker is held inside the other vault's job, so the detach
-        // the reap below schedules waits in the channel while the read is
-        // taken.
-        ops.block_reconcile.store(true, Ordering::SeqCst);
-        report_through_a_driven_poll(&ops, &host, &holding, &ops.off_thread_rescan_poll_batches);
-        wait_for_flag("reconcile_started", &ops.reconcile_started);
-
-        host.reap_idle(Instant::now() + Duration::from_secs(3600))
-            .unwrap();
-        assert!(
-            entry.gate.lock().unwrap().detach_scheduled,
-            "no idle detach was scheduled"
-        );
-
-        // The reap-then-read order: the detach is already on its way when the
-        // read takes its hold, which is the one pin standing over the entry.
         let read = host.begin_read(&subject).expect("the entry answers a read");
         assert!(entry.gate.lock().unwrap().pinned(), "the read took no pin");
 
         *ops.panic_in_detach_at.lock().unwrap() = Some(subject.clone());
-        ops.block_reconcile.store(false, Ordering::SeqCst);
-        ops.reconcile_release.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &subject, TrustState::Unattached);
+        refuse_identity_error(&host.shared, &subject, "the root cannot be read".into());
+        wait_for_environmental_refusal(&host, &subject);
 
         assert_eq!(
             entry.gate.lock().unwrap().safety_pins,
@@ -6910,12 +7815,12 @@ mod tests {
         drop(read);
 
         // The entry is demand-answerable: nothing about the panic its release
-        // absorbed is left for a fresh attach to work around.
+        // absorbed is left for a fresh attach to work around. The demand is
+        // what withdraws the identity park the refusal raised.
         *ops.panic_in_detach_at.lock().unwrap() = None;
         drop(host.demand(&subject, AttachMode::Durable).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
 
-        drop(holding_lease);
         std::mem::forget(host);
     }
 
@@ -6929,41 +7834,24 @@ mod tests {
     fn an_attach_that_unwinds_gives_back_no_pin_it_never_took() {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("z").unwrap();
-        let holding = VaultName::new("a").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding], 1);
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject], 1);
         drop(host.demand(&subject, AttachMode::Durable).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
-        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
-        wait_for_state(&host, &holding, TrustState::Ready);
         let entry = host.shared.entries.get(&subject).unwrap();
 
-        // The one worker is held inside the other vault's job, so the detach
-        // the reap below schedules waits in the channel while the read is
-        // taken.
-        ops.block_reconcile.store(true, Ordering::SeqCst);
-        report_through_a_driven_poll(&ops, &host, &holding, &ops.off_thread_rescan_poll_batches);
-        wait_for_flag("reconcile_started", &ops.reconcile_started);
-
-        host.reap_idle(Instant::now() + Duration::from_secs(3600))
-            .unwrap();
-        assert!(
-            entry.gate.lock().unwrap().detach_scheduled,
-            "no idle detach was scheduled"
-        );
-
-        // The reap-then-read order: the detach is already on its way when the
-        // read takes its hold, which is the one pin standing over the entry.
+        // The read takes the one pin over the entry, and the teardown that
+        // follows is one no read holds back: an identity refusal consults
+        // neither the pin nor the demand a read holds.
         let read = host.begin_read(&subject).expect("the entry answers a read");
         assert!(entry.gate.lock().unwrap().pinned(), "the read took no pin");
 
-        ops.block_reconcile.store(false, Ordering::SeqCst);
-        ops.reconcile_release.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &subject, TrustState::Unattached);
+        refuse_identity_error(&host.shared, &subject, "the root cannot be read".into());
+        wait_for_environmental_refusal(&host, &subject);
 
         assert_eq!(
             entry.gate.lock().unwrap().safety_pins,
             1,
-            "the read's pin did not survive the idle release"
+            "the read's pin did not survive the release"
         );
 
         // The read is held past the re-demand: the fresh attach this asks for
@@ -6990,7 +7878,6 @@ mod tests {
         drop(host.demand(&subject, AttachMode::Durable).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
 
-        drop(holding_lease);
         std::mem::forget(host);
     }
 
@@ -11847,13 +12734,18 @@ mod tests {
             .begin_read(&name)
             .expect("an entry holding a reader answers a read");
         assert_eq!(
-            hold.trust(),
-            &TrustState::Ready,
-            "the hold reports a label the entry does not stand at"
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready),
+            "the hold reports a demand the entry does not publish"
         );
         assert!(
-            Arc::ptr_eq(&hold.reader().0, &ops.readers),
+            Arc::ptr_eq(&hold.reader().ledger, &ops.readers),
             "the read runs on a handle the entry's own coverage did not mint"
+        );
+        assert_eq!(
+            hold.reading().store().epoch(),
+            "fake-epoch",
+            "the answer names a database the entry's handle did not establish over"
         );
     }
 
@@ -11888,7 +12780,10 @@ mod tests {
             "an attach that installed no coverage minted a reader from it"
         );
         assert!(!reader_stands(&host, &name));
-        assert!(host.begin_read(&name).is_none());
+        assert!(matches!(
+            host.begin_read(&name),
+            Err(ReadRefusal::NotServing(_)),
+        ));
 
         drop((lease, host));
     }
@@ -11947,7 +12842,7 @@ mod tests {
         );
         assert!(!reader_stands(&host, &name));
         assert!(
-            host.begin_read(&name).is_none(),
+            matches!(host.begin_read(&name), Err(ReadRefusal::NotServing(_))),
             "an entry whose coverage is going back answered a read"
         );
 
@@ -12060,7 +12955,10 @@ mod tests {
             "the entry kept its reader over coverage the leg below gives back"
         );
         assert!(!reader_stands(&host, &name));
-        assert!(host.begin_read(&name).is_none());
+        assert!(matches!(
+            host.begin_read(&name),
+            Err(ReadRefusal::NotServing(_))
+        ));
 
         end_job_leg(&host.shared, &entry, &name, epoch, Some(attachment));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
@@ -12095,16 +12993,18 @@ mod tests {
         assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 1);
     }
 
-    /// The other order, and the gap the contract admits. `schedule_due_detach`
-    /// reads the pin where it schedules and nowhere after, so a teardown
-    /// already scheduled is a teardown a later read does not hold back: the
-    /// read is answered, and the entry is torn down while the hold stands.
+    /// The other order: a read that arrives after an idle detach was scheduled
+    /// and before a worker ran it. **A read is demand**, so it withdraws that
+    /// teardown the way a client's demand does — the entry is still serving
+    /// when the worker is released, and the teardown runs after the read's
+    /// hold and the lease under it are gone.
     ///
-    /// What the read goes on holding is its own clone of the handle, which is
-    /// the whole of what it has. Nothing here says the store behind that handle
-    /// is still open, and nothing pins that it is.
+    /// What the read goes on holding through any teardown it does not
+    /// withdraw is its own clone of the handle, which is the whole of what it
+    /// has. Nothing here says the store behind that handle is still open, and
+    /// nothing pins that it is.
     #[test]
-    fn a_detach_scheduled_before_a_read_tears_the_entry_down_under_it() {
+    fn a_read_withdraws_an_idle_detach_that_is_scheduled_and_not_yet_running() {
         let ops = Arc::new(FakeOps::default());
         let working = VaultName::new("working").unwrap();
         let occupied = VaultName::new("occupied").unwrap();
@@ -12129,53 +13029,977 @@ mod tests {
         let hold = host
             .begin_read(&working)
             .expect("a scheduled teardown is not what a read consults");
-        assert_eq!(hold.trust(), &TrustState::Ready);
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready)
+        );
 
         ops.attach_release.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &working, TrustState::Unattached);
+        wait_for_state(&host, &occupied, TrustState::Ready);
+        settle();
         assert_eq!(
             ops.detaches.load(Ordering::SeqCst),
-            1,
-            "the scheduled teardown did not run"
-        );
-        assert!(!reader_stands(&host, &working));
-        assert_eq!(
-            ops.readers.closed.load(Ordering::SeqCst),
             0,
-            "the entry was torn down and the read's own handle went with it"
+            "the teardown the read withdrew ran anyway"
         );
+        assert_eq!(
+            host.state(&working),
+            answered(TrustState::Ready),
+            "the entry the read is running against stopped serving"
+        );
+        assert!(reader_stands(&host, &working));
 
+        // The hold and the lease under it go back together, and the entry is
+        // reaped from there like any other idle entry.
         drop(hold);
+        host.reap_idle(Instant::now() + Duration::from_secs(61))
+            .unwrap();
+        wait_for_state(&host, &working, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 1);
         drop(occupier);
     }
 
-    /// Coverage that mints no reader leaves the slot empty, and the entry
-    /// beside it answers no read while publishing the trust its coverage earns.
-    ///
-    /// That is the configuration production stands in: `ProductionAttachment`
-    /// mints nothing, so a vault attaches, heals and reports Ready with no
-    /// handle in its slot and every read against it refused for want of one.
+    /// The negative control for the withdrawal above: a teardown already in
+    /// flight is not withdrawn. It has begun its release — the reader slot is
+    /// empty and the entry publishes the releasing phase — so the read is
+    /// refused with that demand rather than granted over resources on their
+    /// way back.
     #[test]
-    fn coverage_that_mints_no_reader_leaves_an_entry_no_read_reaches() {
+    fn a_read_does_not_withdraw_a_release_already_in_flight() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_reaped_on_demand(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        host.reap_idle(Instant::now()).unwrap();
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("an entry giving its resources back answered a read");
+        assert_eq!(
+            refusal,
+            ReadRefusal::NotServing(Demand::State(TrustState::warming(
+                WarmingPhase::ReleasingCoverage,
+                0,
+                None
+            ))),
+            "the refusal names something other than the release in flight"
+        );
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Unattached);
+    }
+
+    /// **A read attaches a vault nothing else has asked for.** The hold
+    /// records demand the way a client's demand does, so an entry holding
+    /// nothing schedules the attach it owes and the read is refused with the
+    /// state that attach warms under.
+    #[test]
+    fn a_read_over_an_unattached_entry_schedules_the_attach_and_refuses_warming() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
-        ops.coverage_mints_no_reader.store(true, Ordering::SeqCst);
+
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("an unattached entry answered a read");
+        assert_eq!(
+            refusal,
+            ReadRefusal::NotServing(Demand::State(TrustState::warming(
+                WarmingPhase::InstallingCoverage,
+                0,
+                None
+            ))),
+            "the refused read published something other than the work it scheduled"
+        );
+
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "the refused read scheduled no attach"
+        );
+        let hold = host
+            .begin_read(&name)
+            .expect("the attach a read scheduled left the entry readable");
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready)
+        );
+    }
+
+    /// A read holds the entry's demand for its own length, so a vault nothing
+    /// but reads touch is not reaped between two of them.
+    #[test]
+    fn an_entry_only_reads_touch_is_not_reaped_across_the_detach_horizon() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        // Two reads, with the reap the entry is over its horizon for run
+        // between them and after the second.
+        for pass in 0..2 {
+            let hold = host
+                .begin_read(&name)
+                .expect("a read-only workload stopped being served");
+            host.reap_idle(Instant::now() + Duration::from_secs(61))
+                .unwrap();
+            settle();
+            assert_eq!(
+                ops.detaches.load(Ordering::SeqCst),
+                0,
+                "pass {pass}: the entry was reaped under a read"
+            );
+            drop(hold);
+            host.reap_idle(Instant::now()).unwrap();
+            settle();
+            assert_eq!(
+                ops.detaches.load(Ordering::SeqCst),
+                0,
+                "pass {pass}: the read that just ended did not restart the idle interval"
+            );
+            assert_eq!(host.state(&name), answered(TrustState::Ready));
+        }
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
+
+        // The horizon is what the entry is reaped at, once no read is asking
+        // for it any more.
+        host.reap_idle(Instant::now() + Duration::from_secs(61))
+            .unwrap();
+        wait_for_state(&host, &name, TrustState::Unattached);
+    }
+
+    /// **A mint that fails publishes its reason, and reads refuse with it.**
+    /// The entry serves every other surface — the trust its coverage earned is
+    /// what it publishes — and the reason the mint gave is retained beside it,
+    /// so a vault that answers no read says why rather than answering nothing.
+    #[test]
+    fn a_mint_that_fails_leaves_an_entry_serving_and_its_reads_refusing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_reaped_on_demand(Arc::clone(&ops));
+        ops.reader_mint_fails.store(true, Ordering::SeqCst);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert_eq!(
             ops.readers.opened.load(Ordering::SeqCst),
             0,
-            "coverage that mints no reader minted one"
+            "a mint that refused minted a handle"
         );
         assert!(
             !reader_stands(&host, &name),
-            "an entry over coverage that mints no reader is holding a handle"
+            "an entry whose mint refused is holding a handle"
+        );
+        assert_eq!(
+            host.state(&name),
+            answered(TrustState::Ready),
+            "a read seam that is down changed what the entry serves"
+        );
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("an entry with no handle answered a read");
+        assert_eq!(
+            refusal,
+            ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "this coverage mints no read handle"
+            )),
+            "the refusal names something other than the mint that failed"
+        );
+        assert_eq!(
+            host.inspect(&name)
+                .expect("the vault is registered")
+                .reader_unavailable,
+            Some(ReaderUnavailable::new("this coverage mints no read handle")),
+            "the status surface cannot read why this entry's reads refuse"
+        );
+
+        // The reason is re-derived at the next publication rather than kept:
+        // an attach that mints answers reads again.
+        ops.reader_mint_fails.store(false, Ordering::SeqCst);
+        host.reap_idle(Instant::now()).unwrap();
+        wait_for_state(&host, &name, TrustState::Unattached);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert!(
+            host.begin_read(&name).is_ok(),
+            "the publication that minted a handle left the reads refusing"
+        );
+        assert_eq!(
+            host.inspect(&name)
+                .expect("the vault is registered")
+                .reader_unavailable,
+            None,
+            "the reason outlived the mint that replaced it"
+        );
+    }
+
+    /// An establishment that refuses is the same refusal as a mint that
+    /// refuses: the entry is serving and its read seam is not. The handle
+    /// stands in the slot, and what fails is the snapshot the read would have
+    /// answered from.
+    #[test]
+    fn an_establishment_that_refuses_reads_as_reader_unavailable() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.readers.establish_fails.store(true, Ordering::SeqCst);
+
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a handle that establishes nothing answered a read");
+        assert_eq!(
+            refusal,
+            ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "this handle establishes no snapshot"
+            ))
         );
         assert!(
-            host.begin_read(&name).is_none(),
-            "an entry with an empty slot answered a read"
+            reader_stands(&host, &name),
+            "the refused establishment took the entry's handle with it"
+        );
+    }
+
+    /// **The read-concurrency instrument.** A read that finds its entry's
+    /// handle standing runs exactly one statement while it holds the entry
+    /// gate — the statement that establishes its snapshot — and a read that
+    /// took the entry's connection without waiting paid no wait, so the
+    /// account below is four reads, four establishing statements, nothing
+    /// minted and nothing contended.
+    ///
+    /// The other two readings are asserted here and not left implied: the
+    /// claim is that one statement is all these reads ran under the gate, and
+    /// the served-read reading alone cannot say that — a mint or a refused
+    /// establishment would be gate-held work it does not carry.
+    #[test]
+    fn a_read_runs_one_statement_under_the_gate() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let before = host.read_evidence();
+        for pass in 0..4 {
+            drop(
+                host.begin_read(&name)
+                    .unwrap_or_else(|refusal| panic!("read {pass} was refused: {refusal:?}")),
+            );
+        }
+        let reading = host.read_evidence().since(before);
+
+        assert_eq!(reading.reads_served, 4, "the account missed a read");
+        assert_eq!(
+            reading.statements_under_the_gate, 4,
+            "four reads ran something other than one statement each under the gate"
+        );
+        assert_eq!(
+            (
+                reading.mint_statements_under_the_gate,
+                reading.refused_establishment_statements_under_the_gate
+            ),
+            (0, 0),
+            "reads that each found a handle standing and were served ran something else under the gate"
+        );
+        assert_eq!(
+            reading.reader_waits, 0,
+            "reads that never overlapped waited for the connection anyway"
+        );
+        assert_eq!(
+            host.read_evidence().widest_statements_under_the_gate,
+            1,
+            "one read ran more than the establishing statement under the gate"
+        );
+    }
+
+    /// **A read that heals accounts for the repair it ran under the gate.** An
+    /// entry serving with an empty handle slot mints the handle again under
+    /// the read's own gate hold, and that mint reads the database. The
+    /// establishing reading stays the sharp thing it is — one statement, the
+    /// snapshot's — while the mint's statements are reported beside it, so
+    /// nothing this read ran under the gate is left out of the account and the
+    /// repair is still told apart from the query work the exactly-one bar
+    /// refuses.
+    ///
+    /// The control is the read after it: the slot is filled by then, so it
+    /// mints nothing and is charged for nothing.
+    #[test]
+    fn a_read_that_heals_an_empty_slot_accounts_for_the_mint_it_ran() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+
+        // The number is this case's own. What is asserted is that the account
+        // reports what the mint ran, not a cost this fake shares with a real
+        // mint, so it is a number nothing else in the reading below produces.
+        ops.readers.mint_statements.store(3, Ordering::SeqCst);
+        entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .close_reader();
+
+        let before = host.read_evidence();
+        let hold = host
+            .begin_read(&name)
+            .expect("a read over coverage that mints was refused the handle it healed");
+        let reading = host.read_evidence().since(before);
+
+        assert_eq!(reading.reads_served, 1, "the account missed the read");
+        assert_eq!(
+            reading.statements_under_the_gate, 1,
+            "the healing read's establishing reading is something other than its one statement"
+        );
+        assert_eq!(
+            reading.mint_statements_under_the_gate, 3,
+            "the mint this read ran under the gate is missing from the account"
+        );
+        assert_eq!(
+            host.read_evidence().widest_statements_under_the_gate,
+            4,
+            "the widest reading is not this read's mint and its establishment together"
+        );
+        drop(hold);
+
+        let before = host.read_evidence();
+        drop(
+            host.begin_read(&name)
+                .expect("the entry serves reads from the handle the heal left"),
+        );
+        assert_eq!(
+            host.read_evidence()
+                .since(before)
+                .mint_statements_under_the_gate,
+            0,
+            "a read that found a handle standing was charged for a mint"
+        );
+    }
+
+    /// **An establishment that refuses held the gate for what it ran.** The
+    /// acquisition took the connection, opened its transaction, ran the
+    /// statement that refused it and rolled back, all under the gate, and was
+    /// served nothing — so `reads_served` and the served-read reading stay
+    /// where they were while what it ran is in the account beside them. This
+    /// is the same claim the mint gets, in the arm the mint's report does not
+    /// reach.
+    ///
+    /// The acquisition heals first, so the reading below is a mint and a
+    /// refused establishment together: the widest is what this one acquisition
+    /// ran, which is the number a ceiling is stated against and the number an
+    /// account that stopped at the refusal would under-report.
+    #[test]
+    fn a_read_refused_by_its_establishment_accounts_for_what_that_establishment_ran() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+
+        ops.readers.mint_statements.store(3, Ordering::SeqCst);
+        ops.readers.establish_statements.store(2, Ordering::SeqCst);
+        ops.readers.establish_fails.store(true, Ordering::SeqCst);
+        entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .close_reader();
+
+        let before = host.read_evidence();
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a handle that establishes nothing answered a read");
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "the refused establishment was rendered as something other than the read seam: {refusal:?}"
+        );
+        let reading = host.read_evidence().since(before);
+
+        assert_eq!(
+            (reading.reads_served, reading.statements_under_the_gate),
+            (0, 0),
+            "a read that was never served moved the served-read reading"
+        );
+        assert_eq!(
+            reading.mint_statements_under_the_gate, 3,
+            "the mint this acquisition healed with is missing from the account"
+        );
+        assert_eq!(
+            reading.refused_establishment_statements_under_the_gate, 2,
+            "the establishment that refused ran under the gate uncounted"
+        );
+        assert_eq!(
+            host.read_evidence().widest_statements_under_the_gate,
+            5,
+            "the widest reading stopped at the refusal instead of holding what this acquisition ran"
+        );
+    }
+
+    /// **A mint that refuses held the gate for what it ran.** The read it
+    /// refuses establishes nothing and is served nothing, so neither
+    /// `reads_served` nor the establishing reading moves — and the statements
+    /// that mint ran before it refused are the gate's price all the same, so
+    /// they are in the account and the widest reading is what that acquisition
+    /// ran. An account that reported the cost of successful mints alone would
+    /// leave out exactly the mints that took the busy timeout.
+    #[test]
+    fn a_read_refused_by_its_mint_accounts_for_what_that_mint_ran() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+
+        ops.readers.mint_statements.store(2, Ordering::SeqCst);
+        ops.reader_mint_fails.store(true, Ordering::SeqCst);
+        entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .close_reader();
+
+        let before = host.read_evidence();
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a coverage that mints nothing answered a read");
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "the refused mint was rendered as something other than the read seam: {refusal:?}"
+        );
+        let reading = host.read_evidence().since(before);
+
+        assert_eq!(
+            (reading.reads_served, reading.statements_under_the_gate),
+            (0, 0),
+            "a read that was never served moved the establishing reading"
+        );
+        assert_eq!(
+            reading.mint_statements_under_the_gate, 2,
+            "the mint that refused ran under the gate uncounted"
+        );
+        assert_eq!(
+            host.read_evidence().widest_statements_under_the_gate,
+            2,
+            "the widest reading left out an acquisition whose whole cost was its mint"
+        );
+    }
+
+    /// **The establishing statement runs under the entry gate, and the gate is
+    /// what says so.** The account above is a number the establishment reports
+    /// about itself, and a read that established outside the lock would report
+    /// the same one. What this observes is the lock: while an establishment is
+    /// held part way through, the entry gate is not there to be taken, and
+    /// once the read has its hold the gate is free again.
+    ///
+    /// The control is the second half: a gate that were never takeable would
+    /// pass the first assertion whatever the read path did.
+    #[test]
+    fn the_establishing_statement_runs_while_the_acquisition_holds_the_entry_gate() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+
+        park_establishments(&ops.readers);
+        let reading = thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                host.begin_read(&name)
+                    .expect("an entry holding a reader answers a read")
+            });
+            wait_for_a_parked_establishment(&ops.readers);
+            let held = matches!(
+                entry.gate.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            );
+            release_establishments(&ops.readers);
+            let hold = reader.join().expect("the read finished");
+            (held, hold)
+        });
+        let (held_the_gate, hold) = reading;
+        assert!(
+            held_the_gate,
+            "the entry gate was free while the read's establishing statement ran"
+        );
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready)
+        );
+        drop(hold);
+        assert!(
+            entry.gate.try_lock().is_ok(),
+            "the gate the establishment ran under was never given back"
+        );
+    }
+
+    /// The control for the instrument: with no read taken, the account does
+    /// not move. A counter that reported reads nobody made would pass the bars
+    /// above whatever the read path did.
+    #[test]
+    fn the_read_account_moves_only_where_a_read_is_served() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reader_mint_fails.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let before = host.read_evidence();
+        assert!(host.begin_read(&name).is_err(), "a refused read was served");
+        let reading = host.read_evidence().since(before);
+        assert_eq!(
+            (reading.reads_served, reading.statements_under_the_gate),
+            (0, 0),
+            "a read that was never served moved the account"
+        );
+    }
+
+    /// **An unwind under the entry gate poisons that gate, and the acquisition
+    /// it unwound out of returns.** The mint states that it does not panic,
+    /// and the price of one that did is named beside that statement: the
+    /// entry's account of itself is lost and every later holder of the gate
+    /// meets the poison. What is asserted here is that the price is the one
+    /// named. An acquisition holds its demand lease across the hold of the
+    /// gate that records it, and a lease's own give-back takes that same
+    /// non-reentrant gate — so an unwind that dropped the lease inside the
+    /// hold would block forever on the gate the unwinding frame is holding,
+    /// and one that dropped it after the hold released would panic a second
+    /// time on the poison, inside a drop, and abort the process.
+    ///
+    /// The read is run on a thread of its own under a bounded wait, because a
+    /// lease that did take the gate would hang this case rather than fail it.
+    #[test]
+    fn a_read_whose_mint_unwinds_under_the_gate_poisons_it_rather_than_holding_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let host = Arc::new(host);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+
+        // The shape: an entry serving with an empty handle slot, so the read
+        // reaches the re-mint under the gate, and a mint that unwinds there.
+        entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .close_reader();
+        ops.readers.mint_panics.store(true, Ordering::SeqCst);
+
+        let reading = Arc::clone(&host);
+        let reading_name = name.clone();
+        let unwinding = thread::spawn(move || {
+            std::panic::catch_unwind(AssertUnwindSafe(|| reading.begin_read(&reading_name)))
+        });
+        wait_until(
+            "the acquisition whose mint unwound to come back",
+            lifecycle_wait_budget(),
+            || {
+                if unwinding.is_finished() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(
+                        "the unwinding acquisition is still inside the entry gate".to_string(),
+                    )
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        let caught = unwinding.join().expect("the thread that caught the unwind");
+        assert!(
+            caught.is_err(),
+            "the mint the case asked to unwind answered instead, so nothing unwound under the gate"
+        );
+
+        // Poisoned rather than held: a poisoned gate is a gate every later
+        // holder fails fast on, and a held one is an entry frozen for the life
+        // of the process.
+        match entry.gate.try_lock() {
+            Err(std::sync::TryLockError::Poisoned(_)) => {}
+            Err(std::sync::TryLockError::WouldBlock) => {
+                panic!("the unwind left the entry gate held, so the entry answers nothing again")
+            }
+            Ok(_) => panic!("the unwind under the entry gate left it unpoisoned"),
+        }
+
+        // The poison is cleared here so this case can tear its own fixture
+        // down: the host's destruction takes every entry's gate, and a
+        // poisoned one would panic it. What that leaves is what the surfaces
+        // read once the entry is reachable again.
+        entry.gate.clear_poison();
+        ops.readers.mint_panics.store(false, Ordering::SeqCst);
+        assert_eq!(
+            host.state(&name),
+            answered(TrustState::Ready),
+            "the entry's state is unreadable after the gate was recovered"
+        );
+    }
+
+    /// **An acquisition waiting for the entry's connection holds no entry
+    /// gate.** A read holds its entry's one connection for as long as its
+    /// snapshot stands and gives it back on its way out, asking for the entry
+    /// gate after that; an acquisition that waited for the connection under
+    /// the gate would be holding the lock the read it is waiting for needs, and
+    /// every gate-taking surface of that entry — its state, its inspection,
+    /// its authored drift, its demand, its reap — would stop answering.
+    ///
+    /// So the second read waits with the gate given back, and the entry goes
+    /// on answering while it does. The threads here are spawned rather than
+    /// scoped: an acquisition that did ride the gate would never finish, and a
+    /// case that joined it would hang where it should fail.
+    #[test]
+    fn a_read_waiting_for_the_entrys_connection_leaves_every_other_surface_answering() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let host = Arc::new(host);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let first = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+
+        let reading = Arc::clone(&host);
+        let reading_name = name.clone();
+        let waiting = thread::spawn(move || {
+            reading
+                .begin_read(&reading_name)
+                .expect("the read that waited for the connection was refused")
+        });
+        wait_until(
+            "the second read to reach the wait for the entry's connection",
+            lifecycle_wait_budget(),
+            || {
+                if ops.readers.waiting.load(Ordering::SeqCst) >= 1 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("no read is waiting yet".to_string())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        // Every gate-taking surface of the entry, while the second read waits.
+        // They run on a thread of their own under a bounded wait, so a gate
+        // the wait were riding fails this rather than hanging it.
+        let surfacing = Arc::clone(&host);
+        let surfacing_name = name.clone();
+        let surfaces = thread::spawn(move || {
+            assert_eq!(
+                surfacing.state(&surfacing_name),
+                answered(TrustState::Ready)
+            );
+            assert!(surfacing.inspect(&surfacing_name).is_some());
+            assert!(surfacing.authored_drift(&surfacing_name).is_some());
+            drop(
+                surfacing
+                    .demand(&surfacing_name, AttachMode::Durable)
+                    .unwrap(),
+            );
+            surfacing.reap_idle(Instant::now()).unwrap();
+        });
+        wait_until(
+            "the entry's other surfaces to answer under a waiting read",
+            lifecycle_wait_budget(),
+            || {
+                if surfaces.is_finished() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("a surface is still waiting for the entry gate".to_string())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        surfaces.join().expect("the surfaces answered");
+
+        // The first read's end is what hands the connection on.
+        drop(first);
+        let second = waiting.join().expect("the waiting read finished");
+        assert_eq!(
+            second.reading().published(),
+            &Demand::State(TrustState::Ready),
+            "the read that waited answered under a demand it never re-read"
+        );
+        drop(second);
+
+        let reading = host.read_evidence();
+        assert_eq!(
+            reading.reader_waits, 1,
+            "the account did not name the read that waited for the connection"
+        );
+        assert_eq!(
+            reading.widest_reader_wait, 1,
+            "a read waited for the entry's connection more than once"
+        );
+    }
+
+    /// The re-validation the wait pays for: the entry may have stopped serving
+    /// while the acquisition waited, and the demand the read would answer
+    /// under is the one the entry publishes when it establishes rather than
+    /// the one it published before the wait.
+    ///
+    /// **The wait it paid is in the account, and the read it was not served is
+    /// not.** The account reports what an acquisition did whichever way it
+    /// left, and this acquisition waited out another read in full before the
+    /// re-read refused it.
+    #[test]
+    fn a_read_that_waited_for_the_connection_refuses_where_the_entry_stopped_serving() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let first = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+        let before = host.read_evidence();
+        thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                host.begin_read(&name)
+                    .expect_err("an entry that stopped serving answered a read")
+            });
+            wait_until(
+                "the second read to reach the wait for the entry's connection",
+                lifecycle_wait_budget(),
+                || {
+                    if ops.readers.waiting.load(Ordering::SeqCst) >= 1 {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending("no read is waiting yet".to_string())
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+
+            // The entry leaves service while the read waits, and the handle
+            // the read is about to take the connection of goes with it.
+            refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
+            drop(first);
+            let refusal = waiting.join().expect("the waiting read finished");
+            assert!(
+                matches!(refusal, ReadRefusal::NotServing(_)),
+                "the read that waited was refused as something other than the entry it found: \
+                 {refusal:?}"
+            );
+        });
+
+        let reading = host.read_evidence().since(before);
+        assert_eq!(
+            reading.reads_served, 0,
+            "the read that waited and was refused was counted as served"
+        );
+        assert_eq!(
+            reading.reader_waits, 1,
+            "the wait the refused acquisition paid is missing from the account"
+        );
+        assert_eq!(
+            host.read_evidence().widest_reader_wait,
+            1,
+            "an acquisition waited for the entry's connection more than once"
+        );
+    }
+
+    /// **An entry whose trust is withheld holds coverage, and a read still
+    /// mints nothing over it.** An attachment whose vault declaration this
+    /// build cannot act on is installed rather than refused, so the entry
+    /// holds its coverage and publishes untrusted over it. That is the shape
+    /// the read path's own re-mint would otherwise walk into: the re-mint
+    /// asks the coverage for a handle, and this coverage answers — what stops
+    /// it is the acquisition refusing on the published demand before the
+    /// re-mint is reached at all. The handle count is the assertion, because a
+    /// refusal alone would pass whether or not the mint ran on the way to it.
+    #[test]
+    fn a_read_over_an_entry_whose_trust_is_withheld_refuses_and_mints_nothing() {
+        let ops = Arc::new(FakeOps::default());
+        ops.withholds_trust.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_until(
+            "the entry to publish the withheld trust its attach carried",
+            lifecycle_wait_budget(),
+            || match host.state(&name) {
+                Err(envelope)
+                    if matches!(
+                        envelope.detail(),
+                        ErrorDetail::EntryUntrusted {
+                            reason: UntrustedReason::SchemaUnreadable { .. },
+                            ..
+                        }
+                    ) =>
+                {
+                    Observed::Met(())
+                }
+                other => Observed::pending(format!("the entry publishes {other:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        // **The shape this case is about**: coverage in hand, an empty handle
+        // slot, and a published demand that is not serving. The re-mint returns
+        // early on a standing handle, so an entry that still held one would
+        // pass this whatever the acquisition did; the slot is emptied here so
+        // the only thing left between a read and a mint is the acquisition's
+        // own refusal on the published demand.
+        {
+            let entry = host.shared.entries.get(&name).expect("the entry is served");
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.close_reader();
+            assert!(
+                state.coverage.held().is_some(),
+                "the withheld-trust attach installed no coverage, so this case no longer \
+                 stands over the shape it is about"
+            );
+            assert!(
+                state.reader.is_none(),
+                "the handle slot is not empty, so a mint here would be refused by the \
+                 re-mint's own guard rather than by the acquisition"
+            );
+        }
+
+        let minted = ops.readers.opened.load(Ordering::SeqCst);
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("an entry publishing untrusted answered a read");
+        // The demand the refusal carries is the warming state of the recovery
+        // this read's own demand scheduled, because a read asks an untrusted
+        // vault to become answerable again. What every shape here shares is
+        // that it is not `Ready`, which is the whole of what keeps the read off
+        // the re-mint.
+        let ReadRefusal::NotServing(published) = &refusal else {
+            panic!("the read was refused as something other than the entry it found: {refusal:?}");
+        };
+        assert_ne!(
+            published,
+            &Demand::State(TrustState::Ready),
+            "an entry whose trust is withheld published a serving demand to a read"
+        );
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            minted,
+            "the read minted a handle over coverage the entry cannot be derived under"
+        );
+    }
+
+    /// The other half of the re-validation the wait pays for: the entry is
+    /// still serving, and the handle it serves reads from is no longer the one
+    /// the acquisition waited for. A rebuild that replaces an entry's coverage
+    /// mints a handle over the store that replaced the damaged one, so the
+    /// connection this acquisition waited for reads a file nothing links to;
+    /// establishing on it would answer from a database the entry has moved on
+    /// from. The acquisition refuses as reader-unavailable and gives that
+    /// connection back to the handle it took it from, which is what keeps a
+    /// retired handle from being left empty.
+    ///
+    /// **The wait it paid is in the account, and the read it was not served is
+    /// not.** The account reports what an acquisition did whichever way it
+    /// left, and a refusal after the wait paid the whole of that wait: the
+    /// contention reading moves and the served reading does not.
+    #[test]
+    fn a_read_that_waited_refuses_where_the_entrys_handle_was_replaced_under_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+
+        let first = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+        let before = host.read_evidence();
+        let waited_for = Arc::clone(
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .reader
+                .as_ref()
+                .expect("the entry holds the handle its reads run on"),
+        );
+
+        let refusal = thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                host.begin_read(&name)
+                    .expect_err("a read established on a handle the entry had replaced")
+            });
+            wait_until(
+                "the second read to reach the wait for the entry's connection",
+                lifecycle_wait_budget(),
+                || {
+                    if ops.readers.waiting.load(Ordering::SeqCst) >= 1 {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending("no read is waiting yet".to_string())
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+
+            // The entry lets its handle go and mints another over the coverage
+            // it holds, the way a rebuild that replaced the store does. It
+            // goes on serving throughout, so what refuses the waiting read is
+            // the handle rather than the entry's state.
+            {
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                state.close_reader();
+                assert!(
+                    state.remint_for_a_read().handle.is_some(),
+                    "the entry minted no handle over the coverage it holds"
+                );
+            }
+            assert_eq!(host.state(&name), answered(TrustState::Ready));
+
+            drop(first);
+            waiting.join().expect("the waiting read finished")
+        });
+
+        let ReadRefusal::ReaderUnavailable(unavailable) = &refusal else {
+            panic!(
+                "the read that waited was refused as the entry rather than as the handle it waited for: {refusal:?}"
+            );
+        };
+        assert!(
+            unavailable.detail().contains("another handle"),
+            "the refusal names something other than the handle that moved: {unavailable}"
+        );
+        assert!(
+            waited_for.try_take().is_some(),
+            "the refused read kept the connection of the handle it waited for"
+        );
+        let reading = host.read_evidence().since(before);
+        assert_eq!(
+            reading.reads_served, 0,
+            "the read that waited and was refused was counted as served"
+        );
+        assert_eq!(
+            reading.reader_waits, 1,
+            "the wait the refused acquisition paid is missing from the account"
+        );
+        assert_eq!(
+            host.read_evidence().widest_reader_wait,
+            1,
+            "an acquisition waited for the entry's connection more than once"
         );
     }
 
@@ -12193,19 +14017,335 @@ mod tests {
         let first = host
             .begin_read(&name)
             .expect("an entry holding a reader answers a read");
-        let second = host
-            .begin_read(&name)
-            .expect("a read in flight left the entry with no reader for the next");
-
-        assert!(
-            std::ptr::eq(first.reader(), second.reader()),
-            "two reads against one entry ran on two handles"
-        );
+        let first_handle = std::ptr::from_ref(first.reader()) as usize;
+        thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                let hold = host
+                    .begin_read(&name)
+                    .expect("a read in flight left the entry with no reader for the next");
+                std::ptr::from_ref(hold.reader()) as usize
+            });
+            wait_until(
+                "the second read to reach the wait for the entry's connection",
+                lifecycle_wait_budget(),
+                || {
+                    if ops.readers.waiting.load(Ordering::SeqCst) >= 1 {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending("no read is waiting yet".to_string())
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            drop(first);
+            let second_handle = waiting.join().expect("the waiting read finished");
+            assert_eq!(
+                first_handle, second_handle,
+                "two reads against one entry ran on two handles"
+            );
+        });
         assert_eq!(
             ops.readers.opened.load(Ordering::SeqCst),
             1,
             "a read minted a handle of its own rather than taking the entry's"
         );
+    }
+
+    /// **A schema reload that succeeds leaves the entry readable.** The reload
+    /// empties the slot when it enters its schema half, and the parking that
+    /// ends it is what puts a handle back. An entry publishing `Ready` over an
+    /// empty slot refuses every read until a detach and an attach, which is a
+    /// live vault with a dead read seam.
+    #[test]
+    fn a_schema_reload_that_succeeds_leaves_the_entry_readable() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop(
+            host.begin_read(&name)
+                .expect("an attached entry answers a read"),
+        );
+
+        host.reload(&name).expect("the schema reload to succeed");
+
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
+        assert!(
+            reader_stands(&host, &name),
+            "a schema reload that succeeded left the entry publishing Ready with no read handle"
+        );
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            2,
+            "the reload's own parking minted no handle over the coverage it kept"
+        );
+        assert_eq!(
+            ops.readers.closed.load(Ordering::SeqCst),
+            1,
+            "the handle the reload withdrew was kept as well as replaced"
+        );
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            0,
+            "the entry was torn down to get its read seam back"
+        );
+        let hold = host
+            .begin_read(&name)
+            .expect("a schema reload that succeeded left the entry unreadable");
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready)
+        );
+    }
+
+    /// **A read withdraws no park, and answers under the demand rather than
+    /// the label underneath it.** A park outranks the trust state an entry
+    /// publishes, so an entry parked over `Ready` refuses a read with the
+    /// park's own code — and the park is still standing afterwards, because
+    /// what withdraws one is a caller asking for the acquisition that reads
+    /// those roots again, and a read asks for an answer.
+    #[test]
+    fn a_read_over_a_parked_entry_refuses_with_the_park_and_leaves_it_standing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+
+        // The park stands over a trust label that is still Ready, which is the
+        // one arrangement where the two answers differ.
+        let detail = "the root cannot be read".to_string();
+        entry.gate.lock().unwrap().identity_refused = Some(detail.clone());
+        assert_eq!(
+            entry.gate.lock().unwrap().trust,
+            TrustState::Ready,
+            "the park changed the label underneath it"
+        );
+
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a parked entry answered a read");
+        assert_eq!(
+            refusal,
+            ReadRefusal::NotServing(Demand::IdentityRefused(detail.clone())),
+            "the read answered under the label the park outranks"
+        );
+
+        let state = entry.gate.lock().unwrap();
+        assert_eq!(
+            state.identity_refused.as_deref(),
+            Some(detail.as_str()),
+            "the read withdrew the park it was refused with"
+        );
+        assert_eq!(
+            state.trust,
+            TrustState::Ready,
+            "the refused read moved the label under the park"
+        );
+    }
+
+    /// **Every mint site publishes its reason.** A leg that gives coverage back
+    /// mints where the slot is empty, and a mint that refuses leaves the reason
+    /// beside the empty slot: the status surface reports it, and a read refuses
+    /// with it as the detail rather than with the placeholder an entry that
+    /// never had a handle answers.
+    #[test]
+    fn a_leg_that_parks_coverage_publishes_the_reason_its_mint_refused_with() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        // A recovery gives the coverage back through the parking leg, and the
+        // environment refuses the mint while it does.
+        ops.reader_mint_fails.store(true, Ordering::SeqCst);
+        {
+            let entry = host
+                .shared
+                .entries
+                .get(&name)
+                .expect("the vault is registered");
+            let mut state = entry.gate.lock().unwrap();
+            state.close_reader();
+        }
+        host.reload(&name)
+            .expect("a config-only reload to leave the entry Ready");
+
+        assert!(!reader_stands(&host, &name));
+        assert_eq!(
+            host.inspect(&name)
+                .expect("the vault is registered")
+                .reader_unavailable,
+            Some(ReaderUnavailable::new("this coverage mints no read handle")),
+            "the parking leg dropped the reason its mint refused with"
+        );
+        assert_eq!(
+            host.begin_read(&name)
+                .expect_err("an entry with no handle answered a read"),
+            ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "this coverage mints no read handle"
+            )),
+            "the read refused with the placeholder rather than the mint's own reason"
+        );
+    }
+
+    /// The other mint site: the leg that swaps an attached entry's coverage
+    /// for another mints over what it installs, and publishes the reason where
+    /// that mint refuses.
+    #[test]
+    fn a_leg_that_remints_coverage_publishes_the_reason_its_mint_refused_with() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.reader_mint_fails.store(true, Ordering::SeqCst);
+        host.reload(&name).expect("the schema reload to succeed");
+
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
+        assert!(!reader_stands(&host, &name));
+        assert_eq!(
+            host.inspect(&name)
+                .expect("the vault is registered")
+                .reader_unavailable,
+            Some(ReaderUnavailable::new("this coverage mints no read handle")),
+            "the re-minting leg dropped the reason its mint refused with"
+        );
+        assert_eq!(
+            host.begin_read(&name)
+                .expect_err("an entry with no handle answered a read"),
+            ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "this coverage mints no read handle"
+            )),
+            "the read refused with the placeholder rather than the mint's own reason"
+        );
+    }
+
+    /// The reason belongs to the mint over the coverage that is going back. An
+    /// entry holding no coverage makes no claim about a handle it never had,
+    /// so the teardown that empties the slot clears the reason beside it.
+    #[test]
+    fn a_teardown_clears_the_reason_the_mint_over_its_coverage_left() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reader_mint_fails.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_reaped_on_demand(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            host.inspect(&name)
+                .expect("the vault is registered")
+                .reader_unavailable,
+            Some(ReaderUnavailable::new("this coverage mints no read handle")),
+            "the failed mint published no reason to clear"
+        );
+
+        host.reap_idle(Instant::now()).unwrap();
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(
+            host.inspect(&name)
+                .expect("the vault is registered")
+                .reader_unavailable,
+            None,
+            "an entry holding no coverage still names why a handle it never had refuses"
+        );
+    }
+
+    /// **A read seam that failed on the environment heals under read traffic.**
+    /// A mint fails on what the environment did, the entry goes on serving
+    /// every other surface, and nothing it publishes afterwards would mint
+    /// again — so the read that meets the empty slot asks for the mint before
+    /// it refuses. The recovery costs no teardown, which is what keeps a read
+    /// stream from being the thing that prevents its own repair.
+    #[test]
+    fn a_read_seam_that_failed_heals_on_the_next_read_after_the_environment_recovers() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reader_mint_fails.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert!(matches!(
+            host.begin_read(&name),
+            Err(ReadRefusal::ReaderUnavailable(_))
+        ));
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            0,
+            "a mint that refused minted a handle"
+        );
+
+        ops.reader_mint_fails.store(false, Ordering::SeqCst);
+        // Twenty rounds of the reap the entry is over its horizon for, each
+        // followed by a read: the read withdraws the teardown it was
+        // scheduled for, so a seam that could only heal through one would
+        // never heal here.
+        let mut served = None;
+        for round in 0..20 {
+            host.reap_idle(Instant::now() + Duration::from_secs(61))
+                .unwrap();
+            if host.begin_read(&name).is_ok() {
+                served = Some(round);
+                break;
+            }
+        }
+        assert_eq!(
+            served,
+            Some(0),
+            "the read that met the recovered environment did not mint the handle again"
+        );
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            0,
+            "the read seam healed through a teardown rather than through a mint"
+        );
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            1,
+            "the read minted more than one handle"
+        );
+        assert_eq!(
+            host.inspect(&name)
+                .expect("the vault is registered")
+                .reader_unavailable,
+            None,
+            "the reason outlived the mint that replaced it"
+        );
+    }
+
+    /// The control for the heal above: a read over an entry whose environment
+    /// still refuses the mint asks once, is refused with what that mint said,
+    /// and leaves the entry exactly as it found it.
+    #[test]
+    fn a_read_over_a_seam_the_environment_still_refuses_is_refused_with_the_mint_s_own_reason() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reader_mint_fails.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        for _ in 0..3 {
+            assert_eq!(
+                host.begin_read(&name)
+                    .expect_err("an entry with no handle answered a read"),
+                ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                    "this coverage mints no read handle"
+                ))
+            );
+        }
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            0,
+            "a refused mint minted a handle"
+        );
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
     }
 
     /// The handle a read is running on outlives the entry's own hold on it. A

@@ -116,6 +116,15 @@ pub struct VaultInspection {
     pub trust: TrustState,
     pub active_fingerprints: Option<ActiveFingerprints>,
     pub last_reload_error: Option<ReloadError>,
+    /// Why this entry's reads refuse, where its coverage minted no read
+    /// handle.
+    ///
+    /// A retained fact of the same kind as the reload diagnostic beside it: it
+    /// does not move the trust state, because an entry whose read seam is down
+    /// is still serving every other surface. It is read here and reported as
+    /// itself, so a status answer says "served, reads refusing, and this is
+    /// why" rather than leaving a client to infer it from a refused read.
+    pub reader_unavailable: Option<crate::ReaderUnavailable>,
 }
 
 /// The authored control-file state relative to the active fingerprints.

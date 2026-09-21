@@ -397,3 +397,290 @@ fn an_environment_that_holds_no_database_is_refused_through_the_client_s_error()
     };
     assert!(operation.contains("opening"), "{operation}");
 }
+
+/// A read-only handle answers from the database the writer wrote, and refuses
+/// every write. **The open flag is the refusal**: SQLite reports the database
+/// read-only on this connection, which is a property of the open that no
+/// statement run on it can withdraw.
+#[test]
+fn a_read_only_connection_answers_reads_and_refuses_writes() {
+    let scratch = Scratch::new("read-only");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 7_i64).expect("a writer writes");
+
+    let reader = norn_db::connect_read_only(&database).expect("a read-only handle");
+    assert!(
+        reader
+            .is_readonly(norn_db::rusqlite::MAIN_DB)
+            .expect("SQLite reports the mode the database is open in"),
+        "the read-only open left the database writable"
+    );
+    assert_eq!(
+        meta::get_meta::<i64>(&reader, meta::WRITE_GENERATION).expect("a pinned scalar"),
+        Some(7),
+        "the read-only handle answers from another database"
+    );
+    let refused = meta::put_meta(&reader, meta::WRITE_GENERATION, 8_i64)
+        .expect_err("a read-only handle refuses a write");
+    assert!(
+        matches!(refused, DbError::Sql { .. }),
+        "a refused write is reported as the statement it was: {refused:?}"
+    );
+    assert_eq!(
+        meta::get_meta::<i64>(&writer, meta::WRITE_GENERATION).expect("a pinned scalar"),
+        Some(7),
+        "the refused write reached the database"
+    );
+}
+
+/// A read-only open creates nothing. Without it a reader over a path whose
+/// database is gone would answer every read with no rows instead of saying the
+/// file is not there.
+#[test]
+fn a_read_only_open_of_a_path_with_no_database_refuses() {
+    let scratch = Scratch::new("read-only-absent");
+    let error = norn_db::connect_read_only(&scratch.database())
+        .expect_err("a read-only open of a path with no database refuses");
+    assert!(
+        matches!(error, DbError::Lifecycle { .. }),
+        "an absent database is reported as the open it refused: {error:?}"
+    );
+    assert!(
+        norn_db::connect_read_only(&scratch.database()).is_err(),
+        "the refused open left a database behind for the next one to adopt"
+    );
+}
+
+/// **A read-only open reports what it ran against the database**, so a caller
+/// that holds a lock across the open can account for what that lock paid for.
+///
+/// Three opens, three counts, because a count that stood at the same number
+/// for all of them would attest nothing: an open that adopted ran the
+/// journal-mode read and the store-epoch read; an open refused on the journal
+/// mode ran the journal-mode read alone and never reached the epoch; and an
+/// open of a path with no database reached neither.
+#[test]
+fn a_read_only_open_reports_the_statements_it_ran_against_the_database() {
+    let scratch = Scratch::new("read-only-statements");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 1_i64).expect("a writer writes");
+
+    let adopted = norn_db::open_read_only(&database);
+    adopted
+        .adopted
+        .expect("a read-only open of a live database binds to its file");
+    assert_eq!(
+        adopted.statements, 2,
+        "an open that adopted ran something other than the journal-mode read and the epoch read"
+    );
+
+    let absent = Scratch::new("read-only-statements-absent");
+    let nothing = norn_db::open_read_only(&absent.database());
+    assert!(
+        nothing.adopted.is_err(),
+        "a read-only open of a path with no database adopted one"
+    );
+    assert_eq!(
+        nothing.statements, 0,
+        "an open that never opened a connection ran statements against a database"
+    );
+
+    writer
+        .pragma_update(None, "journal_mode", "delete")
+        .expect("a writer sets its own journal mode");
+    drop(writer);
+    let refused = norn_db::open_read_only(&database);
+    assert!(
+        refused.adopted.is_err(),
+        "a read-only open adopted a database that is not in write-ahead logging"
+    );
+    assert_eq!(
+        refused.statements, 1,
+        "an open refused on the journal mode reported a count other than the read that refused it"
+    );
+}
+
+/// The snapshot spelling holds one transaction open past the call that opened
+/// it, and refuses a second over the same handle: a handle in a snapshot is a
+/// handle nothing else begins a transaction on.
+#[test]
+fn a_snapshot_is_one_transaction_and_ends_where_it_is_closed() {
+    let scratch = Scratch::new("snapshot");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 1_i64).expect("a writer writes");
+
+    let mut reader = norn_db::Database::adopt(
+        norn_db::connect_read_only(&database).expect("a read-only handle"),
+        &database,
+    )
+    .expect("a read-only handle binds to its file");
+    reader.open_snapshot().expect("a snapshot opens");
+    // The statement that makes the snapshot real, and the reading it takes.
+    assert_eq!(
+        meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
+        Some(1)
+    );
+    let refused = reader
+        .open_snapshot()
+        .expect_err("a second snapshot over one handle refuses");
+    assert!(matches!(refused, DbError::Lifecycle { .. }), "{refused:?}");
+
+    // The writer moves on, and the snapshot still answers at the reading it
+    // was established at.
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 2_i64).expect("a writer writes");
+    assert_eq!(
+        meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
+        Some(1),
+        "the snapshot read a write that landed after it was established"
+    );
+
+    reader.close_snapshot().expect("a snapshot ends");
+    reader
+        .close_snapshot()
+        .expect("ending an ended snapshot is no act");
+    assert_eq!(
+        meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
+        Some(2),
+        "the handle is still inside the snapshot it closed"
+    );
+}
+
+/// **A snapshot is ended by the handle that opened it and by nothing else.**
+/// A request is answered from one snapshot, and transaction control composed
+/// over the snapshot's connection is what would break that: a `ROLLBACK` or a
+/// `COMMIT` run there ends the snapshot and leaves every later statement
+/// reading whatever is committed by then, while the reading the request
+/// carries still names the generation its snapshot was established at. The
+/// authorizer denies both, and admits the handle's own `BEGIN` and `ROLLBACK`
+/// for the length of the one statement each runs.
+#[test]
+fn a_snapshot_refuses_the_transaction_control_that_would_end_it() {
+    let scratch = Scratch::new("snapshot-control");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 1_i64).expect("a writer writes");
+
+    let mut reader = norn_db::Database::adopt(
+        norn_db::connect_read_only(&database).expect("a read-only handle"),
+        &database,
+    )
+    .expect("a read-only handle binds to its file");
+    reader.open_snapshot().expect("a snapshot opens");
+    assert_eq!(
+        meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
+        Some(1),
+        "the statement that establishes the snapshot read another database"
+    );
+
+    // The writer moves on, so a snapshot that ended here would start reading
+    // the new generation and say nothing about it.
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 2_i64).expect("a writer writes");
+    for control in ["ROLLBACK", "COMMIT", "BEGIN"] {
+        let refused = reader
+            .connection()
+            .execute_batch(control)
+            .expect_err("a statement composed over the snapshot controlled its transaction");
+        assert!(
+            refused.to_string().contains("not authorized"),
+            "`{control}` was refused as something other than an authorization: {refused}"
+        );
+    }
+    assert_eq!(
+        meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
+        Some(1),
+        "the snapshot ended under the refused transaction control"
+    );
+
+    // The handle's own control still runs: the snapshot ends where it is
+    // closed, and the connection reads the writer's new generation after it.
+    reader.close_snapshot().expect("a snapshot ends");
+    assert_eq!(
+        meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
+        Some(2),
+        "the handle is still inside the snapshot it closed"
+    );
+    reader.open_snapshot().expect("a second snapshot opens");
+    reader.close_snapshot().expect("a second snapshot ends");
+}
+
+/// **A read-only connection cannot disarm itself.** The open flag is what
+/// refuses a write, and the authorizer is what keeps the connection from
+/// reaching around it: the pragma that would relax `query_only`, the attach
+/// that would reach a writable database, the temporary table that would be
+/// writable inside the connection, and the table-valued pragma form that
+/// spells a pragma as a table are each refused at statement preparation.
+///
+/// One pragma stands apart and is asserted here too: `data_version` is read
+/// with no value, sets nothing, and is what FTS5 runs on the connection for
+/// itself, so it passes while every setting pragma beside it refuses.
+#[test]
+fn a_read_only_connection_refuses_to_relax_its_own_settings() {
+    let scratch = Scratch::new("read-only-sealed");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 3_i64).expect("a writer writes");
+
+    let elsewhere = scratch.root.join("derived").join("elsewhere.sqlite3");
+    let (second, _) = open(&elsewhere, Answer::Keep).expect("a second database");
+    drop(second);
+
+    let reader = norn_db::connect_read_only(&database).expect("a read-only handle");
+    for statement in [
+        "PRAGMA query_only = 0",
+        "PRAGMA foreign_keys = OFF",
+        "CREATE TEMP TABLE probe (value INTEGER)",
+        "SELECT name FROM pragma_table_info('meta')",
+    ] {
+        assert!(
+            reader.execute_batch(statement).is_err(),
+            "a read-only connection ran `{statement}`"
+        );
+    }
+
+    // The one pragma the connection answers, and it reports rather than sets.
+    reader
+        .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+        .expect("a read-only connection refused the pragma its full-text reads run");
+    reader
+        .execute_batch(&format!(
+            "ATTACH DATABASE '{}' AS writable",
+            elsewhere.display()
+        ))
+        .expect_err("a read-only connection attached a writable database");
+
+    // The refusals above are refusals of those statements alone: the
+    // connection still reads.
+    assert_eq!(
+        meta::get_meta::<i64>(&reader, meta::WRITE_GENERATION).expect("a pinned scalar"),
+        Some(3),
+        "a sealed connection stopped answering reads"
+    );
+}
+
+/// A database that is not in write-ahead logging is refused as an environment
+/// fact rather than as damage. The journal mode says how the file is being
+/// used, not what its pages hold, and discarding a sound database over it
+/// would destroy work to fix nothing.
+#[test]
+fn a_read_only_open_of_a_database_that_is_not_in_wal_refuses_without_authorizing_a_rebuild() {
+    let scratch = Scratch::new("read-only-journal");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    writer
+        .pragma_update(None, "journal_mode", "delete")
+        .expect("a writer sets its own journal mode");
+    drop(writer);
+
+    let error = norn_db::connect_read_only(&database)
+        .expect_err("a read-only handle opened a database that is not in write-ahead logging");
+    let DbError::Lifecycle { message, .. } = &error else {
+        panic!("the journal mode was typed as something a rebuild answers: {error:?}");
+    };
+    assert!(
+        message.contains("write-ahead logging"),
+        "the refusal names something other than the journal mode: {message}"
+    );
+}

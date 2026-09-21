@@ -5,8 +5,10 @@
 //!
 //! A store holds exactly one connection, and every operation runs through a
 //! request that borrows the store mutably. That is the whole of "one writer per
-//! *store*": there is no pool here, no internal lock, and no second connection
-//! to serialize against.
+//! *store*": on the writer's side there is no pool, no internal lock and no
+//! second connection to serialize against. The reader this module mints beside
+//! it is a second connection with a lock of its own, and it writes nothing —
+//! see below.
 //!
 //! It is **not** one writer per database file. Two `Store` values on one path are
 //! two connections and two writers, serialized by SQLite's own locking rather
@@ -24,9 +26,10 @@
 //! stays what a writer takes. A shared borrow of the store itself cannot serve
 //! reads, because the store lives inside an attachment that lifecycle jobs hold
 //! mutably for their whole duration (ADR 0015). [`SnapshotReader`] is that
-//! handle's type and the whole of what stands here: [`Store`] offers no mint,
-//! every request in this crate is `&mut` against the one connection, and no
-//! caller anywhere holds a reader.
+//! handle's type and [`Store::open_reader`] is its one mint: every request in
+//! this crate is `&mut` against the one connection, and a reader is a second
+//! connection over the same file that is opened read-only and so can only
+//! read.
 //!
 //! # What the substrate owns, and what is decided here
 //!
@@ -63,12 +66,15 @@
 //! database destroys work to fix nothing. One policy decides which is which —
 //! [`norn_db::is_damaged`] — and every read an open performs goes through it.
 
+use std::fmt;
 use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex};
 
 use norn_db::rusqlite::{self, Connection};
 use norn_db::{Adoption, Database, OpenOutcome, meta};
 use norn_wire::{FindingKind, Severity};
 
+use crate::counters::SnapshotCounters;
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{LinkFamily, Provenance, TagSource};
@@ -77,24 +83,415 @@ use crate::request::Request;
 
 /// The read-only snapshot handle wire reads run on.
 ///
-/// The type is uninhabited and it is the whole of what stands here: [`Store`]
-/// offers no mint, no value of this type exists, and no code path answers a
-/// read from a snapshot. What the type carries is the shape a consumer holds a
-/// reader through — one the entry keeps beside its store and lets go of before
-/// that store closes — so the seam is settled before the connection behind it
-/// is.
+/// One handle per attached entry, and one connection inside it: a read takes
+/// that connection for the length of its snapshot and gives it back when the
+/// snapshot ends, so **concurrent reads of one entry serialize against each
+/// other here** rather than opening a connection each.
 ///
-/// The discipline the mint must satisfy when it arrives is the one this shape
-/// was carved for. A reader is made from a live [`Store`], because minting from
-/// a live store is what binds the handle's lifetime and what guarantees the
-/// usable `-shm` a read-only WAL open requires. Its connection comes from the
-/// substrate seam, which is where every connection comes from — and read-only
-/// with `query_only` set is an open shape `norn-db` gains when the reader is
-/// built: today it opens read-write-create and writes the pragmas a schema is
-/// read under, which a reader that derives nothing may not do. What the shape
-/// buys is a reader that answers from the last committed increment, never
-/// blocks the writer, and derives nothing.
-pub enum SnapshotReader {}
+/// **Taking the connection and establishing on it are two acts**, because the
+/// caller holds a lock across the second and may not hold it across the first:
+/// [`SnapshotReader::try_take`] answers at once with the connection or with
+/// nothing, and [`SnapshotReader::wait_for_the_connection`] waits for it.
+/// Either way what comes back is a [`ConnectionTurn`], and
+/// [`ConnectionTurn::establish`] is the one way a snapshot is made. A turn
+/// that establishes nothing gives the connection back when it drops, an
+/// unwind included.
+///
+/// A handle is made from a live [`Store`] by [`Store::open_reader`], which is
+/// what binds its lifetime: it reads the file that store is holding, and the
+/// usable `-shm` a read-only write-ahead-log open needs is there because the
+/// writer has it open. The connection comes from the substrate seam opened
+/// **read-only** — the open flag, which no statement run on the connection can
+/// withdraw, is what refuses every write, and `query_only` and the statement
+/// authorizer stand on top of it — so no rung is concluded through a reader,
+/// and a warm read's zero derivation counters are structural rather than a
+/// rule the read paths keep.
+///
+/// The handle outlives the entry that minted it where a read is still running
+/// against it: the entry lets its own hold go at the teardown window, and the
+/// read goes on answering from the handle it took. Nothing promises the
+/// database file behind it survives that teardown.
+///
+/// **The database file this handle reads is not reachable from it.** A handle
+/// is what a hold hands out, and a caller holding the file's path needs no
+/// hold at all: it can open its own read-only connection over the same
+/// database and establish snapshots on it under no adjudication, un-pinned,
+/// holding no lease, serialized against nothing and invisible to the read
+/// account — the same escape a cloned handle would be. So there is no
+/// accessor, and the [`fmt::Debug`] rendering below carries the epoch rather
+/// than the path. The absence is pinned:
+///
+/// ```compile_fail,E0599
+/// use std::path::Path;
+/// use norn_store::SnapshotReader;
+///
+/// fn the_file_escapes(reader: &SnapshotReader) -> &Path {
+///     reader.path()
+/// }
+/// ```
+pub struct SnapshotReader {
+    /// The one connection reads answer from, held here between reads and taken
+    /// by the read that is answering.
+    ///
+    /// Absent means a read holds it. A read that finds it absent waits on
+    /// [`SnapshotReader::returned`] rather than opening a second connection,
+    /// which is the serialization this handle is.
+    connection: Mutex<Option<Database>>,
+    returned: Condvar,
+    /// The database the connection reads, carried beside it because the
+    /// identity is asked for while a read holds the connection. The file it
+    /// reads is not carried: the connection holds the path it was opened on,
+    /// and a second copy here would be one this type had to keep from being
+    /// read back out.
+    epoch: String,
+}
+
+impl fmt::Debug for SnapshotReader {
+    /// The epoch and nothing else. The epoch names which database the handle
+    /// reads; the path would name where to open a second connection to it,
+    /// which is the escape this type has no accessor for either.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SnapshotReader")
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SnapshotReader {
+    /// Take this handle's connection where no read holds it. **Never waits.**
+    ///
+    /// This is the spelling a caller holding a lock takes: the answer is the
+    /// turn or nothing, and nothing is another read holding the connection
+    /// rather than a fault.
+    ///
+    /// The handle is taken by [`Arc`] because the turn keeps it, and the
+    /// snapshot after it keeps it too: a read runs after the caller that
+    /// established it has let its own hold go.
+    pub fn try_take(self: &Arc<Self>) -> Option<ConnectionTurn> {
+        let mut held = self
+            .connection
+            .lock()
+            .expect("a snapshot reader's connection is poisoned");
+        held.take().map(|database| ConnectionTurn {
+            reader: Arc::clone(self),
+            database: Some(database),
+        })
+    }
+
+    /// Wait for this handle's connection, and take it.
+    ///
+    /// **It blocks until the read holding the connection ends.** A caller
+    /// holding a lock the holding read needs in order to end would deadlock
+    /// here, which is why [`SnapshotReader::try_take`] exists and why this is
+    /// the spelling taken with no such lock held.
+    pub fn wait_for_the_connection(self: &Arc<Self>) -> ConnectionTurn {
+        let mut held = self
+            .connection
+            .lock()
+            .expect("a snapshot reader's connection is poisoned");
+        let database = loop {
+            if let Some(database) = held.take() {
+                break database;
+            }
+            held = self
+                .returned
+                .wait(held)
+                .expect("a snapshot reader's connection is poisoned");
+        };
+        ConnectionTurn {
+            reader: Arc::clone(self),
+            database: Some(database),
+        }
+    }
+
+    /// The database this handle reads, from its creation to its discard.
+    pub fn epoch(&self) -> &str {
+        &self.epoch
+    }
+
+    fn give_the_connection_back(&self, database: Database) {
+        let mut held = self
+            .connection
+            .lock()
+            .expect("a snapshot reader's connection is poisoned");
+        *held = Some(database);
+        drop(held);
+        self.returned.notify_one();
+    }
+}
+
+/// A minted read handle, and what minting it ran against the database.
+///
+/// The mint is a second open of the file a live store is holding, and it is
+/// paid for under whatever lock its caller took: the count is what that caller
+/// reports about the lock it held. It is carried on both answers because both
+/// cost the same lock — a refusal that waited out a busy timeout and then
+/// failed cost what a handle cost.
+#[derive(Debug)]
+pub struct ReaderMint {
+    /// The handle this store's reads run on, or why the store has none.
+    pub reader: Result<SnapshotReader, StoreError>,
+    /// Statements the mint ran against the database. They are the read-only
+    /// open's own — the journal-mode read and the store-epoch read — counted
+    /// where each one runs, so a refusal reports the statements that ran
+    /// before it.
+    pub statements: u64,
+}
+
+/// One read's turn on the connection its handle holds.
+///
+/// It is the connection out of the handle and not yet inside a snapshot, which
+/// is the state a caller is in while it decides whether to establish. The
+/// connection goes back where the turn drops without establishing — a caller
+/// that changed its mind, and an unwind alike — so a handle is never left
+/// empty by a read that never happened.
+pub struct ConnectionTurn {
+    reader: Arc<SnapshotReader>,
+    /// The connection, taken out by [`ConnectionTurn::establish`] so the
+    /// snapshot owns the give-back from there on.
+    database: Option<Database>,
+}
+
+impl fmt::Debug for ConnectionTurn {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConnectionTurn")
+            .field("reader", &self.reader)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ConnectionTurn {
+    /// Establish the write-ahead-log snapshot one read answers from, and
+    /// sample the store reading it is answered under.
+    ///
+    /// **One statement against the database, and it is the establishing one.**
+    /// A deferred `BEGIN` takes no snapshot, so the snapshot is the first
+    /// statement's — and that statement is the read of the store's write
+    /// generation, which is the reading the answer carries. A caller that runs
+    /// this where the published demand is read gets a demand and a snapshot
+    /// describing one instant, and pays one statement for both.
+    ///
+    /// **This waits for nothing.** The connection is already this turn's, so
+    /// the act is the transaction and the statement and no acquisition, which
+    /// is what makes it safe to run under a caller's lock.
+    ///
+    /// The connection goes back to the handle when the [`Snapshot`] is
+    /// dropped, or here where the establishment refuses.
+    ///
+    /// **It reports what it ran whichever way it ended.** An establishment
+    /// that refused ran the statement that refused it, rolled the transaction
+    /// back and gave the connection up, and a caller holding a lock across all
+    /// of that waited for every part of it.
+    pub fn establish(mut self) -> SnapshotAttempt {
+        let mut database = self
+            .database
+            .take()
+            .expect("a turn holds the connection until it establishes or drops");
+        let reader = Arc::clone(&self.reader);
+        let mut counters = SnapshotCounters::default();
+        let snapshot = match establish_on(&mut database, &reader.epoch, &mut counters) {
+            Ok(reading) => Ok(Snapshot {
+                reader,
+                database: Some(database),
+                reading,
+                counters,
+            }),
+            Err(error) => {
+                let _ = database.close_snapshot();
+                reader.give_the_connection_back(database);
+                Err(error)
+            }
+        };
+        SnapshotAttempt { snapshot, counters }
+    }
+}
+
+impl Drop for ConnectionTurn {
+    fn drop(&mut self) {
+        if let Some(database) = self.database.take() {
+            self.reader.give_the_connection_back(database);
+        }
+    }
+}
+
+/// Open the snapshot and run the one statement that establishes it.
+///
+/// The two counts are taken at different moments, because they answer
+/// different questions. A snapshot either opened or it did not, so it is
+/// counted where the open succeeded. A statement is a cost the caller paid
+/// whether or not it answered — a read that waited out the busy timeout and
+/// then failed held the connection for that wait — so it is counted as it is
+/// run.
+fn establish_on(
+    database: &mut Database,
+    epoch: &str,
+    counters: &mut SnapshotCounters,
+) -> Result<StoreReading, StoreError> {
+    database.open_snapshot()?;
+    counters.count_snapshot();
+    counters.count_statement();
+    let write_generation =
+        norn_db::meta::get_meta::<i64>(database.connection(), norn_db::meta::WRITE_GENERATION)?
+            .ok_or_else(|| StoreError::Damaged {
+                what: "the database records no write generation, so no read can say what it read"
+                    .to_string(),
+            })?;
+    Ok(StoreReading {
+        epoch: epoch.to_string(),
+        write_generation,
+    })
+}
+
+/// One read's attempt to establish its snapshot, and what that attempt ran.
+///
+/// **The counters are reported on both answers**, because the caller holding a
+/// lock across the attempt paid for the statements either way: an attempt that
+/// refused opened its transaction, ran the statement that refused it and
+/// rolled back, all inside that lock.
+///
+/// On the snapshot arm these are the reading [`Snapshot::counters`] starts
+/// from. The two stop being equal as soon as a read builder runs a statement
+/// on the snapshot: this reading is what establishing cost, and the snapshot's
+/// own is what that snapshot has cost so far.
+#[derive(Debug)]
+pub struct SnapshotAttempt {
+    /// The snapshot the read answers from, or why there is none.
+    pub snapshot: Result<Snapshot, StoreError>,
+    /// What the attempt ran: the snapshot it opened, and the statements it ran
+    /// against the database.
+    pub counters: SnapshotCounters,
+}
+
+/// One read's snapshot: the connection it answers on, the reading it was
+/// established at, and what establishing it cost.
+///
+/// Every statement run through this reads the rows the snapshot was
+/// established over, so a request answered here is answered from one instant
+/// of the database whatever the writer does meanwhile. The connection goes
+/// back to the [`SnapshotReader`] when this is dropped, and the next read
+/// waiting for it is woken.
+///
+/// **The handle inside is not reachable from here.** A snapshot is a read's to
+/// answer from, not a way to reach the handle it was established on and
+/// establish another: the field is private and no accessor hands it out, so
+/// the one route to a snapshot is a turn taken from a handle a caller already
+/// holds. An accessor added here would let a caller clone the handle out of a
+/// snapshot, end the read that adjudicated it, and go on establishing
+/// snapshots on the entry's one connection that no adjudication ever saw — so
+/// the absence is pinned:
+///
+/// ```compile_fail,E0599
+/// use std::sync::Arc;
+/// use norn_store::{Snapshot, SnapshotReader};
+///
+/// fn the_handle_escapes(snapshot: &Snapshot) -> Arc<SnapshotReader> {
+///     Arc::clone(snapshot.reader())
+/// }
+/// ```
+pub struct Snapshot {
+    reader: Arc<SnapshotReader>,
+    /// The connection this snapshot is open on, taken out to be given back to
+    /// the reader at the drop that ends the snapshot.
+    database: Option<Database>,
+    reading: StoreReading,
+    counters: SnapshotCounters,
+}
+
+impl fmt::Debug for Snapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Snapshot")
+            .field("reading", &self.reading)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Snapshot {
+    /// The store reading this snapshot was established at: which database, and
+    /// how far its writes had got.
+    pub fn reading(&self) -> &StoreReading {
+        &self.reading
+    }
+
+    /// What this read's snapshot cost: the snapshot itself, and the statements
+    /// run on it.
+    pub fn counters(&self) -> SnapshotCounters {
+        self.counters
+    }
+
+    /// The connection this snapshot's statements run on.
+    ///
+    /// It is opened with the read-only flag, so every write to the database it
+    /// names and to any database attached to it is refused by SQLite before
+    /// the statement runs; `query_only` and the statement authorizer stand on
+    /// top of that and refuse the pragma, the attach and the temporary object
+    /// a statement would otherwise reach around it with.
+    ///
+    /// The read builders are the layer that runs statements here, each of them
+    /// counted on [`Snapshot::counters`] beside the establishing one. They are
+    /// the consuming layer this accessor waits for; until they land the call
+    /// graph reaches it from this module's own cases alone, which is where the
+    /// refusals above are stated.
+    #[allow(dead_code)] // No builder composes statements here yet; this module's cases are the only callers.
+    pub(crate) fn connection(&self) -> &Connection {
+        self.database
+            .as_ref()
+            .expect("a snapshot holds its connection until it is dropped")
+            .connection()
+    }
+}
+
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        // The connection goes back whichever way the read ended, including an
+        // unwind: a handle left empty is an entry no later read reaches.
+        if let Some(mut database) = self.database.take() {
+            let _ = database.close_snapshot();
+            self.reader.give_the_connection_back(database);
+        }
+    }
+}
+
+/// Which database a read was answered from, and how far its writes had got.
+///
+/// **A generation orders the writes of one database and the epoch says which
+/// database**, so the pair is one reading: a generation compared across epochs
+/// names a position in a database that no longer exists. Every answer carries
+/// this, because what a read saw is a fact about the state it read rather than
+/// one a later call can be asked for.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreReading {
+    epoch: String,
+    write_generation: i64,
+}
+
+impl StoreReading {
+    /// The reading a snapshot established at `write_generation` in `epoch`.
+    ///
+    /// The establishment mints its own, and this is the spelling a caller
+    /// standing in for one uses: a test double for a reader answers under a
+    /// reading the same shape a store's own answers under.
+    pub fn of(epoch: impl Into<String>, write_generation: i64) -> Self {
+        StoreReading {
+            epoch: epoch.into(),
+            write_generation,
+        }
+    }
+
+    /// The database this reading names.
+    pub fn epoch(&self) -> &str {
+        &self.epoch
+    }
+
+    /// The last write generation committed to that database when the snapshot
+    /// was established. A read may trail derivation still in flight, and this
+    /// is how far it does not.
+    pub fn write_generation(&self) -> i64 {
+        self.write_generation
+    }
+}
 
 /// Whether the store's file outlives the store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -222,6 +619,47 @@ impl Store {
     /// in.
     pub fn epoch(&self) -> &str {
         self.database.epoch()
+    }
+
+    /// Mint the read-only snapshot handle this store's reads run on.
+    ///
+    /// **The mint is fallible and it is the only one.** A second connection is
+    /// opened over the file this store is holding, with the read-only open
+    /// flag — which no statement run on the connection can withdraw, and which
+    /// is what refuses every write — and with `query_only` and a statement
+    /// authorizer on top of it, so a caller that gets a handle has one that
+    /// can read and cannot derive, and a caller that gets an error has a store
+    /// whose reads cannot be served rather than a handle that answers nothing.
+    /// The open reaches the filesystem, which is why it can fail: the file may
+    /// be gone, the environment may refuse it, and a database that is not in
+    /// write-ahead logging is refused rather than read under a mode its writer
+    /// is not using.
+    ///
+    /// It is taken from a **live** store, and that is what binds the handle:
+    /// the writer holds the file open, so the `-shm` a read-only write-ahead
+    /// logging open needs is there to be read. Nothing here concludes a heal
+    /// rung — the open bypasses inspection and rebuild entirely — because a
+    /// reader reads derived state and never decides what it means.
+    ///
+    /// **It reports what it ran against the database beside the handle**, and
+    /// it reports it whichever way it ended: a caller that holds a lock across
+    /// the mint answers for those statements, and a mint that refused held
+    /// that lock for the ones it ran before it refused.
+    pub fn open_reader(&self) -> ReaderMint {
+        let path = self.database.path().to_path_buf();
+        let opened = norn_db::open_read_only(&path);
+        let reader = opened
+            .adopted
+            .map_err(StoreError::from)
+            .map(|database| SnapshotReader {
+                epoch: database.epoch().to_string(),
+                connection: Mutex::new(Some(database)),
+                returned: Condvar::new(),
+            });
+        ReaderMint {
+            reader,
+            statements: opened.statements,
+        }
     }
 
     /// Open a request. Everything the store does happens inside one, so that
@@ -650,4 +1088,346 @@ fn quoted<'a>(values: impl Iterator<Item = &'a str>) -> String {
         .map(|value| format!("'{value}'"))
         .collect::<Vec<String>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use norn_testkit::scratch::Scratch;
+
+    /// **A reader cannot write, and it is not the writer's connection.** The
+    /// open takes neither the write flag nor create, and SQLite reports the
+    /// database read-only on this connection: the refusal of a write is the
+    /// connection's own rather than a rule a read path has to keep, which is
+    /// what makes a warm read's zero derivation structural.
+    #[test]
+    fn a_snapshot_refuses_a_write_and_reads_beside_the_writer() {
+        let scratch = Scratch::new("norn-store-reader-refuses-writes");
+        let mut store =
+            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
+        let snapshot = reader
+            .try_take()
+            .expect("a handle nothing is reading holds its connection")
+            .establish()
+            .snapshot
+            .expect("a snapshot");
+        assert!(
+            snapshot
+                .connection()
+                .is_readonly(norn_db::rusqlite::MAIN_DB)
+                .expect("SQLite reports the mode the database is open in"),
+            "the snapshot's connection is open for writing"
+        );
+        snapshot
+            .connection()
+            .execute("INSERT INTO meta (key, value) VALUES ('probe', 1)", [])
+            .expect_err("a read-only connection refused nothing");
+
+        // The writer's own connection is another connection, and it still
+        // writes: the refusal above is the reader's and not the file's.
+        drop(snapshot);
+        store
+            .begin_request()
+            .pin_vault_schema(b"version: 1\n", "a-fingerprint")
+            .expect("the writer still writes");
+    }
+
+    /// **The connection is out of the handle only while a read holds it.** A
+    /// turn that establishes nothing gives it back where it drops, and a
+    /// snapshot gives it back where the read ends, so the next read finds a
+    /// handle it can take without waiting.
+    #[test]
+    fn a_turn_that_establishes_nothing_gives_the_connection_back() {
+        let scratch = Scratch::new("norn-store-reader-turn");
+        let store =
+            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
+
+        let turn = reader.try_take().expect("a free handle hands out its turn");
+        assert!(
+            reader.try_take().is_none(),
+            "a handle whose connection a turn holds handed out a second turn"
+        );
+        drop(turn);
+
+        let snapshot = reader
+            .try_take()
+            .expect("the dropped turn kept the connection")
+            .establish()
+            .snapshot
+            .expect("a snapshot");
+        assert!(
+            reader.try_take().is_none(),
+            "a handle whose connection a snapshot holds handed out a turn"
+        );
+        drop(snapshot);
+        assert!(
+            reader.try_take().is_some(),
+            "the ended read kept the connection"
+        );
+    }
+
+    /// The establishing statement is one, and it is the one the reading is
+    /// read off: a deferred `BEGIN` takes no snapshot, so the generation read
+    /// is what makes the snapshot real.
+    #[test]
+    fn establishing_a_snapshot_runs_one_statement_and_reports_the_reading() {
+        let scratch = Scratch::new("norn-store-reader-establish");
+        let store =
+            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
+
+        let snapshot = reader
+            .try_take()
+            .expect("a free handle hands out its turn")
+            .establish()
+            .snapshot
+            .expect("a snapshot");
+        assert_eq!(snapshot.counters().snapshots_opened(), 1);
+        assert_eq!(
+            snapshot.counters().statements_executed(),
+            1,
+            "establishing one snapshot ran something other than the one establishing statement"
+        );
+        assert_eq!(
+            snapshot.reading().epoch(),
+            store.epoch(),
+            "the snapshot names a database its handle was not minted from"
+        );
+    }
+
+    /// **An unwind between taking the connection and establishing gives the
+    /// connection back.** A turn is the connection out of the handle and not
+    /// yet inside a snapshot, so a panic there is the one moment the handle
+    /// could be left empty for good — and a handle left empty is an entry
+    /// every later read waits on a connection nothing holds for. The turn's
+    /// drop runs on the unwinding thread, which is what puts it back.
+    #[test]
+    fn a_turn_an_unwind_drops_gives_the_connection_back() {
+        let scratch = Scratch::new("norn-store-reader-unwind");
+        let store =
+            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _turn = reader.try_take().expect("a free handle hands out its turn");
+            panic!("a read that took the connection and never established");
+        }));
+        assert!(
+            unwound.is_err(),
+            "the read that was to unwind holding the connection returned instead"
+        );
+
+        let snapshot = reader
+            .try_take()
+            .expect("the unwound turn kept the handle's connection")
+            .establish()
+            .snapshot
+            .expect("a snapshot");
+        assert_eq!(
+            snapshot.counters().snapshots_opened(),
+            1,
+            "the read after the unwind established no snapshot"
+        );
+    }
+
+    /// One document written into the store, so a read has rows to answer from.
+    fn write_one_document(store: &mut Store, at: &str, body: &str) {
+        let facts = crate::facts::DocumentFacts::new(
+            crate::path::DocumentPath::new(at).expect("a vault-relative document path"),
+            "a-content-hash",
+            body,
+            body.len() as u64,
+        );
+        store
+            .begin_request()
+            .apply_increment(
+                crate::increment::IncrementProvenance::Derived,
+                [crate::increment::Change::Upsert(facts)],
+                &[],
+            )
+            .expect("a changeset that writes one document");
+    }
+
+    /// **A full-text read is judged by running it, because explaining it
+    /// cannot judge it.** FTS5 runs `PRAGMA data_version` on the connection
+    /// for itself, once for every `MATCH` and once for every `fts5vocab` read,
+    /// so a statement authorizer that refuses that pragma refuses every
+    /// full-text read this schema is built on — while `EXPLAIN QUERY PLAN`
+    /// over the identical statement still returns a clean plan, because
+    /// explaining a virtual table never runs it. An `EXPLAIN` bar would
+    /// therefore certify a statement no read can execute. This case executes
+    /// the match and the vocabulary read and asserts their rows.
+    #[test]
+    fn a_snapshot_runs_the_full_text_statements_this_schema_is_built_on() {
+        const MATCHED: &str = "SELECT documents.path FROM documents_fts
+             JOIN documents ON documents.id = documents_fts.rowid
+             WHERE documents_fts MATCH ?1";
+
+        let scratch = Scratch::new("norn-store-reader-full-text");
+        let mut store =
+            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        write_one_document(&mut store, "notes/first.md", "the interloper walked in");
+
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
+        let snapshot = reader
+            .try_take()
+            .expect("a handle nothing is reading holds its connection")
+            .establish()
+            .snapshot
+            .expect("a snapshot");
+        let connection = snapshot.connection();
+
+        let matched: Vec<String> = connection
+            .prepare(MATCHED)
+            .expect("a full-text match compiles on a snapshot connection")
+            .query_map(["interloper"], |row| row.get(0))
+            .expect("a full-text match runs on a snapshot connection")
+            .collect::<Result<_, _>>()
+            .expect("the rows a full-text match answered");
+        assert_eq!(
+            matched,
+            vec!["notes/first.md".to_string()],
+            "a full-text match answered rows other than the document whose body carries the term"
+        );
+
+        let indexed: Vec<String> = connection
+            .prepare("SELECT term FROM documents_fts_vocab ORDER BY term")
+            .expect("a vocabulary read compiles on a snapshot connection")
+            .query_map([], |row| row.get(0))
+            .expect("a vocabulary read runs on a snapshot connection")
+            .collect::<Result<_, _>>()
+            .expect("the rows a vocabulary read answered");
+        assert!(
+            indexed.contains(&"interloper".to_string()),
+            "the index this snapshot reads holds no term the written body carries: {indexed:?}"
+        );
+
+        // The plan for that same statement, which is what an EXPLAIN bar reads
+        // and the reason the two assertions above read rows instead.
+        let plan =
+            norn_db::emitted_plan(connection, MATCHED, ["interloper"]).expect("the match's plan");
+        assert!(
+            plan.steps
+                .iter()
+                .any(|step| step.detail.contains("documents_fts")),
+            "the plan of a full-text match names no virtual table: {:?}",
+            plan.steps
+        );
+    }
+
+    /// **The read surface a snapshot connection has is the set of statements
+    /// that run on it.** Every shape a read builder composes is executed here
+    /// and answers its row: a join, a subquery, a recursive common table
+    /// expression, an aggregate with `GROUP BY` and `HAVING`, a window
+    /// function, a `UNION`, ordering with a bounded page, the json1 functions
+    /// a frontmatter projection is read with, `sqlite_master`, and a bound
+    /// parameter. A shape the statement authorizer refuses is a surface this
+    /// connection does not have, whatever a plan taken of it reports.
+    #[test]
+    fn a_snapshot_runs_every_shape_a_read_builder_composes() {
+        let scratch = Scratch::new("norn-store-reader-shapes");
+        let mut store =
+            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        write_one_document(&mut store, "notes/first.md", "the interloper walked in");
+
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
+        let snapshot = reader
+            .try_take()
+            .expect("a handle nothing is reading holds its connection")
+            .establish()
+            .snapshot
+            .expect("a snapshot");
+        let connection = snapshot.connection();
+
+        for (shape, sql) in [
+            (
+                "a join",
+                "SELECT count(*) FROM documents AS outer_row
+                 JOIN documents AS inner_row ON inner_row.id = outer_row.id",
+            ),
+            (
+                "a subquery",
+                "SELECT count(*) FROM documents WHERE id IN (SELECT id FROM documents)",
+            ),
+            (
+                "a recursive common table expression",
+                "WITH RECURSIVE counted(n) AS (
+                     SELECT 1 UNION ALL SELECT n + 1 FROM counted WHERE n < 3
+                 ) SELECT sum(n) = 6 FROM counted",
+            ),
+            (
+                "an aggregate with GROUP BY and HAVING",
+                "SELECT count(*) FROM (
+                     SELECT path FROM documents GROUP BY path HAVING count(*) = 1
+                 )",
+            ),
+            (
+                "a window function",
+                "SELECT count(*) FROM (SELECT row_number() OVER (ORDER BY path) FROM documents)",
+            ),
+            (
+                "a UNION",
+                "SELECT count(*) FROM (SELECT path FROM documents UNION SELECT path FROM documents)",
+            ),
+            (
+                "an ordered bounded page",
+                "SELECT count(*) FROM (SELECT path FROM documents ORDER BY path LIMIT 1 OFFSET 0)",
+            ),
+            (
+                "the json1 functions",
+                "SELECT json_valid(json_object('term', 'interloper'))",
+            ),
+            (
+                "a read of sqlite_master",
+                "SELECT count(*) > 0 FROM sqlite_master WHERE name = 'documents_fts'",
+            ),
+        ] {
+            let answered: i64 = connection
+                .query_row(sql, [], |row| row.get(0))
+                .unwrap_or_else(|error| panic!("{shape} on a snapshot connection: {error}"));
+            assert_eq!(answered, 1, "{shape} answered {answered}");
+        }
+
+        let bound: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM documents WHERE path = ?1",
+                ["notes/first.md"],
+                |row| row.get(0),
+            )
+            .expect("a bound parameter on a snapshot connection");
+        assert_eq!(bound, 1, "a bound parameter matched no row");
+    }
 }

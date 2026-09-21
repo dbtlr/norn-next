@@ -48,6 +48,7 @@ mod attach;
 
 use std::path::Path;
 
+use norn_host::Demand;
 use norn_store::{
     Change, DocumentFacts, DocumentPath, ExplainedStatement, IncrementProvenance, Store,
     StoredDocument, StoredPathOrder, class_probe,
@@ -101,6 +102,11 @@ fn a_warm_request_over_an_attached_vault_finishes_at_zero() {
 /// yet is where a lazily-built index or a cache filled on demand would be paid
 /// for; the second is the steady state the claim is about, and the pair is what
 /// separates them.
+///
+/// **What this case does not do is execute its requests through the hold.** It
+/// takes a production hold and asserts the reading that hold carries; the
+/// counted passes run against the store this case opened beside it. The body
+/// below states why that is the shape available and what it costs the claim.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn warm_requests_under_a_live_attachment_finish_at_zero() {
@@ -119,8 +125,43 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     assert_the_attachment_derived_the_profile(&mut store, &profile);
     let subject = a_derived_document(&mut store);
 
+    // **A production hold stands across the passes, and the passes do not run
+    // through it.** What the hold establishes is that this entry answers a
+    // read: it is minted only over a published `Ready`, it carries the
+    // snapshot a read is answered from, and the reading asserted below says
+    // that snapshot names the database this attachment derived. What it is not
+    // is the executor of the requests counted after it. Those run against the
+    // store this case opened, because a request is opened from `&mut Store`
+    // and a hold hands out a snapshot; the surface that executes a counted
+    // request through a hold belongs to the read builders, and the measured
+    // half of this bar lands with them.
+    //
+    // **So the zero below is structural rather than measured.** A derivation
+    // counter exists only inside a request, a request is opened from `&mut
+    // Store`, and no route from a hold reaches one — a read through a hold
+    // cannot move a counter because there is no counter it can reach. Past
+    // that, every counter's increment sits behind a write statement, and the
+    // read-only open flag, `query_only` and the statement authorizer each
+    // refuse those. This pass confirms the property over the store, which is
+    // the strictly more derivation-capable subject; it is confirmation and not
+    // the evidence the claim rests on.
+    let hold = host
+        .begin_read(vault.name())
+        .expect("a live attachment answers a read");
+    assert_eq!(
+        hold.reading().published(),
+        &Demand::State(TrustState::Ready),
+        "the read ran under a demand the entry does not publish"
+    );
+    assert_eq!(
+        hold.reading().store().epoch(),
+        store.epoch(),
+        "the read answered from a database this attachment did not derive"
+    );
+
     let first = a_warm_pass(&mut store, &subject);
     let second = a_warm_pass(&mut store, &subject);
+    drop(hold);
     record_the_counters("a warm request under a live attachment, first pass", &first);
     record_the_counters(
         "a warm request under a live attachment, second pass",

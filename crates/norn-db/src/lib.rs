@@ -28,7 +28,11 @@
 //! # Where to start
 //!
 //! - [`connect`] — the one place a connection is opened, and [`Database`], the
-//!   handle that binds an open connection to its file and its epoch.
+//!   handle that binds an open connection to its file and its epoch;
+//!   [`connect_read_only`] is the same act in the shape a snapshot reader is
+//!   opened in, where the connection can only read, and [`open_read_only`] is
+//!   that open and its adoption together, reporting what they ran against the
+//!   database for a caller that holds a lock across them.
 //! - [`open`] — the ceremony every database runs: connect, judge, and create,
 //!   adopt or rebuild; with [`Schema`], what a client hands it, and [`Client`],
 //!   the three hooks it calls back into.
@@ -38,7 +42,9 @@
 //!   database, and whether it still holds what that list created.
 //! - [`Database::immediate_transaction`] — the transaction discipline every
 //!   changeset runs in, and [`Database::deferred_transaction`], the read
-//!   snapshot a multi-statement read answers from.
+//!   snapshot a multi-statement read answers from;
+//!   [`Database::open_snapshot`] is that same read snapshot for a read that
+//!   outlives the stack frame that opened it.
 //! - [`sql`] and [`is_damaged`] — the one judgment made about a driver error:
 //!   damaged state, which authorizes a rebuild, or a broken environment, which
 //!   does not.
@@ -68,7 +74,10 @@ mod schema;
 pub use ceremony::{
     Adoption, Client, OpenOutcome, Operations, RebuildReason, Schema, open, rebuild,
 };
-pub use database::{Attempt, Database, connect, mint_an_epoch, prepare_parent, remove_database};
+pub use database::{
+    Attempt, Database, ReadOnlyOpen, connect, connect_read_only, mint_an_epoch, open_read_only,
+    prepare_parent, remove_database,
+};
 pub use error::{DbError, damage_or_fail, is_damaged, sql, sql_at_statement};
 pub use plan::{EmittedPlan, PlanStep, emitted_plan};
 pub use schema::{digest, schema_digest};
