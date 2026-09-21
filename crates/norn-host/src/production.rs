@@ -2421,6 +2421,12 @@ impl Declaration {
     /// says. The store is single-writer, so a row stamped above the pin was
     /// derived after it and is judged.
     ///
+    /// The boundary itself is vacuous by construction: a pin and the act that
+    /// derives a row are two transactions and generations are strictly
+    /// monotonic, so no row can carry the pin's own generation. The comparison
+    /// is stated as the floor it is rather than as a boundary a caller could
+    /// reach either way, and the case below is what holds it.
+    ///
     /// A declaration no re-derivation is owed under answers yes for every row:
     /// there is nothing to restore, so re-reading the vault would buy nothing.
     fn judged(&self, generation: i64) -> bool {
