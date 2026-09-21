@@ -16,7 +16,7 @@ use norn_store::{
     Change, DerivedFinding, DirectoryPrefix, DocumentPath, FindingFacts, IncrementProvenance,
     Provenance, SchemaPin, Store, StoreError, StoredDocument, StoredPathOrder, SubjectScope,
 };
-use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, VaultName};
+use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, UntrustedReason, VaultName};
 
 use crate::derivation::{
     Cause, Decided, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS, WALKED_KINDS,
@@ -162,6 +162,17 @@ pub struct ProductionAttachment {
     /// reading says both whether the question is due and, once it is answered,
     /// when it is due again.
     store_verification_due: Instant,
+    /// Why this build cannot act on the vault's schema declaration, where it
+    /// cannot.
+    ///
+    /// **An attachment standing over an unreadable declaration derives
+    /// nothing.** The leg that established it read the schema, could not read
+    /// what it declares, and pinned nothing: deriving under a default empty
+    /// model would answer confidently wrong questions about every document in
+    /// the vault, and refusing the attach would hide the vault instead of
+    /// saying why. So the coverage, the store and the maintainer lock are all
+    /// held, and this is what the entry publishes over them.
+    undeclarable_schema: Option<String>,
     /// The maintainer lock, declared last because fields drop in declaration
     /// order: an attachment dropped rather than released gives its resources
     /// back in the order [`release`] gives them back, so the lock never ends
@@ -614,7 +625,15 @@ impl EntryOps for ProductionEntryOps {
             _shadows: shadows,
             last_shadow_sweep: Instant::now(),
             store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
+            undeclarable_schema: candidate.undeclarable().map(str::to_string),
         };
+        if attachment.undeclarable_schema.is_some() {
+            // Nothing is pinned and nothing is derived under a declaration this
+            // build cannot read. The attachment stands so the vault is
+            // observable and so a demand can read the schema again; what it is
+            // holding back is published as the entry's trust.
+            return Ok(attachment);
+        }
         Self::pin_candidate(&mut attachment.store, &candidate)?;
         // The open resolves damage it can see in the store schema, and the heal
         // is where damage in the pages under it is met: a corrupt page an open
@@ -700,6 +719,15 @@ impl EntryOps for ProductionEntryOps {
         attachment._own_writes = own_writes;
         attachment._shadows = shadows;
         attachment.covered_root = covered_root;
+        attachment.undeclarable_schema = candidate.undeclarable().map(str::to_string);
+        if attachment.undeclarable_schema.is_some() {
+            // The same stance the attach takes: coverage is re-installed, the
+            // schema is re-read, and a declaration this build still cannot read
+            // pins nothing and derives nothing. A recovery run after the schema
+            // is corrected is what returns the vault to service.
+            attachment.controls = candidate;
+            return Ok(());
+        }
         Self::pin_candidate(&mut attachment.store, &candidate)?;
         attachment.controls = candidate;
         self.dispatch_config(&attachment.registration.name, attachment.controls.config());
@@ -721,6 +749,13 @@ impl EntryOps for ProductionEntryOps {
         let candidate =
             ReloadCandidate::read_at(&attachment.registration, &attachment.covered_root)
                 .map_err(JobFailure::Reload)?;
+        // A reload refuses a declaration this build cannot act on: the vault is
+        // already serving one it can, and replacing it with a schema nothing
+        // reads would take that away. The refusal is retained and the active
+        // pin stands.
+        if let Some(detail) = candidate.undeclarable() {
+            return Err(JobFailure::Reload(ReloadError::SchemaParse(detail.to_string())).into());
+        }
         let schema_changed =
             candidate.fingerprints().schema != attachment.controls.fingerprints().schema;
         if !schema_changed {
@@ -755,6 +790,13 @@ impl EntryOps for ProductionEntryOps {
 
     fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf> {
         Some(attachment.covered_root.clone())
+    }
+
+    fn withheld_trust(&self, attachment: &Self::Attachment) -> Option<UntrustedReason> {
+        attachment
+            .undeclarable_schema
+            .clone()
+            .map(UntrustedReason::schema_unreadable)
     }
 
     fn poll(
@@ -3433,6 +3475,120 @@ mod tests {
             assert_eq!(inspection.active_fingerprints, active);
             assert_eq!(inspection.last_reload_error, Some(error));
         }
+    }
+
+    /// **A schema this build cannot read does not hide the vault.** The attach
+    /// acquires everything a read runs on — the maintainer lock, watcher
+    /// coverage, the derived store — pins nothing and derives nothing, and the
+    /// entry publishes the cause: the vault is observable, and `doctor` and the
+    /// status seam can say why it is not readable. A vault that refused the
+    /// attach would be invisible instead, and one derived under a default empty
+    /// model would answer confidently wrong questions about every document in
+    /// it.
+    #[test]
+    fn a_schema_this_build_cannot_read_attaches_untrusted_rather_than_refusing() {
+        let f = Fixture::new("undeclarable-schema-attach");
+        fs::write(f.vault().join(".norn/schema.yaml"), "version: 9\n").unwrap();
+        fs::write(f.vault().join("note.md"), "# body\n#draft\n").unwrap();
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+
+        let untrusted = wait_untrusted(&host, &name);
+        let norn_wire::UntrustedReason::SchemaUnreadable { detail, .. } = &untrusted else {
+            panic!("the entry published {untrusted:?}");
+        };
+        assert!(
+            detail.contains("version 9") && detail.contains("reads 1"),
+            "the reason does not name the cause: {detail}"
+        );
+        // Attached, not unattached: the entry holds the controls it read.
+        let inspection = host.inspect(&name).expect("the served vault");
+        assert!(
+            inspection.active_fingerprints.is_some(),
+            "the entry holds no attachment, so the vault is hidden rather than explained"
+        );
+
+        // The schema is corrected, and a demand is what re-reads it. The vault
+        // returns to service and derives the document that was standing in it
+        // all along, with no edit to that document.
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\ntags:\n  declared: [project]\n  undeclared: report\n",
+        )
+        .unwrap();
+        drop(lease);
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        let mut store = Store::open(dirs_store(&f, &name)).unwrap();
+        assert_eq!(stored_paths(&mut store), ["note.md"]);
+        let findings = findings_at(&mut store, "note.md");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].kind, FindingKind::UndeclaredTag.as_str());
+    }
+
+    /// The control on the case above: the same vault under a schema this build
+    /// reads attaches `Ready` and derives. Without it the case above would pass
+    /// for a host that published the reason over every vault.
+    #[test]
+    fn a_schema_this_build_reads_attaches_ready_and_derives() {
+        let f = Fixture::new("declarable-schema-attach");
+        fs::write(f.vault().join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        fs::write(f.vault().join("note.md"), "# body\n#draft\n").unwrap();
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        let mut store = Store::open(dirs_store(&f, &name)).unwrap();
+        assert_eq!(stored_paths(&mut store), ["note.md"]);
+    }
+
+    /// The derived store one served vault keeps, read from outside the host.
+    fn dirs_store(f: &Fixture, name: &VaultName) -> PathBuf {
+        ConfigDirs::new(f.root.join("config"), f.root.join("data"))
+            .expect("the fixture's directories")
+            .derived_dir(name)
+            .join("store.sqlite3")
+    }
+
+    /// Wait until the entry publishes an untrusted reason, and hand it back.
+    fn wait_untrusted<O: EntryOps>(
+        host: &crate::Host<O>,
+        name: &VaultName,
+    ) -> norn_wire::UntrustedReason {
+        wait_until("an untrusted entry", lifecycle_budget(), || {
+            match host.inspect(name).map(|inspection| inspection.trust) {
+                Some(norn_wire::TrustState::Untrusted { reason, .. }) => Observed::Met(reason),
+                other => Observed::Pending(format!("the state is {other:?}")),
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     #[test]

@@ -132,6 +132,21 @@ pub trait EntryOps: Send + Sync + 'static {
     fn control_root(&self, _: &Self::Attachment) -> Option<std::path::PathBuf> {
         None
     }
+    /// Why nothing may be derived under this attachment, where the attachment
+    /// itself stands.
+    ///
+    /// **An attachment that holds everything a read runs on and still cannot
+    /// be read from.** It is what an implementation answers where the vault's
+    /// own declaration is one this build cannot act on: deriving under it would
+    /// answer wrong, and refusing the attach would hide the vault rather than
+    /// say why, so the coverage stands and the reason is published over it. The
+    /// entry owes a recovery from there, which is the leg that reads the
+    /// declaration again — a corrected one returns the vault to service.
+    ///
+    /// The default withholds nothing.
+    fn withheld_trust(&self, _: &Self::Attachment) -> Option<UntrustedReason> {
+        None
+    }
     /// Discard damaged derived state and build it from the vault again — heal
     /// rung 3, reached where an implementation reported
     /// [`JobFailure::StoreDamaged`].
@@ -1009,10 +1024,10 @@ impl DemandedWork {
     /// The work this entry owes a demand lease.
     ///
     /// The reconcile arm rests on where the untrusted reasons are written:
-    /// every writer of a watcher loss or an environmental refusal against an
-    /// entry holding coverage sets `recovery_required` beside it, and every
-    /// writer of damaged derived state over an entry holding its store sets
-    /// `rebuild_required`. An overflow is
+    /// every writer of a watcher loss, an environmental refusal or a schema
+    /// this build cannot read against an entry holding coverage sets
+    /// `recovery_required` beside it, and every writer of damaged derived state
+    /// over an entry holding its store sets `rebuild_required`. An overflow is
     /// the one reason that stands without either, and rereading the facts is
     /// what clears an overflow. The assertion says that invariant out loud, so
     /// a writer that stops pairing a reason with the work it owes is caught
@@ -3213,6 +3228,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
                     state.control_root = shared.ops.control_root(&attachment);
                     state.last_reload_error = None;
+                    let withheld = shared.ops.withheld_trust(&attachment);
                     state.install_coverage(attachment);
                     // The coverage is this attach's, and what any earlier
                     // requirement was raised against went back with the release
@@ -3223,7 +3239,15 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.identity_refused = None;
                     state.maintainer_contended = None;
                     state.duplicate_root = None;
-                    if state.pending.is_empty() && !handoff_saturated {
+                    if let Some(reason) = withheld {
+                        // The attach acquired everything and derived nothing.
+                        // The entry owes the recovery that reads the vault's
+                        // declaration again, and the facts this attach observed
+                        // wait in `pending` for the heal that recovery runs.
+                        state.require_recovery();
+                        state.pending.merge(Batch::rescan(RescanScope::Vault));
+                        state.trust = TrustState::untrusted(reason);
+                    } else if state.pending.is_empty() && !handoff_saturated {
                         state.trust = TrustState::Ready;
                     } else {
                         state.trust = trust_for_pending_reconcile(&state.pending);
@@ -3408,9 +3432,19 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.pending.merge(observed);
                     state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
                     state.last_reload_error = None;
+                    let withheld = shared.ops.withheld_trust(&attachment);
                     state.coverage.park_by(epoch, attachment);
                     state.clear_recovery();
-                    if state.detach_due {
+                    if let Some(reason) = withheld {
+                        // The recovery re-read a declaration this build still
+                        // cannot act on, so it derived nothing. The entry owes
+                        // the same recovery again, which the next demand asks
+                        // for once the schema is corrected.
+                        state.require_recovery();
+                        state.pending.merge(Batch::rescan(RescanScope::Vault));
+                        state.trust = TrustState::untrusted(reason);
+                        next = schedule_due_detach(&mut state, &name);
+                    } else if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
                     } else if state.pending.is_empty() && !handoff_saturated {
                         state.trust = TrustState::Ready;

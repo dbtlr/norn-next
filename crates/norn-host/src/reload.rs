@@ -132,11 +132,21 @@ pub enum AuthoredDrift {
 }
 
 /// One fully read and core-validated reload candidate.
+///
+/// **Reading the schema's bytes and reading its declaration are two
+/// questions.** Bytes that cannot be read at all refuse here, because there is
+/// no candidate without them. A declaration this build cannot act on is carried
+/// as [`ReloadCandidate::undeclarable`] instead, so the two callers can answer
+/// it differently: a reload refuses and leaves the vault serving the
+/// declaration it already has, while an attach has no such declaration to fall
+/// back on and publishes the cause over live coverage rather than hiding the
+/// vault behind a refusal.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ReloadCandidate {
     schema_bytes: Vec<u8>,
     config: VaultConfig,
     fingerprints: ActiveFingerprints,
+    undeclarable: Option<String>,
 }
 
 impl ReloadCandidate {
@@ -167,12 +177,12 @@ impl ReloadCandidate {
         let schema = norn_fs::read_and_hash(&schema_anchor, &schema_name)
             .map_err(ReloadError::SchemaRead)?;
         // The schema is read into its content model here and nowhere else on
-        // this path: a candidate that becomes the active schema is one whose
-        // declaration this build can act on, so bytes that read as YAML and
-        // declare something this grammar does not hold are refused before they
-        // are pinned rather than judged as an empty declaration afterwards.
-        VaultSchema::parse(schema.bytes())
-            .map_err(|error| ReloadError::SchemaParse(error.to_string()))?;
+        // this path, so every caller reads one declaration out of one set of
+        // bytes. What it means for that reading to fail is the caller's to
+        // decide, which is why it is carried rather than raised.
+        let undeclarable = VaultSchema::parse(schema.bytes())
+            .err()
+            .map(|error| error.to_string());
 
         let config =
             norn_fs::read_if_present_and_hash(covered_root, Path::new(IN_VAULT_CONFIG_PATH))
@@ -185,7 +195,14 @@ impl ReloadCandidate {
             schema_bytes,
             config: parsed,
             fingerprints,
+            undeclarable,
         })
+    }
+
+    /// Why this build cannot act on the candidate's declaration, in words, and
+    /// `None` where it can.
+    pub(crate) fn undeclarable(&self) -> Option<&str> {
+        self.undeclarable.as_deref()
     }
 
     pub(crate) fn schema_bytes(&self) -> &[u8] {

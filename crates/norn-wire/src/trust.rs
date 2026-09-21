@@ -259,6 +259,21 @@ pub enum UntrustedReason {
         /// branches on.
         detail: String,
     },
+    /// The vault's schema states a declaration this build cannot read, so
+    /// nothing may be derived under it: a document judged against a
+    /// declaration nobody could read would be answered confidently and wrong.
+    /// The vault is sound and this build is not the one that reads it — a
+    /// later grammar version, or a key the grammar does not hold. The entry
+    /// holds its coverage and its derived state, and re-reads the schema when
+    /// a client demands it, so a corrected schema is what returns it to
+    /// service.
+    #[non_exhaustive]
+    SchemaUnreadable {
+        /// What the schema states and this build cannot read, in words, for a
+        /// person reading a message or a log. Clients never match on it: the
+        /// reason's `kind` is what a client branches on.
+        detail: String,
+    },
     /// The run of work over this vault ended in a panic. It reached no verdict
     /// about the vault or about the derived state, so neither is said to be at
     /// fault; what it was holding is given back unread. The entry holds nothing
@@ -300,6 +315,14 @@ impl UntrustedReason {
     /// is what establishes the database to discard, described by `detail`.
     pub fn store_damaged_awaiting_demand(detail: impl Into<String>) -> Self {
         UntrustedReason::StoreDamagedAwaitingDemand {
+            detail: detail.into(),
+        }
+    }
+
+    /// The vault's schema states a declaration this build cannot read,
+    /// described by `detail`.
+    pub fn schema_unreadable(detail: impl Into<String>) -> Self {
+        UntrustedReason::SchemaUnreadable {
             detail: detail.into(),
         }
     }

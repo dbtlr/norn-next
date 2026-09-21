@@ -47,6 +47,9 @@ fn untrusted_reasons() -> Vec<UntrustedReason> {
     reasons.push(UntrustedReason::store_damaged_awaiting_demand(
         "the database disk image is malformed",
     ));
+    reasons.push(UntrustedReason::schema_unreadable(
+        "the vault schema is at version 9 and this build reads 1",
+    ));
     reasons.push(UntrustedReason::leg_unwound("the heal panicked"));
     reasons
 }
