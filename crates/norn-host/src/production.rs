@@ -13,14 +13,14 @@ use norn_fs::{
     Subscription, WatchError, try_acquire, walk, walk_subtree, watch, watch_polling,
 };
 use norn_store::{
-    Change, DirectoryPrefix, DocumentPath, FindingFacts, IncrementProvenance, Provenance,
-    SchemaPin, Store, StoreError, StoredDocument, StoredPathOrder, SubjectScope,
+    Change, DerivedFinding, DirectoryPrefix, DocumentPath, FindingFacts, IncrementProvenance,
+    Provenance, SchemaPin, Store, StoreError, StoredDocument, StoredPathOrder, SubjectScope,
 };
 use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, VaultName};
 
 use crate::derivation::{
-    Cause, Decided, Plan, PlannedFinding, Quarantine, SIDES, WALKED_KINDS, document_path,
-    plan_document, plan_quarantine,
+    Cause, Decided, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS, WALKED_KINDS,
+    document_path, plan_document, plan_quarantine,
 };
 use crate::evidence::{JobEvidence, count_changeset};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
@@ -1091,26 +1091,31 @@ where
     Ok(())
 }
 
-/// Whether this row is a degraded one whose finding is not standing beside it.
+/// Whether this row is a degraded one whose own finding is not standing beside
+/// it.
 ///
 /// A heal is otherwise hash-authoritative: a path a row stands at is read again
 /// only when its bytes moved. That reaches a **place-scoped** finding whatever
 /// happened to it, because no row stands where one sits — but a
 /// **document-scoped** finding sits beside a row, so a heal that only compared
-/// hashes would never restore one that left the table. What takes one here is a
-/// process killed between a flush's increment and the recording after it — the
-/// other taker, a vault-schema re-pin, is converged by [`Declaration::judged`],
-/// which reads every row derived below the pin as owing its judgment again.
-/// The kill leaves the row asserting an absent frontmatter
-/// with nothing stating that the fields were never read, which is the answer
-/// the degradation exists to prevent.
+/// hashes would never restore one that left the table. The other taker of one,
+/// a vault-schema re-pin, is converged by [`Declaration::judged`], which reads
+/// every row derived below the pin as owing its judgment again; this is the
+/// axis that converges a pair broken any other way, and it reads the pair off
+/// the row rather than off the vault.
 ///
-/// So the pair is what the heal converges, not the row alone. The row says
-/// which documents can owe a finding — an absent frontmatter projection beside
-/// a nonzero frontmatter-scoped diagnostic count is a block nothing read, and
-/// the same absence beside a zero count is a document with no block — so the
-/// findings read below costs one indexed lookup per **defective** document per
-/// heal, and a converged vault re-derives nothing.
+/// **The question is about the finding this row's own defect implies, not about
+/// any finding at the path.** A row carrying an absent frontmatter projection
+/// beside a nonzero frontmatter-scoped diagnostic count is a block nothing
+/// read, and the same absence beside a zero count is a document with no block;
+/// what that defect owes is a finding of [`UNREAD_BLOCK_KINDS`]. Other
+/// document-scoped findings stand at the same path about other things — a
+/// document whose frontmatter does not read can carry an undeclared tag too —
+/// so asking whether *any* of them stands would read one of those as the
+/// block's own finding and leave it lost.
+///
+/// The findings read below costs one indexed lookup per **defective** document
+/// per heal, and a converged vault re-derives nothing.
 fn stands_without_its_finding(store: &mut Store, row: &StoredDocument) -> Result<bool, JobFailure> {
     if row.frontmatter.is_some() || row.frontmatter_diagnostic_count == 0 {
         return Ok(false);
@@ -1121,7 +1126,7 @@ fn stands_without_its_finding(store: &mut Store, row: &StoredDocument) -> Result
         .map_err(store_effect)?;
     Ok(!standing.iter().any(|finding| {
         FindingKind::try_from(finding.kind.as_str())
-            .is_ok_and(|kind| kind.scope() == FindingScope::Document)
+            .is_ok_and(|kind| UNREAD_BLOCK_KINDS.contains(&kind))
     }))
 }
 
@@ -2324,7 +2329,7 @@ fn revisit_vacated(
     // carries — this job's own, emptied above — is one nothing adds to.
     let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, account)?;
     pending.revisit(&readings)?;
-    pending.record_findings()
+    pending.flush()
 }
 
 /// The vault's standing declaration, as a deriving act reads it.
@@ -2379,6 +2384,22 @@ impl Declaration {
     fn judged(&self, generation: i64) -> bool {
         !self.model.rederives_documents() || generation > self.floor
     }
+}
+
+/// Whether each path a changeset names holds a document row once it lands.
+///
+/// A changeset may name one path more than once and **the last entry for a path
+/// decides**, which is how the increment applies them: an upsert leaves a row,
+/// a death leaves none, and a path the changeset never names is absent here so
+/// the caller asks the store about it.
+fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool> {
+    changes
+        .iter()
+        .map(|change| match change {
+            Change::Upsert(facts) => (&facts.path, true),
+            Change::Death { path, .. } => (path, false),
+        })
+        .collect()
 }
 
 /// What one heal scope has derived and not yet committed: the changeset being
@@ -2587,64 +2608,89 @@ impl<'s> Pending<'s> {
         self.changes.len() >= self.bound || self.queued.len() >= self.bound
     }
 
-    /// Apply the changeset, then record what its findings say.
+    /// Apply the changeset and the findings its act derived, as one act.
     ///
-    /// Findings go after the increment because the increment's own subject
-    /// discard would otherwise take them, and because the rows the increment
-    /// wrote are what the recording reads: a place-scoped finding is withheld
-    /// where a document row stands, and a document-scoped one is refiled at the
-    /// row the same act just wrote.
+    /// **The pair is one transaction.** A document's row and what is wrong with
+    /// that document are concluded by one reading of it, so they land together:
+    /// a recording after the commit would leave a window in which a killed
+    /// process loses the finding and the row above it says nothing.
     ///
     /// The places the increment **vacated** are the other half of the
-    /// withholding: while a document stood at a rendered spelling, every
+    /// withholding below: while a document stood at a rendered spelling, every
     /// place-scoped finding filed there was withheld, and the paths those
     /// findings are about are not paths the increment names. The roots to read
-    /// for them go to the job,
-    /// which reads each of them once after its last flush — a row this increment
-    /// kills is a row no later one revives, so a reading here would be a reading
-    /// per flush of an answer that does not change.
+    /// for them go to the job, which reads each of them once after its last
+    /// flush — a row this increment kills is a row no later one revives, so a
+    /// reading here would be a reading per flush of an answer that does not
+    /// change.
     fn flush(&mut self) -> Result<(), JobFailure> {
-        if !self.changes.is_empty() {
+        let findings = self.recordable()?;
+        if self.changes.is_empty() && findings.is_empty() {
+            return Ok(());
+        }
+        let applied = !self.changes.is_empty();
+        if applied {
             self.account.vacated.absorb(&self.changes);
-            // The outcome is the store's account of what this changeset did, and
-            // it is recorded rather than dropped: the job that applied it is the
-            // only place the tallies are ever visible, since a changeset that
-            // landed leaves the same rows behind however many entries it held.
-            let outcome = self
-                .store
-                .begin_request()
-                .apply_increment(IncrementProvenance::Derived, self.changes.drain(..))
-                .map_err(store_effect)?;
+        }
+        let outcome = self
+            .store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                self.changes.drain(..),
+                &findings,
+            )
+            .map_err(store_effect)?;
+        // The outcome is the store's account of what this changeset did, and it
+        // is recorded rather than dropped: the job that applied it is the only
+        // place the tallies are ever visible, since a changeset that landed
+        // leaves the same rows behind however many entries it held. A flush
+        // carrying findings alone applied no changeset and counts none.
+        if applied {
             count_changeset(&outcome);
         }
-        self.record_findings()
+        Ok(())
     }
 
-    /// Record every finding waiting in this scope, emptying the queue.
+    /// Every finding waiting in this scope that the act about to run records,
+    /// each with the maintenance recording it performs, emptying the queue.
     ///
-    /// The revisit calls this whenever it fills the bound as well as at its own
-    /// end, which is what keeps a queue filled by a reading of the vault inside
-    /// the bound the changeset beside it holds to.
-    fn record_findings(&mut self) -> Result<(), JobFailure> {
-        for Queued { finding, cause } in self.queued.drain(..) {
-            let mut request = self.store.begin_request();
-            // A **place-scoped** finding says no document is derived at its
-            // subject, so a document row standing there contradicts it and
-            // withholds it: the place belongs to the document occupying it, and
-            // a finding filed over that document would call one that just
-            // derived unreadable.
-            //
-            // A **document-scoped** finding is about the document derived at
-            // its subject, so the row standing there is what it describes.
-            // Withholding it would suppress every finding of the kind, since a
-            // row is what the act that derives one always writes.
-            if cause.kind().scope() == FindingScope::Place
-                && request
-                    .stored_document(&finding.path)
-                    .map_err(store_effect)?
-                    .is_some()
-            {
-                continue;
+    /// **Withholding is decided here rather than in the store**, because the
+    /// question is about the vault this scope is deriving and the store answers
+    /// only about rows. A **place-scoped** finding says no document is derived
+    /// at its subject, so a document row standing there contradicts it and
+    /// withholds it: the place belongs to the document occupying it, and a
+    /// finding filed over that document would call one that just derived
+    /// unreadable. Whether a row will stand once this act lands is read off the
+    /// changeset where the changeset names the path — the last entry for a path
+    /// decides, exactly as the increment applies them — and off the store
+    /// otherwise, which costs one indexed lookup per place-scoped finding just
+    /// as reading it after the commit did.
+    ///
+    /// A **document-scoped** finding is about the document derived at its
+    /// subject, so the row standing there is what it describes. Withholding it
+    /// would suppress every finding of the kind, since a row is what the act
+    /// that derives one always writes.
+    fn recordable(&mut self) -> Result<Vec<DerivedFinding<'static>>, JobFailure> {
+        if self.queued.is_empty() {
+            return Ok(Vec::new());
+        }
+        let written = rows_the_changeset_leaves(&self.changes);
+        let mut recordable = Vec::with_capacity(self.queued.len());
+        for Queued { finding, cause } in std::mem::take(&mut self.queued) {
+            if cause.kind().scope() == FindingScope::Place {
+                let stands = match written.get(&finding.path) {
+                    Some(alive) => *alive,
+                    None => self
+                        .store
+                        .begin_request()
+                        .stored_document(&finding.path)
+                        .map_err(store_effect)?
+                        .is_some(),
+                };
+                if stands {
+                    continue;
+                }
             }
             // The first finding this scope **records** at a subject on one side
             // of the split replaces what that side re-derives there, which is
@@ -2657,22 +2703,23 @@ impl<'s> Pending<'s> {
             //
             // A **document-scoped** finding takes no turn either, and needs
             // none: it is queued by the act that pushed the row at its subject,
-            // and the increment ahead of this loop ended every finding standing
+            // and that act's own subject discard — which runs inside the
+            // transaction, ahead of these writes — ended every finding standing
             // at each path it wrote a row to. There is nothing at the subject
             // for a discard to reach, and nothing this scope can record there
-            // twice — one row is derived per path per flush, and it concludes
+            // twice: one row is derived per path per flush, and it concludes
             // the block's readability once.
-            if cause.kind().scope() == FindingScope::Place {
-                let decided = cause.decided();
-                if self.replaced.insert((finding.path.clone(), decided)) {
-                    request
-                        .discard_findings_about(&finding.path, decided.rederives())
-                        .map_err(store_effect)?;
-                }
-            }
-            request.record_finding(&finding).map_err(store_effect)?;
+            let replaces = (cause.kind().scope() == FindingScope::Place
+                && self
+                    .replaced
+                    .insert((finding.path.clone(), cause.decided())))
+            .then(|| cause.decided().rederives());
+            recordable.push(DerivedFinding {
+                facts: finding,
+                replaces,
+            });
         }
-        Ok(())
+        Ok(recordable)
     }
 
     /// Read the roots this job's deaths freed and quarantine every path beneath
@@ -2738,7 +2785,7 @@ impl<'s> Pending<'s> {
                 // read from bytes this reading never opens, so it stands.
                 self.quarantine(&path, quarantine);
                 if self.is_full() {
-                    self.record_findings()?;
+                    self.flush()?;
                 }
             }
         }
@@ -7928,13 +7975,12 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// **A flush torn between its increment and its recording converges.** The
-    /// row landed and the finding beside it did not, which is the state a
-    /// process killed in that window leaves. The row itself says its block was
-    /// read by nothing, so the next heal reads the document again and states the
-    /// cause again — no edit to the file is needed to reach it.
+    /// **A degraded row whose own finding is not beside it is re-derived.** The
+    /// row says its block was read by nothing, so the next heal reads the
+    /// document again and states the cause again — no edit to the file is
+    /// needed to reach it.
     #[test]
-    fn a_heal_re_files_the_finding_a_torn_flush_never_recorded() {
+    fn a_heal_re_files_the_finding_a_degraded_row_stands_without() {
         let f = Fixture::new("unread-block-torn-flush");
         fs::write(f.vault().join("note.md"), "---\ntitle: : :\n---\n# body\n").unwrap();
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
@@ -7943,8 +7989,8 @@ mod tests {
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(findings_at(&mut attachment.store, "note.md").len(), 1);
 
-        // What the tear leaves: the increment's own subject discard ran and the
-        // recording after it did not.
+        // The state the check exists to converge: the row standing with nothing
+        // beside it saying what its own defect is.
         attachment
             .store
             .begin_request()
@@ -7967,6 +8013,67 @@ mod tests {
         assert_eq!(
             stored_paths(&mut attachment.store),
             ["note.md", "steady.md"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **The pair check asks about the finding the row's own defect implies.**
+    /// A document whose frontmatter does not read and which carries a tag the
+    /// vault does not declare stands under two document-scoped findings at one
+    /// path. Take the block's finding away and leave the tag's, and the row is
+    /// still a degraded row with nothing saying its block was unread — so the
+    /// heal reads it again. A check that asked whether *any* document-scoped
+    /// finding stands would read the surviving tag finding as the block's and
+    /// leave the vault under-reporting for good.
+    #[test]
+    fn a_surviving_finding_of_another_kind_does_not_stand_in_for_the_blocks_own() {
+        let f = Fixture::new("unread-block-co-occurrence");
+        fs::write(f.vault().join(".norn/schema.yaml"), REPORTING_SCHEMA).unwrap();
+        fs::write(
+            f.vault().join("note.md"),
+            "---\ntitle: : :\n---\n# body\n#draft\n",
+        )
+        .unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        let both = findings_at(&mut attachment.store, "note.md");
+        let kinds: Vec<&str> = both.iter().map(|finding| finding.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["document/frontmatter-unreadable", "document/undeclared-tag"],
+            "the two document-scoped kinds do not co-occur at one path, so this case proves \
+             nothing"
+        );
+
+        // Only the block's own finding goes. The tag finding stands, and it is
+        // about something else entirely.
+        attachment
+            .store
+            .begin_request()
+            .discard_findings_about(
+                &DocumentPath::new("note.md").unwrap(),
+                norn_store::DiscardScope::Kinds(&[FindingKind::FrontmatterUnreadable]),
+            )
+            .unwrap();
+        assert_eq!(
+            findings_at(&mut attachment.store, "note.md").len(),
+            1,
+            "the discard took more than the block's own kind"
+        );
+        ops.detach(&name, attachment);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let restored = findings_at(&mut attachment.store, "note.md");
+        let recovered: Vec<&str> = restored
+            .iter()
+            .map(|finding| finding.kind.as_str())
+            .collect();
+        assert_eq!(
+            recovered,
+            vec!["document/frontmatter-unreadable", "document/undeclared-tag"],
+            "a finding of another kind stood in for the one the row's defect implies"
         );
         ops.detach(&name, attachment);
     }

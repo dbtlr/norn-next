@@ -134,7 +134,7 @@ fn tear_increment() -> ! {
     });
     let _ = store
         .begin_request()
-        .apply_increment(IncrementProvenance::Derived, changes);
+        .apply_increment(IncrementProvenance::Derived, changes, &[]);
     panic!("induced abort did not fire")
 }
 

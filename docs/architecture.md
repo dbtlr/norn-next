@@ -1478,9 +1478,16 @@ standing pin was taken at owes its judgment again**, so a document whose bytes h
 moved since a schema edit is derived under the schema standing now. The walk pays that only
 where the schema states something a document can be judged against — a schema that declares
 nothing discards nothing it could record again, so a pin under one re-derives no row. Beside
-that, a **document-scoped** finding that left the table between an increment and the
-recording after it is reached because the row records its own defect and the walk restores
-the missing finding.
+that, a row whose own defect implies a **document-scoped** finding that is not standing
+beside it is read again: the row records the defect, the walk asks whether a finding of the
+kinds that defect implies stands, and restores it where none does. A finding of another kind
+at the same path is not that finding, and does not stand in for it.
+
+**A changeset and the findings its act derived are one transaction.** The act that writes a
+document's row is the act that concluded what is wrong with it, so the two commit together
+and a killed process loses neither: there is no state in which a row says a document is
+degraded and nothing says how. A producer whose act writes no document row records through
+the store's separate finding door.
 
 The **`#tag` facet** is the first derived state keyed that way. Its declaration under [ADR
 0021](decisions/0021-derived-indexes-split-into-two-lanes.md): its inputs are a document's

@@ -437,13 +437,14 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
-        id: "induced-tear-between-a-flush-and-its-findings",
+        id: "induced-flush-commits-its-findings-with-its-changeset",
         suite: Suite::InducedFailure,
         lane: Lane::Any,
-        states: "a tear between an increment and the findings recorded after it is healed by the \
-                 rows' own state, with no edit to either file",
+        states: "a process that dies the instant a changeset is at rest has lost no finding: the \
+                 rows and what is wrong with the documents they are about commit in one \
+                 transaction, and the heal after it writes nothing",
         carrier: "crates/norn-host/tests/lockdown.rs::\
-                  a_tear_between_a_flush_and_its_findings_is_healed_by_the_rows_themselves",
+                  a_flush_commits_its_findings_with_its_changeset",
         feature: Some(INDUCED_FAILURE),
     },
     Case {

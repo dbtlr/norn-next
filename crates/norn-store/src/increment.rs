@@ -12,11 +12,11 @@ use norn_db::rusqlite::{CachedStatement, OptionalExtension, Transaction, params}
 
 use crate::counters::{Counter, DerivationCounters};
 use crate::error::{self, StoreError};
-use crate::facts::{DocumentFacts, Invalidation, Provenance};
+use crate::facts::{DocumentFacts, FindingFacts, Invalidation, Provenance};
 use crate::hash;
 use crate::json;
 use crate::path::{ClassKey, DocumentPath};
-use crate::request;
+use crate::request::{self, DiscardScope};
 use crate::store::Store;
 
 /// One entry in a changeset.
@@ -67,6 +67,29 @@ pub enum Change {
         path: DocumentPath,
         provenance: Provenance,
     },
+}
+
+/// One finding a changeset's own act derived, recorded in the changeset's
+/// transaction.
+///
+/// **A finding and the rows it is about land together or not at all.** The act
+/// that derives a document concludes both — the facts, and what is wrong with
+/// them — and a finding recorded in a second transaction is one a process
+/// killed between the two loses with nothing at rest saying it was ever
+/// concluded. Handing them over together is what makes the pair one act.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DerivedFinding<'a> {
+    /// The finding itself.
+    pub facts: FindingFacts,
+    /// What recording this finding replaces at its subject, discarded
+    /// immediately before it is written, and `None` where it replaces nothing.
+    ///
+    /// The changeset's own subject discard already ends every finding standing
+    /// at a path it writes a row to, so a finding about a path the changeset
+    /// names needs none. What names a scope here is a producer filing at a
+    /// subject the changeset does not name — a place holding no derivable
+    /// document — where discard-then-record has no other door.
+    pub replaces: Option<DiscardScope<'a>>,
 }
 
 /// Where a changeset's post-state came from.
@@ -129,7 +152,8 @@ pub struct IncrementOutcome {
     pub invalidated: Invalidation,
 }
 
-/// Apply one changeset and report what it did.
+/// Apply one changeset with the findings its act derived, and report what it
+/// did.
 ///
 /// The transaction is taken `IMMEDIATE`, so the write lock is held from the
 /// first statement: a deferred transaction that upgrades halfway through can
@@ -138,12 +162,15 @@ pub(crate) fn apply(
     store: &mut Store,
     counters: &mut DerivationCounters,
     changes: impl IntoIterator<Item = Change>,
+    findings: &[DerivedFinding<'_>],
 ) -> Result<IncrementOutcome, StoreError> {
-    // The first entry is what decides whether there is an act at all, so it is
-    // taken before anything is opened: an empty changeset writes nothing, takes
-    // no generation and holds no lock.
+    // The first entry is what decides whether the changeset half is an act at
+    // all, so it is taken before anything is opened: an empty changeset writes
+    // no document row and takes no generation. An act carrying findings and no
+    // entries still opens the transaction, because the findings are writes.
     let mut entries = changes.into_iter();
-    let Some(first) = entries.next() else {
+    let first = entries.next();
+    if first.is_none() && findings.is_empty() {
         return Ok(IncrementOutcome {
             generation: None,
             documents_upserted: 0,
@@ -152,12 +179,16 @@ pub(crate) fn apply(
             affected_classes: BTreeSet::new(),
             invalidated: Invalidation::default(),
         });
-    };
+    }
+    // Every bound is read before the transaction, so a refused finding costs no
+    // lock and leaves nothing half applied.
+    for finding in findings {
+        request::check_finding_bounds(&finding.facts)?;
+    }
 
-    // The boundary between two chunks: everything before this changeset has
-    // committed and recorded its findings, and this one has taken no lock and
-    // opened no transaction. A build without the `induced-failure` feature
-    // carries no check here.
+    // The boundary between two acts: everything before this one has committed
+    // whole, and this one has taken no lock and opened no transaction. A build
+    // without the `induced-failure` feature carries no check here.
     #[cfg(feature = "induced-failure")]
     crate::faults::abort_if_the_chunk_boundary_is_torn();
 
@@ -167,10 +198,12 @@ pub(crate) fn apply(
     let transaction = store
         .database
         .immediate_transaction("opening the increment transaction")?;
-    let generation = norn_db::meta::next_generation(&transaction)?;
 
     let mut tally = Tally::default();
-    {
+    let mut generation = None;
+    if let Some(first) = first {
+        let stamp = norn_db::meta::next_generation(&transaction)?;
+        generation = Some(stamp);
         let mut statements = Statements::prepare(&transaction)?;
         for (index, change) in std::iter::once(first).chain(entries).enumerate() {
             let subject = subject(&change);
@@ -180,13 +213,13 @@ pub(crate) fn apply(
             // them.
             let applied = match &change {
                 Change::Upsert(facts) => {
-                    upsert(&mut statements, generation, recorded_at, facts, &mut tally)
+                    upsert(&mut statements, stamp, recorded_at, facts, &mut tally)
                 }
                 // The death's own provenance, which is a different thing from
                 // the changeset's mark this function was called with.
                 Change::Death { path, provenance } => record_death(
                     &mut statements,
-                    generation,
+                    stamp,
                     recorded_at,
                     path,
                     *provenance,
@@ -208,14 +241,25 @@ pub(crate) fn apply(
         tally.findings_discarded += discarded;
     }
 
+    // The findings the same act derived, after the discards above so that a
+    // finding this act still concludes is not taken by them. Each one that
+    // names a scope replaces that scope at its subject first, which is
+    // discard-then-record for a subject the changeset does not name.
+    for DerivedFinding { facts, replaces } in findings {
+        if let Some(scope) = replaces {
+            tally.findings_discarded +=
+                request::discard_about_in(&transaction, &facts.path, *scope)?;
+        }
+        request::write_finding(&transaction, facts)?;
+    }
+
     transaction
         .commit()
         .map_err(|error| error::sql("committing an increment", error))?;
 
-    // The changeset is at rest and whatever the caller records beside it is
-    // not. A flush torn here leaves the increment landed with no finding
-    // stating why, which is the state the rows themselves demand their own
-    // re-derivation from.
+    // The act is at rest, findings included. A process that ends here has lost
+    // nothing: what the transaction carried landed whole, and what it did not
+    // carry was never begun.
     #[cfg(feature = "induced-failure")]
     crate::faults::note_the_changeset_committed();
 
@@ -231,9 +275,10 @@ pub(crate) fn apply(
     counters.add(Counter::TagRowsWritten, tally.tag_rows);
     counters.add(Counter::FrontmatterProjections, tally.projections);
     counters.add(Counter::FindingsDiscarded, tally.findings_discarded);
+    counters.add(Counter::FindingsWritten, findings.len() as u64);
 
     Ok(IncrementOutcome {
-        generation: Some(generation),
+        generation,
         documents_upserted: tally.documents_upserted,
         documents_deleted: tally.documents_deleted,
         tombstones_recorded: tally.tombstones_recorded,

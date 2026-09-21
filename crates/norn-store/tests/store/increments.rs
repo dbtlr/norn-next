@@ -502,6 +502,7 @@ fn one_changeset_stamps_one_generation_across_every_row_it_wrote() {
                 upsert("three.md", "hash-1", "three\n"),
                 death("gone.md", Provenance::WatcherRemoval),
             ],
+            &[],
         )
         .expect("applying a changeset");
     let stamped = outcome
@@ -534,6 +535,7 @@ fn one_changeset_stamps_one_generation_across_every_row_it_wrote() {
         .apply_increment(
             IncrementProvenance::Derived,
             [upsert("four.md", "hash-1", "four\n")],
+            &[],
         )
         .expect("applying a changeset");
     assert_eq!(next.generation, Some(stamped + 1));
@@ -553,11 +555,12 @@ fn an_empty_changeset_writes_nothing_and_takes_no_generation() {
         .apply_increment(
             IncrementProvenance::Derived,
             [upsert("one.md", "hash-1", "one\n")],
+            &[],
         )
         .expect("applying a changeset");
 
     let empty = request
-        .apply_increment(IncrementProvenance::Derived, [])
+        .apply_increment(IncrementProvenance::Derived, [], &[])
         .expect("applying an empty changeset");
     assert_eq!(empty.generation, None);
     assert_eq!(empty.documents_upserted, 0);
@@ -572,6 +575,7 @@ fn an_empty_changeset_writes_nothing_and_takes_no_generation() {
         .apply_increment(
             IncrementProvenance::Derived,
             [upsert("two.md", "hash-1", "two\n")],
+            &[],
         )
         .expect("applying a changeset");
     assert_eq!(
@@ -608,6 +612,7 @@ fn the_last_entry_for_a_path_is_the_one_that_stands() {
                 death("revived.md", Provenance::HealPrune),
                 upsert("revived.md", "hash-1", "a body\n"),
             ],
+            &[],
         )
         .expect("applying a changeset");
 
@@ -684,6 +689,7 @@ fn a_path_named_three_times_ends_where_its_last_entry_left_it() {
                 death("twice/dead.md", Provenance::HealPrune),
                 death("twice/dead.md", Provenance::PlanDelete),
             ],
+            &[],
         )
         .expect("applying a changeset");
 
@@ -751,6 +757,7 @@ fn a_re_death_within_one_changeset_keeps_the_hash_already_recorded() {
                 // reported it gone: nothing left to hash.
                 death("glossary.md", Provenance::HealPrune),
             ],
+            &[],
         )
         .expect("applying a changeset");
     assert_eq!(outcome.documents_deleted, 1);
@@ -790,6 +797,7 @@ fn deriving_a_path_clears_its_own_tombstone_and_no_other() {
                 .iter()
                 .chain(standing.iter())
                 .map(|at| death(at, Provenance::HealPrune)),
+            &[],
         )
         .expect("recording four deaths");
 
@@ -797,6 +805,7 @@ fn deriving_a_path_clears_its_own_tombstone_and_no_other() {
         .apply_increment(
             IncrementProvenance::Derived,
             [upsert("docs/a.md", "hash-1", "a body\n")],
+            &[],
         )
         .expect("deriving one of the dead paths");
 
@@ -869,6 +878,7 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
         .apply_increment(
             IncrementProvenance::Derived,
             [upsert("docs/norn/glossary.md", "hash-2", "another body\n")],
+            &[],
         )
         .expect("applying a changeset");
 
@@ -896,6 +906,7 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
         .apply_increment(
             IncrementProvenance::Derived,
             [death("archive/notes.md", Provenance::HealPrune)],
+            &[],
         )
         .expect("applying a changeset");
     assert_eq!(died.affected_classes, classes(&["notes/"]));
@@ -917,6 +928,7 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
         .apply_increment(
             IncrementProvenance::Derived,
             [upsert("docs/index.md", "hash-2", "another body\n")],
+            &[],
         )
         .expect("applying a changeset");
     assert_eq!(subject.affected_classes, classes(&["index/"]));
@@ -993,6 +1005,7 @@ fn a_changeset_discards_the_findings_recorded_about_every_path_it_names() {
                 upsert("re/derived.md", "hash-2", "another body\n"),
                 death("about/to/die.md", Provenance::PlanDelete),
             ],
+            &[],
         )
         .expect("applying a changeset");
 
@@ -1065,6 +1078,7 @@ fn a_finding_stands_beside_the_document_row_at_its_subject() {
         .apply_increment(
             IncrementProvenance::Derived,
             [upsert("note.md", "hash-2", "another body\n")],
+            &[],
         )
         .expect("applying a changeset");
     assert_eq!(outcome.invalidated.findings_discarded, 1);
@@ -1113,6 +1127,7 @@ fn a_finding_both_axes_reach_is_counted_once() {
         .apply_increment(
             IncrementProvenance::Derived,
             [upsert("docs/glossary.md", "hash-2", "another body\n")],
+            &[],
         )
         .expect("applying a changeset");
     assert_eq!(outcome.affected_classes, classes(&["glossary/"]));
@@ -1152,6 +1167,7 @@ fn a_changeset_counts_a_finding_in_two_of_its_classes_once() {
                 upsert("archive/notes.tar.gz", "hash-1", "a body\n"),
                 upsert("notes.md", "hash-1", "a body\n"),
             ],
+            &[],
         )
         .expect("applying a changeset");
 
@@ -1191,6 +1207,7 @@ fn two_paths_in_one_class_name_that_class_once() {
                 upsert("two/glossary.md", "hash-1", "a body\n"),
                 death("three/glossary.md", Provenance::HealPrune),
             ],
+            &[],
         )
         .expect("applying a changeset");
     assert_eq!(outcome.affected_classes, classes(&["glossary/"]));
@@ -1219,6 +1236,7 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
                     Change::Upsert(document_with_every_fact("docs/index.md", "hash-1")),
                     death("gone.md", Provenance::PlanDelete),
                 ],
+                &[],
             )
             .expect("applying a changeset");
         let outcome = request
@@ -1228,6 +1246,7 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
                     "docs/norn/glossary.md",
                     "hash-2",
                 ))],
+                &[],
             )
             .expect("re-deriving a document");
         assert_eq!(outcome.documents_upserted, 1);
@@ -1311,6 +1330,7 @@ fn a_changeset_is_applied_from_a_generator_that_materializes_nothing() {
                     "a body\n",
                 ))
             }),
+            &[],
         )
         .expect("applying a changeset out of a generator");
 
@@ -1383,6 +1403,7 @@ fn a_refused_changeset_rolls_back_the_entries_that_ran_before_it() {
                 Change::Upsert(refused),
                 upsert("notes/four.md", "hash-1", "never reached\n"),
             ],
+            &[],
         )
         .expect_err("a changeset carrying an entry that does not add up");
 
@@ -1463,6 +1484,7 @@ fn a_refused_changeset_rolls_back_the_entries_that_ran_before_it() {
         .apply_increment(
             IncrementProvenance::Derived,
             [upsert("notes/five.md", "hash-1", "a body\n")],
+            &[],
         )
         .expect("applying a changeset");
     assert_eq!(
@@ -1662,6 +1684,7 @@ fn tear_a_changeset(database: &Path) -> ! {
             upsert("notes/three.md", "hash-1", &torn_body()),
             upsert("notes/four.md", "hash-1", &torn_body()),
         ],
+        &[],
     );
     panic!("the changeset committed, so the arrangement that arms the abort did not fire");
 }

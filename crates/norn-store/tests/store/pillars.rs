@@ -1409,6 +1409,7 @@ fn a_feed_drained_a_page_at_a_time_reaches_every_row_in_generation_order() {
                 path: path(at),
                 provenance: Provenance::HealPrune,
             }),
+            &[],
         )
         .expect("recording two deaths in one changeset")
         .generation
@@ -1508,6 +1509,7 @@ fn a_path_killed_and_rewritten_in_one_changeset_stands_only_in_the_document_feed
                 },
                 norn_store::Change::Upsert(document(at.as_str(), "hash-2", "another body\n")),
             ],
+            &[],
         )
         .expect("killing and rewriting one path in one changeset");
 

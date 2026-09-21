@@ -663,36 +663,34 @@ fn a_tear_at_a_chunk_boundary_leaves_every_committed_chunk_whole() {
 }
 
 // ---------------------------------------------------------------------------
-// Rung 2, torn: between a flush's increment and its findings
+// Rung 2: a flush commits its findings with its changeset
 // ---------------------------------------------------------------------------
 
-/// **A tear between a flush's increment and its findings is healed by the rows
-/// themselves.**
+/// **One flush is one act: the changeset and the findings that act derived
+/// commit in one transaction.**
 ///
-/// One flush is a changeset plus the findings recorded after it, each in its
-/// own transaction. A process that dies between the two leaves the increment
-/// landed with nothing beside it saying why — and no pending-work table stands
-/// beside the store, because what the tear leaves is required to demand its own
-/// re-derivation.
+/// The process is killed the instant a changeset is at rest, which is where a
+/// second transaction for the findings would begin. Nothing is lost there: the
+/// rows the act wrote and what is wrong with the documents they are about are
+/// both in the database, so there is no state in which a row says a document is
+/// degraded and nothing says how.
 ///
-/// Two signals do that, and this case is stated over both:
+/// Two subjects, because the two finding scopes reach the store by different
+/// routes and a build that recorded either of them outside the transaction
+/// would fail here:
 ///
-/// - **A markdown place holding no row is re-derived unconditionally.** The
-///   quarantined document's row died in the increment and a tombstone stands
-///   where it was; a tombstone is not a row, so the next walk opens the path
-///   again and files the finding the tear lost.
-/// - **A degraded row standing without its finding is re-derived on an
-///   unchanged content hash.** The degraded document's row asserts an absent
-///   frontmatter projection beside a nonzero count of frontmatter diagnostics,
-///   and nothing document-scoped stands at it, so the heal reads it again even
-///   though its bytes did not move.
+/// - **A place-scoped finding.** The quarantined document's row died in the
+///   changeset and a tombstone stands where it was, and the quarantine stating
+///   why is beside it.
+/// - **A document-scoped finding.** The degraded document's row asserts an
+///   absent frontmatter projection beside a nonzero count of frontmatter
+///   diagnostics, and the finding naming the block nothing read is beside it.
 ///
-/// **No file is edited between the tear and the recovery.** That is the whole
-/// claim: the pair converges from what is at rest in the rows, and a heal that
-/// needed a filesystem event to notice would leave the vault under-reporting
-/// until one arrived.
+/// **No file is edited between the kill and the heal after it**, and that heal
+/// writes nothing: what a converged pair leaves over is no work at all, where a
+/// torn one would leave the degraded document to be read again.
 #[test]
-fn a_tear_between_a_flush_and_its_findings_is_healed_by_the_rows_themselves() {
+fn a_flush_commits_its_findings_with_its_changeset() {
     let _beside = beside_the_arms();
     let vault = Vault::new("findings-tear");
     vault.write("steady.md", &readable(0));
@@ -708,17 +706,17 @@ fn a_tear_between_a_flush_and_its_findings_is_healed_by_the_rows_themselves() {
     assert!(
         findings_at(&mut store, "quarantined.md").is_empty()
             && findings_at(&mut store, "degraded.md").is_empty(),
-        "the vault opened with findings, so this case cannot tell the tear's absence from them"
+        "the vault opened with findings, so this case cannot tell the act's own from them"
     );
     drop(store);
 
-    // The two documents stop reading, each in the way its own signal is about.
-    // Two of the vault's three documents change, and the child heals them under
-    // `ProductionPolicy::new(8, 2)` — a chunk of 2 — so the changed set is
-    // exactly one chunk: the first changeset to commit carries both of them,
-    // which is the changeset `after-commit` tears the findings away from.
-    // `steady.md` never enters the increment, so nothing about the tear depends
-    // on where it would fall in the walk's ordering.
+    // The two documents stop reading, each in the way its own finding scope is
+    // about. Two of the vault's three documents change, and the child heals
+    // them under `ProductionPolicy::new(8, 2)` — a chunk of 2 — so the changed
+    // set is exactly one chunk: the first changeset to commit carries both of
+    // them, which is the act `after-commit` stops the process at. `steady.md`
+    // never enters the increment, so nothing here depends on where it would
+    // fall in the walk's ordering.
     vault.write_bytes("quarantined.md", UNDECODABLE);
     vault.write("degraded.md", "---\ntitle: : :\n---\n\n# Body\n");
 
@@ -726,11 +724,11 @@ fn a_tear_between_a_flush_and_its_findings_is_healed_by_the_rows_themselves() {
     assert_eq!(
         torn.status,
         RunStatus::Signaled(SIGABRT),
-        "the flush was not torn between its increment and its findings\n{}",
+        "the process did not end at the changeset it committed\n{}",
         torn.stderr
     );
     torn.attestation.assert_reached(
-        "a tear between a flush's increment and its findings",
+        "a process ended the instant a flush's act was at rest",
         &[
             (SEAM, INCREMENT_SEAM),
             ("boundary", "after-commit"),
@@ -738,9 +736,9 @@ fn a_tear_between_a_flush_and_its_findings_is_healed_by_the_rows_themselves() {
         ],
     );
     torn.attestation
-        .assert_count("a tear between a flush's increment and its findings", 1);
+        .assert_count("a process ended the instant a flush's act was at rest", 1);
 
-    // What the tear left: the increment landed, and nothing beside it.
+    // What the act left: the rows, and the findings about them, together.
     let mut store = vault.store();
     assert!(
         store
@@ -748,7 +746,7 @@ fn a_tear_between_a_flush_and_its_findings_is_healed_by_the_rows_themselves() {
             .stored_document(&document_path("quarantined.md"))
             .expect("reading the quarantined path")
             .is_none(),
-        "the quarantined path kept a row, so the tear did not reach the increment"
+        "the quarantined path kept a row, so the kill did not reach the increment"
     );
     assert!(
         tombstones(&mut store)
@@ -757,9 +755,11 @@ fn a_tear_between_a_flush_and_its_findings_is_healed_by_the_rows_themselves() {
             .any(|tombstone| tombstone.path.as_str() == "quarantined.md"),
         "the increment recorded no death for the quarantined path"
     );
-    assert!(
-        findings_at(&mut store, "quarantined.md").is_empty(),
-        "the tear did not land between the increment and the recording"
+    let quarantine = findings_at(&mut store, "quarantined.md");
+    assert_eq!(
+        quarantine.len(),
+        1,
+        "the place-scoped finding did not commit with the changeset that killed the row"
     );
 
     let degraded = store
@@ -771,54 +771,53 @@ fn a_tear_between_a_flush_and_its_findings_is_healed_by_the_rows_themselves() {
         degraded.frontmatter.is_none() && degraded.frontmatter_diagnostic_count > 0,
         "the degraded row does not assert a block nothing read: {degraded:?}"
     );
-    assert!(
-        findings_at(&mut store, "degraded.md").is_empty(),
-        "the tear did not land between the increment and the recording"
+    let standing = findings_at(&mut store, "degraded.md");
+    assert_eq!(
+        standing.len(),
+        1,
+        "the document-scoped finding did not commit with the row it is about"
+    );
+    assert_eq!(
+        standing[0].kind, "document/frontmatter-unreadable",
+        "the finding beside the degraded row states a different cause"
     );
     let hash_before = degraded.content_hash.clone();
+    let generation_before = degraded.generation;
     drop(store);
 
-    // The next heal, with no edit to the vault at all. The two documents the
-    // tear left bare are the whole of its work, and only the degraded one has a
-    // row to write — the quarantined path yields no facts — where a derivation
-    // from zero over this tree writes that row and `steady.md` beside it.
+    // The next heal, with no edit to the vault at all. The act that landed
+    // converged both documents, so the work left over is none: the degraded
+    // row carries its own finding and its bytes did not move, and the
+    // quarantined path yields no facts to write — where a derivation from zero
+    // over this tree writes two rows and takes a changeset to do it.
     let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
     let healed = heal_and_read(&serving, vault.name());
     drop(serving);
-    assert_healed_only("a flush torn before its findings", healed, 1, 1);
+    assert_healed_only("a flush whose act committed whole", healed, 0, 0);
 
     let mut store = vault.store();
-    let refiled = findings_at(&mut store, "quarantined.md");
     assert_eq!(
-        refiled.len(),
+        findings_at(&mut store, "quarantined.md").len(),
         1,
-        "the walk did not re-derive a markdown place holding no row, so the finding the tear \
-         lost is still lost"
+        "the heal left the quarantined place reported twice, or not at all"
     );
     let restored = findings_at(&mut store, "degraded.md");
-    assert_eq!(
-        restored.len(),
-        1,
-        "a degraded row standing without its finding did not route a re-derivation, so the \
-         finding the tear lost is still lost"
-    );
-    assert_eq!(
-        restored[0].kind, "document/frontmatter-unreadable",
-        "the finding beside the degraded row states a different cause"
-    );
+    assert_eq!(restored.len(), 1, "{restored:?}");
+    assert_eq!(restored[0].kind, "document/frontmatter-unreadable");
     let degraded = store
         .begin_request()
         .stored_document(&document_path("degraded.md"))
         .expect("reading the degraded path")
         .expect("the degraded row");
+    assert_eq!(degraded.content_hash, hash_before);
     assert_eq!(
-        degraded.content_hash, hash_before,
-        "the recovery needed the document's bytes to move, which is the edit this case forbids"
+        degraded.generation, generation_before,
+        "the heal re-derived a document whose row and finding both stood"
     );
-    assert_operationally_valid(&mut store, "the store a findings tear was healed in");
+    assert_operationally_valid(&mut store, "the store a whole flush left");
     drop(store);
 
-    vault.assert_converged_from_zero("a flush torn before its findings");
+    vault.assert_converged_from_zero("a flush whose act committed whole");
 }
 
 /// Bytes no derivation reads facts out of, which is what quarantines a place.

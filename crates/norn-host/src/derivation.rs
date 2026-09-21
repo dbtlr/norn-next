@@ -477,6 +477,45 @@ const SPELLING_KINDS: [FindingKind; decided_count(Decided::BySpelling)] =
 const CONTENT_KINDS: [FindingKind; decided_count(Decided::ByBytes)] =
     decided_kinds(Decided::ByBytes);
 
+/// The kinds an unread frontmatter block is stated under, which is what a row
+/// asserting that defect implies stands beside it.
+///
+/// **This is what makes the pair check kind-precise.** A row carrying an absent
+/// frontmatter projection beside a nonzero frontmatter-diagnostic count owes a
+/// finding of one of these kinds and of no other: a document-scoped finding of
+/// some other kind — a facet breach, say — can stand at the same path about
+/// something else entirely, and reading its presence as the pair being whole
+/// would leave the block's own finding lost.
+pub(crate) const UNREAD_BLOCK_KINDS: [FindingKind; unread_block_count()] = unread_block_kinds();
+
+/// How many causes in [`CAUSES`] are an unread frontmatter block.
+const fn unread_block_count() -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < CAUSES.len() {
+        if matches!(CAUSES[index], Cause::UnreadBlock(_)) {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+/// [`CAUSES`]' unread-block members, read as the kinds they record under.
+const fn unread_block_kinds() -> [FindingKind; unread_block_count()] {
+    let mut kinds = [FindingKind::FrontmatterUnreadable; unread_block_count()];
+    let mut filled = 0;
+    let mut index = 0;
+    while index < CAUSES.len() {
+        if matches!(CAUSES[index], Cause::UnreadBlock(_)) {
+            kinds[filled] = CAUSES[index].kind();
+            filled += 1;
+        }
+        index += 1;
+    }
+    kinds
+}
+
 /// Every side a place is read on, which is what a prune asks its account for one
 /// at a time.
 ///

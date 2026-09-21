@@ -177,17 +177,17 @@ pub mod induced_failure {
         super::TEAR_CHANGESET_AFTER.set(Some(entries));
     }
 
-    /// Kill this process the moment `changesets` of them have committed, with
-    /// the findings recorded beside the last one still unwritten.
+    /// Kill this process the moment `changesets` of them have committed.
     ///
-    /// **One flush is a changeset plus the findings recorded after it, each in
-    /// its own transaction**, and this is the window between the two. What it
-    /// leaves is the increment landed with nothing beside it saying why — a
-    /// tombstone where a quarantined path had a row, a degraded row asserting a
-    /// frontmatter nothing read — which is the state the rows themselves are
-    /// required to demand their own re-derivation from.
+    /// **One flush is a changeset and the findings its act derived, in one
+    /// transaction**, so this arm stops at an act that is whole: the rows and
+    /// what is wrong with them are both at rest, and the work the process had
+    /// not reached was never begun. That is what it exists to hold — a build
+    /// that moved the findings back out of the changeset's transaction would
+    /// leave the increment landed with nothing beside it saying why, and this
+    /// arm is where that is caught.
     ///
-    /// Process-wide, because the flush this tears is a host worker's.
+    /// Process-wide, because the flush this stops is a host worker's.
     pub fn abort_after_committing_changesets(changesets: u64) {
         TEAR_AFTER_COMMIT.store(changesets, Ordering::SeqCst);
     }
@@ -197,7 +197,7 @@ pub mod induced_failure {
     ///
     /// **A heal-scale increment is chunked into separately atomic changesets**,
     /// and this is the boundary between two of them: the chunk before it
-    /// committed and recorded its findings, the chunk after it has not opened a
+    /// committed, findings included, and the chunk after it has not opened a
     /// transaction. What it leaves is every chunk that landed and no part of
     /// the one that had not begun — each generation whole, the vault's coverage
     /// short by whatever the walk had not reached.
@@ -379,8 +379,8 @@ pub(crate) fn abort_if_the_chunk_boundary_is_torn() {
     }
 }
 
-/// Count a changeset that committed, and end the process where the findings
-/// beside it are what an arrangement asked to lose.
+/// Count an act that committed, and end the process where an arrangement asked
+/// to stop the moment it was at rest.
 pub(crate) fn note_the_changeset_committed() {
     use std::sync::atomic::Ordering;
     let committed = CHANGESETS_COMMITTED.fetch_add(1, Ordering::SeqCst) + 1;
