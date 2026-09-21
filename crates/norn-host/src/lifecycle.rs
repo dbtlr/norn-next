@@ -13291,6 +13291,92 @@ mod tests {
         );
     }
 
+    /// The other half of the re-validation the wait pays for: the entry is
+    /// still serving, and the handle it serves reads from is no longer the one
+    /// the acquisition waited for. A rebuild that replaces an entry's coverage
+    /// mints a handle over the store that replaced the damaged one, so the
+    /// connection this acquisition waited for reads a file nothing links to;
+    /// establishing on it would answer from a database the entry has moved on
+    /// from. The acquisition refuses as reader-unavailable and gives that
+    /// connection back to the handle it took it from, which is what keeps a
+    /// retired handle from being left empty.
+    #[test]
+    fn a_read_that_waited_refuses_where_the_entrys_handle_was_replaced_under_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+
+        let first = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+        let waited_for = Arc::clone(
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .reader
+                .as_ref()
+                .expect("the entry holds the handle its reads run on"),
+        );
+
+        let refusal = thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                host.begin_read(&name)
+                    .expect_err("a read established on a handle the entry had replaced")
+            });
+            wait_until(
+                "the second read to reach the wait for the entry's connection",
+                lifecycle_wait_budget(),
+                || {
+                    if ops.readers.waiting.load(Ordering::SeqCst) >= 1 {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending("no read is waiting yet".to_string())
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+
+            // The entry lets its handle go and mints another over the coverage
+            // it holds, the way a rebuild that replaced the store does. It
+            // goes on serving throughout, so what refuses the waiting read is
+            // the handle rather than the entry's state.
+            {
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                state.close_reader();
+                assert!(
+                    state.remint_for_a_read(),
+                    "the entry minted no handle over the coverage it holds"
+                );
+            }
+            assert_eq!(host.state(&name), answered(TrustState::Ready));
+
+            drop(first);
+            waiting.join().expect("the waiting read finished")
+        });
+
+        let ReadRefusal::ReaderUnavailable(unavailable) = &refusal else {
+            panic!(
+                "the read that waited was refused as the entry rather than as the handle it waited for: {refusal:?}"
+            );
+        };
+        assert!(
+            unavailable.detail().contains("another handle"),
+            "the refusal names something other than the handle that moved: {unavailable}"
+        );
+        assert!(
+            waited_for.try_take().is_some(),
+            "the refused read kept the connection of the handle it waited for"
+        );
+        assert_eq!(
+            host.read_evidence().reads_served,
+            1,
+            "the read that waited and was refused was counted as served"
+        );
+    }
+
     /// Every read against one entry runs on that entry's one handle. A read in
     /// flight leaves the handle where the next read finds it, so what
     /// concurrent reads contend for is inside the handle rather than a slot

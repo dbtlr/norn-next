@@ -1131,6 +1131,40 @@ mod tests {
         );
     }
 
+    /// **An unwind between taking the connection and establishing gives the
+    /// connection back.** A turn is the connection out of the handle and not
+    /// yet inside a snapshot, so a panic there is the one moment the handle
+    /// could be left empty for good — and a handle left empty is an entry
+    /// every later read waits on a connection nothing holds for. The turn's
+    /// drop runs on the unwinding thread, which is what puts it back.
+    #[test]
+    fn a_turn_an_unwind_drops_gives_the_connection_back() {
+        let scratch = Scratch::new("norn-store-reader-unwind");
+        let store =
+            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        let reader = Arc::new(store.open_reader().expect("a live store mints a reader"));
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _turn = reader.try_take().expect("a free handle hands out its turn");
+            panic!("a read that took the connection and never established");
+        }));
+        assert!(
+            unwound.is_err(),
+            "the read that was to unwind holding the connection returned instead"
+        );
+
+        let snapshot = reader
+            .try_take()
+            .expect("the unwound turn kept the handle's connection")
+            .establish()
+            .expect("a snapshot");
+        assert_eq!(
+            snapshot.counters().snapshots_opened(),
+            1,
+            "the read after the unwind established no snapshot"
+        );
+    }
+
     /// One document written into the store, so a read has rows to answer from.
     fn write_one_document(store: &mut Store, at: &str, body: &str) {
         let facts = crate::facts::DocumentFacts::new(
