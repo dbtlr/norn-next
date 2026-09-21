@@ -530,6 +530,19 @@ impl<A> Coverage<A> {
         matches!(self.0, Custody::OnLeg(_))
     }
 
+    /// The coverage the entry itself holds, borrowed rather than taken.
+    ///
+    /// The reader mint is what reads it: a handle is minted from the store
+    /// inside the coverage, and minting takes nothing out of the entry's hand.
+    /// Coverage out with a leg is not borrowed here — it is that leg's until
+    /// it ends, and a mint over it would read a store on its way somewhere.
+    pub(super) fn held(&self) -> Option<&A> {
+        match &self.0 {
+            Custody::Parked(coverage) => Some(coverage),
+            _ => None,
+        }
+    }
+
     /// Take the coverage the entry holds, for the leg at this epoch. An entry
     /// holding none gives none, and coverage already out with a leg is taken by
     /// no other.

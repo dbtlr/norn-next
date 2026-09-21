@@ -92,7 +92,9 @@ fn a_read_over_an_entry_that_is_not_serving_refuses_with_its_published_demand() 
 /// **The read-concurrency instrument, over overlapping reads of one entry.**
 /// Each read runs exactly one statement while it holds the entry gate — the
 /// statement that establishes its snapshot — and the reads that queued behind
-/// the one handle the entry holds report the wait that cost them.
+/// the one connection the entry holds report the wait that cost them. Each
+/// waits once: the wait ends holding the connection, so the gate hold that
+/// establishes cannot contend again.
 #[test]
 fn overlapping_reads_run_one_statement_each_under_the_gate_and_attest_contention() {
     let (_sandbox, vault) = a_vault("host-reads-overlap");
@@ -107,8 +109,8 @@ fn overlapping_reads_run_one_statement_each_under_the_gate_and_attest_contention
                 let hold = host
                     .begin_read(vault.name())
                     .expect("an attached vault answers a read");
-                // The handle is held while the other reads ask for it, which
-                // is what makes the reads overlap rather than queue.
+                // The connection is held while the other reads ask for it,
+                // which is what makes the reads overlap rather than queue.
                 thread::sleep(Duration::from_millis(20));
                 drop(hold);
             });
@@ -125,12 +127,18 @@ fn overlapping_reads_run_one_statement_each_under_the_gate_and_attest_contention
         "an overlapping read ran something other than one statement under the gate"
     );
     assert_eq!(
-        overlapped.widest_statements_under_the_gate, 1,
+        host.read_evidence().widest_statements_under_the_gate,
+        1,
         "one read ran more than the establishing statement under the gate"
     );
     assert!(
         overlapped.reader_waits >= 1,
-        "four overlapping reads of one entry reported no wait for the one handle they share"
+        "four overlapping reads of one entry reported no wait for the one connection they share"
+    );
+    assert_eq!(
+        host.read_evidence().widest_reader_wait,
+        1,
+        "a read waited for the entry's connection more than once"
     );
     // **The control.** The same reads without the overlap wait for nothing:
     // a contention reading that stood whether or not the reads overlapped

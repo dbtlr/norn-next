@@ -15,13 +15,13 @@ mod registry;
 mod reload;
 mod semantic;
 
-pub use evidence::ReadReading;
 /// **The harness-reachable readers of a host's own account.** Every job writes
 /// the account whatever features are on; reading it is what this feature opens,
 /// beside [`ProductionEntryOps::account`], [`Host::classifications`] and
 /// [`Host::recovery_demands`].
 #[cfg(feature = "induced-failure")]
 pub use evidence::{EvidenceReading, JobEvidence};
+pub use evidence::{ReadReading, ReadsSince};
 /// **What is running against an entry**, read by the harness that has to know
 /// the host stopped working before it measures one at rest. Behind the same
 /// feature as the rest of [`Host`]'s harness-reachable readers.

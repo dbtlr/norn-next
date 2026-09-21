@@ -396,12 +396,11 @@ mod tests {
 /// derived, and a read derives nothing by construction. What this counts is
 /// the read path's own shape: how many reads were served, what each ran while
 /// it held the entry gate, and what concurrent reads of one entry paid for
-/// sharing the one handle that entry holds.
+/// sharing the one connection that entry holds.
 ///
-/// Every field is a running total, read by subtracting two readings — with one
-/// exception stated by its own name: the widest gate-held statement count and
-/// the widest wait a single read paid are maxima, because a per-read bar is a
-/// statement about the worst read rather than about the mean of a run.
+/// Every field is a running total for the host's whole life. Two of them are
+/// maxima rather than sums, which is why a window over this account carries
+/// neither: see [`ReadsSince`].
 #[derive(Debug, Default)]
 pub(crate) struct ReadEvidence {
     reads_served: AtomicU64,
@@ -411,7 +410,7 @@ pub(crate) struct ReadEvidence {
     widest_reader_wait: AtomicU64,
 }
 
-/// One reading of a host's read account.
+/// One reading of a host's read account, over the whole of its life.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReadReading {
     /// Reads that took a hold, over every entry.
@@ -424,27 +423,53 @@ pub struct ReadReading {
     /// The most statements any one read ran under the gate, which is the
     /// value a per-read bar is stated against.
     pub widest_statements_under_the_gate: u64,
-    /// Times a read waited for the one handle its entry holds. Nonzero is
-    /// reader contention, measured rather than assumed.
+    /// Reads that gave the entry gate back and waited for the one connection
+    /// their entry holds. Nonzero is reader contention, measured rather than
+    /// assumed.
+    ///
+    /// It is a wait for the reader's connection and not for a gate: no
+    /// acquisition waits for that connection while it holds the entry gate,
+    /// and nothing here counts a wait for the gate itself.
     pub reader_waits: u64,
-    /// The most waits any one read paid.
+    /// The most times any one read waited for its entry's connection.
+    ///
+    /// **One, or none.** An acquisition that finds the connection taken waits
+    /// for it once and holds it from there, so the hold that establishes
+    /// cannot contend again. A reading above one is a round this acquisition
+    /// does not have.
     pub widest_reader_wait: u64,
+}
+
+/// What happened between an earlier reading of a host's read account and a
+/// later one.
+///
+/// **A maximum is not a difference**, so a window carries none. The widest
+/// read of a window cannot be computed from two readings of a running maximum:
+/// the earlier reading may already hold the widest read the host ever made,
+/// and subtracting or carrying it forward would both report a number about
+/// another window. A bar on a maximum reads it off [`ReadReading`], whose
+/// window is the whole of the host's life.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReadsSince {
+    /// Reads that took a hold in this window, over every entry.
+    pub reads_served: u64,
+    /// Statements run against a database while the entry gate was held, in
+    /// this window.
+    pub statements_under_the_gate: u64,
+    /// Reads in this window that gave the entry gate back and waited for the
+    /// one connection their entry holds.
+    pub reader_waits: u64,
 }
 
 impl ReadReading {
     /// What happened between an earlier reading and this one.
-    ///
-    /// The cumulative fields subtract; the maxima do not — a widest read is
-    /// not a difference, so each is reported as it stands.
-    pub fn since(self, earlier: ReadReading) -> ReadReading {
-        ReadReading {
+    pub fn since(self, earlier: ReadReading) -> ReadsSince {
+        ReadsSince {
             reads_served: self.reads_served.saturating_sub(earlier.reads_served),
             statements_under_the_gate: self
                 .statements_under_the_gate
                 .saturating_sub(earlier.statements_under_the_gate),
-            widest_statements_under_the_gate: self.widest_statements_under_the_gate,
             reader_waits: self.reader_waits.saturating_sub(earlier.reader_waits),
-            widest_reader_wait: self.widest_reader_wait,
         }
     }
 }
@@ -462,16 +487,19 @@ impl ReadEvidence {
         }
     }
 
-    /// Record what one read's snapshot establishment ran and waited for.
-    pub(crate) fn count_read<S>(&self, established: &crate::Established<S>) {
+    /// Record what one read's snapshot establishment ran, and how many times
+    /// that read waited for its entry's connection on the way to it.
+    ///
+    /// The waits are the host's own count rather than a number the
+    /// establishment reports: the acquisition is what gave the entry gate back
+    /// and waited, and the establishment it eventually ran waited for nothing.
+    pub(crate) fn count_read<S>(&self, established: &crate::Established<S>, waits: u64) {
         self.reads_served.fetch_add(1, Ordering::Relaxed);
         self.statements_under_the_gate
             .fetch_add(established.statements, Ordering::Relaxed);
-        self.reader_waits
-            .fetch_add(established.waits, Ordering::Relaxed);
+        self.reader_waits.fetch_add(waits, Ordering::Relaxed);
         self.widest_statements_under_the_gate
             .fetch_max(established.statements, Ordering::Relaxed);
-        self.widest_reader_wait
-            .fetch_max(established.waits, Ordering::Relaxed);
+        self.widest_reader_wait.fetch_max(waits, Ordering::Relaxed);
     }
 }

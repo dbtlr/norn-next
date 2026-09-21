@@ -203,17 +203,26 @@ impl SnapshotSource for ProductionAttachment {
 
 impl ReadSource for norn_store::SnapshotReader {
     type Snapshot = norn_store::Snapshot;
+    type Turn = norn_store::ConnectionTurn;
+
+    fn try_take(self: &Arc<Self>) -> Option<Self::Turn> {
+        norn_store::SnapshotReader::try_take(self)
+    }
+
+    fn wait_for_the_connection(self: &Arc<Self>) -> Self::Turn {
+        norn_store::SnapshotReader::wait_for_the_connection(self)
+    }
 
     /// The store establishes the snapshot and reports what it cost: the
-    /// reading it was established at, the one statement that established it,
-    /// and the waits the one handle an entry shares cost this read.
-    fn establish(self: Arc<Self>) -> Result<Established<Self::Snapshot>, ReaderUnavailable> {
-        let snapshot = norn_store::SnapshotReader::establish(self)
+    /// reading it was established at, and the one statement that established
+    /// it.
+    fn establish(turn: Self::Turn) -> Result<Established<Self::Snapshot>, ReaderUnavailable> {
+        let snapshot = turn
+            .establish()
             .map_err(|error| ReaderUnavailable::new(error.to_string()))?;
         Ok(Established {
             reading: snapshot.reading().clone(),
             statements: snapshot.counters().statements_executed(),
-            waits: snapshot.waits(),
             snapshot,
         })
     }
