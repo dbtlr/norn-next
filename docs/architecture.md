@@ -1323,7 +1323,9 @@ reach the database independently of orchestration, on a read-only snapshot handl
 mints from the live `Store` — a second connection beside the writer, opened with the read-only
 flag, which is what refuses every write to the database it names and to anything attached to
 it, with `query_only` and a statement authorizer on top of it so the connection cannot relax
-its own settings — held in entry state beside the attachment, never inside it, so a read
+its own settings and cannot compose transaction control, which the authorizer admits only
+while the store itself opens or closes a snapshot — held in entry state beside the
+attachment, never inside it, so a read
 proceeds while a warm lifecycle job holds the store. The snapshot is established under the
 entry gate lock in the same critical section that reads trust — established by a read
 statement, since a bare deferred `BEGIN` takes no snapshot — so the trust label and the
@@ -1453,8 +1455,9 @@ request carries names the trust state and the store generation at that snapshot;
 rung reads its engine's sidecar instead and carries its own freshness in that same reading.
 The guarantee is one of transaction ownership: the reader is a second connection beside the
 writer, so no write consumes the snapshot a request read and no later write executes inside
-the request's snapshot transaction. A precondition a read observed is the applier's to check
-again at the write.
+the request's snapshot transaction; and the snapshot is ended by the handle that opened it,
+since a `COMMIT` or `ROLLBACK` composed over the connection is refused at preparation. A
+precondition a read observed is the applier's to check again at the write.
 The suffix-resolution ladder follows the same split. Targets resolve by **right-to-left,
 segment-aligned path suffix** — `glossary` matches any `**/glossary.md`; `norn/glossary`
 matches only `**/norn/glossary.md`; stem resolution is the one-segment case. This is *the*
