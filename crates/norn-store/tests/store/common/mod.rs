@@ -22,24 +22,6 @@ pub fn snapshot(counters: &DerivationCounters) -> CounterSnapshot {
     counters.readings().collect()
 }
 
-/// Everything back to what a store opened in an ordinary process meets.
-///
-/// **A case that arms an induced failure takes one of these first.** Every
-/// arrangement the seam offers outlives the act it was armed for where nothing
-/// consumes it — the busy one-shot until the next pinned scalar is read on its
-/// thread, the page cap for every connection the process opens after it — so a
-/// case that left without consuming one hands the next opener an arrangement
-/// it never asked for. A destructor is what puts them back, because an early
-/// return and a panic are both paths out that an explicit disarm at the end of
-/// a case is not on.
-pub struct Disarmed;
-
-impl Drop for Disarmed {
-    fn drop(&mut self) {
-        norn_store::induced_failure::disarm();
-    }
-}
-
 /// A store's database under a directory that lasts one test.
 ///
 /// The naming and the removal are [`norn_testkit::scratch::Scratch`]'s; what

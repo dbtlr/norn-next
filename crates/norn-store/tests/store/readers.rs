@@ -10,7 +10,21 @@
 use std::sync::Arc;
 use std::thread;
 
-use crate::common::{Disarmed, Scratch, document, write_document};
+use crate::common::{Scratch, document, write_document};
+
+/// The busy one-shot off this thread again, consumed or not.
+///
+/// **It resets that arm and nothing else.** The seam's broad `disarm` would
+/// also clear the process-wide arrangements beside it — the page cap among
+/// them — which no case here makes: a guard that resets more than its case
+/// arranged is a guard that can undo an arrangement it knows nothing about.
+struct BusyArmCleared;
+
+impl Drop for BusyArmCleared {
+    fn drop(&mut self) {
+        norn_store::induced_failure::clear_the_meta_read_arm();
+    }
+}
 
 /// The snapshot a case reads from: the handle's turn, taken where nothing
 /// holds it, and the snapshot established on it.
@@ -71,12 +85,13 @@ fn a_mint_reports_the_statements_it_ran_against_the_database() {
 /// rolled its transaction back rather than leaving one open.
 #[test]
 fn an_establishment_that_refuses_reports_what_it_ran_and_gives_the_connection_back() {
-    // The arm below is per-thread and one-shot, and the establishment it is
-    // armed for is what consumes it. The guard is what puts it back on every
-    // other path out of this case, an early return and a panic alike: the
-    // seam's contract is that an arm a case leaves standing must not fail
-    // whatever opens next on its thread.
-    let _disarmed = Disarmed;
+    // The arm below is per-thread and one-shot: it stands on this thread until
+    // a pinned-scalar read consumes it, and the seam's contract is that a case
+    // does not leave one standing for whatever reads next on that thread. The
+    // establishment is what consumes it on the path this case takes; the guard
+    // is what takes it back on the paths it does not — an early return above
+    // that establishment, and a panic.
+    let _cleared = BusyArmCleared;
     let scratch = Scratch::new("reader-refused-establishment");
     let mut store = scratch.open();
     write_one(&mut store, "notes/first.md");
