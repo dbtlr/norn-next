@@ -102,6 +102,11 @@ fn a_warm_request_over_an_attached_vault_finishes_at_zero() {
 /// yet is where a lazily-built index or a cache filled on demand would be paid
 /// for; the second is the steady state the claim is about, and the pair is what
 /// separates them.
+///
+/// **What this case does not do is execute its requests through the hold.** It
+/// takes a production hold and asserts the reading that hold carries; the
+/// counted passes run against the store this case opened beside it. The body
+/// below states why that is the shape available and what it costs the claim.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn warm_requests_under_a_live_attachment_finish_at_zero() {
@@ -120,13 +125,26 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     assert_the_attachment_derived_the_profile(&mut store, &profile);
     let subject = a_derived_document(&mut store);
 
-    // **The passes run under a production read hold**, which is the handle the
-    // entry minted and the snapshot a read is answered from. The hold is what
-    // makes the zeroes below readings of the production read path rather than
-    // of a store a case opened beside it: the reader is opened with the
-    // read-only flag, so nothing run on it can derive, and a store this case
-    // opens for itself is strictly more derivation-capable than the read path
-    // it stands for.
+    // **A production hold stands across the passes, and the passes do not run
+    // through it.** What the hold establishes is that this entry answers a
+    // read: it is minted only over a published `Ready`, it carries the
+    // snapshot a read is answered from, and the reading asserted below says
+    // that snapshot names the database this attachment derived. What it is not
+    // is the executor of the requests counted after it. Those run against the
+    // store this case opened, because a request is opened from `&mut Store`
+    // and a hold hands out a snapshot; the surface that executes a counted
+    // request through a hold belongs to the read builders, and the measured
+    // half of this bar lands with them.
+    //
+    // **So the zero below is structural rather than measured.** A derivation
+    // counter exists only inside a request, a request is opened from `&mut
+    // Store`, and no route from a hold reaches one — a read through a hold
+    // cannot move a counter because there is no counter it can reach. Past
+    // that, every counter's increment sits behind a write statement, and the
+    // read-only open flag, `query_only` and the statement authorizer each
+    // refuse those. This pass confirms the property over the store, which is
+    // the strictly more derivation-capable subject; it is confirmation and not
+    // the evidence the claim rests on.
     let hold = host
         .begin_read(vault.name())
         .expect("a live attachment answers a read");
