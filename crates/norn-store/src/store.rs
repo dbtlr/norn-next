@@ -1178,6 +1178,7 @@ mod tests {
             .apply_increment(
                 crate::increment::IncrementProvenance::Derived,
                 [crate::increment::Change::Upsert(facts)],
+                &[],
             )
             .expect("a changeset that writes one document");
     }
