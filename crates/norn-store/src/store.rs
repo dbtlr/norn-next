@@ -307,7 +307,19 @@ fn establish_on(
 /// answer from, not a way to reach the handle it was established on and
 /// establish another: the field is private and no accessor hands it out, so
 /// the one route to a snapshot is a turn taken from a handle a caller already
-/// holds.
+/// holds. An accessor added here would let a caller clone the handle out of a
+/// snapshot, end the read that adjudicated it, and go on establishing
+/// snapshots on the entry's one connection that no adjudication ever saw — so
+/// the absence is pinned:
+///
+/// ```compile_fail,E0599
+/// use std::sync::Arc;
+/// use norn_store::{Snapshot, SnapshotReader};
+///
+/// fn the_handle_escapes(snapshot: &Snapshot) -> Arc<SnapshotReader> {
+///     Arc::clone(snapshot.reader())
+/// }
+/// ```
 pub struct Snapshot {
     reader: Arc<SnapshotReader>,
     /// The connection this snapshot is open on, taken out to be given back to
@@ -547,14 +559,16 @@ impl Store {
     /// Mint the read-only snapshot handle this store's reads run on.
     ///
     /// **The mint is fallible and it is the only one.** A second connection is
-    /// opened over the file this store is holding, read-only and `query_only`,
-    /// so a caller that gets a handle has one that can read and cannot derive,
-    /// and a caller that gets an error has a store whose reads cannot be
-    /// served rather than a handle that answers nothing. The open reaches the
-    /// filesystem, which is why it can fail: the file may be gone, the
-    /// environment may refuse it, and a database that is not in write-ahead
-    /// logging is refused rather than read under a mode its writer is not
-    /// using.
+    /// opened over the file this store is holding, with the read-only open
+    /// flag — which no statement run on the connection can withdraw, and which
+    /// is what refuses every write — and with `query_only` and a statement
+    /// authorizer on top of it, so a caller that gets a handle has one that
+    /// can read and cannot derive, and a caller that gets an error has a store
+    /// whose reads cannot be served rather than a handle that answers nothing.
+    /// The open reaches the filesystem, which is why it can fail: the file may
+    /// be gone, the environment may refuse it, and a database that is not in
+    /// write-ahead logging is refused rather than read under a mode its writer
+    /// is not using.
     ///
     /// It is taken from a **live** store, and that is what binds the handle:
     /// the writer holds the file open, so the `-shm` a read-only write-ahead

@@ -123,10 +123,10 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     // **The passes run under a production read hold**, which is the handle the
     // entry minted and the snapshot a read is answered from. The hold is what
     // makes the zeroes below readings of the production read path rather than
-    // of a store a case opened beside it: the reader is opened `query_only`,
-    // so derivation through it is impossible by construction, and a store this
-    // case opens for itself is strictly more derivation-capable than the read
-    // path it stands for.
+    // of a store a case opened beside it: the reader is opened with the
+    // read-only flag, so nothing run on it can derive, and a store this case
+    // opens for itself is strictly more derivation-capable than the read path
+    // it stands for.
     let hold = host
         .begin_read(vault.name())
         .expect("a live attachment answers a read");

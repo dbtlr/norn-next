@@ -371,20 +371,30 @@
 //! coverage as one move, under the lock that publishes the trust label beside
 //! them: an attach that installs nothing mints nothing, and a handle minted
 //! under a later lock is one minted from coverage the entry may have given back
-//! already. The fusion of the two moves is carried by construction rather than
-//! by a test: [`Coverage`] hands out no borrow of what it holds, so no mint
-//! beside the install can read the attachment in place, and a test that
-//! watched the two land together would pass unchanged over a mint moved to a
-//! lock of its own. What the tests pin is the rest of the row — one mint per
-//! install, published where the entry publishes its trust label and readable
-//! there, by
+//! already. What the tests pin is one mint per install, published where the
+//! entry publishes its trust label and readable there, by
 //! `an_attach_publishes_a_reader_beside_the_coverage_it_installs`; and no mint
 //! where nothing is installed, by
 //! `an_attach_the_entry_moved_on_from_mints_no_reader` and
 //! `an_attach_that_installs_no_coverage_mints_no_reader`. A mint that refuses
 //! leaves the slot empty and the reason beside it, and the entry goes on
 //! serving every surface but its reads, which is pinned by
-//! `a_mint_that_fails_leaves_an_entry_serving_and_its_reads_refusing`.
+//! `a_mint_that_fails_leaves_an_entry_serving_and_its_reads_refusing`; every
+//! leg that parks coverage answers for the slot the same way, pinned by
+//! `a_leg_that_parks_coverage_publishes_the_reason_its_mint_refused_with` and
+//! `a_leg_that_remints_coverage_publishes_the_reason_its_mint_refused_with`.
+//!
+//! *A mint is one open, and a read is what asks for the next one.* [`Coverage`]
+//! hands out a borrow of what the entry itself holds — `Coverage::held` — and
+//! `EntryState::remint_for_a_read` is its one reader: an entry serving with an
+//! empty slot mints again over that coverage when a read meets it, so a read
+//! seam that failed on the environment heals without a teardown. Coverage out
+//! with a leg is not borrowed, so the mint never reads a store on its way
+//! somewhere. Pinned by
+//! `a_read_seam_that_failed_heals_on_the_next_read_after_the_environment_recovers`,
+//! with
+//! `a_read_over_a_seam_the_environment_still_refuses_is_refused_with_the_mint_s_own_reason`
+//! as its control.
 //!
 //! *A reader goes back before the store it was minted from closes.* Carried by
 //! `begin_release`, which lets go of the handle at the window's start, so the
