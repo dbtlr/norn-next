@@ -4845,9 +4845,10 @@ mod tests {
     /// reads both ends of the handle's life off it; a fake with no such
     /// subject installs a ledger nothing reads. Coverage minting a reader is
     /// the default here, so the slot an entry publishes is occupied wherever a
-    /// case looks at it. `mints` false is the other configuration a coverage
+    /// case looks at it. `mint_fails` is the other configuration a coverage
     /// can be in: the mint refuses, which is the one shape a coverage that
     /// serves no reads takes — there is no third answer to give.
+    #[derive(Default)]
     struct FakeCoverage {
         readers: Arc<ReaderLedger>,
         /// Whether a mint over this coverage refuses, read at the mint rather
@@ -4855,15 +4856,6 @@ mod tests {
         /// attach and the leg that mints again, and a real mint answers for
         /// the environment as it stands at the open.
         mint_fails: Arc<AtomicBool>,
-    }
-
-    impl Default for FakeCoverage {
-        fn default() -> Self {
-            Self {
-                readers: Arc::default(),
-                mint_fails: Arc::default(),
-            }
-        }
     }
 
     /// What a case reads about an entry's readers: one open counted where the
@@ -13154,70 +13146,82 @@ mod tests {
     /// its demand, its reap — would stop answering.
     ///
     /// So the second read waits with the gate given back, and the entry goes
-    /// on answering while it does.
+    /// on answering while it does. The threads here are spawned rather than
+    /// scoped: an acquisition that did ride the gate would never finish, and a
+    /// case that joined it would hang where it should fail.
     #[test]
     fn a_read_waiting_for_the_entrys_connection_leaves_every_other_surface_answering() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let host = Arc::new(host);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         let first = host
             .begin_read(&name)
             .expect("an entry holding a reader answers a read");
-        thread::scope(|scope| {
-            let waiting = scope.spawn(|| {
-                host.begin_read(&name)
-                    .expect("the read that waited for the connection was refused")
-            });
-            wait_until(
-                "the second read to reach the wait for the entry's connection",
-                lifecycle_wait_budget(),
-                || {
-                    let waiting = ops.readers.waiting.load(Ordering::SeqCst);
-                    if waiting >= 1 {
-                        Observed::Met(())
-                    } else {
-                        Observed::pending("no read is waiting yet".to_string())
-                    }
-                },
-            )
-            .unwrap_or_else(|failure| panic!("{failure}"));
 
-            // Every gate-taking surface of the entry, while the second read
-            // waits. Each runs on a thread of its own with a bounded wait, so
-            // a gate the wait were riding fails this rather than hanging it.
-            let surfaces = scope.spawn(|| {
-                assert_eq!(host.state(&name), answered(TrustState::Ready));
-                assert!(host.inspect(&name).is_some());
-                drop(host.demand(&name, AttachMode::Durable).unwrap());
-                host.reap_idle(Instant::now()).unwrap();
-            });
-            wait_until(
-                "the entry's other surfaces to answer under a waiting read",
-                lifecycle_wait_budget(),
-                || {
-                    if surfaces.is_finished() {
-                        Observed::Met(())
-                    } else {
-                        Observed::pending(
-                            "a surface is still waiting for the entry gate".to_string(),
-                        )
-                    }
-                },
-            )
-            .unwrap_or_else(|failure| panic!("{failure}"));
-            surfaces.join().expect("the surfaces answered");
-
-            // The first read's end is what hands the connection on.
-            drop(first);
-            let second = waiting.join().expect("the waiting read finished");
-            assert_eq!(
-                second.reading().published(),
-                &Demand::State(TrustState::Ready),
-                "the read that waited answered under a demand it never re-read"
-            );
+        let reading = Arc::clone(&host);
+        let reading_name = name.clone();
+        let waiting = thread::spawn(move || {
+            reading
+                .begin_read(&reading_name)
+                .expect("the read that waited for the connection was refused")
         });
+        wait_until(
+            "the second read to reach the wait for the entry's connection",
+            lifecycle_wait_budget(),
+            || {
+                if ops.readers.waiting.load(Ordering::SeqCst) >= 1 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("no read is waiting yet".to_string())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        // Every gate-taking surface of the entry, while the second read waits.
+        // They run on a thread of their own under a bounded wait, so a gate
+        // the wait were riding fails this rather than hanging it.
+        let surfacing = Arc::clone(&host);
+        let surfacing_name = name.clone();
+        let surfaces = thread::spawn(move || {
+            assert_eq!(
+                surfacing.state(&surfacing_name),
+                answered(TrustState::Ready)
+            );
+            assert!(surfacing.inspect(&surfacing_name).is_some());
+            drop(
+                surfacing
+                    .demand(&surfacing_name, AttachMode::Durable)
+                    .unwrap(),
+            );
+            surfacing.reap_idle(Instant::now()).unwrap();
+        });
+        wait_until(
+            "the entry's other surfaces to answer under a waiting read",
+            lifecycle_wait_budget(),
+            || {
+                if surfaces.is_finished() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("a surface is still waiting for the entry gate".to_string())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        surfaces.join().expect("the surfaces answered");
+
+        // The first read's end is what hands the connection on.
+        drop(first);
+        let second = waiting.join().expect("the waiting read finished");
+        assert_eq!(
+            second.reading().published(),
+            &Demand::State(TrustState::Ready),
+            "the read that waited answered under a demand it never re-read"
+        );
+        drop(second);
 
         let reading = host.read_evidence();
         assert_eq!(
