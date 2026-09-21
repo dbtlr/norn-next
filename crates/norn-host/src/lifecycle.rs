@@ -872,10 +872,12 @@ impl<A: SnapshotSource> EntryState<A> {
     ///
     /// Coverage out with a leg mints nothing: the store the handle would read
     /// is that leg's until it ends, and the leg's own give-back is what mints
-    /// over it. The cost is one open under the entry gate, paid by a read that
-    /// is otherwise about to be refused, and there is no retry inside it: one
-    /// attempt per read, and the reason it leaves is what that read refuses
-    /// with.
+    /// over it. The cost is one open of the database file under the entry
+    /// gate, so every other holder of that entry waits behind it, bounded by
+    /// the busy timeout the read-only open sets before it reads the journal
+    /// mode back. It is paid by a read that is otherwise about to be refused,
+    /// and there is no retry inside it: one attempt per read, and the reason
+    /// it leaves is what that read refuses with.
     ///
     /// Answers whether a handle now stands.
     fn remint_for_a_read(&mut self) -> bool {

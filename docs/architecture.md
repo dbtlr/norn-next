@@ -1401,6 +1401,23 @@ A mint may fail at a publication that is not serving, and then the read renders 
 and leaves the retained fact unsaid; the fact stands until the next publication mints again
 and re-derives it.
 
+**A read is the other occasion that mints.** A read that meets a serving entry with an empty
+slot asks for the mint again over the coverage that entry is already holding, so a read seam
+that failed on the environment heals under read traffic rather than waiting for a teardown
+the read's own demand keeps withdrawing. That mint opens the database file, and it opens it
+under the entry gate, so it is priced the way the publication's mint is: every other holder
+of that entry — its state, its inspection, its demand, its reap, and every other read of it
+— waits behind the open. **The bound is the read-only open's own busy timeout, five
+seconds**, because the open reads the journal mode back before it hands the connection over
+and that read waits on the timeout wherever the database is locked against it. Five seconds
+under the gate is accepted on the read path rather than shortened for it. The read that pays
+it is a read that would otherwise be refused, the entry it stalls is one whose read seam is
+already down, and the reads queued behind it get the healed handle instead of the refusal
+they were headed for; a shorter bound would buy a faster refusal by trading the heal away,
+and it would make the read path a second spelling of an open the substrate has one spelling
+of. A read pays it at most once: one open per read that meets an empty slot, no retry inside
+it, and a mint that fails there leaves the reason that read refuses with.
+
 **A request is answered from one snapshot.** Every lane-1 statement a request runs takes its
 rows from the snapshot its hold established — the store counts the snapshots established
 through a reader, and an acquired request establishes exactly one — and the reading the
