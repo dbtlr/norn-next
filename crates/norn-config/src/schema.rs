@@ -642,13 +642,20 @@ fn read_folders(document: &serde_yaml::Mapping) -> Result<Vec<DeclaredFolder>, V
                 return Err(section_error("folders", "a sequence of mappings", folder));
             };
             known_keys_only("folders", folder, FOLDER_KEYS)?;
-            let path = at(folder, "path").and_then(Value::as_str).ok_or_else(|| {
-                VaultSchemaError::Section {
+            // Absent and present-but-wrong-shape are two refusals. A folder
+            // that never wrote `path` is missing a declaration; a folder that
+            // wrote `path: 2026` holds one the grammar cannot read, and the
+            // author is told which of the two they wrote.
+            let Some(path) = at(folder, "path") else {
+                return Err(VaultSchemaError::Section {
                     at: "folders.path".to_string(),
                     wanted: "a path",
                     found: "absent".to_string(),
-                }
-            })?;
+                });
+            };
+            let path = path
+                .as_str()
+                .ok_or_else(|| section_error("folders.path", "a path", path))?;
             let description = match at(folder, "description") {
                 None => None,
                 Some(value) => Some(

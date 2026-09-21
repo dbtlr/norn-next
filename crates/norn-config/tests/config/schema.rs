@@ -228,6 +228,44 @@ fn a_section_of_the_wrong_shape_names_itself() {
     );
 }
 
+#[test]
+fn a_folder_that_declares_no_path_is_told_the_key_is_absent() {
+    let error = VaultSchema::parse(b"version: 1\nfolders:\n  - description: no path\n")
+        .expect_err("a folder with no path");
+
+    assert_eq!(
+        error,
+        VaultSchemaError::Section {
+            at: "folders.path".to_string(),
+            wanted: "a path",
+            found: "absent".to_string(),
+        }
+    );
+}
+
+/// **A present value of the wrong shape is not an absent one.** `path: 2026`
+/// reads as a YAML number, and an author told the key is absent would go
+/// looking for a key that is written right in front of them. The refusal names
+/// the shape that is there instead.
+#[test]
+fn a_folder_path_of_the_wrong_shape_names_the_shape_it_found() {
+    let error = VaultSchema::parse(b"version: 1\nfolders:\n  - path: 2026\n")
+        .expect_err("a folder path that is not a path");
+
+    assert_eq!(
+        error,
+        VaultSchemaError::Section {
+            at: "folders.path".to_string(),
+            wanted: "a path",
+            found: "a number".to_string(),
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "`folders.path` is a number, and it must be a path"
+    );
+}
+
 /// **An unknown key is a schema this build cannot act on.** A misspelled
 /// section or a misspelled key would otherwise read as a valid schema that
 /// declares nothing, so `undecalred: report` would turn a vault's reporting
