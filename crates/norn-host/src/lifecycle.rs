@@ -5114,6 +5114,12 @@ mod tests {
         /// it between an attach and a later mint the way an environment
         /// breaks and recovers.
         reader_mint_fails: Arc<AtomicBool>,
+        /// Whether this fake's coverage withholds trust, which is an
+        /// attachment that holds everything a read would run on and still
+        /// cannot be derived under. Read at the publication rather than fixed
+        /// when the coverage was built, the way an implementation reads the
+        /// vault's own declaration.
+        withholds_trust: Arc<AtomicBool>,
         attaches: AtomicUsize,
         /// The root every attach was handed, filed under the name the
         /// registration it was handed carries.
@@ -5299,6 +5305,12 @@ mod tests {
 
     impl EntryOps for Arc<FakeOps> {
         type Attachment = FakeCoverage;
+
+        fn withheld_trust(&self, _: &FakeCoverage) -> Option<UntrustedReason> {
+            self.withholds_trust
+                .load(Ordering::SeqCst)
+                .then(|| UntrustedReason::schema_unreadable("this fake withholds trust"))
+        }
 
         fn attach(
             &self,
@@ -13293,6 +13305,87 @@ mod tests {
             host.read_evidence().reads_served,
             1,
             "the read that waited and was refused was counted as served"
+        );
+    }
+
+    /// **An entry whose trust is withheld holds coverage, and a read still
+    /// mints nothing over it.** An attachment whose vault declaration this
+    /// build cannot act on is installed rather than refused, so the entry
+    /// holds its coverage and publishes untrusted over it. That is the shape
+    /// the read path's own re-mint would otherwise walk into: the re-mint
+    /// asks the coverage for a handle, and this coverage answers — what stops
+    /// it is the acquisition refusing on the published demand before the
+    /// re-mint is reached at all. The handle count is the assertion, because a
+    /// refusal alone would pass whether or not the mint ran on the way to it.
+    #[test]
+    fn a_read_over_an_entry_whose_trust_is_withheld_refuses_and_mints_nothing() {
+        let ops = Arc::new(FakeOps::default());
+        ops.withholds_trust.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_until(
+            "the entry to publish the withheld trust its attach carried",
+            lifecycle_wait_budget(),
+            || match host.state(&name) {
+                Err(envelope)
+                    if matches!(
+                        envelope.detail(),
+                        ErrorDetail::EntryUntrusted {
+                            reason: UntrustedReason::SchemaUnreadable { .. },
+                            ..
+                        }
+                    ) =>
+                {
+                    Observed::Met(())
+                }
+                other => Observed::pending(format!("the entry publishes {other:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        // **The shape this case is about**: coverage in hand, an empty handle
+        // slot, and a published demand that is not serving. The re-mint returns
+        // early on a standing handle, so an entry that still held one would
+        // pass this whatever the acquisition did; the slot is emptied here so
+        // the only thing left between a read and a mint is the acquisition's
+        // own refusal on the published demand.
+        {
+            let entry = host.shared.entries.get(&name).expect("the entry is served");
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.close_reader();
+            assert!(
+                state.coverage.held().is_some(),
+                "the withheld-trust attach installed no coverage, so this case no longer \
+                 stands over the shape it is about"
+            );
+            assert!(
+                state.reader.is_none(),
+                "the handle slot is not empty, so a mint here would be refused by the \
+                 re-mint's own guard rather than by the acquisition"
+            );
+        }
+
+        let minted = ops.readers.opened.load(Ordering::SeqCst);
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("an entry publishing untrusted answered a read");
+        // The demand the refusal carries is the warming state of the recovery
+        // this read's own demand scheduled, because a read asks an untrusted
+        // vault to become answerable again. What every shape here shares is
+        // that it is not `Ready`, which is the whole of what keeps the read off
+        // the re-mint.
+        let ReadRefusal::NotServing(published) = &refusal else {
+            panic!("the read was refused as something other than the entry it found: {refusal:?}");
+        };
+        assert_ne!(
+            published,
+            &Demand::State(TrustState::Ready),
+            "an entry whose trust is withheld published a serving demand to a read"
+        );
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            minted,
+            "the read minted a handle over coverage the entry cannot be derived under"
         );
     }
 
