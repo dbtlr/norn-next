@@ -408,10 +408,14 @@ mod tests {
 /// holds what one acquisition ran across all three so a ceiling over a single
 /// read is one number rather than a sum of maxima.
 ///
-/// **No path out of an acquisition runs a statement under the gate and reports
-/// nothing.** The mint is counted where the mint returns and the establishment
-/// where the establishment returns, both before the branch that decides how
-/// the read leaves, so the refusals are accounted exactly as the answers are.
+/// **Every act is counted where the act ends, never where the read leaves**,
+/// so what an acquisition did is in the account whichever way it left. The
+/// mint is counted where the mint returns, the establishment where the
+/// establishment returns, and the wait for the entry's connection where that
+/// wait ends — each of them before the branch that decides how the read
+/// leaves, so the refusals are accounted exactly as the answers are. No path
+/// out of an acquisition runs a statement under the gate, or waits out another
+/// read, and reports nothing.
 ///
 /// Every field is a running total for the host's whole life. Two of them are
 /// maxima rather than sums, which is why a window over this account carries
@@ -474,22 +478,29 @@ pub struct ReadReading {
     /// mint's alone where the mint refused; and its mint's plus the refused
     /// establishment's where the establishment is what refused.
     pub widest_statements_under_the_gate: u64,
-    /// Reads that gave the entry gate back and waited for the one connection
-    /// their entry holds. Nonzero is reader contention among **served** reads,
-    /// measured rather than assumed: an acquisition refused after its wait is
-    /// not one of these, because this reading sits beside `reads_served` and
-    /// describes what the reads in it paid.
+    /// Acquisitions that gave the entry gate back and waited for the one
+    /// connection their entry holds. Nonzero is reader contention, measured
+    /// rather than assumed.
+    ///
+    /// **Counted where the wait ends, whichever way the acquisition leaves.**
+    /// An acquisition that waited and was then refused — because its entry
+    /// stopped serving, or because its handle was replaced while it waited —
+    /// paid the whole of that wait, so it is one of these and is not among
+    /// `reads_served`. Those are the paths contention is most likely to be
+    /// interesting on, and a reading that held only served reads would
+    /// under-report exactly there.
     ///
     /// It is a wait for the reader's connection and not for a gate: no
     /// acquisition waits for that connection while it holds the entry gate,
     /// and nothing here counts a wait for the gate itself.
     pub reader_waits: u64,
-    /// The most times any one read waited for its entry's connection.
+    /// The most times any one acquisition waited for its entry's connection.
     ///
     /// **One, or none.** An acquisition that finds the connection taken waits
     /// for it once and holds it from there, so the hold that establishes
-    /// cannot contend again. A reading above one is a round this acquisition
-    /// does not have.
+    /// cannot contend again and a refused one gives the connection back rather
+    /// than waiting a second time. A reading above one is a round this
+    /// acquisition does not have.
     pub widest_reader_wait: u64,
 }
 
@@ -515,8 +526,8 @@ pub struct ReadsSince {
     /// Statements this window's refused establishments ran while the entry
     /// gate was held.
     pub refused_establishment_statements_under_the_gate: u64,
-    /// Reads in this window that gave the entry gate back and waited for the
-    /// one connection their entry holds.
+    /// Acquisitions in this window that gave the entry gate back and waited
+    /// for the one connection their entry holds, served and refused alike.
     pub reader_waits: u64,
 }
 
@@ -605,18 +616,25 @@ impl ReadEvidence {
         );
     }
 
-    /// Record that one read was served, and how many times it waited for its
-    /// entry's connection on the way to its establishment.
+    /// Record that one acquisition waited for its entry's connection.
     ///
-    /// The waits are the host's own count rather than a number the
-    /// establishment reports: the acquisition is what gave the entry gate back
-    /// and waited, and the establishment it eventually ran waited for nothing.
-    /// They are recorded here, so an acquisition refused after its wait is not
-    /// among them — the wait a refused acquisition paid is deliberately
-    /// outside this reading, which is about what served reads contend for.
-    pub(crate) fn count_read(&self, waits: u64) {
+    /// **This is called where the wait ends and not where the read leaves**,
+    /// for the reason the two statement counts are: the acquisition gave the
+    /// entry gate back and waited out another read whichever answer it went on
+    /// to get, and the re-validation that decides that answer runs after this.
+    ///
+    /// The wait is the host's own count rather than a number the establishment
+    /// reports: the acquisition is what waited, and the establishment it
+    /// eventually ran waited for nothing. The widest is a structural reading
+    /// rather than a sum — an acquisition waits once and then holds the
+    /// connection — so one is the only value above zero this can produce.
+    pub(crate) fn count_reader_wait(&self) {
+        self.reader_waits.fetch_add(1, Ordering::Relaxed);
+        self.widest_reader_wait.fetch_max(1, Ordering::Relaxed);
+    }
+
+    /// Record that one read was served.
+    pub(crate) fn count_read(&self) {
         self.reads_served.fetch_add(1, Ordering::Relaxed);
-        self.reader_waits.fetch_add(waits, Ordering::Relaxed);
-        self.widest_reader_wait.fetch_max(waits, Ordering::Relaxed);
     }
 }

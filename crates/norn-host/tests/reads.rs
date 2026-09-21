@@ -97,8 +97,8 @@ fn a_read_over_an_entry_that_is_not_serving_refuses_with_its_published_demand() 
 /// **The contention half of the instrument is not asserted here, because it
 /// cannot be asserted here without a race.** Saying "a read waited" requires
 /// observing a read while it is waiting, and the host records a wait only once
-/// that wait has ended: `reader_waits` moves when the read that waited
-/// establishes, so a case cannot hold the connection and watch the account for
+/// that wait has ended — the reading moves when the waiter takes the
+/// connection — so a case cannot hold the connection and watch the account for
 /// a waiter at the same time. No production signal reports a read that is
 /// currently waiting, and this suite runs against the production attachment,
 /// so it has no hook to synchronize on. Sleeping and hoping the other threads

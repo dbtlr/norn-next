@@ -3188,17 +3188,21 @@ impl<O: EntryOps> Host<O> {
             drop(state);
             return Err(ReadRefusal::ReaderUnavailable(unavailable));
         };
-        let (turn, waits, published) = match reader.try_take() {
+        let (turn, published) = match reader.try_take() {
             // The connection is free, so this hold is the hold that
             // establishes and the demand above is the demand the answer
             // carries.
-            Some(turn) => (turn, 0, published),
+            Some(turn) => (turn, published),
             None => {
                 // Another read is answering on the entry's one connection.
                 // The gate goes back before the wait, and the demand recorded
                 // above is what holds the entry across it.
                 drop(state);
                 let turn = reader.wait_for_the_connection();
+                // Accounted where the wait ended, before the re-validation
+                // below decides how this acquisition leaves: the wait was paid
+                // either way.
+                self.shared.reads.count_reader_wait();
                 state = entry.gate.lock().expect("entry gate poisoned");
                 // The connection is this read's from here, so this hold is the
                 // hold that establishes and nothing else can be establishing
@@ -3230,7 +3234,7 @@ impl<O: EntryOps> Host<O> {
                     drop(state);
                     return Err(ReadRefusal::ReaderUnavailable(unavailable));
                 }
-                (turn, 1, published)
+                (turn, published)
             }
         };
         // The establishment is accounted where it returns, for the reason the
@@ -3247,7 +3251,7 @@ impl<O: EntryOps> Host<O> {
                 return Err(ReadRefusal::ReaderUnavailable(unavailable));
             }
         };
-        self.shared.reads.count_read(waits);
+        self.shared.reads.count_read();
         state.pin();
         drop(state);
         Ok(ReadHold {
@@ -13755,6 +13759,11 @@ mod tests {
     /// while the acquisition waited, and the demand the read would answer
     /// under is the one the entry publishes when it establishes rather than
     /// the one it published before the wait.
+    ///
+    /// **The wait it paid is in the account, and the read it was not served is
+    /// not.** The account reports what an acquisition did whichever way it
+    /// left, and this acquisition waited out another read in full before the
+    /// re-read refused it.
     #[test]
     fn a_read_that_waited_for_the_connection_refuses_where_the_entry_stopped_serving() {
         let ops = Arc::new(FakeOps::default());
@@ -13765,6 +13774,7 @@ mod tests {
         let first = host
             .begin_read(&name)
             .expect("an entry holding a reader answers a read");
+        let before = host.read_evidence();
         thread::scope(|scope| {
             let waiting = scope.spawn(|| {
                 host.begin_read(&name)
@@ -13795,10 +13805,19 @@ mod tests {
             );
         });
 
+        let reading = host.read_evidence().since(before);
         assert_eq!(
-            host.read_evidence().reads_served,
-            1,
+            reading.reads_served, 0,
             "the read that waited and was refused was counted as served"
+        );
+        assert_eq!(
+            reading.reader_waits, 1,
+            "the wait the refused acquisition paid is missing from the account"
+        );
+        assert_eq!(
+            host.read_evidence().widest_reader_wait,
+            1,
+            "an acquisition waited for the entry's connection more than once"
         );
     }
 
@@ -13892,6 +13911,11 @@ mod tests {
     /// from. The acquisition refuses as reader-unavailable and gives that
     /// connection back to the handle it took it from, which is what keeps a
     /// retired handle from being left empty.
+    ///
+    /// **The wait it paid is in the account, and the read it was not served is
+    /// not.** The account reports what an acquisition did whichever way it
+    /// left, and a refusal after the wait paid the whole of that wait: the
+    /// contention reading moves and the served reading does not.
     #[test]
     fn a_read_that_waited_refuses_where_the_entrys_handle_was_replaced_under_it() {
         let ops = Arc::new(FakeOps::default());
@@ -13903,6 +13927,7 @@ mod tests {
         let first = host
             .begin_read(&name)
             .expect("an entry holding a reader answers a read");
+        let before = host.read_evidence();
         let waited_for = Arc::clone(
             entry
                 .gate
@@ -13962,10 +13987,19 @@ mod tests {
             waited_for.try_take().is_some(),
             "the refused read kept the connection of the handle it waited for"
         );
+        let reading = host.read_evidence().since(before);
         assert_eq!(
-            host.read_evidence().reads_served,
-            1,
+            reading.reads_served, 0,
             "the read that waited and was refused was counted as served"
+        );
+        assert_eq!(
+            reading.reader_waits, 1,
+            "the wait the refused acquisition paid is missing from the account"
+        );
+        assert_eq!(
+            host.read_evidence().widest_reader_wait,
+            1,
+            "an acquisition waited for the entry's connection more than once"
         );
     }
 

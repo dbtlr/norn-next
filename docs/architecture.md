@@ -1434,9 +1434,17 @@ statement it waited on, which is precisely the case a ceiling exists to catch �
 kept apart from the served reading so that reading stays exactly the reads it served. Beside
 them the account keeps the widest reading any one acquisition produced, its mint and its
 establishment together, which is the number a ceiling over one read is stated against.
-**No path out of an acquisition runs a statement under the gate and reports nothing**: the
-mint is accounted where the mint returns and the establishment where the establishment
-returns, both before the branch that decides how the read leaves.
+Beside the three the account also keeps the contention it measured: the acquisitions that
+gave the gate back and waited for the entry's one connection, and the widest such wait any
+one acquisition paid — which is one or none, because an acquisition waits once and holds the
+connection from there. That wait is counted where the wait ends, so an acquisition refused
+after it waited is in the contention reading and not in the served one; those are the paths
+contention is most likely to be interesting on, and a reading of served reads alone would
+under-report exactly there.
+**No act an acquisition runs is reported by no reading, whichever way the acquisition
+left**: the mint is accounted where the mint returns, the establishment where the
+establishment returns, and the wait where the wait ends, each of them before the branch that
+decides how the read leaves.
 
 **A request is answered from one snapshot.** Every lane-1 statement a request runs takes its
 rows from the snapshot its hold established — the store counts the snapshots established
