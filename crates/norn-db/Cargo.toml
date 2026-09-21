@@ -17,7 +17,7 @@ publish.workspace = true
 # declares the driver. A client composes SQL through the re-export at this
 # crate's root rather than declaring the dependency a second time. The version
 # and the features are pinned in the workspace root manifest, which is what
-# this `workspace = true` inherits; what that pin holds, and why each half of
+# this `workspace = true` inherits; what that pin holds, and why each part of
 # it is not optional:
 #
 # - `bundled` compiles SQLite from vendored source, so a schema is read by the
@@ -28,6 +28,12 @@ publish.workspace = true
 #   checked conversion, so an offset or a length that does not fit is an error
 #   rather than a wrapped number. The alternative is casting at every call
 #   site, which is where a wrapped number stops being visible.
+# - `hooks` carries the statement authorizer a read-only connection is sealed
+#   with. Without it a read-only connection is refused its writes by the open
+#   flag alone, and every settings pragma, attach and temporary object it
+#   could reach around that flag with is left to run. With it they are refused
+#   at statement preparation, and the one read-only pragma a full-text read
+#   needs is the single name allowed through.
 # - Nothing else. No `serde_json`, no `time`, no `chrono`: a value's shape at
 #   rest is the client's own projection, and a driver convenience that decided
 #   it would be a second spelling of one.
