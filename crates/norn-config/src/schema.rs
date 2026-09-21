@@ -158,6 +158,12 @@ impl VaultSchema {
     }
 
     /// The declared fields, in key order.
+    ///
+    /// **Read by `describe`, which is not built.** `describe` reports the
+    /// vault's declared and observed field universe, and this iterator is the
+    /// declared half of that answer. The current call graph does not reach
+    /// it: the read surface and its builders do not exist yet, and the tag
+    /// facet is the only schema-keyed derivation that does.
     pub fn fields(&self) -> impl Iterator<Item = (&str, &DeclaredField)> {
         self.fields.iter().map(|(key, field)| (key.as_str(), field))
     }
@@ -173,11 +179,24 @@ impl VaultSchema {
     }
 
     /// The declared folders, in the order they were written.
+    ///
+    /// **Read by `describe`, which is not built.** `describe` reports the
+    /// vault's declared and observed field universe, and the declared folders
+    /// stand beside it. The current call graph does not reach it, for the
+    /// same reason [`VaultSchema::fields`] is not reached: the read surface
+    /// and its builders do not exist yet, and the tag facet is the only
+    /// schema-keyed derivation that does.
     pub fn folders(&self) -> &[DeclaredFolder] {
         &self.folders
     }
 
     /// The paths the resolution ladder does not count as candidates.
+    ///
+    /// **Read by the resolution ladder, and backlinks and findings apply the
+    /// same exclusion.** The current call graph does not reach it: the read
+    /// surface and its builders — the resolution ladder among them — do not
+    /// exist yet, and the tag facet is the only schema-keyed derivation that
+    /// does.
     pub fn ambiguity_ignore(&self) -> &[Pattern] {
         &self.ambiguity_ignore
     }

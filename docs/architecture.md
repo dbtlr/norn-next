@@ -1456,15 +1456,18 @@ hold — is one of those errors: the vault is already serving a declaration it c
 replacing it with one nothing reads would take that away. A successful candidate clears that
 error.
 
-**An attach has no such declaration to fall back on, and does not refuse.** It acquires the
-maintainer lock, watcher coverage and the store, pins nothing, derives nothing, and the entry
-publishes `Untrusted` naming the cause — so the vault is observable and the status seam can
-explain it, where a refused attach would hide it and a derivation under an empty model would
-answer confidently wrong questions about every document. The entry owes a recovery from
-there; a demand after the schema is corrected re-reads it and returns the vault to service. The host dispatches the vault identity and each registered
-engine's optional config section. The receiving engine owns the section after dispatch. The
-parser ignores unknown top-level keys. The host silently ignores engine sections that have
-no registered receiver.
+**An attach has no such declaration to fall back on, and does not refuse.** It acquires
+the maintainer lock, watcher coverage and the store, pins nothing, derives nothing, and
+the entry publishes `Untrusted` naming the cause — so the vault is observable and the
+status seam can explain it, where a refused attach would hide it and a derivation under an
+empty model would answer confidently wrong questions about every document. The entry owes
+a recovery from there; a demand after the schema is corrected re-reads it and returns the
+vault to service.
+
+The host dispatches the vault identity and each registered engine's optional config
+section. The receiving engine owns the section after dispatch. The parser ignores unknown
+top-level keys. The host silently ignores engine sections that have no registered
+receiver.
 
 The schema fingerprint alone decides whether Lane 1 runs. A config-only reload stays
 `Ready` and does not re-derive Lane 1. A schema change enters `Warming`, pins the new schema,
