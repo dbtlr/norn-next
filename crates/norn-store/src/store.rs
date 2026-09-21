@@ -5,8 +5,10 @@
 //!
 //! A store holds exactly one connection, and every operation runs through a
 //! request that borrows the store mutably. That is the whole of "one writer per
-//! *store*": there is no pool here, no internal lock, and no second connection
-//! to serialize against.
+//! *store*": on the writer's side there is no pool, no internal lock and no
+//! second connection to serialize against. The reader this module mints beside
+//! it is a second connection with a lock of its own, and it writes nothing —
+//! see below.
 //!
 //! It is **not** one writer per database file. Two `Store` values on one path are
 //! two connections and two writers, serialized by SQLite's own locking rather
