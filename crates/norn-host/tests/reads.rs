@@ -17,8 +17,6 @@
 mod attach;
 
 use std::path::Path;
-use std::thread;
-use std::time::Duration;
 
 use norn_host::{Demand, ReadRefusal};
 use norn_testkit::process::Sandbox;
@@ -89,60 +87,35 @@ fn a_read_over_an_entry_that_is_not_serving_refuses_with_its_published_demand() 
     );
 }
 
-/// **The read-concurrency instrument, over overlapping reads of one entry.**
-/// Each read runs exactly one statement while it holds the entry gate — the
-/// statement that establishes its snapshot — and the reads that queued behind
-/// the one connection the entry holds report the wait that cost them. Each
-/// waits once: the wait ends holding the connection, so the gate hold that
-/// establishes cannot contend again.
+/// **The per-read gate discipline, over a real attachment.** Each read runs
+/// exactly one statement while it holds the entry gate — the statement that
+/// establishes its snapshot — and a read that found the entry's connection
+/// free waited for nothing on its way to it.
+///
+/// **The contention half of the instrument is not asserted here, because it
+/// cannot be asserted here without a race.** Saying "a read waited" requires
+/// observing a read while it is waiting, and the host records a wait only once
+/// that wait has ended: `reader_waits` moves when the read that waited
+/// establishes, so a case cannot hold the connection and watch the account for
+/// a waiter at the same time. No production signal reports a read that is
+/// currently waiting, and this suite runs against the production attachment,
+/// so it has no hook to synchronize on. Sleeping and hoping the other threads
+/// reached the wait first is what that gap tempts a case into, and a reading
+/// that only sometimes observes contention fails on a loaded machine while the
+/// code is perfectly correct.
+///
+/// Where the contention reading is pinned instead is the lifecycle suite,
+/// against a reader fake that counts a wait when the wait begins: a case there
+/// blocks until a waiter has provably reached the occupied-connection path,
+/// then releases the connection and asserts the wait was one. That is the same
+/// claim, held where it can be held deterministically.
 #[test]
-fn overlapping_reads_run_one_statement_each_under_the_gate_and_attest_contention() {
+fn reads_over_one_entry_each_run_one_statement_under_the_gate() {
     let (_sandbox, vault) = a_vault("host-reads-overlap");
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
 
     let readers = 4;
-    let before = host.read_evidence();
-    thread::scope(|scope| {
-        for _ in 0..readers {
-            scope.spawn(|| {
-                let hold = host
-                    .begin_read(vault.name())
-                    .expect("an attached vault answers a read");
-                // The connection is held while the other reads ask for it,
-                // which is what makes the reads overlap rather than queue.
-                thread::sleep(Duration::from_millis(20));
-                drop(hold);
-            });
-        }
-    });
-    let overlapped = host.read_evidence().since(before);
-
-    assert_eq!(
-        overlapped.reads_served, readers,
-        "the account missed one of the overlapping reads"
-    );
-    assert_eq!(
-        overlapped.statements_under_the_gate, readers,
-        "an overlapping read ran something other than one statement under the gate"
-    );
-    assert_eq!(
-        host.read_evidence().widest_statements_under_the_gate,
-        1,
-        "one read ran more than the establishing statement under the gate"
-    );
-    assert!(
-        overlapped.reader_waits >= 1,
-        "four overlapping reads of one entry reported no wait for the one connection they share"
-    );
-    assert_eq!(
-        host.read_evidence().widest_reader_wait,
-        1,
-        "a read waited for the entry's connection more than once"
-    );
-    // **The control.** The same reads without the overlap wait for nothing:
-    // a contention reading that stood whether or not the reads overlapped
-    // would attest nothing about sharing the handle.
     let before = host.read_evidence();
     for _ in 0..readers {
         drop(
@@ -150,13 +123,27 @@ fn overlapping_reads_run_one_statement_each_under_the_gate_and_attest_contention
                 .expect("an attached vault answers a read"),
         );
     }
-    let sequential = host.read_evidence().since(before);
+    let reading = host.read_evidence().since(before);
+
     assert_eq!(
-        sequential.reads_served, readers,
-        "the account missed one of the sequential reads"
+        reading.reads_served, readers,
+        "the account missed one of the reads"
     );
     assert_eq!(
-        sequential.reader_waits, 0,
+        reading.statements_under_the_gate, readers,
+        "a read ran something other than one statement under the gate"
+    );
+    assert_eq!(
+        host.read_evidence().widest_statements_under_the_gate,
+        1,
+        "one read ran more than the establishing statement under the gate"
+    );
+    // **The control on the contention reading.** Each read here gave the
+    // connection back before the next one asked for it, so none of them waited.
+    // A reading that reported a wait anyway would attest nothing about sharing
+    // the handle, because it would stand whether or not two reads overlapped.
+    assert_eq!(
+        reading.reader_waits, 0,
         "reads that never overlapped waited for the handle anyway"
     );
 }
