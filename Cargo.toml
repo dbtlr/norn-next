@@ -40,7 +40,11 @@ regex = "1"
 # `fallible_uint` binds unsigned values to SQLite's signed integers with a
 # checked conversion, so an offset or a length that does not fit is an error
 # rather than a wrapped number.
-rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+# `hooks` carries the statement authorizer, which is what makes a read-only
+# connection refuse to relax its own settings: a pragma, an attach and a
+# temporary object are refused at statement preparation rather than left to a
+# pragma any statement could undo.
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint", "hooks"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 # The content hash the system concludes "unchanged" from. Declared here rather

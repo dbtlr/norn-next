@@ -106,4 +106,6 @@ pub use request::{
     DiscardScope, ExplainedStatement, FeedCursor, FindingCursor, MAX_PAGE, POINT_READS, Request,
     STATEMENTS, SubjectScope,
 };
-pub use store::{RecordedStoreSchema, Snapshot, SnapshotReader, Store, StoreMode, StoreReading};
+pub use store::{
+    ConnectionTurn, RecordedStoreSchema, Snapshot, SnapshotReader, Store, StoreMode, StoreReading,
+};

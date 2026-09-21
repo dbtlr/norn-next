@@ -399,8 +399,9 @@ fn an_environment_that_holds_no_database_is_refused_through_the_client_s_error()
 }
 
 /// A read-only handle answers from the database the writer wrote, and refuses
-/// every write: the file is opened without the write flag and `query_only` is
-/// set on top of it, so nothing a client composes can derive through one.
+/// every write. **The open flag is the refusal**: SQLite reports the database
+/// read-only on this connection, which is a property of the open that no
+/// statement run on it can withdraw.
 #[test]
 fn a_read_only_connection_answers_reads_and_refuses_writes() {
     let scratch = Scratch::new("read-only");
@@ -409,6 +410,12 @@ fn a_read_only_connection_answers_reads_and_refuses_writes() {
     meta::put_meta(&writer, meta::WRITE_GENERATION, 7_i64).expect("a writer writes");
 
     let reader = norn_db::connect_read_only(&database).expect("a read-only handle");
+    assert!(
+        reader
+            .is_readonly(norn_db::rusqlite::MAIN_DB)
+            .expect("SQLite reports the mode the database is open in"),
+        "the read-only open left the database writable"
+    );
     assert_eq!(
         meta::get_meta::<i64>(&reader, meta::WRITE_GENERATION).expect("a pinned scalar"),
         Some(7),
@@ -488,5 +495,73 @@ fn a_snapshot_is_one_transaction_and_ends_where_it_is_closed() {
         meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
         Some(2),
         "the handle is still inside the snapshot it closed"
+    );
+}
+
+/// **A read-only connection cannot disarm itself.** The open flag is what
+/// refuses a write, and the authorizer is what keeps the connection from
+/// reaching around it: the pragma that would relax `query_only`, the attach
+/// that would reach a writable database, and the temporary table that would be
+/// writable inside the connection are each refused at statement preparation.
+#[test]
+fn a_read_only_connection_refuses_to_relax_its_own_settings() {
+    let scratch = Scratch::new("read-only-sealed");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 3_i64).expect("a writer writes");
+
+    let elsewhere = scratch.root.join("derived").join("elsewhere.sqlite3");
+    let (second, _) = open(&elsewhere, Answer::Keep).expect("a second database");
+    drop(second);
+
+    let reader = norn_db::connect_read_only(&database).expect("a read-only handle");
+    for statement in [
+        "PRAGMA query_only = 0",
+        "PRAGMA foreign_keys = OFF",
+        "CREATE TEMP TABLE probe (value INTEGER)",
+    ] {
+        assert!(
+            reader.execute_batch(statement).is_err(),
+            "a read-only connection ran `{statement}`"
+        );
+    }
+    reader
+        .execute_batch(&format!(
+            "ATTACH DATABASE '{}' AS writable",
+            elsewhere.display()
+        ))
+        .expect_err("a read-only connection attached a writable database");
+
+    // The refusals above are refusals of those statements alone: the
+    // connection still reads.
+    assert_eq!(
+        meta::get_meta::<i64>(&reader, meta::WRITE_GENERATION).expect("a pinned scalar"),
+        Some(3),
+        "a sealed connection stopped answering reads"
+    );
+}
+
+/// A database that is not in write-ahead logging is refused as an environment
+/// fact rather than as damage. The journal mode says how the file is being
+/// used, not what its pages hold, and discarding a sound database over it
+/// would destroy work to fix nothing.
+#[test]
+fn a_read_only_open_of_a_database_that_is_not_in_wal_refuses_without_authorizing_a_rebuild() {
+    let scratch = Scratch::new("read-only-journal");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    writer
+        .pragma_update(None, "journal_mode", "delete")
+        .expect("a writer sets its own journal mode");
+    drop(writer);
+
+    let error = norn_db::connect_read_only(&database)
+        .expect_err("a read-only handle opened a database that is not in write-ahead logging");
+    let DbError::Lifecycle { message, .. } = &error else {
+        panic!("the journal mode was typed as something a rebuild answers: {error:?}");
+    };
+    assert!(
+        message.contains("write-ahead logging"),
+        "the refusal names something other than the journal mode: {message}"
     );
 }

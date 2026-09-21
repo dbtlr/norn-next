@@ -12,6 +12,16 @@ use std::thread;
 
 use crate::common::{Scratch, document, write_document};
 
+/// The snapshot a case reads from: the handle's turn, taken where nothing
+/// holds it, and the snapshot established on it.
+fn a_snapshot(reader: &Arc<norn_store::SnapshotReader>) -> norn_store::Snapshot {
+    reader
+        .try_take()
+        .expect("a handle nothing is reading holds its connection")
+        .establish()
+        .expect("a snapshot")
+}
+
 /// Write one document, and report the generation the store is at afterwards.
 fn write_one(store: &mut norn_store::Store, text: &str) -> i64 {
     let mut request = store.begin_request();
@@ -40,7 +50,7 @@ fn a_reader_answers_under_the_store_s_own_epoch_and_generation() {
     );
     assert_eq!(reader.path(), store.path(), "the reader reads another file");
 
-    let snapshot = Arc::clone(&reader).establish().expect("a snapshot");
+    let snapshot = a_snapshot(&reader);
     assert_eq!(snapshot.reading().epoch(), store.epoch());
     assert_eq!(
         snapshot.reading().write_generation(),
@@ -60,7 +70,7 @@ fn establishing_a_snapshot_costs_one_snapshot_and_one_statement() {
     write_one(&mut store, "notes/first.md");
     let reader = Arc::new(store.open_reader().expect("a reader"));
 
-    let snapshot = Arc::clone(&reader).establish().expect("a snapshot");
+    let snapshot = a_snapshot(&reader);
     let counters = snapshot.counters();
     assert_eq!(
         counters.snapshots_opened(),
@@ -90,7 +100,7 @@ fn a_snapshot_answers_at_the_instant_it_was_established() {
     let first = write_one(&mut store, "notes/first.md");
     let reader = Arc::new(store.open_reader().expect("a reader"));
 
-    let snapshot = Arc::clone(&reader).establish().expect("a snapshot");
+    let snapshot = a_snapshot(&reader);
     let second = write_one(&mut store, "notes/second.md");
     assert!(
         second > first,
@@ -103,7 +113,7 @@ fn a_snapshot_answers_at_the_instant_it_was_established() {
     );
 
     drop(snapshot);
-    let after = Arc::clone(&reader).establish().expect("a second snapshot");
+    let after = a_snapshot(&reader);
     assert_eq!(
         after.reading().write_generation(),
         second,
@@ -111,29 +121,38 @@ fn a_snapshot_answers_at_the_instant_it_was_established() {
     );
 }
 
-/// **Concurrent reads of one entry serialize on the one reader**, and the wait
-/// that costs is counted rather than assumed. The reading a waiting read
-/// carries is what mints more handles through this seam.
+/// **Concurrent reads of one entry serialize on the one connection.** The
+/// handle hands out one turn at a time: a second read finds no turn to take
+/// while the first holds it, and the wait it then pays outside the caller's
+/// lock ends when the first read gives the connection back.
 #[test]
-fn a_second_read_waits_for_the_one_connection_and_reports_the_wait() {
+fn a_second_read_waits_for_the_one_connection_and_takes_it_when_it_comes_back() {
     let scratch = Scratch::new("reader-contention");
     let mut store = scratch.open();
     write_one(&mut store, "notes/first.md");
     let reader = Arc::new(store.open_reader().expect("a reader"));
 
-    let held = Arc::clone(&reader).establish().expect("a first snapshot");
-    assert_eq!(held.waits(), 0, "an uncontended read waited");
+    let held = a_snapshot(&reader);
+    assert!(
+        reader.try_take().is_none(),
+        "a handle a read is answering on handed out a second turn"
+    );
 
     let waiting = Arc::clone(&reader);
-    let second = thread::spawn(move || waiting.establish().expect("a second snapshot"));
+    let second = thread::spawn(move || {
+        waiting
+            .wait_for_the_connection()
+            .establish()
+            .expect("a second snapshot")
+    });
     // The second read cannot establish while the first holds the connection,
     // so the hand-back is what releases it.
     thread::sleep(std::time::Duration::from_millis(50));
     drop(held);
     let second = second.join().expect("the waiting read finished");
     assert!(
-        second.waits() >= 1,
-        "the second read reported no wait for a connection it could not have had"
+        second.reading().write_generation() > 0,
+        "the read that waited for the connection answered under no reading"
     );
 }
 
@@ -146,7 +165,7 @@ fn a_snapshot_answers_after_the_store_it_was_minted_from_is_gone() {
     let mut store = scratch.open();
     let generation = write_one(&mut store, "notes/first.md");
     let reader = Arc::new(store.open_reader().expect("a reader"));
-    let snapshot = Arc::clone(&reader).establish().expect("a snapshot");
+    let snapshot = a_snapshot(&reader);
 
     drop(store);
     assert_eq!(

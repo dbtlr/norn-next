@@ -4,9 +4,11 @@
 //!
 //! Both are **per-connection** settings in SQLite rather than properties of the
 //! file — foreign keys are off by default in every new connection — and the
-//! cascade a client's wholesale row replacement depends on needs them on. One
-//! function opens every connection this workspace ever holds, so there is no
-//! reading of a schema under settings the schema was not designed for.
+//! cascade a client's wholesale row replacement depends on needs them on. Two
+//! functions open every connection this workspace ever holds — [`connect`] for
+//! the one writer of a database, [`connect_read_only`] for a reader beside it —
+//! so there is no reading of a schema under settings the schema was not
+//! designed for.
 //!
 //! The open flags are named rather than defaulted, and the one that is left out
 //! is the point: **URI filenames are off**. With them on, a path is a
@@ -37,6 +39,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 
 use crate::error::{self, DbError};
@@ -313,12 +316,30 @@ pub fn connect(path: &Path) -> Result<Attempt, DbError> {
 /// Open a **read-only** connection to a database that is already there.
 ///
 /// This is the shape a snapshot reader is opened in, beside the writer its
-/// client holds: the connection is opened without the write and create flags,
-/// and `query_only` is set on top of them, so a write is refused by the
-/// connection as well as by the file mode and nothing on it can derive.
+/// client holds.
+///
+/// **The read-only open flag is what refuses every write.** It is a property
+/// of the connection that no statement run on the connection can withdraw, and
+/// it covers the main database and every database attached to it: a write to
+/// either is refused by SQLite before the statement runs. That is the
+/// guarantee a caller composing statements here may rely on.
+///
+/// Two settings stand on top of it, and neither is that guarantee. `query_only`
+/// is a pragma, and a pragma is defeasible: `PRAGMA query_only = 0` on this
+/// connection would succeed on its own. What it buys is a second refusal for
+/// statements the file mode does not reach — a write to a temporary table, for
+/// one — stated at the connection rather than left to the read paths. The
+/// authorizer is what makes the pair stand: it refuses every action but
+/// reading rows, planning them, and the transaction control a snapshot runs
+/// on, so `PRAGMA`, `ATTACH`, and temporary-object creation are all refused at
+/// statement preparation and the connection cannot disarm itself.
+///
 /// Write-ahead logging is **read back rather than set** — setting the journal
 /// mode is a write — so a database in any other mode is refused here instead
-/// of being read under settings its writer is not using.
+/// of being read under settings its writer is not using. The refusal is an
+/// environmental one: the mode is a fact about how the file is being used
+/// rather than about the contents of its pages, and discarding a sound
+/// database over it would destroy work to fix nothing.
 ///
 /// A path that names no database is a refusal: without the create flag there
 /// is nothing to open, and a reader that created an empty database would
@@ -341,8 +362,10 @@ pub fn connect_read_only(path: &Path) -> Result<Connection, DbError> {
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
         .map_err(|error| error::sql("reading the journal mode", error))?;
     if !journal.eq_ignore_ascii_case("wal") {
-        return Err(DbError::Damaged {
-            what: format!(
+        return Err(DbError::Lifecycle {
+            operation: "opening the database read-only",
+            path: path.to_path_buf(),
+            message: format!(
                 "a read-only handle needs write-ahead logging and the database reports `{journal}`"
             ),
         });
@@ -350,12 +373,39 @@ pub fn connect_read_only(path: &Path) -> Result<Connection, DbError> {
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|error| error::sql("turning foreign keys on", error))?;
-    // Last, because it is what makes every statement after it a read: a
-    // pragma this function still had to set would be refused by it too.
     connection
         .pragma_update(None, "query_only", true)
         .map_err(|error| error::sql("making the connection read-only", error))?;
+    // Last, because it refuses the pragmas above: everything this function had
+    // to set is set before the connection stops accepting settings at all.
+    connection
+        .authorizer(Some(refuse_everything_but_reading))
+        .map_err(|error| error::sql("sealing the read-only connection", error))?;
     Ok(connection)
+}
+
+/// The one thing a read-only connection may do: read rows.
+///
+/// **Deny by default.** The allowed set is reading a column, the `SELECT` that
+/// reads it, the functions a predicate applies, and the transaction control a
+/// snapshot is opened and ended with. Everything else is refused at statement
+/// preparation — the writes the file mode already refuses, and, past those,
+/// `PRAGMA` so the connection cannot relax its own settings, `ATTACH` so it
+/// cannot reach a database that is writable, and temporary objects so there is
+/// no writable table inside the connection either.
+///
+/// A new action SQLite gains arrives as an action this refuses, which is the
+/// direction an allow-list is chosen for: a read builder that needs one is
+/// refused loudly here rather than served through a hole nobody added.
+fn refuse_everything_but_reading(context: AuthContext<'_>) -> Authorization {
+    match context.action {
+        AuthAction::Read { .. }
+        | AuthAction::Select
+        | AuthAction::Function { .. }
+        | AuthAction::Transaction { .. }
+        | AuthAction::Recursive => Authorization::Allow,
+        _ => Authorization::Deny,
+    }
 }
 
 /// Mint an epoch for a database being created.
