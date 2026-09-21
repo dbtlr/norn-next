@@ -351,11 +351,6 @@ impl Snapshot {
         self.counters
     }
 
-    /// The database file this snapshot answers from.
-    pub fn path(&self) -> &Path {
-        self.reader.path()
-    }
-
     /// The connection this snapshot's statements run on.
     ///
     /// It is opened with the read-only flag, so every write to the database it
