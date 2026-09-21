@@ -65,7 +65,7 @@
 //! [`norn_db::is_damaged`] — and every read an open performs goes through it.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 
 use norn_db::rusqlite::{self, Connection};
@@ -109,6 +109,24 @@ use crate::request::Request;
 /// against it: the entry lets its own hold go at the teardown window, and the
 /// read goes on answering from the handle it took. Nothing promises the
 /// database file behind it survives that teardown.
+///
+/// **The database file this handle reads is not reachable from it.** A handle
+/// is what a hold hands out, and a caller holding the file's path needs no
+/// hold at all: it can open its own read-only connection over the same
+/// database and establish snapshots on it under no adjudication, un-pinned,
+/// holding no lease, serialized against nothing and invisible to the read
+/// account — the same escape a cloned handle would be. So there is no
+/// accessor, and the [`fmt::Debug`] rendering below carries the epoch rather
+/// than the path. The absence is pinned:
+///
+/// ```compile_fail,E0599
+/// use std::path::Path;
+/// use norn_store::SnapshotReader;
+///
+/// fn the_file_escapes(reader: &SnapshotReader) -> &Path {
+///     reader.path()
+/// }
+/// ```
 pub struct SnapshotReader {
     /// The one connection reads answer from, held here between reads and taken
     /// by the read that is answering.
@@ -119,16 +137,20 @@ pub struct SnapshotReader {
     connection: Mutex<Option<Database>>,
     returned: Condvar,
     /// The database the connection reads, carried beside it because the
-    /// identity is asked for while a read holds the connection.
+    /// identity is asked for while a read holds the connection. The file it
+    /// reads is not carried: the connection holds the path it was opened on,
+    /// and a second copy here would be one this type had to keep from being
+    /// read back out.
     epoch: String,
-    path: PathBuf,
 }
 
 impl fmt::Debug for SnapshotReader {
+    /// The epoch and nothing else. The epoch names which database the handle
+    /// reads; the path would name where to open a second connection to it,
+    /// which is the escape this type has no accessor for either.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SnapshotReader")
-            .field("path", &self.path)
             .field("epoch", &self.epoch)
             .finish_non_exhaustive()
     }
@@ -179,11 +201,6 @@ impl SnapshotReader {
             reader: Arc::clone(self),
             database: Some(database),
         }
-    }
-
-    /// The database file this handle reads.
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     /// The database this handle reads, from its creation to its discard.
@@ -576,7 +593,6 @@ impl Store {
         let database = Database::adopt(connection, &path)?;
         Ok(SnapshotReader {
             epoch: database.epoch().to_string(),
-            path,
             connection: Mutex::new(Some(database)),
             returned: Condvar::new(),
         })

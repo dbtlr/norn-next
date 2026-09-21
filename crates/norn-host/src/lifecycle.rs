@@ -2236,6 +2236,12 @@ impl<O: EntryOps> ReadHold<O> {
     /// adjudication at all — un-pinned, holding no lease, and invisible to the
     /// read account. The signature is what refuses it:
     ///
+    /// What the borrow hands out has to refuse the same escape one
+    /// indirection along, so a handle carries no route to the database file it
+    /// reads: a caller holding that path opens its own connection over the
+    /// same database and answers from it under no hold. The reader type is
+    /// where that absence is stated and pinned.
+    ///
     /// ```compile_fail,E0308
     /// use std::sync::Arc;
     /// use norn_host::{EntryOps, ReadHold, SnapshotSource};

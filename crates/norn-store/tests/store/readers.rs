@@ -48,7 +48,20 @@ fn a_reader_answers_under_the_store_s_own_epoch_and_generation() {
         store.epoch(),
         "the reader reads another database"
     );
-    assert_eq!(reader.path(), store.path(), "the reader reads another file");
+    // The handle names which database it reads and never where that database
+    // is: a caller holding the path opens its own connection to it and reads
+    // under no hold at all, which is the escape this type has no accessor and
+    // no Debug field for.
+    let rendered = format!("{reader:?}");
+    assert!(
+        !rendered.contains(
+            store
+                .path()
+                .to_str()
+                .expect("a scratch path is representable")
+        ),
+        "the handle's rendering hands out its database file: {rendered}"
+    );
 
     let snapshot = a_snapshot(&reader);
     assert_eq!(snapshot.reading().epoch(), store.epoch());
