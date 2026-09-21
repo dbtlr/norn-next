@@ -444,10 +444,8 @@ fn a_block_id_span_points_at_its_marker() {
 /// document, a `\r\n` document and a lone-`\r` document carrying the same
 /// text find the same block ids.
 ///
-/// The agreement covers the line rule this crate owns. It does not extend
-/// inside a backtick fence, where the CommonMark parse decides what is opaque
-/// and reads a lone-`\r` document differently — see
-/// `a_lone_cr_backtick_fence_is_not_opaque`.
+/// The agreement covers code as well: a backtick fence is opaque on all three
+/// styles — see `a_lone_cr_backtick_fence_is_opaque`.
 #[test]
 fn block_id_detection_agrees_across_line_break_styles() {
     let lf_ids = BodyScan::new("first ^a\nsecond ^b\nthird\n").block_ids();
@@ -475,32 +473,39 @@ fn a_block_id_inside_code_is_not_an_anchor() {
     assert!(BodyScan::new("prose\n`^incode`\n").block_ids().is_empty());
 }
 
-/// A known gap, characterized rather than asserted as correct: the CommonMark
-/// parse opens a backtick fence on `\n` and on `\r\n`, and does not open one
-/// terminated by a lone `\r`. No code range comes out of such a fence, so
-/// nothing inside it is opaque and every construct the crate scans for leaks
-/// out of it — a block id, a wikilink and a tag alike. A `[[N#^a]]` reference
-/// therefore resolves into a code sample in a lone-`\r` document.
+/// A backtick fence is opaque on all three break styles, a lone `\r`
+/// included. The CommonMark parse behind the scan opens a backtick fence on
+/// `\n` and on `\r\n` and not on a lone `\r`, so the scan hands it input
+/// whose lone `\r` breaks read as `\n` — and every family that reads the
+/// fence's code ranges (a block id, a wikilink, a tag) sees the same fence the
+/// other two styles produce.
 ///
-/// A tilde fence is not affected, which locates the gap in fence opening
-/// rather than in the exclusion this crate applies.
+/// The tilde fence is the negative control's twin: the parse opens one on a
+/// lone `\r` unaided, so it was opaque before the normalization and states
+/// what the backtick fence now matches.
 #[test]
-fn a_lone_cr_backtick_fence_is_not_opaque() {
-    // What the fence should do, and does on the two terminators the parse
-    // opens it with.
+fn a_lone_cr_backtick_fence_is_opaque() {
     assert!(BodyScan::new("```\nfoo ^a\n```\n").block_ids().is_empty());
     assert!(
         BodyScan::new("```\r\nfoo ^a\r\n```\r\n")
             .block_ids()
             .is_empty()
     );
-    // A tilde fence opens on a lone `\r`, so its contents stay opaque.
+    // A tilde fence opens on a lone `\r` without help.
     assert!(BodyScan::new("~~~\rfoo ^a\r~~~\r").block_ids().is_empty());
 
-    // The gap. Every family leaks out of the same unopened fence.
-    assert_eq!(ids(&BodyScan::new("```\rfoo ^a\r```\r").block_ids()), ["a"]);
-    assert_eq!(BodyScan::new("```\r[[X]]\r```\r").wikilinks().len(), 1);
-    assert_eq!(BodyScan::new("```\r#tagme\r```\r").tags().len(), 1);
+    // The backtick fence, on the terminator the parse does not open one with.
+    // Every family is excluded by the same fence.
+    assert!(BodyScan::new("```\rfoo ^a\r```\r").block_ids().is_empty());
+    assert!(BodyScan::new("```\r[[X]]\r```\r").wikilinks().is_empty());
+    assert!(BodyScan::new("```\r#tagme\r```\r").tags().is_empty());
+
+    // Opacity that swallows the document is not the point: a construct after
+    // the closing fence is still read.
+    assert_eq!(
+        ids(&BodyScan::new("```\rfoo ^a\r```\rafter ^b\r").block_ids()),
+        ["b"]
+    );
 }
 
 /// The nuance that goes with it: a `^id` on the line *after* a closing fence

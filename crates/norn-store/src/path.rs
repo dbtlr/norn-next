@@ -37,11 +37,15 @@
 //! - **Bytes are compared as bytes.** Case, dot-prefix and separator
 //!   normalization belong to the filesystem seam, which is the workspace's one
 //!   path-spelling normalization point. The store therefore requires a
-//!   normalized path and refuses one that is obviously not — but it folds
-//!   nothing itself, so nothing here can disagree with the seam about what two
-//!   paths are. **`BINARY` collation is load-bearing**: it is what makes the
-//!   exclusive upper bound below exact, and a case-insensitive collation on
-//!   `suffix_key` would silently change which keys a range holds.
+//!   normalized path and refuses one that is obviously not — but it spells no
+//!   path differently from the way it arrived, so nothing here can disagree
+//!   with the seam about what two paths are. Where a read has to compare
+//!   case-insensitively it applies the same ASCII fold the seam is held to,
+//!   spelled here as a collation — see [`crate::StoredPathOrder`] — which
+//!   changes an order and a key range, never a stored byte. **`BINARY` collation is load-bearing**:
+//!   it is what makes the exclusive upper bound below exact, and a
+//!   case-insensitive collation on `suffix_key` would silently change which
+//!   keys a range holds.
 //!
 //! # A target has two reductions, and it probes both
 //!

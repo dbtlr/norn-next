@@ -19,7 +19,7 @@ use crate::heading::Heading;
 use crate::line_ending::LineEnding;
 use crate::link::{Link, parse_wikilinks_in_text};
 use crate::section::{SectionAddress, SectionError, SectionSpan};
-use crate::span::LineCursor;
+use crate::span::{LineCursor, split_lines_inclusive};
 use crate::tag::{Tag, frontmatter_tag_name};
 use crate::value::{KeyIndex, Mapping, Value};
 
@@ -382,6 +382,11 @@ impl<'a> Document<'a> {
     /// value span. A block sequence whose scanned item count disagrees with
     /// the parsed one reports none either — a disagreement is refused, never
     /// guessed at.
+    ///
+    /// The scan cuts lines on [`crate::span`]'s break rule, so a
+    /// `\r`-separated sequence is scanned item by item and agrees with the
+    /// parse about how many items it holds, rather than reaching the refusal
+    /// above for a sequence that is not ambiguous.
     fn sequence_item_ranges(&self, field: &Field, items: &[Value]) -> Vec<Option<Range<usize>>> {
         let absent = vec![None; items.len()];
         if field.style != ValueStyle::BlockSequence {
@@ -389,7 +394,7 @@ impl<'a> Document<'a> {
         }
         let mut scanned = Vec::new();
         let mut line_start = field.line_range.start;
-        for line in self.source[field.line_range.clone()].split_inclusive('\n') {
+        for line in split_lines_inclusive(&self.source[field.line_range.clone()]) {
             let trimmed = line.trim_end_matches(['\r', '\n']);
             let indent = trimmed.len() - trimmed.trim_start().len();
             if trimmed.trim_start().starts_with("- ") || trimmed.trim_start() == "-" {
@@ -605,9 +610,18 @@ impl<'a> Document<'a> {
     ///
     /// The heading and the blank lines separating it from its neighbours are
     /// not the section's content and are left where they are. An empty
-    /// `content` empties the section without touching its heading. Every line
-    /// the splice writes uses the document's own terminator, `content`'s own
-    /// lines included.
+    /// `content` empties the section without touching its heading.
+    ///
+    /// **Every line the splice writes carries the document's terminator**,
+    /// `content`'s own lines included: each break in `content` — `\n`, `\r\n`
+    /// or a lone `\r` — is rewritten to [`LineEnding::of`]'s classification of
+    /// the document, which is `Crlf` or `Lf` and nothing else. A document
+    /// holding no `\n` at all classifies as `Lf`, so a `\r`-broken document's
+    /// replaced section is written with `\n`.
+    ///
+    /// **Bytes outside the addressed range keep their spelling**, whatever
+    /// they are broken by. The splice rewrites the section's content and
+    /// nothing above or below it.
     ///
     /// The result is re-read before it is returned. A replace that moved the
     /// frontmatter, lost a heading the body already had, or produced a section
@@ -638,8 +652,11 @@ impl<'a> Document<'a> {
         if !content.is_empty() {
             // A splice into a point that is not at the start of a line — a
             // heading at end of file with no trailing newline — needs one, or
-            // the content welds onto the heading.
-            if start > 0 && !self.source[..start].ends_with('\n') {
+            // the content welds onto the heading. Whether the byte before the
+            // splice ends a line is the crate's break rule: a lone `\r` ends
+            // one, so a document written with them already has its separator
+            // and gains no second one.
+            if start > 0 && !self.source[..start].ends_with(['\n', '\r']) {
                 replacement.push_str(terminator);
             }
             append_with_terminator(&mut replacement, content, self.line_ending);
@@ -960,11 +977,14 @@ fn same_heading(left: &Heading, right: &Heading) -> bool {
 /// document's whatever the content arrived with, and the last line is
 /// terminated whether or not it asked to be. Neither is a difference in what
 /// the section says, so neither is a mismatch.
+///
+/// Both sides are cut on [`crate::span`]'s break rule, the same rule the splice
+/// writes by, so the comparison is over the lines the splice produced rather
+/// than over a run it held whole.
 fn same_lines(left: &str, right: &str) -> bool {
     fn lines(text: &str) -> impl Iterator<Item = &str> {
-        text.trim_end_matches(['\n', '\r'])
-            .split('\n')
-            .map(|line| line.trim_end_matches('\r'))
+        split_lines_inclusive(text.trim_end_matches(['\n', '\r']))
+            .map(|line| line.trim_end_matches(['\n', '\r']))
     }
     lines(left).eq(lines(right))
 }
@@ -972,13 +992,16 @@ fn same_lines(left: &str, right: &str) -> bool {
 /// Append `content` with every line terminated by `line_ending`, and terminate
 /// the last line too.
 ///
-/// Content arrives written however its author wrote it. Splicing it verbatim
+/// Content arrives written however its author wrote it, and **the document's
+/// own terminator wins**: every break in `content` — `\n`, `\r\n` or a lone
+/// `\r` — is rewritten to `line_ending` on the way in. Splicing it verbatim
 /// is how a CRLF document ends up with LF lines in the middle of it, which is
 /// the same defect as a synthesized line with the wrong terminator and is
-/// caught by nothing downstream.
+/// caught by nothing downstream. Cutting lines on [`crate::span`]'s break rule
+/// is what makes the promise cover all three.
 fn append_with_terminator(out: &mut String, content: &str, line_ending: LineEnding) {
     let terminator = line_ending.as_str();
-    for line in content.split_inclusive('\n') {
+    for line in split_lines_inclusive(content) {
         out.push_str(line.trim_end_matches(['\r', '\n']));
         out.push_str(terminator);
     }

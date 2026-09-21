@@ -378,7 +378,10 @@ pub fn render_document(
     out.push_str(terminator);
     if !body.is_empty() {
         out.push_str(body);
-        if !body.ends_with('\n') {
+        // Whether the body's last line is already terminated is the crate's
+        // break rule, so a body ending in a lone `\r` ends a line and gets no
+        // second terminator welded onto it.
+        if !body.ends_with(['\n', '\r']) {
             out.push_str(terminator);
         }
     }

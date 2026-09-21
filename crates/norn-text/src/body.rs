@@ -60,7 +60,7 @@ use crate::link::{
     BlockId, Link, markdown_link, parse_block_ids_in, parse_tokens, splice_tokens, wikilink_ranges,
 };
 use crate::section::{SectionAddress, SectionError, SectionSpan, resolve_section_in};
-use crate::span::{LineCursor, split_lines_inclusive};
+use crate::span::{LineCursor, lf_normalized, split_lines_inclusive};
 use crate::tag::{Tag as TagFact, scan_tags};
 
 /// One CommonMark reading of a document body: its headings, the inline
@@ -97,7 +97,29 @@ impl<'a> BodyScan<'a> {
         let mut slugs = SlugCounter::default();
         let mut container_depth: usize = 0;
 
-        for (event, range) in Parser::new(body).into_offset_iter() {
+        // The parse reads a narrower line rule than the rest of the crate: it
+        // opens a backtick fence on `\n` and on `\r\n` and not on a lone
+        // `\r`, so a CR-only document's code is not code and every construct
+        // this scan extracts leaks out of it. Normalizing lone `\r` to `\n`
+        // gives the parse the break rule CommonMark states and the cursor
+        // already counts. A document carrying no lone `\r` is parsed from the
+        // caller's own bytes.
+        //
+        // Two things come out of the parse, and the normalization is sound for
+        // both. **Offsets**: the rewrite is byte-length preserving, so every
+        // range the parse reports — heading starts, link ranges, code ranges —
+        // indexes the original `body` unchanged. **Decoded text**: the heading
+        // text, the link text and `dest_url` are built from the copy's bytes,
+        // and no rewritten byte can reach one. A line ending inside inline
+        // content arrives as `SoftBreak` or `HardBreak`, which this loop
+        // flattens to a space without reading the break's bytes at all; and
+        // CommonMark forbids a line ending inside a link destination, in the
+        // angle-bracket form and outside it, so `dest_url` spans no break in
+        // the first place. What is left is a code span's text, where a `\r`
+        // the copy holds as `\n` is a line ending either way.
+        let source = lf_normalized(body);
+
+        for (event, range) in Parser::new(&source).into_offset_iter() {
             // Every link, image and span of raw HTML the parse recognizes is
             // opaque to the tag scan, whichever family it belongs to and
             // whether or not it produces a link fact: the `#` in

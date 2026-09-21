@@ -267,11 +267,26 @@ pub struct StoredDocument {
 }
 
 /// Ordering used by a bounded stored-document scan.
+///
+/// The variant is the case behavior the vault's root was **proven** to have at
+/// the filesystem seam, carried into the store so a scan compares paths the way
+/// the root resolves them. It selects a collation and an index; it never
+/// rewrites a path. A stored path keeps the spelling the tree carries.
+///
+/// This crate depends on nothing in the filesystem seam, so the fold below is
+/// **a second implementation of the seam's rule, not a derivation of it**. The
+/// contract both are held to is written once — ASCII lowercase, then bytes,
+/// with the byte comparison breaking a fold's ties — and each side carries a
+/// test against it over the same sample, so widening one implementation and
+/// not the other fails.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoredPathOrder {
     /// Preserve bytewise UTF-8 path order.
     Sensitive,
-    /// Fold ASCII case, matching SQLite's `NOCASE` collation.
+    /// Fold ASCII case — `A`–`Z` onto `a`–`z`, every other byte as itself —
+    /// which is exactly SQLite's `NOCASE` collation and exactly the seam's
+    /// fold. Order under it is made total by a bytewise tie-break, so two paths
+    /// that fold together still page in one fixed order.
     AsciiCaseInsensitive,
 }
 

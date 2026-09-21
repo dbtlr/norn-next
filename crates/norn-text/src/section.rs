@@ -21,6 +21,7 @@ use std::fmt;
 
 use crate::body::BodyScan;
 use crate::heading::Heading;
+use crate::span::split_lines_inclusive;
 
 /// Which section a caller means.
 ///
@@ -183,11 +184,15 @@ pub(crate) fn resolve_section_in(
 /// A section whose body is entirely blank collapses to a single point at
 /// `end`, so an insert lands below the separators the heading already has
 /// rather than crowding the heading.
+///
+/// Lines are cut on [`crate::span`]'s break rule, so a `\r`-separated blank
+/// line is blank and the separators it makes stay outside the content an edit
+/// writes over.
 fn content_bounds(body: &str, body_start: usize, end: usize) -> (usize, usize) {
     let slice = &body[body_start..end];
 
     let mut start = body_start;
-    for line in slice.split_inclusive('\n') {
+    for line in split_lines_inclusive(slice) {
         if !line.trim().is_empty() {
             break;
         }
@@ -195,7 +200,7 @@ fn content_bounds(body: &str, body_start: usize, end: usize) -> (usize, usize) {
     }
 
     let mut stop = end;
-    for line in slice.split_inclusive('\n').rev() {
+    for line in split_lines_inclusive(slice).rev() {
         if !line.trim().is_empty() {
             break;
         }

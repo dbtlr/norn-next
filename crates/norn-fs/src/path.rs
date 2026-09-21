@@ -7,10 +7,37 @@
 //! entry proves that the root treats alternate case spellings as the same
 //! entry. No platform-name or mount-type guess is made.
 //!
-//! Case folding is deliberately ASCII-only. Unix path names are byte strings,
-//! not necessarily UTF-8; preserving non-ASCII bytes avoids inventing a lossy
-//! Unicode policy while still covering the case behavior Norn currently
-//! promises.
+//! # Where case is folded, and what "case-insensitive" means
+//!
+//! **This module owns the fold that every case-insensitive path comparison in
+//! the workspace is held to.** It is the rule's home, not a function every
+//! comparison calls: `norn-store` depends on nothing in this crate and orders
+//! its pages under SQLite's `NOCASE` collation, which is a *second
+//! implementation of the same rule* rather than a derivation of this one. Two
+//! implementations held to one written contract is what that is, so each side
+//! is pinned by a test against the contract — ASCII lowercase, then bytes —
+//! and widening one without the other fails.
+//!
+//! What no implementation does is rewrite a path's spelling. The spelling a
+//! vault's tree carries is the spelling that is stored, reported and written
+//! back; folding produces a comparison key beside it, never a replacement for
+//! it.
+//!
+//! **"Case-insensitive" means ASCII case, and only ASCII case.** `A`–`Z` fold
+//! onto `a`–`z`; every other byte compares as itself. Unix path names are byte
+//! strings, not necessarily UTF-8, so preserving non-ASCII bytes avoids
+//! inventing a lossy Unicode policy while still covering the case behavior
+//! Norn promises. The limit that buys is exact and worth naming: a volume that
+//! folds case in Unicode resolves `café.md` and `CAFÉ.md` to one entry while
+//! this fold reads them as two, so on such a root the two spellings are one
+//! file the vault sees under two keys. Widening the fold is a change to this
+//! module and to the stored keys derived from it, never a local choice made at
+//! a comparison site.
+//!
+//! **Whether the fold is applied at all is proven, not assumed.** The key
+//! folds only where an existing directory entry demonstrates that the root
+//! treats alternate case spellings as the same entry — see [`CaseSensitivity`]
+//! — and no platform-name or mount-type guess is made.
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -38,16 +65,19 @@ pub enum CaseSensitivity {
 
 impl CaseSensitivity {
     /// Compare two UTF-8 vault-relative spellings with this root's proven
-    /// lookup semantics.
+    /// lookup semantics: the fold, then the bytes to break a fold's ties.
+    ///
+    /// The fold is `fold_onto`'s, the same one every comparison key in this
+    /// module is built by. Spelling it again here is how the ordering and the
+    /// keys drift apart, so this builds the keys rather than re-deriving them.
     pub fn compare(self, left: &str, right: &str) -> Ordering {
-        match self {
-            Self::Sensitive => left.as_bytes().cmp(right.as_bytes()),
-            Self::Insensitive => left
-                .bytes()
-                .map(|byte| byte.to_ascii_lowercase())
-                .cmp(right.bytes().map(|byte| byte.to_ascii_lowercase()))
-                .then_with(|| left.as_bytes().cmp(right.as_bytes())),
-        }
+        let mut folded = (Vec::new(), Vec::new());
+        fold_onto(self, &mut folded.0, left.as_bytes());
+        fold_onto(self, &mut folded.1, right.as_bytes());
+        folded
+            .0
+            .cmp(&folded.1)
+            .then_with(|| left.as_bytes().cmp(right.as_bytes()))
     }
 }
 
@@ -752,6 +782,81 @@ mod tests {
         );
         assert!(CaseSensitivity::Insensitive.compare("A.md", "a.md").is_lt());
         assert!(CaseSensitivity::Sensitive.compare("A.md", "a.md").is_lt());
+    }
+
+    /// The sample the folded order is pinned over, shared verbatim with
+    /// `norn-store`'s test of its `NOCASE` collation.
+    ///
+    /// It is deliberately awkward: ASCII case pairs, the punctuation sitting
+    /// between the two ASCII case ranges, and non-ASCII letters that do have
+    /// case. A fold widened to Unicode reorders the last group and a fold
+    /// narrowed reorders the first, so neither change can pass quietly on one
+    /// side alone.
+    const FOLD_CONTRACT_SAMPLE: &[&str] = &[
+        "B.md",
+        "a.md",
+        "A.md",
+        "_x.md",
+        "[y.md",
+        "Zeta.md",
+        "zeta.md",
+        "Éclair.md",
+        "éclair.md",
+        "Straße.md",
+        "STRASSE.md",
+        "Éb.md",
+        "éa.md",
+        "a/Z.md",
+        "A/b.md",
+        "ab/no.md",
+    ];
+
+    /// The written contract both implementations of the fold are held to:
+    /// ASCII lowercase, then the raw bytes to break a fold's ties.
+    ///
+    /// Computed here rather than called, because a test that calls the
+    /// implementation asserts only that the implementation equals itself.
+    fn contract_order(sample: &[&str]) -> Vec<String> {
+        let mut ordered: Vec<String> = sample.iter().map(|path| (*path).to_string()).collect();
+        ordered.sort_by(|left, right| {
+            left.bytes()
+                .map(|byte| byte.to_ascii_lowercase())
+                .cmp(right.bytes().map(|byte| byte.to_ascii_lowercase()))
+                .then_with(|| left.as_bytes().cmp(right.as_bytes()))
+        });
+        ordered
+    }
+
+    /// This crate's implementation of the fold matches the written contract.
+    ///
+    /// `norn-store` depends on nothing here and reaches the same order through
+    /// SQLite's `NOCASE` collation. Neither side derives the other, so each is
+    /// pinned to the contract over this same sample and widening one alone
+    /// fails here or there.
+    #[test]
+    fn the_insensitive_order_is_the_written_ascii_fold_contract() {
+        let mut ordered: Vec<String> = FOLD_CONTRACT_SAMPLE
+            .iter()
+            .map(|path| (*path).to_string())
+            .collect();
+        ordered.sort_by(|left, right| CaseSensitivity::Insensitive.compare(left, right));
+        assert_eq!(ordered, contract_order(FOLD_CONTRACT_SAMPLE));
+        // The contract really orders the awkward parts: a case pair folds
+        // together and breaks on bytes, and a non-ASCII case pair does not
+        // fold at all.
+        let at = |path: &str| {
+            ordered
+                .iter()
+                .position(|held| held == path)
+                .expect("the sample holds it")
+        };
+        assert!(at("A.md") < at("a.md"));
+        assert!(at("Éclair.md") < at("éclair.md"));
+        assert!(at("STRASSE.md") < at("Straße.md"));
+        // The pair that tells an ASCII fold from a Unicode one: folding É onto
+        // é would put "éa.md" first, and the ASCII fold leaves É where its
+        // bytes put it.
+        assert!(at("Éb.md") < at("éa.md"));
     }
 
     #[test]
