@@ -330,9 +330,11 @@ pub fn connect(path: &Path) -> Result<Attempt, DbError> {
 /// statements the file mode does not reach — a write to a temporary table, for
 /// one — stated at the connection rather than left to the read paths. The
 /// authorizer is what makes the pair stand: it refuses every action but
-/// reading rows, planning them, and the transaction control a snapshot runs
-/// on, so `PRAGMA`, `ATTACH`, and temporary-object creation are all refused at
-/// statement preparation and the connection cannot disarm itself.
+/// reading rows, planning them, the transaction control a snapshot runs on,
+/// and the one read-only pragma FTS5 issues for itself, so every setting
+/// `PRAGMA`, `ATTACH`, and temporary-object creation are refused at statement
+/// preparation and the connection cannot disarm itself. The authorizer states
+/// which pragma passes and why it is not a pragma opening.
 ///
 /// Write-ahead logging is **read back rather than set** — setting the journal
 /// mode is a write — so a database in any other mode is refused here instead
@@ -387,12 +389,32 @@ pub fn connect_read_only(path: &Path) -> Result<Connection, DbError> {
 /// The one thing a read-only connection may do: read rows.
 ///
 /// **Deny by default.** The allowed set is reading a column, the `SELECT` that
-/// reads it, the functions a predicate applies, and the transaction control a
-/// snapshot is opened and ended with. Everything else is refused at statement
-/// preparation — the writes the file mode already refuses, and, past those,
-/// `PRAGMA` so the connection cannot relax its own settings, `ATTACH` so it
-/// cannot reach a database that is writable, and temporary objects so there is
-/// no writable table inside the connection either.
+/// reads it, the functions a predicate applies, the transaction control a
+/// snapshot is opened and ended with, and the one pragma named below.
+/// Everything else is refused at statement preparation — the writes the file
+/// mode already refuses, and, past those, every setting `PRAGMA` so the
+/// connection cannot relax its own settings, `ATTACH` so it cannot reach a
+/// database that is writable, and temporary objects so there is no writable
+/// table inside the connection either.
+///
+/// **The one pragma is `data_version`, asked with no value.** It reports
+/// whether another connection has committed to this file since this one last
+/// looked; it sets nothing and it takes no value. It is also the pragma FTS5
+/// runs on the connection for itself, once for every `MATCH` and every
+/// `fts5vocab` read, so refusing it does not narrow a read surface — it
+/// removes one. On a connection that refuses it every full-text statement
+/// fails with an authorization refusal while `EXPLAIN QUERY PLAN` over that
+/// same statement still returns a clean plan, because explaining a virtual
+/// table never runs it. The entry is that one name with that one shape, so it
+/// opens no pragma surface: `PRAGMA query_only = 0`, `PRAGMA foreign_keys =
+/// OFF` and every other setting are refused exactly as they were.
+///
+/// **The table-valued pragma form is a pragma here, and is refused.** `SELECT
+/// ... FROM pragma_table_info('documents')` reaches this as the pragma it
+/// spells rather than as a read of a table, so it is denied with the rest.
+/// Nothing a read answers needs it: a read answers about a client's rows, and
+/// the schema facts a read reports are rows of the client's own meta table and
+/// of `sqlite_master`, both of which this connection reads.
 ///
 /// A new action SQLite gains arrives as an action this refuses, which is the
 /// direction an allow-list is chosen for: a read builder that needs one is
@@ -403,7 +425,11 @@ fn refuse_everything_but_reading(context: AuthContext<'_>) -> Authorization {
         | AuthAction::Select
         | AuthAction::Function { .. }
         | AuthAction::Transaction { .. }
-        | AuthAction::Recursive => Authorization::Allow,
+        | AuthAction::Recursive
+        | AuthAction::Pragma {
+            pragma_name: "data_version",
+            pragma_value: None,
+        } => Authorization::Allow,
         _ => Authorization::Deny,
     }
 }

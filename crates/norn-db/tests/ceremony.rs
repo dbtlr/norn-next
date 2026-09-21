@@ -501,8 +501,13 @@ fn a_snapshot_is_one_transaction_and_ends_where_it_is_closed() {
 /// **A read-only connection cannot disarm itself.** The open flag is what
 /// refuses a write, and the authorizer is what keeps the connection from
 /// reaching around it: the pragma that would relax `query_only`, the attach
-/// that would reach a writable database, and the temporary table that would be
-/// writable inside the connection are each refused at statement preparation.
+/// that would reach a writable database, the temporary table that would be
+/// writable inside the connection, and the table-valued pragma form that
+/// spells a pragma as a table are each refused at statement preparation.
+///
+/// One pragma stands apart and is asserted here too: `data_version` is read
+/// with no value, sets nothing, and is what FTS5 runs on the connection for
+/// itself, so it passes while every setting pragma beside it refuses.
 #[test]
 fn a_read_only_connection_refuses_to_relax_its_own_settings() {
     let scratch = Scratch::new("read-only-sealed");
@@ -519,12 +524,18 @@ fn a_read_only_connection_refuses_to_relax_its_own_settings() {
         "PRAGMA query_only = 0",
         "PRAGMA foreign_keys = OFF",
         "CREATE TEMP TABLE probe (value INTEGER)",
+        "SELECT name FROM pragma_table_info('meta')",
     ] {
         assert!(
             reader.execute_batch(statement).is_err(),
             "a read-only connection ran `{statement}`"
         );
     }
+
+    // The one pragma the connection answers, and it reports rather than sets.
+    reader
+        .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+        .expect("a read-only connection refused the pragma its full-text reads run");
     reader
         .execute_batch(&format!(
             "ATTACH DATABASE '{}' AS writable",

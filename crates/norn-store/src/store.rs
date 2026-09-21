@@ -1114,4 +1114,169 @@ mod tests {
             "the snapshot names a database its handle was not minted from"
         );
     }
+
+    /// One document written into the store, so a read has rows to answer from.
+    fn write_one_document(store: &mut Store, at: &str, body: &str) {
+        let facts = crate::facts::DocumentFacts::new(
+            crate::path::DocumentPath::new(at).expect("a vault-relative document path"),
+            "a-content-hash",
+            body,
+            body.len() as u64,
+        );
+        store
+            .begin_request()
+            .apply_increment(
+                crate::increment::IncrementProvenance::Derived,
+                [crate::increment::Change::Upsert(facts)],
+            )
+            .expect("a changeset that writes one document");
+    }
+
+    /// **A full-text read is judged by running it, because explaining it
+    /// cannot judge it.** FTS5 runs `PRAGMA data_version` on the connection
+    /// for itself, once for every `MATCH` and once for every `fts5vocab` read,
+    /// so a statement authorizer that refuses that pragma refuses every
+    /// full-text read this schema is built on — while `EXPLAIN QUERY PLAN`
+    /// over the identical statement still returns a clean plan, because
+    /// explaining a virtual table never runs it. An `EXPLAIN` bar would
+    /// therefore certify a statement no read can execute. This case executes
+    /// the match and the vocabulary read and asserts their rows.
+    #[test]
+    fn a_snapshot_runs_the_full_text_statements_this_schema_is_built_on() {
+        const MATCHED: &str = "SELECT documents.path FROM documents_fts
+             JOIN documents ON documents.id = documents_fts.rowid
+             WHERE documents_fts MATCH ?1";
+
+        let scratch = Scratch::new("norn-store-reader-full-text");
+        let mut store =
+            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        write_one_document(&mut store, "notes/first.md", "the interloper walked in");
+
+        let reader = Arc::new(store.open_reader().expect("a live store mints a reader"));
+        let snapshot = reader
+            .try_take()
+            .expect("a handle nothing is reading holds its connection")
+            .establish()
+            .expect("a snapshot");
+        let connection = snapshot.connection();
+
+        let matched: Vec<String> = connection
+            .prepare(MATCHED)
+            .expect("a full-text match compiles on a snapshot connection")
+            .query_map(["interloper"], |row| row.get(0))
+            .expect("a full-text match runs on a snapshot connection")
+            .collect::<Result<_, _>>()
+            .expect("the rows a full-text match answered");
+        assert_eq!(
+            matched,
+            vec!["notes/first.md".to_string()],
+            "a full-text match answered rows other than the document whose body carries the term"
+        );
+
+        let indexed: Vec<String> = connection
+            .prepare("SELECT term FROM documents_fts_vocab ORDER BY term")
+            .expect("a vocabulary read compiles on a snapshot connection")
+            .query_map([], |row| row.get(0))
+            .expect("a vocabulary read runs on a snapshot connection")
+            .collect::<Result<_, _>>()
+            .expect("the rows a vocabulary read answered");
+        assert!(
+            indexed.contains(&"interloper".to_string()),
+            "the index this snapshot reads holds no term the written body carries: {indexed:?}"
+        );
+
+        // The plan for that same statement, which is what an EXPLAIN bar reads
+        // and the reason the two assertions above read rows instead.
+        let plan =
+            norn_db::emitted_plan(connection, MATCHED, ["interloper"]).expect("the match's plan");
+        assert!(
+            plan.steps
+                .iter()
+                .any(|step| step.detail.contains("documents_fts")),
+            "the plan of a full-text match names no virtual table: {:?}",
+            plan.steps
+        );
+    }
+
+    /// **The read surface a snapshot connection has is the set of statements
+    /// that run on it.** Every shape a read builder composes is executed here
+    /// and answers its row: a join, a subquery, a recursive common table
+    /// expression, an aggregate with `GROUP BY` and `HAVING`, a window
+    /// function, a `UNION`, ordering with a bounded page, the json1 functions
+    /// a frontmatter projection is read with, `sqlite_master`, and a bound
+    /// parameter. A shape the statement authorizer refuses is a surface this
+    /// connection does not have, whatever a plan taken of it reports.
+    #[test]
+    fn a_snapshot_runs_every_shape_a_read_builder_composes() {
+        let scratch = Scratch::new("norn-store-reader-shapes");
+        let mut store =
+            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        write_one_document(&mut store, "notes/first.md", "the interloper walked in");
+
+        let reader = Arc::new(store.open_reader().expect("a live store mints a reader"));
+        let snapshot = reader
+            .try_take()
+            .expect("a handle nothing is reading holds its connection")
+            .establish()
+            .expect("a snapshot");
+        let connection = snapshot.connection();
+
+        for (shape, sql) in [
+            (
+                "a join",
+                "SELECT count(*) FROM documents AS outer_row
+                 JOIN documents AS inner_row ON inner_row.id = outer_row.id",
+            ),
+            (
+                "a subquery",
+                "SELECT count(*) FROM documents WHERE id IN (SELECT id FROM documents)",
+            ),
+            (
+                "a recursive common table expression",
+                "WITH RECURSIVE counted(n) AS (
+                     SELECT 1 UNION ALL SELECT n + 1 FROM counted WHERE n < 3
+                 ) SELECT sum(n) = 6 FROM counted",
+            ),
+            (
+                "an aggregate with GROUP BY and HAVING",
+                "SELECT count(*) FROM (
+                     SELECT path FROM documents GROUP BY path HAVING count(*) = 1
+                 )",
+            ),
+            (
+                "a window function",
+                "SELECT count(*) FROM (SELECT row_number() OVER (ORDER BY path) FROM documents)",
+            ),
+            (
+                "a UNION",
+                "SELECT count(*) FROM (SELECT path FROM documents UNION SELECT path FROM documents)",
+            ),
+            (
+                "an ordered bounded page",
+                "SELECT count(*) FROM (SELECT path FROM documents ORDER BY path LIMIT 1 OFFSET 0)",
+            ),
+            (
+                "the json1 functions",
+                "SELECT json_valid(json_object('term', 'interloper'))",
+            ),
+            (
+                "a read of sqlite_master",
+                "SELECT count(*) > 0 FROM sqlite_master WHERE name = 'documents_fts'",
+            ),
+        ] {
+            let answered: i64 = connection
+                .query_row(sql, [], |row| row.get(0))
+                .unwrap_or_else(|error| panic!("{shape} on a snapshot connection: {error}"));
+            assert_eq!(answered, 1, "{shape} answered {answered}");
+        }
+
+        let bound: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM documents WHERE path = ?1",
+                ["notes/first.md"],
+                |row| row.get(0),
+            )
+            .expect("a bound parameter on a snapshot connection");
+        assert_eq!(bound, 1, "a bound parameter matched no row");
+    }
 }
