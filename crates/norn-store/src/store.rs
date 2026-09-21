@@ -219,6 +219,24 @@ impl SnapshotReader {
     }
 }
 
+/// A minted read handle, and what minting it ran against the database.
+///
+/// The mint is a second open of the file a live store is holding, and it is
+/// paid for under whatever lock its caller took: the count is what that caller
+/// reports about the lock it held. It is carried on both answers because both
+/// cost the same lock — a refusal that waited out a busy timeout and then
+/// failed cost what a handle cost.
+#[derive(Debug)]
+pub struct ReaderMint {
+    /// The handle this store's reads run on, or why the store has none.
+    pub reader: Result<SnapshotReader, StoreError>,
+    /// Statements the mint ran against the database. They are the read-only
+    /// open's own — the journal-mode read and the store-epoch read — counted
+    /// where each one runs, so a refusal reports the statements that ran
+    /// before it.
+    pub statements: u64,
+}
+
 /// One read's turn on the connection its handle holds.
 ///
 /// It is the connection out of the handle and not yet inside a snapshot, which
@@ -587,15 +605,26 @@ impl Store {
     /// logging open needs is there to be read. Nothing here concludes a heal
     /// rung — the open bypasses inspection and rebuild entirely — because a
     /// reader reads derived state and never decides what it means.
-    pub fn open_reader(&self) -> Result<SnapshotReader, StoreError> {
+    ///
+    /// **It reports what it ran against the database beside the handle**, and
+    /// it reports it whichever way it ended: a caller that holds a lock across
+    /// the mint answers for those statements, and a mint that refused held
+    /// that lock for the ones it ran before it refused.
+    pub fn open_reader(&self) -> ReaderMint {
         let path = self.database.path().to_path_buf();
-        let connection = norn_db::connect_read_only(&path)?;
-        let database = Database::adopt(connection, &path)?;
-        Ok(SnapshotReader {
-            epoch: database.epoch().to_string(),
-            connection: Mutex::new(Some(database)),
-            returned: Condvar::new(),
-        })
+        let opened = norn_db::open_read_only(&path);
+        let reader = opened
+            .adopted
+            .map_err(StoreError::from)
+            .map(|database| SnapshotReader {
+                epoch: database.epoch().to_string(),
+                connection: Mutex::new(Some(database)),
+                returned: Condvar::new(),
+            });
+        ReaderMint {
+            reader,
+            statements: opened.statements,
+        }
     }
 
     /// Open a request. Everything the store does happens inside one, so that
@@ -1042,7 +1071,12 @@ mod tests {
         let mut store =
             Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
 
-        let reader = Arc::new(store.open_reader().expect("a live store mints a reader"));
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
         let snapshot = reader
             .try_take()
             .expect("a handle nothing is reading holds its connection")
@@ -1078,7 +1112,12 @@ mod tests {
         let scratch = Scratch::new("norn-store-reader-turn");
         let store =
             Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
-        let reader = Arc::new(store.open_reader().expect("a live store mints a reader"));
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
 
         let turn = reader.try_take().expect("a free handle hands out its turn");
         assert!(
@@ -1111,7 +1150,12 @@ mod tests {
         let scratch = Scratch::new("norn-store-reader-establish");
         let store =
             Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
-        let reader = Arc::new(store.open_reader().expect("a live store mints a reader"));
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
 
         let snapshot = reader
             .try_take()
@@ -1142,7 +1186,12 @@ mod tests {
         let scratch = Scratch::new("norn-store-reader-unwind");
         let store =
             Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
-        let reader = Arc::new(store.open_reader().expect("a live store mints a reader"));
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
 
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _turn = reader.try_take().expect("a free handle hands out its turn");
@@ -1203,7 +1252,12 @@ mod tests {
             Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
         write_one_document(&mut store, "notes/first.md", "the interloper walked in");
 
-        let reader = Arc::new(store.open_reader().expect("a live store mints a reader"));
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
         let snapshot = reader
             .try_take()
             .expect("a handle nothing is reading holds its connection")
@@ -1264,7 +1318,12 @@ mod tests {
             Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
         write_one_document(&mut store, "notes/first.md", "the interloper walked in");
 
-        let reader = Arc::new(store.open_reader().expect("a live store mints a reader"));
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
         let snapshot = reader
             .try_take()
             .expect("a handle nothing is reading holds its connection")

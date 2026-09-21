@@ -398,6 +398,13 @@ mod tests {
 /// it held the entry gate, and what concurrent reads of one entry paid for
 /// sharing the one connection that entry holds.
 ///
+/// **What a read runs under the gate is two readings, not one.** The
+/// establishing statement is exactly one per read and the bar on it is read
+/// off that; the repair a read runs when it finds the handle slot empty is
+/// under the same gate and is not query work. They are counted apart so each
+/// bar says what it asserts, and the widest reading holds their sum so a
+/// ceiling over one acquisition reads one number.
+///
 /// Every field is a running total for the host's whole life. Two of them are
 /// maxima rather than sums, which is why a window over this account carries
 /// neither: see [`ReadsSince`].
@@ -405,6 +412,7 @@ mod tests {
 pub(crate) struct ReadEvidence {
     reads_served: AtomicU64,
     statements_under_the_gate: AtomicU64,
+    mint_statements_under_the_gate: AtomicU64,
     widest_statements_under_the_gate: AtomicU64,
     reader_waits: AtomicU64,
     widest_reader_wait: AtomicU64,
@@ -415,13 +423,34 @@ pub(crate) struct ReadEvidence {
 pub struct ReadReading {
     /// Reads that took a hold, over every entry.
     pub reads_served: u64,
-    /// Statements run against a database while the entry gate was held. One
-    /// per read — the snapshot-establishing statement — so this moves with
-    /// `reads_served` and any other number is a read that ran work under the
-    /// lock every other holder of that entry waits behind.
+    /// Snapshot-establishing statements run while the entry gate was held.
+    ///
+    /// **One per read served**, so this moves with `reads_served`, and any
+    /// other number is a read that ran query work under the lock every other
+    /// holder of that entry waits behind. That claim is what this field is
+    /// for, so it holds the establishment alone: the repair below runs under
+    /// the same gate and is not query work, and folding the two would leave
+    /// the exactly-one reading unable to say which of them moved it.
     pub statements_under_the_gate: u64,
-    /// The most statements any one read ran under the gate, which is the
-    /// value a per-read bar is stated against.
+    /// Statements the read path's own mints ran against a database while the
+    /// entry gate was held.
+    ///
+    /// A read that meets a serving entry with an empty handle slot mints that
+    /// handle again under its gate hold, before it establishes anything, and
+    /// the mint reads the database: the journal-mode read of the read-only
+    /// open, and the store-epoch read that binds the connection to its file.
+    /// This is the repair's own cost, so **zero is a host whose reads all
+    /// found a handle standing** and any other number is read-traffic healing.
+    ///
+    /// It counts what a mint ran whichever way that mint ended, and whichever
+    /// way the read that paid for it left: a mint that refused held the gate
+    /// for the statements it ran before it refused.
+    pub mint_statements_under_the_gate: u64,
+    /// The most statements any one acquisition ran under the gate — **its
+    /// mint's and its establishment's together** — which is the value a
+    /// per-read ceiling is stated against. An acquisition that found a handle
+    /// standing runs one; one that healed runs its mint's statements and then
+    /// that one; one whose mint refused runs the mint's alone.
     pub widest_statements_under_the_gate: u64,
     /// Reads that gave the entry gate back and waited for the one connection
     /// their entry holds. Nonzero is reader contention, measured rather than
@@ -453,9 +482,12 @@ pub struct ReadReading {
 pub struct ReadsSince {
     /// Reads that took a hold in this window, over every entry.
     pub reads_served: u64,
-    /// Statements run against a database while the entry gate was held, in
+    /// Snapshot-establishing statements run while the entry gate was held, in
     /// this window.
     pub statements_under_the_gate: u64,
+    /// Statements this window's read-path mints ran against a database while
+    /// the entry gate was held.
+    pub mint_statements_under_the_gate: u64,
     /// Reads in this window that gave the entry gate back and waited for the
     /// one connection their entry holds.
     pub reader_waits: u64,
@@ -469,6 +501,9 @@ impl ReadReading {
             statements_under_the_gate: self
                 .statements_under_the_gate
                 .saturating_sub(earlier.statements_under_the_gate),
+            mint_statements_under_the_gate: self
+                .mint_statements_under_the_gate
+                .saturating_sub(earlier.mint_statements_under_the_gate),
             reader_waits: self.reader_waits.saturating_sub(earlier.reader_waits),
         }
     }
@@ -481,25 +516,58 @@ impl ReadEvidence {
         ReadReading {
             reads_served: get(&self.reads_served),
             statements_under_the_gate: get(&self.statements_under_the_gate),
+            mint_statements_under_the_gate: get(&self.mint_statements_under_the_gate),
             widest_statements_under_the_gate: get(&self.widest_statements_under_the_gate),
             reader_waits: get(&self.reader_waits),
             widest_reader_wait: get(&self.widest_reader_wait),
         }
     }
 
-    /// Record what one read's snapshot establishment ran, and how many times
-    /// that read waited for its entry's connection on the way to it.
+    /// Record what one read's mint ran under the entry gate.
+    ///
+    /// **This is called where the mint returns and not where the read leaves**,
+    /// because the read has already paid for those statements by then: a read
+    /// that is refused after its mint refused ran them under the gate exactly
+    /// as a read that went on to establish did. A read that minted nothing
+    /// reports zero here and moves nothing.
+    pub(crate) fn count_mint_under_the_gate(&self, statements: u64) {
+        self.mint_statements_under_the_gate
+            .fetch_add(statements, Ordering::Relaxed);
+        // The widest is per acquisition, and this acquisition has run its
+        // mint's statements and no establishing statement yet. A read that
+        // goes on to establish widens it again below; a read that is refused
+        // from here leaves this as what it ran.
+        self.widest_statements_under_the_gate
+            .fetch_max(statements, Ordering::Relaxed);
+    }
+
+    /// Record what one read's snapshot establishment ran, how many times that
+    /// read waited for its entry's connection on the way to it, and what the
+    /// mint it ran first cost.
     ///
     /// The waits are the host's own count rather than a number the
     /// establishment reports: the acquisition is what gave the entry gate back
     /// and waited, and the establishment it eventually ran waited for nothing.
-    pub(crate) fn count_read<S>(&self, established: &crate::Established<S>, waits: u64) {
+    ///
+    /// The mint's statements are taken again here, already counted by
+    /// [`ReadEvidence::count_mint_under_the_gate`], because the widest reading
+    /// is per acquisition: what this read ran under the gate is its mint's
+    /// statements and its establishing one, and a ceiling read off the two
+    /// maxima separately would be a sum of two different reads.
+    pub(crate) fn count_read<S>(
+        &self,
+        established: &crate::Established<S>,
+        waits: u64,
+        mint_statements: u64,
+    ) {
         self.reads_served.fetch_add(1, Ordering::Relaxed);
         self.statements_under_the_gate
             .fetch_add(established.statements, Ordering::Relaxed);
         self.reader_waits.fetch_add(waits, Ordering::Relaxed);
-        self.widest_statements_under_the_gate
-            .fetch_max(established.statements, Ordering::Relaxed);
+        self.widest_statements_under_the_gate.fetch_max(
+            mint_statements.saturating_add(established.statements),
+            Ordering::Relaxed,
+        );
         self.widest_reader_wait.fetch_max(waits, Ordering::Relaxed);
     }
 }

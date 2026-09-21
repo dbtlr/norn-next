@@ -111,6 +111,19 @@ impl Database {
     /// consumer's record of progress is keyed by, so adopting it absent would
     /// let a cursor into a discarded database read as a position in this one.
     pub fn adopt(connection: Connection, path: &Path) -> Result<Self, DbError> {
+        Self::adopt_counting(connection, path, &mut 0)
+    }
+
+    /// [`Database::adopt`], reporting what it ran against the database.
+    ///
+    /// The count is taken beside the epoch read and before it is run, for the
+    /// reason [`connect_read_only_counting`] gives.
+    fn adopt_counting(
+        connection: Connection,
+        path: &Path,
+        statements: &mut u64,
+    ) -> Result<Self, DbError> {
+        *statements += 1;
         let epoch = meta::get_meta::<String>(&connection, meta::STORE_EPOCH)?.ok_or_else(|| {
             DbError::Damaged {
                 what: "the database records no store epoch, so nothing it holds can be progressed \
@@ -346,8 +359,18 @@ pub fn connect(path: &Path) -> Result<Attempt, DbError> {
 /// A path that names no database is a refusal: without the create flag there
 /// is nothing to open, and a reader that created an empty database would
 /// answer every read with no rows rather than saying the file is gone.
-#[allow(clippy::disallowed_methods)] // The substrate seam: this is the one place a SQLite connection is opened.
 pub fn connect_read_only(path: &Path) -> Result<Connection, DbError> {
+    connect_read_only_counting(path, &mut 0)
+}
+
+/// [`connect_read_only`], reporting what it ran against the database.
+///
+/// The count is taken beside each statement and before it is run, so a
+/// statement that waited out the busy timeout and then failed is one of these:
+/// the caller paid for it. `statements` is added to rather than assigned, so a
+/// caller counting a whole open passes one tally through every step of it.
+#[allow(clippy::disallowed_methods)] // The substrate seam: this is the one place a SQLite connection is opened.
+fn connect_read_only_counting(path: &Path, statements: &mut u64) -> Result<Connection, DbError> {
     refuse_a_name_that_is_not_a_file("opening the database read-only", path)?;
     let connection =
         Connection::open_with_flags(path, READ_ONLY_FLAGS).map_err(|error| DbError::Lifecycle {
@@ -360,6 +383,7 @@ pub fn connect_read_only(path: &Path) -> Result<Connection, DbError> {
         .map_err(|error| error::sql("setting the busy timeout", error))?;
     connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE);
 
+    *statements += 1;
     let journal: String = connection
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
         .map_err(|error| error::sql("reading the journal mode", error))?;
@@ -384,6 +408,43 @@ pub fn connect_read_only(path: &Path) -> Result<Connection, DbError> {
         .authorizer(Some(refuse_everything_but_reading))
         .map_err(|error| error::sql("sealing the read-only connection", error))?;
     Ok(connection)
+}
+
+/// A read-only open of a database, and what that open ran against it.
+///
+/// **The statements are reported whichever way the open ended.** A caller that
+/// holds a lock across the open waits for a statement that took the busy
+/// timeout and then failed exactly as it waits for one that answered, so a
+/// report only a successful open made would leave the expensive failures
+/// unaccounted.
+#[derive(Debug)]
+pub struct ReadOnlyOpen {
+    /// The database this open bound to its file, or why there is none.
+    pub adopted: Result<Database, DbError>,
+    /// Statements this open ran against the database: the journal-mode read
+    /// that checks the file is in write-ahead logging, and the store-epoch
+    /// read that binds the connection to the file it was opened on. The
+    /// settings the open applies read no rows and are not among them, and a
+    /// refusal reports the statements that ran before it.
+    pub statements: u64,
+}
+
+/// Open a read-only connection over a database and bind it to its file,
+/// reporting what the open ran against that database.
+///
+/// This is the spelling a caller takes where the cost of the open is part of
+/// what it answers for — a mint under a lock every other holder of the thing
+/// being minted for waits behind. [`connect_read_only`] and
+/// [`Database::adopt`] are the same two acts for a caller that answers for
+/// neither.
+pub fn open_read_only(path: &Path) -> ReadOnlyOpen {
+    let mut statements = 0;
+    let adopted = connect_read_only_counting(path, &mut statements)
+        .and_then(|connection| Database::adopt_counting(connection, path, &mut statements));
+    ReadOnlyOpen {
+        adopted,
+        statements,
+    }
 }
 
 /// The one thing a read-only connection may do: read rows.

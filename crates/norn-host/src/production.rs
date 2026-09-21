@@ -25,8 +25,8 @@ use crate::derivation::{
 use crate::evidence::{JobEvidence, count_changeset};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
-    EntryOps, Established, Healing, JobFailure, ProgressReporter, ReadSource, ReaderUnavailable,
-    ReconcileWork, ReloadError, ReloadOutcome, SnapshotSource,
+    EntryOps, Established, Healing, JobFailure, MintedReader, ProgressReporter, ReadSource,
+    ReaderUnavailable, ReconcileWork, ReloadError, ReloadOutcome, SnapshotSource,
 };
 
 /// Maximum number of document changes materialized for one store transaction.
@@ -194,10 +194,19 @@ impl SnapshotSource for ProductionAttachment {
     /// environment can refuse it, and a refusal is an entry that serves every
     /// surface but this one rather than an entry that silently answers no
     /// reads. The refusal is the store's own account of what it met.
-    fn open_reader(&self) -> Result<Self::Reader, ReaderUnavailable> {
-        self.store
-            .open_reader()
-            .map_err(|error| ReaderUnavailable::new(error.to_string()))
+    ///
+    /// The statements are the store's own count of what the open ran against
+    /// the database, carried through rather than restated here: the read-only
+    /// open is the store's act, and a number this seam declared for it would
+    /// stop being true the moment that open changed.
+    fn open_reader(&self) -> MintedReader<Self::Reader> {
+        let minted = self.store.open_reader();
+        MintedReader {
+            reader: minted
+                .reader
+                .map_err(|error| ReaderUnavailable::new(error.to_string())),
+            statements: minted.statements,
+        }
     }
 }
 

@@ -452,6 +452,56 @@ fn a_read_only_open_of_a_path_with_no_database_refuses() {
     );
 }
 
+/// **A read-only open reports what it ran against the database**, so a caller
+/// that holds a lock across the open can account for what that lock paid for.
+///
+/// Three opens, three counts, because a count that stood at the same number
+/// for all of them would attest nothing: an open that adopted ran the
+/// journal-mode read and the store-epoch read; an open refused on the journal
+/// mode ran the journal-mode read alone and never reached the epoch; and an
+/// open of a path with no database reached neither.
+#[test]
+fn a_read_only_open_reports_the_statements_it_ran_against_the_database() {
+    let scratch = Scratch::new("read-only-statements");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 1_i64).expect("a writer writes");
+
+    let adopted = norn_db::open_read_only(&database);
+    adopted
+        .adopted
+        .expect("a read-only open of a live database binds to its file");
+    assert_eq!(
+        adopted.statements, 2,
+        "an open that adopted ran something other than the journal-mode read and the epoch read"
+    );
+
+    let absent = Scratch::new("read-only-statements-absent");
+    let nothing = norn_db::open_read_only(&absent.database());
+    assert!(
+        nothing.adopted.is_err(),
+        "a read-only open of a path with no database adopted one"
+    );
+    assert_eq!(
+        nothing.statements, 0,
+        "an open that never opened a connection ran statements against a database"
+    );
+
+    writer
+        .pragma_update(None, "journal_mode", "delete")
+        .expect("a writer sets its own journal mode");
+    drop(writer);
+    let refused = norn_db::open_read_only(&database);
+    assert!(
+        refused.adopted.is_err(),
+        "a read-only open adopted a database that is not in write-ahead logging"
+    );
+    assert_eq!(
+        refused.statements, 1,
+        "an open refused on the journal mode reported a count other than the read that refused it"
+    );
+}
+
 /// The snapshot spelling holds one transaction open past the call that opened
 /// it, and refuses a second over the same handle: a handle in a snapshot is a
 /// handle nothing else begins a transaction on.

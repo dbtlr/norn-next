@@ -29,8 +29,8 @@ pub use evidence::{ReadReading, ReadsSince};
 pub use lifecycle::WorkInFlight;
 pub use lifecycle::{
     AnswerReading, Demand, DemandLease, EntryOps, EntryReloadFailure, Established, Healing, Host,
-    HostError, JobFailure, LifecyclePolicy, LifecyclePolicyError, ProgressReporter, ReadHold,
-    ReadRefusal, ReadSource, ReaderUnavailable, ReconcileWork, SnapshotSource,
+    HostError, JobFailure, LifecyclePolicy, LifecyclePolicyError, MintedReader, ProgressReporter,
+    ReadHold, ReadRefusal, ReadSource, ReaderUnavailable, ReconcileWork, SnapshotSource,
 };
 /// One vault's registration: the name it is served under, its root, and where
 /// its schema is read from.

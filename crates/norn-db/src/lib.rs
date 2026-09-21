@@ -30,7 +30,9 @@
 //! - [`connect`] — the one place a connection is opened, and [`Database`], the
 //!   handle that binds an open connection to its file and its epoch;
 //!   [`connect_read_only`] is the same act in the shape a snapshot reader is
-//!   opened in, where the connection can only read.
+//!   opened in, where the connection can only read, and [`open_read_only`] is
+//!   that open and its adoption together, reporting what they ran against the
+//!   database for a caller that holds a lock across them.
 //! - [`open`] — the ceremony every database runs: connect, judge, and create,
 //!   adopt or rebuild; with [`Schema`], what a client hands it, and [`Client`],
 //!   the three hooks it calls back into.
@@ -73,7 +75,8 @@ pub use ceremony::{
     Adoption, Client, OpenOutcome, Operations, RebuildReason, Schema, open, rebuild,
 };
 pub use database::{
-    Attempt, Database, connect, connect_read_only, mint_an_epoch, prepare_parent, remove_database,
+    Attempt, Database, ReadOnlyOpen, connect, connect_read_only, mint_an_epoch, open_read_only,
+    prepare_parent, remove_database,
 };
 pub use error::{DbError, damage_or_fail, is_damaged, sql, sql_at_statement};
 pub use plan::{EmittedPlan, PlanStep, emitted_plan};

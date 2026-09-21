@@ -86,7 +86,27 @@ pub trait SnapshotSource: Send + 'static {
     /// and the one this host composes does, but the entry the resources
     /// belonged to is unreachable from there on. A mint that cannot answer
     /// reports [`ReaderUnavailable`] rather than unwinding.
-    fn open_reader(&self) -> Result<Self::Reader, ReaderUnavailable>;
+    ///
+    /// **It reports what it ran against the database beside its answer**, so
+    /// the caller holding the gate can account for what the gate paid for. A
+    /// mint that refused reports what it ran before it refused, because the
+    /// gate was held for those statements too.
+    fn open_reader(&self) -> MintedReader<Self::Reader>;
+}
+
+/// A minted read handle, and what minting it ran against the database.
+///
+/// **Both answers carry the cost**, because the mint runs under the entry gate
+/// either way: a mint that refused held that gate for the statements it ran
+/// before it refused, and a report only a successful mint made would leave the
+/// expensive refusals unaccounted.
+pub struct MintedReader<R> {
+    /// The handle this coverage's reads run on, or why it serves none.
+    pub reader: Result<R, ReaderUnavailable>,
+    /// Statements the mint ran against the database. The establishment a read
+    /// runs afterwards is not among them: that runs on the minted handle and
+    /// reports itself through [`Established::statements`].
+    pub statements: u64,
 }
 
 /// The handle an entry's reads run on, and the snapshot one read establishes on
@@ -718,6 +738,21 @@ struct EntryState<A: SnapshotSource> {
     detach_in_flight: bool,
 }
 
+/// What a read's re-mint left: the handle the read runs on, and what the mint
+/// ran against the database while that read held the entry gate.
+///
+/// The statements are the read's to account for whichever way it leaves. A
+/// mint that refused ran what it ran before it refused, and the read it
+/// refuses held the gate for all of it.
+struct ReadMint<R> {
+    /// The handle the entry now serves reads from, or nothing where the mint
+    /// produced none.
+    handle: Option<Arc<R>>,
+    /// Statements the mint ran against the database, and zero where there was
+    /// no mint to run.
+    statements: u64,
+}
+
 impl<A: SnapshotSource> EntryState<A> {
     fn record_reload_error(&mut self, error: ReloadError) -> String {
         let detail = error.to_string();
@@ -848,7 +883,11 @@ impl<A: SnapshotSource> EntryState<A> {
     /// reason always describe one mint — the one the coverage beside them was
     /// installed by.
     fn mint_reader(&mut self, attachment: &A) {
-        match attachment.open_reader() {
+        // What the mint ran is not carried out of here. The account that reads
+        // a mint's statements is the read path's, and this mint belongs to a
+        // publication: it runs on the leg that installs or parks the coverage,
+        // and no read is waiting on the handle it produces.
+        match attachment.open_reader().reader {
             Ok(reader) => {
                 self.reader = Some(Arc::new(reader));
                 self.reader_unavailable = None;
@@ -882,24 +921,35 @@ impl<A: SnapshotSource> EntryState<A> {
     /// is no retry inside it: one attempt per read, and the reason it leaves
     /// is what that read refuses with.
     ///
-    /// Answers whether a handle now stands.
-    fn remint_for_a_read(&mut self) -> bool {
-        if self.reader.is_some() {
-            return true;
+    /// Those statements are reported back rather than spent unseen: they run
+    /// under the read's gate hold, and the read account keeps them apart from
+    /// the establishing statement so neither reading has to stand for the
+    /// other.
+    ///
+    /// Answers the handle the read now runs on, and what this cost the gate.
+    fn remint_for_a_read(&mut self) -> ReadMint<A::Reader> {
+        // A slot that already holds a handle mints nothing, and neither does
+        // an entry whose coverage is out with a leg. Both run no statement,
+        // and the read reports that zero rather than reporting nothing.
+        let mut statements = 0;
+        if self.reader.is_none()
+            && let Some(attachment) = self.coverage.held()
+        {
+            let minted = attachment.open_reader();
+            statements = minted.statements;
+            match minted.reader {
+                Ok(reader) => {
+                    self.reader = Some(Arc::new(reader));
+                    self.reader_unavailable = None;
+                }
+                Err(unavailable) => {
+                    self.reader_unavailable = Some(unavailable);
+                }
+            }
         }
-        let Some(attachment) = self.coverage.held() else {
-            return false;
-        };
-        match attachment.open_reader() {
-            Ok(reader) => {
-                self.reader = Some(Arc::new(reader));
-                self.reader_unavailable = None;
-                true
-            }
-            Err(unavailable) => {
-                self.reader_unavailable = Some(unavailable);
-                false
-            }
+        ReadMint {
+            handle: self.reader.as_ref().map(Arc::clone),
+            statements,
         }
     }
 
@@ -2988,7 +3038,11 @@ impl<O: EntryOps> Host<O> {
     /// The one state a read is served under is `Ready`. Every other published
     /// demand refuses as itself, and an entry serving with no handle mints one
     /// again from the coverage it holds and refuses as
-    /// [`ReadRefusal::ReaderUnavailable`] where that mint refuses too.
+    /// [`ReadRefusal::ReaderUnavailable`] where that mint refuses too. That
+    /// mint runs under this same hold, so what it ran against the database is
+    /// the read's own cost under the gate and is accounted as that — beside
+    /// the establishing statement rather than inside it, and whichever way the
+    /// read leaves.
     pub fn begin_read(&self, name: &VaultName) -> Result<ReadHold<O>, ReadRefusal> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Err(ReadRefusal::NotServing(Demand::UnknownVault));
@@ -3038,8 +3092,15 @@ impl<O: EntryOps> Host<O> {
         // An entry serving with an empty slot is one whose mint met the
         // environment and lost. The read asks for the mint again before it
         // refuses, because nothing else this entry does will.
-        state.remint_for_a_read();
-        let Some(reader) = state.reader.as_ref().map(Arc::clone) else {
+        //
+        // What that mint ran, it ran under this hold of the entry gate, so it
+        // is accounted here rather than on the way out: every path below this
+        // line is a path that already paid for it, the refusals included.
+        let minted = state.remint_for_a_read();
+        self.shared
+            .reads
+            .count_mint_under_the_gate(minted.statements);
+        let Some(reader) = minted.handle else {
             let unavailable = state.reader_unavailable.clone().unwrap_or_else(|| {
                 ReaderUnavailable::new("this entry's coverage holds no read handle")
             });
@@ -3100,7 +3161,9 @@ impl<O: EntryOps> Host<O> {
         };
         state.pin();
         drop(state);
-        self.shared.reads.count_read(&established, waits);
+        self.shared
+            .reads
+            .count_read(&established, waits, minted.statements);
         Ok(ReadHold {
             entry,
             reader,
@@ -4831,7 +4894,7 @@ mod tests {
     use norn_wire::ErrorDetail;
     use std::cell::Cell;
     use std::sync::Condvar;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     thread_local! {
         /// Whether `poll` on this thread runs inside a job's own handoff drain
@@ -4886,6 +4949,14 @@ mod tests {
         /// refuses, which is the read seam failing under an entry that holds
         /// its handle and is otherwise serving.
         establish_fails: std::sync::atomic::AtomicBool,
+        /// What a mint over a coverage holding this ledger reports having run
+        /// against the database.
+        ///
+        /// A fake mint runs no statement, so the default is the truth about
+        /// this fake and zero is what every case that is not about the
+        /// accounting reads. A case that asserts what a healing read reports
+        /// sets it, and the number it sets is that case's own.
+        mint_statements: AtomicU64,
         /// Where an establishment is held, so a case can observe what the
         /// acquisition holds while the one statement runs.
         establishing: Mutex<EstablishGate>,
@@ -4950,16 +5021,26 @@ mod tests {
     impl SnapshotSource for FakeCoverage {
         type Reader = FakeReader;
 
-        fn open_reader(&self) -> Result<FakeReader, ReaderUnavailable> {
+        fn open_reader(&self) -> MintedReader<FakeReader> {
+            // Reported on both answers, the way a real mint reports it: the
+            // statements a mint runs before it refuses are statements its
+            // caller held the gate for.
+            let statements = self.readers.mint_statements.load(Ordering::SeqCst);
             if self.mint_fails.load(Ordering::SeqCst) {
-                return Err(ReaderUnavailable::new("this coverage mints no read handle"));
+                return MintedReader {
+                    reader: Err(ReaderUnavailable::new("this coverage mints no read handle")),
+                    statements,
+                };
             }
             self.readers.opened.fetch_add(1, Ordering::SeqCst);
-            Ok(FakeReader {
-                ledger: Arc::clone(&self.readers),
-                free: Mutex::new(true),
-                returned: Condvar::new(),
-            })
+            MintedReader {
+                reader: Ok(FakeReader {
+                    ledger: Arc::clone(&self.readers),
+                    free: Mutex::new(true),
+                    returned: Condvar::new(),
+                }),
+                statements,
+            }
         }
     }
 
@@ -13050,11 +13131,16 @@ mod tests {
         );
     }
 
-    /// **The read-concurrency instrument.** Every read runs exactly one
-    /// statement while it holds the entry gate — the statement that
-    /// establishes its snapshot — and a read that took the entry's connection
-    /// without waiting paid no wait, so the account below is four reads, four
-    /// statements, and nothing contended.
+    /// **The read-concurrency instrument.** A read that finds its entry's
+    /// handle standing runs exactly one statement while it holds the entry
+    /// gate — the statement that establishes its snapshot — and a read that
+    /// took the entry's connection without waiting paid no wait, so the
+    /// account below is four reads, four establishing statements, nothing
+    /// minted and nothing contended.
+    ///
+    /// The mint reading is asserted here and not left implied: the claim is
+    /// that one statement is all these reads ran under the gate, and the
+    /// establishing reading alone cannot say that.
     #[test]
     fn a_read_runs_one_statement_under_the_gate() {
         let ops = Arc::new(FakeOps::default());
@@ -13077,6 +13163,10 @@ mod tests {
             "four reads ran something other than one statement each under the gate"
         );
         assert_eq!(
+            reading.mint_statements_under_the_gate, 0,
+            "reads that each found a handle standing ran a mint under the gate"
+        );
+        assert_eq!(
             reading.reader_waits, 0,
             "reads that never overlapped waited for the connection anyway"
         );
@@ -13084,6 +13174,128 @@ mod tests {
             host.read_evidence().widest_statements_under_the_gate,
             1,
             "one read ran more than the establishing statement under the gate"
+        );
+    }
+
+    /// **A read that heals accounts for the repair it ran under the gate.** An
+    /// entry serving with an empty handle slot mints the handle again under
+    /// the read's own gate hold, and that mint reads the database. The
+    /// establishing reading stays the sharp thing it is — one statement, the
+    /// snapshot's — while the mint's statements are reported beside it, so
+    /// nothing this read ran under the gate is left out of the account and the
+    /// repair is still told apart from the query work the exactly-one bar
+    /// refuses.
+    ///
+    /// The control is the read after it: the slot is filled by then, so it
+    /// mints nothing and is charged for nothing.
+    #[test]
+    fn a_read_that_heals_an_empty_slot_accounts_for_the_mint_it_ran() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+
+        // The number is this case's own. What is asserted is that the account
+        // reports what the mint ran, not a cost this fake shares with a real
+        // mint, so it is a number nothing else in the reading below produces.
+        ops.readers.mint_statements.store(3, Ordering::SeqCst);
+        entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .close_reader();
+
+        let before = host.read_evidence();
+        let hold = host
+            .begin_read(&name)
+            .expect("a read over coverage that mints was refused the handle it healed");
+        let reading = host.read_evidence().since(before);
+
+        assert_eq!(reading.reads_served, 1, "the account missed the read");
+        assert_eq!(
+            reading.statements_under_the_gate, 1,
+            "the healing read's establishing reading is something other than its one statement"
+        );
+        assert_eq!(
+            reading.mint_statements_under_the_gate, 3,
+            "the mint this read ran under the gate is missing from the account"
+        );
+        assert_eq!(
+            host.read_evidence().widest_statements_under_the_gate,
+            4,
+            "the widest reading is not this read's mint and its establishment together"
+        );
+        drop(hold);
+
+        let before = host.read_evidence();
+        drop(
+            host.begin_read(&name)
+                .expect("the entry serves reads from the handle the heal left"),
+        );
+        assert_eq!(
+            host.read_evidence()
+                .since(before)
+                .mint_statements_under_the_gate,
+            0,
+            "a read that found a handle standing was charged for a mint"
+        );
+    }
+
+    /// **A mint that refuses held the gate for what it ran.** The read it
+    /// refuses establishes nothing and is served nothing, so neither
+    /// `reads_served` nor the establishing reading moves — and the statements
+    /// that mint ran before it refused are the gate's price all the same, so
+    /// they are in the account and the widest reading is what that acquisition
+    /// ran. An account that reported the cost of successful mints alone would
+    /// leave out exactly the mints that took the busy timeout.
+    #[test]
+    fn a_read_refused_by_its_mint_accounts_for_what_that_mint_ran() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+
+        ops.readers.mint_statements.store(2, Ordering::SeqCst);
+        ops.reader_mint_fails.store(true, Ordering::SeqCst);
+        entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .close_reader();
+
+        let before = host.read_evidence();
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a coverage that mints nothing answered a read");
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "the refused mint was rendered as something other than the read seam: {refusal:?}"
+        );
+        let reading = host.read_evidence().since(before);
+
+        assert_eq!(
+            (reading.reads_served, reading.statements_under_the_gate),
+            (0, 0),
+            "a read that was never served moved the establishing reading"
+        );
+        assert_eq!(
+            reading.mint_statements_under_the_gate, 2,
+            "the mint that refused ran under the gate uncounted"
+        );
+        assert_eq!(
+            host.read_evidence().widest_statements_under_the_gate,
+            2,
+            "the widest reading left out an acquisition whose whole cost was its mint"
         );
     }
 
@@ -13445,7 +13657,7 @@ mod tests {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 state.close_reader();
                 assert!(
-                    state.remint_for_a_read(),
+                    state.remint_for_a_read().handle.is_some(),
                     "the entry minted no handle over the coverage it holds"
                 );
             }

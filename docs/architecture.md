@@ -1422,6 +1422,16 @@ and it would make the read path a second spelling of an open the substrate has o
 of. A read pays it at most once: one open per read that meets an empty slot, no retry inside
 it, and a mint that fails there leaves the reason that read refuses with.
 
+**The read account reports that mint apart from the establishment, and reports it whichever
+way the read left.** The host keeps two readings of what its reads run under the entry gate:
+the snapshot-establishing statements, which are exactly one per read served and are what the
+structural bar on gate-held query work is stated against, and the statements the read path's
+mints ran, which are the repair's own cost and are zero on a host whose reads all found a
+handle standing. A mint that refused is counted there too, because the gate was held for
+what it ran before it refused. Beside them the account keeps the widest reading any one
+acquisition produced, the mint and the establishment together, which is the number a ceiling
+over one read is stated against.
+
 **A request is answered from one snapshot.** Every lane-1 statement a request runs takes its
 rows from the snapshot its hold established — the store counts the snapshots established
 through a reader, and an acquired request establishes exactly one — and the reading the

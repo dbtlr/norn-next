@@ -34,6 +34,30 @@ fn write_one(store: &mut norn_store::Store, text: &str) -> i64 {
         .expect("a changeset that wrote a document stamps a generation")
 }
 
+/// **The mint reports what it ran against the database**, so a caller that
+/// holds a lock across it can say what that lock paid for. The read-only open
+/// runs two statements the database answers — the journal-mode read and the
+/// store-epoch read — and the establishment a read runs afterwards is a third
+/// that is not this mint's.
+#[test]
+fn a_mint_reports_the_statements_it_ran_against_the_database() {
+    let scratch = Scratch::new("reader-mint-cost");
+    let mut store = scratch.open();
+    write_one(&mut store, "notes/first.md");
+
+    let minted = store.open_reader();
+    let reader = Arc::new(minted.reader.expect("a live store mints a reader"));
+    assert_eq!(
+        minted.statements, 2,
+        "the mint reported a cost other than the two statements the read-only open runs"
+    );
+    assert_eq!(
+        a_snapshot(&reader).counters().statements_executed(),
+        1,
+        "the establishment ran the mint's statements again instead of its own one"
+    );
+}
+
 /// A reader is minted from a live store, and it answers under the reading that
 /// store is at: the store's own epoch, and the last generation it committed.
 #[test]
@@ -42,7 +66,12 @@ fn a_reader_answers_under_the_store_s_own_epoch_and_generation() {
     let mut store = scratch.open();
     let generation = write_one(&mut store, "notes/first.md");
 
-    let reader = Arc::new(store.open_reader().expect("a live store mints a reader"));
+    let reader = Arc::new(
+        store
+            .open_reader()
+            .reader
+            .expect("a live store mints a reader"),
+    );
     assert_eq!(
         reader.epoch(),
         store.epoch(),
@@ -81,7 +110,7 @@ fn establishing_a_snapshot_costs_one_snapshot_and_one_statement() {
     let scratch = Scratch::new("reader-counters");
     let mut store = scratch.open();
     write_one(&mut store, "notes/first.md");
-    let reader = Arc::new(store.open_reader().expect("a reader"));
+    let reader = Arc::new(store.open_reader().reader.expect("a reader"));
 
     let snapshot = a_snapshot(&reader);
     let counters = snapshot.counters();
@@ -111,7 +140,7 @@ fn a_snapshot_answers_at_the_instant_it_was_established() {
     let scratch = Scratch::new("reader-instant");
     let mut store = scratch.open();
     let first = write_one(&mut store, "notes/first.md");
-    let reader = Arc::new(store.open_reader().expect("a reader"));
+    let reader = Arc::new(store.open_reader().reader.expect("a reader"));
 
     let snapshot = a_snapshot(&reader);
     let second = write_one(&mut store, "notes/second.md");
@@ -143,7 +172,7 @@ fn a_second_read_waits_for_the_one_connection_and_takes_it_when_it_comes_back() 
     let scratch = Scratch::new("reader-contention");
     let mut store = scratch.open();
     write_one(&mut store, "notes/first.md");
-    let reader = Arc::new(store.open_reader().expect("a reader"));
+    let reader = Arc::new(store.open_reader().reader.expect("a reader"));
 
     let held = a_snapshot(&reader);
     assert!(
@@ -177,7 +206,7 @@ fn a_snapshot_answers_after_the_store_it_was_minted_from_is_gone() {
     let scratch = Scratch::new("reader-outlives");
     let mut store = scratch.open();
     let generation = write_one(&mut store, "notes/first.md");
-    let reader = Arc::new(store.open_reader().expect("a reader"));
+    let reader = Arc::new(store.open_reader().reader.expect("a reader"));
     let snapshot = a_snapshot(&reader);
 
     drop(store);

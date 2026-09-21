@@ -107,5 +107,6 @@ pub use request::{
     STATEMENTS, SubjectScope,
 };
 pub use store::{
-    ConnectionTurn, RecordedStoreSchema, Snapshot, SnapshotReader, Store, StoreMode, StoreReading,
+    ConnectionTurn, ReaderMint, RecordedStoreSchema, Snapshot, SnapshotReader, Store, StoreMode,
+    StoreReading,
 };
