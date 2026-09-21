@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::thread;
 
-use crate::common::{Scratch, document, write_document};
+use crate::common::{Disarmed, Scratch, document, write_document};
 
 /// The snapshot a case reads from: the handle's turn, taken where nothing
 /// holds it, and the snapshot established on it.
@@ -71,6 +71,12 @@ fn a_mint_reports_the_statements_it_ran_against_the_database() {
 /// rolled its transaction back rather than leaving one open.
 #[test]
 fn an_establishment_that_refuses_reports_what_it_ran_and_gives_the_connection_back() {
+    // The arm below is per-thread and one-shot, and the establishment it is
+    // armed for is what consumes it. The guard is what puts it back on every
+    // other path out of this case, an early return and a panic alike: the
+    // seam's contract is that an arm a case leaves standing must not fail
+    // whatever opens next on its thread.
+    let _disarmed = Disarmed;
     let scratch = Scratch::new("reader-refused-establishment");
     let mut store = scratch.open();
     write_one(&mut store, "notes/first.md");
