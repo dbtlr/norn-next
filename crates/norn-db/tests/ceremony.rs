@@ -548,6 +548,64 @@ fn a_snapshot_is_one_transaction_and_ends_where_it_is_closed() {
     );
 }
 
+/// **A snapshot is ended by the handle that opened it and by nothing else.**
+/// A request is answered from one snapshot, and transaction control composed
+/// over the snapshot's connection is what would break that: a `ROLLBACK` or a
+/// `COMMIT` run there ends the snapshot and leaves every later statement
+/// reading whatever is committed by then, while the reading the request
+/// carries still names the generation its snapshot was established at. The
+/// authorizer denies both, and admits the handle's own `BEGIN` and `ROLLBACK`
+/// for the length of the one statement each runs.
+#[test]
+fn a_snapshot_refuses_the_transaction_control_that_would_end_it() {
+    let scratch = Scratch::new("snapshot-control");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 1_i64).expect("a writer writes");
+
+    let mut reader = norn_db::Database::adopt(
+        norn_db::connect_read_only(&database).expect("a read-only handle"),
+        &database,
+    )
+    .expect("a read-only handle binds to its file");
+    reader.open_snapshot().expect("a snapshot opens");
+    assert_eq!(
+        meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
+        Some(1),
+        "the statement that establishes the snapshot read another database"
+    );
+
+    // The writer moves on, so a snapshot that ended here would start reading
+    // the new generation and say nothing about it.
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 2_i64).expect("a writer writes");
+    for control in ["ROLLBACK", "COMMIT", "BEGIN"] {
+        let refused = reader
+            .connection()
+            .execute_batch(control)
+            .expect_err("a statement composed over the snapshot controlled its transaction");
+        assert!(
+            refused.to_string().contains("not authorized"),
+            "`{control}` was refused as something other than an authorization: {refused}"
+        );
+    }
+    assert_eq!(
+        meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
+        Some(1),
+        "the snapshot ended under the refused transaction control"
+    );
+
+    // The handle's own control still runs: the snapshot ends where it is
+    // closed, and the connection reads the writer's new generation after it.
+    reader.close_snapshot().expect("a snapshot ends");
+    assert_eq!(
+        meta::get_meta::<i64>(reader.connection(), meta::WRITE_GENERATION).expect("a reading"),
+        Some(2),
+        "the handle is still inside the snapshot it closed"
+    );
+    reader.open_snapshot().expect("a second snapshot opens");
+    reader.close_snapshot().expect("a second snapshot ends");
+}
+
 /// **A read-only connection cannot disarm itself.** The open flag is what
 /// refuses a write, and the authorizer is what keeps the connection from
 /// reaching around it: the pragma that would relax `query_only`, the attach

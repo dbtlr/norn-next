@@ -37,6 +37,8 @@
 //! and removes; the verdicts are read one layer up.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -100,6 +102,11 @@ pub struct Database {
     connection: Connection,
     path: PathBuf,
     epoch: String,
+    /// Raised while this handle runs its own transaction control, and down
+    /// everywhere else. A sealed read-only connection reads it through its
+    /// authorizer; a writable one has no authorizer and is unaffected by it.
+    /// See [`arm_the_snapshot_control`].
+    snapshot_control: Arc<AtomicBool>,
 }
 
 impl Database {
@@ -131,10 +138,18 @@ impl Database {
                     .to_string(),
             }
         })?;
+        let snapshot_control = Arc::new(AtomicBool::new(false));
+        if connection
+            .is_readonly(rusqlite::MAIN_DB)
+            .map_err(|error| error::sql("reading the mode the database is open in", error))?
+        {
+            arm_the_snapshot_control(&connection, Arc::clone(&snapshot_control))?;
+        }
         Ok(Database {
             connection,
             path: path.to_path_buf(),
             epoch,
+            snapshot_control,
         })
     }
 
@@ -230,6 +245,7 @@ impl Database {
                 message: "a transaction is already open on this handle".to_string(),
             });
         }
+        let _control = SnapshotControl::raise(&self.snapshot_control);
         self.connection
             .execute_batch("BEGIN DEFERRED")
             .map_err(|error| error::sql("opening a read snapshot", error))
@@ -247,6 +263,7 @@ impl Database {
         if self.connection.is_autocommit() {
             return Ok(());
         }
+        let _control = SnapshotControl::raise(&self.snapshot_control);
         self.connection
             .execute_batch("ROLLBACK")
             .map_err(|error| error::sql("ending a read snapshot", error))
@@ -447,16 +464,73 @@ pub fn open_read_only(path: &Path) -> ReadOnlyOpen {
     }
 }
 
+/// Permission for one act of transaction control on a sealed read-only
+/// connection, withdrawn where it drops.
+///
+/// The permission covers the one statement the handle runs under it. That
+/// statement runs on a connection the caller borrows mutably, so nothing else
+/// can be running inside the window, and the withdrawal is a destructor so an
+/// unwind out of the statement closes it too.
+struct SnapshotControl<'a>(&'a AtomicBool);
+
+impl<'a> SnapshotControl<'a> {
+    fn raise(control: &'a AtomicBool) -> Self {
+        control.store(true, Ordering::SeqCst);
+        SnapshotControl(control)
+    }
+}
+
+impl Drop for SnapshotControl<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Bind a sealed read-only connection's transaction control to the handle that
+/// owns it.
+///
+/// **A request is answered from one snapshot, and this is what makes that
+/// structural.** The authorizer below denies transaction control outright, so
+/// the only `BEGIN`, `COMMIT` or `ROLLBACK` that reaches such a connection is
+/// one [`Database::open_snapshot`] or [`Database::close_snapshot`] issues:
+/// those two raise `control` around their own statement and lower it again,
+/// and it is down everywhere else. Without it a caller composing SQL over a
+/// snapshot's connection could run `ROLLBACK`, end the snapshot the read was
+/// adjudicated for, and go on reading whatever is committed next — while the
+/// reading that read carries still named the generation it started at.
+///
+/// A writable connection has no authorizer, so nothing consults the flag on
+/// one and a writer's transactions are unaffected.
+fn arm_the_snapshot_control(
+    connection: &Connection,
+    control: Arc<AtomicBool>,
+) -> Result<(), DbError> {
+    connection
+        .authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(context.action, AuthAction::Transaction { .. })
+                && control.load(Ordering::SeqCst)
+            {
+                return Authorization::Allow;
+            }
+            refuse_everything_but_reading(context)
+        }))
+        .map_err(|error| error::sql("binding the snapshot control to its handle", error))
+}
+
 /// The one thing a read-only connection may do: read rows.
 ///
 /// **Deny by default.** The allowed set is reading a column, the `SELECT` that
-/// reads it, the functions a predicate applies, the transaction control a
-/// snapshot is opened and ended with, and the one pragma named below.
-/// Everything else is refused at statement preparation — the writes the file
-/// mode already refuses, and, past those, every setting `PRAGMA` so the
+/// reads it, the functions a predicate applies, and the one pragma named
+/// below. Everything else is refused at statement preparation — the writes the
+/// file mode already refuses, and, past those, every setting `PRAGMA` so the
 /// connection cannot relax its own settings, `ATTACH` so it cannot reach a
 /// database that is writable, and temporary objects so there is no writable
 /// table inside the connection either.
+///
+/// **Transaction control is denied here**, so the snapshot a read is
+/// adjudicated for cannot be ended by a statement composed over its
+/// connection. The handle's own `BEGIN` and `ROLLBACK` are what
+/// [`arm_the_snapshot_control`] admits, for the length of one statement each.
 ///
 /// **The one pragma is `data_version`, asked with no value.** It reports
 /// whether another connection has committed to this file since this one last
@@ -485,7 +559,6 @@ fn refuse_everything_but_reading(context: AuthContext<'_>) -> Authorization {
         AuthAction::Read { .. }
         | AuthAction::Select
         | AuthAction::Function { .. }
-        | AuthAction::Transaction { .. }
         | AuthAction::Recursive
         | AuthAction::Pragma {
             pragma_name: "data_version",
