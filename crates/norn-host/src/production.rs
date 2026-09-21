@@ -202,9 +202,7 @@ impl SnapshotSource for ProductionAttachment {
     fn open_reader(&self) -> MintedReader<Self::Reader> {
         let minted = self.store.open_reader();
         MintedReader {
-            reader: minted
-                .reader
-                .map_err(|error| ReaderUnavailable::new(error.to_string())),
+            reader: minted.reader.map_err(|error| reader_unavailable(&error)),
             statements: minted.statements,
         }
     }
@@ -238,9 +236,31 @@ impl ReadSource for norn_store::SnapshotReader {
                     reading: snapshot.reading().clone(),
                     snapshot,
                 })
-                .map_err(|error| ReaderUnavailable::new(error.to_string())),
+                .map_err(|error| reader_unavailable(&error)),
             statements: attempt.counters.statements_executed(),
         }
+    }
+}
+
+/// Render a store refusal as the reason a read is refused with.
+///
+/// **The inspection surface names no file.** The reason a mint or an
+/// establishment left behind is retained beside the entry's published demand
+/// and is rendered into the vault inspection and into a read's refusal detail,
+/// both of which answer a caller holding no hold — while `StoreError` renders
+/// its file-lifecycle refusals with the derived database's path in them. A
+/// caller reading that path opens its own connection over the same database
+/// and answers from it under no adjudication, which is the escape the reader
+/// type carries no route to. So the path is dropped here and the refusal keeps
+/// what a caller can act on: what was being done, and what the driver said.
+/// The path stays on the `StoreError` itself, where a log line that needs it
+/// reads it.
+fn reader_unavailable(error: &StoreError) -> ReaderUnavailable {
+    match error {
+        StoreError::Lifecycle {
+            operation, message, ..
+        } => ReaderUnavailable::new(format!("{operation} failed: {message}")),
+        named => ReaderUnavailable::new(named.to_string()),
     }
 }
 
@@ -2983,6 +3003,44 @@ mod tests {
     use norn_testkit::wait::{Budget, Observed, wait_until};
     use std::fs;
     use std::thread;
+
+    /// **The read seam's refusal names no file.** The reason a refused mint or
+    /// establishment leaves is retained beside the entry's published demand and
+    /// is rendered into the vault inspection and into a read's refusal detail,
+    /// both of which answer a caller holding no hold. The store's own rendering
+    /// of a file-lifecycle refusal carries the derived database's path; what
+    /// crosses into the read seam keeps the act and the driver's message and
+    /// drops the path, because a caller holding it opens its own connection
+    /// over the same database and answers from it under no adjudication.
+    #[test]
+    fn a_reader_refusal_carries_what_failed_and_never_the_database_file() {
+        let derived = PathBuf::from("/machine-local/derived/a-vault");
+        let refused = StoreError::Lifecycle {
+            operation: "opening the database read-only",
+            path: derived.join("store.db"),
+            message: "a read-only handle needs write-ahead logging and the database reports \
+                      `delete`"
+                .to_string(),
+        };
+        assert!(
+            refused.to_string().contains("/machine-local/derived"),
+            "the store's own rendering dropped the path a log line reads: {refused}"
+        );
+
+        let detail = reader_unavailable(&refused).detail().to_string();
+        assert!(
+            !detail.contains("/machine-local/derived"),
+            "the read seam's refusal names the database directory: {detail}"
+        );
+        assert!(
+            detail.contains("opening the database read-only failed"),
+            "the refusal dropped the act that failed: {detail}"
+        );
+        assert!(
+            detail.contains("write-ahead logging"),
+            "the refusal dropped what the driver said: {detail}"
+        );
+    }
 
     /// **The maintainer lock is the last thing an attachment gives back**, and
     /// this file states that twice: [`release`] hands the resources back in
