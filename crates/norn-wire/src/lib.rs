@@ -88,8 +88,9 @@
 //!   advertised schema and the emitted bytes are one description. It too is
 //!   written by hand where a derive would advertise a shape the reader does
 //!   not accept: [`DocumentPath`] and [`Cursor`] are strings a derive would
-//!   describe as newtypes, and [`RungSet`] carries the `minItems` floor its
-//!   read path keeps.
+//!   describe as newtypes, [`RungSet`] carries the `minItems` floor its read
+//!   path keeps, and [`CandidateHead`] carries the `maxItems` ceiling its read
+//!   path keeps, read off [`CANDIDATE_HEAD`] so the bound has one spelling.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.
 //!
 //! **Enums are internally tagged with an explicit tag name, never externally

@@ -12,7 +12,11 @@
 //! finding row here, and the ambiguous-target refusal. One type is what makes
 //! the bound hold everywhere — a payload bounded only where it is rendered is
 //! a payload the second renderer emits unbounded, and a bound stated twice is
-//! a bound one of the two spellings will outgrow. It holds at rest in the
+//! a bound one of the two spellings will outgrow. [`CANDIDATE_HEAD`] is that
+//! one spelling: the constructor truncates to it, the read path refuses a
+//! wider head than it, and the hand-written schema advertises it as
+//! `maxItems`, so a surface validating a head refuses what this crate refuses
+//! rather than passing bytes no reader here accepts. It holds at rest in the
 //! findings table for the same reason. What makes the head a head is its
 //! total, so a total below the candidates it heads describes no vault and is
 //! refused where one is built and where one is read alike.
@@ -33,7 +37,9 @@
 //! hint: the hint is a request a client can send, and the subject is the text
 //! the document holds.
 
-use schemars::JsonSchema;
+use std::borrow::Cow;
+
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::document::{DocumentPath, Span, TotalBelowHead};
@@ -72,17 +78,17 @@ impl Candidate {
 /// there were.
 ///
 /// On the wire a head is a plain object:
-/// `{"candidates":[…],"total":9}`. The candidates are the first
-/// [`CANDIDATE_HEAD`] in the resolution ladder's deterministic order, and
-/// `total` beside them is how many there were. A head longer than the bound,
-/// or a total below the candidates beside it, describes no vault and is
-/// refused.
-#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+/// `{"candidates":[…],"total":9}`. The candidates are the first of them in
+/// the resolution ladder's deterministic order, bounded at the ceiling the
+/// schema advertises, and `total` beside them is how many there were. A head
+/// longer than that bound, or a total below the candidates beside it,
+/// describes no vault and is refused.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct CandidateHead {
     /// The documents the target could have named, in the resolution ladder's
-    /// order, at most five of them, and empty where the subject is not a
-    /// resolution.
+    /// order, bounded at the ceiling the schema advertises, and empty where
+    /// the subject is not a resolution.
     candidates: Vec<Candidate>,
     /// How many documents the target could have named, which is what makes
     /// the candidates a head.
@@ -119,6 +125,44 @@ impl CandidateHead {
     /// Whether the target names documents this head does not carry.
     pub fn is_truncated(&self) -> bool {
         (self.candidates.len() as u64) < self.total
+    }
+}
+
+impl JsonSchema for CandidateHead {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CandidateHead")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed("norn_wire::CandidateHead")
+    }
+
+    /// The object a derive would describe, with the ceiling the reader keeps
+    /// advertised as `maxItems`. A derive over a `Vec` says an array of any
+    /// length at all, so a surface validating against it would pass a head
+    /// this crate refuses to read, and the bound would be spelled in prose
+    /// here rather than in the one number [`CANDIDATE_HEAD`] holds.
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let candidate = generator.subschema_for::<Candidate>();
+        json_schema!({
+            "type": "object",
+            "description": "The bounded head of the documents a target could have named, with how many there were.",
+            "properties": {
+                "candidates": {
+                    "type": "array",
+                    "description": "The documents the target could have named, in the resolution ladder's order, and empty where the subject is not a resolution.",
+                    "items": candidate,
+                    "maxItems": CANDIDATE_HEAD,
+                },
+                "total": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "description": "How many documents the target could have named, which is what makes the candidates a head.",
+                },
+            },
+            "required": ["candidates", "total"],
+        })
     }
 }
 

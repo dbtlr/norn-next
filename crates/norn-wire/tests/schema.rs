@@ -11,18 +11,18 @@
 //! restating it.
 
 use norn_wire::{
-    Addressing, Anchor, AnswerReading, AttachMode, BlockRow, BodyText, Candidate, CandidateHead,
-    Collection, CollectionPage, CollectionSelector, Column, ContainerKind, CountParams,
-    CountReport, Cursor, CursorKey, DescribeParams, DescribeReport, Direction, DocumentPath,
-    DocumentRow, EngineSection, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType,
-    FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope, Freshness,
-    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LinkFamily, LinkHealth,
-    LinkRow, MaintainerIdentity, Moved, NotReady, Page, PathRuleKind, PollBackend, Predicate,
-    ReasonCode, ReloadFailure, RequestScope, ResolutionTarget, Rung, RungReport, RungSet,
-    SchemaSource, Score, SearchParams, SearchReport, Severity, Snapshot, Sort, SortKey, Span,
-    TagRow, TagSource, TagStance, Tally, TrustState, Unsatisfied, UntrustedReason, ValidateParams,
-    ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb, WarmingPhase,
-    WatcherLossCause,
+    Addressing, Anchor, AnswerReading, AttachMode, BlockRow, BodyText, CANDIDATE_HEAD, Candidate,
+    CandidateHead, Collection, CollectionPage, CollectionSelector, Column, ContainerKind,
+    CountParams, CountReport, Cursor, CursorKey, DescribeParams, DescribeReport, Direction,
+    DocumentPath, DocumentRow, EngineSection, ErrorDetail, ErrorEnvelope, Facet, FacetKind,
+    FieldType, FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
+    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LinkFamily,
+    LinkHealth, LinkRow, MaintainerIdentity, Moved, NotReady, Page, PathRuleKind, PollBackend,
+    Predicate, ReasonCode, ReloadFailure, RequestScope, ResolutionTarget, Rung, RungReport,
+    RungSet, SchemaSource, Score, SearchParams, SearchReport, Severity, Snapshot, Sort, SortKey,
+    Span, TagRow, TagSource, TagStance, Tally, TrustState, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb,
+    WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -1358,6 +1358,28 @@ fn a_field_value_advertises_a_tree_rather_than_json_in_a_string() {
 }
 
 // ── The finding row ──────────────────────────────────────────────────────
+
+/// The head advertises the ceiling its read path keeps, so a surface
+/// validating a head against the schema refuses the same wider head this
+/// crate refuses to read. The bound is read off the constant here rather than
+/// written down a second time: the schema and [`CANDIDATE_HEAD`] are one
+/// spelling, and the number itself is pinned where the constant is.
+#[test]
+fn a_candidate_head_advertises_the_ceiling_it_is_read_through() {
+    let schema = schema_of::<CandidateHead>();
+    let candidates = &schema["properties"]["candidates"];
+    assert_eq!(candidates["type"].as_str(), Some("array"));
+    assert_eq!(
+        candidates["maxItems"].as_u64(),
+        Some(CANDIDATE_HEAD as u64),
+        "the head does not advertise the ceiling it is read through: {schema}"
+    );
+    assert_eq!(
+        candidates["items"]["$ref"].as_str(),
+        Some("#/$defs/Candidate"),
+        "the head restates a candidate rather than referring to it: {schema}"
+    );
+}
 
 /// A finding row advertises the bounded head, the total that makes it a head,
 /// and the hint that names what enumerates the rest.
