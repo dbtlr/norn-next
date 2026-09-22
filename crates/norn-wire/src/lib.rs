@@ -54,10 +54,38 @@
 //! the latter two carry it beside the [`Hint`] that names what enumerates the
 //! rest. What a reload met is spelled
 //! here too:
-//! [`ReloadFailure`], with the [`ControlFile`] and [`ReloadStage`] a control
-//! file refused at. [`EngineSection`] is what a host was delivered as a
-//! vault's engine section, which is what a status answer reports and what a
-//! vector refusal is composed against.
+//! [`ReloadFailure`], with the [`ControlFileFailure`] — a [`ControlFile`] and
+//! the [`ReloadStage`] it refused at — that three of its carriers hold alone.
+//! [`Directory`] is a directory a client asks a question about, the third
+//! path grammar beside [`VaultRoot`] and [`SchemaSource`]. [`EngineSection`]
+//! is what a host was delivered as a vault's engine section, which is what a
+//! status answer reports and what a vector refusal is composed against.
+//!
+//! The seven verbs of the vault namespace and
+//! [`doctor`](DoctorRegistryParams)'s registry half are spelled the same
+//! way: [`RegisterParams`] answering
+//! [`RegisterReport`], [`UnregisterParams`] answering [`UnregisterReport`],
+//! [`ListParams`] answering [`ListReport`], [`SetParams`] — whose every field
+//! is a [`Change`], or a [`Replace`] where the field has no default to be
+//! cleared to — answering [`SetReport`], [`ResolveParams`] answering
+//! [`ResolveReport`], [`StatusParams`] answering [`StatusReport`],
+//! [`ReloadParams`] answering [`ReloadReport`] of a [`ReloadOutcome`], and
+//! [`DoctorRegistryParams`] answering [`DoctorRegistryReport`] over the
+//! [`RegistrySanity`] of the registry itself, its [`RegistryProblem`]s and the
+//! [`EngineHealth`] of each vault. What those eight report about a
+//! registration is spelled here too: the [`Registration`] itself, the
+//! [`Published`] answer an entry carries, the [`Fingerprints`] it serves
+//! under, the [`Drift`] its authored control files stand at, the
+//! [`EngineStatus`] of its engine slot, the [`Advisory`] list its serving
+//! raises, and the [`VaultStatus`] that holds all of them — with the [`RollUp`]
+//! those statuses add up to and the [`Attention`] it names them for.
+//!
+//! **A registry report and a lifecycle observation carry no answer reading.**
+//! A registration is not answered from a database, and neither a status nor a
+//! reload is a read: a status is taken off what an entry already publishes and
+//! creates no demand, and a reload reports what it applied. So the eight
+//! reports above cross as themselves rather than inside a [`VaultAnswer`],
+//! which is what carries an [`AnswerReading`] for the six verbs that do read.
 //!
 //! Nothing crosses the seam that is not a type from here. There is no untyped
 //! JSON value in any signature and no JSON-in-a-string; a payload that cannot
@@ -74,11 +102,15 @@
 //!   are renamed to the `namespace/what-happened` grammar below. A grammar's
 //!   read path is written by hand where the read is the constructor —
 //!   [`VaultName`], [`VaultRoot`], [`SchemaSource`], [`DocumentPath`],
-//!   [`ResolutionTarget`] and [`Score`] refuse a string outside their grammar,
-//!   [`RungSet`] refuses a ladder that runs no rung, and four shapes refuse a
+//!   [`ResolutionTarget`], [`Directory`] and [`Score`] refuse a string outside
+//!   their grammar,
+//!   [`RungSet`] refuses a ladder that runs no rung, [`RegistrySanity`]
+//!   refuses a problem list that names no problem and [`NameSet`] refuses a
+//!   name list naming fewer than two distinct names, and five shapes refuse a
 //!   value whose halves disagree: [`ErrorEnvelope`], whose code must be its
 //!   detail's, [`LinkRow`], whose health must be the health of the total
-//!   documents its head heads, and the three bounded heads — [`Collection`],
+//!   documents its head heads, [`RollUp`], whose five counts must sum to the
+//!   vaults it says it counted, and the three bounded heads — [`Collection`],
 //!   [`BodyText`] and [`CandidateHead`] — whose total must be a total the
 //!   head they carry can head, the last of them refusing a head wider than
 //!   [`CANDIDATE_HEAD`] as well — each with the wire shape a derive would
@@ -88,11 +120,15 @@
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
 //!   advertised schema and the emitted bytes are one description. It too is
 //!   written by hand where a derive would advertise a shape the reader does
-//!   not accept. Eight types do: the grammars [`VaultName`], [`VaultRoot`],
-//!   [`SchemaSource`], [`DocumentPath`] and [`ResolutionTarget`] advertise the
-//!   pattern or floor their constructors hold; [`Cursor`] is one opaque string
-//!   rather than the fields a derive would emit; [`RungSet`] carries the
-//!   `minItems` floor its read path keeps; and [`CandidateHead`] carries the
+//!   not accept. Eleven types do: the grammars [`VaultName`], [`VaultRoot`],
+//!   [`SchemaSource`], [`Directory`], [`DocumentPath`] and
+//!   [`ResolutionTarget`] advertise the pattern or floor their constructors
+//!   hold; [`Cursor`] is one opaque string
+//!   rather than the fields a derive would emit; [`RungSet`],
+//!   [`RegistrySanity`] and [`NameSet`] carry the
+//!   `minItems` floor their read paths keep, the last of them advertising
+//!   `uniqueItems` for the distinctness it is measured against as well; and
+//!   [`CandidateHead`] carries the
 //!   `maxItems` ceiling its read path keeps, read off [`CANDIDATE_HEAD`] so
 //!   the bound has one spelling.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.
@@ -148,7 +184,7 @@
 //! [`UntrustedReason::store_damaged_awaiting_demand`],
 //! [`UntrustedReason::schema_unreadable`],
 //! [`UntrustedReason::leg_unwound`],
-//! [`ErrorDetail::duplicate_root`],
+//! [`NameSet::new`], [`ErrorDetail::duplicate_root`],
 //! [`ErrorDetail::entry_untrusted`], [`ErrorDetail::maintainer_contended`],
 //! [`ErrorDetail::unknown_vault`], [`ErrorDetail::unsupported_attach_mode`],
 //! [`ErrorDetail::already_served`], [`ErrorDetail::entry_held`],
@@ -181,8 +217,19 @@
 //! [`DocumentPath::new`], [`Candidate::new`], [`CandidateHead::new`],
 //! [`FindingRow::new`],
 //! [`Sort::new`], [`RungSet::lexical`], [`RungSet::of`], [`Hit::new`],
-//! [`Tally::new`], [`KindTally::new`], and the `new` on each of the six
-//! params types.
+//! [`Tally::new`], [`KindTally::new`], and the `new` on each of the six read
+//! params types;
+//! [`Registration::new`], [`Published::state`], [`Published::parked`],
+//! [`Published::of`], [`Fingerprints::new`], [`Drift::inactive`],
+//! [`Drift::current`], [`Drift::reload_pending`], [`Drift::unreadable`],
+//! [`EngineStatus::off`], [`EngineStatus::on`], [`EngineStatus::self_disabled`],
+//! [`ControlFileFailure::new`],
+//! the constructor on each [`Advisory`], [`Attention`], [`ResolveReport`],
+//! [`StatusReport`], [`RegistrySanity`] and [`RegistryProblem`] variant,
+//! [`VaultStatus::new`], [`RollUp::of`], [`Change::keep`], [`Change::set`],
+//! [`Change::clear`], [`Replace::keep`], [`Replace::set`],
+//! [`EngineHealth::new`], and the `new` on each of the seven vault-namespace
+//! params types, on [`DoctorRegistryParams`], and on each of their reports.
 //!
 //! **A closed vocabulary whose every reader must decide what a new member
 //! means is plain rather than `#[non_exhaustive]`.** The two rules answer two
@@ -289,6 +336,7 @@ mod address;
 mod base64url;
 mod cursor;
 mod demand;
+mod doctor;
 mod document;
 mod error;
 mod finding;
@@ -299,23 +347,29 @@ mod product;
 mod read;
 mod reading;
 mod reload;
+mod status;
 mod target;
 mod trust;
+mod vault;
 mod verb;
 
 pub use address::{
-    IllegalPath, PollBackend, SchemaSource, UnknownPollBackend, VaultAddress, VaultRoot,
+    Directory, IllegalPath, PollBackend, SchemaSource, UnknownPollBackend, VaultAddress, VaultRoot,
     absolute_path,
 };
 pub use cursor::{
     Cursor, CursorKey, CursorOrderChanged, FacetKind, Moved, NonFiniteScore, Page, Score, Snapshot,
 };
 pub use demand::AttachMode;
+pub use doctor::{
+    DoctorRegistryParams, DoctorRegistryReport, EngineHealth, NoProblems, RegistryProblem,
+    RegistrySanity,
+};
 pub use document::{
     BlockRow, BodyText, Collection, Column, DocumentPath, DocumentRow, FieldValue, HeadingRow,
     LinkFamily, LinkHealth, LinkRow, Span, TagRow, TagSource, TotalBelowHead,
 };
-pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
+pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReasonCode, TooFewNames};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
 pub use name::{IllegalVaultName, VaultName};
@@ -332,9 +386,20 @@ pub use read::validate::{KindTally, ValidateParams, ValidateReport};
 pub use reading::{
     AnswerReading, EngineSection, Freshness, LadderDeclaration, ModelIdentity, Rung, RungReport,
 };
-pub use reload::{ControlFile, ReloadFailure, ReloadStage};
+pub use reload::{ControlFile, ControlFileFailure, ReloadFailure, ReloadStage};
+pub use status::{
+    Advisory, Attention, Drift, EngineStatus, Fingerprints, Published, Registration, RollUp,
+    VaultStatus,
+};
 pub use target::{Anchor, IllegalTarget, ResolutionTarget};
 pub use trust::{NotReady, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
+pub use vault::list::{ListParams, ListReport};
+pub use vault::register::{RegisterParams, RegisterReport};
+pub use vault::reload::{ReloadOutcome, ReloadParams, ReloadReport};
+pub use vault::resolve::{ResolveParams, ResolveReport};
+pub use vault::set::{Change, Replace, SetParams, SetReport};
+pub use vault::status::{StatusParams, StatusReport};
+pub use vault::unregister::{UnregisterParams, UnregisterReport};
 pub use verb::{
     Addressing, RequestScope, UnknownAddressing, UnknownRequestScope, UnknownVerb, Verb,
 };

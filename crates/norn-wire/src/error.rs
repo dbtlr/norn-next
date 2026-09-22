@@ -38,7 +38,10 @@
 //! carries. `ReasonCode` is matched without a wildcard in this module's tests,
 //! so a code minted without its detail does not compile.
 
-use schemars::JsonSchema;
+use std::borrow::Cow;
+use std::fmt;
+
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::cursor::CursorOrderChanged;
@@ -184,6 +187,99 @@ pub enum ReasonCode {
     EngineFailed,
 }
 
+/// A list of vault names naming fewer than two of them.
+///
+/// A collision is more than one name reaching one thing, so a list holding one
+/// name or none names no collision at all and is refused rather than carried.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TooFewNames;
+
+impl fmt::Display for TooFewNames {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "a collision is between at least two distinct vault names; one name or none is no collision",
+        )
+    }
+}
+
+impl std::error::Error for TooFewNames {}
+
+/// The vault names one collision is between: at least two, ascending, each
+/// named once.
+///
+/// On the wire it is the array of names itself.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct NameSet(Vec<VaultName>);
+
+impl NameSet {
+    /// The collision `names` are between, or the reason those names are no
+    /// collision.
+    ///
+    /// This is the one place the floor of two is judged. The shapes that carry
+    /// a set take it already judged and refuse nothing themselves, so a
+    /// collision that cannot be spelled is refused where the names are
+    /// collected rather than at each shape that renders them.
+    ///
+    /// The names come out ascending and each named once, so the ascending
+    /// order the carrying fields promise holds for every producer rather than
+    /// for the ones that sorted first, and what is measured against the floor
+    /// of two is what remains once a name handed in twice is one name.
+    pub fn new(names: impl IntoIterator<Item = VaultName>) -> Result<Self, TooFewNames> {
+        let mut names: Vec<VaultName> = names.into_iter().collect();
+        names.sort();
+        names.dedup();
+        if names.len() < 2 {
+            return Err(TooFewNames);
+        }
+        Ok(NameSet(names))
+    }
+
+    /// The names, ascending and each named once.
+    pub fn names(&self) -> &[VaultName] {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for NameSet {
+    /// A set arrives as the array of names it is and is read back through the
+    /// same grammar the constructor holds: an array naming fewer than two
+    /// distinct names is no collision, so it refuses the read rather than
+    /// landing as a refusal or a problem that names one vault or none.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let names = Vec::<VaultName>::deserialize(deserializer)?;
+        NameSet::new(names).map_err(D::Error::custom)
+    }
+}
+
+impl JsonSchema for NameSet {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("NameSet")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed("norn_wire::NameSet")
+    }
+
+    /// The array a derive would describe, with the floor and the distinctness
+    /// the reader keeps advertised as `minItems` and `uniqueItems`. A derive
+    /// says an array of any length holding any names, so a surface validating
+    /// against it would pass a list this crate refuses to read.
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let name = generator.subschema_for::<VaultName>();
+        json_schema!({
+            "type": "array",
+            "description": "The vault names one collision is between: at least two, ascending, each named once.",
+            "items": name,
+            "minItems": 2,
+            "uniqueItems": true,
+        })
+    }
+}
+
 /// The typed payload one reason code carries.
 ///
 /// One detail shape per code, and the detail's `code` tag *is* the code:
@@ -200,11 +296,12 @@ pub enum ErrorDetail {
     #[serde(rename = "host/duplicate-root")]
     #[non_exhaustive]
     DuplicateRoot {
-        /// The colliding names, in ascending order, each echoed back as the
-        /// typed name: the registry holds them as names parsed through the
-        /// grammar, and the refusal hands the same parsed values back rather
-        /// than strings a reader would have to parse again.
-        aliases: Vec<VaultName>,
+        /// The colliding names, at least two, each echoed back as the typed
+        /// name: the registry holds them as names parsed through the grammar,
+        /// and the refusal hands the same parsed values back rather than
+        /// strings a reader would have to parse again. They arrive ascending
+        /// and each named once.
+        aliases: NameSet,
     },
     /// The detail of `host/entry-untrusted`: why the entry's derived state
     /// cannot be trusted.
@@ -287,9 +384,9 @@ pub enum ErrorDetail {
     #[serde(rename = "vault/ambiguous-root")]
     #[non_exhaustive]
     AmbiguousRoot {
-        /// The candidate names, in ascending order, each echoed back as the
-        /// typed name.
-        candidates: Vec<VaultName>,
+        /// The candidate names, at least two, each echoed back as the typed
+        /// name. They arrive ascending and each named once.
+        candidates: NameSet,
     },
     /// The detail of `vault/ambiguous-target`: the target, the head of the
     /// documents it resolves to, and the request that enumerates the rest. It
@@ -369,11 +466,9 @@ pub enum ErrorDetail {
 impl ErrorDetail {
     /// The detail of `host/duplicate-root`, for the colliding `aliases`.
     ///
-    /// The aliases are sorted here, so the ascending order the field promises
-    /// holds for every producer rather than for the ones that sorted first.
-    pub fn duplicate_root(aliases: impl IntoIterator<Item = VaultName>) -> Self {
-        let mut aliases: Vec<VaultName> = aliases.into_iter().collect();
-        aliases.sort();
+    /// The floor is the set's: a caller that holds one has names a collision
+    /// can be spelled with, so there is nothing left for this to refuse.
+    pub fn duplicate_root(aliases: NameSet) -> Self {
         ErrorDetail::DuplicateRoot { aliases }
     }
 
@@ -428,15 +523,12 @@ impl ErrorDetail {
         }
     }
 
-    /// The detail of `vault/ambiguous-root`, for the `candidates` the root
-    /// resolves under.
+    /// The detail of `vault/ambiguous-root`, for the `candidates` the
+    /// directory resolves under.
     ///
-    /// The candidates are sorted here, so the ascending order the field
-    /// promises holds for every producer rather than for the ones that sorted
-    /// first.
-    pub fn ambiguous_root(candidates: impl IntoIterator<Item = VaultName>) -> Self {
-        let mut candidates: Vec<VaultName> = candidates.into_iter().collect();
-        candidates.sort();
+    /// The floor is the set's: a caller that holds one has names an ambiguity
+    /// can be spelled with, so there is nothing left for this to refuse.
+    pub fn ambiguous_root(candidates: NameSet) -> Self {
         ErrorDetail::AmbiguousRoot { candidates }
     }
 
@@ -606,6 +698,15 @@ mod tests {
     use crate::document::DocumentPath;
     use crate::finding_row::Candidate;
 
+    /// The two names the two collision refusals are read against, judged
+    /// through the floor the set keeps.
+    fn two_names() -> NameSet {
+        NameSet::new(
+            ["notes", "vault"].map(|text| VaultName::new(text).expect("a legal vault name")),
+        )
+        .expect("two distinct names")
+    }
+
     /// The target the two target refusals are read against, parsed through the
     /// grammar the type keeps.
     fn a_target() -> ResolutionTarget {
@@ -667,9 +768,7 @@ mod tests {
     /// not compile.
     fn a_detail(code: &ReasonCode) -> ErrorDetail {
         match code {
-            ReasonCode::HostDuplicateRoot => ErrorDetail::duplicate_root(
-                ["notes", "vault"].map(|text| VaultName::new(text).expect("a legal vault name")),
-            ),
+            ReasonCode::HostDuplicateRoot => ErrorDetail::duplicate_root(two_names()),
             ReasonCode::HostEntryUntrusted => {
                 ErrorDetail::entry_untrusted(UntrustedReason::WatcherOverflow)
             }
@@ -695,9 +794,7 @@ mod tests {
             ReasonCode::HostRegistryUnwritable => {
                 ErrorDetail::registry_unwritable("the registry file is read-only")
             }
-            ReasonCode::VaultAmbiguousRoot => ErrorDetail::ambiguous_root(
-                ["notes", "vault"].map(|text| VaultName::new(text).expect("a legal vault name")),
-            ),
+            ReasonCode::VaultAmbiguousRoot => ErrorDetail::ambiguous_root(two_names()),
             ReasonCode::VaultAmbiguousTarget => ErrorDetail::ambiguous_target(
                 a_target(),
                 CandidateHead::new(

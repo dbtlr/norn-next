@@ -2015,6 +2015,7 @@ fn retry_pending_dispatches<O: EntryOps>(shared: &Arc<Shared<O>>) {
 fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflict) {
     let entries = conflict
         .aliases()
+        .names()
         .iter()
         .filter_map(|name| shared.entries.get(name))
         .collect::<Vec<_>>();
@@ -3772,8 +3773,13 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             }
             let claim_identity = reading.identity;
             if let Some(identity) = claim_identity {
-                if let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name) {
-                    let conflict = AliasConflict::new([owner.clone(), name.clone()]);
+                // The claim's owner and this name collide exactly when they
+                // are two names: an identity this very name already owns is no
+                // conflict, and the floor a conflict keeps is what says so.
+                if let Some(conflict) = attach_claims
+                    .get(&identity)
+                    .and_then(|owner| AliasConflict::new([owner.clone(), name.clone()]).ok())
+                {
                     drop(attach_claims);
                     refuse_conflict(shared, &conflict);
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -3826,9 +3832,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             let mut post_conflict = post_reading.conflict;
             if post_conflict.is_none()
                 && let Some(identity) = post_reading.identity
-                && let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name)
+                && let Some(owner) = attach_claims.get(&identity)
             {
-                post_conflict = Some(AliasConflict::new([owner.clone(), name.clone()]));
+                // Two names or none: an identity this very name already owns
+                // is no conflict, which is the floor a conflict keeps.
+                post_conflict = AliasConflict::new([owner.clone(), name.clone()]).ok();
             }
             if let Some(conflict) = post_conflict {
                 drop(attach_claims);
@@ -3967,8 +3975,13 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             }
             let claim_identity = reading.identity;
             if let Some(identity) = claim_identity {
-                if let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name) {
-                    let conflict = AliasConflict::new([owner.clone(), name.clone()]);
+                // The claim's owner and this name collide exactly when they
+                // are two names: an identity this very name already owns is no
+                // conflict, and the floor a conflict keeps is what says so.
+                if let Some(conflict) = attach_claims
+                    .get(&identity)
+                    .and_then(|owner| AliasConflict::new([owner.clone(), name.clone()]).ok())
+                {
                     drop(attach_claims);
                     refuse_conflict(shared, &conflict);
                     return None;
@@ -4031,9 +4044,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             let mut post_conflict = post_reading.conflict;
             if post_conflict.is_none()
                 && let Some(identity) = post_reading.identity
-                && let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name)
+                && let Some(owner) = attach_claims.get(&identity)
             {
-                post_conflict = Some(AliasConflict::new([owner.clone(), name.clone()]));
+                // Two names or none: an identity this very name already owns
+                // is no conflict, which is the floor a conflict keeps.
+                post_conflict = AliasConflict::new([owner.clone(), name.clone()]).ok();
             }
             if let Some(conflict) = post_conflict {
                 entry
@@ -5013,8 +5028,31 @@ mod tests {
     use norn_config::registry::{Entry as RegistryEntry, VaultRoot};
     use norn_testkit::scratch::Scratch;
     use norn_testkit::wait::{Budget, Observed, wait_until};
-    use norn_wire::ErrorDetail;
+    use norn_wire::{ErrorDetail, NameSet};
     use std::cell::Cell;
+
+    /// The conflict `aliases` raise. A conflict is between at least two
+    /// registrations, so a case that arranges one names two.
+    fn a_conflict(aliases: impl IntoIterator<Item = VaultName>) -> AliasConflict {
+        AliasConflict::new(aliases).expect("a conflict is between at least two registrations")
+    }
+
+    /// A conflict over `named` and one registration this host does not hold.
+    ///
+    /// `refuse_conflict` acts on the aliases the host has an entry for, so the
+    /// second name completes the fact a conflict is without widening what the
+    /// case touches.
+    fn conflict_over(named: &VaultName) -> AliasConflict {
+        a_conflict([
+            named.clone(),
+            VaultName::new("unregistered-alias").expect("a legal vault name"),
+        ])
+    }
+
+    /// The two colliding names, as the set a refusal spells a collision with.
+    fn colliding(first: &VaultName, second: &VaultName) -> NameSet {
+        NameSet::new([first.clone(), second.clone()]).expect("two distinct colliding names")
+    }
     use std::sync::Condvar;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -7194,7 +7232,7 @@ mod tests {
 
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         // The refusal runs off the test thread because it releases both
         // aliases inline, and this test reads the entries from inside that
         // release.
@@ -7235,7 +7273,7 @@ mod tests {
             state.claim.begin_job_leg(epoch);
             assert!(state.coverage.in_hand(), "the entry parked its coverage");
         }
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         refuse_conflict(&host.shared, &conflict);
 
         assert_eq!(
@@ -7288,7 +7326,7 @@ mod tests {
             }
             epoch
         };
-        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
+        refuse_conflict(&host.shared, &conflict_over(&name));
 
         {
             let state = entry.gate.lock().unwrap();
@@ -7339,7 +7377,7 @@ mod tests {
         ops.poll_release.store(true, Ordering::SeqCst);
         wait_for_flag("detach_started", &ops.detach_started);
 
-        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
+        refuse_conflict(&host.shared, &conflict_over(&name));
         assert_eq!(published_label(&host, &name), Some(releasing()));
 
         ops.detach_release.store(true, Ordering::SeqCst);
@@ -7385,7 +7423,7 @@ mod tests {
         ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_flag("detach_started", &ops.detach_started);
 
-        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
+        refuse_conflict(&host.shared, &conflict_over(&name));
         assert_eq!(published_label(&host, &name), Some(releasing()));
 
         ops.detach_release.store(true, Ordering::SeqCst);
@@ -7669,7 +7707,7 @@ mod tests {
         poll_watchers(&host.shared);
         wait_for_reconciles(&ops, 1, "the reconcile leg to take the coverage");
 
-        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
+        refuse_conflict(&host.shared, &conflict_over(&name));
         assert_eq!(
             published_label(&host, &name),
             Some(releasing()),
@@ -7806,7 +7844,7 @@ mod tests {
         wait_for_park(
             &host,
             &b,
-            Demand::DuplicateRoot(AliasConflict::new([a.clone(), b.clone()])),
+            Demand::DuplicateRoot(a_conflict([a.clone(), b.clone()])),
         );
 
         // The gate b's attach ran the panicking detach under still locks: the
@@ -8133,7 +8171,7 @@ mod tests {
         assert_eq!(*lease.outcome(), Demand::State(TrustState::Ready));
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         // The refusal runs off the test thread because it releases the alias it
         // finds idle inline, and this test reads both entries from inside that
         // release.
@@ -8200,7 +8238,7 @@ mod tests {
             state.claim.begin_job_leg(epoch);
             state.pending.merge(Batch::rescan(RescanScope::Vault));
         }
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         refuse_conflict(&host.shared, &conflict);
         let polls = ops.polls.lock().unwrap().get(&a).copied().unwrap_or(0);
 
@@ -8387,7 +8425,7 @@ mod tests {
 
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         let second = conflict.clone();
         // The first refusal runs off the test thread because it releases both
         // aliases inline, and the second one below runs from inside that
@@ -8421,7 +8459,7 @@ mod tests {
 
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         // The refusal runs off the test thread because it releases both
         // aliases inline, and this test demands from inside that release.
         let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
@@ -8453,7 +8491,7 @@ mod tests {
     fn a_demand_scheduled_over_a_withdrawn_conflict_answers_the_work_it_scheduled() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         refuse_conflict(&host.shared, &conflict);
         wait_for_published_label(&host, &a, TrustState::Unattached);
 
@@ -8543,7 +8581,7 @@ mod tests {
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
         let lease = host.demand(&a, AttachMode::Durable).unwrap();
         let entry = host.shared.entries.get(&a).unwrap();
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         let refused_detail = |detail: &ErrorDetail| {
             assert_eq!(
                 host.state(&a)
@@ -8571,7 +8609,7 @@ mod tests {
 
         entry.gate.lock().unwrap().maintainer_contended = None;
         assert_eq!(lease.completion(), Demand::DuplicateRoot(conflict));
-        refused_detail(&ErrorDetail::duplicate_root([a.clone(), b.clone()]));
+        refused_detail(&ErrorDetail::duplicate_root(colliding(&a, &b)));
 
         entry.gate.lock().unwrap().duplicate_root = None;
         assert_eq!(
@@ -8600,7 +8638,7 @@ mod tests {
         {
             let entry = host.shared.entries.get(&a).unwrap();
             let mut state = entry.gate.lock().unwrap();
-            state.duplicate_root = Some(AliasConflict::new([a.clone(), b.clone()]));
+            state.duplicate_root = Some(a_conflict([a.clone(), b.clone()]));
             state.trust = TrustState::Unattached;
         }
 
@@ -8637,7 +8675,7 @@ mod tests {
     fn a_retry_over_a_resolved_conflict_reaches_ready() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        refuse_conflict(&host.shared, &AliasConflict::new([a.clone(), b.clone()]));
+        refuse_conflict(&host.shared, &a_conflict([a.clone(), b.clone()]));
         wait_for_published_label(&host, &a, TrustState::Unattached);
 
         let retried = host.retry(&a, AttachMode::Durable).unwrap();
@@ -8771,7 +8809,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
         let lease = host.demand(&a, AttachMode::Durable).unwrap();
-        refuse_conflict(&host.shared, &AliasConflict::new([a.clone(), b.clone()]));
+        refuse_conflict(&host.shared, &a_conflict([a.clone(), b.clone()]));
         wait_for_published_label(&host, &a, TrustState::Unattached);
 
         assert!(matches!(lease.completion(), Demand::DuplicateRoot(_)));
@@ -8781,7 +8819,7 @@ mod tests {
                 .as_ref()
                 .expect_err("a parked entry refuses")
                 .detail(),
-            &ErrorDetail::duplicate_root([a.clone(), b.clone()]),
+            &ErrorDetail::duplicate_root(colliding(&a, &b)),
             "the status surface spelled the park in a vocabulary of its own"
         );
         assert_eq!(
@@ -8852,7 +8890,7 @@ mod tests {
 
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         // The refusal runs off the test thread because it releases both
         // aliases inline, and this case reads the entry from inside that
         // release.
@@ -8868,7 +8906,7 @@ mod tests {
             host.state(&a)
                 .expect_err("a parked entry refuses through its release")
                 .detail(),
-            &ErrorDetail::duplicate_root([a.clone(), b.clone()]),
+            &ErrorDetail::duplicate_root(colliding(&a, &b)),
             "the release window answered the warming label under the park"
         );
 
@@ -8916,7 +8954,7 @@ mod tests {
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::CoverageLost(b_root.clone()));
         poll_watchers(&host.shared);
 
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         assert_eq!(
             entry_park(&host, &b),
             Some(Demand::DuplicateRoot(conflict.clone())),
@@ -8974,7 +9012,7 @@ mod tests {
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::CoverageLost(b_root.clone()));
         ops.maintenance_release.store(true, Ordering::SeqCst);
 
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         wait_for_park(&host, &b, Demand::DuplicateRoot(conflict.clone()));
         assert_eq!(
             entry_park(&host, &a),
@@ -9029,7 +9067,7 @@ mod tests {
         symlink(&a_root, &b_root).unwrap();
 
         let recovery = host.demand(&b, AttachMode::Durable).unwrap();
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         wait_for_park(&host, &b, Demand::DuplicateRoot(conflict.clone()));
         assert_eq!(
             entry_park(&host, &a),
@@ -9088,7 +9126,7 @@ mod tests {
         symlink(&moved_b_root, &a_root).unwrap();
         let a_lease = host.demand(&a, AttachMode::Durable).unwrap();
 
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         wait_until(
             "the concurrent attach to publish Ready or meet the recovery claim",
             lifecycle_wait_budget(),
@@ -9157,7 +9195,7 @@ mod tests {
         symlink(&a_root, &b_root).unwrap();
         ops.recover_release.store(true, Ordering::SeqCst);
 
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         wait_until(
             "the recovery to publish Ready or refuse the alias",
             lifecycle_wait_budget(),
@@ -9373,7 +9411,7 @@ mod tests {
     fn a_demand_a_contention_answers_leaves_the_conflict_park_standing() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let conflict = a_conflict([a.clone(), b.clone()]);
         refuse_conflict(&host.shared, &conflict);
         wait_for_published_label(&host, &a, TrustState::Unattached);
         {
@@ -9444,12 +9482,12 @@ mod tests {
         {
             let entry = host.shared.entries.get(&a).unwrap();
             let mut state = entry.gate.lock().unwrap();
-            state.duplicate_root = Some(AliasConflict::new([a.clone(), b.clone()]));
+            state.duplicate_root = Some(a_conflict([a.clone(), b.clone()]));
         }
         let parked = lease.answer().expect_err("a parked entry refuses");
         assert_eq!(
             parked.detail(),
-            &ErrorDetail::duplicate_root([a.clone(), b.clone()]),
+            &ErrorDetail::duplicate_root(colliding(&a, &b)),
             "the lease answered its park with another refusal"
         );
 
@@ -12946,7 +12984,7 @@ mod tests {
 
         // The refusal moves the entry past the epoch the attach carries, so
         // the publication below finds an entry that has left the work it ran.
-        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
+        refuse_conflict(&host.shared, &conflict_over(&name));
         ops.attach_release.store(true, Ordering::SeqCst);
 
         wait_for_detaches(
@@ -13020,7 +13058,7 @@ mod tests {
                 .expect("the entry parked its coverage");
             (epoch, attachment)
         };
-        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
+        refuse_conflict(&host.shared, &conflict_over(&name));
 
         {
             let state = entry.gate.lock().unwrap();
@@ -16239,7 +16277,7 @@ mod tests {
             serve(&host.shared, registration(&alias, &root.join(".")))
                 .expect("the set serves no such name");
 
-            let conflict = AliasConflict::new([alias.clone(), served.clone()]);
+            let conflict = a_conflict([alias.clone(), served.clone()]);
             assert_eq!(
                 entry_park(&host, &alias),
                 Some(Demand::DuplicateRoot(conflict.clone())),

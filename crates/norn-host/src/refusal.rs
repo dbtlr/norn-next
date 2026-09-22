@@ -48,7 +48,8 @@
 //! trusted, because the environment refused.
 
 use norn_wire::{
-    ControlFile, ErrorDetail, ErrorEnvelope, ReloadFailure, TrustState, UntrustedReason, VaultName,
+    ControlFile, ControlFileFailure, ErrorDetail, ErrorEnvelope, ReloadFailure, TrustState,
+    UntrustedReason, VaultName,
 };
 
 use crate::lifecycle::{Demand, HostError, JobFailure, ReadRefusal, ServingRefusal};
@@ -77,7 +78,7 @@ impl Demand {
             Demand::DuplicateRoot(conflict) => Err(ErrorEnvelope::new(
                 "more than one registered name resolves to this vault's root, so none of them \
                  is served",
-                ErrorDetail::duplicate_root(conflict.aliases().iter().cloned()),
+                ErrorDetail::duplicate_root(conflict.aliases().clone()),
             )),
             Demand::IdentityRefused(refusal) => Err(ErrorEnvelope::new(
                 "the registry cannot read this vault's root",
@@ -157,7 +158,9 @@ impl ReloadRefusal {
                 ErrorDetail::unknown_vault(name.clone()),
             ),
             ReloadRefusal::Unavailable(state) => unavailable(state),
-            ReloadRefusal::Core(error) => reload_failed(control_file_failure(&error)),
+            ReloadRefusal::Core(error) => {
+                reload_failed(ReloadFailure::control_file(control_file_failure(&error)))
+            }
             ReloadRefusal::Runtime(failure) => reload_failed(runtime_failure(failure)),
             ReloadRefusal::Unsupported => reload_failed(ReloadFailure::unsupported()),
             ReloadRefusal::HostStopped => return Err(HostError::WorkerStopped),
@@ -211,9 +214,14 @@ fn reload_failed(failure: ReloadFailure) -> ErrorEnvelope {
     )
 }
 
-/// A core reload error as the wire failure it is: which file, which boundary,
-/// and the reader's own account of it.
-fn control_file_failure(error: &ReloadError) -> ReloadFailure {
+/// A core reload error as the wire control-file failure it is: which file,
+/// which boundary, and the reader's own account of it.
+///
+/// The reload refusals here are its first caller; its second is the `vault
+/// status` handler, which lands in this crate (NORN-231) and reports the same
+/// failure as an entry's last reload failure, so the visibility is
+/// `pub(crate)` rather than private to this module.
+pub(crate) fn control_file_failure(error: &ReloadError) -> ControlFileFailure {
     let file = match error.file() {
         ReloadFile::Schema => ControlFile::Schema,
         ReloadFile::Config => ControlFile::Config,
@@ -223,7 +231,7 @@ fn control_file_failure(error: &ReloadError) -> ReloadFailure {
         ReloadStage::Parse => norn_wire::ReloadStage::Parse,
         ReloadStage::Apply => norn_wire::ReloadStage::Apply,
     };
-    ReloadFailure::control_file(file, stage, error.to_string())
+    ControlFileFailure::new(file, stage, error.to_string())
 }
 
 /// A job failure as the wire failure it is. The match carries no wildcard, so
@@ -232,7 +240,7 @@ fn control_file_failure(error: &ReloadError) -> ReloadFailure {
 fn runtime_failure(failure: JobFailure) -> ReloadFailure {
     match failure {
         JobFailure::Environmental(detail) => ReloadFailure::environmental(detail),
-        JobFailure::Reload(error) => control_file_failure(&error),
+        JobFailure::Reload(error) => ReloadFailure::control_file(control_file_failure(&error)),
         JobFailure::StoreDamaged(detail) => ReloadFailure::store_damaged(detail),
         JobFailure::WatcherTerminal(error) => ReloadFailure::watcher_terminal(error.to_string()),
         JobFailure::LostMaintainership => ReloadFailure::lost_maintainership(),
@@ -314,7 +322,7 @@ fn answer_state(state: TrustState) -> Result<TrustState, ErrorEnvelope> {
 
 #[cfg(test)]
 mod tests {
-    use norn_wire::{AttachMode, MaintainerIdentity, WarmingPhase, WatcherLossCause};
+    use norn_wire::{AttachMode, MaintainerIdentity, NameSet, WarmingPhase, WatcherLossCause};
 
     use crate::registry::AliasConflict;
 
@@ -322,6 +330,16 @@ mod tests {
 
     fn name(text: &str) -> VaultName {
         VaultName::new(text).expect("a legal vault name")
+    }
+
+    /// Two colliding names, as the set a collision is spelled with.
+    fn two_names(first: &str, second: &str) -> NameSet {
+        NameSet::new([name(first), name(second)]).expect("two distinct colliding names")
+    }
+
+    /// The conflict two colliding registrations raise.
+    fn a_conflict(first: &str, second: &str) -> AliasConflict {
+        AliasConflict::new([name(first), name(second)]).expect("two distinct colliding names")
     }
 
     /// The name every sample below is answered under, and the name the one
@@ -452,8 +470,8 @@ mod tests {
                 )),
             ),
             (
-                Demand::DuplicateRoot(AliasConflict::new([name("alpha"), name("beta")])),
-                Some(ErrorDetail::duplicate_root([name("alpha"), name("beta")])),
+                Demand::DuplicateRoot(a_conflict("alpha", "beta")),
+                Some(ErrorDetail::duplicate_root(two_names("alpha", "beta"))),
             ),
             (
                 Demand::IdentityRefused("the root cannot be read".to_string()),
@@ -625,8 +643,8 @@ mod serving_tests {
 mod reload_tests {
     use norn_fs::WatchError;
     use norn_wire::{
-        ControlFile, ErrorDetail, MaintainerIdentity, NotReady, ReloadFailure, TrustState,
-        UntrustedReason, VaultName, WarmingPhase,
+        ControlFile, ControlFileFailure, ErrorDetail, MaintainerIdentity, NotReady, ReloadFailure,
+        TrustState, UntrustedReason, VaultName, WarmingPhase,
     };
 
     use crate::lifecycle::{HostError, JobFailure};
@@ -721,17 +739,21 @@ mod reload_tests {
             (
                 ReloadRefusal::Core(unreadable()),
                 Some(ErrorDetail::reload_failed(ReloadFailure::control_file(
-                    ControlFile::Schema,
-                    norn_wire::ReloadStage::Parse,
-                    unreadable().to_string(),
+                    ControlFileFailure::new(
+                        ControlFile::Schema,
+                        norn_wire::ReloadStage::Parse,
+                        unreadable().to_string(),
+                    ),
                 ))),
             ),
             (
                 ReloadRefusal::Runtime(JobFailure::Reload(unreadable())),
                 Some(ErrorDetail::reload_failed(ReloadFailure::control_file(
-                    ControlFile::Schema,
-                    norn_wire::ReloadStage::Parse,
-                    unreadable().to_string(),
+                    ControlFileFailure::new(
+                        ControlFile::Schema,
+                        norn_wire::ReloadStage::Parse,
+                        unreadable().to_string(),
+                    ),
                 ))),
             ),
             (
@@ -862,11 +884,11 @@ mod reload_tests {
                 .expect("a core error carries a code");
             assert_eq!(
                 envelope.detail(),
-                &ErrorDetail::reload_failed(ReloadFailure::control_file(
+                &ErrorDetail::reload_failed(ReloadFailure::control_file(ControlFileFailure::new(
                     file,
                     stage,
                     error.to_string()
-                ))
+                )))
             );
         }
     }

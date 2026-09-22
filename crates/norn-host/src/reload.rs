@@ -88,7 +88,8 @@ pub struct ActiveFingerprints {
     pub config: ConfigFingerprint,
 }
 
-/// Which core-controlled part of a validated candidate changed.
+/// What a reload decided about a validated candidate's schema. The config is
+/// taken into service either way.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReloadOutcome {
     ConfigOnly,

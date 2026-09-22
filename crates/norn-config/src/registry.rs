@@ -87,37 +87,22 @@ pub use norn_wire::PollBackend;
 /// A path outside the grammar a root or a schema source is held to.
 pub use norn_wire::IllegalPath;
 
-/// One registered vault.
+/// The registration that crosses the client/host seam, which is the four
+/// fields the registry file holds and no others.
 ///
-/// Four fields and no others. Anything a host learns about a vault by looking
-/// at it — its trust state, its store's generation, when it was last derived —
-/// is derived state and lives where derived state lives, not in the file a
-/// person edits.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Entry {
-    /// The name the vault is addressed and keyed by.
-    pub name: VaultName,
-    /// The vault's root directory.
-    pub root: VaultRoot,
-    /// Where the vault's schema is read from. Absent means the in-vault
-    /// default, [`crate::IN_VAULT_SCHEMA_PATH`], relative to the root.
-    pub schema_source: Option<SchemaSource>,
-    /// The watch backend this entry pins. Absent is the platform's native one.
-    pub poll_backend: Option<PollBackend>,
-}
+/// Anything a host learns about a vault by looking at it — its trust state,
+/// its store's generation, when it was last derived — is derived state and
+/// lives where derived state lives, not in the file a person edits.
+pub use norn_wire::Registration;
 
-impl Entry {
-    /// An entry with the two fields that have no default, and the defaults for
-    /// the two that do.
-    pub fn new(name: VaultName, root: VaultRoot) -> Self {
-        Entry {
-            name,
-            root,
-            schema_source: None,
-            poll_backend: None,
-        }
-    }
-}
+/// A registry entry.
+///
+/// The entry and the registration are one reading of a registered vault, so
+/// there is one type rather than two shapes and a conversion between them.
+/// The name stays because the registry file is what this module is about: an
+/// entry is what the file holds, and a registration is what that same value is
+/// called at the seam.
+pub type Entry = Registration;
 
 /// The registry, as read.
 ///
@@ -196,15 +181,19 @@ impl Registry {
                 };
 
             raw.insert(name.clone(), table);
-            entries.insert(
-                name.clone(),
-                Entry {
-                    name,
-                    root,
-                    schema_source,
-                    poll_backend,
-                },
-            );
+            // `Registration` is `#[non_exhaustive]` and belongs to another
+            // crate, so a field added to it is filled in here by
+            // `Entry::new`'s default rather than refused by the compiler: this
+            // parser goes on compiling while projecting nothing for the new
+            // key. What catches that is the registry file's round trip —
+            // `a_registration_round_trips_through_the_file_over_every_combination`
+            // and its siblings compare the read-back registration to the
+            // written one whole, so a field a producer sets and this parser
+            // does not project comes back unequal.
+            let mut entry = Entry::new(name.clone(), root);
+            entry.schema_source = schema_source;
+            entry.poll_backend = poll_backend;
+            entries.insert(name, entry);
         }
         Ok(Registry {
             document,
