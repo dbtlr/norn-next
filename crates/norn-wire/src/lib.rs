@@ -48,10 +48,11 @@
 //! [`DocumentRow`] a [`Column`] projection selects, at its [`DocumentPath`],
 //! with the [`LinkRow`], [`HeadingRow`], [`BlockRow`], [`TagRow`] and
 //! [`FindingRow`] its [`Collection`]s hold, the [`BodyText`] its body crosses
-//! as, and the [`FieldValue`] each frontmatter key carries. A finding and an
-//! ambiguous-target refusal each carry a [`CandidateHead`] — at most
-//! [`CANDIDATE_HEAD`] [`Candidate`]s and the total they head — beside the
-//! [`Hint`] that names what enumerates the rest. What a reload met is spelled
+//! as, and the [`FieldValue`] each frontmatter key carries. A link row, a
+//! finding and an ambiguous-target refusal each carry a [`CandidateHead`] —
+//! at most [`CANDIDATE_HEAD`] [`Candidate`]s and the total they head — and
+//! the latter two carry it beside the [`Hint`] that names what enumerates the
+//! rest. What a reload met is spelled
 //! here too:
 //! [`ReloadFailure`], with the [`ControlFile`] and [`ReloadStage`] a control
 //! file refused at. [`EngineSection`] is what a host was delivered as a
@@ -76,8 +77,8 @@
 //!   [`ResolutionTarget`] and [`Score`] refuse a string outside their grammar,
 //!   [`RungSet`] refuses a ladder that runs no rung, and four shapes refuse a
 //!   value whose halves disagree: [`ErrorEnvelope`], whose code must be its
-//!   detail's, [`LinkRow`], whose health must be the health of the documents
-//!   it resolves to, and the three bounded heads — [`Collection`],
+//!   detail's, [`LinkRow`], whose health must be the health of the total
+//!   documents its head heads, and the three bounded heads — [`Collection`],
 //!   [`BodyText`] and [`CandidateHead`] — whose total must be a total the
 //!   head they carry can head, the last of them refusing a head wider than
 //!   [`CANDIDATE_HEAD`] as well — each with the wire shape a derive would

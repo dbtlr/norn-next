@@ -528,27 +528,57 @@ fn nested_field_value() -> FieldValue {
     )])
 }
 
-/// One link row per health, built through the constructor that derives it.
+/// One link row per health, built through the constructor that derives it
+/// from the total of the bounded head beside it.
 fn link_rows() -> Vec<LinkRow> {
     [
-        vec![],
-        vec![path("notes/a.md")],
-        vec![path("notes/a.md"), path("archive/a.md")],
+        head([], 0),
+        head([candidate("notes/a")], 1),
+        head([candidate("notes/a"), candidate("archive/a")], 2),
     ]
     .into_iter()
-    .map(|targets| {
-        LinkRow::new(
-            LinkFamily::Wikilink,
-            false,
-            None,
-            "a",
-            Some("A".to_string()),
-            Some(Anchor::heading("Design")),
-            span(),
-            targets,
-        )
-    })
+    .map(link_row)
     .collect()
+}
+
+/// A link row resolving to `targets`, built through the constructor that
+/// derives its health.
+fn link_row(targets: CandidateHead) -> LinkRow {
+    LinkRow::new(
+        LinkFamily::Wikilink,
+        false,
+        None,
+        "a",
+        Some("A".to_string()),
+        Some(Anchor::heading("Design")),
+        span(),
+        targets,
+    )
+}
+
+/// The candidates a link row's head carries, as the bytes a reader is handed.
+fn candidate_values(paths: &[&str]) -> Vec<serde_json::Value> {
+    paths
+        .iter()
+        .map(|path| serde_json::json!({"path": path, "suffix": "a"}))
+        .collect()
+}
+
+/// A link row as bytes, with the head and the health named apart so a test can
+/// hand the reader halves that disagree.
+fn link_row_json(health: &str, candidates: &[serde_json::Value], total: u64) -> String {
+    serde_json::json!({
+        "family": "wikilink",
+        "embed": false,
+        "protocol": null,
+        "target": "a",
+        "title": null,
+        "anchor": null,
+        "span": {"line": 1, "column": 1, "byte_offset": 0},
+        "targets": {"candidates": candidates, "total": total},
+        "health": health,
+    })
+    .to_string()
 }
 
 /// Every hint a bounded head points a client at.
@@ -3007,47 +3037,77 @@ fn a_links_health_is_the_count_of_what_it_resolves_to() {
     assert_eq!(LinkHealth::of_targets(400), LinkHealth::Ambiguous);
 }
 
+/// The count the health is read off is the head's total, not the candidates
+/// the head carries: a target that named nine documents is ambiguous on a row
+/// whose head stops at five, because what the health describes is the class
+/// rather than the part of it that fit.
+#[test]
+fn a_links_health_is_the_heads_total_rather_than_its_length() {
+    let nine: Vec<Candidate> = (0..9)
+        .map(|index| candidate(&format!("notes/g{index}")))
+        .collect();
+    let five_of_nine = head(nine, 9);
+    assert_eq!(five_of_nine.candidates().len(), CANDIDATE_HEAD);
+    assert_eq!(link_row(five_of_nine).health(), LinkHealth::Ambiguous);
+    assert_eq!(
+        link_row(head([candidate("notes/a")], 1)).health(),
+        LinkHealth::Healthy
+    );
+    assert_eq!(link_row(head([], 0)).health(), LinkHealth::Broken);
+}
+
 /// The two halves of one fact cannot arrive disagreeing: a row whose `health`
 /// is not the health of the documents beside it is refused entire rather than
 /// read into a value that says two things about one link.
 #[test]
 fn a_link_whose_health_is_not_its_targets_refuses_the_read() {
-    let row = |health: &str, targets: &[&str]| {
-        serde_json::json!({
-            "family": "wikilink",
-            "embed": false,
-            "protocol": null,
-            "target": "a",
-            "title": null,
-            "anchor": null,
-            "span": {"line": 1, "column": 1, "byte_offset": 0},
-            "targets": targets,
-            "health": health,
-        })
-        .to_string()
-    };
-    for (health, targets) in [
-        ("broken", &[][..]),
-        ("healthy", &["notes/a.md"][..]),
-        ("ambiguous", &["notes/a.md", "archive/a.md"][..]),
+    for (health, paths, total) in [
+        ("broken", &[][..], 0),
+        ("healthy", &["notes/a.md"][..], 1),
+        ("ambiguous", &["notes/a.md", "archive/a.md"][..], 2),
+        ("ambiguous", &["notes/a.md"][..], 9),
     ] {
-        let json = row(health, targets);
+        let json = link_row_json(health, &candidate_values(paths), total);
         assert!(
             serde_json::from_str::<LinkRow>(&json).is_ok(),
             "reading {json} refused a row whose halves agree"
         );
     }
-    for (health, targets) in [
-        ("healthy", &[][..]),
-        ("broken", &["notes/a.md"][..]),
-        ("healthy", &["notes/a.md", "archive/a.md"][..]),
+    for (health, paths, total) in [
+        ("healthy", &[][..], 0),
+        ("broken", &["notes/a.md"][..], 1),
+        ("healthy", &["notes/a.md", "archive/a.md"][..], 2),
+        ("healthy", &["notes/a.md"][..], 9),
     ] {
-        let json = row(health, targets);
+        let json = link_row_json(health, &candidate_values(paths), total);
         assert!(
             serde_json::from_str::<LinkRow>(&json).is_err(),
             "reading {json} produced a row whose halves disagree"
         );
     }
+}
+
+/// The bound the head keeps is the link row's too: a row carrying more
+/// candidates than the bound is bytes nothing here minted, and the row refuses
+/// the read through the head nested in it rather than landing a payload no
+/// bound covers. The head cut to the bound reads back, total and all.
+#[test]
+fn a_link_row_whose_head_is_wider_than_the_bound_refuses_the_read() {
+    let nine: Vec<serde_json::Value> = (0..9)
+        .map(|index| serde_json::json!({"path": format!("notes/g{index}.md"), "suffix": "g"}))
+        .collect();
+    let json = link_row_json("ambiguous", &nine, 9);
+    assert!(
+        serde_json::from_str::<LinkRow>(&json).is_err(),
+        "reading {json} produced a link row no bound covers"
+    );
+    let json = link_row_json("ambiguous", &nine[..CANDIDATE_HEAD], 9);
+    let read: LinkRow =
+        serde_json::from_str(&json).unwrap_or_else(|error| panic!("reading {json}: {error}"));
+    assert_eq!(read.targets.candidates().len(), CANDIDATE_HEAD);
+    assert_eq!(read.targets.total(), 9);
+    assert!(read.targets.is_truncated());
+    assert_eq!(read.health(), LinkHealth::Ambiguous);
 }
 
 /// A column the read did not project is left out of the bytes entirely, so a
@@ -3909,7 +3969,7 @@ fn every_document_row_setter_lands_in_the_bytes() {
     assert_eq!(
         wire(&request),
         [
-            r##"{"path":"notes/a.md","fields":{"type":{"kind":"scalar","raw":"note"}},"body":{"text":"Design\n","byte_length":4096},"links":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":[],"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":["notes/a.md"],"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":["notes/a.md","archive/a.md"],"health":"ambiguous"}],"total":9},"headings":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"blocks":{"items":[{"id":"a1","span":null}],"total":1},"tags":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12}],"total":1}}"##,
+            r##"{"path":"notes/a.md","fields":{"type":{"kind":"scalar","raw":"note"}},"body":{"text":"Design\n","byte_length":4096},"links":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"}],"total":1},"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"},{"path":"archive/a.md","suffix":"archive/a"}],"total":2},"health":"ambiguous"}],"total":9},"headings":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"blocks":{"items":[{"id":"a1","span":null}],"total":1},"tags":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12}],"total":1}}"##,
         ]
         .concat()
     );

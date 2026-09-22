@@ -8,8 +8,9 @@
 //!
 //! **The candidate list is a head, and the head is one type.**
 //! [`CandidateHead`] is a bounded head of candidates and a total, in the
-//! resolution ladder's deterministic order, and it is what both carriers hold: the
-//! finding row here, and the ambiguous-target refusal. One type is what makes
+//! resolution ladder's deterministic order, and it is what every carrier
+//! holds: the finding row here, the link row whose target resolved, and the
+//! ambiguous-target refusal. One type is what makes
 //! the bound hold everywhere — a payload bounded only where it is rendered is
 //! a payload the second renderer emits unbounded, and a bound stated twice is
 //! a bound one of the two spellings will outgrow. [`CANDIDATE_HEAD`] is that
@@ -46,7 +47,7 @@ use crate::document::{DocumentPath, Span, TotalBelowHead};
 use crate::finding::{FindingKind, Severity};
 use crate::target::ResolutionTarget;
 
-/// How many resolution candidates a finding carries.
+/// How many resolution candidates a row or a refusal carries.
 ///
 /// The head is the first five in deterministic resolution-ladder order, and
 /// the total beside them is how many there were. The bound is wire shape: the

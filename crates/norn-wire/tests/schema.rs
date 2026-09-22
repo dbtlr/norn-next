@@ -1428,7 +1428,8 @@ fn a_document_row_advertises_its_path_and_one_property_per_column() {
     }
 }
 
-/// A link row advertises the syntactic half beside the resolved half, and the
+/// A link row advertises the syntactic half beside the resolved half, the
+/// resolved half is the bounded head both other carriers advertise, and the
 /// health it carries is the vocabulary rather than a sentence naming it.
 #[test]
 fn a_link_row_advertises_the_targets_and_the_health_read_off_them() {
@@ -1441,6 +1442,16 @@ fn a_link_row_advertises_the_targets_and_the_health_read_off_them() {
         ]
         .into_iter()
         .collect()
+    );
+    assert_eq!(
+        schema["properties"]["targets"]["$ref"].as_str(),
+        Some("#/$defs/CandidateHead"),
+        "a link row restates the head rather than referring to it"
+    );
+    assert_eq!(
+        schema["$defs"]["CandidateHead"]["properties"]["candidates"]["maxItems"].as_u64(),
+        Some(CANDIDATE_HEAD as u64),
+        "a link row's head is advertised without the bound it keeps"
     );
     assert_eq!(
         schema["properties"]["health"]["$ref"].as_str(),

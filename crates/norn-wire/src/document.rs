@@ -28,8 +28,12 @@
 //! **Link health is computed, never stored.** Resolution runs at read time
 //! over syntactic link facts, so the health of a link is a fact about the
 //! vault at the instant of the read: one target is healthy, none is broken,
-//! and more than one is ambiguous. [`LinkRow`] derives it in its constructor
-//! from the targets beside it, and reads it back the same way, so the two
+//! and more than one is ambiguous. What the target resolved to crosses as a
+//! [`CandidateHead`] — the same bounded head of paths and total that a
+//! finding and the ambiguous-target refusal carry — so a short link a large
+//! vault resolves many ways puts a bounded head and a count on the row rather
+//! than the whole ambiguity class. [`LinkRow`] derives its health in its
+//! constructor from that total, and reads it back the same way, so the two
 //! halves of one fact cannot arrive disagreeing.
 //!
 //! **A frontmatter value crosses as the tree it is written as.** The content
@@ -66,7 +70,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::address::IllegalPath;
-use crate::finding_row::FindingRow;
+use crate::finding_row::{CandidateHead, FindingRow};
 use crate::target::Anchor;
 
 /// What a document path is called in a refusal that names one.
@@ -456,8 +460,10 @@ impl LinkHealth {
     /// The health of a link whose target resolved to `targets` documents.
     ///
     /// This is the whole of the derivation, so a producer cannot file one
-    /// reading of a count and a consumer another.
-    pub const fn of_targets(targets: usize) -> Self {
+    /// reading of a count and a consumer another. The count is the head's
+    /// total rather than the candidates it carries, so a head cut at its bound
+    /// reports the health of the whole class.
+    pub const fn of_targets(targets: u64) -> Self {
         match targets {
             0 => LinkHealth::Broken,
             1 => LinkHealth::Healthy,
@@ -482,7 +488,9 @@ pub enum LinkFamily {
 /// One link the document carries, with what its target resolves to.
 ///
 /// The syntactic half is what the document says; the resolved half is what the
-/// vault held at the instant of the read. `health` is derived from `targets`
+/// vault held at the instant of the read. `targets` is a bounded head and a
+/// total, so a link a vault resolves many ways crosses as the first of those
+/// documents and how many there were. `health` is derived from that total
 /// rather than carried beside it: the constructor computes it and the read
 /// path recomputes it, so a row whose health disagrees with the documents it
 /// names has no representation on either side of the seam.
@@ -504,20 +512,20 @@ pub struct LinkRow {
     pub anchor: Option<Anchor>,
     /// Where the link stands in the document body.
     pub span: Span,
-    /// The documents the target resolves to, in the resolution ladder's own
-    /// order.
-    pub targets: Vec<DocumentPath>,
+    /// The bounded head of the documents the target resolves to, in the
+    /// resolution ladder's own order, with how many there were.
+    pub targets: CandidateHead,
     /// What resolving the target found, which is read off the documents it
     /// found.
     health: LinkHealth,
 }
 
 impl LinkRow {
-    /// A link of `family` at `span`, written as `target`, resolving to
-    /// `targets`.
+    /// A link of `family` at `span`, written as `target`, resolving to the
+    /// documents `targets` heads.
     ///
-    /// The health is computed from `targets` here rather than passed in, so
-    /// the two name one reading of the vault.
+    /// The health is computed from the total `targets` carries rather than
+    /// passed in, so the two name one reading of the vault.
     #[allow(clippy::too_many_arguments)] // A link row is the link's own facts; grouping them would mint a shape nothing else holds.
     pub fn new(
         family: LinkFamily,
@@ -527,9 +535,9 @@ impl LinkRow {
         title: Option<String>,
         anchor: Option<Anchor>,
         span: Span,
-        targets: Vec<DocumentPath>,
+        targets: CandidateHead,
     ) -> Self {
-        let health = LinkHealth::of_targets(targets.len());
+        let health = LinkHealth::of_targets(targets.total());
         LinkRow {
             family,
             embed,
@@ -561,7 +569,7 @@ struct LinkRowFields {
     title: Option<String>,
     anchor: Option<Anchor>,
     span: Span,
-    targets: Vec<DocumentPath>,
+    targets: CandidateHead,
     health: LinkHealth,
 }
 
@@ -575,12 +583,12 @@ impl<'de> Deserialize<'de> for LinkRow {
         D: Deserializer<'de>,
     {
         let fields = LinkRowFields::deserialize(deserializer)?;
-        let derived = LinkHealth::of_targets(fields.targets.len());
+        let derived = LinkHealth::of_targets(fields.targets.total());
         if fields.health != derived {
             return Err(D::Error::custom(format!(
                 "the link's health {:?} is not the health of the {} documents it resolves to, {derived:?}",
                 fields.health,
-                fields.targets.len(),
+                fields.targets.total(),
             )));
         }
         Ok(LinkRow {
