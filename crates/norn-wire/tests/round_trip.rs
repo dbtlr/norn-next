@@ -23,8 +23,9 @@ use norn_wire::{
     UnknownSeverity, UnknownVerb, Unsatisfied, UntrustedReason, VaultAddress, VaultAnswer,
     VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
 };
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::de::value::{Error as ValueError, F64Deserializer};
+use serde::de::{DeserializeOwned, IntoDeserializer};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 
@@ -1793,8 +1794,19 @@ fn a_score_that_is_not_finite_is_no_score() {
     round_trip(&score(0.5));
     assert_eq!(wire(&score(0.5)), "0.5");
 
-    // JSON spells no non-finite number, so the read path meets one as a
-    // literal out of the range a double holds.
+    // The read path is the constructor, so it refuses every non-finite value
+    // a format can hand it. JSON spells none of the three, so the value is
+    // handed to the read path directly, the way a format that does spell them
+    // would hand it over.
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let number: F64Deserializer<ValueError> = value.into_deserializer();
+        assert!(
+            Score::deserialize(number).is_err(),
+            "{value} was read back as a score"
+        );
+    }
+    // A JSON literal out of the range a double holds is the nearest thing
+    // JSON itself spells, and it is no score either.
     for spelling in ["1e400", "-1e400"] {
         assert!(
             serde_json::from_str::<Score>(spelling).is_err(),
