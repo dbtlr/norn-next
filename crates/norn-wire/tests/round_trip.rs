@@ -3068,9 +3068,9 @@ fn an_unprojected_column_is_absent_from_the_row() {
     assert_eq!(read.body, None);
 }
 
-/// A frontmatter value crosses as the text it is written as, tagged by the
-/// container it sits in. A map crosses as its canonical JSON, which is a
-/// string here rather than a shape this crate would have to re-express.
+/// A frontmatter value crosses tagged by the container it sits in: a scalar
+/// as the text it is written as, a sequence as a sequence of values, and a
+/// map as a mapping of nested values, never as JSON in a string.
 #[test]
 fn a_field_value_is_an_object_tagged_kind() {
     assert_eq!(
