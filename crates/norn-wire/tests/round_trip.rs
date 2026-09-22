@@ -3151,8 +3151,8 @@ fn every_finding_row_shape_survives_the_round_trip() {
 }
 
 /// The head is bounded where one is built, so a producer handing over more
-/// than five candidates does not widen it. The total is untouched: it is what
-/// makes the head a head.
+/// candidates than the bound does not widen it. The total is untouched: it is
+/// what makes the head a head.
 #[test]
 fn a_candidate_list_is_bounded_at_the_head_wherever_it_is_built() {
     let many: Vec<Candidate> = (0..12)

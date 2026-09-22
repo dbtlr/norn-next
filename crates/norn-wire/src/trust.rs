@@ -255,7 +255,7 @@ pub enum WarmingPhase {
     /// Documents are being derived, and the counters beside this phase advance
     /// as they are.
     Healing,
-    /// The entry is giving back everything the installing-coverage phase
+    /// The entry is giving back everything the `installing_coverage` phase
     /// acquired: change detection over the vault ends, the derived state is
     /// closed, and sole maintainership of it is given up — released
     /// where the entry still holds it, and put down where the entry has already

@@ -7,8 +7,8 @@
 //! it resolves to.
 //!
 //! **The candidate list is a head, and the head is one type.**
-//! [`CandidateHead`] is five candidates and a total, in the resolution
-//! ladder's deterministic order, and it is what both carriers hold: the
+//! [`CandidateHead`] is a bounded head of candidates and a total, in the
+//! resolution ladder's deterministic order, and it is what both carriers hold: the
 //! finding row here, and the ambiguous-target refusal. One type is what makes
 //! the bound hold everywhere — a payload bounded only where it is rendered is
 //! a payload the second renderer emits unbounded, and a bound stated twice is
@@ -80,9 +80,10 @@ impl Candidate {
 /// On the wire a head is a plain object:
 /// `{"candidates":[…],"total":9}`. The candidates are the first of them in
 /// the resolution ladder's deterministic order, bounded at the ceiling the
-/// schema advertises, and `total` beside them is how many there were. A head
-/// longer than that bound, or a total below the candidates beside it,
-/// describes no vault and is refused.
+/// schema advertises, and the total beside them is never below the candidates
+/// carried: a smaller total heads nothing, and the read refuses it. A head
+/// longer than the advertised ceiling describes no vault and is refused the
+/// same way.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct CandidateHead {
@@ -146,7 +147,7 @@ impl JsonSchema for CandidateHead {
         let candidate = generator.subschema_for::<Candidate>();
         json_schema!({
             "type": "object",
-            "description": "The bounded head of the documents a target could have named, with how many there were.",
+            "description": "The bounded head of the documents a target could have named, with how many there were. The candidates are in the resolution ladder's deterministic order and stop at the ceiling this schema advertises, and the total beside them is never below the candidates carried: a smaller total heads nothing, and the read refuses it.",
             "properties": {
                 "candidates": {
                     "type": "array",

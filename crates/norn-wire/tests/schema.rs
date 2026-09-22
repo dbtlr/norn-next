@@ -1533,9 +1533,20 @@ fn a_field_value_advertises_a_tree_rather_than_json_in_a_string() {
 /// crate refuses to read. The bound is read off the constant here rather than
 /// written down a second time: the schema and [`CANDIDATE_HEAD`] are one
 /// spelling, and the number itself is pinned where the constant is.
+///
+/// The description is pinned for the reason the name's is: this is a
+/// hand-written schema, so the sentence the schema carries states the ladder
+/// order and the total rule on its own, and nothing else holds it to them.
 #[test]
 fn a_candidate_head_advertises_the_ceiling_it_is_read_through() {
     let schema = schema_of::<CandidateHead>();
+    assert_eq!(
+        schema["description"].as_str(),
+        Some(
+            "The bounded head of the documents a target could have named, with how many there were. The candidates are in the resolution ladder's deterministic order and stop at the ceiling this schema advertises, and the total beside them is never below the candidates carried: a smaller total heads nothing, and the read refuses it."
+        ),
+        "the hand-written head states less than the read enforces: {schema}"
+    );
     let candidates = &schema["properties"]["candidates"];
     assert_eq!(candidates["type"].as_str(), Some("array"));
     assert_eq!(

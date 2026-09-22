@@ -146,11 +146,11 @@ impl JsonSchema for VaultName {
     /// surface that validates against the schema and a reader that parses the
     /// string refuse the same names.
     ///
-    /// This is the crate's one hand-written schema. Every other type derives
-    /// one, and a derive lifts the description out of the doc comment over the
-    /// type; here the description is maintained beside that doc rather than
-    /// lifted from it, so the two are two spellings of one sentence and the
-    /// schema suite pins them equal.
+    /// This is one of the hand-written schemas the crate doc lists. A derive
+    /// lifts the description out of the doc comment over the type; here the
+    /// description is maintained beside that doc rather than lifted from it,
+    /// so the two are two spellings of one sentence and the schema suite pins
+    /// them equal.
     ///
     /// **The pattern is ECMA-262**, the dialect JSON Schema names, and a
     /// validator reading it as another flavor of regular expression admits
