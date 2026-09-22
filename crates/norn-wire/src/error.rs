@@ -24,9 +24,12 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
+use crate::cursor::CursorOrderChanged;
 use crate::demand::AttachMode;
 use crate::name::VaultName;
-use crate::trust::UntrustedReason;
+use crate::reading::Rung;
+use crate::reload::ReloadFailure;
+use crate::trust::{NotReady, UntrustedReason};
 
 /// Who holds a contended maintainer lock, as far as its diagnostic says.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -94,6 +97,53 @@ pub enum ReasonCode {
     /// the mode that was named.
     #[serde(rename = "host/unsupported-attach-mode")]
     HostUnsupportedAttachMode,
+    /// `host/already-served` — the host already serves an entry under this
+    /// name, so nothing was registered over it. The detail is the name.
+    #[serde(rename = "host/already-served")]
+    HostAlreadyServed,
+    /// `host/entry-held` — the entry is holding something, or something is
+    /// holding it, so it was not taken out of service. The detail is the name.
+    #[serde(rename = "host/entry-held")]
+    HostEntryHeld,
+    /// `host/entry-not-ready` — the entry holds nothing the request can be
+    /// answered from yet. The detail is where the entry stands.
+    #[serde(rename = "host/entry-not-ready")]
+    HostEntryNotReady,
+    /// `host/reader-unavailable` — the entry is serving and its read seam is
+    /// not. The detail is the account the act that failed produced.
+    #[serde(rename = "host/reader-unavailable")]
+    HostReaderUnavailable,
+    /// `vault/ambiguous-root` — more than one registered name resolves to the
+    /// root that was asked about, so the ask names no one vault. The detail is
+    /// every name that resolves to it.
+    #[serde(rename = "vault/ambiguous-root")]
+    VaultAmbiguousRoot,
+    /// `vault/reload-busy` — the vault is serving and something is already
+    /// working over it, so the reload was not started. The detail carries
+    /// nothing: the ask is repeated rather than resolved.
+    #[serde(rename = "vault/reload-busy")]
+    VaultReloadBusy,
+    /// `vault/reload-failed` — the reload ran and did not leave the vault
+    /// serving what its control files state. The detail is what it met.
+    #[serde(rename = "vault/reload-failed")]
+    VaultReloadFailed,
+    /// `vault/cursor-order-changed` — the cursor was minted under one order
+    /// and continued under another, so the position it names is in a sequence
+    /// that no longer exists. The detail is the two orders.
+    #[serde(rename = "vault/cursor-order-changed")]
+    VaultCursorOrderChanged,
+    /// `engine/not-enabled` — the vault has not enabled the rung the request
+    /// asked for. The detail is the rung, and what to do about it.
+    #[serde(rename = "engine/not-enabled")]
+    EngineNotEnabled,
+    /// `engine/unavailable` — the rung is enabled and no engine stands for it
+    /// here and now. The detail is the rung and why.
+    #[serde(rename = "engine/unavailable")]
+    EngineUnavailable,
+    /// `engine/failed` — the engine stands for the rung and this answer
+    /// failed. The detail is the rung and the failure.
+    #[serde(rename = "engine/failed")]
+    EngineFailed,
 }
 
 /// The typed payload one reason code carries.
@@ -154,6 +204,95 @@ pub enum ErrorDetail {
         /// refused.
         mode: AttachMode,
     },
+    /// The detail of `host/already-served`: the name already in service.
+    #[serde(rename = "host/already-served")]
+    #[non_exhaustive]
+    AlreadyServed {
+        /// The name an entry already stands under.
+        name: VaultName,
+    },
+    /// The detail of `host/entry-held`: the name whose entry is held.
+    #[serde(rename = "host/entry-held")]
+    #[non_exhaustive]
+    EntryHeld {
+        /// The name the held entry stands under.
+        name: VaultName,
+    },
+    /// The detail of `host/entry-not-ready`: where the entry stands.
+    #[serde(rename = "host/entry-not-ready")]
+    #[non_exhaustive]
+    EntryNotReady {
+        /// What the entry is doing instead of serving, with the counters a
+        /// poll would have read.
+        state: NotReady,
+    },
+    /// The detail of `host/reader-unavailable`: why the read seam is down.
+    #[serde(rename = "host/reader-unavailable")]
+    #[non_exhaustive]
+    ReaderUnavailable {
+        /// The refusal in words, for a person reading a message or a log.
+        /// Clients never match on it.
+        detail: String,
+    },
+    /// The detail of `vault/ambiguous-root`: every registered name that
+    /// resolves to the root that was asked about.
+    #[serde(rename = "vault/ambiguous-root")]
+    #[non_exhaustive]
+    AmbiguousRoot {
+        /// The candidate names, in ascending order, each echoed back as the
+        /// typed name.
+        candidates: Vec<VaultName>,
+    },
+    /// The detail of `vault/reload-busy`, which carries nothing.
+    #[serde(rename = "vault/reload-busy")]
+    ReloadBusy {},
+    /// The detail of `vault/reload-failed`: what the reload met.
+    #[serde(rename = "vault/reload-failed")]
+    #[non_exhaustive]
+    ReloadFailed {
+        /// Why the reload did not leave the vault serving what its control
+        /// files state.
+        failure: ReloadFailure,
+    },
+    /// The detail of `vault/cursor-order-changed`: the order the cursor was
+    /// minted under, and the order that stands.
+    #[serde(rename = "vault/cursor-order-changed")]
+    #[non_exhaustive]
+    CursorOrderChanged {
+        /// The schema fingerprint the cursor was minted under.
+        minted_under: String,
+        /// The schema fingerprint the establishment reads now.
+        current: String,
+    },
+    /// The detail of `engine/not-enabled`: which rung, and what enables it.
+    #[serde(rename = "engine/not-enabled")]
+    #[non_exhaustive]
+    EngineNotEnabled {
+        /// The rung the request asked for.
+        rung: Rung,
+        /// What to do about it, in words, for a person reading a message.
+        detail: String,
+    },
+    /// The detail of `engine/unavailable`: which rung, and why no engine
+    /// stands for it.
+    #[serde(rename = "engine/unavailable")]
+    #[non_exhaustive]
+    EngineUnavailable {
+        /// The rung the request asked for.
+        rung: Rung,
+        /// Why no engine stands for it, in words, for a person reading a
+        /// message or a log.
+        detail: String,
+    },
+    /// The detail of `engine/failed`: which rung, and how the answer failed.
+    #[serde(rename = "engine/failed")]
+    #[non_exhaustive]
+    EngineFailed {
+        /// The rung the request asked for.
+        rung: Rung,
+        /// The failure in words, for a person reading a message or a log.
+        detail: String,
+    },
 }
 
 impl ErrorDetail {
@@ -188,6 +327,83 @@ impl ErrorDetail {
         ErrorDetail::UnsupportedAttachMode { mode }
     }
 
+    /// The detail of `host/already-served`, for the `name` already in
+    /// service.
+    pub const fn already_served(name: VaultName) -> Self {
+        ErrorDetail::AlreadyServed { name }
+    }
+
+    /// The detail of `host/entry-held`, for the held entry's `name`.
+    pub const fn entry_held(name: VaultName) -> Self {
+        ErrorDetail::EntryHeld { name }
+    }
+
+    /// The detail of `host/entry-not-ready`, for where the entry stands.
+    pub const fn entry_not_ready(state: NotReady) -> Self {
+        ErrorDetail::EntryNotReady { state }
+    }
+
+    /// The detail of `host/reader-unavailable`, described by `detail`.
+    pub fn reader_unavailable(detail: impl Into<String>) -> Self {
+        ErrorDetail::ReaderUnavailable {
+            detail: detail.into(),
+        }
+    }
+
+    /// The detail of `vault/ambiguous-root`, for the `candidates` the root
+    /// resolves under.
+    ///
+    /// The candidates are sorted here, so the ascending order the field
+    /// promises holds for every producer rather than for the ones that sorted
+    /// first.
+    pub fn ambiguous_root(candidates: impl IntoIterator<Item = VaultName>) -> Self {
+        let mut candidates: Vec<VaultName> = candidates.into_iter().collect();
+        candidates.sort();
+        ErrorDetail::AmbiguousRoot { candidates }
+    }
+
+    /// The detail of `vault/reload-busy`.
+    pub const fn reload_busy() -> Self {
+        ErrorDetail::ReloadBusy {}
+    }
+
+    /// The detail of `vault/reload-failed`, for what the reload met.
+    pub const fn reload_failed(failure: ReloadFailure) -> Self {
+        ErrorDetail::ReloadFailed { failure }
+    }
+
+    /// The detail of `vault/cursor-order-changed`, for the order that changed.
+    pub fn cursor_order_changed(changed: CursorOrderChanged) -> Self {
+        ErrorDetail::CursorOrderChanged {
+            minted_under: changed.minted_under,
+            current: changed.current,
+        }
+    }
+
+    /// The detail of `engine/not-enabled`, for `rung`, described by `detail`.
+    pub fn engine_not_enabled(rung: Rung, detail: impl Into<String>) -> Self {
+        ErrorDetail::EngineNotEnabled {
+            rung,
+            detail: detail.into(),
+        }
+    }
+
+    /// The detail of `engine/unavailable`, for `rung`, described by `detail`.
+    pub fn engine_unavailable(rung: Rung, detail: impl Into<String>) -> Self {
+        ErrorDetail::EngineUnavailable {
+            rung,
+            detail: detail.into(),
+        }
+    }
+
+    /// The detail of `engine/failed`, for `rung`, described by `detail`.
+    pub fn engine_failed(rung: Rung, detail: impl Into<String>) -> Self {
+        ErrorDetail::EngineFailed {
+            rung,
+            detail: detail.into(),
+        }
+    }
+
     /// The code this detail is the payload of.
     pub const fn code(&self) -> ReasonCode {
         match self {
@@ -196,6 +412,17 @@ impl ErrorDetail {
             ErrorDetail::MaintainerContended { .. } => ReasonCode::HostMaintainerContended,
             ErrorDetail::UnknownVault { .. } => ReasonCode::HostUnknownVault,
             ErrorDetail::UnsupportedAttachMode { .. } => ReasonCode::HostUnsupportedAttachMode,
+            ErrorDetail::AlreadyServed { .. } => ReasonCode::HostAlreadyServed,
+            ErrorDetail::EntryHeld { .. } => ReasonCode::HostEntryHeld,
+            ErrorDetail::EntryNotReady { .. } => ReasonCode::HostEntryNotReady,
+            ErrorDetail::ReaderUnavailable { .. } => ReasonCode::HostReaderUnavailable,
+            ErrorDetail::AmbiguousRoot { .. } => ReasonCode::VaultAmbiguousRoot,
+            ErrorDetail::ReloadBusy { .. } => ReasonCode::VaultReloadBusy,
+            ErrorDetail::ReloadFailed { .. } => ReasonCode::VaultReloadFailed,
+            ErrorDetail::CursorOrderChanged { .. } => ReasonCode::VaultCursorOrderChanged,
+            ErrorDetail::EngineNotEnabled { .. } => ReasonCode::EngineNotEnabled,
+            ErrorDetail::EngineUnavailable { .. } => ReasonCode::EngineUnavailable,
+            ErrorDetail::EngineFailed { .. } => ReasonCode::EngineFailed,
         }
     }
 }
@@ -311,6 +538,17 @@ mod tests {
             ReasonCode::HostMaintainerContended => "host/maintainer-contended",
             ReasonCode::HostUnknownVault => "host/unknown-vault",
             ReasonCode::HostUnsupportedAttachMode => "host/unsupported-attach-mode",
+            ReasonCode::HostAlreadyServed => "host/already-served",
+            ReasonCode::HostEntryHeld => "host/entry-held",
+            ReasonCode::HostEntryNotReady => "host/entry-not-ready",
+            ReasonCode::HostReaderUnavailable => "host/reader-unavailable",
+            ReasonCode::VaultAmbiguousRoot => "vault/ambiguous-root",
+            ReasonCode::VaultReloadBusy => "vault/reload-busy",
+            ReasonCode::VaultReloadFailed => "vault/reload-failed",
+            ReasonCode::VaultCursorOrderChanged => "vault/cursor-order-changed",
+            ReasonCode::EngineNotEnabled => "engine/not-enabled",
+            ReasonCode::EngineUnavailable => "engine/unavailable",
+            ReasonCode::EngineFailed => "engine/failed",
         }
     }
 
@@ -333,6 +571,36 @@ mod tests {
             }
             ReasonCode::HostUnsupportedAttachMode => {
                 ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
+            }
+            ReasonCode::HostAlreadyServed => {
+                ErrorDetail::already_served(VaultName::new("notes").expect("a legal vault name"))
+            }
+            ReasonCode::HostEntryHeld => {
+                ErrorDetail::entry_held(VaultName::new("notes").expect("a legal vault name"))
+            }
+            ReasonCode::HostEntryNotReady => ErrorDetail::entry_not_ready(NotReady::unattached()),
+            ReasonCode::HostReaderUnavailable => {
+                ErrorDetail::reader_unavailable("this coverage mints no read handle")
+            }
+            ReasonCode::VaultAmbiguousRoot => ErrorDetail::ambiguous_root(
+                ["notes", "vault"].map(|text| VaultName::new(text).expect("a legal vault name")),
+            ),
+            ReasonCode::VaultReloadBusy => ErrorDetail::reload_busy(),
+            ReasonCode::VaultReloadFailed => {
+                ErrorDetail::reload_failed(ReloadFailure::unsupported())
+            }
+            ReasonCode::VaultCursorOrderChanged => {
+                ErrorDetail::cursor_order_changed(CursorOrderChanged::new("fp-1", "fp-2"))
+            }
+            ReasonCode::EngineNotEnabled => ErrorDetail::engine_not_enabled(
+                Rung::Vector,
+                "enable the engine section in .norn/config.toml and run vault reload",
+            ),
+            ReasonCode::EngineUnavailable => {
+                ErrorDetail::engine_unavailable(Rung::Vector, "the engine slot is empty")
+            }
+            ReasonCode::EngineFailed => {
+                ErrorDetail::engine_failed(Rung::Vector, "the answer failed")
             }
         }
     }

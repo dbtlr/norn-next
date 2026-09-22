@@ -13,9 +13,10 @@
 use norn_wire::{
     Anchor, AnswerReading, AttachMode, Cursor, CursorKey, EngineSection, ErrorDetail,
     ErrorEnvelope, FacetKind, FindingKind, FindingScope, Freshness, MaintainerIdentity, Moved,
-    Page, PollBackend, Predicate, ReasonCode, RequestScope, ResolutionTarget, Rung, SchemaSource,
-    Severity, Snapshot, TrustState, Unsatisfied, UntrustedReason, VaultAddress, VaultAnswer,
-    VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
+    NotReady, Page, PollBackend, Predicate, ReasonCode, ReloadFailure, RequestScope,
+    ResolutionTarget, Rung, SchemaSource, Severity, Snapshot, TrustState, Unsatisfied,
+    UntrustedReason, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb, WarmingPhase,
+    WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -128,6 +129,8 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<EngineSection>(),
         schema_of::<Unsatisfied>(),
         schema_of::<VaultAnswer<String>>(),
+        schema_of::<NotReady>(),
+        schema_of::<ReloadFailure>(),
     ] {
         assert!(
             schema.get("$schema").is_some(),
@@ -206,7 +209,18 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "host/entry-untrusted",
             "host/maintainer-contended",
             "host/unknown-vault",
-            "host/unsupported-attach-mode"
+            "host/unsupported-attach-mode",
+            "host/already-served",
+            "host/entry-held",
+            "host/entry-not-ready",
+            "host/reader-unavailable",
+            "vault/ambiguous-root",
+            "vault/reload-busy",
+            "vault/reload-failed",
+            "vault/cursor-order-changed",
+            "engine/not-enabled",
+            "engine/unavailable",
+            "engine/failed",
         ])
     );
 }
@@ -364,7 +378,18 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "host/entry-untrusted",
             "host/maintainer-contended",
             "host/unknown-vault",
-            "host/unsupported-attach-mode"
+            "host/unsupported-attach-mode",
+            "host/already-served",
+            "host/entry-held",
+            "host/entry-not-ready",
+            "host/reader-unavailable",
+            "vault/ambiguous-root",
+            "vault/reload-busy",
+            "vault/reload-failed",
+            "vault/cursor-order-changed",
+            "engine/not-enabled",
+            "engine/unavailable",
+            "engine/failed",
         ])
     );
 }
@@ -898,4 +923,35 @@ fn a_vault_answer_advertises_its_reading_its_unsatisfied_parts_and_its_report() 
             "an answer carries no definition of {definition}"
         );
     }
+}
+
+/// The two vocabularies the new codes carry as payloads advertise their tags,
+/// so a client branches on the typed half and reads the prose beside it.
+#[test]
+fn a_not_ready_state_and_a_reload_failure_advertise_their_tags() {
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<NotReady>(), "state")),
+        sorted(["warming", "unattached"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<ReloadFailure>(), "kind")),
+        sorted([
+            "control_file",
+            "environmental",
+            "store_damaged",
+            "watcher_terminal",
+            "lost_maintainership",
+            "maintainer_contended",
+            "unsupported",
+        ])
+    );
+    let detail = schema_of::<ErrorDetail>();
+    let not_ready = branches(&detail)
+        .iter()
+        .find(|branch| tag_constant(branch, "code") == Some("host/entry-not-ready"))
+        .expect("the entry-not-ready branch");
+    assert_eq!(
+        not_ready["properties"]["state"]["$ref"].as_str(),
+        Some("#/$defs/NotReady")
+    );
 }

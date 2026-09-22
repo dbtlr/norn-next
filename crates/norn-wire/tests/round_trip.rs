@@ -14,13 +14,14 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Anchor, AnswerReading, AttachMode, Cursor, CursorKey, CursorOrderChanged, EngineSection,
-    ErrorDetail, ErrorEnvelope, FacetKind, FindingKind, FindingScope, Freshness, LadderDeclaration,
-    MaintainerIdentity, ModelIdentity, Moved, Page, PollBackend, Predicate, ReasonCode,
-    RequestScope, ResolutionTarget, Rung, RungReport, SchemaSource, Severity, Snapshot, TrustState,
-    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
-    Unsatisfied, UntrustedReason, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb,
-    WarmingPhase, WatcherLossCause,
+    Anchor, AnswerReading, AttachMode, ControlFile, Cursor, CursorKey, CursorOrderChanged,
+    EngineSection, ErrorDetail, ErrorEnvelope, FacetKind, FindingKind, FindingScope, Freshness,
+    LadderDeclaration, MaintainerIdentity, ModelIdentity, Moved, NotReady, Page, PollBackend,
+    Predicate, ReasonCode, ReloadFailure, ReloadStage, RequestScope, ResolutionTarget, Rung,
+    RungReport, SchemaSource, Severity, Snapshot, TrustState, UnknownFindingKind,
+    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, Unsatisfied,
+    UntrustedReason, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb, WarmingPhase,
+    WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -110,7 +111,54 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::HostMaintainerContended,
         ReasonCode::HostUnknownVault,
         ReasonCode::HostUnsupportedAttachMode,
+        ReasonCode::HostAlreadyServed,
+        ReasonCode::HostEntryHeld,
+        ReasonCode::HostEntryNotReady,
+        ReasonCode::HostReaderUnavailable,
+        ReasonCode::VaultAmbiguousRoot,
+        ReasonCode::VaultReloadBusy,
+        ReasonCode::VaultReloadFailed,
+        ReasonCode::VaultCursorOrderChanged,
+        ReasonCode::EngineNotEnabled,
+        ReasonCode::EngineUnavailable,
+        ReasonCode::EngineFailed,
     ]
+}
+
+/// Every state an entry that holds nothing yet publishes.
+fn not_ready_states() -> Vec<NotReady> {
+    let mut states = vec![NotReady::unattached()];
+    states.extend(
+        warming_phases()
+            .into_iter()
+            .map(|phase| NotReady::warming(phase, 12, Some(400))),
+    );
+    states
+}
+
+/// Every failure a reload carries.
+fn reload_failures() -> Vec<ReloadFailure> {
+    let mut failures = Vec::new();
+    for file in [ControlFile::Schema, ControlFile::Config] {
+        for stage in [ReloadStage::Read, ReloadStage::Parse, ReloadStage::Apply] {
+            failures.push(ReloadFailure::control_file(
+                file,
+                stage,
+                "the vault schema cannot be read",
+            ));
+        }
+    }
+    failures.push(ReloadFailure::environmental("the disk is full"));
+    failures.push(ReloadFailure::store_damaged("the disk image is malformed"));
+    failures.push(ReloadFailure::watcher_terminal(
+        "the watcher backend stopped",
+    ));
+    failures.push(ReloadFailure::lost_maintainership());
+    failures.push(ReloadFailure::maintainer_contended(
+        MaintainerIdentity::unknown(),
+    ));
+    failures.push(ReloadFailure::unsupported());
+    failures
 }
 
 /// Every detail variant, over every payload it can carry.
@@ -124,7 +172,28 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
         ErrorDetail::maintainer_contended(MaintainerIdentity::named(41, "0.1.0", 1_700_000_000)),
         ErrorDetail::unknown_vault(name("notes")),
+        ErrorDetail::already_served(name("notes")),
+        ErrorDetail::entry_held(name("notes")),
+        ErrorDetail::reader_unavailable("this coverage mints no read handle"),
+        ErrorDetail::ambiguous_root([name("notes"), name("vault")]),
+        ErrorDetail::reload_busy(),
+        ErrorDetail::cursor_order_changed(CursorOrderChanged::new("fp-1", "fp-2")),
     ]);
+    details.extend(
+        not_ready_states()
+            .into_iter()
+            .map(ErrorDetail::entry_not_ready),
+    );
+    details.extend(
+        reload_failures()
+            .into_iter()
+            .map(ErrorDetail::reload_failed),
+    );
+    for rung in rungs() {
+        details.push(ErrorDetail::engine_not_enabled(rung, "enable the engine"));
+        details.push(ErrorDetail::engine_unavailable(rung, "the slot is empty"));
+        details.push(ErrorDetail::engine_failed(rung, "the answer failed"));
+    }
     details.extend(
         attach_modes()
             .into_iter()
@@ -477,6 +546,22 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<ErrorDetail>(Some("code")),
         "the details built here are not the details the vocabulary holds"
+    );
+    assert_eq!(
+        not_ready_states()
+            .iter()
+            .map(|state| tag_string(state, "state"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<NotReady>(Some("state")),
+        "the not-ready states built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        reload_failures()
+            .iter()
+            .map(|failure| tag_string(failure, "kind"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<ReloadFailure>(Some("kind")),
+        "the reload failures built here are not the ones the vocabulary holds"
     );
     assert_eq!(
         rungs().iter().map(flat_string).collect::<BTreeSet<_>>(),
@@ -1849,4 +1934,123 @@ fn a_vault_answer_is_complete_exactly_when_nothing_was_left_unapplied() {
     assert!(!partial.is_complete());
     assert_eq!(partial.unsatisfied.len(), unsatisfied_parts().len());
     round_trip(&partial);
+}
+
+// ── The codes minted for the verbs ───────────────────────────────────────
+
+/// A state that is not ready yet is the same reading the trust state carries,
+/// so a refusal and a poll report one thing. `Ready` and every untrusted state
+/// are not readings of this kind: one holds something to act on and the other
+/// refuses with a reason of its own.
+#[test]
+fn the_not_ready_reading_is_the_two_states_a_poll_walks_out_of() {
+    assert_eq!(
+        TrustState::Unattached.not_ready(),
+        Some(NotReady::unattached())
+    );
+    for phase in warming_phases() {
+        assert_eq!(
+            TrustState::warming(phase, 12, Some(400)).not_ready(),
+            Some(NotReady::warming(phase, 12, Some(400))),
+            "a warming entry lost its counters on the way"
+        );
+    }
+    assert_eq!(TrustState::Ready.not_ready(), None);
+    for reason in untrusted_reasons() {
+        assert_eq!(TrustState::untrusted(reason).not_ready(), None);
+    }
+}
+
+/// A warming entry's not-ready reading carries the same bytes its trust state
+/// carries, so a client reads one vocabulary whether it polled or was refused.
+#[test]
+fn a_not_ready_reading_is_the_bytes_the_trust_state_carries() {
+    for state in trust_states() {
+        let Some(not_ready) = state.not_ready() else {
+            continue;
+        };
+        assert_eq!(
+            serde_json::to_value(&not_ready).expect("a reading as JSON"),
+            serde_json::to_value(&state).expect("a state as JSON"),
+            "the reading and the state it came from are not one shape"
+        );
+    }
+}
+
+/// Every reload outcome is a fact about the vault, and the failure it carries
+/// is typed where a client branches and prose where a person reads.
+#[test]
+fn a_reload_failure_is_an_object_tagged_kind() {
+    assert_eq!(
+        wire(&ReloadFailure::control_file(
+            ControlFile::Schema,
+            ReloadStage::Parse,
+            "the vault schema is invalid"
+        )),
+        concat!(
+            r#"{"kind":"control_file","file":"schema","stage":"parse","#,
+            r#""detail":"the vault schema is invalid"}"#
+        )
+    );
+    assert_eq!(
+        wire(&ReloadFailure::unsupported()),
+        r#"{"kind":"unsupported"}"#
+    );
+    assert_eq!(
+        wire(&ReloadFailure::lost_maintainership()),
+        r#"{"kind":"lost_maintainership"}"#
+    );
+}
+
+/// Every code the three namespaces hold is a fact about the host's serving of
+/// an entry, about the requested vault, or about that vault's engine.
+#[test]
+fn every_code_sits_in_one_of_the_three_namespaces() {
+    let namespaces: BTreeSet<String> = reason_codes()
+        .iter()
+        .map(|code| {
+            flat_string(code)
+                .split_once('/')
+                .expect("a code carries a namespace")
+                .0
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        namespaces,
+        ["host", "vault", "engine"]
+            .map(str::to_string)
+            .into_iter()
+            .collect()
+    );
+}
+
+/// A busy reload carries nothing beyond its code: the ask is repeated rather
+/// than resolved, so there is no payload to act on.
+#[test]
+fn a_busy_reload_carries_nothing_but_its_code() {
+    assert_eq!(
+        wire(&ErrorEnvelope::new(
+            "this vault is already being worked over",
+            ErrorDetail::reload_busy()
+        )),
+        concat!(
+            r#"{"code":"vault/reload-busy","#,
+            r#""message":"this vault is already being worked over","#,
+            r#""detail":{"code":"vault/reload-busy"}}"#
+        )
+    );
+}
+
+/// The candidates a root resolves under ascend because the detail sorts them.
+#[test]
+fn ambiguous_root_candidates_ascend_whatever_order_they_arrive_in() {
+    assert_eq!(
+        wire(&ErrorDetail::ambiguous_root([
+            name("vault"),
+            name("archive"),
+            name("notes"),
+        ])),
+        r#"{"code":"vault/ambiguous-root","candidates":["archive","notes","vault"]}"#
+    );
 }

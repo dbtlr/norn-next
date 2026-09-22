@@ -9,14 +9,21 @@
 //! compared, and that is the whole of what it does.
 //!
 //! What is defined here today is where a vault entry stands — [`TrustState`]
-//! and the [`UntrustedReason`] it carries — the one shape a refusal takes:
-//! [`ErrorEnvelope`], with its [`ReasonCode`] and [`ErrorDetail`]; and what a
-//! finding is filed under, [`FindingKind`], with the [`FindingScope`] its kind
-//! answers and its [`Severity`]. Maintainer
+//! and the [`UntrustedReason`] it carries, read a second way as [`NotReady`]
+//! by a request that cannot answer with a state — the one shape a refusal
+//! takes: [`ErrorEnvelope`], with its [`ReasonCode`] and [`ErrorDetail`]; and
+//! what a finding is filed under, [`FindingKind`], with the [`FindingScope`]
+//! its kind answers and its [`Severity`]. Maintainer
 //! contention carries the diagnostic [`MaintainerIdentity`] reported by the
 //! lock without changing an entry's trust state. Requests are spelled here
-//! too: the [`VaultName`] a request names its vault by, and the [`AttachMode`]
-//! a demand asks for its derived state under.
+//! too: the [`VaultAddress`] a request names its vault by — a [`VaultName`] or
+//! a [`VaultRoot`] — the [`AttachMode`] a demand asks for its derived state
+//! under, the [`Verb`] a request asks for with the [`RequestScope`] it is
+//! answered from, the [`Predicate`] list a read filters by, and the
+//! [`ResolutionTarget`] one document is addressed by. What a read answers with
+//! is spelled here as well: the [`AnswerReading`] every answer carries, the
+//! [`Unsatisfied`] parts of a request that could not be applied, and the
+//! [`Cursor`] a page continues from.
 //!
 //! Nothing crosses the seam that is not a type from here. There is no untyped
 //! JSON value in any signature and no JSON-in-a-string; a payload that cannot
@@ -92,6 +99,18 @@
 //! [`ErrorDetail::duplicate_root`],
 //! [`ErrorDetail::entry_untrusted`], [`ErrorDetail::maintainer_contended`],
 //! [`ErrorDetail::unknown_vault`], [`ErrorDetail::unsupported_attach_mode`],
+//! [`ErrorDetail::already_served`], [`ErrorDetail::entry_held`],
+//! [`ErrorDetail::entry_not_ready`], [`ErrorDetail::reader_unavailable`],
+//! [`ErrorDetail::ambiguous_root`], [`ErrorDetail::reload_busy`],
+//! [`ErrorDetail::reload_failed`], [`ErrorDetail::cursor_order_changed`],
+//! [`ErrorDetail::engine_not_enabled`], [`ErrorDetail::engine_unavailable`],
+//! [`ErrorDetail::engine_failed`],
+//! [`NotReady::warming`], [`NotReady::unattached`],
+//! [`VaultAddress::name`], [`VaultAddress::root`],
+//! the constructor on each [`Predicate`], [`Anchor`], [`CursorKey`],
+//! [`Unsatisfied`], [`ReloadFailure`] and [`EngineSection`] variant,
+//! [`Cursor::new`], [`Page::new`], [`Snapshot::new`], [`AnswerReading::new`],
+//! [`VaultAnswer::new`],
 //! [`MaintainerIdentity::named`] and
 //! [`MaintainerIdentity::unknown`].
 //!
@@ -116,8 +135,20 @@
 //! **A code is a flat `namespace/what-happened` string**, lowercase kebab-case
 //! on both sides of one slash. Codes are what a client enumerates, switches on
 //! and filters by, and they live in exactly two closed registries:
-//! [`ReasonCode`] for what the host refused (`host/…`), and [`FindingKind`]
-//! for what a finding is filed under (`document/…`). A namespace names who the
+//! [`ReasonCode`] for what was refused, and [`FindingKind`] for what a finding
+//! is filed under (`document/…`).
+//!
+//! [`ReasonCode`] holds three namespaces, and which one a code sits in is
+//! decided by what the fact is about. `host/…` is a fact about the host's
+//! serving of an entry: a name it does not hold, a name it already serves, an
+//! entry that is held, warming, untrusted, or serving with its read seam
+//! down. `vault/…` is a fact about the requested vault's content or its
+//! control files, and every reload outcome is one of these — including
+//! `vault/reload-busy`, because what is busy is the work over that vault
+//! rather than the host. `engine/…` is a fact about the vault's engine: a rung
+//! not enabled, an engine that does not stand, an answer that failed.
+//!
+//! A namespace names who the
 //! fact is about, never which crate produced it, and a code is *defined*
 //! nowhere but here: a layer below stores the code it was handed rather than
 //! defining one, and a surface that needs a code it cannot find adds it to a
@@ -168,6 +199,7 @@ mod name;
 mod predicate;
 mod product;
 mod reading;
+mod reload;
 mod target;
 mod trust;
 mod verb;
@@ -186,6 +218,7 @@ pub use product::{Unsatisfied, VaultAnswer};
 pub use reading::{
     AnswerReading, EngineSection, Freshness, LadderDeclaration, ModelIdentity, Rung, RungReport,
 };
+pub use reload::{ControlFile, ReloadFailure, ReloadStage};
 pub use target::{Anchor, IllegalTarget, ResolutionTarget};
-pub use trust::{TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
+pub use trust::{NotReady, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
 pub use verb::{RequestScope, UnknownRequestScope, UnknownVerb, Verb};

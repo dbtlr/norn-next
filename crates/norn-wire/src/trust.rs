@@ -64,6 +64,19 @@
 //! perform: holdings cross no seam, and a fact a client branches on is a tag
 //! here or it is nothing.
 //!
+//! **A state that is not ready yet is a second reading of the same states.**
+//! [`NotReady`] holds the two states an entry passes through before it is
+//! readable, and [`TrustState::not_ready`] is where a request learns that its
+//! subject is in one of them. The two readings differ in what they are for:
+//! [`TrustState::refusal`] answers "does this state refuse", and this one
+//! answers "is there nothing here to act on yet".
+//!
+//! **A read never renders `Unattached`, and a reload does.** A read's own
+//! demand schedules the attach the entry owes, so the state a read is answered
+//! with is that attach's warming state rather than the unattached one it found.
+//! A reload demands nothing — it re-reads the control files of a vault that is
+//! already serving — so an unattached entry is exactly what it reports.
+//!
 //! **A run that ended in a panic is a word of its own.**
 //! [`UntrustedReason::LegUnwound`] says the work over the vault stopped part
 //! way through and reached no verdict about anything. The two verdicts beside
@@ -153,6 +166,73 @@ impl TrustState {
             TrustState::Unattached | TrustState::Warming { .. } | TrustState::Ready => None,
             TrustState::Untrusted { reason } => Some(reason),
         }
+    }
+
+    /// This state as an entry that holds nothing a request can be answered
+    /// from yet, or `None` where the entry holds something or refuses.
+    ///
+    /// A request that cannot answer with a state — a read, a reload — reads
+    /// its subject's standing here and is refused under
+    /// `host/entry-not-ready`, carrying the same counters a poll would have
+    /// read. The match carries no wildcard, so a state minted beside these
+    /// takes its stance where the states are written.
+    pub const fn not_ready(&self) -> Option<NotReady> {
+        match self {
+            TrustState::Unattached => Some(NotReady::Unattached {}),
+            TrustState::Warming {
+                phase,
+                healed,
+                total_estimate,
+            } => Some(NotReady::Warming {
+                phase: *phase,
+                healed: *healed,
+                total_estimate: *total_estimate,
+            }),
+            TrustState::Ready | TrustState::Untrusted { .. } => None,
+        }
+    }
+}
+
+/// An entry that holds nothing a request can be answered from yet.
+///
+/// On the wire it is an object tagged `state`: `{"state":"unattached"}`,
+/// `{"state":"warming","phase":"healing","healed":12,"total_estimate":400}`.
+/// The two members are the two [`TrustState`] members a poll walks out of, and
+/// they carry exactly what those states carry.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum NotReady {
+    /// Attached and not readable. `phase` says what the entry is doing, and
+    /// the counters say how far the counted work has come.
+    #[non_exhaustive]
+    Warming {
+        /// The kind of work the entry is doing.
+        phase: WarmingPhase,
+        /// Documents the heal has finished with.
+        healed: u64,
+        /// Documents the heal expects to touch, and `null` when that estimate
+        /// is not known yet.
+        total_estimate: Option<u64>,
+    },
+    /// Registered and holding nothing.
+    Unattached {},
+}
+
+impl NotReady {
+    /// An entry warming in `phase`, `healed` documents in, against
+    /// `total_estimate` documents expected.
+    pub const fn warming(phase: WarmingPhase, healed: u64, total_estimate: Option<u64>) -> Self {
+        NotReady::Warming {
+            phase,
+            healed,
+            total_estimate,
+        }
+    }
+
+    /// An entry holding nothing.
+    pub const fn unattached() -> Self {
+        NotReady::Unattached {}
     }
 }
 
