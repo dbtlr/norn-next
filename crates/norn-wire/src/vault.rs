@@ -12,10 +12,13 @@
 //! [`Verb::addressing`](crate::Verb::addressing) says the same thing, and the
 //! verb table holds the two together.
 //!
-//! **`vault status` and `vault reload` name a registration, not an address.**
-//! Both are vault requests, and both take a [`VaultName`](crate::VaultName)
-//! rather than a [`VaultAddress`](crate::VaultAddress): a root addresses a
-//! throwaway attach, which has no lifecycle to observe and nothing to reload.
+//! **`vault status` and `vault reload` carry a vault address.** Both are
+//! vault-scope requests, and every vault-scope params type in the vocabulary
+//! names its vault by a [`VaultAddress`](crate::VaultAddress) —
+//! [`Addressing`](crate::Addressing) says so for every verb that carries one.
+//! An address naming a root asks for a throwaway attach, which has no
+//! lifecycle to observe and nothing to reload, so the host refuses it
+//! `host/unsupported-attach-mode` here as it does for every read.
 //!
 //! **Neither of them carries an answer reading.** A status and a reload are
 //! lifecycle observations rather than reads: a status is taken off what an
@@ -26,11 +29,14 @@
 //! [`VaultAnswer`](crate::VaultAnswer). Registry reports cross the same way,
 //! for the same reason.
 //!
-//! **A refusal is never one of a report's shapes.** Each verb's refusals are
-//! named in its own module documentation as the codes a client meets, and each
-//! of them is an
+//! **A refusal of the request is never one of its report's shapes.** Each
+//! verb's refusals are named in its own module documentation as the codes a
+//! client meets, and each of them is an
 //! [`ErrorEnvelope`](crate::ErrorEnvelope) beside the report rather than a
-//! variant inside it.
+//! variant inside it. A report may still *carry* a refusal another surface
+//! published, as a parked entry's status does: the park's own envelope is
+//! what that entry publishes, and reporting it is an answer rather than a
+//! refusal of the status request.
 
 pub(crate) mod list;
 pub(crate) mod register;

@@ -16,22 +16,23 @@
 use norn_wire::{
     Addressing, Advisory, Anchor, AnswerReading, AttachMode, Attention, BlockRow, BodyText,
     CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage,
-    CollectionSelector, Column, ContainerKind, ControlFile, CountParams, Cursor, CursorKey,
-    CursorOrderChanged, DescribeParams, Direction, DoctorRegistryParams, DoctorRegistryReport,
-    DocumentPath, DocumentRow, Drift, EmptyLadder, EngineHealth, EngineSection, EngineStatus,
-    ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind,
-    FindingRow, FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, KindTally, LadderDeclaration, LinkFamily, LinkHealth, LinkRow, ListParams,
-    ListReport, MaintainerIdentity, ModelIdentity, Moved, NonFiniteScore, NotReady, Page,
-    PathRuleKind, PollBackend, Predicate, Published, ReasonCode, RegisterParams, RegisterReport,
-    Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams,
-    ReloadReport, ReloadStage, Replace, RequestScope, ResolutionTarget, ResolveParams,
-    ResolveReport, RollUp, Rung, RungReport, RungSet, SchemaSource, Score, SearchParams, SetParams,
-    SetReport, Severity, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow,
-    TagSource, TagStance, Tally, TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind,
-    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
-    UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
-    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    CollectionSelector, Column, ContainerKind, ControlFile, ControlFileFailure, CountParams,
+    Cursor, CursorKey, CursorOrderChanged, DescribeParams, Direction, Directory,
+    DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift, EmptyLadder,
+    EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind,
+    FieldType, FieldValue, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints,
+    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LadderDeclaration,
+    LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, ModelIdentity,
+    Moved, NonFiniteScore, NotReady, Page, PathRuleKind, PollBackend, Predicate, Published,
+    ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
+    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace, RequestScope,
+    ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport, RungSet,
+    SchemaSource, Score, SearchParams, SetParams, SetReport, Severity, Snapshot, Sort, SortKey,
+    Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead,
+    TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
+    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
+    Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -150,18 +151,27 @@ fn not_ready_states() -> Vec<NotReady> {
     states
 }
 
-/// Every failure a reload carries.
-fn reload_failures() -> Vec<ReloadFailure> {
+/// Every control file a reload met a refusal on, at every boundary.
+fn control_file_failures() -> Vec<ControlFileFailure> {
     let mut failures = Vec::new();
     for file in [ControlFile::Schema, ControlFile::Config] {
         for stage in [ReloadStage::Read, ReloadStage::Parse, ReloadStage::Apply] {
-            failures.push(ReloadFailure::control_file(
+            failures.push(ControlFileFailure::new(
                 file,
                 stage,
                 "the vault schema cannot be read",
             ));
         }
     }
+    failures
+}
+
+/// Every failure a reload carries.
+fn reload_failures() -> Vec<ReloadFailure> {
+    let mut failures: Vec<ReloadFailure> = control_file_failures()
+        .into_iter()
+        .map(ReloadFailure::control_file)
+        .collect();
     failures.push(ReloadFailure::environmental("the disk is full"));
     failures.push(ReloadFailure::store_damaged("the disk image is malformed"));
     failures.push(ReloadFailure::watcher_terminal(
@@ -262,6 +272,20 @@ fn schema_sources() -> Vec<SchemaSource> {
         .into_iter()
         .map(|text| SchemaSource::new(text).expect("an absolute schema source"))
         .collect()
+}
+
+/// Every directory the grammar accepts, spread across the shapes a path
+/// takes. A directory is not a root: the deepest of these sits well under one.
+fn directories() -> Vec<Directory> {
+    [
+        "/",
+        "/home/person/notes",
+        "/home/person/notes/journal/2026",
+        "/tmp/a.b",
+    ]
+    .into_iter()
+    .map(|text| Directory::new(text).expect("an absolute directory"))
+    .collect()
 }
 
 /// Every way a request addresses a vault.
@@ -2849,14 +2873,14 @@ fn a_not_ready_reading_is_the_bytes_the_trust_state_carries() {
 #[test]
 fn a_reload_failure_is_an_object_tagged_kind() {
     assert_eq!(
-        wire(&ReloadFailure::control_file(
+        wire(&ReloadFailure::control_file(ControlFileFailure::new(
             ControlFile::Schema,
             ReloadStage::Parse,
             "the vault schema is invalid"
-        )),
+        ))),
         concat!(
-            r#"{"kind":"control_file","file":"schema","stage":"parse","#,
-            r#""detail":"the vault schema is invalid"}"#
+            r#"{"kind":"control_file","failure":{"file":"schema","stage":"parse","#,
+            r#""detail":"the vault schema is invalid"}}"#
         )
     );
     assert_eq!(
@@ -4121,7 +4145,7 @@ fn fingerprints() -> Vec<Fingerprints> {
 /// Every drift reading, over every failure an unreadable one carries.
 fn drifts() -> Vec<Drift> {
     let mut drifts = vec![Drift::inactive(), Drift::current(), Drift::reload_pending()];
-    drifts.extend(reload_failures().into_iter().map(Drift::unreadable));
+    drifts.extend(control_file_failures().into_iter().map(Drift::unreadable));
     drifts
 }
 
@@ -4166,7 +4190,7 @@ fn attentions() -> Vec<Attention> {
         "this coverage mints no read handle",
     ));
     attentions.extend(
-        reload_failures()
+        control_file_failures()
             .into_iter()
             .map(|failure| Attention::reload_failed(name("notes"), failure)),
     );
@@ -4216,7 +4240,7 @@ fn vault_statuses() -> Vec<VaultStatus> {
             ));
         }
     }
-    for failure in reload_failures() {
+    for failure in control_file_failures() {
         statuses.push(
             VaultStatus::new(
                 registrations().remove(0),
@@ -4250,8 +4274,8 @@ fn status_reports() -> Vec<StatusReport> {
         .into_iter()
         .map(StatusReport::vault)
         .collect();
-    reports.push(StatusReport::roll_up(Vec::new()));
-    reports.push(StatusReport::roll_up(vault_statuses()));
+    reports.push(StatusReport::roll_up(RollUp::of(&[])));
+    reports.push(StatusReport::roll_up(RollUp::of(&vault_statuses())));
     reports
 }
 
@@ -4316,6 +4340,12 @@ fn every_vault_namespace_shape_survives_the_round_trip() {
     for attention in attentions() {
         round_trip(&attention);
     }
+    for failure in control_file_failures() {
+        round_trip(&failure);
+    }
+    for directory in directories() {
+        round_trip(&directory);
+    }
     for status in vault_statuses() {
         round_trip(&status);
     }
@@ -4374,11 +4404,15 @@ fn every_vault_namespace_params_and_report_shape_survives_the_round_trip() {
         registrations().remove(0),
         Published::parked(park()),
     ));
-    round_trip(&ResolveParams::new(vault_roots().remove(1)));
+    for directory in directories() {
+        round_trip(&ResolveParams::new(directory));
+    }
     round_trip(&StatusParams::new());
-    round_trip(&StatusParams::new().with_vault(name("notes")));
-    round_trip(&ReloadParams::new(name("notes")));
-    round_trip(&ReloadParams::new(name("notes")).dry_run());
+    for address in vault_addresses() {
+        round_trip(&StatusParams::new().with_vault(address.clone()));
+        round_trip(&ReloadParams::new(address.clone()));
+        round_trip(&ReloadParams::new(address).dry_run());
+    }
     for outcome in reload_outcomes() {
         round_trip(&ReloadReport::new(outcome, fingerprints().remove(1)));
         round_trip(&ReloadReport::new(outcome, fingerprints().remove(0)).validated());
@@ -4462,10 +4496,15 @@ fn a_drift_is_an_object_tagged_state() {
         r#"{"state":"reload_pending"}"#
     );
     assert_eq!(
-        wire(&Drift::unreadable(ReloadFailure::environmental(
-            "the disk is full"
+        wire(&Drift::unreadable(ControlFileFailure::new(
+            ControlFile::Schema,
+            ReloadStage::Read,
+            "the vault schema cannot be read"
         ))),
-        r#"{"state":"unreadable","failure":{"kind":"environmental","detail":"the disk is full"}}"#
+        concat!(
+            r#"{"state":"unreadable","failure":{"file":"schema","stage":"read","#,
+            r#""detail":"the vault schema cannot be read"}}"#
+        )
     );
 }
 
@@ -4517,14 +4556,18 @@ fn a_roll_ups_counts_sum_to_the_vaults_it_counted() {
     let statuses = vault_statuses();
     assert!(statuses.len() > 5, "the census counts too few vaults");
     let roll_up = RollUp::of(&statuses);
-    assert_eq!(roll_up.vaults, statuses.len() as u64);
+    assert_eq!(roll_up.vaults(), statuses.len() as u64);
     assert_eq!(
-        roll_up.ready + roll_up.warming + roll_up.untrusted + roll_up.parked + roll_up.unattached,
-        roll_up.vaults,
+        roll_up.ready()
+            + roll_up.warming()
+            + roll_up.untrusted()
+            + roll_up.parked()
+            + roll_up.unattached(),
+        roll_up.vaults(),
         "the counts do not partition the vaults counted"
     );
-    assert_eq!(RollUp::of(&[]).vaults, 0);
-    assert!(RollUp::of(&[]).attention.is_empty());
+    assert_eq!(RollUp::of(&[]).vaults(), 0);
+    assert!(RollUp::of(&[]).attention().is_empty());
 }
 
 /// Each published answer counts once and in the count it belongs to: a park is
@@ -4553,12 +4596,12 @@ fn a_roll_up_counts_each_entry_under_what_it_publishes() {
         ))),
         status(Published::parked(park())),
     ]);
-    assert_eq!(roll_up.vaults, 5);
-    assert_eq!(roll_up.ready, 1);
-    assert_eq!(roll_up.unattached, 1);
-    assert_eq!(roll_up.warming, 1);
-    assert_eq!(roll_up.untrusted, 1);
-    assert_eq!(roll_up.parked, 1);
+    assert_eq!(roll_up.vaults(), 5);
+    assert_eq!(roll_up.ready(), 1);
+    assert_eq!(roll_up.unattached(), 1);
+    assert_eq!(roll_up.warming(), 1);
+    assert_eq!(roll_up.untrusted(), 1);
+    assert_eq!(roll_up.parked(), 1);
 }
 
 /// A roll-up names what wants attention off the statuses themselves, so a
@@ -4573,7 +4616,7 @@ fn a_roll_up_names_what_each_status_wants_attention_for() {
         EngineStatus::off(),
         EngineSection::absent(),
     );
-    assert!(RollUp::of(&[sound]).attention.is_empty());
+    assert!(RollUp::of(&[sound]).attention().is_empty());
 
     let wanting = VaultStatus::new(
         registrations().remove(0),
@@ -4582,17 +4625,25 @@ fn a_roll_up_names_what_each_status_wants_attention_for() {
         EngineStatus::self_disabled("out of service"),
         EngineSection::enabled(),
     )
-    .with_last_reload_failure(ReloadFailure::environmental("the disk is full"))
+    .with_last_reload_failure(ControlFileFailure::new(
+        ControlFile::Config,
+        ReloadStage::Read,
+        "the vault config cannot be read",
+    ))
     .with_reads_refusing("this coverage mints no read handle")
     .with_advisories([Advisory::symlink_skipped("/home/person/notes/elsewhere")]);
     assert_eq!(
-        RollUp::of(&[wanting]).attention,
-        vec![
+        RollUp::of(&[wanting]).attention(),
+        [
             Attention::parked(name("notes"), ReasonCode::HostEntryUntrusted),
             Attention::reads_refusing(name("notes"), "this coverage mints no read handle"),
             Attention::reload_failed(
                 name("notes"),
-                ReloadFailure::environmental("the disk is full")
+                ControlFileFailure::new(
+                    ControlFile::Config,
+                    ReloadStage::Read,
+                    "the vault config cannot be read",
+                )
             ),
             Attention::reload_pending(name("notes")),
             Attention::engine_self_disabled(name("notes"), "out of service"),
@@ -4610,29 +4661,37 @@ fn a_roll_up_names_what_each_status_wants_attention_for() {
         EngineSection::absent(),
     );
     assert_eq!(
-        RollUp::of(&[untrusted]).attention,
-        vec![Attention::untrusted(
+        RollUp::of(&[untrusted]).attention(),
+        [Attention::untrusted(
             name("notes"),
             UntrustedReason::WatcherOverflow
         )]
     );
 }
 
-/// A status answer's roll-up is derived from the vaults it carries, so the two
-/// halves of one answer cannot disagree.
+/// The nameless status answer is the roll-up alone: the counts and the typed
+/// attention reasons. Where one entry stands is what naming that vault
+/// reports, and nothing else carries a per-vault list.
 #[test]
-fn a_status_roll_up_is_derived_from_the_vaults_beside_it() {
+fn the_nameless_status_answer_carries_the_roll_up_alone() {
     let vaults = vault_statuses();
-    let StatusReport::RollUp {
-        roll_up,
-        vaults: carried,
-        ..
-    } = StatusReport::roll_up(vaults.clone())
-    else {
+    let StatusReport::RollUp { roll_up, .. } = StatusReport::roll_up(RollUp::of(&vaults)) else {
         panic!("a roll-up report");
     };
     assert_eq!(roll_up, RollUp::of(&vaults));
-    assert_eq!(carried, vaults);
+    let rendered =
+        serde_json::to_value(StatusReport::roll_up(RollUp::of(&vaults))).expect("a report as JSON");
+    let members: BTreeSet<&str> = rendered
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        members,
+        BTreeSet::from(["shape", "roll_up"]),
+        "the nameless answer carries something beside the roll-up"
+    );
 }
 
 /// An edit tells keeping a field apart from clearing it, which a value alone
@@ -4697,11 +4756,14 @@ fn a_vault_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
     );
     assert_eq!(StatusParams::new().vault, None);
     assert_eq!(
-        StatusParams::new().with_vault(name("notes")).vault,
-        Some(name("notes"))
+        StatusParams::new()
+            .with_vault(VaultAddress::name(name("notes")))
+            .vault,
+        Some(VaultAddress::name(name("notes")))
     );
-    assert!(!ReloadParams::new(name("notes")).dry_run);
-    assert!(ReloadParams::new(name("notes")).dry_run().dry_run);
+    let reload = || ReloadParams::new(VaultAddress::name(name("notes")));
+    assert!(!reload().dry_run);
+    assert!(reload().dry_run().dry_run);
     let set = SetParams::new(name("notes"));
     assert_eq!(set.root, Replace::keep());
     assert_eq!(set.schema_source, Change::keep());
@@ -4763,12 +4825,12 @@ fn every_set_setter_lands_in_the_bytes() {
 fn every_status_and_reload_setter_lands_in_the_bytes() {
     assert_eq!(wire(&StatusParams::new()), r#"{"vault":null}"#);
     assert_eq!(
-        wire(&StatusParams::new().with_vault(name("notes"))),
-        r#"{"vault":"notes"}"#
+        wire(&StatusParams::new().with_vault(VaultAddress::name(name("notes")))),
+        r#"{"vault":{"by":"name","name":"notes"}}"#
     );
     assert_eq!(
-        wire(&ReloadParams::new(name("notes")).dry_run()),
-        r#"{"vault":"notes","dry_run":true}"#
+        wire(&ReloadParams::new(VaultAddress::name(name("notes"))).dry_run()),
+        r#"{"vault":{"by":"name","name":"notes"},"dry_run":true}"#
     );
 }
 
@@ -4780,6 +4842,177 @@ fn a_verb_that_asks_for_nothing_carries_an_empty_params_object() {
     assert_eq!(wire(&DoctorRegistryParams::new()), "{}");
     assert_eq!(ListParams::default(), ListParams::new());
     assert_eq!(DoctorRegistryParams::default(), DoctorRegistryParams::new());
+}
+
+/// A roll-up is derived on the writing side, so a roll-up that arrives over
+/// the wire is checked on the reading side: five counts that do not sum to the
+/// vaults it says it counted describe no installation, and the message names
+/// the counts that did not add up. The check is the type's own, so it holds
+/// wherever a roll-up is read from — inside a status answer and inside
+/// `doctor`'s registry reading alike.
+#[test]
+fn a_roll_up_whose_counts_do_not_sum_is_refused_on_read() {
+    let summing = r#"{"vaults":3,"ready":1,"warming":1,"untrusted":0,"parked":1,"unattached":0,"attention":[]}"#;
+    let not_summing = r#"{"vaults":3,"ready":1,"warming":0,"untrusted":0,"parked":1,"unattached":0,"attention":[]}"#;
+
+    let read = serde_json::from_str::<RollUp>(summing).expect("a summing roll-up");
+    assert_eq!(read.vaults(), 3);
+    assert_eq!(read.ready(), 1);
+
+    let refusal = serde_json::from_str::<RollUp>(not_summing)
+        .expect_err("a roll-up whose counts do not sum")
+        .to_string();
+    for named in [
+        "3",
+        "2",
+        "ready",
+        "warming",
+        "untrusted",
+        "parked",
+        "unattached",
+    ] {
+        assert!(
+            refusal.contains(named),
+            "the refusal `{refusal}` does not name `{named}`"
+        );
+    }
+
+    let inside_a_status = format!(r#"{{"shape":"roll_up","roll_up":{not_summing}}}"#);
+    assert!(
+        serde_json::from_str::<StatusReport>(&inside_a_status).is_err(),
+        "a status answer read back a roll-up that disagrees with itself"
+    );
+    let inside_a_reading =
+        format!(r#"{{"roll_up":{not_summing},"registry":{{"state":"sound"}},"engines":[]}}"#);
+    assert!(
+        serde_json::from_str::<DoctorRegistryReport>(&inside_a_reading).is_err(),
+        "a registry reading read back a roll-up that disagrees with itself"
+    );
+    let sound_reading =
+        format!(r#"{{"roll_up":{summing},"registry":{{"state":"sound"}},"engines":[]}}"#);
+    serde_json::from_str::<DoctorRegistryReport>(&sound_reading)
+        .expect("a registry reading over a summing roll-up");
+}
+
+/// A listing crosses as the registrations it holds, in name order and each
+/// whole: a constructor that dropped the registrations, or handed them back in
+/// the order it was given them, does not produce these bytes.
+#[test]
+fn a_listing_pins_the_registrations_it_holds() {
+    let notes = Registration::new(name("notes"), vault_roots().remove(1))
+        .with_schema_source(schema_sources().remove(0))
+        .with_poll_backend(PollBackend::Poll);
+    let archive = Registration::new(name("archive"), vault_roots().remove(3));
+    assert_eq!(
+        wire(&ListReport::new([notes, archive])),
+        concat!(
+            r#"{"registrations":["#,
+            r#"{"name":"archive","root":"/tmp/a.b","schema_source":null,"poll_backend":null},"#,
+            r#"{"name":"notes","root":"/home/person/notes","#,
+            r#""schema_source":"/home/person/.config/norn/schemas/work.yaml","#,
+            r#""poll_backend":"poll"}"#,
+            r#"]}"#
+        )
+    );
+}
+
+/// A duplicate-root problem crosses as every alias that reaches the root, in
+/// name order: a constructor that dropped the aliases, or left them in the
+/// order it was given them, does not produce these bytes.
+#[test]
+fn a_duplicate_root_problem_pins_the_aliases_that_reach_it() {
+    assert_eq!(
+        wire(&RegistryProblem::duplicate_root([
+            name("vault"),
+            name("notes")
+        ])),
+        r#"{"problem":"duplicate_root","aliases":["notes","vault"]}"#
+    );
+    assert_eq!(
+        RegistryProblem::duplicate_root([name("notes"), name("notes")]),
+        RegistryProblem::duplicate_root([name("notes")]),
+        "an alias named twice is carried twice"
+    );
+}
+
+/// The registry reading crosses with its problems and its engines whole, the
+/// engines in name order: a constructor that dropped either collection, or
+/// left the engines in the order it was given them, does not produce these
+/// bytes.
+#[test]
+fn a_doctor_registry_reading_pins_its_problems_and_its_engines() {
+    let report = DoctorRegistryReport::new(
+        RollUp::of(&[]),
+        RegistrySanity::problems([RegistryProblem::duplicate_root([
+            name("vault"),
+            name("notes"),
+        ])]),
+        [
+            EngineHealth::new(
+                name("vault"),
+                EngineSection::absent(),
+                EngineStatus::self_disabled("out of service"),
+            ),
+            EngineHealth::new(
+                name("notes"),
+                EngineSection::enabled(),
+                EngineStatus::on(None, None),
+            ),
+        ],
+    );
+    assert_eq!(
+        wire(&report),
+        concat!(
+            r#"{"roll_up":{"vaults":0,"ready":0,"warming":0,"untrusted":0,"parked":0,"#,
+            r#""unattached":0,"attention":[]},"#,
+            r#""registry":{"state":"problems","problems":["#,
+            r#"{"problem":"duplicate_root","aliases":["notes","vault"]}]},"#,
+            r#""engines":["#,
+            r#"{"name":"notes","section":{"state":"enabled"},"#,
+            r#""engine":{"state":"on","last_drain_error":null,"freshness":null}},"#,
+            r#"{"name":"vault","section":{"state":"absent"},"#,
+            r#""engine":{"state":"self_disabled","detail":"out of service"}}"#,
+            r#"]}"#
+        )
+    );
+}
+
+/// A status with every optional part filled in crosses with all of them: a
+/// setter that dropped its assignment does not produce these bytes.
+#[test]
+fn a_fully_set_vault_status_pins_every_setter() {
+    let status = VaultStatus::new(
+        Registration::new(name("notes"), vault_roots().remove(1)),
+        Published::state(TrustState::Ready),
+        Drift::reload_pending(),
+        EngineStatus::off(),
+        EngineSection::enabled(),
+    )
+    .with_fingerprints(Fingerprints::new("schema-1").with_config("config-1"))
+    .with_last_reload_failure(ControlFileFailure::new(
+        ControlFile::Config,
+        ReloadStage::Apply,
+        "the vault config cannot be applied",
+    ))
+    .with_reads_refusing("this coverage mints no read handle")
+    .with_advisories([Advisory::symlink_skipped("/home/person/notes/elsewhere")]);
+    assert_eq!(
+        wire(&status),
+        concat!(
+            r#"{"registration":{"name":"notes","root":"/home/person/notes","#,
+            r#""schema_source":null,"poll_backend":null},"#,
+            r#""published":{"answer":"state","state":{"state":"ready"}},"#,
+            r#""fingerprints":{"schema":"schema-1","config":"config-1"},"#,
+            r#""drift":{"state":"reload_pending"},"#,
+            r#""last_reload_failure":{"file":"config","stage":"apply","#,
+            r#""detail":"the vault config cannot be applied"},"#,
+            r#""reads_refusing":"this coverage mints no read handle","#,
+            r#""engine":{"state":"off"},"#,
+            r#""section":{"state":"enabled"},"#,
+            r#""advisories":[{"kind":"symlink_skipped","#,
+            r#""path":"/home/person/notes/elsewhere"}]}"#
+        )
+    );
 }
 
 /// A sound registry is a shape of its own rather than an empty problem list.

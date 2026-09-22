@@ -10,8 +10,9 @@
 //!
 //! The refusals are `host/unknown-vault` where no such registration exists,
 //! `host/entry-held` where the entry is in use, `host/maintainer-contended`
-//! where another process maintains the derived state, and a parked entry's own
-//! code.
+//! where another process maintains the derived state,
+//! `host/registry-unwritable` where the registry file could not be replaced,
+//! and a parked entry's own code.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -25,7 +26,8 @@ pub struct UnregisterParams {
     /// The registration to remove.
     pub name: VaultName,
     /// Whether to leave the vault's derived state on disk. `false` discards
-    /// it, which is the default.
+    /// the derived database, its sidecars and the shadow home; `true` keeps
+    /// all three where they are.
     pub keep_state: bool,
 }
 

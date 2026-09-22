@@ -29,6 +29,14 @@
 //! the refusal names which of them was offered, so the sentence a person reads
 //! is about their argument rather than about a rule.
 //!
+//! **Three path grammars are spelled here**, over the one absolute-UTF-8
+//! grammar [`absolute_path`] holds them all to: [`VaultRoot`], the directory a
+//! vault is rooted at; [`SchemaSource`], the file a vault's schema is read
+//! from; and [`Directory`], a directory a client asks a question about. A
+//! directory is its own type because it is not a root: a client asking which
+//! vault contains where it is running passes a directory anywhere under a
+//! root, and typing it as a root would say the client had named one.
+//!
 //! **A vault address is one of two things, and the tag says which.** A name is
 //! a registration this installation holds. A root is a vault addressed by
 //! where it is, without a registration standing behind it; that is a throwaway
@@ -273,6 +281,74 @@ impl JsonSchema for SchemaSource {
         json_schema!({
             "type": "string",
             "description": "Where a vault's schema is read from: an absolute UTF-8 path.",
+        })
+    }
+}
+
+/// A directory a client asks about: an absolute UTF-8 path.
+///
+/// On the wire a directory is the string itself:
+/// `"/home/person/notes/journal"`. It is not a vault root and is not asserted
+/// to be one — a client asking which vault it is running in passes its own
+/// working directory, which sits anywhere under a root or under none.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct Directory(String);
+
+impl Directory {
+    /// What a refusal calls this path.
+    const WHAT: &'static str = "directory";
+
+    /// The directory `path` names, or the reason it names none.
+    pub fn new(path: impl Into<PathBuf>) -> Result<Self, IllegalPath> {
+        let path = path.into();
+        Ok(Directory(text_of(&path, Directory::WHAT)?.to_string()))
+    }
+
+    /// The directory as the platform path it addresses.
+    pub fn as_path(&self) -> &Path {
+        Path::new(&self.0)
+    }
+
+    /// The directory as the text it is carried as.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Directory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Directory {
+    /// A directory arrives as the string it is written as and is read through
+    /// the grammar, so a directory that crossed is a directory that parsed.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        Directory::new(text).map_err(D::Error::custom)
+    }
+}
+
+impl JsonSchema for Directory {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("Directory")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed("norn_wire::Directory")
+    }
+
+    /// A string with the grammar stated in words, on the same terms as
+    /// [`VaultRoot`]'s.
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "description": "A directory a client asks about: an absolute UTF-8 path.",
         })
     }
 }

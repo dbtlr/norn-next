@@ -12,6 +12,13 @@
 //! a different thing to show a person from a config that does not read — and
 //! the sentence beside them is the reader's own account, which nothing
 //! matches on.
+//!
+//! **A control file's refusal is one shape, named once.** The three parts move
+//! together and are carried in four places — inside a [`ReloadFailure`], as a
+//! drift that could not be read, as a status's last failure, and as an
+//! attention reason — so [`ControlFileFailure`] is the type, and the three
+//! places that carry nothing wider carry it alone rather than a
+//! [`ReloadFailure`] whose other variants they can never hold.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -47,10 +54,36 @@ pub enum ReloadStage {
     Apply,
 }
 
+/// One of a vault's control files refusing at a boundary.
+///
+/// On the wire a control-file failure is the three fields themselves:
+/// `{"file":"schema","stage":"parse","detail":"…"}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct ControlFileFailure {
+    /// Which file it was.
+    pub file: ControlFile,
+    /// Which boundary refused it.
+    pub stage: ReloadStage,
+    /// The refusal in words, for a person reading a message or a log.
+    pub detail: String,
+}
+
+impl ControlFileFailure {
+    /// The control `file` refused at `stage`, described by `detail`.
+    pub fn new(file: ControlFile, stage: ReloadStage, detail: impl Into<String>) -> Self {
+        ControlFileFailure {
+            file,
+            stage,
+            detail: detail.into(),
+        }
+    }
+}
+
 /// Why a reload did not leave the vault serving what its control files state.
 ///
 /// On the wire a failure is an object tagged `kind`:
-/// `{"kind":"control_file","file":"schema","stage":"parse","detail":"…"}`.
+/// `{"kind":"control_file","failure":{"file":"schema","stage":"parse","detail":"…"}}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -58,12 +91,8 @@ pub enum ReloadFailure {
     /// One of the vault's control files refused at a boundary.
     #[non_exhaustive]
     ControlFile {
-        /// Which file it was.
-        file: ControlFile,
-        /// Which boundary refused it.
-        stage: ReloadStage,
-        /// The refusal in words, for a person reading a message or a log.
-        detail: String,
+        /// Which file refused, where, and in words.
+        failure: ControlFileFailure,
     },
     /// The environment refused the work: the disk is full, or a path stopped
     /// being readable. The stored state is sound and the environment is not.
@@ -102,13 +131,9 @@ pub enum ReloadFailure {
 }
 
 impl ReloadFailure {
-    /// The control `file` refused at `stage`, described by `detail`.
-    pub fn control_file(file: ControlFile, stage: ReloadStage, detail: impl Into<String>) -> Self {
-        ReloadFailure::ControlFile {
-            file,
-            stage,
-            detail: detail.into(),
-        }
+    /// A control file refused, as `failure` accounts for it.
+    pub const fn control_file(failure: ControlFileFailure) -> Self {
+        ReloadFailure::ControlFile { failure }
     }
 
     /// The environment refused the work, described by `detail`.

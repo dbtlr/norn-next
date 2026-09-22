@@ -1,12 +1,16 @@
 //! Where a registration stands, and what a roll-up over every one of them
 //! says.
 //!
-//! **A registration on the wire is the registry entry, field for field.** The
-//! four fields a registry entry holds are the four fields a `vault register`
-//! carries in, a `vault list` reports, and a `vault set` reports back after an
-//! edit. One shape rather than three keeps a registration read the same way
-//! wherever it is met, and the config crate converts its own entry to and from
-//! this without a field falling out on either trip.
+//! **A registration on the wire is the registry entry.** The four fields a
+//! registry entry holds are the four fields a `vault register` carries in, a
+//! `vault list` reports, and a `vault set` reports back after an edit. One
+//! shape rather than three keeps a registration read the same way wherever it
+//! is met, and the config crate names this type as its own entry rather than
+//! holding a second shape and converting between them.
+//!
+//! **A vault status names its vault through its registration.** The
+//! registration carries the name, so a status that carried a second copy
+//! could hand across a name that disagrees with the registration beside it.
 //!
 //! **A status reports the published demand whole.** What the host publishes
 //! for an entry is either a trust state or a refusal, and [`Published`] is
@@ -38,20 +42,29 @@
 //! takes is not a handler's to choose, so the handlers that arrive render
 //! these rather than minting readings of their own.
 //!
-//! **A roll-up is derived from the statuses it rolls up.** Its counts and the
-//! attention it names are computed from a list of [`VaultStatus`], so nothing
-//! can hand across a roll-up whose counts disagree with the vaults beside it.
-//! Every entry falls in exactly one of the five counts, which is what makes
-//! them sum to the vaults counted.
+//! **A roll-up is derived on the writing side and checked on the reading
+//! side.** [`RollUp::of`] computes the counts and the attention from a list of
+//! [`VaultStatus`], so nothing in this process mints one that disagrees with
+//! the statuses it rolled up; its fields are private behind accessors, so
+//! nothing can walk one back afterwards either. A roll-up that arrives over
+//! the wire was derived somewhere this process cannot see, so the read path is
+//! written by hand and refuses a value whose five counts do not sum to
+//! `vaults`. Every entry falls in exactly one of the five counts, which is
+//! what makes the sum the invariant it is.
+//!
+//! **An attention reason is tagged `attention`, not `reason`.** The untrusted
+//! reason one of its members carries is spelled `reason` wherever it is met,
+//! and an internally tagged enum cannot hold a field whose name is its own
+//! tag.
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::address::{PollBackend, SchemaSource, VaultRoot};
 use crate::error::{ErrorEnvelope, ReasonCode};
 use crate::name::VaultName;
 use crate::reading::{EngineSection, Freshness};
-use crate::reload::ReloadFailure;
+use crate::reload::ControlFileFailure;
 use crate::trust::{TrustState, UntrustedReason};
 
 /// One registered vault, as the registry holds it.
@@ -196,8 +209,8 @@ pub enum Drift {
     /// drifted is not known.
     #[non_exhaustive]
     Unreadable {
-        /// What refused the reading.
-        failure: ReloadFailure,
+        /// Which control file refused the reading, where, and in words.
+        failure: ControlFileFailure,
     },
 }
 
@@ -218,7 +231,7 @@ impl Drift {
     }
 
     /// The authored control files could not be read, for `failure`.
-    pub const fn unreadable(failure: ReloadFailure) -> Self {
+    pub const fn unreadable(failure: ControlFileFailure) -> Self {
         Drift::Unreadable { failure }
     }
 }
@@ -327,10 +340,7 @@ impl Advisory {
 /// One vault a roll-up names as wanting attention, and what about it.
 ///
 /// On the wire an attention reason is an object tagged `attention`:
-/// `{"attention":"reload_pending","name":"notes"}`. The tag is not `reason`,
-/// because the untrusted reason a member of this carries is spelled `reason`
-/// wherever it is met, and an internally tagged enum cannot hold a field whose
-/// name is its own tag.
+/// `{"attention":"reload_pending","name":"notes"}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "attention", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -367,8 +377,9 @@ pub enum Attention {
     ReloadFailed {
         /// The vault.
         name: VaultName,
-        /// What the reload met.
-        failure: ReloadFailure,
+        /// Which control file the reload met a refusal on, where, and in
+        /// words.
+        failure: ControlFileFailure,
     },
     /// The vault's authored control files differ from the ones it is serving.
     #[non_exhaustive]
@@ -415,7 +426,7 @@ impl Attention {
     }
 
     /// The vault `name`'s last reload met `failure`.
-    pub const fn reload_failed(name: VaultName, failure: ReloadFailure) -> Self {
+    pub const fn reload_failed(name: VaultName, failure: ControlFileFailure) -> Self {
         Attention::ReloadFailed { name, failure }
     }
 
@@ -442,9 +453,7 @@ impl Attention {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct VaultStatus {
-    /// The vault this is the standing of.
-    pub name: VaultName,
-    /// The registration behind it.
+    /// The registration this is the standing of. Its `name` is the vault.
     pub registration: Registration,
     /// What the entry publishes: where it stands, or the refusal it is parked
     /// under.
@@ -454,8 +463,9 @@ pub struct VaultStatus {
     pub fingerprints: Option<Fingerprints>,
     /// Where the authored control files stand against the ones it is serving.
     pub drift: Drift,
-    /// What the last reload met, and `null` where no reload has failed.
-    pub last_reload_failure: Option<ReloadFailure>,
+    /// Which control file the last reload met a refusal on, where, and in
+    /// words. `null` where no reload has failed.
+    pub last_reload_failure: Option<ControlFileFailure>,
     /// Why this entry's reads refuse, in words, and `null` where they do not.
     /// An entry whose read seam is down is still serving every other surface,
     /// so this moves no trust state. Clients never match on it.
@@ -484,7 +494,6 @@ impl VaultStatus {
         section: EngineSection,
     ) -> Self {
         VaultStatus {
-            name: registration.name.clone(),
             registration,
             published,
             fingerprints: None,
@@ -506,7 +515,7 @@ impl VaultStatus {
 
     /// The status whose last reload met `failure`.
     #[must_use]
-    pub fn with_last_reload_failure(mut self, failure: ReloadFailure) -> Self {
+    pub fn with_last_reload_failure(mut self, failure: ControlFileFailure) -> Self {
         self.last_reload_failure = Some(failure);
         self
     }
@@ -549,31 +558,46 @@ impl VaultStatus {
         let mut attention = Vec::new();
         match &self.published {
             Published::Parked { refusal } => {
-                attention.push(Attention::parked(self.name.clone(), refusal.code().clone()));
+                attention.push(Attention::parked(
+                    self.registration.name.clone(),
+                    refusal.code().clone(),
+                ));
             }
             Published::State {
                 state: TrustState::Untrusted { reason },
             } => {
-                attention.push(Attention::untrusted(self.name.clone(), reason.clone()));
+                attention.push(Attention::untrusted(
+                    self.registration.name.clone(),
+                    reason.clone(),
+                ));
             }
             Published::State { .. } => {}
         }
         if let Some(detail) = &self.reads_refusing {
-            attention.push(Attention::reads_refusing(self.name.clone(), detail));
+            attention.push(Attention::reads_refusing(
+                self.registration.name.clone(),
+                detail,
+            ));
         }
         if let Some(failure) = &self.last_reload_failure {
-            attention.push(Attention::reload_failed(self.name.clone(), failure.clone()));
+            attention.push(Attention::reload_failed(
+                self.registration.name.clone(),
+                failure.clone(),
+            ));
         }
         if matches!(self.drift, Drift::ReloadPending {}) {
-            attention.push(Attention::reload_pending(self.name.clone()));
+            attention.push(Attention::reload_pending(self.registration.name.clone()));
         }
         if let EngineStatus::SelfDisabled { detail } = &self.engine {
-            attention.push(Attention::engine_self_disabled(self.name.clone(), detail));
+            attention.push(Attention::engine_self_disabled(
+                self.registration.name.clone(),
+                detail,
+            ));
         }
         attention.extend(
-            self.advisories
-                .iter()
-                .map(|advisory| Attention::advisory(self.name.clone(), advisory.clone())),
+            self.advisories.iter().map(|advisory| {
+                Attention::advisory(self.registration.name.clone(), advisory.clone())
+            }),
         );
         attention
     }
@@ -594,27 +618,28 @@ enum Count {
 
 /// What every entry this installation serves adds up to.
 ///
-/// The five counts partition the vaults counted, so they sum to `vaults`.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+/// The five counts partition the vaults counted, so they sum to `vaults`. A
+/// roll-up whose counts do not is refused on read.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct RollUp {
     /// How many vaults were counted.
-    pub vaults: u64,
+    vaults: u64,
     /// How many are ready: their derived state is current and reads answer
     /// from it.
-    pub ready: u64,
+    ready: u64,
     /// How many are warming: attached, and not readable yet.
-    pub warming: u64,
+    warming: u64,
     /// How many are untrusted: attached, and their derived state cannot be
     /// trusted.
-    pub untrusted: u64,
+    untrusted: u64,
     /// How many are parked: every request against them is refused.
-    pub parked: u64,
+    parked: u64,
     /// How many are unattached: registered and holding nothing.
-    pub unattached: u64,
+    unattached: u64,
     /// Every vault that wants attention, and what about it. A vault wanting
     /// two things is named twice.
-    pub attention: Vec<Attention>,
+    attention: Vec<Attention>,
 }
 
 impl RollUp {
@@ -643,5 +668,94 @@ impl RollUp {
             roll_up.attention.extend(status.attention());
         }
         roll_up
+    }
+
+    /// How many vaults were counted.
+    pub const fn vaults(&self) -> u64 {
+        self.vaults
+    }
+
+    /// How many are ready.
+    pub const fn ready(&self) -> u64 {
+        self.ready
+    }
+
+    /// How many are warming.
+    pub const fn warming(&self) -> u64 {
+        self.warming
+    }
+
+    /// How many are untrusted.
+    pub const fn untrusted(&self) -> u64 {
+        self.untrusted
+    }
+
+    /// How many are parked.
+    pub const fn parked(&self) -> u64 {
+        self.parked
+    }
+
+    /// How many are unattached.
+    pub const fn unattached(&self) -> u64 {
+        self.unattached
+    }
+
+    /// Every vault that wants attention, and what about it.
+    pub fn attention(&self) -> &[Attention] {
+        &self.attention
+    }
+}
+
+/// The fields a roll-up is written as, which is what a reader is handed before
+/// the sum is checked.
+///
+/// A mirror rather than the type itself: `RollUp`'s fields are private, so a
+/// derived read path would have to make them public to fill them in, and the
+/// invariant the read path exists to keep would be walkable away from again.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RollUpFields {
+    vaults: u64,
+    ready: u64,
+    warming: u64,
+    untrusted: u64,
+    parked: u64,
+    unattached: u64,
+    attention: Vec<Attention>,
+}
+
+impl<'de> Deserialize<'de> for RollUp {
+    /// A roll-up whose five counts do not sum to `vaults` is refused, because
+    /// a roll-up that disagrees with itself says nothing about the
+    /// installation it counted. The counts are read off the value, so the
+    /// message names what did not add up.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = RollUpFields::deserialize(deserializer)?;
+        let counted =
+            fields.ready + fields.warming + fields.untrusted + fields.parked + fields.unattached;
+        if counted != fields.vaults {
+            return Err(D::Error::custom(format!(
+                "a roll-up counts {} vaults and its counts sum to {counted}: \
+                 {} ready, {} warming, {} untrusted, {} parked, {} unattached",
+                fields.vaults,
+                fields.ready,
+                fields.warming,
+                fields.untrusted,
+                fields.parked,
+                fields.unattached,
+            )));
+        }
+        Ok(RollUp {
+            vaults: fields.vaults,
+            ready: fields.ready,
+            warming: fields.warming,
+            untrusted: fields.untrusted,
+            parked: fields.parked,
+            unattached: fields.unattached,
+            attention: fields.attention,
+        })
     }
 }

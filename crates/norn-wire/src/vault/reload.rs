@@ -9,20 +9,24 @@
 //! serving what it was serving; `activated` is what says which of the two
 //! happened.
 //!
-//! **A reload names a registration, not an address.** A root addresses a
-//! throwaway attach, which holds no control files to re-read.
+//! **A reload carries a vault address, as every vault-scope request does.** A
+//! root addresses a throwaway attach, which holds no control files to
+//! re-read, so the host refuses one here the way it refuses one for a read.
 //!
 //! The refusals are the ones a reload answers with: `host/unknown-vault` for a
-//! name the registry does not hold, `host/entry-not-ready` for an entry
-//! holding nothing to reload yet, `host/entry-untrusted` for an entry whose
-//! derived state cannot be trusted, `vault/reload-busy` for a vault whose
-//! reload is already running, and `vault/reload-failed`, carrying what the
-//! reload met, for every outcome of a reload that ran.
+//! name the registry does not hold, `host/unsupported-attach-mode` for an
+//! address that names a root, `host/entry-not-ready` for an entry holding
+//! nothing to reload yet, `host/entry-untrusted` for an entry whose derived
+//! state cannot be trusted, `vault/reload-busy` for a vault that is serving
+//! and already has something working over it — a warm job among them — and
+//! `vault/reload-failed`, carrying what the reload met, for every outcome of a
+//! reload that ran, its `unsupported` kind among them for an attachment that
+//! holds no reload at all.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::name::VaultName;
+use crate::address::VaultAddress;
 use crate::status::Fingerprints;
 
 /// Which core-controlled part of the vault's control files a reload applied.
@@ -45,18 +49,20 @@ pub enum ReloadOutcome {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct ReloadParams {
-    /// The registration to reload. A root addresses a throwaway attach, which
-    /// holds no control files to re-read, so this is a name rather than a
-    /// vault address.
-    pub vault: VaultName,
+    /// The vault to reload. An address naming a root is refused
+    /// `host/unsupported-attach-mode`: a throwaway attach holds no control
+    /// files to re-read.
+    pub vault: VaultAddress,
     /// Whether to validate the authored control files without putting them
-    /// into service. `false` applies what changed, which is the default.
+    /// into service. `false` applies what the authored control files changed;
+    /// `true` reads and judges them and leaves the vault serving what it was
+    /// serving.
     pub dry_run: bool,
 }
 
 impl ReloadParams {
     /// A request to reload `vault` and apply what changed.
-    pub const fn new(vault: VaultName) -> Self {
+    pub const fn new(vault: VaultAddress) -> Self {
         ReloadParams {
             vault,
             dry_run: false,

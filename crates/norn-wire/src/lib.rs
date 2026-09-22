@@ -54,8 +54,10 @@
 //! the latter two carry it beside the [`Hint`] that names what enumerates the
 //! rest. What a reload met is spelled
 //! here too:
-//! [`ReloadFailure`], with the [`ControlFile`] and [`ReloadStage`] a control
-//! file refused at. [`EngineSection`] is what a host was delivered as a
+//! [`ReloadFailure`], with the [`ControlFileFailure`] — a [`ControlFile`] and
+//! the [`ReloadStage`] it refused at — that three of its carriers hold alone.
+//! [`Directory`] is a directory a client asks a question about, the third
+//! path grammar beside [`VaultRoot`] and [`SchemaSource`]. [`EngineSection`] is what a host was delivered as a
 //! vault's engine section, which is what a status answer reports and what a
 //! vector refusal is composed against.
 //!
@@ -99,11 +101,13 @@
 //!   are renamed to the `namespace/what-happened` grammar below. A grammar's
 //!   read path is written by hand where the read is the constructor —
 //!   [`VaultName`], [`VaultRoot`], [`SchemaSource`], [`DocumentPath`],
-//!   [`ResolutionTarget`] and [`Score`] refuse a string outside their grammar,
-//!   [`RungSet`] refuses a ladder that runs no rung, and four shapes refuse a
+//!   [`ResolutionTarget`], [`Directory`] and [`Score`] refuse a string outside
+//!   their grammar,
+//!   [`RungSet`] refuses a ladder that runs no rung, and five shapes refuse a
 //!   value whose halves disagree: [`ErrorEnvelope`], whose code must be its
 //!   detail's, [`LinkRow`], whose health must be the health of the total
-//!   documents its head heads, and the three bounded heads — [`Collection`],
+//!   documents its head heads, [`RollUp`], whose five counts must sum to the
+//!   vaults it says it counted, and the three bounded heads — [`Collection`],
 //!   [`BodyText`] and [`CandidateHead`] — whose total must be a total the
 //!   head they carry can head, the last of them refusing a head wider than
 //!   [`CANDIDATE_HEAD`] as well — each with the wire shape a derive would
@@ -113,9 +117,10 @@
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
 //!   advertised schema and the emitted bytes are one description. It too is
 //!   written by hand where a derive would advertise a shape the reader does
-//!   not accept. Eight types do: the grammars [`VaultName`], [`VaultRoot`],
-//!   [`SchemaSource`], [`DocumentPath`] and [`ResolutionTarget`] advertise the
-//!   pattern or floor their constructors hold; [`Cursor`] is one opaque string
+//!   not accept. Nine types do: the grammars [`VaultName`], [`VaultRoot`],
+//!   [`SchemaSource`], [`Directory`], [`DocumentPath`] and
+//!   [`ResolutionTarget`] advertise the pattern or floor their constructors
+//!   hold; [`Cursor`] is one opaque string
 //!   rather than the fields a derive would emit; [`RungSet`] carries the
 //!   `minItems` floor its read path keeps; and [`CandidateHead`] carries the
 //!   `maxItems` ceiling its read path keeps, read off [`CANDIDATE_HEAD`] so
@@ -212,6 +217,7 @@
 //! [`Published::of`], [`Fingerprints::new`], [`Drift::inactive`],
 //! [`Drift::current`], [`Drift::reload_pending`], [`Drift::unreadable`],
 //! [`EngineStatus::off`], [`EngineStatus::on`], [`EngineStatus::self_disabled`],
+//! [`ControlFileFailure::new`],
 //! the constructor on each [`Advisory`], [`Attention`], [`ResolveReport`],
 //! [`StatusReport`], [`RegistrySanity`] and [`RegistryProblem`] variant,
 //! [`VaultStatus::new`], [`RollUp::of`], [`Change::keep`], [`Change::set`],
@@ -342,7 +348,7 @@ mod vault;
 mod verb;
 
 pub use address::{
-    IllegalPath, PollBackend, SchemaSource, UnknownPollBackend, VaultAddress, VaultRoot,
+    Directory, IllegalPath, PollBackend, SchemaSource, UnknownPollBackend, VaultAddress, VaultRoot,
     absolute_path,
 };
 pub use cursor::{
@@ -373,7 +379,7 @@ pub use read::validate::{KindTally, ValidateParams, ValidateReport};
 pub use reading::{
     AnswerReading, EngineSection, Freshness, LadderDeclaration, ModelIdentity, Rung, RungReport,
 };
-pub use reload::{ControlFile, ReloadFailure, ReloadStage};
+pub use reload::{ControlFile, ControlFileFailure, ReloadFailure, ReloadStage};
 pub use status::{
     Advisory, Attention, Drift, EngineStatus, Fingerprints, Published, Registration, RollUp,
     VaultStatus,

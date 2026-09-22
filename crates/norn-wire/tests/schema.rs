@@ -13,21 +13,21 @@
 use norn_wire::{
     Addressing, Advisory, Anchor, AnswerReading, AttachMode, Attention, BlockRow, BodyText,
     CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage,
-    CollectionSelector, Column, ContainerKind, CountParams, CountReport, Cursor, CursorKey,
-    DescribeParams, DescribeReport, Direction, DoctorRegistryParams, DoctorRegistryReport,
-    DocumentPath, DocumentRow, Drift, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
-    ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindReport, FindingKind,
-    FindingRow, FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, KindTally, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport,
-    MaintainerIdentity, Moved, NotReady, Page, PathRuleKind, PollBackend, Predicate, Published,
-    ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
-    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace, RequestScope,
-    ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport, RungSet,
-    SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity, Snapshot,
-    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
-    TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams,
-    ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb,
-    WarmingPhase, WatcherLossCause,
+    CollectionSelector, Column, ContainerKind, ControlFileFailure, CountParams, CountReport,
+    Cursor, CursorKey, DescribeParams, DescribeReport, Direction, Directory, DoctorRegistryParams,
+    DoctorRegistryReport, DocumentPath, DocumentRow, Drift, EngineHealth, EngineSection,
+    EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams,
+    FindReport, FindingKind, FindingRow, FindingScope, Fingerprints, Freshness, GetParams,
+    GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LinkFamily, LinkHealth, LinkRow,
+    ListParams, ListReport, MaintainerIdentity, Moved, NotReady, Page, PathRuleKind, PollBackend,
+    Predicate, Published, ReasonCode, RegisterParams, RegisterReport, Registration,
+    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
+    Replace, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung,
+    RungReport, RungSet, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport,
+    Severity, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
+    Verb, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -151,6 +151,7 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<Unsatisfied>(),
         schema_of::<VaultAnswer<String>>(),
         schema_of::<NotReady>(),
+        schema_of::<ControlFileFailure>(),
         schema_of::<ReloadFailure>(),
         schema_of::<DocumentPath>(),
         schema_of::<Span>(),
@@ -197,6 +198,7 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<ValidateParams>(),
         schema_of::<DescribeParams>(),
         schema_of::<DescribeReport>(),
+        schema_of::<Directory>(),
         schema_of::<Registration>(),
         schema_of::<Published>(),
         schema_of::<Fingerprints>(),
@@ -2053,7 +2055,7 @@ fn the_status_readings_advertise_their_tags() {
         .clone();
     assert_eq!(
         unreadable["properties"]["failure"]["$ref"].as_str(),
-        Some("#/$defs/ReloadFailure")
+        Some("#/$defs/ControlFileFailure")
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<EngineStatus>(), "state")),
@@ -2089,7 +2091,6 @@ fn a_vault_status_advertises_the_whole_of_what_an_entry_stands_at() {
     assert_eq!(
         property_names(&schema),
         [
-            "name",
             "registration",
             "published",
             "fingerprints",

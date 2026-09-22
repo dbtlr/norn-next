@@ -27,10 +27,27 @@ fn schema_of<T: schemars::JsonSchema>() -> Value {
     serde_json::to_value(schemars::schema_for!(T)).expect("a schema as JSON")
 }
 
-/// One verb, the schema of what a request for it carries, and the schema of
-/// what it answers with.
+/// One verb, the two types that spell it named by hand, and the schemas those
+/// two types advertise.
+///
+/// The names are written out beside the schemas so that a row spelling a verb
+/// by the wrong type fails: a schema advertises its own `title`, and the suite
+/// holds the title against the name the row claims. Without that, a table that
+/// spelled `vault_set` by `ResolveParams` would still pass every other check
+/// here, because both are params types that derive a schema and carry no
+/// vault.
+///
+/// A paged report is an alias for `Page` over the row it carries, so `Page` is
+/// the title it advertises, and `Page` advertises that one title whatever its
+/// row is. Those rows name the row type as well: the title alone would hold
+/// `find` and `search` equal.
 struct Spelling {
     verb: Verb,
+    params_type: &'static str,
+    report_type: &'static str,
+    /// The row a paged report carries, and `None` where the report is not a
+    /// page.
+    report_rows: Option<&'static str>,
     params: Value,
     report: Value,
 }
@@ -40,71 +57,113 @@ fn verb_table() -> Vec<Spelling> {
     vec![
         Spelling {
             verb: Verb::Find,
+            params_type: "FindParams",
+            report_type: "Page",
+            report_rows: Some("DocumentRow"),
             params: schema_of::<FindParams>(),
             report: schema_of::<FindReport>(),
         },
         Spelling {
             verb: Verb::Search,
+            params_type: "SearchParams",
+            report_type: "Page",
+            report_rows: Some("Hit"),
             params: schema_of::<SearchParams>(),
             report: schema_of::<SearchReport>(),
         },
         Spelling {
             verb: Verb::Get,
+            params_type: "GetParams",
+            report_type: "GetReport",
+            report_rows: None,
             params: schema_of::<GetParams>(),
             report: schema_of::<GetReport>(),
         },
         Spelling {
             verb: Verb::Count,
+            params_type: "CountParams",
+            report_type: "Page",
+            report_rows: Some("Tally"),
             params: schema_of::<CountParams>(),
             report: schema_of::<CountReport>(),
         },
         Spelling {
             verb: Verb::Validate,
+            params_type: "ValidateParams",
+            report_type: "ValidateReport",
+            report_rows: None,
             params: schema_of::<ValidateParams>(),
             report: schema_of::<ValidateReport>(),
         },
         Spelling {
             verb: Verb::Describe,
+            params_type: "DescribeParams",
+            report_type: "Page",
+            report_rows: Some("Facet"),
             params: schema_of::<DescribeParams>(),
             report: schema_of::<DescribeReport>(),
         },
         Spelling {
             verb: Verb::VaultRegister,
+            params_type: "RegisterParams",
+            report_type: "RegisterReport",
+            report_rows: None,
             params: schema_of::<RegisterParams>(),
             report: schema_of::<RegisterReport>(),
         },
         Spelling {
             verb: Verb::VaultUnregister,
+            params_type: "UnregisterParams",
+            report_type: "UnregisterReport",
+            report_rows: None,
             params: schema_of::<UnregisterParams>(),
             report: schema_of::<UnregisterReport>(),
         },
         Spelling {
             verb: Verb::VaultList,
+            params_type: "ListParams",
+            report_type: "ListReport",
+            report_rows: None,
             params: schema_of::<ListParams>(),
             report: schema_of::<ListReport>(),
         },
         Spelling {
             verb: Verb::VaultSet,
+            params_type: "SetParams",
+            report_type: "SetReport",
+            report_rows: None,
             params: schema_of::<SetParams>(),
             report: schema_of::<SetReport>(),
         },
         Spelling {
             verb: Verb::VaultResolve,
+            params_type: "ResolveParams",
+            report_type: "ResolveReport",
+            report_rows: None,
             params: schema_of::<ResolveParams>(),
             report: schema_of::<ResolveReport>(),
         },
         Spelling {
             verb: Verb::VaultStatus,
+            params_type: "StatusParams",
+            report_type: "StatusReport",
+            report_rows: None,
             params: schema_of::<StatusParams>(),
             report: schema_of::<StatusReport>(),
         },
         Spelling {
             verb: Verb::VaultReload,
+            params_type: "ReloadParams",
+            report_type: "ReloadReport",
+            report_rows: None,
             params: schema_of::<ReloadParams>(),
             report: schema_of::<ReloadReport>(),
         },
         Spelling {
             verb: Verb::DoctorRegistry,
+            params_type: "DoctorRegistryParams",
+            report_type: "DoctorRegistryReport",
+            report_rows: None,
             params: schema_of::<DoctorRegistryParams>(),
             report: schema_of::<DoctorRegistryReport>(),
         },
@@ -144,16 +203,6 @@ fn vault_reference(params: &Value) -> Option<&str> {
         .find_map(|branch| branch.get("$ref").and_then(Value::as_str))
 }
 
-/// The six read verbs, read off the registry itself rather than off a second
-/// list: the ones that carry a vault address and are not the reload.
-fn read_verbs_in_the_registry() -> BTreeSet<&'static str> {
-    Verb::ALL
-        .into_iter()
-        .filter(|verb| verb.addressing() == Addressing::Required && *verb != Verb::VaultReload)
-        .map(|verb| verb.as_str())
-        .collect()
-}
-
 /// Every verb the registry holds is spelled by a params type and a report
 /// type, and both of them derive a schema a surface can advertise.
 #[test]
@@ -180,6 +229,35 @@ fn every_verb_is_spelled_by_a_params_type_and_a_report_type() {
                 spelling.verb
             );
         }
+    }
+}
+
+/// Each row names the two types its verb is spelled by, and the schema beside
+/// the name is that type's own: a row that reached for the wrong type
+/// advertises a title the row did not claim.
+#[test]
+fn every_row_pins_the_two_types_its_verb_is_spelled_by() {
+    for spelling in verb_table() {
+        for (claimed, schema) in [
+            (spelling.params_type, &spelling.params),
+            (spelling.report_type, &spelling.report),
+        ] {
+            assert_eq!(
+                schema.get("title").and_then(Value::as_str),
+                Some(claimed),
+                "{} is spelled by a type that is not {claimed}",
+                spelling.verb
+            );
+        }
+        assert_eq!(
+            spelling.report["properties"]["rows"]["items"]["$ref"].as_str(),
+            spelling
+                .report_rows
+                .map(|rows| format!("#/$defs/{rows}"))
+                .as_deref(),
+            "{} pages a row it does not page",
+            spelling.verb
+        );
     }
 }
 
@@ -233,18 +311,18 @@ fn every_verbs_params_carry_the_vault_its_addressing_says_it_does() {
     }
 }
 
-/// A read addresses a vault, and a lifecycle observation names a registration:
-/// a root addresses a throwaway attach, which has no lifecycle to observe and
-/// holds no control files to re-read.
+/// Every verb that carries a vault names it by the one vault address the
+/// vocabulary has, read off the registry's own addressing rather than off a
+/// second list. `vault status` and `vault reload` are in that set: a root
+/// addresses a throwaway attach, which has no lifecycle to observe and holds
+/// no control files to re-read, and refusing one is the host's job rather
+/// than a narrower type's.
 #[test]
-fn a_read_addresses_a_vault_and_a_lifecycle_observation_names_a_registration() {
+fn every_verb_that_carries_a_vault_names_it_by_the_one_vault_address() {
     for spelling in verb_table() {
-        let expected = match spelling.verb {
-            verb if read_verbs_in_the_registry().contains(verb.as_str()) => {
-                Some("#/$defs/VaultAddress")
-            }
-            Verb::VaultStatus | Verb::VaultReload => Some("#/$defs/VaultName"),
-            _ => None,
+        let expected = match spelling.verb.addressing() {
+            Addressing::None => None,
+            _ => Some("#/$defs/VaultAddress"),
         };
         assert_eq!(
             vault_reference(&spelling.params),

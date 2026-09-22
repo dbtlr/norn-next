@@ -48,7 +48,8 @@
 //! trusted, because the environment refused.
 
 use norn_wire::{
-    ControlFile, ErrorDetail, ErrorEnvelope, ReloadFailure, TrustState, UntrustedReason, VaultName,
+    ControlFile, ControlFileFailure, ErrorDetail, ErrorEnvelope, ReloadFailure, TrustState,
+    UntrustedReason, VaultName,
 };
 
 use crate::lifecycle::{Demand, HostError, JobFailure, ReadRefusal, ServingRefusal};
@@ -157,7 +158,9 @@ impl ReloadRefusal {
                 ErrorDetail::unknown_vault(name.clone()),
             ),
             ReloadRefusal::Unavailable(state) => unavailable(state),
-            ReloadRefusal::Core(error) => reload_failed(control_file_failure(&error)),
+            ReloadRefusal::Core(error) => {
+                reload_failed(ReloadFailure::control_file(control_file_failure(&error)))
+            }
             ReloadRefusal::Runtime(failure) => reload_failed(runtime_failure(failure)),
             ReloadRefusal::Unsupported => reload_failed(ReloadFailure::unsupported()),
             ReloadRefusal::HostStopped => return Err(HostError::WorkerStopped),
@@ -211,9 +214,9 @@ fn reload_failed(failure: ReloadFailure) -> ErrorEnvelope {
     )
 }
 
-/// A core reload error as the wire failure it is: which file, which boundary,
-/// and the reader's own account of it.
-fn control_file_failure(error: &ReloadError) -> ReloadFailure {
+/// A core reload error as the wire control-file failure it is: which file,
+/// which boundary, and the reader's own account of it.
+fn control_file_failure(error: &ReloadError) -> ControlFileFailure {
     let file = match error.file() {
         ReloadFile::Schema => ControlFile::Schema,
         ReloadFile::Config => ControlFile::Config,
@@ -223,7 +226,7 @@ fn control_file_failure(error: &ReloadError) -> ReloadFailure {
         ReloadStage::Parse => norn_wire::ReloadStage::Parse,
         ReloadStage::Apply => norn_wire::ReloadStage::Apply,
     };
-    ReloadFailure::control_file(file, stage, error.to_string())
+    ControlFileFailure::new(file, stage, error.to_string())
 }
 
 /// A job failure as the wire failure it is. The match carries no wildcard, so
@@ -232,7 +235,7 @@ fn control_file_failure(error: &ReloadError) -> ReloadFailure {
 fn runtime_failure(failure: JobFailure) -> ReloadFailure {
     match failure {
         JobFailure::Environmental(detail) => ReloadFailure::environmental(detail),
-        JobFailure::Reload(error) => control_file_failure(&error),
+        JobFailure::Reload(error) => ReloadFailure::control_file(control_file_failure(&error)),
         JobFailure::StoreDamaged(detail) => ReloadFailure::store_damaged(detail),
         JobFailure::WatcherTerminal(error) => ReloadFailure::watcher_terminal(error.to_string()),
         JobFailure::LostMaintainership => ReloadFailure::lost_maintainership(),
@@ -625,8 +628,8 @@ mod serving_tests {
 mod reload_tests {
     use norn_fs::WatchError;
     use norn_wire::{
-        ControlFile, ErrorDetail, MaintainerIdentity, NotReady, ReloadFailure, TrustState,
-        UntrustedReason, VaultName, WarmingPhase,
+        ControlFile, ControlFileFailure, ErrorDetail, MaintainerIdentity, NotReady, ReloadFailure,
+        TrustState, UntrustedReason, VaultName, WarmingPhase,
     };
 
     use crate::lifecycle::{HostError, JobFailure};
@@ -721,17 +724,21 @@ mod reload_tests {
             (
                 ReloadRefusal::Core(unreadable()),
                 Some(ErrorDetail::reload_failed(ReloadFailure::control_file(
-                    ControlFile::Schema,
-                    norn_wire::ReloadStage::Parse,
-                    unreadable().to_string(),
+                    ControlFileFailure::new(
+                        ControlFile::Schema,
+                        norn_wire::ReloadStage::Parse,
+                        unreadable().to_string(),
+                    ),
                 ))),
             ),
             (
                 ReloadRefusal::Runtime(JobFailure::Reload(unreadable())),
                 Some(ErrorDetail::reload_failed(ReloadFailure::control_file(
-                    ControlFile::Schema,
-                    norn_wire::ReloadStage::Parse,
-                    unreadable().to_string(),
+                    ControlFileFailure::new(
+                        ControlFile::Schema,
+                        norn_wire::ReloadStage::Parse,
+                        unreadable().to_string(),
+                    ),
                 ))),
             ),
             (
@@ -862,11 +869,11 @@ mod reload_tests {
                 .expect("a core error carries a code");
             assert_eq!(
                 envelope.detail(),
-                &ErrorDetail::reload_failed(ReloadFailure::control_file(
+                &ErrorDetail::reload_failed(ReloadFailure::control_file(ControlFileFailure::new(
                     file,
                     stage,
                     error.to_string()
-                ))
+                )))
             );
         }
     }

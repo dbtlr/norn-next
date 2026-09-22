@@ -33,10 +33,14 @@ pub struct ListReport {
 }
 
 impl ListReport {
-    /// The listing of `registrations`.
+    /// The listing of `registrations`, ascending by name.
+    ///
+    /// The field says the registrations are in name order, so the constructor
+    /// is what makes them so: a caller that walked its registry in some other
+    /// order hands the same listing across whichever order it walked in.
     pub fn new(registrations: impl IntoIterator<Item = Registration>) -> Self {
-        ListReport {
-            registrations: registrations.into_iter().collect(),
-        }
+        let mut registrations: Vec<Registration> = registrations.into_iter().collect();
+        registrations.sort_by(|left, right| left.name.cmp(&right.name));
+        ListReport { registrations }
     }
 }

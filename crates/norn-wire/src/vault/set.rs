@@ -9,17 +9,23 @@
 //!
 //! **A field with no default cannot be cleared.** A registration without a
 //! root is not a registration, so the root's edit is a [`Replace`], which
-//! holds keep and set and has no clear to spell. That is a refusal at the read
-//! path rather than a rule a handler enforces: `{"change":"clear"}` is not a
-//! `Replace` a reader accepts.
+//! holds keep and set and has no clear to spell. A replacement is tagged
+//! `change` exactly as a [`Change`] is, and holds two of the same three
+//! members, so a client reads both the same way. Dropping `clear` is a
+//! refusal at the read path rather than a rule a handler enforces:
+//! `{"change":"clear"}` is not a `Replace` a reader accepts.
 //!
 //! **An edit under a standing park is refused under the park's own code**, so
 //! a `vault set` never silently withdraws a park.
 //!
 //! The other refusals are `host/unknown-vault` where no such registration
-//! exists, `host/entry-held` where the entry is in use, and the pre-check
-//! codes a register meets — `host/duplicate-root` and `host/entry-untrusted` —
-//! where the edit moves the root.
+//! exists, `host/entry-held` where the entry is in use,
+//! `host/registry-unwritable` where the registry file could not be replaced,
+//! and the pre-check codes a register meets where the edit moves the root:
+//! `host/duplicate-root` where another registration already reaches the new
+//! root, and `host/entry-untrusted` where the new root itself could not be
+//! read — carrying the environmental-refusal reason, which is the rendering
+//! the registry recheck gives such a root.
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -76,10 +82,10 @@ impl<T: JsonSchema + Serialize + DeserializeOwned> Default for Change<T> {
 
 /// What an edit does to a field that has no default to fall back to.
 ///
-/// On the wire a replacement is an object tagged `change`, as a [`Change`] is,
-/// and it holds two of the same three members: `{"change":"keep"}`,
-/// `{"change":"set","value":…}`. There is no `clear`, because a field spelled
-/// this way is one a registration cannot be without.
+/// On the wire a replacement is an object tagged `change`:
+/// `{"change":"keep"}`, `{"change":"set","value":…}`. There is no `clear`,
+/// because a field spelled this way is one a registration cannot be
+/// without.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "change", rename_all = "snake_case")]
 #[serde(bound(serialize = "T: Serialize", deserialize = "T: DeserializeOwned"))]
@@ -120,14 +126,17 @@ impl<T: JsonSchema + Serialize + DeserializeOwned> Default for Replace<T> {
 pub struct SetParams {
     /// The registration to edit.
     pub name: VaultName,
-    /// What to do with the root. The default is to keep it, and it cannot be
-    /// cleared.
+    /// What to do with the root. `keep` leaves it as registered; `set` moves
+    /// the registration to the given root. There is no `clear`: a
+    /// registration cannot be without a root.
     pub root: Replace<VaultRoot>,
-    /// What to do with the schema source. The default is to keep it, and
-    /// clearing it returns the vault to the in-vault default.
+    /// What to do with the schema source. `keep` leaves it as registered;
+    /// `set` reads the schema from the given path; `clear` returns the vault
+    /// to the in-vault default.
     pub schema_source: Change<SchemaSource>,
-    /// What to do with the watch backend. The default is to keep it, and
-    /// clearing it returns the vault to the platform's native backend.
+    /// What to do with the watch backend. `keep` leaves it as registered;
+    /// `set` pins the given backend; `clear` returns the vault to the
+    /// platform's native one.
     pub poll_backend: Change<PollBackend>,
 }
 

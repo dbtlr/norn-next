@@ -7,8 +7,10 @@
 //!
 //! The refusals are the host's: `host/already-served` where the name is
 //! already registered, `host/duplicate-root` where another registration
-//! already reaches that root, and `host/entry-untrusted` where the root itself
-//! refused the pre-check.
+//! already reaches that root, `host/registry-unwritable` where the registry
+//! file could not be replaced, and `host/entry-untrusted` where the root
+//! itself could not be read — carrying the environmental-refusal reason,
+//! which is the rendering the registry recheck gives such a root.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

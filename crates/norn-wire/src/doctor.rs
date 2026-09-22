@@ -14,6 +14,19 @@
 //! **Sanity is a sum, not a list that is usually empty.** A sound registry and
 //! a registry with problems are two answers a surface renders differently, and
 //! an empty problem list is not how "sound" is spelled.
+//!
+//! **The roll-up's attention reasons include what each vault's advisories
+//! raise.** An [`Advisory`](crate::Advisory) is something about a vault's
+//! serving worth telling an operator that is neither a refusal nor a move of
+//! its trust state, and a roll-up names one vault per advisory it carries.
+//!
+//! **The engine slot and the delivered section sit together**, as they do on
+//! a vault status: a config that enables an engine which is not standing is
+//! those two readings disagreeing, and a reading that carried one of them
+//! could not say so.
+//!
+//! **A verb that asks for nothing still has a params type**, so `doctor` is
+//! spelled by a params type and a report type as every other verb is.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -25,8 +38,7 @@ use crate::status::{EngineStatus, RollUp};
 /// What a `doctor` request carries: nothing.
 ///
 /// `doctor` reads the whole installation, so there is nothing to narrow it to
-/// and no vault to name. The type exists so this verb is spelled by a params
-/// type as every other verb is.
+/// and no vault to name.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct DoctorRegistryParams {}
@@ -71,11 +83,17 @@ pub enum RegistryProblem {
 }
 
 impl RegistryProblem {
-    /// The registrations `aliases` all reach one root.
+    /// The registrations `aliases` all reach one root, in name order and
+    /// each named once.
+    ///
+    /// The field says the aliases are ascending, so the constructor is what
+    /// makes them so: a caller that walked a registry in some other order
+    /// hands the same problem across whichever order it walked in.
     pub fn duplicate_root(aliases: impl IntoIterator<Item = VaultName>) -> Self {
-        RegistryProblem::DuplicateRoot {
-            aliases: aliases.into_iter().collect(),
-        }
+        let mut aliases: Vec<VaultName> = aliases.into_iter().collect();
+        aliases.sort();
+        aliases.dedup();
+        RegistryProblem::DuplicateRoot { aliases }
     }
 
     /// The root of `name` could not be read, for `detail`.
@@ -128,10 +146,8 @@ impl RegistrySanity {
 /// What one vault's engine is doing, and what the host was delivered as that
 /// vault's engine section.
 ///
-/// The two readings sit together here for the same reason they sit together on
-/// a vault status: a config that enables an engine which is not standing is
-/// the two of them disagreeing, and a reading that carried one could not say
-/// so.
+/// A config that enables an engine which is not standing is the two readings
+/// disagreeing, and a reading that carried one of them could not say so.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct EngineHealth {
@@ -168,16 +184,20 @@ pub struct DoctorRegistryReport {
 
 impl DoctorRegistryReport {
     /// The registry reading: `roll_up` over the entries, `registry` sanity,
-    /// and the health of each `engines` entry.
+    /// and the health of each `engines` entry, ascending by name. The field
+    /// says the engines are in name order, so the constructor is what makes
+    /// them so.
     pub fn new(
         roll_up: RollUp,
         registry: RegistrySanity,
         engines: impl IntoIterator<Item = EngineHealth>,
     ) -> Self {
+        let mut engines: Vec<EngineHealth> = engines.into_iter().collect();
+        engines.sort_by(|left, right| left.name.cmp(&right.name));
         DoctorRegistryReport {
             roll_up,
             registry,
-            engines: engines.into_iter().collect(),
+            engines,
         }
     }
 }
