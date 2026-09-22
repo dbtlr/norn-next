@@ -1342,7 +1342,20 @@ fn scoped_increment(
             .to_str()
             .and_then(|spelling| DirectoryPrefix::new(spelling).ok());
         let scope = addressed_scope(&identity, &prefix);
-        match norn_fs::path_kind(&root.join(path)).map_err(effect)? {
+        // **The kind is read at a spelling the tree lists.** A root that folds
+        // beyond ASCII resolves several spellings of one entry, and the fold
+        // that decides identity here is ASCII case alone — so a stat at such a
+        // spelling answers about the entry a directory lists under another
+        // name. The vault answers that first, and a spelling only the volume
+        // resolves reads as the nothing a walk of this vault finds there: its
+        // rows are pruned and the document stays at the name the tree renders.
+        let stands = vault.renders_the_spelling(path).map_err(effect)?;
+        let kind = if stands {
+            norn_fs::path_kind(&root.join(path)).map_err(effect)?
+        } else {
+            norn_fs::PathKind::Missing
+        };
+        match kind {
             norn_fs::PathKind::Directory => {
                 pending.flush()?;
                 match scope {
@@ -9726,6 +9739,64 @@ mod tests {
         assert_eq!(
             stored_paths(&mut attachment.store),
             ["FOLDER/note.md", "FOLDER/other.md"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A batch carrying a spelling only the volume resolves lands one row, at
+    /// the name the tree renders.**
+    ///
+    /// The fold is ASCII, so a rename that flips non-ASCII case leaves the batch
+    /// two roots where an ASCII flip leaves one: two identities here, one entry
+    /// on a volume that folds further. A stat answers at both, and the listing
+    /// answers at the rendered one — so the retired spelling reaches nothing and
+    /// the rows under it die, while the rendered spelling carries the document.
+    #[test]
+    fn a_batch_holding_a_spelling_only_the_volume_resolves_lands_the_rendered_one() {
+        let f = Fixture::new("volume-only-file-spelling");
+        if norn_fs::PathNormalizer::detect(&f.vault())
+            .unwrap()
+            .case_sensitivity()
+            != norn_fs::CaseSensitivity::Insensitive
+        {
+            return;
+        }
+        let retired = "caf\u{e9}.md";
+        let rendered = "CAF\u{c9}.md";
+        fs::write(f.vault().join(retired), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(stored_paths(&mut attachment.store), [retired]);
+        fs::rename(f.vault().join(retired), f.vault().join(rendered)).unwrap();
+
+        let normalizer = norn_fs::PathNormalizer::detect(f.vault().as_path()).unwrap();
+        let mut batch = norn_fs::Batch::default();
+        batch.merge(norn_fs::Batch::vault_removal(
+            normalizer.normalize(Path::new(retired)).unwrap(),
+        ));
+        batch.merge(norn_fs::Batch::vault_change(
+            normalizer.normalize(Path::new(rendered)).unwrap(),
+        ));
+        assert_eq!(
+            batch.vault_roots().len(),
+            2,
+            "the fold is ASCII, so these are two roots"
+        );
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            batch.vault_roots(),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            [rendered],
+            "one document, one row, at the spelling the tree lists"
         );
         ops.detach(&name, attachment);
     }

@@ -228,6 +228,53 @@ impl Vault {
         Ok(None)
     }
 
+    /// Whether an entry standing at `relative` would be spelled this way here.
+    ///
+    /// **A root that tells spellings apart answers yes for every spelling**, and
+    /// reads nothing to do it: a stat there answers only for the entry spelled
+    /// exactly as it was asked, so the spelling a caller holds is the entry's
+    /// own or nothing stands at it.
+    ///
+    /// **A root that folds beyond ASCII is where the question has content.**
+    /// Such a root resolves several spellings of one entry while this crate's
+    /// fold equates only ASCII case, so a stat stands at spellings that name
+    /// other identities here — and the entry is the one spelling its directory
+    /// lists. This asks that directory, by the same rule the subtree descent
+    /// passes its components under, and pays that rule's cost: one listing,
+    /// O(siblings) in wall time.
+    ///
+    /// A caller reading a name's kind asks this first, so a spelling only the
+    /// volume resolves reads as the nothing a walk of this vault finds there.
+    /// Names above the last one are the descent's — [`Self::skip_reaching`]
+    /// states what the walk meets at those — and a directory missing from that
+    /// run lists nothing, which is the answer here too.
+    pub fn renders_the_spelling(&self, relative: &Path) -> Result<bool, WalkError> {
+        if self.case_sensitivity() == CaseSensitivity::Sensitive {
+            return Ok(true);
+        }
+        let subtree = self.normalize(relative)?;
+        let Some(name) = subtree.as_path().file_name() else {
+            return Ok(true);
+        };
+        let above = subtree.as_path().parent().unwrap_or(Path::new(""));
+        let mut directory = self.root_fd.clone();
+        let mut traversed = PathBuf::new();
+        for component in above.components() {
+            traversed.push(component.as_os_str());
+            let access = self.root.join(&traversed);
+            directory = match open_component(&directory, component.as_os_str(), &access)? {
+                Some(fd) => fd,
+                None => return Ok(false),
+            };
+        }
+        lists_the_spelling(
+            &self.normalizer,
+            &directory,
+            name,
+            &self.root.join(subtree.as_path()),
+        )
+    }
+
     /// Whether `name` is one of Norn's shadow basenames on this root.
     fn names_a_shadow(&self, name: &OsStr) -> bool {
         self.normalizer.names_a_shadow(name)
