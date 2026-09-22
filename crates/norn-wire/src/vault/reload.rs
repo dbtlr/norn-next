@@ -29,7 +29,11 @@ use serde::{Deserialize, Serialize};
 use crate::address::VaultAddress;
 use crate::status::Fingerprints;
 
-/// Which core-controlled part of the vault's control files a reload applied.
+/// What a reload decided about the vault's schema.
+///
+/// The decision is read off the candidate schema against the active one. The
+/// config is taken into service either way, so an outcome says nothing about
+/// whether the config changed.
 ///
 /// On the wire an outcome is the flat string itself: `"config_only"`,
 /// `"schema_changed"`.
@@ -37,11 +41,12 @@ use crate::status::Fingerprints;
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ReloadOutcome {
-    /// The vault config changed and the schema did not, so the derived state
-    /// under it stands.
+    /// The candidate schema is the schema the vault already serves, so what
+    /// is derived under it stands and the candidate config was taken into
+    /// service beside it, changed or not.
     ConfigOnly,
-    /// The vault schema changed, so what is derived under it is derived
-    /// again.
+    /// The candidate schema is not the schema the vault was serving, so it was
+    /// pinned and what is derived under it was derived again.
     SchemaChanged,
 }
 
@@ -81,7 +86,7 @@ impl ReloadParams {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct ReloadReport {
-    /// Which part of the control files the candidate changed.
+    /// What the reload decided about the vault's schema.
     pub outcome: ReloadOutcome,
     /// The fingerprints the candidate was read at. They are the vault's active
     /// fingerprints where the reload activated, and the authored ones it
