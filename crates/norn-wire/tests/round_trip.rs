@@ -3573,8 +3573,8 @@ fn a_validate_report_is_an_object_tagged_shape() {
 
 /// A facet is an object tagged `facet`, and every facet names the kind a
 /// request selects it by and a cursor orders it under. A tag pattern reports
-/// the declared-tag kind: a pattern is part of what the vault declares its tag
-/// vocabulary to be.
+/// its own kind rather than the declared-tag one: a pattern and a name are two
+/// shapes, so `--facets tag_pattern` selects the patterns alone.
 #[test]
 fn every_facet_names_the_kind_a_cursor_orders_it_under() {
     for facet in facets() {
