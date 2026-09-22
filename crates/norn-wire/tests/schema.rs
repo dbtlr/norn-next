@@ -11,9 +11,10 @@
 //! restating it.
 
 use norn_wire::{
-    AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
-    PollBackend, ReasonCode, RequestScope, SchemaSource, Severity, TrustState, UntrustedReason,
-    VaultAddress, VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
+    Anchor, AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
+    PollBackend, Predicate, ReasonCode, RequestScope, ResolutionTarget, SchemaSource, Severity,
+    TrustState, UntrustedReason, VaultAddress, VaultName, VaultRoot, Verb, WarmingPhase,
+    WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -111,6 +112,9 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<VaultAddress>(),
         schema_of::<Verb>(),
         schema_of::<RequestScope>(),
+        schema_of::<ResolutionTarget>(),
+        schema_of::<Anchor>(),
+        schema_of::<Predicate>(),
     ] {
         assert!(
             schema.get("$schema").is_some(),
@@ -599,5 +603,90 @@ fn a_verb_and_a_scope_advertise_their_bare_strings() {
     assert_eq!(
         sorted(scopes.iter().map(String::as_str)),
         sorted(["vault", "registry", "installation"])
+    );
+}
+
+// ── The resolution target and the predicate grammar ──────────────────────
+
+/// A target advertises the grammar its constructor keeps, in words. There is
+/// no `pattern`: the address half is a path suffix, and the one rule the
+/// reader applies to it is stated plainly instead.
+#[test]
+fn a_resolution_target_advertises_the_grammar_it_is_parsed_through() {
+    let schema = schema_of::<ResolutionTarget>();
+    assert_eq!(schema["type"].as_str(), Some("string"));
+    assert_eq!(
+        schema["description"].as_str(),
+        Some(
+            "What a request names one document by: a path suffix, optionally followed by `#` and a heading, or `#^` and a block identifier. The path suffix is not empty."
+        )
+    );
+    assert!(
+        schema.get("pattern").is_none(),
+        "a target advertises a pattern: {schema}"
+    );
+}
+
+/// The conjunction advertises one branch per operator, tagged `op`, and the
+/// typed halves refer to their own definitions rather than restating them.
+#[test]
+fn a_predicate_advertises_its_op_tag_and_the_types_behind_it() {
+    let schema = schema_of::<Predicate>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "op")),
+        sorted([
+            "eq",
+            "not_eq",
+            "in",
+            "has",
+            "missing",
+            "before",
+            "after",
+            "matches",
+            "path",
+            "links_to",
+            "resolves",
+            "tag",
+            "has_finding",
+        ])
+    );
+    let branch = |op: &str| {
+        branches(&schema)
+            .iter()
+            .find(|branch| tag_constant(branch, "op") == Some(op))
+            .unwrap_or_else(|| panic!("the {op} branch"))
+            .clone()
+    };
+    assert_eq!(
+        property_names(&branch("eq")),
+        ["op", "key", "value"].into_iter().collect()
+    );
+    for op in ["links_to", "resolves"] {
+        assert_eq!(
+            branch(op)["properties"]["target"]["$ref"].as_str(),
+            Some("#/$defs/ResolutionTarget"),
+            "the {op} branch restates the target grammar"
+        );
+    }
+    assert_eq!(
+        branch("has_finding")["properties"]["kind"]["$ref"].as_str(),
+        Some("#/$defs/FindingKind")
+    );
+    for definition in ["ResolutionTarget", "FindingKind"] {
+        assert!(
+            schema["$defs"][definition].is_object(),
+            "the referenced definition is absent: {schema}"
+        );
+    }
+}
+
+/// The anchor is read back as an object tagged `kind`, so a consumer that
+/// holds a parsed target branches on which place it names.
+#[test]
+fn an_anchor_advertises_its_kind_tag() {
+    let schema = schema_of::<Anchor>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "kind")),
+        sorted(["heading", "block"])
     );
 }

@@ -163,6 +163,8 @@ mod demand;
 mod error;
 mod finding;
 mod name;
+mod predicate;
+mod target;
 mod trust;
 mod verb;
 
@@ -174,5 +176,7 @@ pub use demand::AttachMode;
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use name::{IllegalVaultName, VaultName};
+pub use predicate::Predicate;
+pub use target::{Anchor, IllegalTarget, ResolutionTarget};
 pub use trust::{TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
 pub use verb::{RequestScope, UnknownRequestScope, UnknownVerb, Verb};

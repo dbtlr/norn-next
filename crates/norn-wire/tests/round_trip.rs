@@ -14,10 +14,11 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
-    PollBackend, ReasonCode, RequestScope, SchemaSource, Severity, TrustState, UnknownFindingKind,
-    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UntrustedReason,
-    VaultAddress, VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
+    Anchor, AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
+    PollBackend, Predicate, ReasonCode, RequestScope, ResolutionTarget, SchemaSource, Severity,
+    TrustState, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity,
+    UnknownVerb, UntrustedReason, VaultAddress, VaultName, VaultRoot, Verb, WarmingPhase,
+    WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -182,6 +183,45 @@ fn request_scopes() -> Vec<RequestScope> {
     RequestScope::ALL.to_vec()
 }
 
+/// One target a vector names a document by, parsed through the grammar the
+/// type keeps.
+fn target(text: &str) -> ResolutionTarget {
+    ResolutionTarget::new(text).expect("a legal resolution target")
+}
+
+/// Every target shape the grammar admits: a bare suffix, a heading anchor and
+/// a block anchor.
+fn resolution_targets() -> Vec<ResolutionTarget> {
+    [
+        "glossary",
+        "norn/glossary",
+        "glossary#Design",
+        "glossary#^a1",
+    ]
+    .into_iter()
+    .map(target)
+    .collect()
+}
+
+/// Every part the conjunction admits, one per operator.
+fn predicates() -> Vec<Predicate> {
+    vec![
+        Predicate::eq("type", "note"),
+        Predicate::not_eq("type", "note"),
+        Predicate::in_any("type", ["note".to_string(), "task".to_string()]),
+        Predicate::has("due"),
+        Predicate::missing("due"),
+        Predicate::before("due", "2026-01-01"),
+        Predicate::after("due", "2026-01-01"),
+        Predicate::matches("norn NEAR vault"),
+        Predicate::path("docs/**"),
+        Predicate::links_to(target("glossary#Design")),
+        Predicate::resolves(target("norn/glossary")),
+        Predicate::tag("draft"),
+        Predicate::has_finding(FindingKind::UndeclaredTag),
+    ]
+}
+
 fn round_trip<T>(value: &T)
 where
     T: Serialize + DeserializeOwned + Debug + PartialEq,
@@ -312,6 +352,14 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<ErrorDetail>(Some("code")),
         "the details built here are not the details the vocabulary holds"
+    );
+    assert_eq!(
+        predicates()
+            .iter()
+            .map(|predicate| tag_string(predicate, "op"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<Predicate>(Some("op")),
+        "the parts built here are not the parts the vocabulary holds"
     );
     assert_eq!(
         verbs().iter().map(flat_string).collect::<BTreeSet<_>>(),
@@ -1175,5 +1223,133 @@ fn every_verb_is_scoped_to_a_vault_or_to_the_registry() {
     assert_eq!(
         scoped(RequestScope::Vault).len() + scoped(RequestScope::Registry).len(),
         Verb::ALL.len()
+    );
+}
+
+// ── The resolution target and the predicate grammar ──────────────────────
+
+#[test]
+fn every_resolution_target_survives_the_round_trip() {
+    for target in resolution_targets() {
+        round_trip(&target);
+    }
+}
+
+#[test]
+fn every_predicate_survives_the_round_trip() {
+    for predicate in predicates() {
+        round_trip(&predicate);
+    }
+}
+
+/// A target is the one string it was written as, and the parse is what a
+/// consumer reads afterwards: the suffix address before the first `#`, and the
+/// anchor after it, a block where it opens with `^` and a heading otherwise.
+#[test]
+fn a_target_is_the_string_it_is_written_as_and_the_parse_of_it() {
+    for (text, address, anchor) in [
+        ("glossary", "glossary", None),
+        ("norn/glossary", "norn/glossary", None),
+        (
+            "glossary#Design",
+            "glossary",
+            Some(Anchor::heading("Design")),
+        ),
+        ("glossary#^a1", "glossary", Some(Anchor::block("a1"))),
+        ("glossary#a#b", "glossary", Some(Anchor::heading("a#b"))),
+        ("glossary#", "glossary", Some(Anchor::heading(""))),
+        ("glossary#^", "glossary", Some(Anchor::block(""))),
+    ] {
+        let parsed = target(text);
+        assert_eq!(parsed.address(), address, "`{text}` addresses another");
+        assert_eq!(parsed.anchor(), anchor.as_ref(), "`{text}` anchors another");
+        assert_eq!(
+            wire(&parsed),
+            format!("\"{text}\""),
+            "`{text}` is rewritten"
+        );
+        assert_eq!(parsed.to_string(), text);
+    }
+}
+
+/// A target with no address names no document. The anchor half is optional and
+/// the address half is not, so `#Design` refuses rather than arriving as a
+/// heading in a document nobody named.
+#[test]
+fn a_target_with_no_address_is_refused() {
+    for text in ["", "#Design", "#^a1", "#"] {
+        let refusal = ResolutionTarget::new(text).expect_err(&format!("`{text}` is not a target"));
+        assert_eq!(refusal.target(), text);
+        assert!(refusal.problem().contains("path suffix"), "{refusal}");
+        assert!(
+            serde_json::from_str::<ResolutionTarget>(&format!("\"{text}\"")).is_err(),
+            "`{text}` was read as a target"
+        );
+    }
+}
+
+/// Nothing is percent-decoded. What a client wrote is the address it named, so
+/// two strings a person typed differently stay two addresses.
+#[test]
+fn a_target_is_not_percent_decoded() {
+    let parsed = target("a%2Fb");
+    assert_eq!(parsed.address(), "a%2Fb");
+    assert_ne!(parsed, target("a/b"));
+}
+
+/// A part is an object tagged `op`, and the typed halves — a finding kind, a
+/// target — cross as themselves rather than as strings a reader re-parses.
+#[test]
+fn a_predicate_is_an_object_tagged_op() {
+    assert_eq!(
+        wire(&Predicate::eq("type", "note")),
+        r#"{"op":"eq","key":"type","value":"note"}"#
+    );
+    assert_eq!(
+        wire(&Predicate::not_eq("type", "note")),
+        r#"{"op":"not_eq","key":"type","value":"note"}"#
+    );
+    assert_eq!(
+        wire(&Predicate::in_any(
+            "type",
+            ["note".to_string(), "task".to_string()]
+        )),
+        r#"{"op":"in","key":"type","values":["note","task"]}"#
+    );
+    assert_eq!(wire(&Predicate::has("due")), r#"{"op":"has","key":"due"}"#);
+    assert_eq!(
+        wire(&Predicate::matches("norn NEAR vault")),
+        r#"{"op":"matches","query":"norn NEAR vault"}"#
+    );
+    assert_eq!(
+        wire(&Predicate::links_to(target("glossary#^a1"))),
+        r#"{"op":"links_to","target":"glossary#^a1"}"#
+    );
+    assert_eq!(
+        wire(&Predicate::has_finding(FindingKind::UndeclaredTag)),
+        r#"{"op":"has_finding","kind":"document/undeclared-tag"}"#
+    );
+    assert_eq!(
+        wire(&Predicate::tag("draft")),
+        r#"{"op":"tag","name":"draft"}"#
+    );
+}
+
+/// A part carrying a target refuses one outside the grammar entire, rather
+/// than reading it as a string a later reader would have to check.
+#[test]
+fn a_predicate_refuses_a_target_outside_the_grammar() {
+    assert!(
+        serde_json::from_str::<Predicate>(r##"{"op":"links_to","target":"#Design"}"##).is_err(),
+        "a part carrying an addressless target read back as one"
+    );
+    assert!(
+        serde_json::from_str::<Predicate>(r#"{"op":"has_finding","kind":"document/unreadable"}"#)
+            .is_err(),
+        "a part carrying a finding kind nobody minted read back as one"
+    );
+    assert!(
+        serde_json::from_str::<Predicate>(r#"{"op":"near","query":"x"}"#).is_err(),
+        "a part nobody minted read back as one"
     );
 }
