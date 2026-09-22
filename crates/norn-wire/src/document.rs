@@ -490,8 +490,9 @@ pub enum LinkFamily {
 ///
 /// The syntactic half is what the document says; the resolved half is what the
 /// vault held at the instant of the read. `targets` is a bounded head and a
-/// total, so a link a vault resolves many ways crosses as the first of those
-/// documents and how many there were. `health` is derived from that total
+/// total, so a link a vault resolves many ways crosses as the first few of
+/// those documents and how many there were. `health` is derived from that
+/// total
 /// rather than carried beside it: the constructor computes it and the read
 /// path recomputes it, so a row whose health disagrees with the documents it
 /// names has no representation on either side of the seam.
