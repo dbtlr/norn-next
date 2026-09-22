@@ -1,7 +1,7 @@
 //! The registry file: what round-trips, what is refused, and what a read
 //! never does.
 use norn_config::ConfigError;
-use norn_config::registry::{Entry, PollBackend, SchemaSource};
+use norn_config::registry::{Entry, PollBackend, Registration, SchemaSource};
 
 use crate::common::{Scratch, entry, name, registry, root};
 
@@ -338,5 +338,28 @@ fn a_malformed_entry_is_refused_with_the_reason() {
             reason.contains(needle),
             "`{body}` was refused with `{reason}`, which does not mention `{needle}`"
         );
+    }
+}
+
+/// The registry entry and the registration that crosses the client/host seam
+/// are one reading of a registered vault: every field survives the trip out
+/// and back, whether or not the two that have a default are filled in.
+#[test]
+fn an_entry_and_a_registration_are_one_reading() {
+    for filled in [false, true] {
+        let mut written = entry("notes", "/home/person/notes");
+        if filled {
+            written.schema_source = Some(
+                SchemaSource::new("/home/person/schemas/notes.yaml").expect("a schema source"),
+            );
+            written.poll_backend = Some(PollBackend::Poll);
+        }
+
+        let registration = Registration::from(written.clone());
+        assert_eq!(registration.name, written.name);
+        assert_eq!(registration.root, written.root);
+        assert_eq!(registration.schema_source, written.schema_source);
+        assert_eq!(registration.poll_backend, written.poll_backend);
+        assert_eq!(Entry::from(registration), written);
     }
 }

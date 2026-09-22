@@ -119,6 +119,48 @@ impl Entry {
     }
 }
 
+/// The registration that crosses the client/host seam, which is these four
+/// fields and no others.
+///
+/// The two shapes are one reading of a registered vault, so the conversion is
+/// total in both directions and loses nothing. The entry is destructured
+/// without a wildcard, so a field added to [`Entry`] does not compile until
+/// this says what the registration does with it.
+pub use norn_wire::Registration;
+
+impl From<Entry> for Registration {
+    fn from(entry: Entry) -> Self {
+        let Entry {
+            name,
+            root,
+            schema_source,
+            poll_backend,
+        } = entry;
+        let mut registration = Registration::new(name, root);
+        registration.schema_source = schema_source;
+        registration.poll_backend = poll_backend;
+        registration
+    }
+}
+
+impl From<Registration> for Entry {
+    fn from(registration: Registration) -> Self {
+        let Registration {
+            name,
+            root,
+            schema_source,
+            poll_backend,
+            ..
+        } = registration;
+        Entry {
+            name,
+            root,
+            schema_source,
+            poll_backend,
+        }
+    }
+}
+
 /// The registry, as read.
 ///
 /// Holds the document it was read from as well as the entries projected out of

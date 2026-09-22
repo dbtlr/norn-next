@@ -59,6 +59,31 @@
 //! vault's engine section, which is what a status answer reports and what a
 //! vector refusal is composed against.
 //!
+//! The eight verbs of the vault namespace and [`doctor`](DoctorRegistryParams)'s
+//! registry half are spelled the same way: [`RegisterParams`] answering
+//! [`RegisterReport`], [`UnregisterParams`] answering [`UnregisterReport`],
+//! [`ListParams`] answering [`ListReport`], [`SetParams`] — whose every field
+//! is a [`Change`], or a [`Replace`] where the field has no default to be
+//! cleared to — answering [`SetReport`], [`ResolveParams`] answering
+//! [`ResolveReport`], [`StatusParams`] answering [`StatusReport`],
+//! [`ReloadParams`] answering [`ReloadReport`] of a [`ReloadOutcome`], and
+//! [`DoctorRegistryParams`] answering [`DoctorRegistryReport`] over the
+//! [`RegistrySanity`] of the registry itself, its [`RegistryProblem`]s and the
+//! [`EngineHealth`] of each vault. What those eight report about a
+//! registration is spelled here too: the [`Registration`] itself, the
+//! [`Published`] answer an entry carries, the [`Fingerprints`] it serves
+//! under, the [`Drift`] its authored control files stand at, the
+//! [`EngineStatus`] of its engine slot, the [`Advisory`] list its serving
+//! raises, and the [`VaultStatus`] that holds all of them — with the [`RollUp`]
+//! those statuses add up to and the [`Attention`] it names them for.
+//!
+//! **A registry report and a lifecycle observation carry no answer reading.**
+//! A registration is not answered from a database, and neither a status nor a
+//! reload is a read: a status is taken off what an entry already publishes and
+//! creates no demand, and a reload reports what it applied. So the eight
+//! reports above cross as themselves rather than inside a [`VaultAnswer`],
+//! which is what carries an [`AnswerReading`] for the six verbs that do read.
+//!
 //! Nothing crosses the seam that is not a type from here. There is no untyped
 //! JSON value in any signature and no JSON-in-a-string; a payload that cannot
 //! be spelled as a type here does not cross.
@@ -181,8 +206,18 @@
 //! [`DocumentPath::new`], [`Candidate::new`], [`CandidateHead::new`],
 //! [`FindingRow::new`],
 //! [`Sort::new`], [`RungSet::lexical`], [`RungSet::of`], [`Hit::new`],
-//! [`Tally::new`], [`KindTally::new`], and the `new` on each of the six
-//! params types.
+//! [`Tally::new`], [`KindTally::new`], and the `new` on each of the six read
+//! params types;
+//! [`Registration::new`], [`Published::state`], [`Published::parked`],
+//! [`Published::of`], [`Fingerprints::new`], [`Drift::inactive`],
+//! [`Drift::current`], [`Drift::reload_pending`], [`Drift::unreadable`],
+//! [`EngineStatus::off`], [`EngineStatus::on`], [`EngineStatus::self_disabled`],
+//! the constructor on each [`Advisory`], [`Attention`], [`ResolveReport`],
+//! [`StatusReport`], [`RegistrySanity`] and [`RegistryProblem`] variant,
+//! [`VaultStatus::new`], [`RollUp::of`], [`Change::keep`], [`Change::set`],
+//! [`Change::clear`], [`Replace::keep`], [`Replace::set`],
+//! [`EngineHealth::new`], and the `new` on each of the eight vault-namespace
+//! params types and on each of their reports.
 //!
 //! **A closed vocabulary whose every reader must decide what a new member
 //! means is plain rather than `#[non_exhaustive]`.** The two rules answer two
