@@ -176,6 +176,16 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<PathRuleKind>(),
         schema_of::<TagStance>(),
         schema_of::<Facet>(),
+        schema_of::<FindParams>(),
+        schema_of::<FindReport>(),
+        schema_of::<SearchParams>(),
+        schema_of::<SearchReport>(),
+        schema_of::<GetParams>(),
+        schema_of::<CountParams>(),
+        schema_of::<CountReport>(),
+        schema_of::<ValidateParams>(),
+        schema_of::<DescribeParams>(),
+        schema_of::<DescribeReport>(),
     ]
 }
 
