@@ -1309,40 +1309,16 @@ fn scoped_increment(
             continue;
         }
         // **What this leg may read is what the vault walk reaches**, and the
-        // vault is asked rather than re-read here: an excluded root, a shadow
-        // basename and a symbolic link on the way down are one refusal with one
-        // spelling, in norn-fs. Under a refused root no walk of this vault
-        // yields anything, so the rows there die and nothing is derived — the
-        // answer a build from zero gives. The findings in that range go with
-        // them: a refusal that stands is a reading of every place beneath it,
-        // and a build from zero holds no finding at one either.
-        if let Some(skip) = vault.skip_reaching(path).map_err(effect)? {
-            pending.flush()?;
-            prune_refused_root(
-                pending.store,
-                root,
-                exclusions,
-                skip.path().as_path(),
-                skip.reason().stands(),
-                policy,
-                progress,
-                store_order(sensitivity),
-                pending.account,
-            )?;
-            refused.push(skip);
-            continue;
-        }
-        // Both the identity and the range it addresses are read before anything
-        // that would use them, because what a spelling names and what it holds
-        // are different questions: `..md` names no document and is still where
-        // the documents under it are stored. What they say is acted on per kind:
-        // only the arm that has a file in hand has a document to quarantine.
-        let identity = document_path(path);
-        let prefix = path
-            .to_str()
-            .and_then(|spelling| DirectoryPrefix::new(spelling).ok());
-        let scope = addressed_scope(&identity, &prefix);
-        // **The vault reads the kind, at a spelling its own tree lists.** A root
+        // vault is asked once for it rather than re-read here: an excluded
+        // root, a shadow basename and a symbolic link on the way down are one
+        // refusal with one spelling, in norn-fs, and the kind at the end of the
+        // path comes off the same descent. Under a refused root no walk of this
+        // vault yields anything, so the rows there die and nothing is derived —
+        // the answer a build from zero gives. The findings in that range go
+        // with them: a refusal that stands is a reading of every place beneath
+        // it, and a build from zero holds no finding at one either.
+        //
+        // **The kind is read at a spelling the vault's own tree lists.** A root
         // that folds beyond ASCII resolves several spellings of one entry while
         // the fold that decides identity is ASCII case alone, so a stat spelled
         // by a report answers about an entry the directory lists under another
@@ -1357,7 +1333,36 @@ fn scoped_increment(
         // or when the next whole-vault heal walks it. That is the from-zero
         // reading: a derivation over this tree holds one row for one entry, at
         // the name the directory lists.
-        match vault.path_kind(path).map_err(effect)? {
+        let kind = match vault.reach(path).map_err(effect)? {
+            norn_fs::Reach::Refused(skip) => {
+                pending.flush()?;
+                prune_refused_root(
+                    pending.store,
+                    root,
+                    exclusions,
+                    skip.path().as_path(),
+                    skip.reason().stands(),
+                    policy,
+                    progress,
+                    store_order(sensitivity),
+                    pending.account,
+                )?;
+                refused.push(skip);
+                continue;
+            }
+            norn_fs::Reach::Stands(kind) => kind,
+        };
+        // Both the identity and the range it addresses are read before anything
+        // that would use them, because what a spelling names and what it holds
+        // are different questions: `..md` names no document and is still where
+        // the documents under it are stored. What they say is acted on per kind:
+        // only the arm that has a file in hand has a document to quarantine.
+        let identity = document_path(path);
+        let prefix = path
+            .to_str()
+            .and_then(|spelling| DirectoryPrefix::new(spelling).ok());
+        let scope = addressed_scope(&identity, &prefix);
+        match kind {
             norn_fs::PathKind::Directory => {
                 pending.flush()?;
                 match scope {
@@ -1767,7 +1772,7 @@ fn addressed_scope<'a>(
 /// **A reason that does not stand is asked for, never assumed.** A root that
 /// merely vanished says nothing about what is at it now, so the rows beneath it
 /// converge the way they converge for any name nothing is at while the findings
-/// stay standing: this registers no scope for one. [`Vault::skip_reaching`]
+/// stay standing: this registers no scope for one. [`Vault::reach`]
 /// answers no such reason today, and `stands` is asked here rather than relied
 /// on, so a reason class added later decides at this seam instead of silently
 /// widening it.
@@ -7101,7 +7106,7 @@ mod tests {
     /// zero holds none of.
     ///
     /// This is the leg [`prune_refused_root`] runs, which the case rooted at
-    /// the link itself never reaches: `skip_reaching` reads ancestors and the
+    /// the link itself never reaches: `reach` reads ancestors and the
     /// shadow leaf, so a dirty path that *is* the link answers with no notation
     /// at all and lands in the kind arm instead.
     #[cfg(unix)]
@@ -9941,7 +9946,7 @@ mod tests {
     /// stands at the from-zero answer. Two of the three reach it at the vault's
     /// reading of the walk — an exclusion root covers the path, and a link
     /// stops the descent at its own name — and the third is a last name the
-    /// vault reads through [`norn_fs::Vault::path_kind`], which reads a pipe as
+    /// vault reads through [`norn_fs::Vault::reach`], which reads a pipe as
     /// something other than a regular file.
     ///
     /// The watcher is why the exclusion row is a dirty root at all: it admits

@@ -121,8 +121,8 @@ pub use shadow::{
     is_shadow_name, sweep_fallback_root, sweep_fallback_tree,
 };
 pub use walk::{
-    FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Vault, Walk, WalkError,
-    WalkFact, walk, walk_subtree,
+    FileFact, FileKind, FileStat, LinkKind, Reach, ReadFile, SkipFact, SkipReason, Vault, Walk,
+    WalkError, WalkFact, walk, walk_subtree,
 };
 pub use watch::{
     Batch, OwnWrites, RescanScope, Subscription, SubscriptionState, WatchError, watch,

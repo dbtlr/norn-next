@@ -12,7 +12,7 @@ use crate::refusal::{Refusal, environment, environment_at};
 
 /// What kind of filesystem object a watcher invalidation root names now.
 ///
-/// [`crate::Vault::path_kind`] is what reads one, from a vault's own root
+/// [`crate::Vault::reach`] is what reads one, from a vault's own root
 /// descriptor down: a name is reached through the tree the vault walked, and a
 /// spelling only a folding volume resolves stands at nothing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

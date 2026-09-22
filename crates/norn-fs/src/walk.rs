@@ -110,8 +110,8 @@ pub fn walk_subtree(
 /// the root proved, and the roots inside it Norn does not read.
 ///
 /// A [`Walk`] is one of these with a frontier on it, and
-/// [`skip_reaching`](Self::skip_reaching) is the same descent carrying no
-/// frontier at all. Opening proves the root's case behavior once, so a caller
+/// [`reach`](Self::reach) is the same descent carrying no frontier at all.
+/// Opening proves the root's case behavior once, so a caller
 /// deciding many names against one vault pays for that proof once rather than
 /// per name.
 pub struct Vault {
@@ -144,128 +144,104 @@ impl Vault {
         self.normalizer.case_sensitivity()
     }
 
-    /// The notation the vault walk states in place of reaching `relative`, or
-    /// nothing where the walk reaches that name.
+    /// What this vault's walk finds at `relative`: the notation it states in
+    /// place of reaching that name, or the kind standing at the end of it.
     ///
-    /// This is [`walk_subtree`]'s descent with no frontier on the end of it,
-    /// read in the descent's own order: an exclusion root covering the path,
-    /// then each name above the last one decided the way the walk decides the
-    /// entries it descends through, then the last name's own spelling. So a
-    /// path under a link is the link's answer rather than its own leaf's, which
-    /// is the order the walk reaches the two names in.
+    /// **One descent answers the whole path.** This is [`walk_subtree`]'s
+    /// descent with no frontier on the end of it, read in the descent's own
+    /// order: an exclusion root covering the path, then each name above the
+    /// last one decided the way the walk decides the entries it descends
+    /// through, then the last name's own spelling and what stands at it. So a
+    /// path under a link answers with the link rather than with its own leaf,
+    /// which is the order the walk reaches the two names in. A caller deciding
+    /// both questions asks once and pays one descent for them.
     ///
-    /// **The notation stands at the root the walk stops at**, not at the path
-    /// that reached it: the excluded root, the shadow basename, the link. Every
+    /// **A refusal stands at the root the walk stops at**, not at the path that
+    /// reached it: the excluded root, the shadow basename, the link. Every
     /// place under that root holds the same nothing, so a consumer converging
     /// derived state reads the root once for all of them —
     /// [`SkipFact::covers`] is how it asks which later paths that reading
     /// already answered.
     ///
-    /// **What the last name holds is not read here.** A caller that must tell a
-    /// file from a directory from an absence asks [`Self::path_kind`] for it,
-    /// and this leaves that one reading whole rather than taking half of it.
-    ///
     /// **A name that is not there is not a refusal.** A path no name leads to
-    /// holds nothing, which is what [`Self::path_kind`] answers at it, so this states
-    /// no notation and lets that reading stand alone. A path a *name* blocks is
-    /// the other case and is stated here, as [`SkipReason::UnderAnEntry`]:
-    /// [`Self::path_kind`] cannot answer at all through an entry that is not a
-    /// directory.
+    /// holds nothing, which is [`Reach::Stands`] carrying [`PathKind::Missing`].
+    /// A path a *name* blocks is the other case and is a refusal,
+    /// [`SkipReason::UnderAnEntry`]: nothing is readable through an entry that
+    /// is not a directory.
     ///
-    /// **A notation is a fact about an entry**, so the descent proves each name
+    /// **A refusal is a fact about an entry**, so the descent proves each name
     /// above the last one is there before it reads that name as a shadow
     /// basename or as a link. A spelling nothing stands at vanishes on any
     /// root, and the last name's spelling is reached only once every name above
     /// it is there — so an absent ancestor answers, and a shadow basename below
     /// one is never spelled at all.
     ///
-    /// **Every notation this states stands**, in the sense
-    /// [`SkipReason::stands`] names: a name that is not there answers `None`
-    /// here rather than [`SkipReason::Vanished`], which is what makes that the
-    /// one reason this never yields. A caller whose authority turns on the
+    /// **Every refusal this states stands**, in the sense
+    /// [`SkipReason::stands`] names: a name that is not there is `Missing`
+    /// rather than [`SkipReason::Vanished`], which is what makes that the one
+    /// reason this never yields. A caller whose authority turns on the
     /// distinction still asks the reason for it, so a reason class added later
     /// is answered at the consumer rather than by this sentence.
-    pub fn skip_reaching(&self, relative: &Path) -> Result<Option<SkipFact>, WalkError> {
-        let subtree = self.normalize(relative)?;
-        if let Some((root, reason)) = self.exclusions.covering_root(&subtree) {
-            return Ok(Some(SkipFact {
-                path: root.clone(),
-                reason: reason.into(),
-            }));
-        }
-        if let Descent::Stopped { path, stop } = self.descend(names_above(&subtree))? {
-            return Ok(match stop {
-                Stop::Skipped(reason) => Some(SkipFact { path, reason }),
-                Stop::Vanished => None,
-                Stop::NotADirectory => Some(SkipFact {
-                    path: subtree,
-                    reason: SkipReason::UnderAnEntry,
-                }),
-            });
-        }
-        let Some(leaf) = subtree.as_path().file_name() else {
-            return Ok(None);
-        };
-        if self.names_a_shadow(leaf) {
-            return Ok(Some(SkipFact {
-                path: subtree,
-                reason: SkipReason::Shadow,
-            }));
-        }
-        Ok(None)
-    }
-
-    /// What stands at `relative` inside this vault.
-    ///
-    /// This is the reading [`Self::skip_reaching`] leaves whole for a caller
-    /// that must tell a file from a directory from an absence, and it is taken
-    /// the way the walk takes a name: from this vault's own root descriptor
-    /// down, one component at a time, so the name it reads is the name a walk
-    /// of this vault reaches under that spelling.
     ///
     /// **A spelling the tree does not list stands at nothing.** On a root that
     /// folds beyond ASCII a stat answers for every spelling the volume
     /// resolves, and this crate's fold equates only ASCII case — so the entry
-    /// is the one spelling its directory lists, and every name on the way down
-    /// is confirmed against that listing. A caller converging derived state
-    /// reads [`PathKind::Missing`] at the other spellings, which is what a
-    /// derivation from zero over this tree holds there.
-    ///
-    /// **A name the walk does not descend leaves nothing below it**, so a path
-    /// under an excluded root, a shadow basename, a link or an entry that is
-    /// not a directory is `Missing` here too. Which root that is, and why, is
-    /// [`Self::skip_reaching`]'s to state; this answers only about the end of
-    /// the path.
-    pub fn path_kind(&self, relative: &Path) -> Result<PathKind, WalkError> {
+    /// is the one spelling its directory lists, and every name of the path, the
+    /// last one included, is confirmed against the listing that renders it. A
+    /// caller converging derived state reads `Missing` at the other spellings,
+    /// which is what a derivation from zero over this tree holds there.
+    pub fn reach(&self, relative: &Path) -> Result<Reach, WalkError> {
         let subtree = self.normalize(relative)?;
+        if let Some((root, reason)) = self.exclusions.covering_root(&subtree) {
+            return Ok(Reach::Refused(SkipFact {
+                path: root.clone(),
+                reason: reason.into(),
+            }));
+        }
+        let directory = match self.descend(names_above(&subtree))? {
+            Descent::Reached(directory) => directory,
+            Descent::Stopped { path, stop } => {
+                return Ok(match stop {
+                    Stop::Skipped(reason) => Reach::Refused(SkipFact { path, reason }),
+                    Stop::Vanished => Reach::Stands(PathKind::Missing),
+                    Stop::NotADirectory => Reach::Refused(SkipFact {
+                        path: subtree,
+                        reason: SkipReason::UnderAnEntry,
+                    }),
+                });
+            }
+        };
         let Some(name) = subtree.as_path().file_name() else {
             // The vault root itself, which this vault holds open.
-            return Ok(PathKind::Directory);
+            return Ok(Reach::Stands(PathKind::Directory));
         };
-        let Descent::Reached(directory) = self.descend(names_above(&subtree))? else {
-            return Ok(PathKind::Missing);
-        };
+        if self.names_a_shadow(name) {
+            return Ok(Reach::Refused(SkipFact {
+                path: subtree,
+                reason: SkipReason::Shadow,
+            }));
+        }
         let access = self.root.join(subtree.as_path());
         if self.case_sensitivity() == CaseSensitivity::Insensitive
             && !lists_the_spelling(&self.normalizer, &directory, name, &access)?
         {
-            return Ok(PathKind::Missing);
+            return Ok(Reach::Stands(PathKind::Missing));
         }
         crate::reads::count_stat();
         let metadata = match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(metadata) => metadata,
             Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => {
-                return Ok(PathKind::Missing);
+                return Ok(Reach::Stands(PathKind::Missing));
             }
             Err(source) => return Err(environment_errno("stating", &access, source)),
         };
-        Ok(
+        Ok(Reach::Stands(
             match classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) {
                 EntryKind::Directory => PathKind::Directory,
                 EntryKind::File => PathKind::RegularFile,
                 EntryKind::Symlink | EntryKind::Special(_) => PathKind::Other,
             },
-        )
+        ))
     }
 
     /// Descends `names` from this vault's root, deciding each name the way the
@@ -767,6 +743,26 @@ pub struct FileStat {
     pub identity: Identity,
 }
 
+/// What [`Vault::reach`] found at one caller-supplied path: a root the walk
+/// states a notation at instead of reading through, or the kind that stands at
+/// the end of the path.
+///
+/// **The two arms are the whole answer, and neither half is available alone.**
+/// A refusal is decided before a kind is: a path under an excluded root, under
+/// or at a Norn shadow basename, under a symbolic link, or under an entry that
+/// is not a directory is [`Reach::Refused`] and no kind is read at it — so a
+/// caller cannot see a document the walk refuses to reach. A path the walk does
+/// reach is [`Reach::Stands`], and the kind there is the last name's own, with
+/// [`PathKind::Missing`] for a name that is not there or a spelling this root's
+/// tree does not list.
+#[derive(Clone, Debug)]
+pub enum Reach {
+    /// The root the walk stops at, and the notation it states there.
+    Refused(SkipFact),
+    /// What stands at the end of the path.
+    Stands(PathKind),
+}
+
 /// One root the walk read nothing under, and why.
 ///
 /// Most are roots Norn deliberately does not enter. One is not: a name that went
@@ -820,7 +816,7 @@ pub enum SkipReason {
     /// root is a spelling the vault holds nothing at, and holds nothing at for
     /// as long as that entry stands.
     ///
-    /// [`Vault::skip_reaching`] is what states it, for a caller deciding one
+    /// [`Vault::reach`] is what states it, for a caller deciding one
     /// name it never enumerated. A walk carries it in no fact of its own: a
     /// frontier is a directory or it is nothing, so a subtree walk named
     /// through such an entry reads nothing at the name and says
@@ -2261,7 +2257,7 @@ mod tests {
     ///
     /// The two answers differ, so a caller telling "Norn will not read this
     /// name" from "this name left" gets the same reading from a subtree walk
-    /// that it gets from [`Vault::skip_reaching`].
+    /// that it gets from [`Vault::reach`].
     #[test]
     fn a_shadow_spelled_subtree_root_vanishes_where_no_entry_stands_at_it() {
         let scratch = Scratch::new("walk-subtree-shadow-absent");
@@ -2406,9 +2402,9 @@ mod tests {
 
         let window = crate::reads::ReadWindow::open();
         let frontier = open_subtree(&vault, &subtree).expect("the descent");
-        let kind = vault
-            .path_kind(Path::new("notes/note.md"))
-            .expect("the kind");
+        let Reach::Stands(kind) = vault.reach(Path::new("notes/note.md")).expect("the kind") else {
+            panic!("the walk reaches this name")
+        };
         let tally = window.finish();
 
         assert!(matches!(frontier, Frontier::Open(_)), "the subtree opened");
@@ -2416,6 +2412,51 @@ mod tests {
         assert_eq!(
             tally.walk_dirents, 0,
             "a root whose stat is exact read {} directory entries to descend",
+            tally.walk_dirents
+        );
+    }
+
+    /// **A folding root reads one listing per name, once.** The confirmation a
+    /// fold makes necessary is O(siblings) per component, so reaching one
+    /// caller-supplied path must read each name above the last one exactly once
+    /// and the last name's own parent exactly once.
+    ///
+    /// Every directory in the tree holds one entry, so each listing that is
+    /// taken counts one entry and the tally is the number of listings.
+    ///
+    /// The sensitivity is supplied rather than detected, so this binds on every
+    /// host — including the ones whose own volumes tell spellings apart.
+    #[test]
+    fn a_folding_root_reads_each_name_s_listing_once_to_reach_a_path() {
+        let scratch = Scratch::new("walk-descent-folding-cost");
+        scratch.directory("vault/notes/deep");
+        scratch.place("notes/deep/note.md", b"body");
+        let root = scratch.at("");
+        let vault = Vault {
+            root: Arc::new(root.clone()),
+            root_fd: Arc::new(open(&root, directory_flags(), Mode::empty()).expect("root fd")),
+            normalizer: PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive),
+            exclusions: Exclusions::new(
+                &PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive),
+                &[],
+            )
+            .expect("no host roots"),
+        };
+
+        let window = crate::reads::ReadWindow::open();
+        let reached = vault
+            .reach(Path::new("notes/deep/note.md"))
+            .expect("a decided name");
+        let tally = window.finish();
+
+        assert!(
+            matches!(reached, Reach::Stands(PathKind::RegularFile)),
+            "the walk reaches this name and a document is at it"
+        );
+        assert_eq!(
+            tally.walk_dirents, 3,
+            "reaching a two-name path on a folding root read {} directory \
+             entries, where one listing per name is three",
             tally.walk_dirents
         );
     }
@@ -2926,11 +2967,10 @@ mod tests {
         std::os::unix::fs::symlink("../real", scratch.at("dir/link")).expect("link");
 
         let vault = Vault::open(&scratch.at(""), &[PathBuf::from("excluded")]).expect("a vault");
-        let skip = |relative: &str| {
-            vault
-                .skip_reaching(Path::new(relative))
-                .expect("a decided name")
-                .map(|fact| (fact.path().as_path().to_owned(), fact.reason()))
+        let skip = |relative: &str| match vault.reach(Path::new(relative)).expect("a decided name")
+        {
+            Reach::Refused(fact) => Some((fact.path().as_path().to_owned(), fact.reason())),
+            Reach::Stands(_) => None,
         };
         assert_eq!(
             skip("dir/norn-shadow-7-2/note.md"),
@@ -2975,10 +3015,39 @@ mod tests {
         assert_eq!(skip("dir"), None, "a directory the walk enters");
     }
 
+    /// **A name the walk never descends to stands at nothing, for every
+    /// caller.** An excluded root and a shadow basename are refusals of the
+    /// whole range below them, so no reading of one path answers with what an
+    /// exact stat would find there.
+    #[test]
+    fn a_name_the_walk_never_descends_to_holds_no_kind() {
+        let scratch = Scratch::new("vault-reach-refused");
+        scratch.directory("vault/excluded/deep");
+        scratch.directory("vault/dir/norn-shadow-7-2");
+        scratch.place("excluded/deep/note.md", b"body");
+        scratch.place("dir/norn-shadow-7-2/note.md", b"body");
+
+        let vault = Vault::open(&scratch.at(""), &[PathBuf::from("excluded")]).expect("a vault");
+        let refusal =
+            |relative: &str| match vault.reach(Path::new(relative)).expect("a decided name") {
+                Reach::Refused(fact) => Ok((fact.path().as_path().to_owned(), fact.reason())),
+                Reach::Stands(kind) => Err(kind),
+            };
+        assert_eq!(
+            refusal("excluded/deep/note.md"),
+            Ok((PathBuf::from("excluded"), SkipReason::HostExclusion)),
+            "a document under an excluded root"
+        );
+        assert_eq!(
+            refusal("dir/norn-shadow-7-2"),
+            Ok((PathBuf::from("dir/norn-shadow-7-2"), SkipReason::Shadow)),
+            "a shadow basename as the last name"
+        );
+    }
+
     /// **A name that is not there is not one of the walk's refusals.** No path
     /// the descent finds no name for holds anything, so the vault states no
-    /// notation and leaves that whole reading to [`Vault::path_kind`], which
-    /// answers the same absence for the whole path.
+    /// notation and answers [`PathKind::Missing`] for the whole path instead.
     ///
     /// The last name's own spelling is read after the descent, not before it,
     /// so an absent ancestor answers for a shadow basename below it rather than
@@ -2998,10 +3067,10 @@ mod tests {
             "norn-shadow-3-3/x.md",
         ] {
             assert!(
-                vault
-                    .skip_reaching(Path::new(absent))
-                    .expect("a decided name")
-                    .is_none(),
+                matches!(
+                    vault.reach(Path::new(absent)).expect("a decided name"),
+                    Reach::Stands(PathKind::Missing)
+                ),
                 "{absent}"
             );
         }
@@ -3024,12 +3093,13 @@ mod tests {
 
         let vault = Vault::open(&scratch.at(""), &[]).expect("a vault");
         for blocked in ["plain.md/under.md", "pipe/under.md", "plain.md/a/b.md"] {
+            let Reach::Refused(fact) = vault.reach(Path::new(blocked)).expect("a decided name")
+            else {
+                panic!("{blocked} is a name the walk refuses")
+            };
             assert_eq!(
-                vault
-                    .skip_reaching(Path::new(blocked))
-                    .expect("a decided name")
-                    .map(|fact| (fact.path().as_path().to_owned(), fact.reason())),
-                Some((PathBuf::from(blocked), SkipReason::UnderAnEntry)),
+                (fact.path().as_path().to_owned(), fact.reason()),
+                (PathBuf::from(blocked), SkipReason::UnderAnEntry),
                 "{blocked}"
             );
         }
@@ -3052,10 +3122,13 @@ mod tests {
 
         let facts = paths(walk(&scratch.at(""), &[]).expect("walk"));
         let vault = Vault::open(&scratch.at(""), &[]).expect("a vault");
-        let spelled_lower = vault
-            .skip_reaching(Path::new("norn-shadow-7-2/note.md"))
+        let spelled_lower = match vault
+            .reach(Path::new("norn-shadow-7-2/note.md"))
             .expect("a decided name")
-            .map(|fact| fact.reason());
+        {
+            Reach::Refused(fact) => Some(fact.reason()),
+            Reach::Stands(_) => None,
+        };
         if vault.case_sensitivity() == CaseSensitivity::Sensitive {
             assert!(
                 facts.contains(&(PathBuf::from("NORN-SHADOW-7-2/note.md"), None)),

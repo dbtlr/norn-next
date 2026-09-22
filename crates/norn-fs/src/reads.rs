@@ -49,8 +49,8 @@ pub struct ReadTally {
     pub document_opens: u64,
     /// The stats those same two acts take, and only those: the `fstat`
     /// `open_regular_at` reads a reached file's kind from, the `statat`
-    /// it tells a symbolic link from a non-directory with, [`crate::Vault::path_kind`]'s
-    /// stat of the root an invalidation names, and the walk's own five — the
+    /// it tells a symbolic link from a non-directory with, [`crate::Vault::reach`]'s
+    /// stat of the last name of a path a caller supplied, and the walk's own five — the
     /// frontier entry it is about to classify, a directory entry whose kind the
     /// stream did not report, the re-stat that pages an entry, the target of
     /// a symbolic link it is classifying, and the `fstat` of a file the walk
