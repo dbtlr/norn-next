@@ -242,11 +242,14 @@ mod address;
 mod base64url;
 mod cursor;
 mod demand;
+mod document;
 mod error;
 mod finding;
+mod finding_row;
 mod name;
 mod predicate;
 mod product;
+mod read;
 mod reading;
 mod reload;
 mod target;
@@ -261,11 +264,24 @@ pub use cursor::{
     Cursor, CursorKey, CursorOrderChanged, FacetKind, Moved, NonFiniteScore, Page, Score, Snapshot,
 };
 pub use demand::AttachMode;
+pub use document::{
+    BlockRow, Collection, Column, DocumentPath, DocumentRow, FieldValue, HeadingRow, LinkFamily,
+    LinkHealth, LinkRow, Span, TagRow, TagSource,
+};
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
+pub use finding_row::{CANDIDATE_HEAD, Candidate, FindingRow, Hint, TotalBelowHead};
 pub use name::{IllegalVaultName, VaultName};
 pub use predicate::Predicate;
 pub use product::{Unsatisfied, VaultAnswer};
+pub use read::count::{CountParams, CountReport, GroupKey, Tally};
+pub use read::describe::{
+    ContainerKind, DescribeParams, DescribeReport, Facet, FieldType, PathRuleKind,
+};
+pub use read::find::{Direction, FindParams, FindReport, Sort, SortKey};
+pub use read::get::{CollectionPage, CollectionSelector, GetParams, GetReport};
+pub use read::search::{EmptyLadder, Hit, RungSet, SearchParams, SearchReport};
+pub use read::validate::{KindTally, ValidateParams, ValidateReport};
 pub use reading::{
     AnswerReading, EngineSection, Freshness, LadderDeclaration, ModelIdentity, Rung, RungReport,
 };

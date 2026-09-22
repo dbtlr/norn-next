@@ -36,9 +36,11 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::cursor::CursorOrderChanged;
 use crate::demand::AttachMode;
+use crate::finding_row::{Candidate, Hint, TotalBelowHead, bounded_head};
 use crate::name::VaultName;
 use crate::reading::Rung;
 use crate::reload::ReloadFailure;
+use crate::target::ResolutionTarget;
 use crate::trust::{NotReady, UntrustedReason};
 
 /// Who holds a contended maintainer lock, as far as its diagnostic says.
@@ -137,6 +139,16 @@ pub enum ReasonCode {
     /// that contains the directory.
     #[serde(rename = "vault/ambiguous-root")]
     VaultAmbiguousRoot,
+    /// `vault/ambiguous-target` — the target the request named resolves to
+    /// more than one document, so there is no one document to answer about.
+    /// The detail is the target, the bounded head of what it resolves to, and
+    /// what to ask to see the whole class.
+    #[serde(rename = "vault/ambiguous-target")]
+    VaultAmbiguousTarget,
+    /// `vault/unknown-target` — the target the request named resolves to no
+    /// document in this vault. The detail is the target.
+    #[serde(rename = "vault/unknown-target")]
+    VaultUnknownTarget,
     /// `vault/reload-busy` — the vault is serving and something is already
     /// working over it, so the reload was not started. The detail carries
     /// nothing: the ask is repeated rather than resolved.
@@ -272,6 +284,33 @@ pub enum ErrorDetail {
         /// typed name.
         candidates: Vec<VaultName>,
     },
+    /// The detail of `vault/ambiguous-target`: the target, the head of the
+    /// documents it resolves to, and the request that enumerates the rest. It
+    /// is the same bounded head and the same hint a finding over the class
+    /// carries, so a refusal and a finding say one thing.
+    #[serde(rename = "vault/ambiguous-target")]
+    #[non_exhaustive]
+    AmbiguousTarget {
+        /// The target the request named.
+        target: ResolutionTarget,
+        /// The head of the documents it resolves to, in the resolution
+        /// ladder's order.
+        candidates: Vec<Candidate>,
+        /// How many documents it resolves to, which is what makes the
+        /// candidates a head.
+        candidates_total: u64,
+        /// What to ask to see the whole class.
+        hint: Hint,
+    },
+    /// The detail of `vault/unknown-target`: the target the request named.
+    #[serde(rename = "vault/unknown-target")]
+    #[non_exhaustive]
+    UnknownTarget {
+        /// The target the request named, echoed back as the typed target: the
+        /// request named it through the grammar, and the refusal hands the
+        /// same parsed value back.
+        target: ResolutionTarget,
+    },
     /// The detail of `vault/reload-busy`, which carries nothing.
     #[serde(rename = "vault/reload-busy")]
     ReloadBusy {},
@@ -397,6 +436,31 @@ impl ErrorDetail {
         ErrorDetail::AmbiguousRoot { candidates }
     }
 
+    /// The detail of `vault/ambiguous-target`, for the `target` that resolves
+    /// to `candidates_total` documents, or the reason the head is no head.
+    ///
+    /// The head is bounded here by the same function a finding row's is, so
+    /// the refusal and the finding carry one head.
+    pub fn ambiguous_target(
+        target: ResolutionTarget,
+        candidates: impl IntoIterator<Item = Candidate>,
+        candidates_total: u64,
+        hint: Hint,
+    ) -> Result<Self, TotalBelowHead> {
+        Ok(ErrorDetail::AmbiguousTarget {
+            target,
+            candidates: bounded_head(candidates, candidates_total)?,
+            candidates_total,
+            hint,
+        })
+    }
+
+    /// The detail of `vault/unknown-target`, for the `target` that resolves to
+    /// no document.
+    pub const fn unknown_target(target: ResolutionTarget) -> Self {
+        ErrorDetail::UnknownTarget { target }
+    }
+
     /// The detail of `vault/reload-busy`.
     pub const fn reload_busy() -> Self {
         ErrorDetail::ReloadBusy {}
@@ -451,6 +515,8 @@ impl ErrorDetail {
             ErrorDetail::ReaderUnavailable { .. } => ReasonCode::HostReaderUnavailable,
             ErrorDetail::RegistryUnwritable { .. } => ReasonCode::HostRegistryUnwritable,
             ErrorDetail::AmbiguousRoot { .. } => ReasonCode::VaultAmbiguousRoot,
+            ErrorDetail::AmbiguousTarget { .. } => ReasonCode::VaultAmbiguousTarget,
+            ErrorDetail::UnknownTarget { .. } => ReasonCode::VaultUnknownTarget,
             ErrorDetail::ReloadBusy { .. } => ReasonCode::VaultReloadBusy,
             ErrorDetail::ReloadFailed { .. } => ReasonCode::VaultReloadFailed,
             ErrorDetail::CursorOrderChanged { .. } => ReasonCode::VaultCursorOrderChanged,
@@ -539,6 +605,14 @@ impl<'de> Deserialize<'de> for ErrorEnvelope {
 mod tests {
     use super::*;
 
+    use crate::document::DocumentPath;
+
+    /// The target the two target refusals are read against, parsed through the
+    /// grammar the type keeps.
+    fn a_target() -> ResolutionTarget {
+        ResolutionTarget::new("glossary").expect("a legal resolution target")
+    }
+
     /// Every code the vocabulary holds, read back out of the schema the derive
     /// produces: the list is the enum's own, not one maintained beside it.
     fn every_code() -> Vec<(String, ReasonCode)> {
@@ -578,6 +652,8 @@ mod tests {
             ReasonCode::HostReaderUnavailable => "host/reader-unavailable",
             ReasonCode::HostRegistryUnwritable => "host/registry-unwritable",
             ReasonCode::VaultAmbiguousRoot => "vault/ambiguous-root",
+            ReasonCode::VaultAmbiguousTarget => "vault/ambiguous-target",
+            ReasonCode::VaultUnknownTarget => "vault/unknown-target",
             ReasonCode::VaultReloadBusy => "vault/reload-busy",
             ReasonCode::VaultReloadFailed => "vault/reload-failed",
             ReasonCode::VaultCursorOrderChanged => "vault/cursor-order-changed",
@@ -623,6 +699,17 @@ mod tests {
             ReasonCode::VaultAmbiguousRoot => ErrorDetail::ambiguous_root(
                 ["notes", "vault"].map(|text| VaultName::new(text).expect("a legal vault name")),
             ),
+            ReasonCode::VaultAmbiguousTarget => ErrorDetail::ambiguous_target(
+                a_target(),
+                [Candidate::new(
+                    DocumentPath::new("notes/glossary.md").expect("a legal document path"),
+                    "notes/glossary",
+                )],
+                2,
+                Hint::resolves(a_target()),
+            )
+            .expect("a head no larger than its total"),
+            ReasonCode::VaultUnknownTarget => ErrorDetail::unknown_target(a_target()),
             ReasonCode::VaultReloadBusy => ErrorDetail::reload_busy(),
             ReasonCode::VaultReloadFailed => {
                 ErrorDetail::reload_failed(ReloadFailure::unsupported())

@@ -45,7 +45,9 @@ use crate::trust::TrustState;
 ///
 /// On the wire a rung is the flat string itself: `"lexical"`, `"vector"`,
 /// `"expansion"`, `"rerank"`.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Rung {
