@@ -3257,7 +3257,7 @@ fn a_candidate_list_is_bounded_at_the_head_wherever_it_is_built() {
 
 /// The bound is the vocabulary's, so it holds on the way in as well as on the
 /// way out: bytes carrying nine candidates are bytes nothing here minted, and
-/// both carriers of a head refuse them rather than reading a head no bound
+/// the finding row and the refusal refuse them rather than reading a head no bound
 /// covers.
 #[test]
 fn a_head_wider_than_the_bound_refuses_the_read() {
