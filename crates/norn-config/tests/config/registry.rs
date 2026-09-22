@@ -341,11 +341,41 @@ fn a_malformed_entry_is_refused_with_the_reason() {
     }
 }
 
+/// The parser's own projection, read off bytes it did not write: a registry
+/// file holding every field a registration has reads back as the whole
+/// registration, compared as one value. The round trip above pairs the
+/// renderer with the parser, so a field both dropped would cancel out; this
+/// one pins the read side alone against a registration built here.
+#[test]
+fn every_field_a_registry_file_holds_is_projected_whole() {
+    let scratch = Scratch::new("projection");
+    let dirs = scratch.dirs();
+    scratch.place(
+        &scratch.registry_file(),
+        "version = 1\n\n[vaults.notes]\nroot = \"/home/person/notes\"\n\
+         schema_source = \"/home/person/schemas/notes.yaml\"\npoll_backend = \"poll\"\n",
+    );
+
+    let mut expected: Registration = entry("notes", "/home/person/notes");
+    expected.schema_source =
+        Some(SchemaSource::new("/home/person/schemas/notes.yaml").expect("a schema source"));
+    expected.poll_backend = Some(PollBackend::Poll);
+
+    let read = registry::read(dirs).expect("the registry");
+    assert_eq!(read.get(&name("notes")), Some(&expected));
+}
+
 /// The registry entry and the registration that crosses the client/host seam
 /// are one type, so what the file round-trips is the registration itself. Both
 /// fields that have a default are exercised present and absent, all four
 /// combinations, because each is written and read on its own and a pair that
 /// only ever moved together would hide a field the renderer dropped.
+///
+/// The comparison is whole-value rather than field by field, which is what
+/// makes this the test that catches the parser's alias seam: `Registration` is
+/// `#[non_exhaustive]` and foreign, so a field added to it is defaulted by the
+/// parser rather than refused by the compiler, and only a whole-value
+/// comparison notices a field a producer set and the parser did not project.
 #[test]
 fn a_registration_round_trips_through_the_file_over_every_combination() {
     for (with_source, with_backend) in [(false, false), (false, true), (true, false), (true, true)]

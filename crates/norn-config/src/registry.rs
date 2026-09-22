@@ -181,6 +181,15 @@ impl Registry {
                 };
 
             raw.insert(name.clone(), table);
+            // `Registration` is `#[non_exhaustive]` and belongs to another
+            // crate, so a field added to it is filled in here by
+            // `Entry::new`'s default rather than refused by the compiler: this
+            // parser goes on compiling while projecting nothing for the new
+            // key. What catches that is the registry file's round trip —
+            // `a_registration_round_trips_through_the_file_over_every_combination`
+            // and its siblings compare the read-back registration to the
+            // written one whole, so a field a producer sets and this parser
+            // does not project comes back unequal.
             let mut entry = Entry::new(name.clone(), root);
             entry.schema_source = schema_source;
             entry.poll_backend = poll_backend;
