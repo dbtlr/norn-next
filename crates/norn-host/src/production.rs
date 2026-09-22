@@ -172,7 +172,6 @@ pub struct ProductionAttachment {
     /// the vault, and refusing the attach would hide the vault instead of
     /// saying why. So the coverage, the store and the maintainer lock are all
     /// held, and this is what the entry publishes over them.
-    undeclarable_schema: Option<String>,
     /// The maintainer lock, declared last because fields drop in declaration
     /// order: an attachment dropped rather than released gives its resources
     /// back in the order [`release`] gives them back, so the lock never ends
@@ -692,13 +691,13 @@ impl EntryOps for ProductionEntryOps {
             _shadows: shadows,
             last_shadow_sweep: Instant::now(),
             store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
-            undeclarable_schema: candidate.undeclarable().map(str::to_string),
         };
-        if attachment.undeclarable_schema.is_some() {
+        if candidate.undeclarable().is_some() {
             // Nothing is pinned and nothing is derived under a declaration this
             // build cannot read. The attachment stands so the vault is
             // observable and so a demand can read the schema again; what it is
-            // holding back is published as the entry's trust.
+            // holding back is published as the entry's trust, read off the
+            // controls the attachment holds.
             return Ok(attachment);
         }
         Self::pin_candidate(&mut attachment.store, &candidate)?;
@@ -786,8 +785,7 @@ impl EntryOps for ProductionEntryOps {
         attachment._own_writes = own_writes;
         attachment._shadows = shadows;
         attachment.covered_root = covered_root;
-        attachment.undeclarable_schema = candidate.undeclarable().map(str::to_string);
-        if attachment.undeclarable_schema.is_some() {
+        if candidate.undeclarable().is_some() {
             // The same stance the attach takes: coverage is re-installed, the
             // schema is re-read, and a declaration this build still cannot read
             // pins nothing and derives nothing. A recovery run after the schema
@@ -859,11 +857,16 @@ impl EntryOps for ProductionEntryOps {
         Some(attachment.covered_root.clone())
     }
 
+    /// Read off the controls the attachment holds, so the answer is about the
+    /// declaration the attachment is serving under whichever leg pinned it:
+    /// an attach and a recovery hold the candidate they read, a reload that
+    /// pins a candidate holds that one, and a reload that refuses one keeps
+    /// what was pinned.
     fn withheld_trust(&self, attachment: &Self::Attachment) -> Option<UntrustedReason> {
         attachment
-            .undeclarable_schema
-            .clone()
-            .map(UntrustedReason::schema_unreadable)
+            .controls
+            .undeclarable()
+            .map(|detail| UntrustedReason::schema_unreadable(detail.to_string()))
     }
 
     fn poll(
@@ -3586,6 +3589,51 @@ mod tests {
             assert_eq!(inspection.active_fingerprints, active);
             assert_eq!(inspection.last_reload_error, Some(error));
         }
+    }
+
+    /// **What the ops withhold trust for is the declaration the attachment is
+    /// serving under, and a reload that replaces the declaration replaces the
+    /// answer.** An attachment that stands over a schema this build cannot read
+    /// withholds trust; a reload that pins a corrected one is serving under
+    /// that one from its return, and withholds nothing. A reload that refuses
+    /// a candidate keeps the pinned declaration and keeps its answer with it.
+    #[test]
+    fn a_reload_that_pins_a_readable_schema_withholds_nothing_afterwards() {
+        let f = Fixture::new("undeclarable-schema-reload-refresh");
+        fs::write(f.vault().join(".norn/schema.yaml"), "version: 9\n").unwrap();
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap());
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&registration, &progress).unwrap();
+        assert!(
+            matches!(
+                ops.withheld_trust(&attachment),
+                Some(UntrustedReason::SchemaUnreadable { .. })
+            ),
+            "the attach over a schema this build cannot read withheld nothing"
+        );
+
+        fs::write(f.vault().join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        let outcome = ops.reload(&name, &mut attachment, &progress).unwrap();
+        assert_eq!(outcome, ReloadOutcome::SchemaChanged);
+        assert_eq!(
+            ops.withheld_trust(&attachment),
+            None,
+            "the reload pinned a declaration this build reads, and the attachment still \
+             withholds trust for the one it replaced"
+        );
+
+        fs::write(f.vault().join(".norn/schema.yaml"), "version: 9\n").unwrap();
+        ops.reload(&name, &mut attachment, &progress)
+            .expect_err("a schema this build cannot act on reloaded");
+        assert_eq!(
+            ops.withheld_trust(&attachment),
+            None,
+            "a refused reload changed what the attachment withholds"
+        );
+        ops.detach(&name, attachment);
     }
 
     /// **A schema this build cannot read does not hide the vault.** The attach

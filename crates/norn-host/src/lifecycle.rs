@@ -291,6 +291,13 @@ pub trait EntryOps: Send + Sync + 'static {
     /// entry owes a recovery from there, which is the leg that reads the
     /// declaration again — a corrected one returns the vault to service.
     ///
+    /// Every leg that publishes over coverage it acquired or replaced reads
+    /// this where it ends — the attach, the recovery, and rung 3 — so no leg
+    /// publishes `Ready` over coverage the ops say nothing may be derived
+    /// under. The handle the leg mints with the coverage stands either way; a
+    /// read never reaches it, because acquisition refuses on the published
+    /// demand before the slot is consulted.
+    ///
     /// The default withholds nothing.
     fn withheld_trust(&self, _: &Self::Attachment) -> Option<UntrustedReason> {
         None
@@ -4228,6 +4235,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.claim.release();
                     state.pending.merge(observed);
                     state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    let withheld = shared.ops.withheld_trust(&attachment);
                     // The store inside this coverage is not the store the
                     // entry's reader was minted from, so the handle is minted
                     // again here: this is the one leg that swaps an attached
@@ -4240,10 +4248,20 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     // damaged while a detach queued behind it would be stating
                     // a fact about a file that no longer exists.
                     state.clear_rebuild();
-                    state.trust = TrustState::Ready;
-                    let next = if state.detach_due {
+                    let next = if let Some(reason) = withheld {
+                        // The rung built over a declaration this build cannot
+                        // act on, and publishes what an attach or a recovery
+                        // publishes over one: the reason, and the recovery
+                        // that reads the declaration again owed beside it.
+                        state.require_recovery();
+                        state.pending.merge(Batch::rescan(RescanScope::Vault));
+                        state.trust = TrustState::untrusted(reason);
+                        schedule_due_detach(&mut state, &name)
+                    } else if state.detach_due {
+                        state.trust = TrustState::Ready;
                         schedule_due_detach(&mut state, &name)
                     } else if state.pending.is_empty() && !handoff_saturated {
+                        state.trust = TrustState::Ready;
                         None
                     } else {
                         state.trust = trust_for_pending_reconcile(&state.pending);
@@ -10644,6 +10662,72 @@ mod tests {
         ops.rebuild_release.store(true, Ordering::SeqCst);
         wait_for_one_rebuild_to_ready(&host, &name, &ops);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+    }
+
+    /// **A rebuild that completes over coverage whose trust is withheld
+    /// publishes the withheld reason, not `Ready`.** Rung 3 is a publisher of
+    /// `Ready` at the ops seam, the same as an attach and a recovery, and it
+    /// reads the same answer they do: coverage the ops say nothing may be
+    /// derived under owes the recovery that reads the declaration again, and
+    /// the entry says so. What the rung built is kept — the store it replaced
+    /// is gone — and the verdict it resolved is retired with it.
+    ///
+    /// The case arms the withholding while the rung is running, which is the
+    /// one moment an attach or a recovery cannot have answered it: what the
+    /// entry publishes at the rung's end is decided at the rung's end.
+    #[test]
+    fn a_rebuild_over_coverage_whose_trust_is_withheld_publishes_the_withheld_reason() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        arrange_for(&ops.damaged_maintenance_at, &name);
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        arrange_for(&ops.maintenance_due_at, &name);
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        ops.withholds_trust.store(true, Ordering::SeqCst);
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+
+        wait_until(
+            "the rung to end publishing the reason the ops withhold trust for",
+            lifecycle_wait_budget(),
+            || {
+                let rebuilds = ops.rebuilds.load(Ordering::SeqCst);
+                match host.state(&name) {
+                    Err(envelope)
+                        if rebuilds == 1
+                            && matches!(
+                                envelope.detail(),
+                                ErrorDetail::EntryUntrusted {
+                                    reason: UntrustedReason::SchemaUnreadable { .. },
+                                    ..
+                                }
+                            ) =>
+                    {
+                        Observed::Met(())
+                    }
+                    other => Observed::pending(format!(
+                        "{rebuilds} rebuilds, the entry publishes {other:?}"
+                    )),
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+        let state = entry.gate.lock().expect("entry gate poisoned");
+        assert!(
+            state.recovery_required,
+            "the entry publishes a withheld reason and owes no recovery, which nothing clears"
+        );
+        assert!(
+            !state.rebuild_required,
+            "the rung resolved the verdict, and the entry still owes it"
+        );
+        assert!(state.coverage.in_hand(), "the rung's coverage was not kept");
+        drop(state);
+        drop(lease);
     }
 
     /// The verdict a watcher poll reports reaches the same rung, and the entry
