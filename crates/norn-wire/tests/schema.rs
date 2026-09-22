@@ -11,7 +11,23 @@
 //! restating it.
 
 use norn_wire::{
-    Addressing, Advisory, Anchor, AnswerReading, AttachMode, Attention, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage, CollectionSelector, Column, ContainerKind, CountParams, CountReport, Cursor, CursorKey, DescribeParams, DescribeReport, Direction, DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, Moved, NotReady, Page, PathRuleKind, PollBackend, Predicate, Published, ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport, RungSet, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    Addressing, Advisory, Anchor, AnswerReading, AttachMode, Attention, BlockRow, BodyText,
+    CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage,
+    CollectionSelector, Column, ContainerKind, CountParams, CountReport, Cursor, CursorKey,
+    DescribeParams, DescribeReport, Direction, DoctorRegistryParams, DoctorRegistryReport,
+    DocumentPath, DocumentRow, Drift, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
+    ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindReport, FindingKind,
+    FindingRow, FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
+    Hint, Hit, KindTally, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport,
+    MaintainerIdentity, Moved, NotReady, Page, PathRuleKind, PollBackend, Predicate, Published,
+    ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
+    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace, RequestScope,
+    ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport, RungSet,
+    SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity, Snapshot,
+    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
+    TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams,
+    ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb,
+    WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;

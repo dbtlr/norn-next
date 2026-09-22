@@ -28,6 +28,16 @@
 //! standing is those two readings disagreeing, and a status that carried only
 //! one of them could not say so.
 //!
+//! **Two readings here are typed before anything produces them.** No call
+//! graph reaches an [`Advisory`] yet: the host retains the shadow home's
+//! placement at attach, and that retention lands with NORN-231, which is what
+//! `doctor` and the vault-local temporary directory work read this seam
+//! through. `freshness` on a standing [`EngineStatus`] is `None` for the same
+//! kind of reason: the engine reports a watermark once the five engine seams
+//! land with NORN-230. Both are spelled now because the shape a status answer
+//! takes is not a handler's to choose, so the handlers that arrive render
+//! these rather than minting readings of their own.
+//!
 //! **A roll-up is derived from the statuses it rolls up.** Its counts and the
 //! attention it names are computed from a list of [`VaultStatus`], so nothing
 //! can hand across a roll-up whose counts disagree with the vaults beside it.
