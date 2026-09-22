@@ -19,7 +19,7 @@ use crate::heading::Heading;
 use crate::line_ending::LineEnding;
 use crate::link::{Link, parse_wikilinks_in_text};
 use crate::section::{SectionAddress, SectionError, SectionSpan};
-use crate::span::{LineCursor, split_lines_inclusive};
+use crate::span::{LineCursor, split_lines_inclusive, trailing_break};
 use crate::tag::{Tag, frontmatter_tag_name};
 use crate::value::{KeyIndex, Mapping, Value};
 
@@ -655,7 +655,7 @@ impl<'a> Document<'a> {
             // splice ends a line is the crate's break rule: a lone `\r` ends
             // one, so a document written with them already has its separator
             // and gains no second one.
-            if start > 0 && !self.source[..start].ends_with(['\n', '\r']) {
+            if start > 0 && trailing_break(&self.source[..start]).is_none() {
                 replacement.push_str(terminator);
             }
             append_with_terminator(&mut replacement, content, self.line_ending);
