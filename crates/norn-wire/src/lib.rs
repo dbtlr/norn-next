@@ -87,10 +87,13 @@
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
 //!   advertised schema and the emitted bytes are one description. It too is
 //!   written by hand where a derive would advertise a shape the reader does
-//!   not accept: [`DocumentPath`] and [`Cursor`] are strings a derive would
-//!   describe as newtypes, [`RungSet`] carries the `minItems` floor its read
-//!   path keeps, and [`CandidateHead`] carries the `maxItems` ceiling its read
-//!   path keeps, read off [`CANDIDATE_HEAD`] so the bound has one spelling.
+//!   not accept. Eight types do: the grammars [`VaultName`], [`VaultRoot`],
+//!   [`SchemaSource`], [`DocumentPath`] and [`ResolutionTarget`] advertise the
+//!   pattern or floor their constructors hold; [`Cursor`] is one opaque string
+//!   rather than the fields a derive would emit; [`RungSet`] carries the
+//!   `minItems` floor its read path keeps; and [`CandidateHead`] carries the
+//!   `maxItems` ceiling its read path keeps, read off [`CANDIDATE_HEAD`] so
+//!   the bound has one spelling.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.
 //!
 //! **Enums are internally tagged with an explicit tag name, never externally
