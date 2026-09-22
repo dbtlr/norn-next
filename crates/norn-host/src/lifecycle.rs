@@ -2294,7 +2294,7 @@ pub struct ReadHold<O: EntryOps> {
     /// the drop that ends the read, which is the one place it is taken: a
     /// snapshot stands from the hold's making to the hold's end.
     snapshot: Option<<<O::Attachment as SnapshotSource>::Reader as ReadSource>::Snapshot>,
-    reading: AnswerReading,
+    reading: HoldReading,
     /// The demand this read holds on the entry for its own length. Declared
     /// last because fields drop in declaration order: the pin goes back in
     /// this type's own drop, under the gate, and the lease takes the gate
@@ -2307,7 +2307,7 @@ impl<O: EntryOps> ReadHold<O> {
     /// The reading this read is answered under: the demand the entry published
     /// when the hold was taken, and the store reading its snapshot was
     /// established at.
-    pub fn reading(&self) -> &AnswerReading {
+    pub fn reading(&self) -> &HoldReading {
         &self.reading
     }
 
@@ -2378,19 +2378,25 @@ impl<O: EntryOps> Drop for ReadHold<O> {
     }
 }
 
-/// The reading one read was answered under.
+/// What a [`ReadHold`] was taken under: the demand the entry published, and
+/// the store reading its snapshot was established at.
+///
+/// Host-local, and named apart from `norn-wire`'s `AnswerReading`, which is
+/// what a vault answer carries on the wire. This one carries a host-local
+/// [`Demand`] and a host-local [`StoreReading`]; a surface renders the wire
+/// type out of it rather than handing this one across the seam.
 ///
 /// **The demand, never the label underneath it.** A park outranks the trust
 /// state an entry publishes, so a reading taken off the raw label would say
 /// `Ready` across a park; this carries the demand the entry published, which
 /// is the one value every other surface renders too.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AnswerReading {
+pub struct HoldReading {
     published: Demand,
     store: StoreReading,
 }
 
-impl AnswerReading {
+impl HoldReading {
     /// What the entry published at the instant the hold was taken.
     pub fn published(&self) -> &Demand {
         &self.published
@@ -3266,7 +3272,7 @@ impl<O: EntryOps> Host<O> {
             entry,
             reader,
             snapshot: Some(established.snapshot),
-            reading: AnswerReading {
+            reading: HoldReading {
                 published,
                 store: established.reading,
             },
@@ -4728,8 +4734,15 @@ fn run_reload_job<O: EntryOps>(
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     state.unpin_leg(Leg::Job(epoch));
     if !state.claim.stands_at(epoch) {
+        // The claim this job ran under was taken away while it ran, so the
+        // reload it asked for is not the work that stands over this entry any
+        // more. What the asker is told is where the entry stands now, read off
+        // the gate under the same hold — the same value the prologue of this
+        // job reports for the same condition, and the same one the epilogue
+        // below reports for a detach in flight.
+        let trust = state.trust.clone();
         drop(state);
-        let _ = reply.send(Err(ReloadRefusal::Unavailable(TrustState::Unattached)));
+        let _ = reply.send(Err(ReloadRefusal::Unavailable(trust)));
         return Some(attachment);
     }
     if state.detach_in_flight {
@@ -6606,6 +6619,48 @@ mod tests {
         .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(response, Ok(()));
         assert_eq!(host.state(&name), answered(TrustState::Ready));
+    }
+
+    /// A reload whose claim is taken away while it runs reports where the
+    /// entry stands, not a state the send site invented. The claim goes with
+    /// an identity park, so what the asker is told is the park's own refusal —
+    /// the same value the status surface answers with — rather than
+    /// `Unattached`, which would say the entry holds nothing at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_reload_whose_claim_was_taken_away_reports_the_trust_the_entry_stands_at() {
+        let scratch = temp_base("reload-claim-superseded");
+        let base = scratch.root();
+        let root = base.join("root");
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.block_reload.store(true, Ordering::SeqCst);
+        let name = VaultName::new("notes").unwrap();
+        let host = Arc::new(host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let reloading = Arc::clone(&host);
+        let reload_name = name.clone();
+        let reload = thread::spawn(move || reloading.reload(&reload_name));
+        wait_for_flag("reload_started", &ops.reload_started);
+
+        refuse_root_identity(&root);
+        park_on_current_classification(&host.shared, &name);
+        let park = entry_park(host.as_ref(), &name);
+        let Some(Demand::IdentityRefused(detail)) = park.clone() else {
+            panic!("the entry stands on no identity park: {park:?}");
+        };
+        ops.reload_release.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            reload.join().unwrap(),
+            Err(ReloadRefusal::Unavailable(TrustState::untrusted(
+                UntrustedReason::environmental_refusal(detail)
+            ))),
+            "the reload reported a state the send site invented"
+        );
+        drop(host);
     }
 
     #[test]

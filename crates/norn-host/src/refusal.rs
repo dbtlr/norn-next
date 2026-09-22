@@ -26,9 +26,11 @@
 //! **A refusal a request earns renders here; the host being gone does not.**
 //! [`ReloadRefusal::answer`] hands back an envelope for everything a reload
 //! can be refused for and `Err(HostError)` for the one thing that is not a
-//! refusal at all: the worker pool has stopped, so no reload was attempted and
-//! there is nothing about the vault to report. A code minted for it would
-//! describe the vault, and what stopped is the host.
+//! refusal at all: the worker pool has stopped, so no reload outcome was
+//! learned and there is nothing about the vault to report. The reply channel
+//! can fail after the reload was dispatched as well as before it, so what the
+//! host can say is that it learned nothing, never that nothing ran. A code
+//! minted for it would describe the vault, and what stopped is the host.
 //!
 //! **A read cannot answer with a state, and that is the one place these
 //! mappings differ.** [`Demand::answer`] hands a warming or unattached entry
@@ -102,14 +104,14 @@ impl ServingRefusal {
     /// are `host/…` and both echo the name: what a caller does about either
     /// one is addressed to that name.
     ///
-    /// Nothing in this crate calls it yet. The serving set is changed by the
-    /// registry verbs — `vault register` and `vault unregister` — and this is
-    /// the rendering those verbs refuse through; they land above this layer,
-    /// and the mapping lands here because the vocabulary an answer is spelled
-    /// in is not a surface's to choose.
+    /// Nothing calls it yet. The serving set is changed by the registry verbs
+    /// — `vault register` and `vault unregister` — and this is the rendering
+    /// those verbs refuse through. Their handlers land in this crate
+    /// (NORN-231), which is why the visibility is `pub(crate)`: the mapping
+    /// waits for the handler beside it rather than for a surface above it.
     #[allow(
         dead_code,
-        reason = "the registry verbs that refuse through this mapping land above this layer"
+        reason = "the registry verbs that refuse through this mapping land in NORN-231"
     )]
     pub(crate) fn answer(self, name: &VaultName) -> ErrorEnvelope {
         match self {
@@ -133,13 +135,21 @@ impl ReloadRefusal {
     /// was asked for.
     ///
     /// Every reload outcome is a fact about the vault, so every one of them is
-    /// `vault/…` — except the two the host answers before a reload is a thing
-    /// that happened at all: a name the registry does not hold, and an entry
-    /// that holds nothing to reload yet.
+    /// `vault/…` — except the three the host answers before a reload is a
+    /// thing that happened at all: a name the registry does not hold
+    /// (`host/unknown-vault`), an entry that holds nothing to reload yet
+    /// (`host/entry-not-ready`), and an entry whose derived state cannot be
+    /// trusted (`host/entry-untrusted`).
     ///
     /// `Err(HostError)` is the host being gone rather than the vault refusing.
-    /// It carries no code and no detail: no reload was attempted, so there is
-    /// nothing about the vault to report.
+    /// It carries no code and no detail: no reload outcome was learned, so
+    /// there is nothing about the vault to report.
+    ///
+    /// Nothing calls it yet. The `vault reload` handler is the one caller this
+    /// mapping has, and it lands above this layer (NORN-230); the mapping
+    /// lands here because the vocabulary an answer is spelled in is not a
+    /// surface's to choose, so the handler that arrives renders this rather
+    /// than minting refusals of its own.
     pub fn answer(self, name: &VaultName) -> Result<ErrorEnvelope, HostError> {
         Ok(match self {
             ReloadRefusal::UnknownVault => ErrorEnvelope::new(
@@ -224,35 +234,51 @@ impl ReadRefusal {
     /// This refusal in the wire vocabulary, for the vault `name` the read was
     /// asked for.
     ///
-    /// A read has nothing to answer with but rows, so a demand that answers
-    /// with a state becomes a refusal here: [`TrustState::not_ready`] is what
-    /// files a warming or unattached entry under `host/entry-not-ready`.
+    /// A read has nothing to answer with but rows, so every read refusal is an
+    /// envelope: [`TrustState::not_ready`] is what files a warming or
+    /// unattached entry under `host/entry-not-ready`, and a demand that is
+    /// already a refusal keeps its own.
     ///
-    /// `Ok` is the residue that mapping leaves, and today it holds only
-    /// [`TrustState::Ready`] — a demand the lifecycle never publishes as
-    /// `NotServing`, because an entry that is ready is serving. A caller
-    /// handed one is holding a defect in whoever built the refusal and refuses
-    /// the request rather than answering from it; it is returned rather than
-    /// panicked on, because a wire mapping is not the place a host asserts its
-    /// own invariants.
-    pub fn answer(self, name: &VaultName) -> Result<TrustState, ErrorEnvelope> {
+    /// **A `Ready` demand renders too, and it is this mapping's own reading of
+    /// a shape the host never produces.** `NotServing(Demand::State(Ready))`
+    /// is constructible and `begin_read` never builds one, because an entry
+    /// that is ready is serving. Read as a refusal it says exactly one thing:
+    /// the entry published `Ready` and served every surface but this read,
+    /// which is what `host/reader-unavailable` means and what no other code
+    /// here means. So it renders under that code rather than being returned to
+    /// a caller as a state, and a read that met it is refused rather than
+    /// answered from an entry that gave it nothing.
+    ///
+    /// Nothing calls it yet. The read verbs — `find`, `search`, `get`,
+    /// `count`, `validate`, `describe` — are the callers this mapping has, and
+    /// their handlers land above this layer (NORN-230/231); the mapping lands
+    /// here because the vocabulary an answer is spelled in is not a surface's
+    /// to choose.
+    pub fn answer(self, name: &VaultName) -> ErrorEnvelope {
         match self {
-            ReadRefusal::NotServing(demand) => {
-                let state = demand.answer(name)?;
-                match state.not_ready() {
-                    Some(not_ready) => Err(ErrorEnvelope::new(
+            ReadRefusal::NotServing(demand) => match demand.answer(name) {
+                Err(envelope) => envelope,
+                Ok(state) => match state.not_ready() {
+                    Some(not_ready) => ErrorEnvelope::new(
                         "this vault holds nothing to answer the read from yet",
                         ErrorDetail::entry_not_ready(not_ready),
-                    )),
-                    None => Ok(state),
-                }
-            }
-            ReadRefusal::ReaderUnavailable(reason) => Err(ErrorEnvelope::new(
-                "this vault is served and its read seam is not, so the read is refused",
-                ErrorDetail::reader_unavailable(reason.detail()),
-            )),
+                    ),
+                    None => reader_unavailable(
+                        "the entry published `ready` and served every surface but this read",
+                    ),
+                },
+            },
+            ReadRefusal::ReaderUnavailable(reason) => reader_unavailable(reason.detail()),
         }
     }
+}
+
+/// The envelope an entry that is serving with no read seam refuses with.
+fn reader_unavailable(detail: impl Into<String>) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        "this vault is served and its read seam is not, so the read is refused",
+        ErrorDetail::reader_unavailable(detail),
+    )
 }
 
 /// The state a demand answers with, or the refusal that state is.
@@ -807,7 +833,9 @@ mod reload_tests {
 
 #[cfg(test)]
 mod read_tests {
-    use norn_wire::{ErrorDetail, NotReady, TrustState, UntrustedReason, VaultName, WarmingPhase};
+    use norn_wire::{
+        ErrorDetail, NotReady, ReasonCode, TrustState, UntrustedReason, VaultName, WarmingPhase,
+    };
 
     use crate::lifecycle::{Demand, ReadRefusal, ReaderUnavailable};
 
@@ -831,9 +859,8 @@ mod read_tests {
                 NotReady::warming(WarmingPhase::ReleasingCoverage, 0, None),
             ),
         ] {
-            let envelope = ReadRefusal::NotServing(Demand::State(state.clone()))
-                .answer(&name("notes"))
-                .expect_err("a read over an entry that holds nothing refuses");
+            let envelope =
+                ReadRefusal::NotServing(Demand::State(state.clone())).answer(&name("notes"));
             assert_eq!(
                 envelope.detail(),
                 &ErrorDetail::entry_not_ready(expected),
@@ -850,16 +877,13 @@ mod read_tests {
         let envelope = ReadRefusal::NotServing(Demand::State(TrustState::untrusted(
             UntrustedReason::WatcherOverflow,
         )))
-        .answer(&name("notes"))
-        .expect_err("an untrusted entry refuses");
+        .answer(&name("notes"));
         assert_eq!(
             envelope.detail(),
             &ErrorDetail::entry_untrusted(UntrustedReason::WatcherOverflow)
         );
 
-        let envelope = ReadRefusal::NotServing(Demand::UnknownVault)
-            .answer(&name("ledger"))
-            .expect_err("an unknown vault refuses");
+        let envelope = ReadRefusal::NotServing(Demand::UnknownVault).answer(&name("ledger"));
         assert_eq!(
             envelope.detail(),
             &ErrorDetail::unknown_vault(name("ledger"))
@@ -873,22 +897,29 @@ mod read_tests {
         let envelope = ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
             "this coverage mints no read handle",
         ))
-        .answer(&name("notes"))
-        .expect_err("a read seam that is down refuses");
+        .answer(&name("notes"));
         assert_eq!(
             envelope.detail(),
             &ErrorDetail::reader_unavailable("this coverage mints no read handle")
         );
     }
 
-    /// The residue the mapping leaves is a ready entry, which the lifecycle
-    /// never publishes as a read refusal. It is handed back rather than
-    /// panicked on, and a caller refuses the request over it.
+    /// A `Ready` demand is a shape the lifecycle never publishes as a read
+    /// refusal, and read as one it says the entry served every surface but
+    /// this read — which is `host/reader-unavailable` and nothing else. It
+    /// renders under that code rather than leaving the mapping as a state a
+    /// caller has to decide about.
     #[test]
-    fn a_ready_entry_is_the_residue_the_mapping_hands_back() {
-        assert_eq!(
-            ReadRefusal::NotServing(Demand::State(TrustState::Ready)).answer(&name("notes")),
-            Ok(TrustState::Ready)
+    fn a_ready_entry_read_as_a_refusal_is_the_read_seam_being_down() {
+        let envelope =
+            ReadRefusal::NotServing(Demand::State(TrustState::Ready)).answer(&name("notes"));
+        assert_eq!(envelope.code(), &ReasonCode::HostReaderUnavailable);
+        let ErrorDetail::ReaderUnavailable { detail, .. } = envelope.detail() else {
+            panic!("a ready entry refused under another detail: {envelope:?}");
+        };
+        assert!(
+            detail.contains("ready") && detail.contains("this read"),
+            "the account does not say the entry served every surface but this read: {detail}"
         );
     }
 }

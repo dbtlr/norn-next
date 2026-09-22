@@ -154,6 +154,11 @@ impl std::error::Error for SemanticRefusal {}
 /// This is reached only where the entry is ready; a vault that is not ready
 /// refuses on its answer reading long before a rung is dispatched.
 ///
+/// Nothing calls it yet. The `search` handler is the one caller this
+/// composition has, and it lands above this layer (NORN-230): it is the layer
+/// that holds a delivered engine section beside the engine that answered, so
+/// no call graph reaches this until that handler arrives.
+///
 /// Both matches carry no wildcard, so a refusal or a section minted without a
 /// row here does not compile.
 pub fn compose_vector_refusal(section: &EngineSection, refusal: SemanticRefusal) -> ErrorEnvelope {

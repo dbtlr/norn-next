@@ -28,8 +28,8 @@ pub use evidence::{ReadReading, ReadsSince};
 #[cfg(feature = "induced-failure")]
 pub use lifecycle::WorkInFlight;
 pub use lifecycle::{
-    AnswerReading, Demand, DemandLease, EntryOps, EntryReloadFailure, Established, Establishment,
-    Healing, Host, HostError, JobFailure, LifecyclePolicy, LifecyclePolicyError, MintedReader,
+    Demand, DemandLease, EntryOps, EntryReloadFailure, Established, Establishment, Healing,
+    HoldReading, Host, HostError, JobFailure, LifecyclePolicy, LifecyclePolicyError, MintedReader,
     ProgressReporter, ReadHold, ReadRefusal, ReadSource, ReaderUnavailable, ReconcileWork,
     SnapshotSource,
 };
