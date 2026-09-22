@@ -57,12 +57,13 @@
 //! [`ReloadFailure`], with the [`ControlFileFailure`] — a [`ControlFile`] and
 //! the [`ReloadStage`] it refused at — that three of its carriers hold alone.
 //! [`Directory`] is a directory a client asks a question about, the third
-//! path grammar beside [`VaultRoot`] and [`SchemaSource`]. [`EngineSection`] is what a host was delivered as a
-//! vault's engine section, which is what a status answer reports and what a
-//! vector refusal is composed against.
+//! path grammar beside [`VaultRoot`] and [`SchemaSource`]. [`EngineSection`]
+//! is what a host was delivered as a vault's engine section, which is what a
+//! status answer reports and what a vector refusal is composed against.
 //!
-//! The eight verbs of the vault namespace and [`doctor`](DoctorRegistryParams)'s
-//! registry half are spelled the same way: [`RegisterParams`] answering
+//! The seven verbs of the vault namespace and
+//! [`doctor`](DoctorRegistryParams)'s registry half are spelled the same
+//! way: [`RegisterParams`] answering
 //! [`RegisterReport`], [`UnregisterParams`] answering [`UnregisterReport`],
 //! [`ListParams`] answering [`ListReport`], [`SetParams`] — whose every field
 //! is a [`Change`], or a [`Replace`] where the field has no default to be
@@ -224,8 +225,8 @@
 //! [`StatusReport`], [`RegistrySanity`] and [`RegistryProblem`] variant,
 //! [`VaultStatus::new`], [`RollUp::of`], [`Change::keep`], [`Change::set`],
 //! [`Change::clear`], [`Replace::keep`], [`Replace::set`],
-//! [`EngineHealth::new`], and the `new` on each of the eight vault-namespace
-//! params types and on each of their reports.
+//! [`EngineHealth::new`], and the `new` on each of the seven vault-namespace
+//! params types, on [`DoctorRegistryParams`], and on each of their reports.
 //!
 //! **A closed vocabulary whose every reader must decide what a new member
 //! means is plain rather than `#[non_exhaustive]`.** The two rules answer two
