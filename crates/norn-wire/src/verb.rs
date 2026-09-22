@@ -1,10 +1,18 @@
 //! What a request asks for, and what it is answered from.
 //!
-//! **A scope is what a verb reaches, not who wrote it.** The three scopes
+//! **A scope is what a request reaches, not who wrote it.** The three scopes
 //! partition every request by the state that answers it: one vault's entry,
-//! the serving set and the registry, or the installation itself. A surface
-//! reads a verb's scope to know whether it must be handed a vault address at
-//! all, and the host reads it to know which door the request comes in by.
+//! the serving set and the registry, or the installation itself. The host
+//! reads a request's scope to know which door it comes in by.
+//!
+//! **Addressing is the verb's; scope is the request's.** A verb says whether a
+//! vault address is carried — [`Addressing`] — and one verb, `vault_status`,
+//! says an address *may* be. `vault status` naming a vault reports where that
+//! vault's entry stands; `vault status` naming none reports the serving set,
+//! which is a registry request under one registry entry rather than two verbs
+//! sharing a name. [`Addressing::scope_with`] is where the two meet: the verb
+//! says what may be carried, the request says what was, and the scope follows
+//! from the pair.
 //!
 //! **`Installation` is in the vocabulary before a verb carries it.** Layer 6
 //! lands the installation verbs — self-update, service install — into this
@@ -14,10 +22,10 @@
 //! rather than the part that happens to be inhabited, and so the verbs that
 //! arrive extend the list rather than the vocabulary under it.
 //!
-//! **A verb's scope is answered where the verbs are written.** The match
-//! carries no wildcard, so a verb minted without a scope does not compile:
-//! the question is settled once, beside the list, rather than fallen through
-//! at whichever surface dispatches one.
+//! **A verb's addressing is answered where the verbs are written.** The match
+//! carries no wildcard, so a verb minted without an addressing does not
+//! compile: the question is settled once, beside the list, rather than fallen
+//! through at whichever surface dispatches one.
 
 use std::fmt;
 
@@ -91,6 +99,92 @@ impl TryFrom<&str> for RequestScope {
     }
 }
 
+/// Whether a verb's request carries a vault address.
+///
+/// On the wire an addressing is the flat string itself: `"required"`,
+/// `"none"`, `"optional"`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Addressing {
+    /// The request carries a vault address, and is answered from that vault's
+    /// entry.
+    Required,
+    /// The request carries no vault address, and is answered from the serving
+    /// set and the registry.
+    None,
+    /// The request may carry a vault address. With one it is answered from
+    /// that vault's entry; without one it is answered from the serving set and
+    /// the registry.
+    Optional,
+}
+
+impl Addressing {
+    /// Every addressing the vocabulary holds, in declaration order.
+    pub const ALL: [Addressing; 3] = [Addressing::Required, Addressing::None, Addressing::Optional];
+
+    /// The addressing as the string it is on the wire.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Addressing::Required => "required",
+            Addressing::None => "none",
+            Addressing::Optional => "optional",
+        }
+    }
+
+    /// What a request under this addressing is answered from, given whether it
+    /// carries a vault address.
+    ///
+    /// The match carries no wildcard, so an addressing minted without an
+    /// answer here does not compile. `address_present` decides the scope of an
+    /// optional addressing and is ignored by the other two, which have already
+    /// settled the question: a surface that hands `Required` no address, or
+    /// `None` one, has built a request the verb does not describe, and the
+    /// scope this reports is the verb's rather than a reading of that mistake.
+    pub const fn scope_with(&self, address_present: bool) -> RequestScope {
+        match self {
+            Addressing::Required => RequestScope::Vault,
+            Addressing::None => RequestScope::Registry,
+            Addressing::Optional => {
+                if address_present {
+                    RequestScope::Vault
+                } else {
+                    RequestScope::Registry
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Display for Addressing {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A string that spells no addressing the vocabulary holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnknownAddressing;
+
+impl fmt::Display for UnknownAddressing {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the string spells no addressing")
+    }
+}
+
+impl std::error::Error for UnknownAddressing {}
+
+impl TryFrom<&str> for Addressing {
+    type Error = UnknownAddressing;
+
+    fn try_from(string: &str) -> Result<Self, UnknownAddressing> {
+        Self::ALL
+            .into_iter()
+            .find(|addressing| addressing.as_str() == string)
+            .ok_or(UnknownAddressing)
+    }
+}
+
 /// What a request asks the host to do.
 ///
 /// On the wire a verb is the flat string itself: `"find"`, `"vault_reload"`.
@@ -118,9 +212,10 @@ pub enum Verb {
     VaultList,
     /// Change a field of one registration.
     VaultSet,
-    /// Which registered vault a root or a name resolves to.
+    /// Which registered vault contains a directory.
     VaultResolve,
-    /// Where one vault's entry stands and what it is serving from.
+    /// Where one vault's entry stands and what it is serving from, or, naming
+    /// no vault, where every entry this installation serves stands.
     VaultStatus,
     /// Re-read one vault's control files and apply what changed.
     VaultReload,
@@ -171,31 +266,34 @@ impl Verb {
         }
     }
 
-    /// What this verb is answered from.
+    /// Whether this verb's request carries a vault address.
     ///
-    /// The match carries no wildcard: a verb minted without a scope does not
-    /// compile, because a surface deciding whether to demand a vault address
-    /// and a host deciding which door to route through both read the answer
-    /// from here.
-    pub const fn scope(&self) -> RequestScope {
+    /// The match carries no wildcard: a verb minted without an addressing does
+    /// not compile, because a surface deciding whether to demand a vault
+    /// address reads the answer from here, and the scope a host routes by
+    /// follows from it through [`Addressing::scope_with`].
+    pub const fn addressing(&self) -> Addressing {
         match self {
-            // Answered from one vault's entry, under a hold of that entry.
+            // A vault address is carried, and the request is answered from
+            // that vault's entry under a hold of it.
             Verb::Find
             | Verb::Search
             | Verb::Get
             | Verb::Count
             | Verb::Validate
             | Verb::Describe
-            | Verb::VaultStatus
-            | Verb::VaultReload => RequestScope::Vault,
-            // Answered from the serving set and the registry, naming no vault
-            // entry to be held.
+            | Verb::VaultReload => Addressing::Required,
+            // No vault address is carried; the request is answered from the
+            // serving set and the registry, naming no entry to be held.
             Verb::VaultRegister
             | Verb::VaultUnregister
             | Verb::VaultList
             | Verb::VaultSet
             | Verb::VaultResolve
-            | Verb::DoctorRegistry => RequestScope::Registry,
+            | Verb::DoctorRegistry => Addressing::None,
+            // One vault's standing, or every entry's. Naming a vault reports
+            // that entry; naming none reports the serving set.
+            Verb::VaultStatus => Addressing::Optional,
         }
     }
 }

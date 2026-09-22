@@ -11,12 +11,12 @@
 //! restating it.
 
 use norn_wire::{
-    Anchor, AnswerReading, AttachMode, Cursor, CursorKey, EngineSection, ErrorDetail,
+    Addressing, Anchor, AnswerReading, AttachMode, Cursor, CursorKey, EngineSection, ErrorDetail,
     ErrorEnvelope, FacetKind, FindingKind, FindingScope, Freshness, MaintainerIdentity, Moved,
     NotReady, Page, PollBackend, Predicate, ReasonCode, ReloadFailure, RequestScope,
-    ResolutionTarget, Rung, SchemaSource, Severity, Snapshot, TrustState, Unsatisfied,
-    UntrustedReason, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb, WarmingPhase,
-    WatcherLossCause,
+    ResolutionTarget, Rung, RungReport, SchemaSource, Score, Severity, Snapshot, TrustState,
+    Unsatisfied, UntrustedReason, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb,
+    WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -114,6 +114,7 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<VaultAddress>(),
         schema_of::<Verb>(),
         schema_of::<RequestScope>(),
+        schema_of::<Addressing>(),
         schema_of::<ResolutionTarget>(),
         schema_of::<Anchor>(),
         schema_of::<Predicate>(),
@@ -125,7 +126,9 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<Page<String>>(),
         schema_of::<AnswerReading>(),
         schema_of::<Rung>(),
+        schema_of::<RungReport>(),
         schema_of::<Freshness>(),
+        schema_of::<Score>(),
         schema_of::<EngineSection>(),
         schema_of::<Unsatisfied>(),
         schema_of::<VaultAnswer<String>>(),
@@ -214,6 +217,7 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "host/entry-held",
             "host/entry-not-ready",
             "host/reader-unavailable",
+            "host/registry-unwritable",
             "vault/ambiguous-root",
             "vault/reload-busy",
             "vault/reload-failed",
@@ -383,6 +387,7 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "host/entry-held",
             "host/entry-not-ready",
             "host/reader-unavailable",
+            "host/registry-unwritable",
             "vault/ambiguous-root",
             "vault/reload-busy",
             "vault/reload-failed",
@@ -769,6 +774,33 @@ fn a_cursor_key_advertises_its_row_tag() {
         property_names(document),
         ["row", "sort", "path"].into_iter().collect()
     );
+    let hit = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "row") == Some("hit"))
+        .expect("the hit branch");
+    assert_eq!(
+        property_names(hit),
+        ["row", "score", "path"].into_iter().collect()
+    );
+    assert_eq!(
+        hit["properties"]["score"]["$ref"].as_str(),
+        Some("#/$defs/Score"),
+        "a hit restates the score grammar: {hit}"
+    );
+    assert_eq!(schema["$defs"]["Score"]["type"].as_str(), Some("number"));
+}
+
+/// A score is advertised as the bare number it is on the wire, so a surface
+/// renders the value rather than an object wrapping it. Finiteness is the read
+/// path's and is not a constraint a JSON Schema validator can state.
+#[test]
+fn a_score_advertises_the_number_it_is() {
+    let schema = schema_of::<Score>();
+    assert_eq!(schema["type"].as_str(), Some("number"));
+    assert!(
+        schema.get("properties").is_none(),
+        "a score advertises fields: {schema}"
+    );
 }
 
 #[test]
@@ -858,6 +890,71 @@ fn a_reading_advertises_the_parts_an_answer_is_judged_by() {
     assert!(
         schema["$defs"]["RungReport"].is_object(),
         "the reading carries no definition of a rung report: {schema}"
+    );
+}
+
+/// Addressing is a flat string of its own: what a verb carries, apart from the
+/// scope a request under it is answered from.
+#[test]
+fn an_addressing_advertises_its_bare_strings() {
+    assert_eq!(
+        sorted(
+            branches(&schema_of::<Addressing>())
+                .iter()
+                .map(|branch| string_constant(branch).unwrap_or_else(|| panic!(
+                    "an addressing branch is not a pinned string: {branch}"
+                )))
+        ),
+        sorted(["required", "none", "optional"])
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<RequestScope>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a scope branch is not a pinned string: {branch}"))
+        })),
+        sorted(["vault", "registry", "installation"])
+    );
+}
+
+/// A rung report advertises its `rung` tag, one branch per rung, and each
+/// branch carries what that rung holds: the floor nothing, a request-time rung
+/// its model, the stateful rung its model and its freshness.
+#[test]
+fn a_rung_report_advertises_its_rung_tag_and_what_each_rung_holds() {
+    let schema = schema_of::<RungReport>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "rung")),
+        sorted(["lexical", "vector", "expansion", "rerank"])
+    );
+    let branch = |rung: &str| {
+        branches(&schema)
+            .iter()
+            .find(|branch| tag_constant(branch, "rung") == Some(rung))
+            .unwrap_or_else(|| panic!("the {rung} branch"))
+            .clone()
+    };
+    assert_eq!(
+        property_names(&branch("lexical")),
+        ["rung"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(&branch("vector")),
+        ["rung", "model", "freshness"].into_iter().collect()
+    );
+    for rung in ["expansion", "rerank"] {
+        assert_eq!(
+            property_names(&branch(rung)),
+            ["rung", "model"].into_iter().collect(),
+            "the {rung} branch advertises a lag a request-time rung does not hold"
+        );
+    }
+    assert_eq!(
+        branch("vector")["properties"]["freshness"]["$ref"].as_str(),
+        Some("#/$defs/Freshness")
+    );
+    assert_eq!(
+        branch("rerank")["properties"]["model"]["$ref"].as_str(),
+        Some("#/$defs/ModelIdentity")
     );
 }
 
@@ -953,5 +1050,48 @@ fn a_not_ready_state_and_a_reload_failure_advertise_their_tags() {
     assert_eq!(
         not_ready["properties"]["state"]["$ref"].as_str(),
         Some("#/$defs/NotReady")
+    );
+}
+
+/// A changed order is carried whole: the detail refers to the continuation's
+/// own type rather than re-spelling its two fields, so a client that holds the
+/// struct holds what the refusal carries.
+#[test]
+fn a_changed_order_is_advertised_as_the_type_the_continuation_answers_with() {
+    let schema = schema_of::<ErrorDetail>();
+    let changed = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "code") == Some("vault/cursor-order-changed"))
+        .expect("the cursor-order-changed branch");
+    assert_eq!(
+        property_names(changed),
+        ["code", "order"].into_iter().collect()
+    );
+    assert_eq!(
+        changed["properties"]["order"]["$ref"].as_str(),
+        Some("#/$defs/CursorOrderChanged")
+    );
+    assert_eq!(
+        property_names(&schema["$defs"]["CursorOrderChanged"]),
+        ["minted_under", "current"].into_iter().collect()
+    );
+}
+
+/// The registry-write refusal advertises its account as prose beside the code,
+/// which is the whole of what it carries.
+#[test]
+fn an_unwritable_registry_advertises_its_account_as_prose() {
+    let schema = schema_of::<ErrorDetail>();
+    let unwritable = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "code") == Some("host/registry-unwritable"))
+        .expect("the registry-unwritable branch");
+    assert_eq!(
+        property_names(unwritable),
+        ["code", "detail"].into_iter().collect()
+    );
+    assert_eq!(
+        unwritable["properties"]["detail"]["type"].as_str(),
+        Some("string")
     );
 }

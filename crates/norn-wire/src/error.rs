@@ -15,6 +15,16 @@
 //! only one code fills is a field every other code leaves empty, and readers
 //! learn to check the code before believing it.
 //!
+//! **Two codes here are minted ahead of the layer that produces them.**
+//! `vault/ambiguous-root` answers a `vault resolve` ask over a directory that
+//! more than one registration contains; `host/registry-unwritable` answers a
+//! registration change whose write of the registry file refused. Both are the
+//! vault-namespace handlers' to raise, and those handlers land above this
+//! layer (NORN-231), so the call graph reaches neither from this crate today.
+//! They are spelled here because the vocabulary a refusal is spelled in is not
+//! a surface's to choose: the handler that arrives renders one of these rather
+//! than minting a string of its own.
+//!
 //! The pairing between a code and its detail is structural rather than a rule
 //! constructors keep: [`ErrorEnvelope::new`] takes the code from the detail,
 //! and the read path refuses an envelope whose code is not the code its detail
@@ -113,9 +123,18 @@ pub enum ReasonCode {
     /// not. The detail is the account the act that failed produced.
     #[serde(rename = "host/reader-unavailable")]
     HostReaderUnavailable,
-    /// `vault/ambiguous-root` — more than one registered name resolves to the
-    /// root that was asked about, so the ask names no one vault. The detail is
-    /// every name that resolves to it.
+    /// `host/registry-unwritable` — the registry file could not be written,
+    /// so the registration change was not made and the registration that
+    /// stood before it still stands. The detail is the write's own account of
+    /// what refused.
+    #[serde(rename = "host/registry-unwritable")]
+    HostRegistryUnwritable,
+    /// `vault/ambiguous-root` — the directory that was asked about is
+    /// contained by more than one registration, so the ask names no one vault.
+    /// It answers a resolution of a directory and never a request against an
+    /// entry: what a host refuses about entries it serves under names that
+    /// resolve to one root is `host/duplicate-root`. The detail is every name
+    /// that contains the directory.
     #[serde(rename = "vault/ambiguous-root")]
     VaultAmbiguousRoot,
     /// `vault/reload-busy` — the vault is serving and something is already
@@ -234,8 +253,18 @@ pub enum ErrorDetail {
         /// Clients never match on it.
         detail: String,
     },
-    /// The detail of `vault/ambiguous-root`: every registered name that
-    /// resolves to the root that was asked about.
+    /// The detail of `host/registry-unwritable`: why the registry file could
+    /// not be written.
+    #[serde(rename = "host/registry-unwritable")]
+    #[non_exhaustive]
+    RegistryUnwritable {
+        /// The write's own account of what refused, in words, for a person
+        /// reading a message or a log. Clients never match on it.
+        detail: String,
+    },
+    /// The detail of `vault/ambiguous-root`: every registered name whose
+    /// registration contains the directory that was asked about. No entry is
+    /// involved; the ask is a resolution of a directory.
     #[serde(rename = "vault/ambiguous-root")]
     #[non_exhaustive]
     AmbiguousRoot {
@@ -259,10 +288,9 @@ pub enum ErrorDetail {
     #[serde(rename = "vault/cursor-order-changed")]
     #[non_exhaustive]
     CursorOrderChanged {
-        /// The schema fingerprint the cursor was minted under.
-        minted_under: String,
-        /// The schema fingerprint the establishment reads now.
-        current: String,
+        /// The order the cursor named and the order that stands, as the
+        /// continuation's own account of the change.
+        order: CursorOrderChanged,
     },
     /// The detail of `engine/not-enabled`: which rung, and what enables it.
     #[serde(rename = "engine/not-enabled")]
@@ -350,6 +378,13 @@ impl ErrorDetail {
         }
     }
 
+    /// The detail of `host/registry-unwritable`, described by `detail`.
+    pub fn registry_unwritable(detail: impl Into<String>) -> Self {
+        ErrorDetail::RegistryUnwritable {
+            detail: detail.into(),
+        }
+    }
+
     /// The detail of `vault/ambiguous-root`, for the `candidates` the root
     /// resolves under.
     ///
@@ -372,12 +407,10 @@ impl ErrorDetail {
         ErrorDetail::ReloadFailed { failure }
     }
 
-    /// The detail of `vault/cursor-order-changed`, for the order that changed.
-    pub fn cursor_order_changed(changed: CursorOrderChanged) -> Self {
-        ErrorDetail::CursorOrderChanged {
-            minted_under: changed.minted_under,
-            current: changed.current,
-        }
+    /// The detail of `vault/cursor-order-changed`, for the `order` that
+    /// changed.
+    pub const fn cursor_order_changed(order: CursorOrderChanged) -> Self {
+        ErrorDetail::CursorOrderChanged { order }
     }
 
     /// The detail of `engine/not-enabled`, for `rung`, described by `detail`.
@@ -416,6 +449,7 @@ impl ErrorDetail {
             ErrorDetail::EntryHeld { .. } => ReasonCode::HostEntryHeld,
             ErrorDetail::EntryNotReady { .. } => ReasonCode::HostEntryNotReady,
             ErrorDetail::ReaderUnavailable { .. } => ReasonCode::HostReaderUnavailable,
+            ErrorDetail::RegistryUnwritable { .. } => ReasonCode::HostRegistryUnwritable,
             ErrorDetail::AmbiguousRoot { .. } => ReasonCode::VaultAmbiguousRoot,
             ErrorDetail::ReloadBusy { .. } => ReasonCode::VaultReloadBusy,
             ErrorDetail::ReloadFailed { .. } => ReasonCode::VaultReloadFailed,
@@ -542,6 +576,7 @@ mod tests {
             ReasonCode::HostEntryHeld => "host/entry-held",
             ReasonCode::HostEntryNotReady => "host/entry-not-ready",
             ReasonCode::HostReaderUnavailable => "host/reader-unavailable",
+            ReasonCode::HostRegistryUnwritable => "host/registry-unwritable",
             ReasonCode::VaultAmbiguousRoot => "vault/ambiguous-root",
             ReasonCode::VaultReloadBusy => "vault/reload-busy",
             ReasonCode::VaultReloadFailed => "vault/reload-failed",
@@ -582,6 +617,9 @@ mod tests {
             ReasonCode::HostReaderUnavailable => {
                 ErrorDetail::reader_unavailable("this coverage mints no read handle")
             }
+            ReasonCode::HostRegistryUnwritable => {
+                ErrorDetail::registry_unwritable("the registry file is read-only")
+            }
             ReasonCode::VaultAmbiguousRoot => ErrorDetail::ambiguous_root(
                 ["notes", "vault"].map(|text| VaultName::new(text).expect("a legal vault name")),
             ),
@@ -589,9 +627,9 @@ mod tests {
             ReasonCode::VaultReloadFailed => {
                 ErrorDetail::reload_failed(ReloadFailure::unsupported())
             }
-            ReasonCode::VaultCursorOrderChanged => {
-                ErrorDetail::cursor_order_changed(CursorOrderChanged::new("fp-1", "fp-2"))
-            }
+            ReasonCode::VaultCursorOrderChanged => ErrorDetail::cursor_order_changed(
+                CursorOrderChanged::new("fp-1", Some("fp-2".to_string())),
+            ),
             ReasonCode::EngineNotEnabled => ErrorDetail::engine_not_enabled(
                 Rung::Vector,
                 "enable the engine section in .norn/config.toml and run vault reload",

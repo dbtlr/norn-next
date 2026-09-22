@@ -20,12 +20,21 @@
 //! stateful rung has both: the model it derived under, and how far that
 //! derivation trails the store — in generations while it is draining the same
 //! database, and as a rescan while its epoch is not the store's, because a
-//! generation count across two databases compares nothing.
+//! generation count across two databases compares nothing. A rung report is a
+//! sum for that reason rather than a struct with optional halves: which halves
+//! a rung has is decided by which rung it is, so a shape that admits a
+//! request-time rung with a lag admits a report no answer can produce.
 //!
 //! **The engine section is what the host was delivered, not what a file
 //! says.** It is the reading the status verb reports and the reading a vector
 //! refusal is composed against, so "the vault has no engine" and "the vault's
 //! engine section is malformed" are two answers rather than one.
+//!
+//! Nothing produces a section today. The reading is retained at config
+//! dispatch by the `search` handler's engine seams (NORN-230), which are the
+//! layer that holds a delivered section beside the engine it delivered; until
+//! those seams land, the host composes a vector refusal from a section a
+//! caller supplies and no call graph reaches one it retained.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -105,38 +114,86 @@ impl Freshness {
 }
 
 /// What one rung of the ladder contributed to this answer.
+///
+/// On the wire a report is an object tagged `rung`:
+/// `{"rung":"lexical"}`, `{"rung":"rerank","model":{"id":"…","version":"…"}}`.
+/// Each rung carries exactly what that rung has: the floor runs no model and
+/// holds no state, a request-time rung names its model, and the one stateful
+/// rung names its model and how far its derived state trails.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "rung", rename_all = "snake_case")]
 #[non_exhaustive]
-pub struct RungReport {
-    /// The rung that ran.
-    pub rung: Rung,
-    /// The model it ran, and `null` for a rung that runs none.
-    pub model: Option<ModelIdentity>,
-    /// How far its derived state trails the store, and `null` for a rung that
-    /// holds none.
-    pub freshness: Option<Freshness>,
+pub enum RungReport {
+    /// The model-free floor ran: full-text matching over the store.
+    Lexical {},
+    /// Nearest neighbours over the vault's derived vectors ran.
+    #[non_exhaustive]
+    Vector {
+        /// The model the vectors were derived under.
+        model: ModelIdentity,
+        /// How far that derivation trails the store.
+        freshness: Freshness,
+    },
+    /// Query expansion by a model at request time ran.
+    #[non_exhaustive]
+    Expansion {
+        /// The model that expanded the query.
+        model: ModelIdentity,
+    },
+    /// Re-ordering of the candidates by a model at request time ran.
+    #[non_exhaustive]
+    Rerank {
+        /// The model that re-ordered the candidates.
+        model: ModelIdentity,
+    },
 }
 
 impl RungReport {
-    /// The rung `rung` ran, under `model`, at `freshness`.
-    pub const fn new(
-        rung: Rung,
-        model: Option<ModelIdentity>,
-        freshness: Option<Freshness>,
-    ) -> Self {
-        RungReport {
-            rung,
-            model,
-            freshness,
+    /// The model-free floor ran.
+    pub const fn lexical() -> Self {
+        RungReport::Lexical {}
+    }
+
+    /// The vector rung ran, derived under `model`, at `freshness`.
+    pub const fn vector(model: ModelIdentity, freshness: Freshness) -> Self {
+        RungReport::Vector { model, freshness }
+    }
+
+    /// Query expansion ran, under `model`.
+    pub const fn expansion(model: ModelIdentity) -> Self {
+        RungReport::Expansion { model }
+    }
+
+    /// Re-ranking ran, under `model`.
+    pub const fn rerank(model: ModelIdentity) -> Self {
+        RungReport::Rerank { model }
+    }
+
+    /// Which rung this is a report of.
+    ///
+    /// The match carries no wildcard, so a report minted without a rung does
+    /// not compile: [`Rung`] stays the flat selector a request names a rung
+    /// by, and this is the one place the two lists are held together.
+    pub const fn rung(&self) -> Rung {
+        match self {
+            RungReport::Lexical {} => Rung::Lexical,
+            RungReport::Vector { .. } => Rung::Vector,
+            RungReport::Expansion { .. } => Rung::Expansion,
+            RungReport::Rerank { .. } => Rung::Rerank,
         }
     }
 }
 
 /// The ladder this answer ran.
+///
+/// The rungs are reports rather than a repeated flat shape: each one carries
+/// what that rung has and nothing it does not, so a request-time rung cannot
+/// be spelled with a lag it never held.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct LadderDeclaration {
-    /// The rungs that ran, in the order they ran.
+    /// The rungs that ran, in the order they ran, each carrying what that
+    /// rung contributed.
     pub rungs: Vec<RungReport>,
     /// Whether the same request against the same reading produces the same
     /// rows in the same order.

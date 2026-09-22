@@ -14,14 +14,14 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Anchor, AnswerReading, AttachMode, ControlFile, Cursor, CursorKey, CursorOrderChanged,
-    EngineSection, ErrorDetail, ErrorEnvelope, FacetKind, FindingKind, FindingScope, Freshness,
-    LadderDeclaration, MaintainerIdentity, ModelIdentity, Moved, NotReady, Page, PollBackend,
-    Predicate, ReasonCode, ReloadFailure, ReloadStage, RequestScope, ResolutionTarget, Rung,
-    RungReport, SchemaSource, Severity, Snapshot, TrustState, UnknownFindingKind,
-    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, Unsatisfied,
-    UntrustedReason, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb, WarmingPhase,
-    WatcherLossCause,
+    Addressing, Anchor, AnswerReading, AttachMode, ControlFile, Cursor, CursorKey,
+    CursorOrderChanged, EngineSection, ErrorDetail, ErrorEnvelope, FacetKind, FindingKind,
+    FindingScope, Freshness, LadderDeclaration, MaintainerIdentity, ModelIdentity, Moved,
+    NonFiniteScore, NotReady, Page, PollBackend, Predicate, ReasonCode, ReloadFailure, ReloadStage,
+    RequestScope, ResolutionTarget, Rung, RungReport, SchemaSource, Score, Severity, Snapshot,
+    TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
+    UnknownSeverity, UnknownVerb, Unsatisfied, UntrustedReason, VaultAddress, VaultAnswer,
+    VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -115,6 +115,7 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::HostEntryHeld,
         ReasonCode::HostEntryNotReady,
         ReasonCode::HostReaderUnavailable,
+        ReasonCode::HostRegistryUnwritable,
         ReasonCode::VaultAmbiguousRoot,
         ReasonCode::VaultReloadBusy,
         ReasonCode::VaultReloadFailed,
@@ -175,9 +176,14 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::already_served(name("notes")),
         ErrorDetail::entry_held(name("notes")),
         ErrorDetail::reader_unavailable("this coverage mints no read handle"),
+        ErrorDetail::registry_unwritable("the registry file is read-only"),
         ErrorDetail::ambiguous_root([name("notes"), name("vault")]),
         ErrorDetail::reload_busy(),
-        ErrorDetail::cursor_order_changed(CursorOrderChanged::new("fp-1", "fp-2")),
+        ErrorDetail::cursor_order_changed(CursorOrderChanged::new(
+            "fp-1",
+            Some("fp-2".to_string()),
+        )),
+        ErrorDetail::cursor_order_changed(CursorOrderChanged::new("fp-1", None)),
     ]);
     details.extend(
         not_ready_states()
@@ -254,6 +260,11 @@ fn request_scopes() -> Vec<RequestScope> {
     RequestScope::ALL.to_vec()
 }
 
+/// Every way a verb carries a vault address.
+fn addressings() -> Vec<Addressing> {
+    Addressing::ALL.to_vec()
+}
+
 /// One target a vector names a document by, parsed through the grammar the
 /// type keeps.
 fn target(text: &str) -> ResolutionTarget {
@@ -277,8 +288,8 @@ fn resolution_targets() -> Vec<ResolutionTarget> {
 /// Every part the conjunction admits, one per operator.
 fn predicates() -> Vec<Predicate> {
     vec![
-        Predicate::eq("type", "note"),
-        Predicate::not_eq("type", "note"),
+        Predicate::equal_to("type", "note"),
+        Predicate::not_equal_to("type", "note"),
         Predicate::in_any("type", ["note".to_string(), "task".to_string()]),
         Predicate::has("due"),
         Predicate::missing("due"),
@@ -309,12 +320,17 @@ fn movements() -> Vec<Moved> {
     vec![Moved::Epoch, Moved::Generation, Moved::SidecarRevision]
 }
 
+/// A finite score, built through the grammar the type keeps.
+fn score(value: f64) -> Score {
+    Score::new(value).expect("a finite relevance score")
+}
+
 /// Every paged row type, with one key per shape its order takes.
 fn cursor_keys() -> Vec<CursorKey> {
     let mut keys = vec![
         CursorKey::document(Some("2026-01-01".to_string()), "notes/a.md"),
         CursorKey::document(None, "notes/a.md"),
-        CursorKey::hit(0.5, "notes/a.md"),
+        CursorKey::hit(score(0.5), "notes/a.md"),
         CursorKey::tally(["note".to_string(), "open".to_string()]),
         CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", 7),
         CursorKey::ordinal(3),
@@ -331,9 +347,17 @@ fn cursor_keys() -> Vec<CursorKey> {
 fn cursors() -> Vec<Cursor> {
     let mut cursors: Vec<Cursor> = cursor_keys()
         .into_iter()
-        .map(|key| Cursor::new("epoch-1", 12, Some("fp-1".to_string()), Some(4), key))
+        .map(|key| {
+            Cursor::new(
+                Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4)),
+                key,
+            )
+        })
         .collect();
-    cursors.push(Cursor::new("epoch-1", 0, None, None, CursorKey::ordinal(0)));
+    cursors.push(Cursor::new(
+        Snapshot::new("epoch-1", 0, None, None),
+        CursorKey::ordinal(0),
+    ));
     cursors
 }
 
@@ -361,22 +385,17 @@ fn engine_sections() -> Vec<EngineSection> {
     ]
 }
 
-/// One rung report per shape a rung takes: the model-free floor, a stateful
-/// rung with both halves, and a request-time rung with a model alone.
+/// One rung report per rung: the model-free floor, the stateful rung across
+/// every freshness it can report, and the two request-time rungs.
 fn rung_reports() -> Vec<RungReport> {
-    let mut reports = vec![RungReport::new(Rung::Lexical, None, None)];
-    reports.extend(freshnesses().into_iter().map(|freshness| {
-        RungReport::new(
-            Rung::Vector,
-            Some(ModelIdentity::new("stub", "1")),
-            Some(freshness),
-        )
-    }));
-    reports.push(RungReport::new(
-        Rung::Rerank,
-        Some(ModelIdentity::new("stub", "1")),
-        None,
-    ));
+    let mut reports = vec![RungReport::lexical()];
+    reports.extend(
+        freshnesses()
+            .into_iter()
+            .map(|freshness| RungReport::vector(ModelIdentity::new("stub", "1"), freshness)),
+    );
+    reports.push(RungReport::expansion(ModelIdentity::new("stub", "1")));
+    reports.push(RungReport::rerank(ModelIdentity::new("stub", "1")));
     reports
 }
 
@@ -394,10 +413,7 @@ fn answer_readings() -> Vec<AnswerReading> {
             TrustState::Ready,
             "epoch-1",
             12,
-            Some(LadderDeclaration::new(
-                vec![RungReport::new(Rung::Lexical, None, None)],
-                true,
-            )),
+            Some(LadderDeclaration::new(vec![RungReport::lexical()], true)),
         ),
     ]
 }
@@ -633,6 +649,22 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<RequestScope>(None),
         "the scopes built here are not the scopes the vocabulary holds"
+    );
+    assert_eq!(
+        addressings()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<Addressing>(None),
+        "the addressings built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        rung_reports()
+            .iter()
+            .map(|report| tag_string(report, "rung"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<RungReport>(Some("rung")),
+        "the rung reports built here are not the ones the vocabulary holds"
     );
     assert_eq!(
         poll_backends()
@@ -1440,23 +1472,67 @@ fn every_request_scope_is_the_flat_string_it_renders_as() {
     assert_eq!(RequestScope::try_from("machine"), Err(UnknownRequestScope));
 }
 
-/// Every verb this layer lands is answered from one vault's entry or from the
-/// registry. Nothing here acts on the installation: that scope is spelled so
-/// the partition a surface reads is whole, and the verbs that carry it arrive
-/// with the layer that lands them.
 #[test]
-fn every_verb_is_scoped_to_a_vault_or_to_the_registry() {
-    let scoped = |scope: RequestScope| {
+fn every_addressing_is_the_flat_string_it_renders_as() {
+    let strings = ["required", "none", "optional"];
+    assert_eq!(addressings().len(), strings.len());
+    for (addressing, string) in addressings().into_iter().zip(strings) {
+        assert_eq!(addressing.as_str(), string);
+        assert_eq!(addressing.to_string(), string);
+        assert_eq!(wire(&addressing), format!("\"{string}\""));
+        assert_eq!(Addressing::try_from(string), Ok(addressing));
+        round_trip(&addressing);
+    }
+    assert_eq!(Addressing::try_from("maybe"), Err(UnknownAddressing));
+}
+
+/// Addressing is the verb's and scope is the request's, and this is where the
+/// two meet: an optional addressing is a vault request with an address and a
+/// registry request without one, and the other two answer the same whichever
+/// way the flag reads, because the verb has already settled it.
+#[test]
+fn a_scope_follows_from_the_addressing_and_whether_an_address_was_carried() {
+    assert_eq!(
+        Addressing::Optional.scope_with(true),
+        RequestScope::Vault,
+        "an optional addressing carrying a vault is not a vault request"
+    );
+    assert_eq!(
+        Addressing::Optional.scope_with(false),
+        RequestScope::Registry,
+        "an optional addressing carrying no vault is not a registry request"
+    );
+    for carried in [true, false] {
+        assert_eq!(
+            Addressing::Required.scope_with(carried),
+            RequestScope::Vault
+        );
+        assert_eq!(Addressing::None.scope_with(carried), RequestScope::Registry);
+    }
+}
+
+/// Every verb this layer lands carries a vault address or carries none, and
+/// exactly one may carry one either way: `vault status` naming a vault reports
+/// that entry, and naming none reports the serving set, under one registry
+/// entry rather than two verbs sharing a name.
+///
+/// Nothing here acts on the installation: that scope is spelled so the
+/// partition a surface reads is whole, and the verbs that carry it arrive with
+/// the layer that lands them.
+#[test]
+fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either() {
+    let addressed = |addressing: Addressing| {
         let mut named: Vec<&str> = verbs()
             .into_iter()
-            .filter(|verb| verb.scope() == scope)
+            .filter(|verb| verb.addressing() == addressing)
             .map(|verb| verb.as_str())
             .collect();
         named.sort_unstable();
         named
     };
+    assert_eq!(Verb::ALL.len(), 14);
     assert_eq!(
-        scoped(RequestScope::Vault),
+        addressed(Addressing::Required),
         [
             "count",
             "describe",
@@ -1465,11 +1541,10 @@ fn every_verb_is_scoped_to_a_vault_or_to_the_registry() {
             "search",
             "validate",
             "vault_reload",
-            "vault_status",
         ]
     );
     assert_eq!(
-        scoped(RequestScope::Registry),
+        addressed(Addressing::None),
         [
             "doctor_registry",
             "vault_list",
@@ -1479,10 +1554,21 @@ fn every_verb_is_scoped_to_a_vault_or_to_the_registry() {
             "vault_unregister",
         ]
     );
-    assert_eq!(scoped(RequestScope::Installation), [] as [&str; 0]);
+    assert_eq!(addressed(Addressing::Optional), ["vault_status"]);
     assert_eq!(
-        scoped(RequestScope::Vault).len() + scoped(RequestScope::Registry).len(),
+        addressed(Addressing::Required).len()
+            + addressed(Addressing::None).len()
+            + addressed(Addressing::Optional).len(),
         Verb::ALL.len()
+    );
+
+    let scopes: Vec<RequestScope> = verbs()
+        .into_iter()
+        .flat_map(|verb| [true, false].map(move |carried| verb.addressing().scope_with(carried)))
+        .collect();
+    assert!(
+        !scopes.contains(&RequestScope::Installation),
+        "a verb this layer lands is answered from the installation"
     );
 }
 
@@ -1562,11 +1648,11 @@ fn a_target_is_not_percent_decoded() {
 #[test]
 fn a_predicate_is_an_object_tagged_op() {
     assert_eq!(
-        wire(&Predicate::eq("type", "note")),
+        wire(&Predicate::equal_to("type", "note")),
         r#"{"op":"eq","key":"type","value":"note"}"#
     );
     assert_eq!(
-        wire(&Predicate::not_eq("type", "note")),
+        wire(&Predicate::not_equal_to("type", "note")),
         r#"{"op":"not_eq","key":"type","value":"note"}"#
     );
     assert_eq!(
@@ -1649,11 +1735,80 @@ fn a_cursor_is_one_opaque_string_a_client_passes_back_unchanged() {
         let back: Cursor = serde_json::from_str(&json).expect("reading a cursor back");
         assert_eq!(back, cursor);
         assert_eq!(back.key(), cursor.key());
-        assert_eq!(back.epoch(), cursor.epoch());
-        assert_eq!(back.generation(), cursor.generation());
-        assert_eq!(back.schema_fingerprint(), cursor.schema_fingerprint());
-        assert_eq!(back.sidecar_revision(), cursor.sidecar_revision());
+        assert_eq!(back.snapshot(), cursor.snapshot());
     }
+}
+
+/// One position has one spelling. A payload that carries a field the fields do
+/// not hold, writes them in another order, or leaves an optional one out
+/// decodes and parses and is still no position: the read path re-encodes what
+/// it parsed and refuses a string that is not that encoding.
+#[test]
+fn a_cursor_spelled_any_other_way_names_no_position() {
+    let canonical = concat!(
+        r#"{"snapshot":{"epoch":"e","generation":1,"schema_fingerprint":null,"#,
+        r#""sidecar_revision":null},"key":{"row":"ordinal","index":3}}"#
+    );
+    let minted = Cursor::new(Snapshot::new("e", 1, None, None), CursorKey::ordinal(3));
+    assert_eq!(
+        serde_json::from_str::<Cursor>(&opaque(canonical.as_bytes()))
+            .expect("the canonical spelling reads"),
+        minted,
+        "the canonical spelling is not the one the type mints"
+    );
+    assert_eq!(opaque(canonical.as_bytes()), wire(&minted));
+
+    let lax = [
+        // An extra field the fields do not hold.
+        concat!(
+            r#"{"snapshot":{"epoch":"e","generation":1,"schema_fingerprint":null,"#,
+            r#""sidecar_revision":null},"key":{"row":"ordinal","index":3},"page":2}"#
+        ),
+        // The same fields in another order.
+        concat!(
+            r#"{"key":{"row":"ordinal","index":3},"snapshot":{"epoch":"e","#,
+            r#""generation":1,"schema_fingerprint":null,"sidecar_revision":null}}"#
+        ),
+        // The optional parts left out rather than written null.
+        r#"{"snapshot":{"epoch":"e","generation":1},"key":{"row":"ordinal","index":3}}"#,
+    ];
+    for spelling in lax {
+        let read = serde_json::from_str::<Cursor>(&opaque(spelling.as_bytes()));
+        let error = read.expect_err(&format!("`{spelling}` was read as a cursor"));
+        assert!(
+            error.to_string().contains("names no position"),
+            "`{spelling}` refused with another account: {error}"
+        );
+    }
+}
+
+/// A score orders the ranked rows a hit cursor continues, so it is finite: a
+/// value that is not refuses when a hit key is built and when one is read.
+#[test]
+fn a_score_that_is_not_finite_is_no_score() {
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(Score::new(value), Err(NonFiniteScore), "{value} built");
+    }
+    assert_eq!(score(0.5).get(), 0.5);
+    round_trip(&score(0.5));
+    assert_eq!(wire(&score(0.5)), "0.5");
+
+    // JSON spells no non-finite number, so the read path meets one as a
+    // literal out of the range a double holds.
+    for spelling in ["1e400", "-1e400"] {
+        assert!(
+            serde_json::from_str::<Score>(spelling).is_err(),
+            "`{spelling}` was read as a score"
+        );
+    }
+    let overflowing = concat!(
+        r#"{"snapshot":{"epoch":"e","generation":1,"schema_fingerprint":null,"#,
+        r#""sidecar_revision":null},"key":{"row":"hit","score":1e400,"path":"a.md"}}"#
+    );
+    assert!(
+        serde_json::from_str::<Cursor>(&opaque(overflowing.as_bytes())).is_err(),
+        "a cursor scored beyond a double was read as one"
+    );
 }
 
 /// A string nobody minted is not a position. It refuses whether it fails the
@@ -1668,14 +1823,20 @@ fn a_cursor_nobody_minted_refuses_the_read() {
             "`{text}` was read as a cursor"
         );
     }
-    let unknown = norn_wire_test_base64(
-        br#"{"epoch":"e","generation":1,"schema_fingerprint":null,"sidecar_revision":null,"key":{"row":"shard","at":1}}"#,
+    let unknown = concat!(
+        r#"{"snapshot":{"epoch":"e","generation":1,"schema_fingerprint":null,"#,
+        r#""sidecar_revision":null},"key":{"row":"shard","at":1}}"#
     );
     assert!(
-        serde_json::from_str::<Cursor>(&serde_json::to_string(&unknown).expect("a string"))
-            .is_err(),
+        serde_json::from_str::<Cursor>(&opaque(unknown.as_bytes())).is_err(),
         "a cursor naming a row type nobody minted was read as one"
     );
+}
+
+/// `bytes` as the opaque string a cursor is spelled as, quoted as JSON, so a
+/// test hands the read path a spelling the way a writer would.
+fn opaque(bytes: &[u8]) -> String {
+    serde_json::to_string(&norn_wire_test_base64(bytes)).expect("a string as JSON")
 }
 
 /// The URL-safe alphabet, unpadded, spelled here so the test builds a hostile
@@ -1697,71 +1858,140 @@ fn norn_wire_test_base64(bytes: &[u8]) -> String {
     out
 }
 
-/// The parts a continuation reports, one at a time.
+/// The cursor every continuation rule below is read against.
+fn minted() -> Cursor {
+    Cursor::new(
+        Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4)),
+        CursorKey::ordinal(1),
+    )
+}
+
+/// An establishment that has not moved at all reports nothing.
 #[test]
-fn a_continuation_reports_each_part_that_moved() {
-    let key = || CursorKey::ordinal(1);
-    let minted = Cursor::new("epoch-1", 12, Some("fp-1".to_string()), Some(4), key());
-
+fn an_unmoved_establishment_reports_nothing() {
     let exact = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4));
-    assert_eq!(minted.continuation(&exact), Ok(vec![]));
+    assert_eq!(minted().continuation(&exact), Ok(vec![]));
+}
 
+/// A database that is not the one the cursor was minted from reports `epoch`,
+/// and the generation beside it is not reported: a rebuild restarts the write
+/// count, so a count read against another database compares nothing.
+#[test]
+fn a_rebuilt_database_reports_the_epoch_and_not_the_generation() {
     let rebuilt = Snapshot::new("epoch-2", 3, Some("fp-1".to_string()), Some(4));
-    assert_eq!(minted.continuation(&rebuilt), Ok(vec![Moved::Epoch]));
-
-    let written = Snapshot::new("epoch-1", 13, Some("fp-1".to_string()), Some(4));
-    assert_eq!(minted.continuation(&written), Ok(vec![Moved::Generation]));
-
-    let drained = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(5));
     assert_eq!(
-        minted.continuation(&drained),
-        Ok(vec![Moved::SidecarRevision])
+        minted().continuation(&rebuilt),
+        Ok(vec![Moved::Epoch, Moved::SidecarRevision])
     );
 }
 
-/// Everything at once, in the fixed order the list promises. A rebuild
-/// restarts the write count, so a generation read against another database is
-/// not a movement of its own.
+/// A generation that differs inside one epoch reports `generation` whichever
+/// way it moved. Writes landing after the cursor was minted move it forward; a
+/// count that moved backwards is a database that is not the one the cursor
+/// named, and hiding that is worse than reporting it.
 #[test]
-fn a_continuation_reports_every_part_in_one_fixed_order() {
-    let minted = Cursor::new(
-        "epoch-1",
-        12,
-        Some("fp-1".to_string()),
-        Some(4),
+fn a_generation_that_differs_in_either_direction_reports_the_generation() {
+    for generation in [13, 11] {
+        let written = Snapshot::new("epoch-1", generation, Some("fp-1".to_string()), Some(4));
+        assert_eq!(
+            minted().continuation(&written),
+            Ok(vec![Moved::Generation]),
+            "generation {generation} was not reported as moved"
+        );
+    }
+}
+
+/// A sidecar at another revision reports `sidecar_revision`, and so does one
+/// at the same number under another epoch: the revision is epoch-qualified, so
+/// two epochs share no scale for it to be compared on.
+#[test]
+fn a_sidecar_moves_with_its_revision_and_with_its_epoch() {
+    let drained = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(5));
+    assert_eq!(
+        minted().continuation(&drained),
+        Ok(vec![Moved::SidecarRevision])
+    );
+    let requalified = Snapshot::new("epoch-2", 12, Some("fp-1".to_string()), Some(4));
+    assert_eq!(
+        minted().continuation(&requalified),
+        Ok(vec![Moved::Epoch, Moved::SidecarRevision]),
+        "a revision another database qualifies was read as the same revision"
+    );
+}
+
+/// A cursor minted without a sidecar revision reports nothing about one,
+/// whatever the sidecar now answers: its position was taken without one, so
+/// there is no revision it moved from.
+#[test]
+fn a_cursor_that_read_no_sidecar_reports_nothing_about_one() {
+    let without = Cursor::new(
+        Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), None),
         CursorKey::ordinal(1),
     );
-    let moved = Snapshot::new("epoch-2", 99, Some("fp-1".to_string()), Some(5));
+    for revision in [None, Some(4)] {
+        assert_eq!(
+            without.continuation(&Snapshot::new(
+                "epoch-1",
+                12,
+                Some("fp-1".to_string()),
+                revision
+            )),
+            Ok(vec![]),
+            "a cursor that read no sidecar reported one at {revision:?}"
+        );
+    }
+}
+
+/// Everything at once, in the fixed order the list promises.
+#[test]
+fn a_continuation_reports_every_part_in_one_fixed_order() {
+    let inside = Snapshot::new("epoch-1", 99, Some("fp-1".to_string()), Some(5));
     assert_eq!(
-        minted.continuation(&moved),
+        minted().continuation(&inside),
+        Ok(vec![Moved::Generation, Moved::SidecarRevision])
+    );
+    let rebuilt = Snapshot::new("epoch-2", 99, Some("fp-1".to_string()), Some(5));
+    assert_eq!(
+        minted().continuation(&rebuilt),
         Ok(vec![Moved::Epoch, Moved::SidecarRevision])
     );
 }
 
 /// A cursor minted under one order and continued under another refuses: the
 /// rows its key names a position in are in a sequence that no longer exists.
+/// An establishment that reads no fingerprint at all is not walking that
+/// sequence either, so a typed cursor refuses there too.
 #[test]
 fn a_changed_order_refuses_the_continuation() {
-    let minted = Cursor::new(
-        "epoch-1",
-        12,
-        Some("fp-1".to_string()),
-        None,
+    let typed = Cursor::new(
+        Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), None),
         CursorKey::ordinal(1),
     );
-    let reshaped = Snapshot::new("epoch-1", 12, Some("fp-2".to_string()), None);
     assert_eq!(
-        minted.continuation(&reshaped),
-        Err(CursorOrderChanged::new("fp-1", "fp-2"))
+        typed.continuation(&Snapshot::new(
+            "epoch-1",
+            12,
+            Some("fp-2".to_string()),
+            None
+        )),
+        Err(CursorOrderChanged::new("fp-1", Some("fp-2".to_string())))
+    );
+    assert_eq!(
+        typed.continuation(&Snapshot::new("epoch-1", 12, None, None)),
+        Err(CursorOrderChanged::new("fp-1", None)),
+        "a typed cursor continued where no fingerprint stands was answered"
     );
 }
 
 /// A raw order does not change with the schema. A cursor carrying no
-/// fingerprint was not ordered by one, and a snapshot carrying none against a
-/// cursor that has one says nothing about the order either.
+/// fingerprint was not ordered by one, so nothing the establishment's schema
+/// does is a change of its order.
 #[test]
 fn a_raw_order_never_changes() {
-    let raw = Cursor::new("epoch-1", 12, None, None, CursorKey::ordinal(1));
+    let raw = Cursor::new(
+        Snapshot::new("epoch-1", 12, None, None),
+        CursorKey::ordinal(1),
+    );
     for fingerprint in [None, Some("fp-1".to_string()), Some("fp-2".to_string())] {
         assert_eq!(
             raw.continuation(&Snapshot::new("epoch-1", 12, fingerprint, None)),
@@ -1769,17 +1999,6 @@ fn a_raw_order_never_changes() {
             "a raw order was reported as changed"
         );
     }
-    let typed = Cursor::new(
-        "epoch-1",
-        12,
-        Some("fp-1".to_string()),
-        None,
-        CursorKey::ordinal(1),
-    );
-    assert_eq!(
-        typed.continuation(&Snapshot::new("epoch-1", 12, None, None)),
-        Ok(vec![])
-    );
 }
 
 /// A page carries its rows, where the next one begins, and what moved. The
@@ -1790,7 +2009,10 @@ fn a_page_carries_its_rows_its_continuation_and_what_moved() {
     assert_eq!(wire(&page), r#"{"rows":["a"],"next":null,"moved":[]}"#);
     round_trip(&page);
 
-    let cursor = Cursor::new("epoch-1", 1, None, None, CursorKey::ordinal(1));
+    let cursor = Cursor::new(
+        Snapshot::new("epoch-1", 1, None, None),
+        CursorKey::ordinal(1),
+    );
     let continued: Page<String> = Page::new(
         vec!["a".to_string()],
         Some(cursor.clone()),
@@ -1845,19 +2067,17 @@ fn a_reading_carries_the_trust_state_the_database_and_the_ladder() {
     );
 }
 
-/// The lexical floor has neither half; a stateful rung has both; a
-/// request-time rung has a model and no lag to report.
+/// A report carries what its rung has and nothing it does not: the floor
+/// neither half, the stateful rung both, a request-time rung its model alone.
+/// There is no spelling of a request-time rung with a lag, because the shape
+/// holds no field for one.
 #[test]
-fn a_rung_report_carries_a_model_and_a_lag_only_where_the_rung_holds_them() {
+fn a_rung_report_carries_what_its_own_rung_holds() {
+    assert_eq!(wire(&RungReport::lexical()), r#"{"rung":"lexical"}"#);
     assert_eq!(
-        wire(&RungReport::new(Rung::Lexical, None, None)),
-        r#"{"rung":"lexical","model":null,"freshness":null}"#
-    );
-    assert_eq!(
-        wire(&RungReport::new(
-            Rung::Vector,
-            Some(ModelIdentity::new("stub", "1")),
-            Some(Freshness::trailing(3))
+        wire(&RungReport::vector(
+            ModelIdentity::new("stub", "1"),
+            Freshness::trailing(3)
         )),
         concat!(
             r#"{"rung":"vector","model":{"id":"stub","version":"1"},"#,
@@ -1865,14 +2085,47 @@ fn a_rung_report_carries_a_model_and_a_lag_only_where_the_rung_holds_them() {
         )
     );
     assert_eq!(
-        wire(&RungReport::new(
-            Rung::Rerank,
-            Some(ModelIdentity::new("stub", "1")),
-            None
-        )),
-        r#"{"rung":"rerank","model":{"id":"stub","version":"1"},"freshness":null}"#
+        wire(&RungReport::expansion(ModelIdentity::new("stub", "1"))),
+        r#"{"rung":"expansion","model":{"id":"stub","version":"1"}}"#
+    );
+    assert_eq!(
+        wire(&RungReport::rerank(ModelIdentity::new("stub", "1"))),
+        r#"{"rung":"rerank","model":{"id":"stub","version":"1"}}"#
     );
     assert_eq!(wire(&Freshness::rescanning()), r#"{"state":"rescanning"}"#);
+    assert!(
+        serde_json::from_str::<RungReport>(
+            r#"{"rung":"expansion","model":{"id":"stub","version":"1"},"freshness":{"state":"rescanning"}}"#
+        )
+        .is_ok(),
+        "a struct drops a field it does not know, and a report is a struct"
+    );
+}
+
+/// Every report names the rung it is a report of, and the selector it names is
+/// the one a request asks that rung for.
+#[test]
+fn every_rung_report_names_its_own_rung() {
+    let named: Vec<Rung> = rung_reports().iter().map(RungReport::rung).collect();
+    for rung in rungs() {
+        assert!(
+            named.contains(&rung),
+            "no report here is a report of {rung:?}"
+        );
+    }
+    assert_eq!(RungReport::lexical().rung(), Rung::Lexical);
+    assert_eq!(
+        RungReport::vector(ModelIdentity::new("stub", "1"), Freshness::rescanning()).rung(),
+        Rung::Vector
+    );
+    assert_eq!(
+        RungReport::expansion(ModelIdentity::new("stub", "1")).rung(),
+        Rung::Expansion
+    );
+    assert_eq!(
+        RungReport::rerank(ModelIdentity::new("stub", "1")).rung(),
+        Rung::Rerank
+    );
 }
 
 /// The section the host was delivered is four readings, and the malformed one

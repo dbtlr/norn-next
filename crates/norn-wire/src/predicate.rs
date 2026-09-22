@@ -132,15 +132,19 @@ pub enum Predicate {
 
 impl Predicate {
     /// `key` holds `value`.
-    pub fn eq(key: impl Into<String>, value: impl Into<String>) -> Self {
+    ///
+    /// Named apart from `PartialEq::eq`, which every wire type derives: two
+    /// methods of one name on one type make `Predicate::eq(a, b)` read as a
+    /// comparison of two predicates. The wire tag stays `eq`.
+    pub fn equal_to(key: impl Into<String>, value: impl Into<String>) -> Self {
         Predicate::Eq {
             key: key.into(),
             value: value.into(),
         }
     }
 
-    /// `key` does not hold `value`.
-    pub fn not_eq(key: impl Into<String>, value: impl Into<String>) -> Self {
+    /// `key` does not hold `value`. The wire tag stays `not_eq`.
+    pub fn not_equal_to(key: impl Into<String>, value: impl Into<String>) -> Self {
         Predicate::NotEq {
             key: key.into(),
             value: value.into(),

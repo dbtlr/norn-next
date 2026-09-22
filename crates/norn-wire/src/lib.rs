@@ -1,12 +1,20 @@
 #![forbid(unsafe_code)]
-//! The vocabulary. Pure types: no I/O, no logic.
+//! The vocabulary. Pure types: no I/O and no effects.
 //!
 //! What crosses the client/host seam is defined here exactly once, and every
 //! surface is a derived rendering of it: CLI flags, MCP tool schemas and HTTP
 //! payloads render these types and never define vocabulary of their own. The
 //! crate links nothing else in the workspace and reaches no filesystem, no
 //! database and no socket — a type in here can be constructed, serialized and
-//! compared, and that is the whole of what it does.
+//! compared, and nothing it does is visible anywhere but in the value it
+//! hands back.
+//!
+//! **The logic here is the vocabulary's own grammar, never a vault's or a
+//! store's.** Parsing a name, a path, a resolution target or a cursor;
+//! rendering a cursor; judging what moved under a continuation; sorting the
+//! names a refusal carries — each of those is a fact about how the vocabulary
+//! is spelled, decidable from the value alone. What a vault holds, what a
+//! store has derived and what a host is serving are read nowhere in here.
 //!
 //! What is defined here today is where a vault entry stands — [`TrustState`]
 //! and the [`UntrustedReason`] it carries, read a second way as [`NotReady`]
@@ -18,12 +26,20 @@
 //! lock without changing an entry's trust state. Requests are spelled here
 //! too: the [`VaultAddress`] a request names its vault by — a [`VaultName`] or
 //! a [`VaultRoot`] — the [`AttachMode`] a demand asks for its derived state
-//! under, the [`Verb`] a request asks for with the [`RequestScope`] it is
-//! answered from, the [`Predicate`] list a read filters by, and the
-//! [`ResolutionTarget`] one document is addressed by. What a read answers with
-//! is spelled here as well: the [`AnswerReading`] every answer carries, the
-//! [`Unsatisfied`] parts of a request that could not be applied, and the
-//! [`Cursor`] a page continues from.
+//! under, the [`Verb`] a request asks for with the [`Addressing`] it carries a
+//! vault by and the [`RequestScope`] that addressing is answered from, the
+//! [`Predicate`] list a read filters by, and the [`ResolutionTarget`] one
+//! document is addressed by. What a read answers with is spelled here as
+//! well: the [`AnswerReading`] every answer carries — its [`TrustState`], its
+//! establishment, and the [`LadderDeclaration`] of [`RungReport`]s a search
+//! ran — the [`Unsatisfied`] parts of a request that could not be applied, and
+//! the [`Cursor`] a page continues from, with the [`Snapshot`] a continuation
+//! is judged against, what [`Moved`] under it, and the [`CursorKey`] each
+//! paged row type stops at. What a reload met is spelled here too:
+//! [`ReloadFailure`], with the [`ControlFile`] and [`ReloadStage`] a control
+//! file refused at. [`EngineSection`] is what a host was delivered as a
+//! vault's engine section, which is what a status answer reports and what a
+//! vector refusal is composed against.
 //!
 //! Nothing crosses the seam that is not a type from here. There is no untyped
 //! JSON value in any signature and no JSON-in-a-string; a payload that cannot
@@ -101,6 +117,7 @@
 //! [`ErrorDetail::unknown_vault`], [`ErrorDetail::unsupported_attach_mode`],
 //! [`ErrorDetail::already_served`], [`ErrorDetail::entry_held`],
 //! [`ErrorDetail::entry_not_ready`], [`ErrorDetail::reader_unavailable`],
+//! [`ErrorDetail::registry_unwritable`],
 //! [`ErrorDetail::ambiguous_root`], [`ErrorDetail::reload_busy`],
 //! [`ErrorDetail::reload_failed`], [`ErrorDetail::cursor_order_changed`],
 //! [`ErrorDetail::engine_not_enabled`], [`ErrorDetail::engine_unavailable`],
@@ -108,11 +125,27 @@
 //! [`NotReady::warming`], [`NotReady::unattached`],
 //! [`VaultAddress::name`], [`VaultAddress::root`],
 //! the constructor on each [`Predicate`], [`Anchor`], [`CursorKey`],
-//! [`Unsatisfied`], [`ReloadFailure`] and [`EngineSection`] variant,
-//! [`Cursor::new`], [`Page::new`], [`Snapshot::new`], [`AnswerReading::new`],
+//! [`Unsatisfied`], [`ReloadFailure`] and [`RungReport`] variant,
+//! [`Cursor::new`], [`Page::new`], [`Snapshot::new`],
+//! [`CursorOrderChanged::new`], [`Score::new`],
+//! [`AnswerReading::new`], [`LadderDeclaration::new`],
+//! [`ModelIdentity::new`], [`Freshness::trailing`], [`Freshness::rescanning`],
 //! [`VaultAnswer::new`],
 //! [`MaintainerIdentity::named`] and
 //! [`MaintainerIdentity::unknown`].
+//!
+//! **A closed vocabulary whose every reader must decide what a new member
+//! means is plain rather than `#[non_exhaustive]`.** The two rules answer two
+//! different questions. `#[non_exhaustive]` keeps a member's arrival from
+//! breaking a caller that only reads; a plain enum makes that arrival break
+//! every caller that *composes*, which is what a vocabulary wants when no
+//! reader can carry on without deciding. [`EngineSection`] and
+//! [`FindingScope`] are the two members of that class: a section composes with
+//! an engine's own refusal to say what a client should do, and a scope decides
+//! whether a finding is withheld from a document row. A composer of either
+//! that has not made the decision should fail to compile rather than fall into
+//! a default arm, so neither carries the attribute and a new member is a
+//! deliberate break at every composition site.
 //!
 //! **What `#[non_exhaustive]` protects is Rust destructuring, not a writer's
 //! bytes.** A field added to a payload is a field the read path requires, so
@@ -142,14 +175,17 @@
 //! decided by what the fact is about. `host/…` is a fact about the host's
 //! serving of an entry: a name it does not hold, a name it already serves, an
 //! entry that is held, warming, untrusted, or serving with its read seam
-//! down. `vault/…` is a fact about the requested vault's content or its
-//! control files, and every outcome of a reload that ran is one of these —
+//! down, a registry file it could not write. `vault/…` is a fact about the
+//! requested vault's content, its control files, or which vault a directory
+//! is in at all: every outcome of a reload that ran is one of these —
 //! `vault/reload-busy` included, because what is busy is the work over that
-//! vault rather than the host. What a reload is refused with *before* it runs
-//! — a name the registry does not hold, an entry holding nothing to reload yet
-//! — is a fact about the host's serving and stays `host/…`. `engine/…` is a
-//! fact about the vault's engine: a rung not enabled, an engine that does not
-//! stand, an answer that failed.
+//! vault rather than the host — and so is a directory more than one
+//! registration contains, which names no one vault to answer about. What a
+//! reload is refused with *before* it runs — a name the registry does not
+//! hold, an entry holding nothing to reload yet, an entry whose derived state
+//! cannot be trusted — is a fact about the host's serving and stays `host/…`.
+//! `engine/…` is a fact about the vault's engine: a rung not enabled, an
+//! engine that does not stand, an answer that failed.
 //!
 //! A namespace names who the
 //! fact is about, never which crate produced it, and a code is *defined*
@@ -211,7 +247,9 @@ pub use address::{
     IllegalPath, PollBackend, SchemaSource, UnknownPollBackend, VaultAddress, VaultRoot,
     absolute_path,
 };
-pub use cursor::{Cursor, CursorKey, CursorOrderChanged, FacetKind, Moved, Page, Snapshot};
+pub use cursor::{
+    Cursor, CursorKey, CursorOrderChanged, FacetKind, Moved, NonFiniteScore, Page, Score, Snapshot,
+};
 pub use demand::AttachMode;
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
@@ -224,4 +262,6 @@ pub use reading::{
 pub use reload::{ControlFile, ReloadFailure, ReloadStage};
 pub use target::{Anchor, IllegalTarget, ResolutionTarget};
 pub use trust::{NotReady, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
-pub use verb::{RequestScope, UnknownRequestScope, UnknownVerb, Verb};
+pub use verb::{
+    Addressing, RequestScope, UnknownAddressing, UnknownRequestScope, UnknownVerb, Verb,
+};

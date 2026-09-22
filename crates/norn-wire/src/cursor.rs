@@ -8,11 +8,19 @@
 //! whole of the contract, and it is why the shape may grow a field without a
 //! client learning anything.
 //!
+//! **One position has one spelling, and the read path holds it to that.** The
+//! fields are parsed and then re-encoded, and a string that is not byte for
+//! byte that re-encoding names no position: a spelling that carries a field
+//! the fields do not hold, writes them in another order, or leaves an optional
+//! one out is a string this crate never minted. Canonicality is what makes the
+//! opaque string comparable as a value rather than as a structure a reader
+//! would have to normalize first.
+//!
 //! **Opaque is not encrypted, and it is not a promise of privacy.** Anyone may
 //! decode one; what the rendering buys is that nobody *builds* one. A position
 //! spelled by a client is a position no answer minted, and the parts a cursor
-//! carries — the epoch, the generation, the order's fingerprint — are exactly
-//! the parts a continuation is judged against.
+//! carries — the establishment it was taken under, and the key its order
+//! stopped at — are exactly the parts a continuation is judged against.
 //!
 //! **The key carries the order's parts, not an offset.** Paging by offset
 //! re-reads rows under a moving corpus and skips or repeats them; a key is the
@@ -23,13 +31,41 @@
 //!
 //! **Movement is reported, never hidden.** A continuation against a changed
 //! establishment still answers: what moved rides back with the page so a
-//! consumer can say how the ground shifted. The one thing that is refused is a
-//! change of *order* — a cursor minted under one schema fingerprint continued
-//! against another — because the rows a key names are in a sequence that no
-//! longer exists. A cursor minted under no fingerprint was ordered rawly, and
-//! a raw order does not change with the schema.
+//! consumer can say how the ground shifted. Four rules decide a continuation,
+//! read against the snapshot the cursor carries:
+//!
+//! - The epoch differs: the derived state was rebuilt under the vault, and
+//!   `epoch` is reported.
+//! - The epoch is the same and the generation differs *in either direction*:
+//!   `generation` is reported. Writes landing after a cursor was minted move
+//!   it forward; a generation that moved backwards inside one epoch is a
+//!   database that is not the one the cursor named, and hiding that is worse
+//!   than reporting it.
+//! - The cursor carries a sidecar revision, and either the epoch differs or
+//!   the snapshot's revision differs: `sidecar_revision` is reported. The
+//!   revision is epoch-qualified, so it compares nothing across two epochs and
+//!   is reported moved wherever the epoch moved.
+//! - The cursor carries a schema fingerprint and the snapshot's is absent or
+//!   different: the continuation is refused as an order that changed.
+//!
+//! The report is in one fixed order — epoch, generation, sidecar revision — so
+//! a consumer reads it rather than sorting it.
+//!
+//! **The one thing that is refused is a change of *order*.** The rows a key
+//! names are in a sequence that no longer exists, so the page is refused
+//! rather than answered from a position that means something else. A cursor
+//! minted under no fingerprint was ordered rawly, and a raw order does not
+//! change with the schema, so such a cursor never refuses.
+//!
+//! **Two asymmetries follow from those rules.** A cursor minted without a
+//! sidecar revision and continued where a sidecar now answers reports nothing
+//! about it: its position was taken without one, so there is no revision it
+//! moved from. A typed cursor continued where no fingerprint stands refuses:
+//! the sequence its key names a position in is a schema's, and an
+//! establishment reading no schema is not walking that sequence.
 
 use std::borrow::Cow;
+use std::fmt;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::de::DeserializeOwned;
@@ -58,6 +94,71 @@ pub enum FacetKind {
     PathRule,
 }
 
+/// A number that is no relevance score.
+///
+/// A score orders the ranked rows a cursor continues, so every value one holds
+/// is a number two rows can be compared by. Infinity and a value that is not a
+/// number are neither comparable nor spellable as JSON, and are refused here
+/// instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NonFiniteScore;
+
+impl fmt::Display for NonFiniteScore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a relevance score is a finite number")
+    }
+}
+
+impl std::error::Error for NonFiniteScore {}
+
+/// A ranked hit's relevance, as the number the order sorts by.
+///
+/// On the wire a score is that number itself: `0.5`. It is finite: a score
+/// that is infinite, or is not a number at all, has no spelling here and is
+/// refused when one is built and when one is read alike.
+#[derive(Clone, Copy, Debug, JsonSchema, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct Score(f64);
+
+impl Score {
+    /// `score` as a relevance score, if it is finite.
+    ///
+    /// This is the read path as well as the constructor, so a score that
+    /// crossed the seam is a score that parsed: there is no representation of
+    /// a non-finite one on either side of it.
+    pub fn new(score: f64) -> Result<Score, NonFiniteScore> {
+        if score.is_finite() {
+            Ok(Score(score))
+        } else {
+            Err(NonFiniteScore)
+        }
+    }
+
+    /// The score as the number it is, which is finite by construction.
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl fmt::Display for Score {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+impl<'de> Deserialize<'de> for Score {
+    /// A score arrives as a number and is read back through the same grammar
+    /// the constructor holds: a number that is not finite is no score, so it
+    /// refuses the read rather than landing as a value nothing can order.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let score = f64::deserialize(deserializer)?;
+        Score::new(score).map_err(D::Error::custom)
+    }
+}
+
 /// Where one page of rows stopped, as the parts that row's order sorts by.
 ///
 /// On the wire a key is an object tagged `row`:
@@ -69,9 +170,10 @@ pub enum CursorKey {
     /// A document row: the sort field's value, then the path.
     #[non_exhaustive]
     Document {
-        /// The sort field's value as the store's string sort key, and `null`
-        /// for a document that does not carry the sort field. A document
-        /// missing it orders before every document that has it.
+        /// The sort field's value as its string sort key, and `null` for a
+        /// document that does not carry the sort field. A document missing it
+        /// orders before every document that has it under an ascending sort,
+        /// and after every one of them under a descending sort.
         sort: Option<String>,
         /// The document's path.
         path: String,
@@ -80,7 +182,7 @@ pub enum CursorKey {
     #[non_exhaustive]
     Hit {
         /// The hit's relevance score.
-        score: f64,
+        score: Score,
         /// The document's path.
         path: String,
     },
@@ -126,7 +228,7 @@ impl CursorKey {
     }
 
     /// A ranked hit stopped at `path`, scored `score`.
-    pub fn hit(score: f64, path: impl Into<String>) -> Self {
+    pub fn hit(score: Score, path: impl Into<String>) -> Self {
         CursorKey::Hit {
             score,
             path: path.into(),
@@ -214,34 +316,37 @@ pub enum Moved {
     /// The database is not the one the cursor was minted from: the derived
     /// state was rebuilt under it.
     Epoch,
-    /// Writes landed in the same database after the cursor was minted.
+    /// Writes landed in the same database after the cursor was minted, or the
+    /// count they landed under is behind the one the cursor named.
     Generation,
-    /// The sidecar the answer reads is at another revision.
+    /// The sidecar the answer reads is at another revision, or at a revision
+    /// another database qualifies.
     SidecarRevision,
 }
 
 /// A continuation whose order no longer exists.
 ///
 /// The cursor was minted under one schema fingerprint and is being continued
-/// under another, so the sequence its key names a position in is not the
-/// sequence the answer would walk. The page is refused rather than answered
-/// from a position that means something else, and the two fingerprints say
-/// which order was asked for and which one stands.
+/// under another, or under none at all, so the sequence its key names a
+/// position in is not the sequence the answer would walk. The page is refused
+/// rather than answered from a position that means something else, and the two
+/// fingerprints say which order was asked for and which one stands.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct CursorOrderChanged {
     /// The fingerprint the cursor was minted under.
     pub minted_under: String,
-    /// The fingerprint the establishment reads now.
-    pub current: String,
+    /// The fingerprint the establishment reads now, and `null` where the order
+    /// that stands is raw.
+    pub current: Option<String>,
 }
 
 impl CursorOrderChanged {
     /// An order that changed between `minted_under` and `current`.
-    pub fn new(minted_under: impl Into<String>, current: impl Into<String>) -> Self {
+    pub fn new(minted_under: impl Into<String>, current: Option<String>) -> Self {
         CursorOrderChanged {
             minted_under: minted_under.into(),
-            current: current.into(),
+            current,
         }
     }
 }
@@ -251,55 +356,21 @@ impl CursorOrderChanged {
 /// On the wire a cursor is one opaque string a client passes back unchanged.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cursor {
-    epoch: String,
-    generation: u64,
-    schema_fingerprint: Option<String>,
-    sidecar_revision: Option<u64>,
+    snapshot: Snapshot,
     key: CursorKey,
 }
 
 impl Cursor {
-    /// The cursor a page minted at `key`, under the establishment it was
-    /// answered from.
-    ///
-    /// `schema_fingerprint` is present where the order is typed and `None`
-    /// where it is raw; `sidecar_revision` is present where the answer read a
-    /// sidecar, sampled with the answer.
-    pub fn new(
-        epoch: impl Into<String>,
-        generation: u64,
-        schema_fingerprint: Option<String>,
-        sidecar_revision: Option<u64>,
-        key: CursorKey,
-    ) -> Self {
-        Cursor {
-            epoch: epoch.into(),
-            generation,
-            schema_fingerprint,
-            sidecar_revision,
-            key,
-        }
+    /// The cursor a page minted at `key`, under the establishment `snapshot`
+    /// it was answered from.
+    pub const fn new(snapshot: Snapshot, key: CursorKey) -> Self {
+        Cursor { snapshot, key }
     }
 
-    /// The database the page was read from.
-    pub fn epoch(&self) -> &str {
-        &self.epoch
-    }
-
-    /// How far that database's writes had got.
-    pub const fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    /// The fingerprint of the schema the order was taken under, where the
-    /// order is typed.
-    pub fn schema_fingerprint(&self) -> Option<&str> {
-        self.schema_fingerprint.as_deref()
-    }
-
-    /// The sidecar revision the answer was read against, where it read one.
-    pub const fn sidecar_revision(&self) -> Option<u64> {
-        self.sidecar_revision
+    /// The establishment this page was answered from, which is what a
+    /// continuation is judged against.
+    pub const fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
     }
 
     /// Where the page stopped.
@@ -310,47 +381,56 @@ impl Cursor {
     /// What has moved between this cursor being minted and `now`, or the
     /// refusal that the order it names no longer exists.
     ///
-    /// The list is in a fixed order — epoch, generation, sidecar revision —
-    /// so a consumer reads it as a report rather than as a set it has to sort.
-    /// A generation is only compared within one database: a rebuild restarts
-    /// the count, so a generation read against another epoch says nothing.
+    /// The four rules and the fixed report order are the module's own, stated
+    /// once there rather than restated per caller.
     pub fn continuation(&self, now: &Snapshot) -> Result<Vec<Moved>, CursorOrderChanged> {
-        if let (Some(minted_under), Some(current)) =
-            (&self.schema_fingerprint, &now.schema_fingerprint)
-            && minted_under != current
+        if let Some(minted_under) = &self.snapshot.schema_fingerprint
+            && now.schema_fingerprint.as_deref() != Some(minted_under.as_str())
         {
-            return Err(CursorOrderChanged::new(minted_under, current));
+            return Err(CursorOrderChanged::new(
+                minted_under,
+                now.schema_fingerprint.clone(),
+            ));
         }
 
+        let epoch_moved = self.snapshot.epoch != now.epoch;
         let mut moved = Vec::new();
-        if self.epoch != now.epoch {
+        if epoch_moved {
             moved.push(Moved::Epoch);
-        } else if now.generation > self.generation {
+        } else if self.snapshot.generation != now.generation {
             moved.push(Moved::Generation);
         }
-        if self.sidecar_revision.is_some() && self.sidecar_revision != now.sidecar_revision {
+        if self.snapshot.sidecar_revision.is_some()
+            && (epoch_moved || self.snapshot.sidecar_revision != now.sidecar_revision)
+        {
             moved.push(Moved::SidecarRevision);
         }
         Ok(moved)
     }
 }
 
-/// The cursor's fields, which are what the opaque string is an encoding of.
+/// The cursor's fields, which are what the opaque string is an encoding of:
+/// the establishment the page was answered from, and the key it stopped at.
 ///
-/// The wire shape stays a derive: the field names, the tag of the key and the
-/// treatment of an absent fingerprint are all serde's reading of this struct,
-/// and the only thing written by hand is the wrapping around it.
+/// The wire shape stays a derive: the field names, the nesting of the
+/// snapshot, the tag of the key and the treatment of an absent fingerprint are
+/// all serde's reading of this struct, and the only thing written by hand is
+/// the wrapping around it. The snapshot nests rather than flattening, so the
+/// bytes carry the same pair the type does and the canonical encoding is one
+/// derive's output rather than a merge of two.
 #[derive(Deserialize, Serialize)]
 struct CursorFields {
-    epoch: String,
-    generation: u64,
-    schema_fingerprint: Option<String>,
-    sidecar_revision: Option<u64>,
+    snapshot: Snapshot,
     key: CursorKey,
 }
 
 /// The characters a cursor is spelled in.
 const CURSOR_PATTERN: &str = "^[A-Za-z0-9_-]+$";
+
+/// What a string that is no position is told. The same sentence answers a
+/// spelling that does not parse and a spelling that parses and is not the one
+/// this crate mints: both name no position an answer handed out.
+const NO_POSITION: &str = "the cursor names no position";
 
 impl Serialize for Cursor {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -358,10 +438,7 @@ impl Serialize for Cursor {
         S: Serializer,
     {
         let fields = CursorFields {
-            epoch: self.epoch.clone(),
-            generation: self.generation,
-            schema_fingerprint: self.schema_fingerprint.clone(),
-            sidecar_revision: self.sidecar_revision,
+            snapshot: self.snapshot.clone(),
             key: self.key.clone(),
         };
         let json = serde_json::to_vec(&fields).map_err(serde::ser::Error::custom)?;
@@ -371,9 +448,10 @@ impl Serialize for Cursor {
 
 impl<'de> Deserialize<'de> for Cursor {
     /// A cursor arrives as the opaque string a page handed out, and is read
-    /// back by decoding it and parsing the fields. A string that does not
-    /// decode, or that decodes to something these fields do not parse, is not
-    /// a position any answer minted, so it refuses the read.
+    /// back by decoding it, parsing the fields, and re-encoding them. A string
+    /// that does not decode, that decodes to something these fields do not
+    /// parse, or that is not byte for byte the re-encoding of what it parsed
+    /// is not a position any answer minted, so it refuses the read.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -382,12 +460,15 @@ impl<'de> Deserialize<'de> for Cursor {
         let bytes = base64url::decode(&text)
             .map_err(|error| D::Error::custom(format!("a cursor is one opaque string: {error}")))?;
         let fields: CursorFields = serde_json::from_slice(&bytes)
-            .map_err(|error| D::Error::custom(format!("the cursor names no position: {error}")))?;
+            .map_err(|error| D::Error::custom(format!("{NO_POSITION}: {error}")))?;
+        let canonical = serde_json::to_vec(&fields).map_err(D::Error::custom)?;
+        if canonical != bytes {
+            return Err(D::Error::custom(format!(
+                "{NO_POSITION}: one position has one spelling, and this is not it"
+            )));
+        }
         Ok(Cursor {
-            epoch: fields.epoch,
-            generation: fields.generation,
-            schema_fingerprint: fields.schema_fingerprint,
-            sidecar_revision: fields.sidecar_revision,
+            snapshot: fields.snapshot,
             key: fields.key,
         })
     }
