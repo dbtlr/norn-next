@@ -126,6 +126,8 @@
 //! [`VaultAddress::name`], [`VaultAddress::root`],
 //! the constructor on each [`Predicate`], [`Anchor`], [`CursorKey`],
 //! [`Unsatisfied`], [`ReloadFailure`] and [`RungReport`] variant,
+//! [`EngineSection::malformed`], whose variant is the one part of a plain enum
+//! that extends by gaining a field,
 //! [`Cursor::new`], [`Page::new`], [`Snapshot::new`],
 //! [`CursorOrderChanged::new`], [`Score::new`],
 //! [`AnswerReading::new`], [`LadderDeclaration::new`],
@@ -145,7 +147,11 @@
 //! whether a finding is withheld from a document row. A composer of either
 //! that has not made the decision should fail to compile rather than fall into
 //! a default arm, so neither carries the attribute and a new member is a
-//! deliberate break at every composition site.
+//! deliberate break at every composition site. The two rules compose rather
+//! than exclude: [`EngineSection::Malformed`] carries a payload, so the
+//! variant is `#[non_exhaustive]` in its own right and grows by gaining a
+//! field, while the enum around it stays plain and grows by breaking every
+//! composer.
 //!
 //! **What `#[non_exhaustive]` protects is Rust destructuring, not a writer's
 //! bytes.** A field added to a payload is a field the read path requires, so

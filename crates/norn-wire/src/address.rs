@@ -58,15 +58,21 @@ const NOT_ABSOLUTE: &str =
 /// all three.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IllegalPath {
+    /// What was offered, as text. A path that was not text at all is carried
+    /// as its lossy rendering: the refusal exists to be read, so a reader is
+    /// shown the path the way the platform displays it rather than handed
+    /// bytes, and the rendering may differ from what was typed exactly where
+    /// the bytes are what earned the refusal.
     path: String,
     what: &'static str,
     problem: &'static str,
 }
 
 impl IllegalPath {
-    /// The path that was offered, as text. A path that is not UTF-8 is echoed
-    /// the way a person sees it rather than reproduced, because the bytes are
-    /// what earned the refusal.
+    /// The path that was offered, as text. A path that is not UTF-8 is carried
+    /// as its lossy rendering rather than reproduced: the bytes are what
+    /// earned the refusal, and what a person reads is the path as the platform
+    /// displays it.
     pub fn path(&self) -> &str {
         &self.path
     }
