@@ -712,3 +712,28 @@ fn a_pathological_pattern_matches_in_bounded_time() {
         "matching took {spent:?}"
     );
 }
+
+/// The declared field types this crate reads and the ones the wire carries are
+/// two lists, and they name one vocabulary.
+///
+/// `norn-wire` links nothing in the workspace, so the type a `describe` facet
+/// reports is spelled there as well as here and neither definition is derived
+/// from the other. This is where the two are held equal: both lists are walked
+/// by the spelling a schema writes, so a type added on one side alone fails
+/// here rather than crossing the seam as a spelling the other side has no
+/// reader for.
+#[test]
+fn the_declared_field_types_are_the_ones_the_wire_carries() {
+    let here: Vec<&str> = FieldType::ALL.iter().map(|kind| kind.as_str()).collect();
+    let wire: Vec<&str> = norn_wire::FieldType::ALL
+        .iter()
+        .map(norn_wire::FieldType::as_str)
+        .collect();
+    assert_eq!(
+        here, wire,
+        "the field types this crate reads are not the ones the wire carries"
+    );
+    for kind in FieldType::ALL {
+        assert_eq!(FieldType::named(kind.as_str()), Some(kind));
+    }
+}

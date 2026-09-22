@@ -533,12 +533,19 @@ impl ErrorDetail {
 /// a person reads, and the `detail` the code pairs with. The code and the
 /// detail name the same refusal: an envelope whose `code` is not the code its
 /// `detail` carries does not parse.
+///
+/// **The detail is held behind one indirection**, which is invisible on the
+/// wire and is what keeps the envelope narrow. Every fallible call in the
+/// workspace returns `Result<_, ErrorEnvelope>`, so the widest detail any code
+/// carries would otherwise be the width of every `Result` there is; one box
+/// here prices a refusal's payload where the refusal is rather than at every
+/// call that could produce one.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct ErrorEnvelope {
     code: ReasonCode,
     message: String,
-    detail: ErrorDetail,
+    detail: Box<ErrorDetail>,
 }
 
 impl ErrorEnvelope {
@@ -550,7 +557,7 @@ impl ErrorEnvelope {
         ErrorEnvelope {
             code: detail.code(),
             message: message.into(),
-            detail,
+            detail: Box::new(detail),
         }
     }
 
@@ -577,7 +584,7 @@ impl ErrorEnvelope {
 struct EnvelopeFields {
     code: ReasonCode,
     message: String,
-    detail: ErrorDetail,
+    detail: Box<ErrorDetail>,
 }
 
 impl<'de> Deserialize<'de> for ErrorEnvelope {
