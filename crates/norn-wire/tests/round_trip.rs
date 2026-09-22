@@ -3629,3 +3629,178 @@ fn a_hit_carries_a_document_row_only_where_one_was_projected() {
         r#"{"path":"notes/a.md","score":0.5,"document":{"path":"notes/a.md"}}"#
     );
 }
+
+// ── Every setter lands, in bytes ─────────────────────────────────────────
+
+/// The vault address every pinned request below names, written once because
+/// six of them name the same one.
+const PINNED_VAULT: &str = r##"{"by":"name","name":"notes"}"##;
+
+/// Every predicate the vocabulary holds, as the four verbs that filter by
+/// them carry it.
+const PINNED_PREDICATES: &str = r##"[{"op":"eq","key":"type","value":"note"},{"op":"not_eq","key":"type","value":"note"},{"op":"in","key":"type","values":["note","task"]},{"op":"has","key":"due"},{"op":"missing","key":"due"},{"op":"before","key":"due","value":"2026-01-01"},{"op":"after","key":"due","value":"2026-01-01"},{"op":"matches","query":"norn NEAR vault"},{"op":"path","glob":"docs/**"},{"op":"links_to","target":"glossary#Design"},{"op":"resolves","target":"norn/glossary"},{"op":"tag","name":"draft"},{"op":"has_finding","kind":"document/undeclared-tag"}]"##;
+
+/// Every column a projection can ask for, as the three verbs that project
+/// them carry it.
+const PINNED_COLUMNS: &str = r##"[{"col":"path"},{"col":"field","key":"due"},{"col":"body"},{"col":"links"},{"col":"headings"},{"col":"blocks"},{"col":"tags"},{"col":"findings"},{"col":"fields"}]"##;
+
+/// The opaque cursor every pinned request continues from.
+const PINNED_AFTER: &str = r##"eyJzbmFwc2hvdCI6eyJlcG9jaCI6ImVwb2NoLTEiLCJnZW5lcmF0aW9uIjoxMiwic2NoZW1hX2ZpbmdlcnByaW50IjoiZnAtMSIsInNpZGVjYXJfcmV2aXNpb24iOjR9LCJrZXkiOnsicm93IjoiZG9jdW1lbnQiLCJzb3J0IjoiMjAyNi0wMS0wMSIsInBhdGgiOiJub3Rlcy9hLm1kIn19"##;
+
+/// **A setter that does nothing is a setter nothing else catches.** A `with_`
+/// method that dropped its argument still type-checks, still hands back a
+/// value a caller can use, and still survives the round trip — the round trip
+/// compares a value to itself, so a request that lost a part equals the
+/// request it became. The bytes are what catch it: each test below builds a
+/// value through every setter its type has and pins what it serializes to, so
+/// a setter that stops landing changes those bytes and fails here.
+
+#[test]
+fn every_find_setter_lands_in_the_bytes() {
+    let request = FindParams::new(VaultAddress::name(name("notes")))
+        .with_predicates(predicates())
+        .with_sort(Sort::new(SortKey::field("due"), Direction::Descending))
+        .with_columns(columns())
+        .with_limit(20)
+        .with_after(cursors().remove(0));
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"vault":"##,
+            PINNED_VAULT,
+            r##","predicates":"##,
+            PINNED_PREDICATES,
+            r##","sort":{"key":{"by":"field","key":"due"},"direction":"descending"},"columns":"##,
+            PINNED_COLUMNS,
+            r##","limit":20,"after":""##,
+            PINNED_AFTER,
+            r##""}"##,
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn every_search_setter_lands_in_the_bytes() {
+    let request = SearchParams::new(VaultAddress::name(name("notes")), "norn")
+        .with_predicates(predicates())
+        .with_rungs(RungSet::of(rungs()).expect("a ladder that runs a rung"))
+        .with_min_score(score(0.25))
+        .with_columns(columns())
+        .with_limit(20)
+        .with_after(cursors().remove(0));
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"vault":"##,
+            PINNED_VAULT,
+            r##","query":"norn","predicates":"##,
+            PINNED_PREDICATES,
+            r##","rungs":{"rungs":["lexical","vector","expansion","rerank"]},"min_score":0.25,"columns":"##,
+            PINNED_COLUMNS,
+            r##","limit":20,"after":""##,
+            PINNED_AFTER,
+            r##""}"##,
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn every_get_setter_lands_in_the_bytes() {
+    let request = GetParams::new(VaultAddress::name(name("notes")), target("glossary#Design"))
+        .with_columns(columns())
+        .with_collection(CollectionSelector::Links)
+        .with_limit(20)
+        .with_after(cursors().remove(0));
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"vault":"##,
+            PINNED_VAULT,
+            r##","target":"glossary#Design","columns":"##,
+            PINNED_COLUMNS,
+            r##","collection":"links","limit":20,"after":""##,
+            PINNED_AFTER,
+            r##""}"##,
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn every_count_setter_lands_in_the_bytes() {
+    let request = CountParams::new(VaultAddress::name(name("notes")))
+        .with_predicates(predicates())
+        .with_by(group_keys())
+        .with_limit(20)
+        .with_after(cursors().remove(0));
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"vault":"##,
+            PINNED_VAULT,
+            r##","predicates":"##,
+            PINNED_PREDICATES,
+            r##","by":[{"by":"field","key":"type"},{"by":"tag"}],"limit":20,"after":""##,
+            PINNED_AFTER,
+            r##""}"##,
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn every_validate_setter_lands_in_the_bytes() {
+    let request = ValidateParams::new(VaultAddress::name(name("notes")))
+        .with_predicates(predicates())
+        .with_kinds(finding_kinds())
+        .with_severity(Severity::Error)
+        .summarized()
+        .with_limit(20)
+        .with_after(cursors().remove(0));
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"vault":"##,
+            PINNED_VAULT,
+            r##","predicates":"##,
+            PINNED_PREDICATES,
+            r##","kinds":["document/path-bytes-not-utf8","document/path-names-no-document","document/body-bytes-not-utf8","document/frontmatter-too-large","document/frontmatter-unclosed","document/frontmatter-unreadable","document/undeclared-tag"],"severity":"error","summary":true,"limit":20,"after":""##,
+            PINNED_AFTER,
+            r##""}"##,
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn every_describe_setter_lands_in_the_bytes() {
+    let request = DescribeParams::new(VaultAddress::name(name("notes")))
+        .with_facets(facet_kinds())
+        .with_limit(20)
+        .with_after(cursors().remove(0));
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"vault":"##,
+            PINNED_VAULT,
+            r##","facets":["declared_field","observed_field","declared_tag","folder","path_rule","tag_pattern","undeclared_tags"],"limit":20,"after":""##,
+            PINNED_AFTER,
+            r##""}"##,
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn every_document_row_setter_lands_in_the_bytes() {
+    let request = whole_document_row();
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"path":"notes/a.md","fields":{"type":{"kind":"scalar","raw":"note"}},"body":{"text":"Design\n","byte_length":4096},"links":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":[],"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":["notes/a.md"],"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":["notes/a.md","archive/a.md"],"health":"ambiguous"}],"total":9},"headings":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"blocks":{"items":[{"id":"a1","span":null}],"total":1},"tags":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12}],"total":1}}"##,
+        ]
+        .concat()
+    );
+}

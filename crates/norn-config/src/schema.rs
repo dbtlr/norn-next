@@ -362,6 +362,9 @@ pub enum UndeclaredTags {
 }
 
 impl UndeclaredTags {
+    /// Every disposition this crate reads, in declaration order.
+    pub const ALL: [UndeclaredTags; 2] = [UndeclaredTags::Allow, UndeclaredTags::Report];
+
     /// The disposition as the schema spells it.
     pub const fn as_str(self) -> &'static str {
         match self {
