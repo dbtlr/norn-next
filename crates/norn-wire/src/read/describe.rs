@@ -16,16 +16,17 @@
 //! make a selection ambiguous and an ordered page interleave two row shapes
 //! under one key.
 //!
-//! **A facet's cursor key is the facet's own key.** A declared field's is its
-//! frontmatter key, a folder's is its path, a tag pattern's is the pattern,
-//! and the undeclared-tags facet's is the stance spelling — `allow` or
-//! `report` — which is the one text that facet carries.
+//! **A facet's cursor key is the facet's own key.** [`Facet::cursor_key`] is
+//! the one function that turns a facet into the position a page stops at, and
+//! it states that position for every shape, so the seven keys cannot drift
+//! into two orders sharing a kind. What each shape is keyed by is stated
+//! there rather than restated here.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::address::VaultAddress;
-use crate::cursor::{Cursor, FacetKind, Page};
+use crate::cursor::{Cursor, CursorKey, FacetKind, Page};
 
 /// The type a vault's schema declares a field under.
 ///
@@ -262,6 +263,39 @@ impl Facet {
             Facet::PathRule { .. } => FacetKind::PathRule,
             Facet::UndeclaredTags { .. } => FacetKind::UndeclaredTags,
         }
+    }
+
+    /// Where a page of facets stops at this facet.
+    ///
+    /// The key is the one text the facet itself spells: a declared field's
+    /// and an observed field's frontmatter key, a declared tag's name, a tag
+    /// pattern's and a path rule's pattern, a folder's path, and, for the
+    /// undeclared-tags facet, the stance spelling — `allow` or `report`.
+    /// Beside the kind, that names one facet within its shape, which is what a
+    /// continuation resumes after.
+    ///
+    /// The destructuring carries no wildcard, so neither a facet shape minted
+    /// without a key nor a field added to one compiles until this says what
+    /// the order stops at.
+    pub fn cursor_key(&self) -> CursorKey {
+        let key = match self {
+            Facet::DeclaredField {
+                key,
+                field_type: _,
+                required: _,
+                one_of: _,
+            } => key.clone(),
+            Facet::ObservedField { key, container: _ } => key.clone(),
+            Facet::DeclaredTag { name } => name.clone(),
+            Facet::TagPattern { pattern } => pattern.clone(),
+            Facet::Folder {
+                path,
+                description: _,
+            } => path.clone(),
+            Facet::PathRule { rule: _, pattern } => pattern.clone(),
+            Facet::UndeclaredTags { stance } => stance.as_str().to_string(),
+        };
+        CursorKey::facet(self.kind(), key)
     }
 }
 

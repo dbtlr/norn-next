@@ -3633,19 +3633,70 @@ fn every_facet_shape_maps_to_a_kind_of_its_own() {
     );
 }
 
-/// The undeclared-tags facet is ordered by the stance spelling, which is the
-/// one text it carries, so a facet cursor over that kind names a position the
-/// facet itself spells.
+/// Every facet says where a page of facets stops at it, and the key it says is
+/// the one text the facet itself spells. The key each shape hands back is
+/// pinned here, so a shape keyed by another of its fields — or by a field it
+/// gained — is a change this test reports rather than a page that resumes
+/// somewhere else.
 #[test]
-fn the_undeclared_tags_facet_is_keyed_by_its_stance() {
-    for stance in tag_stances() {
-        let facet = Facet::undeclared_tags(stance);
-        let key = CursorKey::facet(facet.kind(), stance.as_str());
-        round_trip(&key);
-        let json = serde_json::to_value(&key).expect("a key as JSON");
-        assert_eq!(json["kind"].as_str(), Some("undeclared_tags"));
-        assert_eq!(json["key"].as_str(), Some(stance.as_str()));
-        assert_eq!(json["key"].as_str(), Some(flat_string(&stance).as_str()));
+fn every_facet_says_where_a_page_of_facets_stops_at_it() {
+    for (facet, kind, key) in [
+        (
+            Facet::declared_field("due", FieldType::Date, true, None),
+            FacetKind::DeclaredField,
+            "due",
+        ),
+        (
+            Facet::observed_field("author", ContainerKind::Sequence),
+            FacetKind::ObservedField,
+            "author",
+        ),
+        (Facet::declared_tag("area"), FacetKind::DeclaredTag, "area"),
+        (
+            Facet::tag_pattern("person/**"),
+            FacetKind::TagPattern,
+            "person/**",
+        ),
+        (
+            Facet::folder("journal", Some("One per day".to_string())),
+            FacetKind::Folder,
+            "journal",
+        ),
+        (
+            Facet::path_rule(PathRuleKind::AmbiguityIgnore, "archive/**"),
+            FacetKind::PathRule,
+            "archive/**",
+        ),
+        (
+            Facet::undeclared_tags(TagStance::Allow),
+            FacetKind::UndeclaredTags,
+            "allow",
+        ),
+        (
+            Facet::undeclared_tags(TagStance::Report),
+            FacetKind::UndeclaredTags,
+            "report",
+        ),
+    ] {
+        let cursor_key = facet.cursor_key();
+        assert_eq!(cursor_key, CursorKey::facet(kind, key));
+        round_trip(&cursor_key);
+        let json = serde_json::to_value(&cursor_key).expect("a key as JSON");
+        assert_eq!(json["row"].as_str(), Some("facet"));
+        assert_eq!(json["kind"].as_str(), Some(flat_string(&kind).as_str()));
+        assert_eq!(json["key"].as_str(), Some(key));
+    }
+    for facet in facets() {
+        let json = serde_json::to_value(facet.cursor_key()).expect("a key as JSON");
+        assert_eq!(
+            json["kind"].as_str(),
+            Some(flat_string(&facet.kind()).as_str()),
+            "a facet is keyed under a kind that is not its own: {facet:?}"
+        );
+        assert!(
+            json["key"].as_str().is_some_and(|key| !key.is_empty()),
+            "a facet stops a page at no text at all: {facet:?}"
+        );
     }
 }
 
