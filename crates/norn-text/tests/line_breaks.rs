@@ -503,26 +503,22 @@ const SOURCES: &[(&str, &str)] = &[
     ("src/value.rs", include_str!("../src/value.rs")),
 ];
 
-/// The two files allowed to decide what a line break is, each for a stated
-/// reason.
+/// The one file allowed to decide what a line break is, with the reason it is
+/// allowed.
 ///
-/// `span.rs` defines the rule. `line_ending.rs` spells the rule's three breaks
-/// as the terminators a synthesis path writes, and decides which one a
-/// document uses by asking `span.rs` for the first break the document carries,
-/// so it holds the spellings rather than a rule of its own.
-const RULE_OWNERS: &[(&str, &str)] = &[
-    ("src/span.rs", "defines the crate's line break rule"),
-    (
-        "src/line_ending.rs",
-        "spells the rule's three breaks as the terminators an edit writes",
-    ),
-];
+/// Every other file of the crate is scanned, `line_ending.rs` included: it
+/// spells the rule's three breaks as the terminators a synthesis path writes
+/// and decides which one a document uses by asking `span.rs`, so it holds no
+/// rule and earns no wholesale exemption. The literals it spells are exempted
+/// one at a time below, like every other site's.
+const RULE_OWNERS: &[(&str, &str)] = &[("src/span.rs", "defines the crate's line break rule")];
 
 /// A `\n` literal the scan does not report, by the exact source line carrying
 /// it and why it is exempt.
 ///
-/// None of the three is a line rule: two are escape-table entries and the
-/// third counts breaks in text a decoder already normalized.
+/// None of the four is a line rule: two are escape-table entries, the third
+/// counts breaks in text a decoder already normalized, and the fourth spells a
+/// terminator an edit writes.
 ///
 /// Matching on the line's text rather than its number keeps an exemption
 /// attached to the code it excuses: moving the code carries it, and rewriting
@@ -542,6 +538,11 @@ const EXEMPT_LINES: &[(&str, &str, &str)] = &[
         "src/frontmatter/fields.rs",
         r"let trailing = text.bytes().rev().take_while(|byte| *byte == b'\n').count();",
         "counts breaks in a value YAML already decoded, where every break is \\n",
+    ),
+    (
+        "src/line_ending.rs",
+        r#"LineEnding::Lf => "\n","#,
+        "a terminator spelling an edit writes, not a rule for where a line ends",
     ),
 ];
 
@@ -564,14 +565,14 @@ fn despaced(line: &str) -> String {
     line.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
-/// Outside the two files that own the rule, no source line decides what a line
-/// is on `\n` alone.
+/// Outside the file that owns the rule, no source line decides what a line is
+/// on `\n` alone.
 ///
 /// The scan is keyed on the rule rather than on a list of function names: a
 /// `\n` literal standing on a line that never mentions `\r` is a line rule
 /// with half the rule missing, however it is spelled — `split_inclusive`,
 /// `split_once`, `splitn`, `ends_with`, `find`, a byte-slice `split`, or a
-/// hand-rolled loop. That is why the four exemptions below are exemptions
+/// hand-rolled loop. That is why the four exemptions above are exemptions
 /// rather than a longer ban list: each is a `\n` literal that is not deciding
 /// where a line ends.
 ///
