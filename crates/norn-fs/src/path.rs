@@ -39,10 +39,10 @@
 //! is the document. A spelling only the volume resolves names no document — a
 //! link or a request spelled that way is broken or not found, and a walk that
 //! reads such a spelling as standing is wrong: a stat on a folding volume
-//! answers for every spelling of an entry, and nothing this crate reads besides
-//! a directory listing reports the spelling the tree renders — so a subtree
-//! descent that proves its components by stat lets a caller's volume-only
-//! spelling descend as if it stood. Widening the fold is a change to this module,
+//! answers for every spelling of an entry, where the directory's listing
+//! answers only for the one it renders — so a subtree descent that proves its
+//! components by stat lets a caller's volume-only spelling descend as if it
+//! stood. Widening the fold is a change to this module,
 //! to the store's collation and the keys it folds, and to the contract sample
 //! both are pinned to, never a local choice made at a comparison site.
 //!
