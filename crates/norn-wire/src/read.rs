@@ -36,11 +36,15 @@
 //! document row, and link health is a finding family. A seventh verb for them
 //! would be a fourth way to ask one question.
 //!
-//! **`--limit` bounds document rows and nothing else.** A nested collection on
-//! a row is bounded by the per-row ceiling the handler keeps, and reports what
-//! it cut through [`Collection::total`](crate::Collection::total), so a
-//! request's limit stays a statement about how many rows come back rather than
-//! about how much of each one does.
+//! **`limit` bounds the rows a page carries and nothing else.** Whichever row
+//! a verb pages — a document, a hit, a tally, a finding, a facet, or a row of
+//! the one nested collection a `get` pages by ordinal — the limit says how
+//! many of them come back. It never says how much of one row does: a nested
+//! collection carried *on* a row is bounded by the per-row ceiling the handler
+//! keeps and reports what it cut through
+//! [`Collection::total`](crate::Collection::total), and a body carried on a
+//! row reports its cut through
+//! [`BodyText::byte_length`](crate::BodyText::byte_length) the same way.
 
 pub(crate) mod count;
 pub(crate) mod describe;
