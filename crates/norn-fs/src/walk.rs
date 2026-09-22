@@ -211,10 +211,12 @@ impl Vault {
                 });
             }
         };
-        let Some(name) = subtree.as_path().file_name() else {
-            // The vault root itself, which this vault holds open.
-            return Ok(Reach::Stands(PathKind::Directory));
-        };
+        // A normalized path names at least one component: `normalize` refuses
+        // every spelling of the vault root itself as empty.
+        let name = subtree
+            .as_path()
+            .file_name()
+            .expect("a normalized path names at least one component");
         if self.names_a_shadow(name) {
             return Ok(Reach::Refused(SkipFact {
                 path: subtree,
