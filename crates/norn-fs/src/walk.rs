@@ -53,7 +53,9 @@ use crate::exclusion::{Excluded, ExclusionError, Exclusions};
 use crate::hash::{ContentHash, read_bytes_and_hash};
 use crate::identity::{Identity, identity_of};
 use crate::open::{Reached, directory_flags, open_regular_at};
-use crate::path::{ChildKeys, NormalizedPath, NormalizerError, PathError, PathNormalizer};
+use crate::path::{
+    CaseSensitivity, ChildKeys, NormalizedPath, NormalizerError, PathError, PathNormalizer,
+};
 
 /// Begins a deterministic streaming walk of `root`.
 ///
@@ -326,13 +328,22 @@ enum Passed {
 /// Reads one name a descent passes through, the way the page reads the entries
 /// it descends through.
 ///
-/// **The stat comes first, so every verdict here is a verdict about an entry.**
-/// The page judges names a directory stream handed it, and each of those is a
-/// name something stands at. This descent is handed a caller's spelling
-/// instead, so it proves an entry is there before it reads the name as a Norn
-/// shadow basename or as a symbolic link. A spelling nothing stands at is an
-/// absence on any root, and a root that tells two spellings apart holds the
-/// shadow name and an ordinary neighbour as two separate names.
+/// **The entry is proven first, so every verdict here is a verdict about an
+/// entry.** The page judges names a directory stream handed it, and each of
+/// those is a name something stands at. This descent is handed a caller's
+/// spelling instead, so it proves an entry is there before it reads the name as
+/// a Norn shadow basename or as a symbolic link. A spelling nothing stands at
+/// is an absence on any root, and a root that tells two spellings apart holds
+/// the shadow name and an ordinary neighbour as two separate names.
+///
+/// **What proves it depends on what the root folds.** Where spellings are told
+/// apart the stat is exact and is the whole proof. Where they are folded the
+/// volume resolves spellings this crate reads as other identities, so the stat
+/// answers at every one of them and the parent's listing is asked as well: the
+/// component stands only where the listing holds an entry this root's key reads
+/// as that name — see [`lists_the_spelling`], which is O(siblings) in wall
+/// time. A spelling only the volume resolves names no document, so the descent
+/// reads it as the absence it is.
 ///
 /// A Norn shadow basename is never entered, and a symbolic link is a fact about
 /// a name rather than an edge to follow. Absence and a non-directory entry are
@@ -354,6 +365,11 @@ fn pass_component(
         Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return Ok(Passed::Vanished),
         Err(source) => return Err(environment_errno("stating", access, source)),
     };
+    if vault.case_sensitivity() == CaseSensitivity::Insensitive
+        && !lists_the_spelling(&vault.normalizer, directory, name, access)?
+    {
+        return Ok(Passed::Vanished);
+    }
     if vault.names_a_shadow(name) {
         return Ok(Passed::Skipped(SkipReason::Shadow));
     }
@@ -373,6 +389,50 @@ fn pass_component(
             },
         },
     )
+}
+
+/// Whether `directory` lists an entry this root reads as `name`.
+///
+/// **The listing is the answer a stat cannot give on a root that folds beyond
+/// ASCII.** Such a root resolves several spellings of one entry — Unicode case,
+/// and the composed and decomposed spellings of one name — while the fold here
+/// equates only ASCII case, so a stat stands at spellings this crate reads as
+/// other identities. The entry is the one spelling the directory lists, and
+/// that is what this asks for.
+///
+/// The comparison is the root's own key, built by the same [`ChildKeys`] the
+/// page builds its keys with, so a name the fold equates is listed here
+/// whichever case it is spelled in.
+///
+/// **The cost is one listing per component**, which is O(siblings) in wall
+/// time: a directory is read until the entry is found and read whole to
+/// establish that none is. Only a folding root pays it — where a stat is exact
+/// the descent never asks.
+#[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and its listings.
+fn lists_the_spelling(
+    normalizer: &PathNormalizer,
+    directory: &Arc<OwnedFd>,
+    name: &OsStr,
+    access: &Path,
+) -> Result<bool, WalkError> {
+    let display = access.parent().unwrap_or(access);
+    let mut keys = ChildKeys::under(normalizer, Path::new(""));
+    let wanted = keys.of(name.as_bytes()).to_vec();
+    let entries = Dir::read_from(directory)
+        .map_err(|source| environment_errno("reading directory", display, source))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|source| environment_errno("reading entry in", display, source))?;
+        let listed = entry.file_name().to_bytes();
+        if listed == b"." || listed == b".." {
+            continue;
+        }
+        crate::reads::count_dirents(1);
+        if keys.of(listed) == wanted {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Opens one name of a descent as the next directory, or answers that there is
@@ -2140,6 +2200,102 @@ mod tests {
             paths(walk_subtree(&scratch.at(""), Path::new("norn-shadow-4-1"), &[]).expect("walk")),
             vec![(PathBuf::from("norn-shadow-4-1"), Some(SkipReason::Shadow))],
             "an entry stands at this one, and Norn never reads it"
+        );
+    }
+
+    /// Whether this tree's root folds alternate case spellings onto one entry.
+    ///
+    /// A case that turns on a folding root is inert on a root that tells
+    /// spellings apart: there the stat is exact and no spelling resolves to an
+    /// entry spelled another way.
+    fn folding(root: &Path) -> bool {
+        PathNormalizer::detect(root)
+            .expect("case behavior")
+            .case_sensitivity()
+            == CaseSensitivity::Insensitive
+    }
+
+    /// **A descent component the tree does not list names nothing to descend.**
+    ///
+    /// The fold is ASCII, and a folding volume resolves more than that: `Éclair`
+    /// and `éclair` are one entry to it and two identities here. So a stat
+    /// answers at both spellings while the directory lists one, and the walk
+    /// reads the listed one as the document's name — a caller's spelling only
+    /// the volume resolves reaches nothing.
+    #[test]
+    fn a_subtree_component_only_the_volume_resolves_is_a_name_the_walk_read_nothing_at() {
+        let scratch = Scratch::new("walk-subtree-volume-only-component");
+        let root = scratch.at("");
+        scratch.directory("vault/\u{c9}clair");
+        scratch.place("\u{c9}clair/note.md", b"body");
+        if !folding(&root) {
+            return;
+        }
+
+        assert_eq!(
+            paths(walk_subtree(&root, Path::new("\u{e9}clair"), &[]).expect("walk")),
+            vec![(PathBuf::from("\u{e9}clair"), Some(SkipReason::Vanished))],
+            "the tree lists no entry spelled this way"
+        );
+        assert_eq!(
+            paths(walk_subtree(&root, Path::new("\u{e9}clair/note.md"), &[]).expect("walk")),
+            vec![(PathBuf::from("\u{e9}clair"), Some(SkipReason::Vanished))],
+            "a name under an unlisted component is never reached"
+        );
+        assert_eq!(
+            paths(walk_subtree(&root, Path::new("\u{c9}clair"), &[]).expect("walk")),
+            vec![(PathBuf::from("\u{c9}clair/note.md"), None)],
+            "the spelling the tree lists is the document's own"
+        );
+    }
+
+    /// **The fold's own equivalences still descend.** ASCII case is what this
+    /// root folds, and a component spelled in the other case is the same
+    /// identity rather than another one — so the descent passes it and the
+    /// facts carry the caller's spelling, exactly as they did before the
+    /// listing confirmed anything.
+    #[test]
+    fn a_subtree_component_the_fold_equates_descends_at_the_callers_spelling() {
+        let scratch = Scratch::new("walk-subtree-ascii-twin");
+        let root = scratch.at("");
+        scratch.directory("vault/Notes");
+        scratch.place("Notes/note.md", b"body");
+        scratch.place("Cafe.md", b"body");
+        if !folding(&root) {
+            return;
+        }
+
+        assert_eq!(
+            paths(walk_subtree(&root, Path::new("notes"), &[]).expect("walk")),
+            vec![(PathBuf::from("notes/note.md"), None)]
+        );
+        assert_eq!(
+            paths(walk_subtree(&root, Path::new("notes/note.md"), &[]).expect("walk")),
+            vec![(PathBuf::from("notes/note.md"), Some(SkipReason::Vanished))],
+            "a file is no frontier, whichever case its ancestors are spelled in"
+        );
+    }
+
+    /// **A spelling that differs only in Unicode composition is the volume's
+    /// too.** A root that resolves the decomposed spelling of a name it lists
+    /// composed folds beyond ASCII the same way case does, and the listing is
+    /// the same answer: the entry is the spelling the tree renders.
+    #[test]
+    fn a_subtree_component_spelled_in_another_composition_reaches_nothing() {
+        let scratch = Scratch::new("walk-subtree-composition");
+        let root = scratch.at("");
+        scratch.directory("vault/\u{e9}clair");
+        scratch.place("\u{e9}clair/note.md", b"body");
+        let decomposed = "e\u{301}clair";
+        if !folding(&root) || !scratch.exists(&scratch.at(decomposed)) {
+            // A root that does not resolve the decomposed spelling at all has
+            // nothing here to confirm: the stat answers absence on its own.
+            return;
+        }
+
+        assert_eq!(
+            paths(walk_subtree(&root, Path::new(decomposed), &[]).expect("walk")),
+            vec![(PathBuf::from(decomposed), Some(SkipReason::Vanished))]
         );
     }
 
