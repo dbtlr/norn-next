@@ -1,4 +1,13 @@
 //! `find`: the documents matching a conjunction, in a stated order.
+//!
+//! **`find` is the sole verb whose rows are documents**, ordered by a field
+//! and paged by the sort value and the path together. A `search` hit and a
+//! `get` record carry a document's projected columns beside their own
+//! identity and are ordered by their own key.
+//!
+//! **`find` is the sole verb a resolution predicate is meaningful on.** A
+//! `resolves` part here selects the documents a target names, where the same
+//! part on `count` or `validate` is reported as an unsatisfied part instead.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -77,14 +86,9 @@ pub type FindReport = Page<DocumentRow>;
 
 /// What a `find` request carries.
 ///
-/// **`find` is the sole verb whose rows are documents**, ordered by a field
-/// and paged by the sort value and the path together. A `search` hit and a
-/// `get` record carry a document's projected columns beside their own
-/// identity and are ordered by their own key.
-///
-/// **`find` is the sole verb a resolution predicate is meaningful on.** A
-/// `resolves` part here selects the documents a target names, where the same
-/// part on `count` or `validate` is reported as an unsatisfied part instead.
+/// A find answers the documents matching the conjunction, in the order the
+/// request states, each projected onto the columns it asked for. A `resolves`
+/// predicate selects the documents the target names.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct FindParams {

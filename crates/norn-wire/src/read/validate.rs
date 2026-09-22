@@ -2,6 +2,19 @@
 //!
 //! **`PartialEq` alone on [`ValidateReport`].** A page carries the cursor it
 //! continues at, and a cursor carries a relevance score.
+//!
+//! **`validate` reports what stands; it runs no rule.** Findings are derived
+//! where documents are derived and read back here, so a request neither
+//! re-judges a vault nor waits on one being re-judged.
+//!
+//! **`validate` emits no plan.** What to do about a finding is a repair's
+//! question, and this verb answers only that the finding stands.
+//!
+//! **A resolution predicate is not applicable.** `resolves` answers which
+//! documents a target names, which is a `find`; a `validate` carrying one is
+//! answered with the findings it earned and reports the part as
+//! [`Unsatisfied::ResolvesNotApplicable`](crate::Unsatisfied::ResolvesNotApplicable)
+//! rather than refusing.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -73,18 +86,10 @@ impl ValidateReport {
 
 /// What a `validate` request carries.
 ///
-/// **`validate` reports what stands; it runs no rule.** Findings are derived
-/// where documents are derived and read back here, so a request neither
-/// re-judges a vault nor waits on one being re-judged.
-///
-/// **`validate` emits no plan.** What to do about a finding is a repair's
-/// question, and this verb answers only that the finding stands.
-///
-/// **A resolution predicate is not applicable.** `resolves` answers which
-/// documents a target names, which is a `find`; a `validate` carrying one is
-/// answered with the findings it earned and reports the part as
-/// [`Unsatisfied::ResolvesNotApplicable`](crate::Unsatisfied::ResolvesNotApplicable)
-/// rather than refusing.
+/// A validate answers the findings standing over a vault, as rows or as one
+/// tally per kind. A `resolves` predicate is answered with the findings the
+/// rest of the request earned and reported back as the unsatisfied part
+/// `resolves_not_applicable`.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct ValidateParams {

@@ -197,8 +197,8 @@ impl TrustState {
 ///
 /// On the wire it is an object tagged `state`: `{"state":"unattached"}`,
 /// `{"state":"warming","phase":"healing","healed":12,"total_estimate":400}`.
-/// The two members are the two [`TrustState`] members a poll walks out of, and
-/// they carry exactly what those states carry.
+/// The two members are the two trust states a poll walks out of, and they
+/// carry exactly what those states carry.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -255,19 +255,18 @@ pub enum WarmingPhase {
     /// Documents are being derived, and the counters beside this phase advance
     /// as they are.
     Healing,
-    /// The entry is giving back everything [`WarmingPhase::InstallingCoverage`]
+    /// The entry is giving back everything the installing-coverage phase
     /// acquired: change detection over the vault ends, the derived state is
     /// closed, and sole maintainership of it is given up — released
     /// where the entry still holds it, and put down where the entry has already
     /// lost it to another maintainer. Nothing is counted here, so the counters
     /// beside this phase stand at zero against an unknown total.
     ///
-    /// This phase is the one that does not end at [`TrustState::Ready`]: it
-    /// ends at [`TrustState::Unattached`], and an entry only reaches
-    /// [`TrustState::Ready`] from here by being demanded again afterwards. It
-    /// sits under [`TrustState::Warming`] because that is the state meaning
-    /// "attached and not readable", which is what the entry is while its
-    /// resources are still being released.
+    /// This phase is the one that does not end at `ready`: it ends at
+    /// `unattached`, and an entry only reaches `ready` from here by being
+    /// demanded again afterwards. It sits under `warming` because that is the
+    /// state meaning "attached and not readable", which is what the entry is
+    /// while its resources are still being released.
     ///
     /// A demand arriving now neither blocks nor fails: the release is what
     /// answers it. Where the entry is free to acquire the resources again, the

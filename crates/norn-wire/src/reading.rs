@@ -37,6 +37,12 @@
 //! refusal is composed against, so "the vault has no engine" and "the vault's
 //! engine section is malformed" are two answers rather than one.
 //!
+//! [`EngineSection`] is plain rather than `#[non_exhaustive]`, on the same
+//! terms as [`FindingScope`](crate::FindingScope): every reading here composes
+//! with an engine's own refusal to say what a client should do about it, and a
+//! composer that has not decided what a new reading means should fail to
+//! compile rather than fall into a default arm.
+//!
 //! Nothing produces a section today. The host retains the reading at config
 //! dispatch once the `search` handler's engine seams land there (NORN-230),
 //! beside the engine slot the dispatch delivered to; until those seams land,
@@ -253,12 +259,6 @@ impl AnswerReading {
 ///
 /// On the wire a section is an object tagged `state`:
 /// `{"state":"absent"}`, `{"state":"malformed","detail":"…"}`.
-///
-/// Plain rather than `#[non_exhaustive]`, on the same terms as
-/// [`FindingScope`](crate::FindingScope): every reading here composes with an
-/// engine's own refusal to say what a client should do about it, and a
-/// composer that has not decided what a new reading means should fail to
-/// compile rather than fall into a default arm.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum EngineSection {

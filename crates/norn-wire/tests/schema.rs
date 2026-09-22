@@ -98,9 +98,10 @@ fn sorted<'a>(members: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
 
 // ── Every type derives one ───────────────────────────────────────────────
 
-#[test]
-fn every_wire_type_derives_a_schema() {
-    for schema in [
+/// Every schema a surface renders against, built once and read by the census
+/// tests below.
+fn every_wire_schema() -> Vec<Value> {
+    vec![
         schema_of::<TrustState>(),
         schema_of::<UntrustedReason>(),
         schema_of::<WatcherLossCause>(),
@@ -175,10 +176,68 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<PathRuleKind>(),
         schema_of::<TagStance>(),
         schema_of::<Facet>(),
-    ] {
+    ]
+}
+
+#[test]
+fn every_wire_type_derives_a_schema() {
+    for schema in every_wire_schema() {
         assert!(
             schema.get("$schema").is_some(),
             "the schema declares no dialect: {schema}"
+        );
+    }
+}
+
+/// Every `description` the schemas carry, at every depth, with the pointer it
+/// sits at so a failure names where to look.
+fn descriptions(schema: &Value, at: String, found: &mut Vec<(String, String)>) {
+    match schema {
+        Value::Object(members) => {
+            for (key, value) in members {
+                if key == "description" {
+                    if let Some(text) = value.as_str() {
+                        found.push((at.clone(), text.to_string()));
+                    }
+                } else {
+                    descriptions(value, format!("{at}/{key}"), found);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                descriptions(item, format!("{at}/{index}"), found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A description is what an MCP consumer reads, and schemars lifts it verbatim
+/// out of the doc comment on a type, a variant or a field. A Rust intralink
+/// survives that lift as its own source text, naming a symbol the consumer
+/// cannot follow and has no vocabulary for, so a bracketed link of either
+/// spelling is a description that leaked maintainer documentation. Rationale
+/// belongs in module documentation, which schemars does not lift.
+#[test]
+fn no_published_description_carries_a_rust_intralink() {
+    let mut found = Vec::new();
+    for schema in every_wire_schema() {
+        let title = schema
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("a schema")
+            .to_string();
+        descriptions(&schema, title, &mut found);
+    }
+    assert!(
+        !found.is_empty(),
+        "the census walked no descriptions at all"
+    );
+    for (at, description) in &found {
+        assert!(
+            !description.contains("](crate::") && !description.contains("[`"),
+            "the description at {at} publishes a Rust intralink: {description}"
         );
     }
 }

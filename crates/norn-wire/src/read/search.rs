@@ -14,6 +14,10 @@
 //!
 //! **`PartialEq` alone on [`Hit`].** A hit carries a relevance score, and a
 //! score is a number two of which may be near without being one value.
+//!
+//! **`search` never sorts by a field.** A ranked answer is ordered by its
+//! ranking, so there is no sort on [`SearchParams`] and no spelling of one: a
+//! request that wants a field order wants `find`.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -165,9 +169,8 @@ pub type SearchReport = Page<Hit>;
 
 /// What a `search` request carries.
 ///
-/// **`search` never sorts by a field.** A ranked answer is ordered by its
-/// ranking, so there is no sort here and no spelling of one: a request that
-/// wants a field order wants `find`.
+/// A search answers the documents the ladder ranked for the query, in
+/// relevance order.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SearchParams {

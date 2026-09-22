@@ -1,6 +1,13 @@
 //! The one structured error envelope: a reason code, a message, and the typed
 //! detail the code carries.
 //!
+//! **The detail is held behind one indirection.** The box is invisible on the
+//! wire and is what keeps [`ErrorEnvelope`] narrow: every fallible call in the
+//! workspace returns `Result<_, ErrorEnvelope>`, so the widest detail any code
+//! carries would otherwise be the width of every `Result` there is. One box
+//! here prices a refusal's payload where the refusal is rather than at every
+//! call that could produce one.
+//!
 //! **There is deliberately no `retryable` flag.** Whether an operation is
 //! worth trying again follows from the code and the detail, and a boolean
 //! beside them is a second answer to that question that can disagree with the
@@ -524,13 +531,6 @@ impl ErrorDetail {
 /// a person reads, and the `detail` the code pairs with. The code and the
 /// detail name the same refusal: an envelope whose `code` is not the code its
 /// `detail` carries does not parse.
-///
-/// **The detail is held behind one indirection**, which is invisible on the
-/// wire and is what keeps the envelope narrow. Every fallible call in the
-/// workspace returns `Result<_, ErrorEnvelope>`, so the widest detail any code
-/// carries would otherwise be the width of every `Result` there is; one box
-/// here prices a refusal's payload where the refusal is rather than at every
-/// call that could produce one.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct ErrorEnvelope {

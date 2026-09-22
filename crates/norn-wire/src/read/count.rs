@@ -4,6 +4,17 @@
 //! not carry is `null`, on the row and in the cursor key alike, and
 //! [`Tally::cursor_key`] is the one function that turns the row into the key,
 //! so the two cannot drift into two orders sharing a name.
+//!
+//! **`count` hydrates no document row**, so [`CountParams`] carries no
+//! projection: the answer is how many, and a request that wants the documents
+//! wants `find`. Tallies of findings are `validate --summary` rather than a
+//! grouping here.
+//!
+//! **A resolution predicate is not applicable.** `resolves` answers which
+//! documents a target names, which is a `find`; a `count` carrying one is
+//! answered with the tallies it earned and reports the part as
+//! [`Unsatisfied::ResolvesNotApplicable`](crate::Unsatisfied::ResolvesNotApplicable)
+//! rather than refusing.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -82,15 +93,10 @@ pub type CountReport = Page<Tally>;
 
 /// What a `count` request carries.
 ///
-/// **`count` hydrates no document row**, so it carries no projection: the
-/// answer is how many, and a request that wants the documents wants `find`.
-/// Tallies of findings are `validate --summary` rather than a grouping here.
-///
-/// **A resolution predicate is not applicable.** `resolves` answers which
-/// documents a target names, which is a `find`; a `count` carrying one is
-/// answered with the tallies it earned and reports the part as
-/// [`Unsatisfied::ResolvesNotApplicable`](crate::Unsatisfied::ResolvesNotApplicable)
-/// rather than refusing.
+/// A count answers how many documents match, in one tally per group the
+/// request names, and it carries no projection. A `resolves` predicate is
+/// answered with the tallies the rest of the request earned and reported back
+/// as the unsatisfied part `resolves_not_applicable`.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct CountParams {
