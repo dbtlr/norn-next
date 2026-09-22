@@ -56,6 +56,7 @@ use crate::open::{Reached, directory_flags, open_regular_at};
 use crate::path::{
     CaseSensitivity, ChildKeys, NormalizedPath, NormalizerError, PathError, PathNormalizer,
 };
+use crate::read::PathKind;
 
 /// Begins a deterministic streaming walk of `root`.
 ///
@@ -161,14 +162,14 @@ impl Vault {
     /// already answered.
     ///
     /// **What the last name holds is not read here.** A caller that must tell a
-    /// file from a directory from an absence asks [`crate::path_kind`] for it,
+    /// file from a directory from an absence asks [`Self::path_kind`] for it,
     /// and this leaves that one reading whole rather than taking half of it.
     ///
     /// **A name that is not there is not a refusal.** A path no name leads to
-    /// holds nothing, which is what `path_kind` answers at it, so this states
+    /// holds nothing, which is what [`Self::path_kind`] answers at it, so this states
     /// no notation and lets that reading stand alone. A path a *name* blocks is
     /// the other case and is stated here, as [`SkipReason::UnderAnEntry`]:
-    /// `path_kind` cannot answer at all through an entry that is not a
+    /// [`Self::path_kind`] cannot answer at all through an entry that is not a
     /// directory.
     ///
     /// **A notation is a fact about an entry**, so the descent proves each name
@@ -192,29 +193,15 @@ impl Vault {
                 reason: reason.into(),
             }));
         }
-        let above = subtree.as_path().parent().unwrap_or(Path::new(""));
-        let mut directory = self.root_fd.clone();
-        let mut traversed = PathBuf::new();
-        for component in above.components() {
-            let name = component.as_os_str();
-            traversed.push(name);
-            let access = self.root.join(&traversed);
-            let path = self.traversed(&traversed);
-            match pass_component(self, &directory, name, &path, &access)? {
-                Passed::Skipped(reason) => return Ok(Some(SkipFact { path, reason })),
-                Passed::Vanished => return Ok(None),
-                Passed::NotADirectory => {
-                    return Ok(Some(SkipFact {
-                        path: subtree,
-                        reason: SkipReason::UnderAnEntry,
-                    }));
-                }
-                Passed::Directory => {}
-            }
-            directory = match open_component(&directory, name, &access)? {
-                Some(fd) => fd,
-                None => return Ok(None),
-            };
+        if let Descent::Stopped { path, stop } = self.descend(names_above(&subtree))? {
+            return Ok(match stop {
+                Stop::Skipped(reason) => Some(SkipFact { path, reason }),
+                Stop::Vanished => None,
+                Stop::NotADirectory => Some(SkipFact {
+                    path: subtree,
+                    reason: SkipReason::UnderAnEntry,
+                }),
+            });
         }
         let Some(leaf) = subtree.as_path().file_name() else {
             return Ok(None);
@@ -228,51 +215,93 @@ impl Vault {
         Ok(None)
     }
 
-    /// Whether an entry standing at `relative` would be spelled this way here.
+    /// What stands at `relative` inside this vault.
     ///
-    /// **A root that tells spellings apart answers yes for every spelling**, and
-    /// reads nothing to do it: a stat there answers only for the entry spelled
-    /// exactly as it was asked, so the spelling a caller holds is the entry's
-    /// own or nothing stands at it.
+    /// This is the reading [`Self::skip_reaching`] leaves whole for a caller
+    /// that must tell a file from a directory from an absence, and it is taken
+    /// the way the walk takes a name: from this vault's own root descriptor
+    /// down, one component at a time, so the name it reads is the name a walk
+    /// of this vault reaches under that spelling.
     ///
-    /// **A root that folds beyond ASCII is where the question has content.**
-    /// Such a root resolves several spellings of one entry while this crate's
-    /// fold equates only ASCII case, so a stat stands at spellings that name
-    /// other identities here — and the entry is the one spelling its directory
-    /// lists. This asks that directory, by the same rule the subtree descent
-    /// passes its components under, and pays that rule's cost: one listing,
-    /// O(siblings) in wall time.
+    /// **A spelling the tree does not list stands at nothing.** On a root that
+    /// folds beyond ASCII a stat answers for every spelling the volume
+    /// resolves, and this crate's fold equates only ASCII case — so the entry
+    /// is the one spelling its directory lists, and every name on the way down
+    /// is confirmed against that listing. A caller converging derived state
+    /// reads [`PathKind::Missing`] at the other spellings, which is what a
+    /// derivation from zero over this tree holds there.
     ///
-    /// A caller reading a name's kind asks this first, so a spelling only the
-    /// volume resolves reads as the nothing a walk of this vault finds there.
-    /// Names above the last one are the descent's — [`Self::skip_reaching`]
-    /// states what the walk meets at those — and a directory missing from that
-    /// run lists nothing, which is the answer here too.
-    pub fn renders_the_spelling(&self, relative: &Path) -> Result<bool, WalkError> {
-        if self.case_sensitivity() == CaseSensitivity::Sensitive {
-            return Ok(true);
-        }
+    /// **A name the walk does not descend leaves nothing below it**, so a path
+    /// under an excluded root, a shadow basename, a link or an entry that is
+    /// not a directory is `Missing` here too. Which root that is, and why, is
+    /// [`Self::skip_reaching`]'s to state; this answers only about the end of
+    /// the path.
+    pub fn path_kind(&self, relative: &Path) -> Result<PathKind, WalkError> {
         let subtree = self.normalize(relative)?;
         let Some(name) = subtree.as_path().file_name() else {
-            return Ok(true);
+            // The vault root itself, which this vault holds open.
+            return Ok(PathKind::Directory);
         };
-        let above = subtree.as_path().parent().unwrap_or(Path::new(""));
+        let Descent::Reached(directory) = self.descend(names_above(&subtree))? else {
+            return Ok(PathKind::Missing);
+        };
+        let access = self.root.join(subtree.as_path());
+        if self.case_sensitivity() == CaseSensitivity::Insensitive
+            && !lists_the_spelling(&self.normalizer, &directory, name, &access)?
+        {
+            return Ok(PathKind::Missing);
+        }
+        crate::reads::count_stat();
+        let metadata = match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(metadata) => metadata,
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => {
+                return Ok(PathKind::Missing);
+            }
+            Err(source) => return Err(environment_errno("stating", &access, source)),
+        };
+        Ok(
+            match classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) {
+                EntryKind::Directory => PathKind::Directory,
+                EntryKind::File => PathKind::RegularFile,
+                EntryKind::Symlink | EntryKind::Special(_) => PathKind::Other,
+            },
+        )
+    }
+
+    /// Descends `names` from this vault's root, deciding each name the way the
+    /// vault walk decides the entries it descends through.
+    ///
+    /// One descent serves every caller that reaches a name it did not
+    /// enumerate — the subtree frontier, the notation a caller reads in place
+    /// of reaching a path, and the kind at the end of one — so a name is passed
+    /// on one rule and confirmed in one place. [`pass_component`] is that rule.
+    ///
+    /// A single multi-component open would resolve the intermediate names in
+    /// the kernel, where `O_NOFOLLOW` binds only the last of them.
+    fn descend(&self, names: &Path) -> Result<Descent, WalkError> {
         let mut directory = self.root_fd.clone();
         let mut traversed = PathBuf::new();
-        for component in above.components() {
-            traversed.push(component.as_os_str());
+        for component in names.components() {
+            let name = component.as_os_str();
+            traversed.push(name);
             let access = self.root.join(&traversed);
-            directory = match open_component(&directory, component.as_os_str(), &access)? {
+            let path = self.traversed(&traversed);
+            if let Some(stop) = pass_component(self, &directory, name, &path, &access)? {
+                return Ok(Descent::Stopped { path, stop });
+            }
+            directory = match open_component(&directory, name, &access)? {
                 Some(fd) => fd,
-                None => return Ok(false),
+                // A directory the descent passed and could not open is a name
+                // another writer took away inside this walk's own window.
+                None => {
+                    return Ok(Descent::Stopped {
+                        path,
+                        stop: Stop::Vanished,
+                    });
+                }
             };
         }
-        lists_the_spelling(
-            &self.normalizer,
-            &directory,
-            name,
-            &self.root.join(subtree.as_path()),
-        )
+        Ok(Descent::Reached(directory))
     }
 
     /// Whether `name` is one of Norn's shadow basenames on this root.
@@ -315,13 +344,9 @@ enum Frontier {
     Skipped(SkipFact),
 }
 
-/// Descends to the subtree one component at a time, deciding each component the
-/// way the vault walk decides the entries it descends through: a name the vault
+/// Opens the subtree's frontier, through [`Vault::descend`]: a name the vault
 /// walk skips ends the descent at that name's own skip, so a subtree walk reads
 /// nothing under a name the vault walk never enters.
-///
-/// A single multi-component open would resolve the intermediate names in the
-/// kernel, where `O_NOFOLLOW` binds only the last of them.
 ///
 /// **A component that is not there ends the descent at that name's own
 /// vanishing**, the way every other window between two observations of a name
@@ -330,39 +355,41 @@ enum Frontier {
 /// vault evolving: the walk reads nothing under the name and says so, so what is
 /// stored beneath it converges while the findings there stay withheld.
 fn open_subtree(vault: &Vault, subtree: &NormalizedPath) -> Result<Frontier, WalkError> {
-    let mut directory = vault.root_fd.clone();
-    let mut traversed = PathBuf::new();
-    for component in subtree.as_path().components() {
-        let name = component.as_os_str();
-        traversed.push(name);
-        let access = vault.root.join(&traversed);
-        let path = vault.traversed(&traversed);
-        let vanished = SkipFact {
-            path: path.clone(),
+    Ok(match vault.descend(subtree.as_path())? {
+        Descent::Reached(directory) => Frontier::Open(directory),
+        Descent::Stopped {
+            path,
+            stop: Stop::Skipped(reason),
+        } => Frontier::Skipped(SkipFact { path, reason }),
+        // A frontier is a directory or it is nothing, so an entry standing
+        // where one was named leaves this walk the same nothing an absence
+        // does.
+        Descent::Stopped { path, .. } => Frontier::Skipped(SkipFact {
+            path,
             reason: SkipReason::Vanished,
-        };
-        match pass_component(vault, &directory, name, &path, &access)? {
-            Passed::Skipped(reason) => return Ok(Frontier::Skipped(SkipFact { path, reason })),
-            // A frontier is a directory or it is nothing, so an entry standing
-            // where one was named leaves this walk the same nothing an absence
-            // does.
-            Passed::Vanished | Passed::NotADirectory => {
-                return Ok(Frontier::Skipped(vanished));
-            }
-            Passed::Directory => {}
-        }
-        directory = match open_component(&directory, name, &access)? {
-            Some(fd) => fd,
-            None => return Ok(Frontier::Skipped(vanished)),
-        };
-    }
-    Ok(Frontier::Open(directory))
+        }),
+    })
 }
 
-/// What a descent meets at one name it passes through.
-enum Passed {
-    /// A directory the descent continues through.
-    Directory,
+/// The names above a path's last one: its parent run, empty at the vault root.
+fn names_above(path: &NormalizedPath) -> &Path {
+    path.as_path().parent().unwrap_or(Path::new(""))
+}
+
+/// Where a descent through a run of names ended.
+enum Descent {
+    /// Every name was a directory the descent passed, and this is the last of
+    /// them, open.
+    Reached(Arc<OwnedFd>),
+    /// A name the descent did not pass, and what it met there.
+    Stopped { path: NormalizedPath, stop: Stop },
+}
+
+/// What ends a descent at one name it reads.
+///
+/// A directory is what a descent carries on through, so it is the absence of
+/// one of these rather than a variant: [`pass_component`] answers `None` there.
+enum Stop {
     /// The notation the walk states at this name in place of descending it.
     Skipped(SkipReason),
     /// No name is there.
@@ -405,35 +432,39 @@ fn pass_component(
     name: &OsStr,
     path: &NormalizedPath,
     access: &Path,
-) -> Result<Passed, WalkError> {
+) -> Result<Option<Stop>, WalkError> {
     crate::reads::count_stat();
     let metadata = match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(metadata) => metadata,
-        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return Ok(Passed::Vanished),
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => {
+            return Ok(Some(Stop::Vanished));
+        }
         Err(source) => return Err(environment_errno("stating", access, source)),
     };
     if vault.case_sensitivity() == CaseSensitivity::Insensitive
         && !lists_the_spelling(&vault.normalizer, directory, name, access)?
     {
-        return Ok(Passed::Vanished);
+        return Ok(Some(Stop::Vanished));
     }
     if vault.names_a_shadow(name) {
-        return Ok(Passed::Skipped(SkipReason::Shadow));
+        return Ok(Some(Stop::Skipped(SkipReason::Shadow)));
     }
     Ok(
         match classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) {
-            EntryKind::Directory => Passed::Directory,
-            EntryKind::File | EntryKind::Special(_) => Passed::NotADirectory,
-            EntryKind::Symlink => match classify_link(
-                &vault.root_fd,
-                path.as_path(),
-                directory,
-                name,
-                &vault.normalizer,
-            )? {
-                Some(kind) => Passed::Skipped(SkipReason::SymbolicLink(kind)),
-                None => Passed::Vanished,
-            },
+            EntryKind::Directory => None,
+            EntryKind::File | EntryKind::Special(_) => Some(Stop::NotADirectory),
+            EntryKind::Symlink => Some(
+                match classify_link(
+                    &vault.root_fd,
+                    path.as_path(),
+                    directory,
+                    name,
+                    &vault.normalizer,
+                )? {
+                    Some(kind) => Stop::Skipped(SkipReason::SymbolicLink(kind)),
+                    None => Stop::Vanished,
+                },
+            ),
         },
     )
 }
@@ -2307,7 +2338,6 @@ mod tests {
         let root = scratch.at("");
         scratch.directory("vault/Notes");
         scratch.place("Notes/note.md", b"body");
-        scratch.place("Cafe.md", b"body");
         if !folding(&root) {
             return;
         }
@@ -2344,6 +2374,89 @@ mod tests {
             paths(walk_subtree(&root, Path::new(decomposed), &[]).expect("walk")),
             vec![(PathBuf::from(decomposed), Some(SkipReason::Vanished))]
         );
+    }
+
+    /// **A root that tells spellings apart reads no listing to descend.**
+    ///
+    /// There a stat answers only for the entry spelled exactly as it was asked,
+    /// so the stat is the whole proof and the confirmation a folding root pays
+    /// for would be a directory read per component for nothing. The reading is
+    /// what says so: the descent and the kind at the end of one take entries
+    /// off no stream.
+    ///
+    /// The sensitivity is supplied rather than detected, so this binds on every
+    /// host — including the ones whose own volumes fold.
+    #[test]
+    fn a_root_that_tells_spellings_apart_descends_without_reading_a_listing() {
+        let scratch = Scratch::new("walk-descent-sensitive-cost");
+        scratch.directory("vault/notes");
+        scratch.place("notes/note.md", b"body");
+        let root = scratch.at("");
+        let vault = Vault {
+            root: Arc::new(root.clone()),
+            root_fd: Arc::new(open(&root, directory_flags(), Mode::empty()).expect("root fd")),
+            normalizer: PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive),
+            exclusions: Exclusions::new(
+                &PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive),
+                &[],
+            )
+            .expect("no host roots"),
+        };
+        let subtree = vault.normalize(Path::new("notes")).expect("a vault path");
+
+        let window = crate::reads::ReadWindow::open();
+        let frontier = open_subtree(&vault, &subtree).expect("the descent");
+        let kind = vault
+            .path_kind(Path::new("notes/note.md"))
+            .expect("the kind");
+        let tally = window.finish();
+
+        assert!(matches!(frontier, Frontier::Open(_)), "the subtree opened");
+        assert_eq!(kind, PathKind::RegularFile);
+        assert_eq!(
+            tally.walk_dirents, 0,
+            "a root whose stat is exact read {} directory entries to descend",
+            tally.walk_dirents
+        );
+    }
+
+    /// **A confirmation is answered on the root's own key**, the one every
+    /// comparison in the crate is held to: ASCII case folded, every other byte
+    /// itself. So the spellings the fold equates are listed and the ones a
+    /// volume resolves past it are not.
+    ///
+    /// The sensitivity is supplied rather than detected, so the rule is read
+    /// here on every host rather than only on the volumes that fold.
+    #[test]
+    fn a_listing_confirmation_answers_on_the_roots_own_key() {
+        let scratch = Scratch::new("walk-listing-confirmation");
+        let root = scratch.at("");
+        scratch.directory("vault/Notes");
+        scratch.place("CAF\u{c9}.md", b"body");
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+        let root_fd = Arc::new(open(&root, directory_flags(), Mode::empty()).expect("root fd"));
+
+        for (spelling, listed) in [
+            ("Notes", true),
+            ("notes", true),
+            ("NOTES", true),
+            ("CAF\u{c9}.md", true),
+            ("caf\u{e9}.md", false),
+            ("CAFE.md", false),
+            ("gone.md", false),
+        ] {
+            assert_eq!(
+                lists_the_spelling(
+                    &normalizer,
+                    &root_fd,
+                    OsStr::new(spelling),
+                    &scratch.at(spelling)
+                )
+                .expect("a listing"),
+                listed,
+                "{spelling}"
+            );
+        }
     }
 
     #[test]
@@ -2864,7 +2977,7 @@ mod tests {
 
     /// **A name that is not there is not one of the walk's refusals.** No path
     /// the descent finds no name for holds anything, so the vault states no
-    /// notation and leaves that whole reading to [`crate::path_kind`], which
+    /// notation and leaves that whole reading to [`Vault::path_kind`], which
     /// answers the same absence for the whole path.
     ///
     /// The last name's own spelling is read after the descent, not before it,

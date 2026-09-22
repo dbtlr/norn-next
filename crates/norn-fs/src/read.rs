@@ -11,30 +11,16 @@ use crate::open::{Reached, Unreached, anchor_flags, open_regular_at};
 use crate::refusal::{Refusal, environment, environment_at};
 
 /// What kind of filesystem object a watcher invalidation root names now.
+///
+/// [`crate::Vault::path_kind`] is what reads one, from a vault's own root
+/// descriptor down: a name is reached through the tree the vault walked, and a
+/// spelling only a folding volume resolves stands at nothing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathKind {
     Missing,
     RegularFile,
     Directory,
     Other,
-}
-
-#[allow(clippy::disallowed_methods)]
-pub fn path_kind(path: &Path) -> Result<PathKind, Refusal> {
-    crate::reads::count_stat();
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(PathKind::Missing),
-        Err(error) => return Err(environment("stating", path, &error)),
-    };
-    let kind = metadata.file_type();
-    Ok(if kind.is_file() {
-        PathKind::RegularFile
-    } else if kind.is_dir() {
-        PathKind::Directory
-    } else {
-        PathKind::Other
-    })
 }
 
 /// Bytes and their content hash from one read of one held file descriptor.
