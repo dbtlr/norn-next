@@ -266,9 +266,10 @@ impl Column {
 /// The total is what makes a bounded head a head, so a total below the number
 /// of rows kept describes nothing: there is no reading of it under which the
 /// head is a head of anything. Every bounded head in the vocabulary — a
-/// nested [`Collection`] on a row, and the
+/// nested [`Collection`] on a row, the [`BodyText`] a body crosses as, and the
 /// [`CandidateHead`](crate::CandidateHead) a finding and a refusal carry —
-/// refuses through this one type.
+/// refuses through this one type, so a person reads one sentence whichever
+/// head they cut short.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TotalBelowHead {
     head: usize,
