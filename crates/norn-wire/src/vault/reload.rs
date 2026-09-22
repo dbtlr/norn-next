@@ -1,0 +1,104 @@
+//! `vault reload`: re-read one vault's control files and apply what changed.
+//!
+//! **A reload is what activates a control file.** No watcher event ever does,
+//! so a vault whose schema or config has been edited goes on serving the ones
+//! it has until a reload is asked for.
+//!
+//! **A dry run validates and activates nothing.** It reads the authored
+//! control files, judges them the way a reload does, and leaves the vault
+//! serving what it was serving; `activated` is what says which of the two
+//! happened.
+//!
+//! **A reload names a registration, not an address.** A root addresses a
+//! throwaway attach, which holds no control files to re-read.
+//!
+//! The refusals are the ones a reload answers with: `host/unknown-vault` for a
+//! name the registry does not hold, `host/entry-not-ready` for an entry
+//! holding nothing to reload yet, `host/entry-untrusted` for an entry whose
+//! derived state cannot be trusted, `vault/reload-busy` for a vault whose
+//! reload is already running, and `vault/reload-failed`, carrying what the
+//! reload met, for every outcome of a reload that ran.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::name::VaultName;
+use crate::status::Fingerprints;
+
+/// Which core-controlled part of the vault's control files a reload applied.
+///
+/// On the wire an outcome is the flat string itself: `"config_only"`,
+/// `"schema_changed"`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ReloadOutcome {
+    /// The vault config changed and the schema did not, so the derived state
+    /// under it stands.
+    ConfigOnly,
+    /// The vault schema changed, so what is derived under it is derived
+    /// again.
+    SchemaChanged,
+}
+
+/// What a `vault reload` request carries.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct ReloadParams {
+    /// The registration to reload. A root addresses a throwaway attach, which
+    /// holds no control files to re-read, so this is a name rather than a
+    /// vault address.
+    pub vault: VaultName,
+    /// Whether to validate the authored control files without putting them
+    /// into service. `false` applies what changed, which is the default.
+    pub dry_run: bool,
+}
+
+impl ReloadParams {
+    /// A request to reload `vault` and apply what changed.
+    pub const fn new(vault: VaultName) -> Self {
+        ReloadParams {
+            vault,
+            dry_run: false,
+        }
+    }
+
+    /// The request validating without activating.
+    #[must_use]
+    pub const fn dry_run(mut self) -> Self {
+        self.dry_run = true;
+        self
+    }
+}
+
+/// What `vault reload` answers with.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct ReloadReport {
+    /// Which part of the control files the candidate changed.
+    pub outcome: ReloadOutcome,
+    /// The fingerprints the candidate was read at. They are the vault's active
+    /// fingerprints where the reload activated, and the authored ones it
+    /// validated where it did not.
+    pub fingerprints: Fingerprints,
+    /// Whether the candidate was put into service. A dry run reports `false`.
+    pub activated: bool,
+}
+
+impl ReloadReport {
+    /// A reload that met `outcome` at `fingerprints` and activated it.
+    pub const fn new(outcome: ReloadOutcome, fingerprints: Fingerprints) -> Self {
+        ReloadReport {
+            outcome,
+            fingerprints,
+            activated: true,
+        }
+    }
+
+    /// The report of a dry run: what it validated, and nothing activated.
+    #[must_use]
+    pub const fn validated(mut self) -> Self {
+        self.activated = false;
+        self
+    }
+}

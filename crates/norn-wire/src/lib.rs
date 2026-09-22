@@ -289,6 +289,7 @@ mod address;
 mod base64url;
 mod cursor;
 mod demand;
+mod doctor;
 mod document;
 mod error;
 mod finding;
@@ -299,8 +300,10 @@ mod product;
 mod read;
 mod reading;
 mod reload;
+mod status;
 mod target;
 mod trust;
+mod vault;
 mod verb;
 
 pub use address::{
@@ -311,6 +314,9 @@ pub use cursor::{
     Cursor, CursorKey, CursorOrderChanged, FacetKind, Moved, NonFiniteScore, Page, Score, Snapshot,
 };
 pub use demand::AttachMode;
+pub use doctor::{
+    DoctorRegistryParams, DoctorRegistryReport, EngineHealth, RegistryProblem, RegistrySanity,
+};
 pub use document::{
     BlockRow, BodyText, Collection, Column, DocumentPath, DocumentRow, FieldValue, HeadingRow,
     LinkFamily, LinkHealth, LinkRow, Span, TagRow, TagSource, TotalBelowHead,
@@ -333,8 +339,19 @@ pub use reading::{
     AnswerReading, EngineSection, Freshness, LadderDeclaration, ModelIdentity, Rung, RungReport,
 };
 pub use reload::{ControlFile, ReloadFailure, ReloadStage};
+pub use status::{
+    Advisory, Attention, Drift, EngineStatus, Fingerprints, Published, Registration, RollUp,
+    VaultStatus,
+};
 pub use target::{Anchor, IllegalTarget, ResolutionTarget};
 pub use trust::{NotReady, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
+pub use vault::list::{ListParams, ListReport};
+pub use vault::register::{RegisterParams, RegisterReport};
+pub use vault::reload::{ReloadOutcome, ReloadParams, ReloadReport};
+pub use vault::resolve::{ResolveParams, ResolveReport};
+pub use vault::set::{Change, Replace, SetParams, SetReport};
+pub use vault::status::{StatusParams, StatusReport};
+pub use vault::unregister::{UnregisterParams, UnregisterReport};
 pub use verb::{
     Addressing, RequestScope, UnknownAddressing, UnknownRequestScope, UnknownVerb, Verb,
 };
