@@ -217,18 +217,12 @@ impl Vault {
             .as_path()
             .file_name()
             .expect("a normalized path names at least one component");
-        if self.names_a_shadow(name) {
-            return Ok(Reach::Refused(SkipFact {
-                path: subtree,
-                reason: SkipReason::Shadow,
-            }));
-        }
+        // The last name is read the way the descent reads every name above
+        // it: an entry is proven there, at the spelling the directory lists,
+        // before the spelling is judged as a shadow basename. A refusal is a
+        // fact about an entry, so a shadow-spelled name nothing stands at is
+        // `Missing`, not a refusal.
         let access = self.root.join(subtree.as_path());
-        if self.case_sensitivity() == CaseSensitivity::Insensitive
-            && !lists_the_spelling(&self.normalizer, &directory, name, &access)?
-        {
-            return Ok(Reach::Stands(PathKind::Missing));
-        }
         crate::reads::count_stat();
         let metadata = match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(metadata) => metadata,
@@ -237,6 +231,17 @@ impl Vault {
             }
             Err(source) => return Err(environment_errno("stating", &access, source)),
         };
+        if self.case_sensitivity() == CaseSensitivity::Insensitive
+            && !lists_the_spelling(&self.normalizer, &directory, name, &access)?
+        {
+            return Ok(Reach::Stands(PathKind::Missing));
+        }
+        if self.names_a_shadow(name) {
+            return Ok(Reach::Refused(SkipFact {
+                path: subtree,
+                reason: SkipReason::Shadow,
+            }));
+        }
         Ok(Reach::Stands(
             match classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) {
                 EntryKind::Directory => PathKind::Directory,
@@ -3044,6 +3049,13 @@ mod tests {
             refusal("dir/norn-shadow-7-2"),
             Ok((PathBuf::from("dir/norn-shadow-7-2"), SkipReason::Shadow)),
             "a shadow basename as the last name"
+        );
+        // A refusal is a fact about an entry: the same spelling with nothing
+        // standing at it is an absence, not a shadow.
+        assert_eq!(
+            refusal("dir/norn-shadow-9-9"),
+            Err(PathKind::Missing),
+            "a shadow-spelled last name nothing stands at"
         );
     }
 
