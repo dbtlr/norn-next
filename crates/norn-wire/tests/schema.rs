@@ -100,6 +100,12 @@ fn sorted<'a>(members: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
 
 /// Every schema a surface renders against, built once and read by the census
 /// tests below.
+///
+/// A generic carrier joins the census at one concrete instantiation —
+/// `Page<String>`, `Collection<String>` and `VaultAnswer<String>` — because
+/// what the census reads is the carrier's own type and field documentation,
+/// which is the same whatever it carries. The row and report types a surface
+/// fills them with are walked on lines of their own.
 fn every_wire_schema() -> Vec<Value> {
     vec![
         schema_of::<TrustState>(),
