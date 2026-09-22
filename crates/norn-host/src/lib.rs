@@ -28,8 +28,8 @@ pub use evidence::{ReadReading, ReadsSince};
 #[cfg(feature = "induced-failure")]
 pub use lifecycle::WorkInFlight;
 pub use lifecycle::{
-    AnswerReading, Demand, DemandLease, EntryOps, EntryReloadFailure, Established, Establishment,
-    Healing, Host, HostError, JobFailure, LifecyclePolicy, LifecyclePolicyError, MintedReader,
+    Demand, DemandLease, EntryOps, EntryReloadFailure, Established, Establishment, Healing,
+    HoldReading, Host, HostError, JobFailure, LifecyclePolicy, LifecyclePolicyError, MintedReader,
     ProgressReporter, ReadHold, ReadRefusal, ReadSource, ReaderUnavailable, ReconcileWork,
     SnapshotSource,
 };
@@ -65,4 +65,4 @@ pub use reload::{
     ActiveFingerprints, AuthoredDrift, ConfigFingerprint, EngineConfigReceiver, ReloadError,
     ReloadFile, ReloadOutcome, ReloadRefusal, ReloadStage, VaultInspection,
 };
-pub use semantic::{SemanticEngines, SemanticRefusal, SemanticStatus};
+pub use semantic::{SemanticEngines, SemanticRefusal, SemanticStatus, compose_vector_refusal};

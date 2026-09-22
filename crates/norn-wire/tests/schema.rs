@@ -11,8 +11,12 @@
 //! restating it.
 
 use norn_wire::{
-    AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
-    ReasonCode, Severity, TrustState, UntrustedReason, VaultName, WarmingPhase, WatcherLossCause,
+    Addressing, Anchor, AnswerReading, AttachMode, Cursor, CursorKey, EngineSection, ErrorDetail,
+    ErrorEnvelope, FacetKind, FindingKind, FindingScope, Freshness, MaintainerIdentity, Moved,
+    NotReady, Page, PollBackend, Predicate, ReasonCode, ReloadFailure, RequestScope,
+    ResolutionTarget, Rung, RungReport, SchemaSource, Score, Severity, Snapshot, TrustState,
+    Unsatisfied, UntrustedReason, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb,
+    WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -104,6 +108,32 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<ErrorEnvelope>(),
         schema_of::<AttachMode>(),
         schema_of::<VaultName>(),
+        schema_of::<VaultRoot>(),
+        schema_of::<SchemaSource>(),
+        schema_of::<PollBackend>(),
+        schema_of::<VaultAddress>(),
+        schema_of::<Verb>(),
+        schema_of::<RequestScope>(),
+        schema_of::<Addressing>(),
+        schema_of::<ResolutionTarget>(),
+        schema_of::<Anchor>(),
+        schema_of::<Predicate>(),
+        schema_of::<Cursor>(),
+        schema_of::<CursorKey>(),
+        schema_of::<FacetKind>(),
+        schema_of::<Moved>(),
+        schema_of::<Snapshot>(),
+        schema_of::<Page<String>>(),
+        schema_of::<AnswerReading>(),
+        schema_of::<Rung>(),
+        schema_of::<RungReport>(),
+        schema_of::<Freshness>(),
+        schema_of::<Score>(),
+        schema_of::<EngineSection>(),
+        schema_of::<Unsatisfied>(),
+        schema_of::<VaultAnswer<String>>(),
+        schema_of::<NotReady>(),
+        schema_of::<ReloadFailure>(),
     ] {
         assert!(
             schema.get("$schema").is_some(),
@@ -182,7 +212,19 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "host/entry-untrusted",
             "host/maintainer-contended",
             "host/unknown-vault",
-            "host/unsupported-attach-mode"
+            "host/unsupported-attach-mode",
+            "host/already-served",
+            "host/entry-held",
+            "host/entry-not-ready",
+            "host/reader-unavailable",
+            "host/registry-unwritable",
+            "vault/ambiguous-root",
+            "vault/reload-busy",
+            "vault/reload-failed",
+            "vault/cursor-order-changed",
+            "engine/not-enabled",
+            "engine/unavailable",
+            "engine/failed",
         ])
     );
 }
@@ -340,7 +382,19 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "host/entry-untrusted",
             "host/maintainer-contended",
             "host/unknown-vault",
-            "host/unsupported-attach-mode"
+            "host/unsupported-attach-mode",
+            "host/already-served",
+            "host/entry-held",
+            "host/entry-not-ready",
+            "host/reader-unavailable",
+            "host/registry-unwritable",
+            "vault/ambiguous-root",
+            "vault/reload-busy",
+            "vault/reload-failed",
+            "vault/cursor-order-changed",
+            "engine/not-enabled",
+            "engine/unavailable",
+            "engine/failed",
         ])
     );
 }
@@ -490,4 +544,554 @@ fn an_envelope_refers_to_the_code_and_the_detail() {
             "the envelope's schema carries no definition of {definition}"
         );
     }
+}
+
+// ── The address grammar ──────────────────────────────────────────────────
+
+/// A recorded path advertises the grammar its constructor keeps, in words.
+/// There is no `pattern`: whether a path is absolute is a platform question,
+/// and a regular expression that answered it on one platform would answer it
+/// wrongly on another, admitting paths the reader refuses.
+///
+/// The descriptions are pinned here for the reason the name's is: these are
+/// hand-written schemas, so the sentence the schema carries and the sentence
+/// the type's doc carries are two spellings that nothing else holds equal.
+#[test]
+fn a_recorded_path_advertises_the_grammar_it_is_parsed_through() {
+    for (schema, description) in [
+        (
+            schema_of::<VaultRoot>(),
+            "A vault's root directory: an absolute UTF-8 path.",
+        ),
+        (
+            schema_of::<SchemaSource>(),
+            "Where a vault's schema is read from: an absolute UTF-8 path.",
+        ),
+    ] {
+        assert_eq!(schema["type"].as_str(), Some("string"));
+        assert_eq!(schema["description"].as_str(), Some(description));
+        assert!(
+            schema.get("pattern").is_none(),
+            "a recorded path advertises a pattern: {schema}"
+        );
+    }
+}
+
+#[test]
+fn a_poll_backend_advertises_its_bare_string() {
+    let schema = schema_of::<PollBackend>();
+    let backends: Vec<&str> = branches(&schema)
+        .iter()
+        .map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a backend branch is not a pinned string: {branch}"))
+        })
+        .collect();
+    assert_eq!(sorted(backends.clone()), sorted(["poll"]));
+    assert_eq!(
+        sorted(backends),
+        sorted(PollBackend::ALL.map(|backend| backend.as_str()))
+    );
+}
+
+/// An address advertises its `by` tag, and each branch refers to the grammar
+/// its payload is parsed through rather than restating it as a bare string.
+#[test]
+fn a_vault_address_advertises_its_by_tag_and_the_grammars_behind_it() {
+    let schema = schema_of::<VaultAddress>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "by")),
+        sorted(["name", "root"])
+    );
+    for (tag, field, definition) in [("name", "name", "VaultName"), ("root", "root", "VaultRoot")] {
+        let branch = branches(&schema)
+            .iter()
+            .find(|branch| tag_constant(branch, "by") == Some(tag))
+            .unwrap_or_else(|| panic!("the {tag} branch"));
+        assert_eq!(property_names(branch), ["by", field].into_iter().collect());
+        assert_eq!(
+            branch["properties"][field]["$ref"].as_str(),
+            Some(format!("#/$defs/{definition}").as_str())
+        );
+        assert!(
+            schema["$defs"][definition].is_object(),
+            "the referenced definition is absent: {schema}"
+        );
+    }
+}
+
+// ── The verb registry ────────────────────────────────────────────────────
+
+/// A verb and a scope are advertised as the bare strings they are on the wire,
+/// and the walkable lists cannot drift behind the enums surfaces render.
+#[test]
+fn a_verb_and_a_scope_advertise_their_bare_strings() {
+    let members = |schema: &Value| -> Vec<String> {
+        branches(schema)
+            .iter()
+            .map(|branch| {
+                string_constant(branch)
+                    .unwrap_or_else(|| panic!("a branch is not a pinned string: {branch}"))
+                    .to_owned()
+            })
+            .collect()
+    };
+    let verbs = members(&schema_of::<Verb>());
+    assert_eq!(verbs.len(), Verb::ALL.len());
+    assert_eq!(
+        sorted(verbs.iter().map(String::as_str)),
+        sorted(Verb::ALL.map(|verb| verb.as_str()))
+    );
+    let scopes = members(&schema_of::<RequestScope>());
+    assert_eq!(
+        sorted(scopes.iter().map(String::as_str)),
+        sorted(["vault", "registry", "installation"])
+    );
+}
+
+// ── The resolution target and the predicate grammar ──────────────────────
+
+/// A target advertises the grammar its constructor keeps, in words. There is
+/// no `pattern`: the address half is a path suffix, and the one rule the
+/// reader applies to it is stated plainly instead.
+#[test]
+fn a_resolution_target_advertises_the_grammar_it_is_parsed_through() {
+    let schema = schema_of::<ResolutionTarget>();
+    assert_eq!(schema["type"].as_str(), Some("string"));
+    assert_eq!(
+        schema["description"].as_str(),
+        Some(
+            "What a request names one document by: a path suffix, optionally followed by `#` and a heading, or `#^` and a block identifier. The path suffix is not empty."
+        )
+    );
+    assert!(
+        schema.get("pattern").is_none(),
+        "a target advertises a pattern: {schema}"
+    );
+}
+
+/// The conjunction advertises one branch per operator, tagged `op`, and the
+/// typed halves refer to their own definitions rather than restating them.
+#[test]
+fn a_predicate_advertises_its_op_tag_and_the_types_behind_it() {
+    let schema = schema_of::<Predicate>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "op")),
+        sorted([
+            "eq",
+            "not_eq",
+            "in",
+            "has",
+            "missing",
+            "before",
+            "after",
+            "matches",
+            "path",
+            "links_to",
+            "resolves",
+            "tag",
+            "has_finding",
+        ])
+    );
+    let branch = |op: &str| {
+        branches(&schema)
+            .iter()
+            .find(|branch| tag_constant(branch, "op") == Some(op))
+            .unwrap_or_else(|| panic!("the {op} branch"))
+            .clone()
+    };
+    assert_eq!(
+        property_names(&branch("eq")),
+        ["op", "key", "value"].into_iter().collect()
+    );
+    for op in ["links_to", "resolves"] {
+        assert_eq!(
+            branch(op)["properties"]["target"]["$ref"].as_str(),
+            Some("#/$defs/ResolutionTarget"),
+            "the {op} branch restates the target grammar"
+        );
+    }
+    assert_eq!(
+        branch("has_finding")["properties"]["kind"]["$ref"].as_str(),
+        Some("#/$defs/FindingKind")
+    );
+    for definition in ["ResolutionTarget", "FindingKind"] {
+        assert!(
+            schema["$defs"][definition].is_object(),
+            "the referenced definition is absent: {schema}"
+        );
+    }
+}
+
+/// The anchor is read back as an object tagged `kind`, so a consumer that
+/// holds a parsed target branches on which place it names.
+#[test]
+fn an_anchor_advertises_its_kind_tag() {
+    let schema = schema_of::<Anchor>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "kind")),
+        sorted(["heading", "block"])
+    );
+}
+
+// ── The cursor envelope ──────────────────────────────────────────────────
+
+/// A cursor advertises one opaque string, and the pattern is the alphabet it
+/// is spelled in — which is the whole of what a validator can say about a
+/// value a consumer is told to read nothing out of.
+#[test]
+fn a_cursor_advertises_one_opaque_string() {
+    let schema = schema_of::<Cursor>();
+    assert_eq!(schema["type"].as_str(), Some("string"));
+    assert_eq!(schema["pattern"].as_str(), Some("^[A-Za-z0-9_-]+$"));
+    let description = schema["description"]
+        .as_str()
+        .expect("a cursor advertises a description");
+    assert!(
+        description.contains("Opaque") && description.contains("unchanged"),
+        "the description does not say the string is opaque: {description}"
+    );
+    assert!(
+        schema.get("properties").is_none(),
+        "a cursor advertises fields a consumer could read: {schema}"
+    );
+}
+
+/// The key advertises its `row` tag, one branch per paged row type, so the
+/// shape stays a derive even though the wrapping around it is hand-written.
+#[test]
+fn a_cursor_key_advertises_its_row_tag() {
+    let schema = schema_of::<CursorKey>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "row")),
+        sorted(["document", "hit", "tally", "finding", "facet", "ordinal"])
+    );
+    let document = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "row") == Some("document"))
+        .expect("the document branch");
+    assert_eq!(
+        property_names(document),
+        ["row", "sort", "path"].into_iter().collect()
+    );
+    let hit = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "row") == Some("hit"))
+        .expect("the hit branch");
+    assert_eq!(
+        property_names(hit),
+        ["row", "score", "path"].into_iter().collect()
+    );
+    assert_eq!(
+        hit["properties"]["score"]["$ref"].as_str(),
+        Some("#/$defs/Score"),
+        "a hit restates the score grammar: {hit}"
+    );
+    assert_eq!(schema["$defs"]["Score"]["type"].as_str(), Some("number"));
+}
+
+/// A score is advertised as the bare number it is on the wire, so a surface
+/// renders the value rather than an object wrapping it. Finiteness is the read
+/// path's and is not a constraint a JSON Schema validator can state.
+#[test]
+fn a_score_advertises_the_number_it_is() {
+    let schema = schema_of::<Score>();
+    assert_eq!(schema["type"].as_str(), Some("number"));
+    assert!(
+        schema.get("properties").is_none(),
+        "a score advertises fields: {schema}"
+    );
+}
+
+#[test]
+fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
+    let members = |schema: &Value| -> Vec<String> {
+        branches(schema)
+            .iter()
+            .map(|branch| {
+                string_constant(branch)
+                    .unwrap_or_else(|| panic!("a branch is not a pinned string: {branch}"))
+                    .to_owned()
+            })
+            .collect()
+    };
+    assert_eq!(
+        sorted(
+            members(&schema_of::<FacetKind>())
+                .iter()
+                .map(String::as_str)
+        ),
+        sorted([
+            "declared_field",
+            "observed_field",
+            "declared_tag",
+            "folder",
+            "path_rule",
+        ])
+    );
+    assert_eq!(
+        sorted(members(&schema_of::<Moved>()).iter().map(String::as_str)),
+        sorted(["epoch", "generation", "sidecar_revision"])
+    );
+}
+
+/// A page advertises its three fields, and the continuation refers to the
+/// cursor's own definition, so a surface publishing a page publishes the
+/// opaque string with it.
+#[test]
+fn a_page_advertises_its_rows_its_continuation_and_what_moved() {
+    let schema = schema_of::<Page<String>>();
+    assert_eq!(
+        property_names(&schema),
+        ["rows", "next", "moved"].into_iter().collect()
+    );
+    assert_eq!(schema["properties"]["rows"]["type"].as_str(), Some("array"));
+    assert!(
+        schema["$defs"]["Cursor"].is_object(),
+        "a page carries no definition of the cursor: {schema}"
+    );
+}
+
+/// The snapshot advertises the four parts a continuation is judged against,
+/// under the snake_case names the wire uses.
+#[test]
+fn a_snapshot_advertises_the_parts_a_continuation_is_judged_against() {
+    let schema = schema_of::<Snapshot>();
+    assert_eq!(
+        property_names(&schema),
+        [
+            "epoch",
+            "generation",
+            "schema_fingerprint",
+            "sidecar_revision",
+        ]
+        .into_iter()
+        .collect()
+    );
+}
+
+// ── The answer reading and the read product ──────────────────────────────
+
+/// A reading advertises the four parts a consumer judges an answer by, and
+/// refers to the trust vocabulary rather than restating it.
+#[test]
+fn a_reading_advertises_the_parts_an_answer_is_judged_by() {
+    let schema = schema_of::<AnswerReading>();
+    assert_eq!(
+        property_names(&schema),
+        ["trust", "epoch", "generation", "ladder"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        schema["properties"]["trust"]["$ref"].as_str(),
+        Some("#/$defs/TrustState")
+    );
+    assert!(
+        schema["$defs"]["RungReport"].is_object(),
+        "the reading carries no definition of a rung report: {schema}"
+    );
+}
+
+/// Addressing is a flat string of its own: what a verb carries, apart from the
+/// scope a request under it is answered from.
+#[test]
+fn an_addressing_advertises_its_bare_strings() {
+    assert_eq!(
+        sorted(
+            branches(&schema_of::<Addressing>())
+                .iter()
+                .map(|branch| string_constant(branch).unwrap_or_else(|| panic!(
+                    "an addressing branch is not a pinned string: {branch}"
+                )))
+        ),
+        sorted(["required", "none", "optional"])
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<RequestScope>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a scope branch is not a pinned string: {branch}"))
+        })),
+        sorted(["vault", "registry", "installation"])
+    );
+}
+
+/// A rung report advertises its `rung` tag, one branch per rung, and each
+/// branch carries what that rung holds: the floor nothing, a request-time rung
+/// its model, the stateful rung its model and its freshness.
+#[test]
+fn a_rung_report_advertises_its_rung_tag_and_what_each_rung_holds() {
+    let schema = schema_of::<RungReport>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "rung")),
+        sorted(["lexical", "vector", "expansion", "rerank"])
+    );
+    let branch = |rung: &str| {
+        branches(&schema)
+            .iter()
+            .find(|branch| tag_constant(branch, "rung") == Some(rung))
+            .unwrap_or_else(|| panic!("the {rung} branch"))
+            .clone()
+    };
+    assert_eq!(
+        property_names(&branch("lexical")),
+        ["rung"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(&branch("vector")),
+        ["rung", "model", "freshness"].into_iter().collect()
+    );
+    for rung in ["expansion", "rerank"] {
+        assert_eq!(
+            property_names(&branch(rung)),
+            ["rung", "model"].into_iter().collect(),
+            "the {rung} branch advertises a lag a request-time rung does not hold"
+        );
+    }
+    assert_eq!(
+        branch("vector")["properties"]["freshness"]["$ref"].as_str(),
+        Some("#/$defs/Freshness")
+    );
+    assert_eq!(
+        branch("rerank")["properties"]["model"]["$ref"].as_str(),
+        Some("#/$defs/ModelIdentity")
+    );
+}
+
+#[test]
+fn a_rung_a_freshness_and_a_section_advertise_their_vocabularies() {
+    assert_eq!(
+        sorted(branches(&schema_of::<Rung>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a rung branch is not a pinned string: {branch}"))
+        })),
+        sorted(["lexical", "vector", "expansion", "rerank"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<Freshness>(), "state")),
+        sorted(["trailing", "rescanning"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<EngineSection>(), "state")),
+        sorted(["absent", "disabled", "malformed", "enabled"])
+    );
+}
+
+/// The unsatisfied vocabulary advertises its `part` tag, one branch per part a
+/// request can leave unapplied.
+#[test]
+fn an_unsatisfied_part_advertises_its_part_tag() {
+    let schema = schema_of::<Unsatisfied>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "part")),
+        sorted([
+            "unknown_sort_key",
+            "unknown_projection_key",
+            "unknown_predicate_key",
+            "bare_directory",
+            "malformed_glob",
+            "impossible_path",
+            "missing_section",
+            "resolves_not_applicable",
+        ])
+    );
+    let resolves = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "part") == Some("resolves_not_applicable"))
+        .expect("the resolves branch");
+    assert_eq!(
+        resolves["properties"]["target"]["$ref"].as_str(),
+        Some("#/$defs/ResolutionTarget")
+    );
+}
+
+/// An answer advertises the reading, the unapplied parts and the verb's own
+/// report, so a surface publishing a verb publishes all three together.
+#[test]
+fn a_vault_answer_advertises_its_reading_its_unsatisfied_parts_and_its_report() {
+    let schema = schema_of::<VaultAnswer<String>>();
+    assert_eq!(
+        property_names(&schema),
+        ["reading", "unsatisfied", "report"].into_iter().collect()
+    );
+    for definition in ["AnswerReading", "Unsatisfied", "TrustState"] {
+        assert!(
+            schema["$defs"][definition].is_object(),
+            "an answer carries no definition of {definition}"
+        );
+    }
+}
+
+/// The two vocabularies the new codes carry as payloads advertise their tags,
+/// so a client branches on the typed half and reads the prose beside it.
+#[test]
+fn a_not_ready_state_and_a_reload_failure_advertise_their_tags() {
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<NotReady>(), "state")),
+        sorted(["warming", "unattached"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<ReloadFailure>(), "kind")),
+        sorted([
+            "control_file",
+            "environmental",
+            "store_damaged",
+            "watcher_terminal",
+            "lost_maintainership",
+            "maintainer_contended",
+            "unsupported",
+        ])
+    );
+    let detail = schema_of::<ErrorDetail>();
+    let not_ready = branches(&detail)
+        .iter()
+        .find(|branch| tag_constant(branch, "code") == Some("host/entry-not-ready"))
+        .expect("the entry-not-ready branch");
+    assert_eq!(
+        not_ready["properties"]["state"]["$ref"].as_str(),
+        Some("#/$defs/NotReady")
+    );
+}
+
+/// A changed order is carried whole: the detail refers to the continuation's
+/// own type rather than re-spelling its two fields, so a client that holds the
+/// struct holds what the refusal carries.
+#[test]
+fn a_changed_order_is_advertised_as_the_type_the_continuation_answers_with() {
+    let schema = schema_of::<ErrorDetail>();
+    let changed = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "code") == Some("vault/cursor-order-changed"))
+        .expect("the cursor-order-changed branch");
+    assert_eq!(
+        property_names(changed),
+        ["code", "order"].into_iter().collect()
+    );
+    assert_eq!(
+        changed["properties"]["order"]["$ref"].as_str(),
+        Some("#/$defs/CursorOrderChanged")
+    );
+    assert_eq!(
+        property_names(&schema["$defs"]["CursorOrderChanged"]),
+        ["minted_under", "current"].into_iter().collect()
+    );
+}
+
+/// The registry-write refusal advertises its account as prose beside the code,
+/// which is the whole of what it carries.
+#[test]
+fn an_unwritable_registry_advertises_its_account_as_prose() {
+    let schema = schema_of::<ErrorDetail>();
+    let unwritable = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "code") == Some("host/registry-unwritable"))
+        .expect("the registry-unwritable branch");
+    assert_eq!(
+        property_names(unwritable),
+        ["code", "detail"].into_iter().collect()
+    );
+    assert_eq!(
+        unwritable["properties"]["detail"]["type"].as_str(),
+        Some("string")
+    );
 }

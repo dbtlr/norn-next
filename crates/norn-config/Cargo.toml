@@ -13,8 +13,9 @@ publish.workspace = true
 # *shape* lives here and the registry's *semantics* live in `norn-host`, which
 # an edge in this direction would blur.
 #
-# `norn-wire` owns the vault-name grammar, because a name crosses the
-# client/host seam as well as keying the registry table and naming a directory.
+# `norn-wire` owns the grammars a registration is spelled in — the vault name,
+# the root, the schema source, and the watch backend — because each of them
+# crosses the client/host seam as well as being written into the registry file.
 # The edge points at the leaf everything else already points at: the vocabulary
 # reaches nothing, so this crate reaching it adds no reachability at all.
 #

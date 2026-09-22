@@ -107,6 +107,10 @@ pub enum ConfigError {
     },
     /// A path this crate records or builds paths under, in a shape it cannot
     /// record. `subject` names which path it was.
+    ///
+    /// The grammar is [`norn_wire::absolute_path`]'s and the refusal is
+    /// [`IllegalPath`](norn_wire::IllegalPath); this is the same refusal read
+    /// as one of this crate's.
     IllegalPath {
         path: PathBuf,
         subject: &'static str,
@@ -204,6 +208,20 @@ impl From<norn_wire::IllegalVaultName> for ConfigError {
     fn from(refusal: norn_wire::IllegalVaultName) -> Self {
         ConfigError::IllegalName {
             name: refusal.name().to_string(),
+            problem: refusal.problem(),
+        }
+    }
+}
+
+impl From<norn_wire::IllegalPath> for ConfigError {
+    /// A path the grammar refused, read as this crate's refusal. The account
+    /// is the grammar's own — the path that was offered, which path it was
+    /// meant to be, and what the grammar wanted — so nothing about the refusal
+    /// changes on the way through.
+    fn from(refusal: norn_wire::IllegalPath) -> Self {
+        ConfigError::IllegalPath {
+            path: PathBuf::from(refusal.path()),
+            subject: refusal.what(),
             problem: refusal.problem(),
         }
     }
