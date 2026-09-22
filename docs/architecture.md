@@ -307,7 +307,7 @@ therefore puts its content in the tree, is settled over, and only then edits, mo
 removes it. One case lands that changing phase while no host is attached at all, which is
 the lane where the attach heal rather than a watcher report is what has to converge it.
 Each settles on a **census** — every markdown place holding the row its bytes
-imply, keyed by identity so a volume that folds case is judged the way it resolves, and the
+imply, keyed by identity so a volume that folds ASCII case is judged the way it resolves those names, and the
 vault's schema declaration agreeing with the pin the store holds — and is then compared
 with a second derivation built from zero over the same final tree. Two claims stand between
 a phase's acts and its settle, because a phase that changed nothing satisfies every bar
