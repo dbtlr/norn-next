@@ -18,9 +18,11 @@
 //! outside what a scan over source text can see, and the test says so.
 //!
 //! [`crate::line_ending::LineEnding`] is the one other module the scan
-//! exempts wholesale, because what it decides is which of two terminator
-//! spellings an edit writes rather than where a line ends. Individual `\n`
-//! literals elsewhere are exempted one at a time, each with its own reason.
+//! exempts wholesale, because it spells the three breaks of this rule as the
+//! terminators an edit writes: it decides which one a document is written
+//! with, and it reads that off [`trailing_break`] rather than off a rule of
+//! its own. Individual `\n` literals elsewhere are exempted one at a time,
+//! each with its own reason.
 
 use std::borrow::Cow;
 
@@ -228,6 +230,30 @@ impl<'a> DoubleEndedIterator for LinesInclusive<'a> {
     }
 }
 
+/// The bytes after the line break `text` opens with, or `None` when `text`
+/// opens none.
+///
+/// One break is stripped, on the rule the cursor and the splitter read: a
+/// `\r\n` pair goes whole, so stripping it never leaves a `\n` behind for
+/// the next reader to count as a second break.
+pub(crate) fn strip_line_break(text: &str) -> Option<&str> {
+    LINE_BREAKS
+        .iter()
+        .find_map(|line_break| text.strip_prefix(line_break))
+}
+
+/// The line break `text` ends with, or `None` when it ends none.
+pub(crate) fn trailing_break(text: &str) -> Option<&'static str> {
+    LINE_BREAKS
+        .iter()
+        .copied()
+        .find(|line_break| text.ends_with(line_break))
+}
+
+/// The three spellings of a line break, longest first so a `\r\n` pair is
+/// never read as the lone `\r` that opens it.
+const LINE_BREAKS: [&str; 3] = ["\r\n", "\n", "\r"];
+
 /// `content` with every lone `\r` rewritten to `\n`, for a reader whose own
 /// line rule is narrower than [`LineCursor`]'s.
 ///
@@ -352,6 +378,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["b", "\r\n", "a\r\n"]
         );
+    }
+
+    /// A `\r\n` pair is one break from either end, so stripping it takes both
+    /// bytes and the break it ends with is the pair rather than the `\r`
+    /// opening it.
+    #[test]
+    fn a_crlf_pair_is_one_break_to_the_two_break_helpers() {
+        assert_eq!(strip_line_break("\r\nrest"), Some("rest"));
+        assert_eq!(strip_line_break("\rrest"), Some("rest"));
+        assert_eq!(strip_line_break("\nrest"), Some("rest"));
+        assert_eq!(strip_line_break("rest"), None);
+        assert_eq!(strip_line_break(""), None);
+
+        assert_eq!(trailing_break("line\r\n"), Some("\r\n"));
+        assert_eq!(trailing_break("line\r"), Some("\r"));
+        assert_eq!(trailing_break("line\n"), Some("\n"));
+        assert_eq!(trailing_break("line"), None);
+        assert_eq!(trailing_break(""), None);
     }
 
     /// The rewrite is one byte wide and touches lone `\r` alone, so lengths

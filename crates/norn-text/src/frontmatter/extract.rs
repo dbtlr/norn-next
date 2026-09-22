@@ -12,7 +12,7 @@
 use std::ops::Range;
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
-use crate::span::split_lines_inclusive;
+use crate::span::{split_lines_inclusive, strip_line_break};
 use crate::value::{StripReport, Value, from_yaml};
 
 /// The byte length of a UTF-8 byte-order mark.
@@ -169,17 +169,17 @@ pub(crate) fn closed_block(content: &str) -> Option<ClosedBlock> {
 /// The bytes after an opening `---` fence, or `None` when `text` does not open
 /// one.
 ///
-/// A fence is `---` plus any spaces or tabs, then a line break. The trailing
+/// A fence is `---` plus any spaces or tabs, then a line break — the crate's
+/// break rule, so a lone `\r` opens a block like the other two. The trailing
 /// whitespace is accepted for the reason the closing fence accepts it — the
 /// two are one delimiter written twice, and an editor that trims neither
-/// writes both. Refusing it is not a smaller contract but a corrupting one: a
-/// document whose block goes unrecognized has its fields written into a
+/// writes both. Refusing either is not a smaller contract but a corrupting
+/// one: a document whose block goes unrecognized has its fields written into a
 /// *second* block synthesized above the first, and the re-read then finds the
 /// synthesized one and approves.
 fn strip_opening_fence(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("---")?.trim_start_matches([' ', '\t']);
-    rest.strip_prefix('\n')
-        .or_else(|| rest.strip_prefix("\r\n"))
+    strip_line_break(rest)
 }
 
 /// Whether `line` is a `---` delimiter: the three dashes, then nothing but

@@ -1545,9 +1545,17 @@ fn an_edit_moves_only_the_bytes_of_the_construct_it_addresses() {
         "---\ntitle: hello   # note\nother: x\n---\n",
         "\u{feff}---\ntitle: hello\nother: x\n---\nbody\n",
         "---\r\ntitle: hello\r\nother: x\r\n---\r\nbody\r\n",
+        "---\rtitle: hello\rother: x\r---\rbody\r",
     ];
     for source in corpus {
         let document = Document::parse(source);
+        // A document whose block is not recognized reports no field, and the
+        // property below then holds over nothing. The corpus is here to be
+        // edited, so every entry has to offer a field to edit.
+        assert!(
+            !document.fields().is_empty(),
+            "{source:?}: no field is located, so nothing below is exercised"
+        );
         for field in document.fields() {
             if let Some(range) = &field.value_range {
                 let edited = document

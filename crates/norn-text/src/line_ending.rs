@@ -1,18 +1,17 @@
 //! The line terminator a document is written with.
 
-/// A document's observed line terminator: the two spellings a synthesis path
+use crate::span::{split_lines_inclusive, trailing_break};
+
+/// A document's observed line terminator: the three spellings a synthesis path
 /// can write.
 ///
 /// Every line a synthesis path emits uses the terminator the document already
-/// uses, so editing a CRLF document never leaves it half LF.
+/// uses, so editing a CRLF document never leaves it half LF and editing a
+/// CR-only document never leaves it half CR.
 ///
-/// **This is a classification of a document into two, not the crate's line
-/// break rule.** The rule — `\n`, `\r\n`, or a lone `\r` — is
-/// `crate::span`'s, and it is what a *reader* counts lines by. A document
-/// broken by lone `\r` is read as the several lines it is, and classifies
-/// here as [`LineEnding::Lf`], which is what an edit writes into the bytes it
-/// replaces. Nothing an edit leaves alone is respelled, so the two answers do
-/// not collide.
+/// The three variants are the three spellings of this crate's line break —
+/// `\n`, `\r\n`, and a lone `\r` — so a document is classified by the same
+/// rule a reader counts its lines by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LineEnding {
     /// `\n`. The default for a document that contains no line break at all.
@@ -20,6 +19,8 @@ pub enum LineEnding {
     Lf,
     /// `\r\n`.
     Crlf,
+    /// A lone `\r`.
+    Cr,
 }
 
 impl LineEnding {
@@ -28,19 +29,22 @@ impl LineEnding {
         match self {
             LineEnding::Lf => "\n",
             LineEnding::Crlf => "\r\n",
+            LineEnding::Cr => "\r",
         }
     }
 
-    /// The terminator `content` uses, decided by its first `\n`: `Crlf` when
-    /// a `\r` stands immediately before it, `Lf` otherwise.
+    /// The terminator `content` uses: the spelling of the **first** line break
+    /// it carries, whichever of the three that is.
     ///
-    /// Content holding no `\n` classifies as `Lf`, which covers both a
-    /// document with no line break at all and one broken by lone `\r` —
-    /// neither carries evidence of the `\r\n` spelling, and `Lf` is the
-    /// spelling this crate writes without it.
+    /// A mixed document is written with whatever its first break is, so a
+    /// document opening `\r` then `\n` is `Cr` and one opening `\n` then `\r`
+    /// is `Lf`. Content carrying no break at all is `Lf`, the spelling this
+    /// crate writes without evidence of another.
     pub fn of(content: &str) -> Self {
-        match content.find('\n') {
-            Some(index) if index > 0 && content.as_bytes()[index - 1] == b'\r' => LineEnding::Crlf,
+        let first_line = split_lines_inclusive(content).next().unwrap_or_default();
+        match trailing_break(first_line) {
+            Some("\r\n") => LineEnding::Crlf,
+            Some("\r") => LineEnding::Cr,
             _ => LineEnding::Lf,
         }
     }

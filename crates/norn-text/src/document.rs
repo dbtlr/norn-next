@@ -615,9 +615,8 @@ impl<'a> Document<'a> {
     /// **Every line the splice writes carries the document's terminator**,
     /// `content`'s own lines included: each break in `content` — `\n`, `\r\n`
     /// or a lone `\r` — is rewritten to [`LineEnding::of`]'s classification of
-    /// the document, which is `Crlf` or `Lf` and nothing else. A document
-    /// holding no `\n` at all classifies as `Lf`, so a `\r`-broken document's
-    /// replaced section is written with `\n`.
+    /// the document, which is the spelling of the document's own first break.
+    /// A document holding no break at all classifies as `Lf`.
     ///
     /// **Bytes outside the addressed range keep their spelling**, whatever
     /// they are broken by. The splice rewrites the section's content and
