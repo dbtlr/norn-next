@@ -27,17 +27,19 @@ impl ListParams {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct ListReport {
-    /// The registrations, ascending by name. A registry holding none is an
-    /// empty list rather than a refusal.
+    /// The registrations. A producer emits them ascending by name, and a
+    /// reader accepts whatever order they arrive in. A registry holding none
+    /// is an empty list rather than a refusal.
     pub registrations: Vec<Registration>,
 }
 
 impl ListReport {
     /// The listing of `registrations`, ascending by name.
     ///
-    /// The field says the registrations are in name order, so the constructor
-    /// is what makes them so: a caller that walked its registry in some other
-    /// order hands the same listing across whichever order it walked in.
+    /// The field says a producer emits the registrations in name order, so
+    /// the constructor is what makes this one a producer that does: a caller
+    /// that walked its registry in some other order hands the same listing
+    /// across whichever order it walked in.
     pub fn new(registrations: impl IntoIterator<Item = Registration>) -> Self {
         let mut registrations: Vec<Registration> = registrations.into_iter().collect();
         registrations.sort_by(|left, right| left.name.cmp(&right.name));

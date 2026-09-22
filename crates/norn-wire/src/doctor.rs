@@ -65,7 +65,9 @@ pub enum RegistryProblem {
     /// its own derived state over the same documents.
     #[non_exhaustive]
     DuplicateRoot {
-        /// Every registered name that reaches the root, ascending.
+        /// Every registered name that reaches the root. A producer emits
+        /// them ascending, and a reader accepts whatever order they arrive
+        /// in.
         aliases: Vec<VaultName>,
     },
     /// A registration's root is there and could not be read.
@@ -89,9 +91,10 @@ impl RegistryProblem {
     /// The registrations `aliases` all reach one root, in name order and
     /// each named once.
     ///
-    /// The field says the aliases are ascending, so the constructor is what
-    /// makes them so: a caller that walked a registry in some other order
-    /// hands the same problem across whichever order it walked in.
+    /// The field says a producer emits the aliases ascending, so the
+    /// constructor is what makes this one a producer that does: a caller that
+    /// walked a registry in some other order hands the same problem across
+    /// whichever order it walked in.
     pub fn duplicate_root(aliases: impl IntoIterator<Item = VaultName>) -> Self {
         let mut aliases: Vec<VaultName> = aliases.into_iter().collect();
         aliases.sort();
@@ -282,15 +285,16 @@ pub struct DoctorRegistryReport {
     pub roll_up: RollUp,
     /// Whether the registry itself is in order.
     pub registry: RegistrySanity,
-    /// What each vault's engine is doing, ascending by name.
+    /// What each vault's engine is doing. A producer emits them ascending by
+    /// name, and a reader accepts whatever order they arrive in.
     pub engines: Vec<EngineHealth>,
 }
 
 impl DoctorRegistryReport {
     /// The registry reading: `roll_up` over the entries, `registry` sanity,
     /// and the health of each `engines` entry, ascending by name. The field
-    /// says the engines are in name order, so the constructor is what makes
-    /// them so.
+    /// says a producer emits the engines in name order, so the constructor is
+    /// what makes this one a producer that does.
     pub fn new(
         roll_up: RollUp,
         registry: RegistrySanity,
