@@ -200,10 +200,11 @@ pub enum ErrorDetail {
     #[serde(rename = "host/duplicate-root")]
     #[non_exhaustive]
     DuplicateRoot {
-        /// The colliding names, in ascending order, each echoed back as the
-        /// typed name: the registry holds them as names parsed through the
-        /// grammar, and the refusal hands the same parsed values back rather
-        /// than strings a reader would have to parse again.
+        /// The colliding names, each echoed back as the typed name: the
+        /// registry holds them as names parsed through the grammar, and the
+        /// refusal hands the same parsed values back rather than strings a
+        /// reader would have to parse again. A producer emits them ascending;
+        /// a reader accepts whatever order they arrive in.
         aliases: Vec<VaultName>,
     },
     /// The detail of `host/entry-untrusted`: why the entry's derived state
@@ -287,8 +288,9 @@ pub enum ErrorDetail {
     #[serde(rename = "vault/ambiguous-root")]
     #[non_exhaustive]
     AmbiguousRoot {
-        /// The candidate names, in ascending order, each echoed back as the
-        /// typed name.
+        /// The candidate names, each echoed back as the typed name. A producer
+        /// emits them ascending; a reader accepts whatever order they arrive
+        /// in.
         candidates: Vec<VaultName>,
     },
     /// The detail of `vault/ambiguous-target`: the target, the head of the
