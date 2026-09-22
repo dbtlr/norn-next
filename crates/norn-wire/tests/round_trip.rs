@@ -4894,6 +4894,39 @@ fn a_roll_up_whose_counts_do_not_sum_is_refused_on_read() {
         .expect("a registry reading over a summing roll-up");
 }
 
+/// The sum a roll-up is checked against is itself computed from counts a
+/// forger chose, so the addition is checked rather than taken: counts that run
+/// past what a count holds refuse the read and name themselves, rather than
+/// wrapping into a total that agrees with `vaults` or aborting the read with a
+/// panic from inside the deserializer.
+#[test]
+fn a_roll_up_whose_counts_sum_past_a_count_is_refused_on_read() {
+    let overflowing = r#"{"vaults":0,"ready":18446744073709551615,"warming":1,"untrusted":0,"parked":0,"unattached":0,"attention":[]}"#;
+
+    let refusal = serde_json::from_str::<RollUp>(overflowing)
+        .expect_err("a roll-up whose counts sum past a count")
+        .to_string();
+    for named in [
+        "18446744073709551615",
+        "ready",
+        "warming",
+        "untrusted",
+        "parked",
+        "unattached",
+    ] {
+        assert!(
+            refusal.contains(named),
+            "the refusal `{refusal}` does not name `{named}`"
+        );
+    }
+
+    let inside_a_status = format!(r#"{{"shape":"roll_up","roll_up":{overflowing}}}"#);
+    assert!(
+        serde_json::from_str::<StatusReport>(&inside_a_status).is_err(),
+        "a status answer read back a roll-up whose counts sum past a count"
+    );
+}
+
 /// A listing crosses as the registrations it holds, in name order and each
 /// whole: a constructor that dropped the registrations, or handed them back in
 /// the order it was given them, does not produce these bytes.

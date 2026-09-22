@@ -50,7 +50,9 @@
 //! the wire was derived somewhere this process cannot see, so the read path is
 //! written by hand and refuses a value whose five counts do not sum to
 //! `vaults`. Every entry falls in exactly one of the five counts, which is
-//! what makes the sum the invariant it is.
+//! what makes the sum the invariant it is. The sum itself is checked rather
+//! than taken, so counts that run past what a count holds refuse the read
+//! instead of wrapping into a total that agrees with `vaults`.
 //!
 //! **An attention reason is tagged `attention`, not `reason`.** The untrusted
 //! reason one of its members carries is spelled `reason` wherever it is met,
@@ -724,28 +726,57 @@ struct RollUpFields {
     attention: Vec<Attention>,
 }
 
+impl RollUpFields {
+    /// The five counts as the refusals name them, so a roll-up that does not
+    /// add up and a roll-up that adds up past `u64` read the same way.
+    fn counts_named(&self) -> String {
+        format!(
+            "{} ready, {} warming, {} untrusted, {} parked, {} unattached",
+            self.ready, self.warming, self.untrusted, self.parked, self.unattached,
+        )
+    }
+
+    /// What the five counts sum to, or `None` where the sum runs past what a
+    /// count holds. The counts arrive from outside this process, so the fold
+    /// is checked: a plain `+` wraps in release and panics in debug, and
+    /// neither is an answer a read path may give.
+    fn counted(&self) -> Option<u64> {
+        [
+            self.ready,
+            self.warming,
+            self.untrusted,
+            self.parked,
+            self.unattached,
+        ]
+        .into_iter()
+        .try_fold(0u64, u64::checked_add)
+    }
+}
+
 impl<'de> Deserialize<'de> for RollUp {
     /// A roll-up whose five counts do not sum to `vaults` is refused, because
     /// a roll-up that disagrees with itself says nothing about the
     /// installation it counted. The counts are read off the value, so the
-    /// message names what did not add up.
+    /// message names what did not add up. Counts that sum past what a count
+    /// holds are refused the same way: no `vaults` they could agree with
+    /// exists.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let fields = RollUpFields::deserialize(deserializer)?;
-        let counted =
-            fields.ready + fields.warming + fields.untrusted + fields.parked + fields.unattached;
+        let Some(counted) = fields.counted() else {
+            return Err(D::Error::custom(format!(
+                "a roll-up counts {} vaults and its counts sum past what a count holds: {}",
+                fields.vaults,
+                fields.counts_named(),
+            )));
+        };
         if counted != fields.vaults {
             return Err(D::Error::custom(format!(
-                "a roll-up counts {} vaults and its counts sum to {counted}: \
-                 {} ready, {} warming, {} untrusted, {} parked, {} unattached",
+                "a roll-up counts {} vaults and its counts sum to {counted}: {}",
                 fields.vaults,
-                fields.ready,
-                fields.warming,
-                fields.untrusted,
-                fields.parked,
-                fields.unattached,
+                fields.counts_named(),
             )));
         }
         Ok(RollUp {
