@@ -8,13 +8,17 @@
 //! that spells it, and that the vault a request carries is the one vault
 //! address the vocabulary has.
 //!
-//! The table holds the six read verbs. The other eight are the vault-namespace
-//! and doctor verbs, whose params and reports land with the layer above; they
-//! extend this table rather than starting another.
+//! The table holds all fourteen verbs the registry declares, and the suite
+//! holds the table equal to [`Verb::ALL`]: a verb minted without a row here is
+//! a verb no surface can render, and a row here naming a verb the registry
+//! does not hold spells a request nobody can make.
 
 use norn_wire::{
-    Addressing, CountParams, CountReport, DescribeParams, DescribeReport, FindParams, FindReport,
-    GetParams, GetReport, SearchParams, SearchReport, ValidateParams, ValidateReport, Verb,
+    Addressing, CountParams, CountReport, DescribeParams, DescribeReport, DoctorRegistryParams,
+    DoctorRegistryReport, FindParams, FindReport, GetParams, GetReport, ListParams, ListReport,
+    RegisterParams, RegisterReport, ReloadParams, ReloadReport, ResolveParams, ResolveReport,
+    SearchParams, SearchReport, SetParams, SetReport, StatusParams, StatusReport, UnregisterParams,
+    UnregisterReport, ValidateParams, ValidateReport, Verb,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -31,8 +35,8 @@ struct Spelling {
     report: Value,
 }
 
-/// Every read verb, paired with the two types that spell it.
-fn read_verbs() -> Vec<Spelling> {
+/// Every verb the registry holds, paired with the two types that spell it.
+fn verb_table() -> Vec<Spelling> {
     vec![
         Spelling {
             verb: Verb::Find,
@@ -64,12 +68,84 @@ fn read_verbs() -> Vec<Spelling> {
             params: schema_of::<DescribeParams>(),
             report: schema_of::<DescribeReport>(),
         },
+        Spelling {
+            verb: Verb::VaultRegister,
+            params: schema_of::<RegisterParams>(),
+            report: schema_of::<RegisterReport>(),
+        },
+        Spelling {
+            verb: Verb::VaultUnregister,
+            params: schema_of::<UnregisterParams>(),
+            report: schema_of::<UnregisterReport>(),
+        },
+        Spelling {
+            verb: Verb::VaultList,
+            params: schema_of::<ListParams>(),
+            report: schema_of::<ListReport>(),
+        },
+        Spelling {
+            verb: Verb::VaultSet,
+            params: schema_of::<SetParams>(),
+            report: schema_of::<SetReport>(),
+        },
+        Spelling {
+            verb: Verb::VaultResolve,
+            params: schema_of::<ResolveParams>(),
+            report: schema_of::<ResolveReport>(),
+        },
+        Spelling {
+            verb: Verb::VaultStatus,
+            params: schema_of::<StatusParams>(),
+            report: schema_of::<StatusReport>(),
+        },
+        Spelling {
+            verb: Verb::VaultReload,
+            params: schema_of::<ReloadParams>(),
+            report: schema_of::<ReloadReport>(),
+        },
+        Spelling {
+            verb: Verb::DoctorRegistry,
+            params: schema_of::<DoctorRegistryParams>(),
+            report: schema_of::<DoctorRegistryReport>(),
+        },
     ]
 }
 
-/// Which verbs the registry holds that are read verbs, read off the registry
-/// itself rather than off a second list: the six that carry a vault address
-/// and are not the reload.
+/// The property names a params schema advertises.
+fn property_names(schema: &Value) -> BTreeSet<&str> {
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().map(String::as_str).collect())
+        .unwrap_or_default()
+}
+
+/// The names a params schema advertises as required. A shape that requires
+/// nothing advertises no list at all, which is an empty one.
+fn required_names(schema: &Value) -> BTreeSet<&str> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| required.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
+/// The type a params schema names its vault by: the reference a field carries
+/// directly, or the one the nullable half of an optional field carries.
+fn vault_reference(params: &Value) -> Option<&str> {
+    let vault = params.get("properties")?.get("vault")?;
+    if let Some(reference) = vault.get("$ref").and_then(Value::as_str) {
+        return Some(reference);
+    }
+    vault
+        .get("anyOf")?
+        .as_array()?
+        .iter()
+        .find_map(|branch| branch.get("$ref").and_then(Value::as_str))
+}
+
+/// The six read verbs, read off the registry itself rather than off a second
+/// list: the ones that carry a vault address and are not the reload.
 fn read_verbs_in_the_registry() -> BTreeSet<&'static str> {
     Verb::ALL
         .into_iter()
@@ -78,20 +154,25 @@ fn read_verbs_in_the_registry() -> BTreeSet<&'static str> {
         .collect()
 }
 
-/// Every read verb the registry holds is spelled by a params type and a report
+/// Every verb the registry holds is spelled by a params type and a report
 /// type, and both of them derive a schema a surface can advertise.
 #[test]
-fn every_read_verb_is_spelled_by_a_params_type_and_a_report_type() {
-    let spelled: BTreeSet<&str> = read_verbs()
+fn every_verb_is_spelled_by_a_params_type_and_a_report_type() {
+    let spelled: BTreeSet<&str> = verb_table()
         .iter()
         .map(|spelling| spelling.verb.as_str())
         .collect();
     assert_eq!(
         spelled,
-        read_verbs_in_the_registry(),
-        "the verbs spelled here are not the read verbs the registry holds"
+        Verb::ALL.into_iter().map(|verb| verb.as_str()).collect(),
+        "the verbs spelled here are not the verbs the registry holds"
     );
-    for spelling in read_verbs() {
+    assert_eq!(
+        spelled.len(),
+        verb_table().len(),
+        "a verb is spelled twice in the table"
+    );
+    for spelling in verb_table() {
         for schema in [&spelling.params, &spelling.report] {
             assert!(
                 schema.get("$schema").is_some(),
@@ -102,34 +183,73 @@ fn every_read_verb_is_spelled_by_a_params_type_and_a_report_type() {
     }
 }
 
-/// A read carries a vault address, and the params type that spells it carries
-/// the one address the vocabulary has — the verb's answer and the type's field
-/// say one thing.
+/// What a verb says about its addressing and what its params type carries are
+/// one statement: a required address is a required field, an optional one is a
+/// field that may be left out, and a registry verb's params carry no vault at
+/// all.
 #[test]
-fn every_read_verbs_params_carry_the_vault_address_its_verb_requires() {
-    for spelling in read_verbs() {
+fn every_verbs_params_carry_the_vault_its_addressing_says_it_does() {
+    for spelling in verb_table() {
+        let properties = property_names(&spelling.params);
+        let required = required_names(&spelling.params);
+        match spelling.verb.addressing() {
+            Addressing::Required => {
+                assert!(
+                    properties.contains("vault"),
+                    "{} carries a vault address and its params name no vault",
+                    spelling.verb
+                );
+                assert!(
+                    required.contains("vault"),
+                    "{} advertises its vault as optional",
+                    spelling.verb
+                );
+            }
+            Addressing::Optional => {
+                assert!(
+                    properties.contains("vault"),
+                    "{} may carry a vault and its params name none",
+                    spelling.verb
+                );
+                assert!(
+                    !required.contains("vault"),
+                    "{} advertises as required the vault its addressing says is optional",
+                    spelling.verb
+                );
+            }
+            Addressing::None => {
+                assert!(
+                    !properties.contains("vault"),
+                    "{} is answered from the registry and its params address a vault",
+                    spelling.verb
+                );
+            }
+            // `Addressing` is `#[non_exhaustive]`, so a suite outside the
+            // crate cannot match it without an arm for what it does not know.
+            // An addressing minted without a rule here fails rather than
+            // passing unchecked.
+            addressing => panic!("{addressing} says nothing about what a params type carries"),
+        }
+    }
+}
+
+/// A read addresses a vault, and a lifecycle observation names a registration:
+/// a root addresses a throwaway attach, which has no lifecycle to observe and
+/// holds no control files to re-read.
+#[test]
+fn a_read_addresses_a_vault_and_a_lifecycle_observation_names_a_registration() {
+    for spelling in verb_table() {
+        let expected = match spelling.verb {
+            verb if read_verbs_in_the_registry().contains(verb.as_str()) => {
+                Some("#/$defs/VaultAddress")
+            }
+            Verb::VaultStatus | Verb::VaultReload => Some("#/$defs/VaultName"),
+            _ => None,
+        };
         assert_eq!(
-            spelling.verb.addressing(),
-            Addressing::Required,
-            "{} is a read verb that carries no vault address",
-            spelling.verb
-        );
-        let vault = &spelling.params["properties"]["vault"];
-        assert_eq!(
-            vault["$ref"].as_str(),
-            Some("#/$defs/VaultAddress"),
-            "{} names its vault by something other than a vault address",
-            spelling.verb
-        );
-        let required: BTreeSet<&str> = spelling.params["required"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{} advertises no required list", spelling.verb))
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
-        assert!(
-            required.contains("vault"),
-            "{} advertises its vault as optional",
+            vault_reference(&spelling.params),
+            expected,
+            "{} names its vault by the wrong type",
             spelling.verb
         );
     }

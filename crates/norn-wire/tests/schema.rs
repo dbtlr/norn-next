@@ -11,18 +11,7 @@
 //! restating it.
 
 use norn_wire::{
-    Addressing, Anchor, AnswerReading, AttachMode, BlockRow, BodyText, CANDIDATE_HEAD, Candidate,
-    CandidateHead, Collection, CollectionPage, CollectionSelector, Column, ContainerKind,
-    CountParams, CountReport, Cursor, CursorKey, DescribeParams, DescribeReport, Direction,
-    DocumentPath, DocumentRow, EngineSection, ErrorDetail, ErrorEnvelope, Facet, FacetKind,
-    FieldType, FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
-    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LinkFamily,
-    LinkHealth, LinkRow, MaintainerIdentity, Moved, NotReady, Page, PathRuleKind, PollBackend,
-    Predicate, ReasonCode, ReloadFailure, RequestScope, ResolutionTarget, Rung, RungReport,
-    RungSet, SchemaSource, Score, SearchParams, SearchReport, Severity, Snapshot, Sort, SortKey,
-    Span, TagRow, TagSource, TagStance, Tally, TrustState, Unsatisfied, UntrustedReason,
-    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb,
-    WarmingPhase, WatcherLossCause,
+    Addressing, Advisory, Anchor, AnswerReading, AttachMode, Attention, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage, CollectionSelector, Column, ContainerKind, CountParams, CountReport, Cursor, CursorKey, DescribeParams, DescribeReport, Direction, DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, Moved, NotReady, Page, PathRuleKind, PollBackend, Predicate, Published, ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport, RungSet, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -192,6 +181,37 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<ValidateParams>(),
         schema_of::<DescribeParams>(),
         schema_of::<DescribeReport>(),
+        schema_of::<Registration>(),
+        schema_of::<Published>(),
+        schema_of::<Fingerprints>(),
+        schema_of::<Drift>(),
+        schema_of::<EngineStatus>(),
+        schema_of::<Advisory>(),
+        schema_of::<Attention>(),
+        schema_of::<VaultStatus>(),
+        schema_of::<RollUp>(),
+        schema_of::<Change<SchemaSource>>(),
+        schema_of::<Replace<VaultRoot>>(),
+        schema_of::<RegisterParams>(),
+        schema_of::<RegisterReport>(),
+        schema_of::<UnregisterParams>(),
+        schema_of::<UnregisterReport>(),
+        schema_of::<ListParams>(),
+        schema_of::<ListReport>(),
+        schema_of::<SetParams>(),
+        schema_of::<SetReport>(),
+        schema_of::<ResolveParams>(),
+        schema_of::<ResolveReport>(),
+        schema_of::<StatusParams>(),
+        schema_of::<StatusReport>(),
+        schema_of::<ReloadOutcome>(),
+        schema_of::<ReloadParams>(),
+        schema_of::<ReloadReport>(),
+        schema_of::<DoctorRegistryParams>(),
+        schema_of::<DoctorRegistryReport>(),
+        schema_of::<RegistrySanity>(),
+        schema_of::<RegistryProblem>(),
+        schema_of::<EngineHealth>(),
     ]
 }
 
@@ -1959,4 +1979,259 @@ fn every_paged_read_report_is_a_page_of_its_row() {
             "the page carries no definition of the cursor: {report}"
         );
     }
+}
+
+// ── The vault namespace and doctor's registry half ───────────────────────
+
+/// A registration advertises the four fields the registry holds and no
+/// others: what a host learns by looking at a vault is reported beside a
+/// registration rather than in it.
+#[test]
+fn a_registration_advertises_the_four_fields_the_registry_holds() {
+    let schema = schema_of::<Registration>();
+    assert_eq!(
+        property_names(&schema),
+        ["name", "root", "schema_source", "poll_backend"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        schema["properties"]["root"]["$ref"].as_str(),
+        Some("#/$defs/VaultRoot"),
+        "a registration names its root by something other than the root grammar"
+    );
+}
+
+/// What an entry publishes is a tagged pair, and the parked shape refers to
+/// the envelope rather than restating a code and a message of its own.
+#[test]
+fn a_published_answer_advertises_its_answer_tag() {
+    let schema = schema_of::<Published>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "answer")),
+        sorted(["state", "parked"])
+    );
+    let parked = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "answer") == Some("parked"))
+        .expect("the parked branch");
+    assert_eq!(
+        parked["properties"]["refusal"]["$ref"].as_str(),
+        Some("#/$defs/ErrorEnvelope"),
+        "a park advertises something other than the refusal it publishes"
+    );
+}
+
+/// The readings a status carries each advertise their own tag, and the two
+/// that carry a payload refer to the typed half rather than restating it.
+#[test]
+fn the_status_readings_advertise_their_tags() {
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<Drift>(), "state")),
+        sorted(["inactive", "current", "reload_pending", "unreadable"])
+    );
+    let unreadable = branches(&schema_of::<Drift>())
+        .iter()
+        .find(|branch| tag_constant(branch, "state") == Some("unreadable"))
+        .expect("the unreadable branch")
+        .clone();
+    assert_eq!(
+        unreadable["properties"]["failure"]["$ref"].as_str(),
+        Some("#/$defs/ReloadFailure")
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<EngineStatus>(), "state")),
+        sorted(["off", "on", "self_disabled"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<Advisory>(), "kind")),
+        sorted(["tmp_fallback_in_use", "symlink_skipped"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<Attention>(), "attention")),
+        sorted([
+            "untrusted",
+            "parked",
+            "reads_refusing",
+            "reload_failed",
+            "reload_pending",
+            "engine_self_disabled",
+            "advisory",
+        ])
+    );
+    assert_eq!(
+        property_names(&schema_of::<Fingerprints>()),
+        ["schema", "config"].into_iter().collect()
+    );
+}
+
+/// A status reports the authoring fact beside the slot fact, so a config that
+/// enables an engine which is not standing is two readings that disagree.
+#[test]
+fn a_vault_status_advertises_the_whole_of_what_an_entry_stands_at() {
+    let schema = schema_of::<VaultStatus>();
+    assert_eq!(
+        property_names(&schema),
+        [
+            "name",
+            "registration",
+            "published",
+            "fingerprints",
+            "drift",
+            "last_reload_failure",
+            "reads_refusing",
+            "engine",
+            "section",
+            "advisories",
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
+        schema["properties"]["section"]["$ref"].as_str(),
+        Some("#/$defs/EngineSection"),
+        "a status advertises no delivered section beside its engine"
+    );
+}
+
+/// A roll-up advertises the five counts, the total they sum to, and what wants
+/// attention.
+#[test]
+fn a_roll_up_advertises_its_counts_and_its_attention() {
+    assert_eq!(
+        property_names(&schema_of::<RollUp>()),
+        [
+            "vaults",
+            "ready",
+            "warming",
+            "untrusted",
+            "parked",
+            "unattached",
+            "attention",
+        ]
+        .into_iter()
+        .collect()
+    );
+}
+
+/// An edit advertises three members where the field has a default to fall back
+/// to and two where it has none, so a reader is told a root cannot be cleared
+/// rather than finding out from a handler.
+#[test]
+fn a_change_advertises_its_change_tag_and_a_root_that_cannot_be_cleared() {
+    assert_eq!(
+        sorted(tag_constants(
+            &schema_of::<Change<SchemaSource>>(),
+            "change"
+        )),
+        sorted(["keep", "set", "clear"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<Replace<VaultRoot>>(), "change")),
+        sorted(["keep", "set"])
+    );
+}
+
+/// Each vault-namespace params type advertises the whole of what a request
+/// carries, and a registry verb's carries no vault at all.
+#[test]
+fn every_vault_params_advertises_the_whole_of_what_a_request_carries() {
+    assert_eq!(
+        property_names(&schema_of::<RegisterParams>()),
+        ["registration"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<UnregisterParams>()),
+        ["name", "keep_state"].into_iter().collect()
+    );
+    assert!(
+        property_names(&schema_of::<ListParams>()).is_empty(),
+        "a listing advertises something to ask for"
+    );
+    assert_eq!(
+        property_names(&schema_of::<SetParams>()),
+        ["name", "root", "schema_source", "poll_backend"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<ResolveParams>()),
+        ["directory"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<StatusParams>()),
+        ["vault"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<ReloadParams>()),
+        ["vault", "dry_run"].into_iter().collect()
+    );
+    assert!(
+        property_names(&schema_of::<DoctorRegistryParams>()).is_empty(),
+        "a doctor advertises something to ask for"
+    );
+}
+
+/// Each vault-namespace report advertises the whole of what an answer holds,
+/// and the two that are sums advertise their own tags.
+#[test]
+fn every_vault_report_advertises_the_whole_of_what_an_answer_holds() {
+    for report in [schema_of::<RegisterReport>(), schema_of::<SetReport>()] {
+        assert_eq!(
+            property_names(&report),
+            ["registration", "published"].into_iter().collect()
+        );
+    }
+    assert_eq!(
+        property_names(&schema_of::<UnregisterReport>()),
+        ["name", "state_discarded"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<ListReport>()),
+        ["registrations"].into_iter().collect()
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<ResolveReport>(), "outcome")),
+        sorted(["registered", "none"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<StatusReport>(), "shape")),
+        sorted(["vault", "roll_up"])
+    );
+    assert_eq!(
+        property_names(&schema_of::<ReloadReport>()),
+        ["outcome", "fingerprints", "activated"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        sorted(
+            branches(&schema_of::<ReloadOutcome>())
+                .iter()
+                .map(|branch| string_constant(branch).expect("a bare string"))
+        ),
+        sorted(["config_only", "schema_changed"])
+    );
+}
+
+/// The doctor's registry half advertises the roll-up, the registry's own
+/// sanity and the engines, with sound and unsound as two shapes.
+#[test]
+fn a_doctor_registry_report_advertises_the_registry_it_read() {
+    assert_eq!(
+        property_names(&schema_of::<DoctorRegistryReport>()),
+        ["roll_up", "registry", "engines"].into_iter().collect()
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<RegistrySanity>(), "state")),
+        sorted(["sound", "problems"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<RegistryProblem>(), "problem")),
+        sorted(["duplicate_root", "root_unreadable", "root_missing"])
+    );
+    assert_eq!(
+        property_names(&schema_of::<EngineHealth>()),
+        ["name", "section", "engine"].into_iter().collect()
+    );
 }
