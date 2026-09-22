@@ -342,24 +342,39 @@ fn a_malformed_entry_is_refused_with_the_reason() {
 }
 
 /// The registry entry and the registration that crosses the client/host seam
-/// are one reading of a registered vault: every field survives the trip out
-/// and back, whether or not the two that have a default are filled in.
+/// are one type, so what the file round-trips is the registration itself. Both
+/// fields that have a default are exercised present and absent, all four
+/// combinations, because each is written and read on its own and a pair that
+/// only ever moved together would hide a field the renderer dropped.
 #[test]
-fn an_entry_and_a_registration_are_one_reading() {
-    for filled in [false, true] {
-        let mut written = entry("notes", "/home/person/notes");
-        if filled {
+fn a_registration_round_trips_through_the_file_over_every_combination() {
+    for (with_source, with_backend) in [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let scratch = Scratch::new("registration-round-trip");
+        let dirs = scratch.dirs();
+
+        let mut written: Registration = entry("notes", "/home/person/notes");
+        if with_source {
             written.schema_source = Some(
                 SchemaSource::new("/home/person/schemas/notes.yaml").expect("a schema source"),
             );
+        }
+        if with_backend {
             written.poll_backend = Some(PollBackend::Poll);
         }
 
-        let registration = Registration::from(written.clone());
-        assert_eq!(registration.name, written.name);
-        assert_eq!(registration.root, written.root);
-        assert_eq!(registration.schema_source, written.schema_source);
-        assert_eq!(registration.poll_backend, written.poll_backend);
-        assert_eq!(Entry::from(registration), written);
+        registry::mutate(dirs, |registry| {
+            registry.insert(written.clone());
+            Ok(())
+        })
+        .expect("a registration");
+
+        let read = registry::read(dirs).expect("the registry");
+        assert_eq!(
+            read.get(&name("notes")),
+            Some(&written),
+            "a registration with schema source {with_source} and backend {with_backend} did not \
+             survive the file"
+        );
     }
 }
