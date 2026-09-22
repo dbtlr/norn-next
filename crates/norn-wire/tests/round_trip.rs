@@ -15,9 +15,9 @@
 
 use norn_wire::{
     AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
-    PollBackend, ReasonCode, SchemaSource, Severity, TrustState, UnknownFindingKind,
-    UnknownPollBackend, UnknownSeverity, UntrustedReason, VaultAddress, VaultName, VaultRoot,
-    WarmingPhase, WatcherLossCause,
+    PollBackend, ReasonCode, RequestScope, SchemaSource, Severity, TrustState, UnknownFindingKind,
+    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UntrustedReason,
+    VaultAddress, VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -172,6 +172,16 @@ fn vault_addresses() -> Vec<VaultAddress> {
     addresses
 }
 
+/// Every verb the registry holds.
+fn verbs() -> Vec<Verb> {
+    Verb::ALL.to_vec()
+}
+
+/// Every scope a request is answered from.
+fn request_scopes() -> Vec<RequestScope> {
+    RequestScope::ALL.to_vec()
+}
+
 fn round_trip<T>(value: &T)
 where
     T: Serialize + DeserializeOwned + Debug + PartialEq,
@@ -302,6 +312,19 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<ErrorDetail>(Some("code")),
         "the details built here are not the details the vocabulary holds"
+    );
+    assert_eq!(
+        verbs().iter().map(flat_string).collect::<BTreeSet<_>>(),
+        advertised::<Verb>(None),
+        "the verbs built here are not the verbs the registry holds"
+    );
+    assert_eq!(
+        request_scopes()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<RequestScope>(None),
+        "the scopes built here are not the scopes the vocabulary holds"
     );
     assert_eq!(
         poll_backends()
@@ -1054,5 +1077,103 @@ fn a_vault_address_is_an_object_tagged_by() {
     assert!(
         serde_json::from_str::<VaultAddress>(r#"{"by":"root","root":"notes"}"#).is_err(),
         "a relative root read back as an address"
+    );
+}
+
+// ── The verb registry ────────────────────────────────────────────────────
+
+/// The registry holds fourteen verbs, and every one of them is the flat string
+/// it renders as, read back as the verb it renders.
+#[test]
+fn every_verb_is_the_flat_string_it_renders_as() {
+    let strings = [
+        "find",
+        "search",
+        "get",
+        "count",
+        "validate",
+        "describe",
+        "vault_register",
+        "vault_unregister",
+        "vault_list",
+        "vault_set",
+        "vault_resolve",
+        "vault_status",
+        "vault_reload",
+        "doctor_registry",
+    ];
+    assert_eq!(Verb::ALL.len(), 14);
+    assert_eq!(verbs().len(), strings.len());
+    for (verb, string) in verbs().into_iter().zip(strings) {
+        assert_eq!(verb.as_str(), string);
+        assert_eq!(verb.to_string(), string);
+        assert_eq!(wire(&verb), format!("\"{string}\""));
+        assert_eq!(Verb::try_from(string), Ok(verb));
+        round_trip(&verb);
+    }
+    assert_eq!(Verb::try_from("vault_forget"), Err(UnknownVerb));
+    assert!(
+        serde_json::from_str::<Verb>(r#""vault_forget""#).is_err(),
+        "a verb nobody minted read back as one"
+    );
+}
+
+#[test]
+fn every_request_scope_is_the_flat_string_it_renders_as() {
+    let strings = ["vault", "registry", "installation"];
+    assert_eq!(request_scopes().len(), strings.len());
+    for (scope, string) in request_scopes().into_iter().zip(strings) {
+        assert_eq!(scope.as_str(), string);
+        assert_eq!(scope.to_string(), string);
+        assert_eq!(wire(&scope), format!("\"{string}\""));
+        assert_eq!(RequestScope::try_from(string), Ok(scope));
+        round_trip(&scope);
+    }
+    assert_eq!(RequestScope::try_from("machine"), Err(UnknownRequestScope));
+}
+
+/// Every verb this layer lands is answered from one vault's entry or from the
+/// registry. Nothing here acts on the installation: that scope is spelled so
+/// the partition a surface reads is whole, and the verbs that carry it arrive
+/// with the layer that lands them.
+#[test]
+fn every_verb_is_scoped_to_a_vault_or_to_the_registry() {
+    let scoped = |scope: RequestScope| {
+        let mut named: Vec<&str> = verbs()
+            .into_iter()
+            .filter(|verb| verb.scope() == scope)
+            .map(|verb| verb.as_str())
+            .collect();
+        named.sort_unstable();
+        named
+    };
+    assert_eq!(
+        scoped(RequestScope::Vault),
+        [
+            "count",
+            "describe",
+            "find",
+            "get",
+            "search",
+            "validate",
+            "vault_reload",
+            "vault_status",
+        ]
+    );
+    assert_eq!(
+        scoped(RequestScope::Registry),
+        [
+            "doctor_registry",
+            "vault_list",
+            "vault_register",
+            "vault_resolve",
+            "vault_set",
+            "vault_unregister",
+        ]
+    );
+    assert_eq!(scoped(RequestScope::Installation), [] as [&str; 0]);
+    assert_eq!(
+        scoped(RequestScope::Vault).len() + scoped(RequestScope::Registry).len(),
+        Verb::ALL.len()
     );
 }

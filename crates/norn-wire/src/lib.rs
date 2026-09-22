@@ -164,6 +164,7 @@ mod error;
 mod finding;
 mod name;
 mod trust;
+mod verb;
 
 pub use address::{
     IllegalPath, PollBackend, SchemaSource, UnknownPollBackend, VaultAddress, VaultRoot,
@@ -174,3 +175,4 @@ pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use name::{IllegalVaultName, VaultName};
 pub use trust::{TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
+pub use verb::{RequestScope, UnknownRequestScope, UnknownVerb, Verb};

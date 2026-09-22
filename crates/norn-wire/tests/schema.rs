@@ -12,8 +12,8 @@
 
 use norn_wire::{
     AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
-    PollBackend, ReasonCode, SchemaSource, Severity, TrustState, UntrustedReason, VaultAddress,
-    VaultName, VaultRoot, WarmingPhase, WatcherLossCause,
+    PollBackend, ReasonCode, RequestScope, SchemaSource, Severity, TrustState, UntrustedReason,
+    VaultAddress, VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -109,6 +109,8 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<SchemaSource>(),
         schema_of::<PollBackend>(),
         schema_of::<VaultAddress>(),
+        schema_of::<Verb>(),
+        schema_of::<RequestScope>(),
     ] {
         assert!(
             schema.get("$schema").is_some(),
@@ -569,4 +571,33 @@ fn a_vault_address_advertises_its_by_tag_and_the_grammars_behind_it() {
             "the referenced definition is absent: {schema}"
         );
     }
+}
+
+// ── The verb registry ────────────────────────────────────────────────────
+
+/// A verb and a scope are advertised as the bare strings they are on the wire,
+/// and the walkable lists cannot drift behind the enums surfaces render.
+#[test]
+fn a_verb_and_a_scope_advertise_their_bare_strings() {
+    let members = |schema: &Value| -> Vec<String> {
+        branches(schema)
+            .iter()
+            .map(|branch| {
+                string_constant(branch)
+                    .unwrap_or_else(|| panic!("a branch is not a pinned string: {branch}"))
+                    .to_owned()
+            })
+            .collect()
+    };
+    let verbs = members(&schema_of::<Verb>());
+    assert_eq!(verbs.len(), Verb::ALL.len());
+    assert_eq!(
+        sorted(verbs.iter().map(String::as_str)),
+        sorted(Verb::ALL.map(|verb| verb.as_str()))
+    );
+    let scopes = members(&schema_of::<RequestScope>());
+    assert_eq!(
+        sorted(scopes.iter().map(String::as_str)),
+        sorted(["vault", "registry", "installation"])
+    );
 }
