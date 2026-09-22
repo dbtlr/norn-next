@@ -2884,6 +2884,22 @@ fn a_column_is_an_object_tagged_col() {
     );
 }
 
+/// A collection of a row type two of which are one value is a value two of
+/// which are one, so a consumer compares two pages of blocks the way it
+/// compares two blocks. The bound holds wherever the row holds it: a
+/// collection of hits carries a score and is `PartialEq` alone, so this is a
+/// compile-time check rather than a comparison.
+#[test]
+fn a_collection_of_an_equatable_row_is_equatable() {
+    fn equatable<T: Eq>() {}
+    equatable::<Collection<BlockRow>>();
+    equatable::<Collection<FindingRow>>();
+    assert_eq!(
+        collection(vec![BlockRow::new("a1", None)], 1),
+        collection(vec![BlockRow::new("a1", None)], 1)
+    );
+}
+
 /// A nested collection says in band what it cut. The items are the head and
 /// the total is the vault's count, so a row whose links were bounded reports
 /// the bound rather than handing back a short list that reads as the whole.
