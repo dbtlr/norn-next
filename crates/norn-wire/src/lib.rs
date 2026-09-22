@@ -159,6 +159,8 @@
 //! the code the detail belongs to.
 
 mod address;
+mod base64url;
+mod cursor;
 mod demand;
 mod error;
 mod finding;
@@ -172,6 +174,7 @@ pub use address::{
     IllegalPath, PollBackend, SchemaSource, UnknownPollBackend, VaultAddress, VaultRoot,
     absolute_path,
 };
+pub use cursor::{Cursor, CursorKey, CursorOrderChanged, FacetKind, Moved, Page, Snapshot};
 pub use demand::AttachMode;
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};

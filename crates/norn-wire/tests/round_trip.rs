@@ -14,11 +14,11 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Anchor, AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
-    PollBackend, Predicate, ReasonCode, RequestScope, ResolutionTarget, SchemaSource, Severity,
-    TrustState, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity,
-    UnknownVerb, UntrustedReason, VaultAddress, VaultName, VaultRoot, Verb, WarmingPhase,
-    WatcherLossCause,
+    Anchor, AttachMode, Cursor, CursorKey, CursorOrderChanged, ErrorDetail, ErrorEnvelope,
+    FacetKind, FindingKind, FindingScope, MaintainerIdentity, Moved, Page, PollBackend, Predicate,
+    ReasonCode, RequestScope, ResolutionTarget, SchemaSource, Severity, Snapshot, TrustState,
+    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
+    UntrustedReason, VaultAddress, VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -222,6 +222,50 @@ fn predicates() -> Vec<Predicate> {
     ]
 }
 
+/// Every kind a facet row is a facet of.
+fn facet_kinds() -> Vec<FacetKind> {
+    vec![
+        FacetKind::DeclaredField,
+        FacetKind::ObservedField,
+        FacetKind::DeclaredTag,
+        FacetKind::Folder,
+        FacetKind::PathRule,
+    ]
+}
+
+/// Every movement a continuation reports.
+fn movements() -> Vec<Moved> {
+    vec![Moved::Epoch, Moved::Generation, Moved::SidecarRevision]
+}
+
+/// Every paged row type, with one key per shape its order takes.
+fn cursor_keys() -> Vec<CursorKey> {
+    let mut keys = vec![
+        CursorKey::document(Some("2026-01-01".to_string()), "notes/a.md"),
+        CursorKey::document(None, "notes/a.md"),
+        CursorKey::hit(0.5, "notes/a.md"),
+        CursorKey::tally(["note".to_string(), "open".to_string()]),
+        CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", 7),
+        CursorKey::ordinal(3),
+    ];
+    keys.extend(
+        facet_kinds()
+            .into_iter()
+            .map(|kind| CursorKey::facet(kind, "type")),
+    );
+    keys
+}
+
+/// Every cursor shape: one per key, across the two optional parts.
+fn cursors() -> Vec<Cursor> {
+    let mut cursors: Vec<Cursor> = cursor_keys()
+        .into_iter()
+        .map(|key| Cursor::new("epoch-1", 12, Some("fp-1".to_string()), Some(4), key))
+        .collect();
+    cursors.push(Cursor::new("epoch-1", 0, None, None, CursorKey::ordinal(0)));
+    cursors
+}
+
 fn round_trip<T>(value: &T)
 where
     T: Serialize + DeserializeOwned + Debug + PartialEq,
@@ -352,6 +396,27 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<ErrorDetail>(Some("code")),
         "the details built here are not the details the vocabulary holds"
+    );
+    assert_eq!(
+        cursor_keys()
+            .iter()
+            .map(|key| tag_string(key, "row"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<CursorKey>(Some("row")),
+        "the keys built here are not the keys the vocabulary holds"
+    );
+    assert_eq!(
+        facet_kinds()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<FacetKind>(None),
+        "the facet kinds built here are not the kinds the vocabulary holds"
+    );
+    assert_eq!(
+        movements().iter().map(flat_string).collect::<BTreeSet<_>>(),
+        advertised::<Moved>(None),
+        "the movements built here are not the movements the vocabulary holds"
     );
     assert_eq!(
         predicates()
@@ -1352,4 +1417,206 @@ fn a_predicate_refuses_a_target_outside_the_grammar() {
         serde_json::from_str::<Predicate>(r#"{"op":"near","query":"x"}"#).is_err(),
         "a part nobody minted read back as one"
     );
+}
+
+// ── The cursor envelope ──────────────────────────────────────────────────
+
+#[test]
+fn every_cursor_survives_the_round_trip() {
+    for cursor in cursors() {
+        round_trip(&cursor);
+    }
+}
+
+#[test]
+fn every_facet_kind_and_movement_survives_the_round_trip() {
+    for kind in facet_kinds() {
+        round_trip(&kind);
+    }
+    for movement in movements() {
+        round_trip(&movement);
+    }
+}
+
+/// A cursor is one opaque string in the URL-safe alphabet, and everything it
+/// carries survives the trip through it.
+#[test]
+fn a_cursor_is_one_opaque_string_a_client_passes_back_unchanged() {
+    for cursor in cursors() {
+        let json = wire(&cursor);
+        let text = serde_json::from_str::<String>(&json).expect("a cursor is a string");
+        assert!(
+            text.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "a cursor is spelled outside the URL-safe alphabet: {text}"
+        );
+        assert!(!text.is_empty(), "a cursor is spelled as nothing");
+        let back: Cursor = serde_json::from_str(&json).expect("reading a cursor back");
+        assert_eq!(back, cursor);
+        assert_eq!(back.key(), cursor.key());
+        assert_eq!(back.epoch(), cursor.epoch());
+        assert_eq!(back.generation(), cursor.generation());
+        assert_eq!(back.schema_fingerprint(), cursor.schema_fingerprint());
+        assert_eq!(back.sidecar_revision(), cursor.sidecar_revision());
+    }
+}
+
+/// A string nobody minted is not a position. It refuses whether it fails the
+/// alphabet, decodes to bytes that are not the fields, or names a row type
+/// this version does not hold.
+#[test]
+fn a_cursor_nobody_minted_refuses_the_read() {
+    for text in ["", "not base64!", "Zg==", "Zh", "Zm9vYmFy"] {
+        let json = serde_json::to_string(text).expect("a string as JSON");
+        assert!(
+            serde_json::from_str::<Cursor>(&json).is_err(),
+            "`{text}` was read as a cursor"
+        );
+    }
+    let unknown = norn_wire_test_base64(
+        br#"{"epoch":"e","generation":1,"schema_fingerprint":null,"sidecar_revision":null,"key":{"row":"shard","at":1}}"#,
+    );
+    assert!(
+        serde_json::from_str::<Cursor>(&serde_json::to_string(&unknown).expect("a string"))
+            .is_err(),
+        "a cursor naming a row type nobody minted was read as one"
+    );
+}
+
+/// The URL-safe alphabet, unpadded, spelled here so the test builds a hostile
+/// cursor the way a writer would rather than reaching into the crate.
+fn norn_wire_test_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = chunk.get(1).copied().map_or(0, u32::from);
+        let b2 = chunk.get(2).copied().map_or(0, u32::from);
+        let group = (b0 << 16) | (b1 << 8) | b2;
+        for position in 0..=chunk.len() {
+            out.push(char::from(
+                ALPHABET[((group >> (18 - 6 * position)) & 0x3f) as usize],
+            ));
+        }
+    }
+    out
+}
+
+/// The parts a continuation reports, one at a time.
+#[test]
+fn a_continuation_reports_each_part_that_moved() {
+    let key = || CursorKey::ordinal(1);
+    let minted = Cursor::new("epoch-1", 12, Some("fp-1".to_string()), Some(4), key());
+
+    let exact = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4));
+    assert_eq!(minted.continuation(&exact), Ok(vec![]));
+
+    let rebuilt = Snapshot::new("epoch-2", 3, Some("fp-1".to_string()), Some(4));
+    assert_eq!(minted.continuation(&rebuilt), Ok(vec![Moved::Epoch]));
+
+    let written = Snapshot::new("epoch-1", 13, Some("fp-1".to_string()), Some(4));
+    assert_eq!(minted.continuation(&written), Ok(vec![Moved::Generation]));
+
+    let drained = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(5));
+    assert_eq!(
+        minted.continuation(&drained),
+        Ok(vec![Moved::SidecarRevision])
+    );
+}
+
+/// Everything at once, in the fixed order the list promises. A rebuild
+/// restarts the write count, so a generation read against another database is
+/// not a movement of its own.
+#[test]
+fn a_continuation_reports_every_part_in_one_fixed_order() {
+    let minted = Cursor::new(
+        "epoch-1",
+        12,
+        Some("fp-1".to_string()),
+        Some(4),
+        CursorKey::ordinal(1),
+    );
+    let moved = Snapshot::new("epoch-2", 99, Some("fp-1".to_string()), Some(5));
+    assert_eq!(
+        minted.continuation(&moved),
+        Ok(vec![Moved::Epoch, Moved::SidecarRevision])
+    );
+}
+
+/// A cursor minted under one order and continued under another refuses: the
+/// rows its key names a position in are in a sequence that no longer exists.
+#[test]
+fn a_changed_order_refuses_the_continuation() {
+    let minted = Cursor::new(
+        "epoch-1",
+        12,
+        Some("fp-1".to_string()),
+        None,
+        CursorKey::ordinal(1),
+    );
+    let reshaped = Snapshot::new("epoch-1", 12, Some("fp-2".to_string()), None);
+    assert_eq!(
+        minted.continuation(&reshaped),
+        Err(CursorOrderChanged::new("fp-1", "fp-2"))
+    );
+}
+
+/// A raw order does not change with the schema. A cursor carrying no
+/// fingerprint was not ordered by one, and a snapshot carrying none against a
+/// cursor that has one says nothing about the order either.
+#[test]
+fn a_raw_order_never_changes() {
+    let raw = Cursor::new("epoch-1", 12, None, None, CursorKey::ordinal(1));
+    for fingerprint in [None, Some("fp-1".to_string()), Some("fp-2".to_string())] {
+        assert_eq!(
+            raw.continuation(&Snapshot::new("epoch-1", 12, fingerprint, None)),
+            Ok(vec![]),
+            "a raw order was reported as changed"
+        );
+    }
+    let typed = Cursor::new(
+        "epoch-1",
+        12,
+        Some("fp-1".to_string()),
+        None,
+        CursorKey::ordinal(1),
+    );
+    assert_eq!(
+        typed.continuation(&Snapshot::new("epoch-1", 12, None, None)),
+        Ok(vec![])
+    );
+}
+
+/// A page carries its rows, where the next one begins, and what moved. The
+/// last page continues at nothing.
+#[test]
+fn a_page_carries_its_rows_its_continuation_and_what_moved() {
+    let page: Page<String> = Page::new(vec!["a".to_string()], None, vec![]);
+    assert_eq!(wire(&page), r#"{"rows":["a"],"next":null,"moved":[]}"#);
+    round_trip(&page);
+
+    let cursor = Cursor::new("epoch-1", 1, None, None, CursorKey::ordinal(1));
+    let continued: Page<String> = Page::new(
+        vec!["a".to_string()],
+        Some(cursor.clone()),
+        vec![Moved::Generation],
+    );
+    round_trip(&continued);
+    assert_eq!(continued.next.as_ref(), Some(&cursor));
+    assert_eq!(continued.moved, vec![Moved::Generation]);
+}
+
+/// The snapshot a continuation is judged against is a plain object, written in
+/// the snake_case names the rest of the vocabulary uses.
+#[test]
+fn a_snapshot_is_the_reading_an_answer_was_established_under() {
+    let snapshot = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4));
+    assert_eq!(
+        wire(&snapshot),
+        concat!(
+            r#"{"epoch":"epoch-1","generation":12,"#,
+            r#""schema_fingerprint":"fp-1","sidecar_revision":4}"#
+        )
+    );
+    round_trip(&snapshot);
 }

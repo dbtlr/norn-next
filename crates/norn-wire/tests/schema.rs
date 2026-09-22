@@ -11,10 +11,10 @@
 //! restating it.
 
 use norn_wire::{
-    Anchor, AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
-    PollBackend, Predicate, ReasonCode, RequestScope, ResolutionTarget, SchemaSource, Severity,
-    TrustState, UntrustedReason, VaultAddress, VaultName, VaultRoot, Verb, WarmingPhase,
-    WatcherLossCause,
+    Anchor, AttachMode, Cursor, CursorKey, ErrorDetail, ErrorEnvelope, FacetKind, FindingKind,
+    FindingScope, MaintainerIdentity, Moved, Page, PollBackend, Predicate, ReasonCode,
+    RequestScope, ResolutionTarget, SchemaSource, Severity, Snapshot, TrustState, UntrustedReason,
+    VaultAddress, VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -115,6 +115,12 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<ResolutionTarget>(),
         schema_of::<Anchor>(),
         schema_of::<Predicate>(),
+        schema_of::<Cursor>(),
+        schema_of::<CursorKey>(),
+        schema_of::<FacetKind>(),
+        schema_of::<Moved>(),
+        schema_of::<Snapshot>(),
+        schema_of::<Page<String>>(),
     ] {
         assert!(
             schema.get("$schema").is_some(),
@@ -688,5 +694,114 @@ fn an_anchor_advertises_its_kind_tag() {
     assert_eq!(
         sorted(tag_constants(&schema, "kind")),
         sorted(["heading", "block"])
+    );
+}
+
+// ── The cursor envelope ──────────────────────────────────────────────────
+
+/// A cursor advertises one opaque string, and the pattern is the alphabet it
+/// is spelled in — which is the whole of what a validator can say about a
+/// value a consumer is told to read nothing out of.
+#[test]
+fn a_cursor_advertises_one_opaque_string() {
+    let schema = schema_of::<Cursor>();
+    assert_eq!(schema["type"].as_str(), Some("string"));
+    assert_eq!(schema["pattern"].as_str(), Some("^[A-Za-z0-9_-]+$"));
+    let description = schema["description"]
+        .as_str()
+        .expect("a cursor advertises a description");
+    assert!(
+        description.contains("Opaque") && description.contains("unchanged"),
+        "the description does not say the string is opaque: {description}"
+    );
+    assert!(
+        schema.get("properties").is_none(),
+        "a cursor advertises fields a consumer could read: {schema}"
+    );
+}
+
+/// The key advertises its `row` tag, one branch per paged row type, so the
+/// shape stays a derive even though the wrapping around it is hand-written.
+#[test]
+fn a_cursor_key_advertises_its_row_tag() {
+    let schema = schema_of::<CursorKey>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "row")),
+        sorted(["document", "hit", "tally", "finding", "facet", "ordinal"])
+    );
+    let document = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "row") == Some("document"))
+        .expect("the document branch");
+    assert_eq!(
+        property_names(document),
+        ["row", "sort", "path"].into_iter().collect()
+    );
+}
+
+#[test]
+fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
+    let members = |schema: &Value| -> Vec<String> {
+        branches(schema)
+            .iter()
+            .map(|branch| {
+                string_constant(branch)
+                    .unwrap_or_else(|| panic!("a branch is not a pinned string: {branch}"))
+                    .to_owned()
+            })
+            .collect()
+    };
+    assert_eq!(
+        sorted(
+            members(&schema_of::<FacetKind>())
+                .iter()
+                .map(String::as_str)
+        ),
+        sorted([
+            "declared_field",
+            "observed_field",
+            "declared_tag",
+            "folder",
+            "path_rule",
+        ])
+    );
+    assert_eq!(
+        sorted(members(&schema_of::<Moved>()).iter().map(String::as_str)),
+        sorted(["epoch", "generation", "sidecar_revision"])
+    );
+}
+
+/// A page advertises its three fields, and the continuation refers to the
+/// cursor's own definition, so a surface publishing a page publishes the
+/// opaque string with it.
+#[test]
+fn a_page_advertises_its_rows_its_continuation_and_what_moved() {
+    let schema = schema_of::<Page<String>>();
+    assert_eq!(
+        property_names(&schema),
+        ["rows", "next", "moved"].into_iter().collect()
+    );
+    assert_eq!(schema["properties"]["rows"]["type"].as_str(), Some("array"));
+    assert!(
+        schema["$defs"]["Cursor"].is_object(),
+        "a page carries no definition of the cursor: {schema}"
+    );
+}
+
+/// The snapshot advertises the four parts a continuation is judged against,
+/// under the snake_case names the wire uses.
+#[test]
+fn a_snapshot_advertises_the_parts_a_continuation_is_judged_against() {
+    let schema = schema_of::<Snapshot>();
+    assert_eq!(
+        property_names(&schema),
+        [
+            "epoch",
+            "generation",
+            "schema_fingerprint",
+            "sidecar_revision",
+        ]
+        .into_iter()
+        .collect()
     );
 }
