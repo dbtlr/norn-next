@@ -5430,9 +5430,17 @@ mod tests {
         poll_gate: Mutex<Option<VaultName>>,
         poll_started: std::sync::atomic::AtomicBool,
         poll_release: std::sync::atomic::AtomicBool,
-        maintenance_due: std::sync::atomic::AtomicBool,
+        /// The vault whose next watcher poll finds maintenance due. It names
+        /// one vault: the host serves every registered vault off one ledger,
+        /// and a due flag every served vault could take would be taken by
+        /// whichever one the dispatcher polls first — which is not the one
+        /// the case arranged for whenever that one is skipped on the tick, its
+        /// claim held or its coverage out with a leg.
+        maintenance_due_at: Mutex<Option<VaultName>>,
         maintenances: AtomicUsize,
-        block_maintenance: std::sync::atomic::AtomicBool,
+        /// The vault whose maintenance waits at the gate until the case sets
+        /// `maintenance_release`.
+        block_maintenance_at: Mutex<Option<VaultName>>,
         maintenance_started: std::sync::atomic::AtomicBool,
         maintenance_release: std::sync::atomic::AtomicBool,
         polls: Mutex<BTreeMap<VaultName, usize>>,
@@ -5793,14 +5801,14 @@ mod tests {
             Ok(None)
         }
 
-        fn maintenance_due(&self, _: &VaultName, _: &FakeCoverage) -> bool {
-            self.maintenance_due.swap(false, Ordering::SeqCst)
+        fn maintenance_due(&self, name: &VaultName, _: &FakeCoverage) -> bool {
+            takes_the_vault(&self.maintenance_due_at, name)
         }
 
         fn maintain(&self, name: &VaultName, _: &mut FakeCoverage) -> Result<(), JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.maintenances.fetch_add(1, Ordering::SeqCst);
-            if self.block_maintenance.load(Ordering::SeqCst) {
+            if stands_for_the_vault(&self.block_maintenance_at, name) {
                 self.maintenance_started.store(true, Ordering::SeqCst);
                 wait_for_release("maintenance_release", &self.maintenance_release);
             }
@@ -6322,13 +6330,12 @@ mod tests {
         wait_for_marker(label, flag, lifecycle_wait_budget())
     }
 
-    /// Hold a fake's job at a gate until the case releases it.
-    ///
-    /// This is the wait a case's own sequence runs inside, so it obeys
-    /// [`held_open_wait_budget`] rather than the budget those waits obey: a
-    /// gate that expired first would let the job run on under a case still
-    /// asserting it is parked, and the failure would land on whatever the job
-    /// touched next rather than here.
+    /// Arrange for one vault: the leg that reads the arrangement finds this
+    /// vault named, and no other. A vault already arranged is replaced.
+    fn arrange_for(arranged: &Mutex<Option<VaultName>>, name: &VaultName) {
+        *arranged.lock().expect("an arranged vault poisoned") = Some(name.clone());
+    }
+
     /// Whether an arrangement naming one vault names this one, taking it where
     /// it does. One-shot, so a leg reports the verdict once and the entry's
     /// answer to it is what the rest of the case reads.
@@ -6344,12 +6351,14 @@ mod tests {
     /// Whether an arrangement naming one vault names this one, leaving the
     /// arrangement standing.
     ///
-    /// The panic armings read through this rather than through the one-shot
-    /// above. A case that arms a panic is asking what the entry settles at
-    /// under work that keeps failing, and an arming spent by the first leg
-    /// would let a second run succeed and carry the entry somewhere the case
-    /// never asked about. A case that wants the operation to succeed again
-    /// takes the arming down itself.
+    /// The panic armings and the maintenance block read through this rather
+    /// than through the one-shot above. A case that arms a panic is asking
+    /// what the entry settles at under work that keeps failing, and an arming
+    /// spent by the first leg would let a second run succeed and carry the
+    /// entry somewhere the case never asked about. A block stands for the
+    /// same reason: every maintenance of the named vault waits at the gate
+    /// until the case releases it. A case that wants the operation to
+    /// succeed again takes the arming down itself.
     fn stands_for_the_vault(arranged: &Mutex<Option<VaultName>>, name: &VaultName) -> bool {
         arranged
             .lock()
@@ -6358,6 +6367,13 @@ mod tests {
             == Some(name)
     }
 
+    /// Hold a fake's job at a gate until the case releases it.
+    ///
+    /// This is the wait a case's own sequence runs inside, so it obeys
+    /// [`held_open_wait_budget`] rather than the budget those waits obey: a
+    /// gate that expired first would let the job run on under a case still
+    /// asserting it is parked, and the failure would land on whatever the job
+    /// touched next rather than here.
     fn wait_for_release(label: &str, flag: &std::sync::atomic::AtomicBool) -> Budget {
         wait_for_marker(label, flag, held_open_wait_budget())
     }
@@ -6979,9 +6995,9 @@ mod tests {
     fn by_due_maintenance(
         ops: &Arc<FakeOps>,
         host: &Host<Arc<FakeOps>>,
-        _: &VaultName,
+        name: &VaultName,
     ) -> Option<DemandLease<Arc<FakeOps>>> {
-        ops.maintenance_due.store(true, Ordering::SeqCst);
+        arrange_for(&ops.maintenance_due_at, name);
         poll_watchers(&host.shared);
         None
     }
@@ -8872,8 +8888,8 @@ mod tests {
 
         // A maintenance leg is held open over b, so the drain that ends it is
         // what reaches the watcher next.
-        ops.maintenance_due.store(true, Ordering::SeqCst);
-        ops.block_maintenance.store(true, Ordering::SeqCst);
+        arrange_for(&ops.maintenance_due_at, &b);
+        arrange_for(&ops.block_maintenance_at, &b);
         poll_watchers(&host.shared);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
 
@@ -10553,9 +10569,7 @@ mod tests {
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
-        *ops.damaged_reconcile_at
-            .lock()
-            .expect("an arranged vault poisoned") = Some(name.clone());
+        arrange_for(&ops.damaged_reconcile_at, &name);
         ops.block_rebuild.store(true, Ordering::SeqCst);
         report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
 
@@ -10612,11 +10626,9 @@ mod tests {
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
-        *ops.damaged_maintenance_at
-            .lock()
-            .expect("an arranged vault poisoned") = Some(name.clone());
+        arrange_for(&ops.damaged_maintenance_at, &name);
         ops.block_rebuild.store(true, Ordering::SeqCst);
-        ops.maintenance_due.store(true, Ordering::SeqCst);
+        arrange_for(&ops.maintenance_due_at, &name);
 
         let withdrawn = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
             "the full-text index disagrees with the documents it indexes",
@@ -10654,9 +10666,7 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_rebuild.store(true, Ordering::SeqCst);
-        *ops.damaged_poll_at
-            .lock()
-            .expect("an arranged vault poisoned") = Some(name.clone());
+        arrange_for(&ops.damaged_poll_at, &name);
 
         let withdrawn = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
             "the watcher cursor points into a truncated page",
@@ -10848,10 +10858,8 @@ mod tests {
         assert_eq!(ops.readers.opened.load(Ordering::SeqCst), 1);
         assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 0);
 
-        *ops.damaged_maintenance_at
-            .lock()
-            .expect("an arranged vault poisoned") = Some(name.clone());
-        ops.maintenance_due.store(true, Ordering::SeqCst);
+        arrange_for(&ops.damaged_maintenance_at, &name);
+        arrange_for(&ops.maintenance_due_at, &name);
         wait_until(
             "the entry to reach Ready through the rung the verdict schedules",
             lifecycle_wait_budget(),
@@ -10922,9 +10930,7 @@ mod tests {
         wait_for_state(&host, &damaged, TrustState::Ready);
         wait_for_state(&host, &sibling, TrustState::Ready);
 
-        *ops.damaged_reconcile_at
-            .lock()
-            .expect("an arranged vault poisoned") = Some(damaged.clone());
+        arrange_for(&ops.damaged_reconcile_at, &damaged);
         report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
         wait_until(
             "the damaged entry to come back through its rebuild",
@@ -10969,9 +10975,7 @@ mod tests {
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
-        *ops.damaged_reconcile_at
-            .lock()
-            .expect("an arranged vault poisoned") = Some(name.clone());
+        arrange_for(&ops.damaged_reconcile_at, &name);
         ops.damaged_rebuild.store(true, Ordering::SeqCst);
         report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
 
@@ -14393,7 +14397,7 @@ mod tests {
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
-        ops.maintenance_due.store(true, Ordering::SeqCst);
+        arrange_for(&ops.maintenance_due_at, &name);
         wait_until(
             "scheduled maintenance to run once",
             lifecycle_wait_budget(),
@@ -15068,8 +15072,8 @@ mod tests {
         // The leg under test: a maintenance whose own handoff drain saturates,
         // so it hands the entry a reconcile carrying no fact of its own — the
         // entry a tick would otherwise find idle and attached.
-        ops.maintenance_due.store(true, Ordering::SeqCst);
-        ops.block_maintenance.store(true, Ordering::SeqCst);
+        arrange_for(&ops.maintenance_due_at, &working);
+        arrange_for(&ops.block_maintenance_at, &working);
         poll_watchers(&host.shared);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         ops.handoff_poll_batches
@@ -15793,7 +15797,7 @@ mod tests {
         // busy vault's poll, driven rather than waited for.
         ops.off_thread_rescan_poll_batches
             .store(1, Ordering::SeqCst);
-        ops.maintenance_due.store(true, Ordering::SeqCst);
+        arrange_for(&ops.maintenance_due_at, &name);
         poll_watchers(&host.shared);
 
         wait_for_maintenance(&ops);
@@ -15816,7 +15820,7 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.off_thread_poll_batches.store(1, Ordering::SeqCst);
-        ops.maintenance_due.store(true, Ordering::SeqCst);
+        arrange_for(&ops.maintenance_due_at, &name);
         poll_watchers(&host.shared);
 
         wait_for_maintenance(&ops);
@@ -15853,7 +15857,7 @@ mod tests {
         report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_poll_batches);
 
         wait_for_flag("reconcile_started", &ops.reconcile_started);
-        ops.maintenance_due.store(true, Ordering::SeqCst);
+        arrange_for(&ops.maintenance_due_at, &name);
         ops.reconcile_release.store(true, Ordering::SeqCst);
 
         wait_for_state(&host, &name, TrustState::Ready);
@@ -15893,8 +15897,8 @@ mod tests {
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
-        ops.block_maintenance.store(true, Ordering::SeqCst);
-        ops.maintenance_due.store(true, Ordering::SeqCst);
+        arrange_for(&ops.block_maintenance_at, &name);
+        arrange_for(&ops.maintenance_due_at, &name);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         // The maintenance job's own handoff drain, not the batch source a
         // watcher poll spends: see the reconcile-side saturation test above
@@ -15920,8 +15924,8 @@ mod tests {
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
-        ops.block_maintenance.store(true, Ordering::SeqCst);
-        ops.maintenance_due.store(true, Ordering::SeqCst);
+        arrange_for(&ops.block_maintenance_at, &name);
+        arrange_for(&ops.maintenance_due_at, &name);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
         ops.handoff_poll_batches
@@ -15940,14 +15944,24 @@ mod tests {
         drop(lease);
     }
 
+    /// The blocked vault sorts after the polled one in the serving set, so the
+    /// dispatcher reaches the polled vault first on every tick. A due
+    /// arrangement any served vault could take would go to the polled vault
+    /// here, and the case would then be waiting on the vault it blocked.
     #[test]
     fn blocked_maintenance_does_not_stall_other_vault_polling_or_reaping() {
         let ops = Arc::new(FakeOps::default());
-        let a = VaultName::new("a").unwrap();
-        let b = VaultName::new("b").unwrap();
+        let blocked = VaultName::new("c").unwrap();
+        let polled = VaultName::new("b").unwrap();
         let registry = RegistryRead::from_entries([
-            RegistryEntry::new(a.clone(), VaultRoot::new("/tmp/norn-host-maint-a").unwrap()),
-            RegistryEntry::new(b.clone(), VaultRoot::new("/tmp/norn-host-maint-b").unwrap()),
+            RegistryEntry::new(
+                blocked.clone(),
+                VaultRoot::new("/tmp/norn-host-maint-c").unwrap(),
+            ),
+            RegistryEntry::new(
+                polled.clone(),
+                VaultRoot::new("/tmp/norn-host-maint-b").unwrap(),
+            ),
         ]);
         let host = Host::new(
             registry,
@@ -15959,25 +15973,25 @@ mod tests {
             },
         )
         .unwrap();
-        let lease_a = host.demand(&a, AttachMode::Durable).unwrap();
-        let lease_b = host.demand(&b, AttachMode::Durable).unwrap();
-        wait_for_state(&host, &a, TrustState::Ready);
-        wait_for_state(&host, &b, TrustState::Ready);
+        let lease_blocked = host.demand(&blocked, AttachMode::Durable).unwrap();
+        let lease_polled = host.demand(&polled, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &blocked, TrustState::Ready);
+        wait_for_state(&host, &polled, TrustState::Ready);
 
-        ops.block_maintenance.store(true, Ordering::SeqCst);
-        ops.maintenance_due.store(true, Ordering::SeqCst);
+        arrange_for(&ops.block_maintenance_at, &blocked);
+        arrange_for(&ops.maintenance_due_at, &blocked);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         let polls_before = *ops
             .polls
             .lock()
             .unwrap()
-            .get(&b)
+            .get(&polled)
             .expect("vault b was polled");
         wait_until(
             "vault b to be polled again",
             lifecycle_wait_budget(),
             || {
-                let polls = ops.polls.lock().unwrap().get(&b).copied().unwrap_or(0);
+                let polls = ops.polls.lock().unwrap().get(&polled).copied().unwrap_or(0);
                 if polls > polls_before {
                     Observed::Met(())
                 } else {
@@ -15986,16 +16000,16 @@ mod tests {
             },
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
-        assert!(ops.polls.lock().unwrap().get(&b).copied().unwrap_or(0) > polls_before);
+        assert!(ops.polls.lock().unwrap().get(&polled).copied().unwrap_or(0) > polls_before);
 
-        drop(lease_b);
+        drop(lease_polled);
         host.reap_idle(Instant::now() + Duration::from_secs(61))
             .unwrap();
-        wait_for_state(&host, &b, TrustState::Unattached);
+        wait_for_state(&host, &polled, TrustState::Unattached);
 
         ops.maintenance_release.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &a, TrustState::Ready);
-        drop(lease_a);
+        wait_for_state(&host, &blocked, TrustState::Ready);
+        drop(lease_blocked);
     }
 
     /// A vault the set gains while the host runs, and a vault it loses.
