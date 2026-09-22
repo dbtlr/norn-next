@@ -104,8 +104,9 @@
 //!   [`VaultName`], [`VaultRoot`], [`SchemaSource`], [`DocumentPath`],
 //!   [`ResolutionTarget`], [`Directory`] and [`Score`] refuse a string outside
 //!   their grammar,
-//!   [`RungSet`] refuses a ladder that runs no rung and [`RegistrySanity`]
-//!   refuses a problem list that names no problem, and five shapes refuse a
+//!   [`RungSet`] refuses a ladder that runs no rung, [`RegistrySanity`]
+//!   refuses a problem list that names no problem and [`NameSet`] refuses a
+//!   name list naming fewer than two distinct names, and five shapes refuse a
 //!   value whose halves disagree: [`ErrorEnvelope`], whose code must be its
 //!   detail's, [`LinkRow`], whose health must be the health of the total
 //!   documents its head heads, [`RollUp`], whose five counts must sum to the
@@ -119,13 +120,15 @@
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
 //!   advertised schema and the emitted bytes are one description. It too is
 //!   written by hand where a derive would advertise a shape the reader does
-//!   not accept. Ten types do: the grammars [`VaultName`], [`VaultRoot`],
+//!   not accept. Eleven types do: the grammars [`VaultName`], [`VaultRoot`],
 //!   [`SchemaSource`], [`Directory`], [`DocumentPath`] and
 //!   [`ResolutionTarget`] advertise the pattern or floor their constructors
 //!   hold; [`Cursor`] is one opaque string
-//!   rather than the fields a derive would emit; [`RungSet`] and
-//!   [`RegistrySanity`] carry the
-//!   `minItems` floor their read paths keep; and [`CandidateHead`] carries the
+//!   rather than the fields a derive would emit; [`RungSet`],
+//!   [`RegistrySanity`] and [`NameSet`] carry the
+//!   `minItems` floor their read paths keep, the last of them advertising
+//!   `uniqueItems` for the distinctness it is measured against as well; and
+//!   [`CandidateHead`] carries the
 //!   `maxItems` ceiling its read path keeps, read off [`CANDIDATE_HEAD`] so
 //!   the bound has one spelling.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.
@@ -181,7 +184,7 @@
 //! [`UntrustedReason::store_damaged_awaiting_demand`],
 //! [`UntrustedReason::schema_unreadable`],
 //! [`UntrustedReason::leg_unwound`],
-//! [`ErrorDetail::duplicate_root`],
+//! [`NameSet::new`], [`ErrorDetail::duplicate_root`],
 //! [`ErrorDetail::entry_untrusted`], [`ErrorDetail::maintainer_contended`],
 //! [`ErrorDetail::unknown_vault`], [`ErrorDetail::unsupported_attach_mode`],
 //! [`ErrorDetail::already_served`], [`ErrorDetail::entry_held`],
@@ -366,7 +369,7 @@ pub use document::{
     BlockRow, BodyText, Collection, Column, DocumentPath, DocumentRow, FieldValue, HeadingRow,
     LinkFamily, LinkHealth, LinkRow, Span, TagRow, TagSource, TotalBelowHead,
 };
-pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
+pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReasonCode, TooFewNames};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
 pub use name::{IllegalVaultName, VaultName};

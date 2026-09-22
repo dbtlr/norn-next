@@ -8571,7 +8571,10 @@ mod tests {
 
         entry.gate.lock().unwrap().maintainer_contended = None;
         assert_eq!(lease.completion(), Demand::DuplicateRoot(conflict));
-        refused_detail(&ErrorDetail::duplicate_root([a.clone(), b.clone()]));
+        refused_detail(
+            &ErrorDetail::duplicate_root([a.clone(), b.clone()])
+                .expect("two distinct colliding names"),
+        );
 
         entry.gate.lock().unwrap().duplicate_root = None;
         assert_eq!(
@@ -8781,7 +8784,8 @@ mod tests {
                 .as_ref()
                 .expect_err("a parked entry refuses")
                 .detail(),
-            &ErrorDetail::duplicate_root([a.clone(), b.clone()]),
+            &ErrorDetail::duplicate_root([a.clone(), b.clone()])
+                .expect("two distinct colliding names"),
             "the status surface spelled the park in a vocabulary of its own"
         );
         assert_eq!(
@@ -8868,7 +8872,8 @@ mod tests {
             host.state(&a)
                 .expect_err("a parked entry refuses through its release")
                 .detail(),
-            &ErrorDetail::duplicate_root([a.clone(), b.clone()]),
+            &ErrorDetail::duplicate_root([a.clone(), b.clone()])
+                .expect("two distinct colliding names"),
             "the release window answered the warming label under the park"
         );
 
@@ -9449,7 +9454,8 @@ mod tests {
         let parked = lease.answer().expect_err("a parked entry refuses");
         assert_eq!(
             parked.detail(),
-            &ErrorDetail::duplicate_root([a.clone(), b.clone()]),
+            &ErrorDetail::duplicate_root([a.clone(), b.clone()])
+                .expect("two distinct colliding names"),
             "the lease answered its park with another refusal"
         );
 

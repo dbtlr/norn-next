@@ -78,7 +78,11 @@ impl Demand {
             Demand::DuplicateRoot(conflict) => Err(ErrorEnvelope::new(
                 "more than one registered name resolves to this vault's root, so none of them \
                  is served",
-                ErrorDetail::duplicate_root(conflict.aliases().iter().cloned()),
+                // An `AliasConflict` is raised only where one root is reached
+                // by more than one registered name, so the names it carries
+                // are the two or more the detail is built from.
+                ErrorDetail::duplicate_root(conflict.aliases().iter().cloned())
+                    .expect("an alias conflict names the two or more registrations that collide"),
             )),
             Demand::IdentityRefused(refusal) => Err(ErrorEnvelope::new(
                 "the registry cannot read this vault's root",
@@ -461,7 +465,10 @@ mod tests {
             ),
             (
                 Demand::DuplicateRoot(AliasConflict::new([name("alpha"), name("beta")])),
-                Some(ErrorDetail::duplicate_root([name("alpha"), name("beta")])),
+                Some(
+                    ErrorDetail::duplicate_root([name("alpha"), name("beta")])
+                        .expect("two distinct colliding names"),
+                ),
             ),
             (
                 Demand::IdentityRefused("the root cannot be read".to_string()),

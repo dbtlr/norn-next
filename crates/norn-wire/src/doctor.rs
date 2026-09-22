@@ -34,6 +34,7 @@ use std::fmt;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
+use crate::error::{NameSet, TooFewNames};
 use crate::name::VaultName;
 use crate::reading::EngineSection;
 use crate::status::{EngineStatus, RollUp};
@@ -65,10 +66,9 @@ pub enum RegistryProblem {
     /// its own derived state over the same documents.
     #[non_exhaustive]
     DuplicateRoot {
-        /// Every registered name that reaches the root. A producer emits
-        /// them ascending, and a reader accepts whatever order they arrive
-        /// in.
-        aliases: Vec<VaultName>,
+        /// Every registered name that reaches the root, at least two of them,
+        /// ascending and each named once.
+        aliases: NameSet,
     },
     /// A registration's root is there and could not be read.
     #[non_exhaustive]
@@ -88,18 +88,18 @@ pub enum RegistryProblem {
 }
 
 impl RegistryProblem {
-    /// The registrations `aliases` all reach one root, in name order and
-    /// each named once.
+    /// The registrations `aliases` all reach one root, in name order and each
+    /// named once, or the reason those names are no duplicate root.
     ///
-    /// The field says a producer emits the aliases ascending, so the
-    /// constructor is what makes this one a producer that does: a caller that
-    /// walked a registry in some other order hands the same problem across
-    /// whichever order it walked in.
-    pub fn duplicate_root(aliases: impl IntoIterator<Item = VaultName>) -> Self {
-        let mut aliases: Vec<VaultName> = aliases.into_iter().collect();
-        aliases.sort();
-        aliases.dedup();
-        RegistryProblem::DuplicateRoot { aliases }
+    /// A root more than one registration reaches is reached by at least two
+    /// distinct names, so fewer than two is refused rather than filed as a
+    /// problem naming one registration or none.
+    pub fn duplicate_root(
+        aliases: impl IntoIterator<Item = VaultName>,
+    ) -> Result<Self, TooFewNames> {
+        Ok(RegistryProblem::DuplicateRoot {
+            aliases: NameSet::new(aliases)?,
+        })
     }
 
     /// The root of `name` could not be read, for `detail`.

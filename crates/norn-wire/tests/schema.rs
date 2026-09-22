@@ -19,8 +19,8 @@ use norn_wire::{
     EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams,
     FindReport, FindingKind, FindingRow, FindingScope, Fingerprints, Freshness, GetParams,
     GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LinkFamily, LinkHealth, LinkRow,
-    ListParams, ListReport, MaintainerIdentity, Moved, NotReady, Page, PathRuleKind, PollBackend,
-    Predicate, Published, ReasonCode, RegisterParams, RegisterReport, Registration,
+    ListParams, ListReport, MaintainerIdentity, Moved, NameSet, NotReady, Page, PathRuleKind,
+    PollBackend, Predicate, Published, ReasonCode, RegisterParams, RegisterReport, Registration,
     RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
     Replace, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung,
     RungReport, RungSet, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport,
@@ -123,6 +123,7 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<Severity>(),
         schema_of::<MaintainerIdentity>(),
         schema_of::<ErrorDetail>(),
+        schema_of::<NameSet>(),
         schema_of::<ErrorEnvelope>(),
         schema_of::<AttachMode>(),
         schema_of::<VaultName>(),
@@ -754,27 +755,80 @@ fn an_unknown_vault_advertises_the_requested_name() {
     );
 }
 
-/// A duplicate root advertises its colliding names as an array of the name's
-/// own definition, so a surface validating an envelope holds every alias to the
-/// grammar a request names a vault through.
+/// A name set advertises the array its read path accepts: names of the name's
+/// own definition, at least two of them, and each named once. A surface
+/// validating against it passes exactly the lists this crate reads.
 #[test]
-fn a_duplicate_root_advertises_its_colliding_names() {
-    let schema = schema_of::<ErrorDetail>();
-    let branch = branches(&schema)
+fn a_name_set_advertises_the_two_distinct_names_it_holds() {
+    let schema = schema_of::<NameSet>();
+    assert_eq!(schema["type"].as_str(), Some("array"));
+    assert_eq!(schema["items"]["$ref"].as_str(), Some("#/$defs/VaultName"));
+    assert_eq!(
+        schema["minItems"].as_u64(),
+        Some(2),
+        "the name set advertises a list that names one collision party or none: {schema}"
+    );
+    assert_eq!(
+        schema["uniqueItems"].as_bool(),
+        Some(true),
+        "the name set advertises a list that names one party twice: {schema}"
+    );
+    assert_eq!(
+        schema["$defs"]["VaultName"]["pattern"].as_str(),
+        schema_of::<VaultName>()["pattern"].as_str(),
+        "the referenced definition is not the name's own grammar: {schema}"
+    );
+}
+
+/// The three carriers of a collision between registered names advertise one
+/// name set, so a surface validating an envelope or a registry problem holds
+/// every name to the grammar a request names a vault through and to the floor
+/// of two the fact itself has.
+#[test]
+fn every_collision_advertises_the_one_name_set() {
+    let detail = schema_of::<ErrorDetail>();
+    for (code, field) in [
+        ("host/duplicate-root", "aliases"),
+        ("vault/ambiguous-root", "candidates"),
+    ] {
+        let branch = branches(&detail)
+            .iter()
+            .find(|branch| tag_constant(branch, "code") == Some(code))
+            .unwrap_or_else(|| panic!("the {code} branch is not advertised: {detail}"));
+        assert_eq!(
+            property_names(branch),
+            ["code", field].into_iter().collect()
+        );
+        assert_eq!(
+            branch["properties"][field]["$ref"].as_str(),
+            Some("#/$defs/NameSet"),
+            "{code} does not carry the one name set: {detail}"
+        );
+    }
+    assert_eq!(
+        detail["$defs"]["NameSet"]["minItems"].as_u64(),
+        Some(2),
+        "the referenced definition carries no floor: {detail}"
+    );
+
+    let problem = schema_of::<RegistryProblem>();
+    let branch = branches(&problem)
         .iter()
-        .find(|branch| tag_constant(branch, "code") == Some("host/duplicate-root"))
-        .expect("the duplicate-root branch");
+        .find(|branch| tag_constant(branch, "problem") == Some("duplicate_root"))
+        .unwrap_or_else(|| panic!("the duplicate-root problem is not advertised: {problem}"));
     assert_eq!(
         property_names(branch),
-        ["code", "aliases"].into_iter().collect()
+        ["problem", "aliases"].into_iter().collect()
     );
     assert_eq!(
-        branch["properties"]["aliases"]["type"].as_str(),
-        Some("array")
+        branch["properties"]["aliases"]["$ref"].as_str(),
+        Some("#/$defs/NameSet"),
+        "the problem does not carry the one name set: {problem}"
     );
     assert_eq!(
-        branch["properties"]["aliases"]["items"]["$ref"].as_str(),
-        Some("#/$defs/VaultName")
+        problem["$defs"]["NameSet"]["uniqueItems"].as_bool(),
+        Some(true),
+        "the referenced definition holds no name to being named once: {problem}"
     );
 }
 

@@ -192,7 +192,8 @@ fn error_details() -> Vec<ErrorDetail> {
         .map(ErrorDetail::entry_untrusted)
         .collect();
     details.extend([
-        ErrorDetail::duplicate_root([name("notes"), name("vault")]),
+        ErrorDetail::duplicate_root([name("notes"), name("vault")])
+            .expect("two distinct colliding names"),
         ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
         ErrorDetail::maintainer_contended(MaintainerIdentity::named(41, "0.1.0", 1_700_000_000)),
         ErrorDetail::unknown_vault(name("notes")),
@@ -200,7 +201,8 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::entry_held(name("notes")),
         ErrorDetail::reader_unavailable("this coverage mints no read handle"),
         ErrorDetail::registry_unwritable("the registry file is read-only"),
-        ErrorDetail::ambiguous_root([name("notes"), name("vault")]),
+        ErrorDetail::ambiguous_root([name("notes"), name("vault")])
+            .expect("two distinct candidate names"),
         ErrorDetail::ambiguous_target(
             target("glossary"),
             head(
@@ -1708,7 +1710,8 @@ fn a_registry_refusal_carries_the_names_the_registry_holds() {
     assert_eq!(
         wire(&ErrorEnvelope::new(
             "two names resolve to one root",
-            ErrorDetail::duplicate_root([name("notes"), name("vault")]),
+            ErrorDetail::duplicate_root([name("notes"), name("vault")])
+                .expect("two distinct colliding names"),
         )),
         concat!(
             r#"{"code":"host/duplicate-root","message":"two names resolve to one root","#,
@@ -1784,17 +1787,95 @@ fn duplicate_root_envelope(named: &str) -> String {
     .to_string()
 }
 
-/// The colliding names ascend because the detail sorts them, so the order the
-/// field promises holds whatever order a producer collected them in.
+/// The colliding names ascend because the name set they cross as sorts them,
+/// so the order the field promises holds whatever order a producer collected
+/// them in.
 #[test]
 fn duplicate_root_aliases_ascend_whatever_order_they_arrive_in() {
     assert_eq!(
-        wire(&ErrorDetail::duplicate_root([
-            name("vault"),
-            name("archive"),
-            name("notes"),
-        ])),
+        wire(
+            &ErrorDetail::duplicate_root([name("vault"), name("archive"), name("notes"),])
+                .expect("three distinct colliding names")
+        ),
         r#"{"code":"host/duplicate-root","aliases":["archive","notes","vault"]}"#
+    );
+}
+
+/// A collision between registered names is a fact about at least two of them,
+/// and the three carriers of that fact hold it the same way: a list naming one
+/// name or none — whether it arrived empty, one-long, or as the same name
+/// twice — is no collision, and every constructor refuses it.
+#[test]
+fn a_collision_refuses_a_list_that_names_fewer_than_two_vaults() {
+    for named in [
+        Vec::new(),
+        vec![name("notes")],
+        vec![name("notes"), name("notes")],
+    ] {
+        assert!(
+            ErrorDetail::duplicate_root(named.clone()).is_err(),
+            "{named:?} was carried as a duplicate-root refusal"
+        );
+        assert!(
+            ErrorDetail::ambiguous_root(named.clone()).is_err(),
+            "{named:?} was carried as an ambiguous-root refusal"
+        );
+        assert!(
+            RegistryProblem::duplicate_root(named.clone()).is_err(),
+            "{named:?} was carried as a duplicate-root problem"
+        );
+    }
+    assert!(ErrorDetail::duplicate_root([name("notes"), name("vault")]).is_ok());
+    assert!(ErrorDetail::ambiguous_root([name("notes"), name("vault")]).is_ok());
+    assert!(RegistryProblem::duplicate_root([name("notes"), name("vault")]).is_ok());
+}
+
+/// The read path refuses what the constructors refuse. Bytes naming one vault
+/// or none are bytes no producer here mints, and a reader that took them would
+/// hold a collision between one party: the refusal is refused entire rather
+/// than read into a value a later reader would have to check.
+#[test]
+fn a_collision_refuses_bytes_that_name_fewer_than_two_vaults() {
+    for names in [r#"[]"#, r#"["notes"]"#, r#"["notes","notes"]"#] {
+        let detail = format!(r#"{{"code":"host/duplicate-root","aliases":{names}}}"#);
+        assert!(
+            serde_json::from_str::<ErrorDetail>(&detail).is_err(),
+            "reading {detail} produced a detail"
+        );
+        let candidates = format!(r#"{{"code":"vault/ambiguous-root","candidates":{names}}}"#);
+        assert!(
+            serde_json::from_str::<ErrorDetail>(&candidates).is_err(),
+            "reading {candidates} produced a detail"
+        );
+        let problem = format!(r#"{{"problem":"duplicate_root","aliases":{names}}}"#);
+        assert!(
+            serde_json::from_str::<RegistryProblem>(&problem).is_err(),
+            "reading {problem} produced a problem"
+        );
+    }
+    assert_eq!(
+        serde_json::from_str::<ErrorDetail>(
+            r#"{"code":"host/duplicate-root","aliases":["notes","vault"]}"#
+        )
+        .expect("two distinct colliding names"),
+        ErrorDetail::duplicate_root([name("notes"), name("vault")])
+            .expect("two distinct colliding names")
+    );
+    assert_eq!(
+        serde_json::from_str::<ErrorDetail>(
+            r#"{"code":"vault/ambiguous-root","candidates":["notes","vault"]}"#
+        )
+        .expect("two distinct candidate names"),
+        ErrorDetail::ambiguous_root([name("notes"), name("vault")])
+            .expect("two distinct candidate names")
+    );
+    assert_eq!(
+        serde_json::from_str::<RegistryProblem>(
+            r#"{"problem":"duplicate_root","aliases":["notes","vault"]}"#
+        )
+        .expect("two distinct colliding names"),
+        RegistryProblem::duplicate_root([name("notes"), name("vault")])
+            .expect("two distinct colliding names")
     );
 }
 
@@ -2933,15 +3014,15 @@ fn a_busy_reload_carries_nothing_but_its_code() {
     );
 }
 
-/// The candidates a root resolves under ascend because the detail sorts them.
+/// The candidates a directory resolves under ascend because the name set they
+/// cross as sorts them.
 #[test]
 fn ambiguous_root_candidates_ascend_whatever_order_they_arrive_in() {
     assert_eq!(
-        wire(&ErrorDetail::ambiguous_root([
-            name("vault"),
-            name("archive"),
-            name("notes"),
-        ])),
+        wire(
+            &ErrorDetail::ambiguous_root([name("vault"), name("archive"), name("notes"),])
+                .expect("three distinct candidate names")
+        ),
         r#"{"code":"vault/ambiguous-root","candidates":["archive","notes","vault"]}"#
     );
 }
@@ -4282,7 +4363,8 @@ fn status_reports() -> Vec<StatusReport> {
 /// Every problem the registry itself carries.
 fn registry_problems() -> Vec<RegistryProblem> {
     vec![
-        RegistryProblem::duplicate_root([name("notes"), name("vault")]),
+        RegistryProblem::duplicate_root([name("notes"), name("vault")])
+            .expect("two distinct colliding names"),
         RegistryProblem::root_unreadable(name("notes"), "the directory cannot be read"),
         RegistryProblem::root_missing(name("notes")),
     ]
@@ -4955,16 +5037,11 @@ fn a_listing_pins_the_registrations_it_holds() {
 #[test]
 fn a_duplicate_root_problem_pins_the_aliases_that_reach_it() {
     assert_eq!(
-        wire(&RegistryProblem::duplicate_root([
-            name("vault"),
-            name("notes")
-        ])),
+        wire(
+            &RegistryProblem::duplicate_root([name("vault"), name("notes")])
+                .expect("two distinct colliding names")
+        ),
         r#"{"problem":"duplicate_root","aliases":["notes","vault"]}"#
-    );
-    assert_eq!(
-        RegistryProblem::duplicate_root([name("notes"), name("notes")]),
-        RegistryProblem::duplicate_root([name("notes")]),
-        "an alias named twice is carried twice"
     );
 }
 
@@ -4976,10 +5053,10 @@ fn a_duplicate_root_problem_pins_the_aliases_that_reach_it() {
 fn a_doctor_registry_reading_pins_its_problems_and_its_engines() {
     let report = DoctorRegistryReport::new(
         RollUp::of(&[]),
-        RegistrySanity::problems([RegistryProblem::duplicate_root([
-            name("vault"),
-            name("notes"),
-        ])])
+        RegistrySanity::problems([
+            RegistryProblem::duplicate_root([name("vault"), name("notes")])
+                .expect("two distinct colliding names"),
+        ])
         .expect("problems that name one"),
         [
             EngineHealth::new(
