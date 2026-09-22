@@ -741,7 +741,7 @@ impl FieldValue {
 /// The path is always carried. Every other column is `null` — and left out of
 /// the bytes — where the read did not ask for it, so a client tells a column
 /// it did not project from a column the document does not have.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct DocumentRow {
     /// Where the document stands in its vault.

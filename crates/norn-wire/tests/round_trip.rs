@@ -2900,6 +2900,25 @@ fn a_collection_of_an_equatable_row_is_equatable() {
     );
 }
 
+/// Every column a document row is projected onto holds a row type two of
+/// which are one value — a path, a frontmatter tree, a body, and the four
+/// collections — so the row itself is a value two of which are one. No column
+/// carries a score, which is the one thing in the vocabulary that is near
+/// without being equal, so this is a compile-time check rather than a
+/// comparison.
+#[test]
+fn a_document_row_is_equatable() {
+    fn equatable<T: Eq>() {}
+    equatable::<DocumentRow>();
+    let row = DocumentRow::new(path("notes/a.md"))
+        .with_fields(BTreeMap::from([(
+            "type".to_string(),
+            FieldValue::scalar("note"),
+        )]))
+        .with_body(body("hello", 5));
+    assert_eq!(row, row.clone());
+}
+
 /// A nested collection says in band what it cut. The items are the head and
 /// the total is the vault's count, so a row whose links were bounded reports
 /// the bound rather than handing back a short list that reads as the whole.
