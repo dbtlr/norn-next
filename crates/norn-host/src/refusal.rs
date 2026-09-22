@@ -216,7 +216,12 @@ fn reload_failed(failure: ReloadFailure) -> ErrorEnvelope {
 
 /// A core reload error as the wire control-file failure it is: which file,
 /// which boundary, and the reader's own account of it.
-fn control_file_failure(error: &ReloadError) -> ControlFileFailure {
+///
+/// The reload refusals here are its first caller; its second is the `vault
+/// status` handler, which lands in this crate (NORN-231) and reports the same
+/// failure as an entry's last reload failure, so the visibility is
+/// `pub(crate)` rather than private to this module.
+pub(crate) fn control_file_failure(error: &ReloadError) -> ControlFileFailure {
     let file = match error.file() {
         ReloadFile::Schema => ControlFile::Schema,
         ReloadFile::Config => ControlFile::Config,
