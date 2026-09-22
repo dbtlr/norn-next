@@ -3039,16 +3039,19 @@ fn a_links_health_is_the_count_of_what_it_resolves_to() {
 
 /// The count the health is read off is the head's total, not the candidates
 /// the head carries: a target that named nine documents is ambiguous on a row
-/// whose head stops at five, because what the health describes is the class
-/// rather than the part of it that fit.
+/// whose head stops at five and on a row whose head carries one of them,
+/// because what the health describes is the class rather than the part of it
+/// that fit.
 #[test]
 fn a_links_health_is_the_heads_total_rather_than_its_length() {
     let nine: Vec<Candidate> = (0..9)
         .map(|index| candidate(&format!("notes/g{index}")))
         .collect();
-    let five_of_nine = head(nine, 9);
+    let five_of_nine = head(nine.clone(), 9);
     assert_eq!(five_of_nine.candidates().len(), CANDIDATE_HEAD);
     assert_eq!(link_row(five_of_nine).health(), LinkHealth::Ambiguous);
+    let one_of_nine = head(nine.into_iter().take(1), 9);
+    assert_eq!(link_row(one_of_nine).health(), LinkHealth::Ambiguous);
     assert_eq!(
         link_row(head([candidate("notes/a")], 1)).health(),
         LinkHealth::Healthy
