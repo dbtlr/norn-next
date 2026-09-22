@@ -14,11 +14,13 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Anchor, AttachMode, Cursor, CursorKey, CursorOrderChanged, ErrorDetail, ErrorEnvelope,
-    FacetKind, FindingKind, FindingScope, MaintainerIdentity, Moved, Page, PollBackend, Predicate,
-    ReasonCode, RequestScope, ResolutionTarget, SchemaSource, Severity, Snapshot, TrustState,
+    Anchor, AnswerReading, AttachMode, Cursor, CursorKey, CursorOrderChanged, EngineSection,
+    ErrorDetail, ErrorEnvelope, FacetKind, FindingKind, FindingScope, Freshness, LadderDeclaration,
+    MaintainerIdentity, ModelIdentity, Moved, Page, PollBackend, Predicate, ReasonCode,
+    RequestScope, ResolutionTarget, Rung, RungReport, SchemaSource, Severity, Snapshot, TrustState,
     UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
-    UntrustedReason, VaultAddress, VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
+    Unsatisfied, UntrustedReason, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb,
+    WarmingPhase, WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -266,6 +268,85 @@ fn cursors() -> Vec<Cursor> {
     cursors
 }
 
+/// Every rung a ladder declares.
+fn rungs() -> Vec<Rung> {
+    vec![Rung::Lexical, Rung::Vector, Rung::Expansion, Rung::Rerank]
+}
+
+/// Every freshness a stateful rung reports.
+fn freshnesses() -> Vec<Freshness> {
+    vec![
+        Freshness::trailing(0),
+        Freshness::trailing(3),
+        Freshness::rescanning(),
+    ]
+}
+
+/// Every section reading the host retains for a vault's engine.
+fn engine_sections() -> Vec<EngineSection> {
+    vec![
+        EngineSection::absent(),
+        EngineSection::disabled(),
+        EngineSection::malformed("the `engine` table holds a string"),
+        EngineSection::enabled(),
+    ]
+}
+
+/// One rung report per shape a rung takes: the model-free floor, a stateful
+/// rung with both halves, and a request-time rung with a model alone.
+fn rung_reports() -> Vec<RungReport> {
+    let mut reports = vec![RungReport::new(Rung::Lexical, None, None)];
+    reports.extend(freshnesses().into_iter().map(|freshness| {
+        RungReport::new(
+            Rung::Vector,
+            Some(ModelIdentity::new("stub", "1")),
+            Some(freshness),
+        )
+    }));
+    reports.push(RungReport::new(
+        Rung::Rerank,
+        Some(ModelIdentity::new("stub", "1")),
+        None,
+    ));
+    reports
+}
+
+/// Every reading an answer is taken under, with and without a ladder.
+fn answer_readings() -> Vec<AnswerReading> {
+    vec![
+        AnswerReading::new(TrustState::Ready, "epoch-1", 12, None),
+        AnswerReading::new(
+            TrustState::Ready,
+            "epoch-1",
+            12,
+            Some(LadderDeclaration::new(rung_reports(), false)),
+        ),
+        AnswerReading::new(
+            TrustState::Ready,
+            "epoch-1",
+            12,
+            Some(LadderDeclaration::new(
+                vec![RungReport::new(Rung::Lexical, None, None)],
+                true,
+            )),
+        ),
+    ]
+}
+
+/// Every part a request can leave unapplied.
+fn unsatisfied_parts() -> Vec<Unsatisfied> {
+    vec![
+        Unsatisfied::unknown_sort_key("due", vec!["date".to_string()]),
+        Unsatisfied::unknown_projection_key("due", vec![]),
+        Unsatisfied::unknown_predicate_key("due", vec!["date".to_string()]),
+        Unsatisfied::bare_directory("docs"),
+        Unsatisfied::malformed_glob("docs/[", "the character class does not close"),
+        Unsatisfied::impossible_path("/etc/passwd"),
+        Unsatisfied::missing_section("Design"),
+        Unsatisfied::resolves_not_applicable(target("norn/glossary")),
+    ]
+}
+
 fn round_trip<T>(value: &T)
 where
     T: Serialize + DeserializeOwned + Debug + PartialEq,
@@ -396,6 +477,35 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<ErrorDetail>(Some("code")),
         "the details built here are not the details the vocabulary holds"
+    );
+    assert_eq!(
+        rungs().iter().map(flat_string).collect::<BTreeSet<_>>(),
+        advertised::<Rung>(None),
+        "the rungs built here are not the rungs the vocabulary holds"
+    );
+    assert_eq!(
+        freshnesses()
+            .iter()
+            .map(|freshness| tag_string(freshness, "state"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<Freshness>(Some("state")),
+        "the freshnesses built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        engine_sections()
+            .iter()
+            .map(|section| tag_string(section, "state"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<EngineSection>(Some("state")),
+        "the sections built here are not the sections the vocabulary holds"
+    );
+    assert_eq!(
+        unsatisfied_parts()
+            .iter()
+            .map(|part| tag_string(part, "part"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<Unsatisfied>(Some("part")),
+        "the parts built here are not the parts the vocabulary holds"
     );
     assert_eq!(
         cursor_keys()
@@ -1619,4 +1729,124 @@ fn a_snapshot_is_the_reading_an_answer_was_established_under() {
         )
     );
     round_trip(&snapshot);
+}
+
+// ── The answer reading and the read product ──────────────────────────────
+
+#[test]
+fn every_answer_reading_survives_the_round_trip() {
+    for reading in answer_readings() {
+        round_trip(&reading);
+    }
+    for section in engine_sections() {
+        round_trip(&section);
+    }
+    for part in unsatisfied_parts() {
+        round_trip(&part);
+    }
+}
+
+/// A reading is the trust state, the database, how far its writes had got, and
+/// the ladder where a model ran. A `null` ladder is an answer no model
+/// contributed to.
+#[test]
+fn a_reading_carries_the_trust_state_the_database_and_the_ladder() {
+    assert_eq!(
+        wire(&AnswerReading::new(TrustState::Ready, "epoch-1", 12, None)),
+        concat!(
+            r#"{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12,"#,
+            r#""ladder":null}"#
+        )
+    );
+}
+
+/// The lexical floor has neither half; a stateful rung has both; a
+/// request-time rung has a model and no lag to report.
+#[test]
+fn a_rung_report_carries_a_model_and_a_lag_only_where_the_rung_holds_them() {
+    assert_eq!(
+        wire(&RungReport::new(Rung::Lexical, None, None)),
+        r#"{"rung":"lexical","model":null,"freshness":null}"#
+    );
+    assert_eq!(
+        wire(&RungReport::new(
+            Rung::Vector,
+            Some(ModelIdentity::new("stub", "1")),
+            Some(Freshness::trailing(3))
+        )),
+        concat!(
+            r#"{"rung":"vector","model":{"id":"stub","version":"1"},"#,
+            r#""freshness":{"state":"trailing","generations":3}}"#
+        )
+    );
+    assert_eq!(
+        wire(&RungReport::new(
+            Rung::Rerank,
+            Some(ModelIdentity::new("stub", "1")),
+            None
+        )),
+        r#"{"rung":"rerank","model":{"id":"stub","version":"1"},"freshness":null}"#
+    );
+    assert_eq!(wire(&Freshness::rescanning()), r#"{"state":"rescanning"}"#);
+}
+
+/// The section the host was delivered is four readings, and the malformed one
+/// carries its account as prose beside the tag a client branches on.
+#[test]
+fn an_engine_section_is_an_object_tagged_state() {
+    assert_eq!(wire(&EngineSection::absent()), r#"{"state":"absent"}"#);
+    assert_eq!(wire(&EngineSection::disabled()), r#"{"state":"disabled"}"#);
+    assert_eq!(wire(&EngineSection::enabled()), r#"{"state":"enabled"}"#);
+    assert_eq!(
+        wire(&EngineSection::malformed(
+            "the `engine` table holds a string"
+        )),
+        r#"{"state":"malformed","detail":"the `engine` table holds a string"}"#
+    );
+}
+
+/// An unsatisfied part is an object tagged `part`, and the one that carries a
+/// target carries it as the typed target rather than as a string a reader
+/// would have to parse again.
+#[test]
+fn an_unsatisfied_part_is_an_object_tagged_part() {
+    assert_eq!(
+        wire(&Unsatisfied::unknown_sort_key(
+            "due",
+            vec!["date".to_string()]
+        )),
+        r#"{"part":"unknown_sort_key","key":"due","did_you_mean":["date"]}"#
+    );
+    assert_eq!(
+        wire(&Unsatisfied::bare_directory("docs")),
+        r#"{"part":"bare_directory","path":"docs"}"#
+    );
+    assert_eq!(
+        wire(&Unsatisfied::resolves_not_applicable(target(
+            "norn/glossary"
+        ))),
+        r#"{"part":"resolves_not_applicable","target":"norn/glossary"}"#
+    );
+    assert!(
+        serde_json::from_str::<Unsatisfied>(r#"{"part":"resolves_not_applicable","target":""}"#)
+            .is_err(),
+        "a part carrying an addressless target read back as one"
+    );
+}
+
+/// The two answering exits are one type: a complete answer is one with no
+/// unsatisfied parts, and a partial one is the same shape saying which parts
+/// were not applied.
+#[test]
+fn a_vault_answer_is_complete_exactly_when_nothing_was_left_unapplied() {
+    let reading = || AnswerReading::new(TrustState::Ready, "epoch-1", 12, None);
+    let whole: VaultAnswer<u64> = VaultAnswer::new(reading(), vec![], 3);
+    assert!(whole.is_complete());
+    assert_eq!(whole.report, 3);
+    round_trip(&whole);
+
+    let partial: VaultAnswer<u64> = VaultAnswer::new(reading(), unsatisfied_parts(), 3);
+    assert!(!partial.is_complete());
+    assert_eq!(partial.unsatisfied.len(), unsatisfied_parts().len());
+    round_trip(&partial);
 }

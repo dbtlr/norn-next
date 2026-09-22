@@ -11,10 +11,11 @@
 //! restating it.
 
 use norn_wire::{
-    Anchor, AttachMode, Cursor, CursorKey, ErrorDetail, ErrorEnvelope, FacetKind, FindingKind,
-    FindingScope, MaintainerIdentity, Moved, Page, PollBackend, Predicate, ReasonCode,
-    RequestScope, ResolutionTarget, SchemaSource, Severity, Snapshot, TrustState, UntrustedReason,
-    VaultAddress, VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
+    Anchor, AnswerReading, AttachMode, Cursor, CursorKey, EngineSection, ErrorDetail,
+    ErrorEnvelope, FacetKind, FindingKind, FindingScope, Freshness, MaintainerIdentity, Moved,
+    Page, PollBackend, Predicate, ReasonCode, RequestScope, ResolutionTarget, Rung, SchemaSource,
+    Severity, Snapshot, TrustState, Unsatisfied, UntrustedReason, VaultAddress, VaultAnswer,
+    VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -121,6 +122,12 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<Moved>(),
         schema_of::<Snapshot>(),
         schema_of::<Page<String>>(),
+        schema_of::<AnswerReading>(),
+        schema_of::<Rung>(),
+        schema_of::<Freshness>(),
+        schema_of::<EngineSection>(),
+        schema_of::<Unsatisfied>(),
+        schema_of::<VaultAnswer<String>>(),
     ] {
         assert!(
             schema.get("$schema").is_some(),
@@ -804,4 +811,91 @@ fn a_snapshot_advertises_the_parts_a_continuation_is_judged_against() {
         .into_iter()
         .collect()
     );
+}
+
+// ── The answer reading and the read product ──────────────────────────────
+
+/// A reading advertises the four parts a consumer judges an answer by, and
+/// refers to the trust vocabulary rather than restating it.
+#[test]
+fn a_reading_advertises_the_parts_an_answer_is_judged_by() {
+    let schema = schema_of::<AnswerReading>();
+    assert_eq!(
+        property_names(&schema),
+        ["trust", "epoch", "generation", "ladder"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        schema["properties"]["trust"]["$ref"].as_str(),
+        Some("#/$defs/TrustState")
+    );
+    assert!(
+        schema["$defs"]["RungReport"].is_object(),
+        "the reading carries no definition of a rung report: {schema}"
+    );
+}
+
+#[test]
+fn a_rung_a_freshness_and_a_section_advertise_their_vocabularies() {
+    assert_eq!(
+        sorted(branches(&schema_of::<Rung>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a rung branch is not a pinned string: {branch}"))
+        })),
+        sorted(["lexical", "vector", "expansion", "rerank"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<Freshness>(), "state")),
+        sorted(["trailing", "rescanning"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<EngineSection>(), "state")),
+        sorted(["absent", "disabled", "malformed", "enabled"])
+    );
+}
+
+/// The unsatisfied vocabulary advertises its `part` tag, one branch per part a
+/// request can leave unapplied.
+#[test]
+fn an_unsatisfied_part_advertises_its_part_tag() {
+    let schema = schema_of::<Unsatisfied>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "part")),
+        sorted([
+            "unknown_sort_key",
+            "unknown_projection_key",
+            "unknown_predicate_key",
+            "bare_directory",
+            "malformed_glob",
+            "impossible_path",
+            "missing_section",
+            "resolves_not_applicable",
+        ])
+    );
+    let resolves = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "part") == Some("resolves_not_applicable"))
+        .expect("the resolves branch");
+    assert_eq!(
+        resolves["properties"]["target"]["$ref"].as_str(),
+        Some("#/$defs/ResolutionTarget")
+    );
+}
+
+/// An answer advertises the reading, the unapplied parts and the verb's own
+/// report, so a surface publishing a verb publishes all three together.
+#[test]
+fn a_vault_answer_advertises_its_reading_its_unsatisfied_parts_and_its_report() {
+    let schema = schema_of::<VaultAnswer<String>>();
+    assert_eq!(
+        property_names(&schema),
+        ["reading", "unsatisfied", "report"].into_iter().collect()
+    );
+    for definition in ["AnswerReading", "Unsatisfied", "TrustState"] {
+        assert!(
+            schema["$defs"][definition].is_object(),
+            "an answer carries no definition of {definition}"
+        );
+    }
 }
