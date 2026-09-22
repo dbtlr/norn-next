@@ -497,9 +497,9 @@ fn tag_sources() -> Vec<TagSource> {
     vec![TagSource::Body, TagSource::Frontmatter]
 }
 
-/// Every container a frontmatter value sits in, and the absence beside them.
-/// The map holds a sequence and the sequence holds a map, so the census walks
-/// the tree rather than its root alone.
+/// Every container a frontmatter value sits in, and the two leaves that carry
+/// no text beside them. The map holds a sequence and the sequence holds a map,
+/// so the census walks the tree rather than its root alone.
 fn field_values() -> Vec<FieldValue> {
     vec![
         FieldValue::scalar("note"),
@@ -508,6 +508,7 @@ fn field_values() -> Vec<FieldValue> {
             FieldValue::map([("b".to_string(), FieldValue::scalar("c"))]),
         ]),
         nested_field_value(),
+        FieldValue::null(),
         FieldValue::absent(),
     ]
 }
@@ -3087,7 +3088,30 @@ fn a_field_value_is_an_object_tagged_kind() {
         )])),
         r#"{"kind":"map","entries":{"a":{"kind":"scalar","raw":"1"}}}"#
     );
+    assert_eq!(wire(&FieldValue::null()), r#"{"kind":"null"}"#);
     assert_eq!(wire(&FieldValue::absent()), r#"{"kind":"absent"}"#);
+}
+
+/// A field written with no value and a field the document never wrote are two
+/// values, not one. A projection that folded them together would leave a
+/// client unable to tell an empty frontmatter key from a missing one, so the
+/// two leaves are compared here as well as pinned in bytes.
+#[test]
+fn a_present_null_is_not_an_absent_field() {
+    assert_ne!(FieldValue::null(), FieldValue::absent());
+    round_trip(&FieldValue::null());
+    let row = DocumentRow::new(path("notes/a.md")).with_fields(BTreeMap::from([
+        ("due".to_string(), FieldValue::null()),
+        ("area".to_string(), FieldValue::absent()),
+    ]));
+    assert_eq!(
+        wire(&row),
+        concat!(
+            r#"{"path":"notes/a.md","fields":{"area":{"kind":"absent"},"#,
+            r#""due":{"kind":"null"}}}"#
+        )
+    );
+    round_trip(&row);
 }
 
 /// A nested value is a value, all the way down: a map holding a sequence

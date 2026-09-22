@@ -1383,7 +1383,7 @@ fn the_document_facts_advertise_their_vocabularies() {
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<FieldValue>(), "kind")),
-        sorted(["scalar", "sequence", "map", "absent"])
+        sorted(["scalar", "sequence", "map", "null", "absent"])
     );
 }
 

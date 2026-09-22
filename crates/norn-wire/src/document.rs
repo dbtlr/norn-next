@@ -42,6 +42,14 @@
 //! client reads a nested value the way it reads a flat one rather than parsing
 //! a second time.
 //!
+//! **A present null and an absent field are two leaves.** The projection
+//! answers whether a document carries a key at all, so a frontmatter key
+//! written with no value is a fact the row can state — `null` for the value
+//! the document holds — and a key the document never wrote is a second one.
+//! Folding them together would make a client unable to tell a field written
+//! empty from a field not written, which is a difference a person editing
+//! frontmatter can see and act on.
+//!
 //! **A field value is filled from the document row's canonical frontmatter
 //! projection.** The projection is what a row's values are read off, one read
 //! of it per row, which is the projection's purpose rather than a second parse
@@ -683,7 +691,8 @@ impl TagRow {
 /// On the wire a value is an object tagged `kind`:
 /// `{"kind":"scalar","raw":"note"}`, `{"kind":"absent"}`. A sequence holds
 /// values and a map holds values by key, so a nested value is read the way a
-/// flat one is.
+/// flat one is. A field written with no value and a field the document never
+/// wrote are two kinds rather than one.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -706,6 +715,8 @@ pub enum FieldValue {
         /// The values the mapping holds, by the key each one is written under.
         entries: BTreeMap<String, FieldValue>,
     },
+    /// The document carries the field, and what it holds is null.
+    Null {},
     /// The document does not carry the field.
     Absent {},
 }
@@ -728,6 +739,11 @@ impl FieldValue {
         FieldValue::Map {
             entries: entries.into_iter().collect(),
         }
+    }
+
+    /// The field the document carries as null.
+    pub const fn null() -> Self {
+        FieldValue::Null {}
     }
 
     /// The field the document does not carry.
