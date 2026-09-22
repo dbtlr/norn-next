@@ -27,7 +27,8 @@ mod claim;
 mod serving;
 
 use claim::{Claim, Coverage, Leg};
-use serving::{ServingRefusal, ServingSet};
+pub(crate) use serving::ServingRefusal;
+use serving::ServingSet;
 
 /// Lifecycle timing chosen by the composition root. There is intentionally no
 /// ambient or library default.

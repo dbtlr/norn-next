@@ -65,4 +65,4 @@ pub use reload::{
     ActiveFingerprints, AuthoredDrift, ConfigFingerprint, EngineConfigReceiver, ReloadError,
     ReloadFile, ReloadOutcome, ReloadRefusal, ReloadStage, VaultInspection,
 };
-pub use semantic::{SemanticEngines, SemanticRefusal, SemanticStatus};
+pub use semantic::{SemanticEngines, SemanticRefusal, SemanticStatus, compose_vector_refusal};

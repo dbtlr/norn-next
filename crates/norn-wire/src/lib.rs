@@ -143,10 +143,13 @@
 //! serving of an entry: a name it does not hold, a name it already serves, an
 //! entry that is held, warming, untrusted, or serving with its read seam
 //! down. `vault/…` is a fact about the requested vault's content or its
-//! control files, and every reload outcome is one of these — including
-//! `vault/reload-busy`, because what is busy is the work over that vault
-//! rather than the host. `engine/…` is a fact about the vault's engine: a rung
-//! not enabled, an engine that does not stand, an answer that failed.
+//! control files, and every outcome of a reload that ran is one of these —
+//! `vault/reload-busy` included, because what is busy is the work over that
+//! vault rather than the host. What a reload is refused with *before* it runs
+//! — a name the registry does not hold, an entry holding nothing to reload yet
+//! — is a fact about the host's serving and stays `host/…`. `engine/…` is a
+//! fact about the vault's engine: a rung not enabled, an engine that does not
+//! stand, an answer that failed.
 //!
 //! A namespace names who the
 //! fact is about, never which crate produced it, and a code is *defined*
