@@ -53,10 +53,14 @@
 //!
 //! - [`serde::Serialize`] and [`serde::Deserialize`], with `snake_case` field
 //!   and variant names on the wire — except the code registries, whose members
-//!   are renamed to the `namespace/what-happened` grammar below. One read path
-//!   is written by hand —
-//!   [`ErrorEnvelope`] refuses a parse whose code is not its detail's — with
-//!   the same wire shape a derive would read.
+//!   are renamed to the `namespace/what-happened` grammar below. A grammar's
+//!   read path is written by hand where the read is the constructor —
+//!   [`VaultName`], [`VaultRoot`], [`SchemaSource`], [`ResolutionTarget`] and
+//!   [`Score`] refuse a string outside their grammar, [`ErrorEnvelope`] refuses
+//!   a parse whose code is not its detail's — each with the wire shape a
+//!   derive would read. [`Cursor`] alone is written by hand on both sides,
+//!   because its wire shape is one opaque string rather than the fields a
+//!   derive would emit.
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
 //!   advertised schema and the emitted bytes are one description.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.

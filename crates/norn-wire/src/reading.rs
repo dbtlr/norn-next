@@ -30,11 +30,11 @@
 //! refusal is composed against, so "the vault has no engine" and "the vault's
 //! engine section is malformed" are two answers rather than one.
 //!
-//! Nothing produces a section today. The reading is retained at config
-//! dispatch by the `search` handler's engine seams (NORN-230), which are the
-//! layer that holds a delivered section beside the engine it delivered; until
-//! those seams land, the host composes a vector refusal from a section a
-//! caller supplies and no call graph reaches one it retained.
+//! Nothing produces a section today. The host retains the reading at config
+//! dispatch once the `search` handler's engine seams land there (NORN-230),
+//! beside the engine slot the dispatch delivered to; until those seams land,
+//! the host composes a vector refusal from a section a caller supplies and no
+//! call graph reaches one it retained.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

@@ -172,13 +172,17 @@ impl ReloadRefusal {
 /// nothing yet is filed as not ready, and what is left is an entry that is
 /// ready and busy — a warm job holds it, which is what a reload waits behind.
 ///
-/// **`Ready` reaching here is a job holding the entry and nothing else.** A
-/// release does not reach it as `Ready`: `begin_release` sets
-/// `detach_in_flight` and sets the trust to
+/// **`Ready` reaches here by two paths, and on both the reload did not run.**
+/// At the ask, a claim held or coverage out with a leg is a job holding the
+/// entry. At a reload leg's epilogue, a claim superseded by newer work is a
+/// reload that lost its turn, and the entry may stand `Ready` again by the
+/// time that epilogue reports. A release does not reach it as `Ready`:
+/// `begin_release` sets `detach_in_flight` and sets the trust to
 /// `Warming(WarmingPhase::ReleasingCoverage)` in the same statement pair under
-/// one hold of the gate, so the reload epilogue that reads the flag reads that
-/// state beside it. `a_release_window_opened_over_reload_closes_at_the_job_epilogue`
-/// pins the value that arrives.
+/// one hold of the gate, so the epilogue that reads the flag reads that state
+/// beside it. `a_release_window_opened_over_reload_closes_at_the_job_epilogue`
+/// pins the value that arrives. Either way the answer is the same: nothing of
+/// the asker's ran, and a retry is what asks again.
 fn unavailable(state: TrustState) -> ErrorEnvelope {
     if let Some(reason) = state.refusal() {
         return ErrorEnvelope::new(

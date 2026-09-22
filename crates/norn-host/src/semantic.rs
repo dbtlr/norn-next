@@ -155,9 +155,9 @@ impl std::error::Error for SemanticRefusal {}
 /// refuses on its answer reading long before a rung is dispatched.
 ///
 /// Nothing calls it yet. The `search` handler is the one caller this
-/// composition has, and it lands above this layer (NORN-230): it is the layer
-/// that holds a delivered engine section beside the engine that answered, so
-/// no call graph reaches this until that handler arrives.
+/// composition has, and it lands in this crate with the engine seams that
+/// retain a delivered section beside the slot it was delivered to (NORN-230),
+/// so no call graph reaches this until that handler arrives.
 ///
 /// Both matches carry no wildcard, so a refusal or a section minted without a
 /// row here does not compile.
