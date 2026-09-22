@@ -24,10 +24,10 @@
 //! `pattern`, because absoluteness is a platform question and no regular
 //! expression decides it.
 //!
-//! **One refusal type for both path grammars.** A root and a schema source are
-//! refused for the same two reasons, and the refusal names which of them was
-//! offered, so the sentence a person reads is about their argument rather than
-//! about a rule.
+//! **One refusal type for every path grammar.** A root and a schema source are
+//! refused for the same two reasons, a document path for one of its own, and
+//! the refusal names which of them was offered, so the sentence a person reads
+//! is about their argument rather than about a rule.
 //!
 //! **A vault address is one of two things, and the tag says which.** A name is
 //! a registration this installation holds. A root is a vault addressed by
@@ -53,9 +53,9 @@ const NOT_ABSOLUTE: &str =
 
 /// A string that spells no path this vocabulary records.
 ///
-/// It carries what was offered, which of the two path grammars refused it, and
-/// what that grammar wanted, because a person who typed one is the reader of
-/// all three.
+/// It carries what was offered, which path grammar refused it, and what that
+/// grammar wanted, because a person who typed one is the reader of all
+/// three.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IllegalPath {
     /// What was offered, as text. A path that was not text at all is carried
@@ -69,6 +69,19 @@ pub struct IllegalPath {
 }
 
 impl IllegalPath {
+    /// The refusal that `path` is no `what`, for `problem`.
+    ///
+    /// Every path grammar in the vocabulary refuses through this one type, so
+    /// a person who typed a root, a schema source or a document path reads one
+    /// sentence shape whichever of them they typed.
+    pub(crate) fn new(path: impl Into<String>, what: &'static str, problem: &'static str) -> Self {
+        IllegalPath {
+            path: path.into(),
+            what,
+            problem,
+        }
+    }
+
     /// The path that was offered, as text. A path that is not UTF-8 is carried
     /// as its lossy rendering rather than reproduced: the bytes are what
     /// earned the refusal, and what a person reads is the path as the platform
@@ -77,8 +90,8 @@ impl IllegalPath {
         &self.path
     }
 
-    /// Which path it was meant to be: a vault root, a schema source, or one of
-    /// the machine-local bases.
+    /// Which path it was meant to be: a vault root, a schema source, a
+    /// document path, or one of the machine-local bases.
     pub const fn what(&self) -> &'static str {
         self.what
     }
@@ -108,18 +121,10 @@ impl std::error::Error for IllegalPath {}
 /// caller's argument.
 fn text_of<'a>(path: &'a Path, what: &'static str) -> Result<&'a str, IllegalPath> {
     let Some(text) = path.to_str() else {
-        return Err(IllegalPath {
-            path: path.display().to_string(),
-            what,
-            problem: NOT_TEXT,
-        });
+        return Err(IllegalPath::new(path.display().to_string(), what, NOT_TEXT));
     };
     if !path.is_absolute() {
-        return Err(IllegalPath {
-            path: text.to_string(),
-            what,
-            problem: NOT_ABSOLUTE,
-        });
+        return Err(IllegalPath::new(text, what, NOT_ABSOLUTE));
     }
     Ok(text)
 }

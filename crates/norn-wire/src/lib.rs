@@ -35,7 +35,25 @@
 //! ran — the [`Unsatisfied`] parts of a request that could not be applied, and
 //! the [`Cursor`] a page continues from, with the [`Snapshot`] a continuation
 //! is judged against, what [`Moved`] under it, and the [`CursorKey`] each
-//! paged row type stops at. What a reload met is spelled here too:
+//! paged row type stops at.
+//!
+//! The six read verbs are spelled here as one params type and one report type
+//! each: [`FindParams`] answering [`FindReport`], [`SearchParams`] answering
+//! [`SearchReport`] over the [`RungSet`] it ran and the [`Hit`]s it ranked,
+//! [`GetParams`] answering [`GetReport`], [`CountParams`] answering
+//! [`CountReport`] of [`Tally`]s, [`ValidateParams`] answering
+//! [`ValidateReport`], and [`DescribeParams`] answering [`DescribeReport`] of
+//! [`Facet`]s, one of which reports the [`TagStance`] a vault takes on a tag
+//! it did not declare. What they page is spelled here too: the
+//! [`DocumentRow`] a [`Column`] projection selects, at its [`DocumentPath`],
+//! with the [`LinkRow`], [`HeadingRow`], [`BlockRow`], [`TagRow`] and
+//! [`FindingRow`] its [`Collection`]s hold, the [`BodyText`] its body crosses
+//! as, and the [`FieldValue`] each frontmatter key carries. A link row, a
+//! finding and an ambiguous-target refusal each carry a [`CandidateHead`] —
+//! at most [`CANDIDATE_HEAD`] [`Candidate`]s and the total they head — and
+//! the latter two carry it beside the [`Hint`] that names what enumerates the
+//! rest. What a reload met is spelled
+//! here too:
 //! [`ReloadFailure`], with the [`ControlFile`] and [`ReloadStage`] a control
 //! file refused at. [`EngineSection`] is what a host was delivered as a
 //! vault's engine section, which is what a status answer reports and what a
@@ -55,14 +73,28 @@
 //!   and variant names on the wire — except the code registries, whose members
 //!   are renamed to the `namespace/what-happened` grammar below. A grammar's
 //!   read path is written by hand where the read is the constructor —
-//!   [`VaultName`], [`VaultRoot`], [`SchemaSource`], [`ResolutionTarget`] and
-//!   [`Score`] refuse a string outside their grammar, [`ErrorEnvelope`] refuses
-//!   a parse whose code is not its detail's — each with the wire shape a
-//!   derive would read. [`Cursor`] alone is written by hand on both sides,
+//!   [`VaultName`], [`VaultRoot`], [`SchemaSource`], [`DocumentPath`],
+//!   [`ResolutionTarget`] and [`Score`] refuse a string outside their grammar,
+//!   [`RungSet`] refuses a ladder that runs no rung, and four shapes refuse a
+//!   value whose halves disagree: [`ErrorEnvelope`], whose code must be its
+//!   detail's, [`LinkRow`], whose health must be the health of the total
+//!   documents its head heads, and the three bounded heads — [`Collection`],
+//!   [`BodyText`] and [`CandidateHead`] — whose total must be a total the
+//!   head they carry can head, the last of them refusing a head wider than
+//!   [`CANDIDATE_HEAD`] as well — each with the wire shape a derive would
+//!   read. [`Cursor`] alone is written by hand on both sides,
 //!   because its wire shape is one opaque string rather than the fields a
 //!   derive would emit.
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
-//!   advertised schema and the emitted bytes are one description.
+//!   advertised schema and the emitted bytes are one description. It too is
+//!   written by hand where a derive would advertise a shape the reader does
+//!   not accept. Eight types do: the grammars [`VaultName`], [`VaultRoot`],
+//!   [`SchemaSource`], [`DocumentPath`] and [`ResolutionTarget`] advertise the
+//!   pattern or floor their constructors hold; [`Cursor`] is one opaque string
+//!   rather than the fields a derive would emit; [`RungSet`] carries the
+//!   `minItems` floor its read path keeps; and [`CandidateHead`] carries the
+//!   `maxItems` ceiling its read path keeps, read off [`CANDIDATE_HEAD`] so
+//!   the bound has one spelling.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.
 //!
 //! **Enums are internally tagged with an explicit tag name, never externally
@@ -122,7 +154,8 @@
 //! [`ErrorDetail::already_served`], [`ErrorDetail::entry_held`],
 //! [`ErrorDetail::entry_not_ready`], [`ErrorDetail::reader_unavailable`],
 //! [`ErrorDetail::registry_unwritable`],
-//! [`ErrorDetail::ambiguous_root`], [`ErrorDetail::reload_busy`],
+//! [`ErrorDetail::ambiguous_root`], [`ErrorDetail::ambiguous_target`],
+//! [`ErrorDetail::unknown_target`], [`ErrorDetail::reload_busy`],
 //! [`ErrorDetail::reload_failed`], [`ErrorDetail::cursor_order_changed`],
 //! [`ErrorDetail::engine_not_enabled`], [`ErrorDetail::engine_unavailable`],
 //! [`ErrorDetail::engine_failed`],
@@ -138,7 +171,18 @@
 //! [`ModelIdentity::new`], [`Freshness::trailing`], [`Freshness::rescanning`],
 //! [`VaultAnswer::new`],
 //! [`MaintainerIdentity::named`] and
-//! [`MaintainerIdentity::unknown`].
+//! [`MaintainerIdentity::unknown`];
+//! the constructor on each [`Column`], [`FieldValue`], [`SortKey`],
+//! [`GroupKey`], [`Hint`], [`CollectionPage`], [`GetReport`],
+//! [`ValidateReport`] and [`Facet`] variant,
+//! [`Span::new`], [`Collection::new`], [`BodyText::new`], [`LinkRow::new`],
+//! [`HeadingRow::new`],
+//! [`BlockRow::new`], [`TagRow::new`], [`DocumentRow::new`],
+//! [`DocumentPath::new`], [`Candidate::new`], [`CandidateHead::new`],
+//! [`FindingRow::new`],
+//! [`Sort::new`], [`RungSet::lexical`], [`RungSet::of`], [`Hit::new`],
+//! [`Tally::new`], [`KindTally::new`], and the `new` on each of the six
+//! params types.
 //!
 //! **A closed vocabulary whose every reader must decide what a new member
 //! means is plain rather than `#[non_exhaustive]`.** The two rules answer two
@@ -190,7 +234,10 @@
 //! is in at all: every outcome of a reload that ran is one of these —
 //! `vault/reload-busy` included, because what is busy is the work over that
 //! vault rather than the host — and so is a directory more than one
-//! registration contains, which names no one vault to answer about. What a
+//! registration contains, which names no one vault to answer about, and so is
+//! a target that names more than one of the vault's documents or none of
+//! them, which is a fact about what the vault holds rather than about how it
+//! is served. What a
 //! reload is refused with *before* it runs — a name the registry does not
 //! hold, an entry holding nothing to reload yet, an entry whose derived state
 //! cannot be trusted — is a fact about the host's serving and stays `host/…`.
@@ -242,11 +289,14 @@ mod address;
 mod base64url;
 mod cursor;
 mod demand;
+mod document;
 mod error;
 mod finding;
+mod finding_row;
 mod name;
 mod predicate;
 mod product;
+mod read;
 mod reading;
 mod reload;
 mod target;
@@ -261,11 +311,24 @@ pub use cursor::{
     Cursor, CursorKey, CursorOrderChanged, FacetKind, Moved, NonFiniteScore, Page, Score, Snapshot,
 };
 pub use demand::AttachMode;
+pub use document::{
+    BlockRow, BodyText, Collection, Column, DocumentPath, DocumentRow, FieldValue, HeadingRow,
+    LinkFamily, LinkHealth, LinkRow, Span, TagRow, TagSource, TotalBelowHead,
+};
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
+pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
 pub use name::{IllegalVaultName, VaultName};
 pub use predicate::Predicate;
 pub use product::{Unsatisfied, VaultAnswer};
+pub use read::count::{CountParams, CountReport, GroupKey, Tally};
+pub use read::describe::{
+    ContainerKind, DescribeParams, DescribeReport, Facet, FieldType, PathRuleKind, TagStance,
+};
+pub use read::find::{Direction, FindParams, FindReport, Sort, SortKey};
+pub use read::get::{CollectionPage, CollectionSelector, GetParams, GetReport};
+pub use read::search::{EmptyLadder, Hit, RungSet, SearchParams, SearchReport};
+pub use read::validate::{KindTally, ValidateParams, ValidateReport};
 pub use reading::{
     AnswerReading, EngineSection, Freshness, LadderDeclaration, ModelIdentity, Rung, RungReport,
 };

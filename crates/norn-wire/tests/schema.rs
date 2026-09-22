@@ -11,11 +11,17 @@
 //! restating it.
 
 use norn_wire::{
-    Addressing, Anchor, AnswerReading, AttachMode, Cursor, CursorKey, EngineSection, ErrorDetail,
-    ErrorEnvelope, FacetKind, FindingKind, FindingScope, Freshness, MaintainerIdentity, Moved,
-    NotReady, Page, PollBackend, Predicate, ReasonCode, ReloadFailure, RequestScope,
-    ResolutionTarget, Rung, RungReport, SchemaSource, Score, Severity, Snapshot, TrustState,
-    Unsatisfied, UntrustedReason, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb,
+    Addressing, Anchor, AnswerReading, AttachMode, BlockRow, BodyText, CANDIDATE_HEAD, Candidate,
+    CandidateHead, Collection, CollectionPage, CollectionSelector, Column, ContainerKind,
+    CountParams, CountReport, Cursor, CursorKey, DescribeParams, DescribeReport, Direction,
+    DocumentPath, DocumentRow, EngineSection, ErrorDetail, ErrorEnvelope, Facet, FacetKind,
+    FieldType, FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
+    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LinkFamily,
+    LinkHealth, LinkRow, MaintainerIdentity, Moved, NotReady, Page, PathRuleKind, PollBackend,
+    Predicate, ReasonCode, ReloadFailure, RequestScope, ResolutionTarget, Rung, RungReport,
+    RungSet, SchemaSource, Score, SearchParams, SearchReport, Severity, Snapshot, Sort, SortKey,
+    Span, TagRow, TagSource, TagStance, Tally, TrustState, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb,
     WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
@@ -92,9 +98,16 @@ fn sorted<'a>(members: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
 
 // ── Every type derives one ───────────────────────────────────────────────
 
-#[test]
-fn every_wire_type_derives_a_schema() {
-    for schema in [
+/// Every schema a surface renders against, built once and read by the census
+/// tests below.
+///
+/// A generic carrier joins the census at one concrete instantiation —
+/// `Page<String>`, `Collection<String>` and `VaultAnswer<String>` — because
+/// what the census reads is the carrier's own type and field documentation,
+/// which is the same whatever it carries. The row and report types a surface
+/// fills them with are walked on lines of their own.
+fn every_wire_schema() -> Vec<Value> {
+    vec![
         schema_of::<TrustState>(),
         schema_of::<UntrustedReason>(),
         schema_of::<WatcherLossCause>(),
@@ -134,12 +147,215 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<VaultAnswer<String>>(),
         schema_of::<NotReady>(),
         schema_of::<ReloadFailure>(),
-    ] {
+        schema_of::<DocumentPath>(),
+        schema_of::<Span>(),
+        schema_of::<Column>(),
+        schema_of::<Collection<String>>(),
+        schema_of::<BodyText>(),
+        schema_of::<LinkHealth>(),
+        schema_of::<LinkFamily>(),
+        schema_of::<LinkRow>(),
+        schema_of::<HeadingRow>(),
+        schema_of::<BlockRow>(),
+        schema_of::<TagSource>(),
+        schema_of::<TagRow>(),
+        schema_of::<FieldValue>(),
+        schema_of::<DocumentRow>(),
+        schema_of::<Candidate>(),
+        schema_of::<CandidateHead>(),
+        schema_of::<Hint>(),
+        schema_of::<FindingRow>(),
+        schema_of::<Direction>(),
+        schema_of::<SortKey>(),
+        schema_of::<Sort>(),
+        schema_of::<RungSet>(),
+        schema_of::<Hit>(),
+        schema_of::<CollectionSelector>(),
+        schema_of::<CollectionPage>(),
+        schema_of::<GetReport>(),
+        schema_of::<GroupKey>(),
+        schema_of::<Tally>(),
+        schema_of::<KindTally>(),
+        schema_of::<ValidateReport>(),
+        schema_of::<FieldType>(),
+        schema_of::<ContainerKind>(),
+        schema_of::<PathRuleKind>(),
+        schema_of::<TagStance>(),
+        schema_of::<Facet>(),
+        schema_of::<FindParams>(),
+        schema_of::<FindReport>(),
+        schema_of::<SearchParams>(),
+        schema_of::<SearchReport>(),
+        schema_of::<GetParams>(),
+        schema_of::<CountParams>(),
+        schema_of::<CountReport>(),
+        schema_of::<ValidateParams>(),
+        schema_of::<DescribeParams>(),
+        schema_of::<DescribeReport>(),
+    ]
+}
+
+#[test]
+fn every_wire_type_derives_a_schema() {
+    for schema in every_wire_schema() {
         assert!(
             schema.get("$schema").is_some(),
             "the schema declares no dialect: {schema}"
         );
     }
+}
+
+/// Every `description` the schemas carry, at every depth, with the pointer it
+/// sits at so a failure names where to look.
+///
+/// `description` is a JSON Schema keyword and a field name a wire type may
+/// carry at once: a schema property named `description` sits at
+/// `properties/description` and holds a whole sub-schema of its own. The walk
+/// therefore descends into every object and array value without exception, and
+/// collects text only where the key is `description` and the value is a
+/// string, so a property by that name is walked rather than mistaken for the
+/// keyword and skipped.
+fn descriptions(schema: &Value, at: String, found: &mut Vec<(String, String)>) {
+    match schema {
+        Value::Object(members) => {
+            for (key, value) in members {
+                if key == "description"
+                    && let Some(text) = value.as_str()
+                {
+                    found.push((at.clone(), text.to_string()));
+                }
+                descriptions(value, format!("{at}/{key}"), found);
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                descriptions(item, format!("{at}/{index}"), found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every description the wire schemas publish, each with the pointer it sits
+/// at.
+fn published_descriptions() -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for schema in every_wire_schema() {
+        let title = schema
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("a schema")
+            .to_string();
+        descriptions(&schema, title, &mut found);
+    }
+    assert!(
+        !found.is_empty(),
+        "the census walked no descriptions at all"
+    );
+    found
+}
+
+/// Whether a description carries a Rust intralink, in any spelling rustdoc
+/// accepts: a shortcut link, which opens with a bracketed backtick, and a
+/// reference link whose target is a Rust path. `](crate:` covers the `crate::`
+/// spelling as well as the bare `crate:` one rustdoc also resolves. A vault's
+/// own link grammars — `[[target]]` and `[title](target)` — are wire
+/// documentation rather than intralinks and carry none of these.
+fn publishes_an_intralink(description: &str) -> bool {
+    description.contains("[`")
+        || description.contains("](crate:")
+        || description.contains("](super::")
+}
+
+/// Whether a description carries a Rust attribute. An attribute is maintainer
+/// documentation about the Rust type: a consumer reading the schema cannot see
+/// one, cannot write one, and has no vocabulary for what it governs.
+fn publishes_an_attribute(description: &str) -> bool {
+    description.contains("#[")
+}
+
+/// A description is what an MCP consumer reads, and schemars lifts it verbatim
+/// out of the doc comment on a type, a variant or a field. A Rust intralink
+/// survives that lift as its own source text, naming a symbol the consumer
+/// cannot follow and has no vocabulary for, so a bracketed link of either
+/// spelling is a description that leaked maintainer documentation. Rationale
+/// belongs in module documentation, which schemars does not lift.
+#[test]
+fn no_published_description_carries_a_rust_intralink() {
+    for (at, description) in &published_descriptions() {
+        assert!(
+            !publishes_an_intralink(description),
+            "the description at {at} publishes a Rust intralink: {description}"
+        );
+    }
+}
+
+/// A description is lifted out of a doc comment, so maintainer rationale
+/// about the Rust shape leaks the same way an intralink does. An attribute is
+/// that rationale at its plainest: `#[non_exhaustive]` governs what a Rust
+/// caller may destructure and says nothing about the bytes a consumer reads.
+/// Rationale belongs in module documentation, which schemars does not lift.
+#[test]
+fn no_published_description_carries_a_rust_attribute() {
+    for (at, description) in &published_descriptions() {
+        assert!(
+            !publishes_an_attribute(description),
+            "the description at {at} publishes a Rust attribute: {description}"
+        );
+    }
+}
+
+/// The census reads the spellings a Rust intralink takes and leaves the
+/// vault's own link grammars alone, which are wire vocabulary a description is
+/// entitled to name.
+#[test]
+fn the_intralink_census_reads_every_spelling_a_rust_link_takes() {
+    for leaked in [
+        "the head [`CandidateHead`] carries",
+        "see [the head](crate::finding_row::CandidateHead)",
+        "see [the head](crate:finding_row)",
+        "see [the head](super::CandidateHead)",
+    ] {
+        assert!(
+            publishes_an_intralink(leaked),
+            "the census reads no intralink in: {leaked}"
+        );
+    }
+    for kept in [
+        "A wikilink, `[[target]]`.",
+        "An inline Markdown link, `[title](target)`.",
+    ] {
+        assert!(
+            !publishes_an_intralink(kept),
+            "the census reads a link grammar as an intralink: {kept}"
+        );
+    }
+}
+
+/// A wire type may carry a field named `description`, and its sub-schema is
+/// where a leak would hide if the walk read the name as the JSON Schema
+/// keyword and stopped.
+#[test]
+fn the_census_walks_a_schema_property_named_description() {
+    let schema = serde_json::json!({
+        "title": "Facet",
+        "description": "A facet of the vault's schema.",
+        "properties": {
+            "description": {
+                "type": "string",
+                "description": "What the schema says the folder is for.",
+            },
+        },
+    });
+    let mut found = Vec::new();
+    descriptions(&schema, "Facet".to_string(), &mut found);
+    assert!(
+        found.contains(&(
+            "Facet/properties/description".to_string(),
+            "What the schema says the folder is for.".to_string()
+        )),
+        "the census walked past the sub-schema of a property named description: {found:?}"
+    );
 }
 
 // ── The tag representation ───────────────────────────────────────────────
@@ -219,6 +435,8 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "host/reader-unavailable",
             "host/registry-unwritable",
             "vault/ambiguous-root",
+            "vault/ambiguous-target",
+            "vault/unknown-target",
             "vault/reload-busy",
             "vault/reload-failed",
             "vault/cursor-order-changed",
@@ -389,6 +607,8 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "host/reader-unavailable",
             "host/registry-unwritable",
             "vault/ambiguous-root",
+            "vault/ambiguous-target",
+            "vault/unknown-target",
             "vault/reload-busy",
             "vault/reload-failed",
             "vault/cursor-order-changed",
@@ -827,6 +1047,8 @@ fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
             "declared_tag",
             "folder",
             "path_rule",
+            "tag_pattern",
+            "undeclared_tags",
         ])
     );
     assert_eq!(
@@ -992,6 +1214,7 @@ fn an_unsatisfied_part_advertises_its_part_tag() {
             "malformed_glob",
             "impossible_path",
             "missing_section",
+            "missing_block",
             "resolves_not_applicable",
         ])
     );
@@ -1094,4 +1317,646 @@ fn an_unwritable_registry_advertises_its_account_as_prose() {
         unwritable["properties"]["detail"]["type"].as_str(),
         Some("string")
     );
+}
+
+// ── The document row and its columns ─────────────────────────────────────
+
+/// A path advertises the one rule its reader keeps and no pattern: the rest of
+/// what a document path may hold is the store's grammar, and a second
+/// definition of it here would be a second grammar.
+#[test]
+fn a_document_path_advertises_the_grammar_it_is_parsed_through() {
+    let schema = schema_of::<DocumentPath>();
+    assert_eq!(schema["type"].as_str(), Some("string"));
+    assert_eq!(schema["minLength"].as_u64(), Some(1));
+    assert!(schema.get("pattern").is_none(), "{schema}");
+    for sentence in ["Not empty", "relative to the vault root"] {
+        assert!(
+            schema["description"]
+                .as_str()
+                .is_some_and(|text| text.contains(sentence)),
+            "the description does not say `{sentence}`: {schema}"
+        );
+    }
+}
+
+/// A column advertises its `col` tag, one branch per part of a document a read
+/// can ask for, and the one that names a key carries it as a property beside
+/// the tag.
+#[test]
+fn a_column_advertises_its_col_tag() {
+    let schema = schema_of::<Column>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "col")),
+        sorted([
+            "path", "field", "body", "links", "headings", "blocks", "tags", "findings", "fields",
+        ])
+    );
+    let field = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "col") == Some("field"))
+        .expect("the field branch");
+    assert_eq!(property_names(field), ["col", "key"].into_iter().collect());
+}
+
+/// A nested collection advertises its head and its total, so a surface
+/// publishing a row publishes what a cut looks like with it.
+#[test]
+fn a_collection_advertises_its_items_and_its_total() {
+    let schema = schema_of::<Collection<String>>();
+    assert_eq!(
+        property_names(&schema),
+        ["items", "total"].into_iter().collect()
+    );
+    assert_eq!(
+        schema["properties"]["items"]["type"].as_str(),
+        Some("array")
+    );
+}
+
+/// A body advertises its head and the whole body's length beside it, so a
+/// surface publishing a row publishes what a cut body looks like with it.
+#[test]
+fn a_body_advertises_its_text_and_the_length_of_the_whole() {
+    let schema = schema_of::<BodyText>();
+    assert_eq!(
+        property_names(&schema),
+        ["text", "byte_length"].into_iter().collect()
+    );
+    assert_eq!(
+        schema["properties"]["text"]["type"].as_str(),
+        Some("string")
+    );
+}
+
+/// The row advertises the path and one property per column, and refers to the
+/// row types its collections hold rather than restating them.
+#[test]
+fn a_document_row_advertises_its_path_and_one_property_per_column() {
+    let schema = schema_of::<DocumentRow>();
+    assert_eq!(
+        property_names(&schema),
+        [
+            "path", "fields", "body", "links", "headings", "blocks", "tags", "findings",
+        ]
+        .into_iter()
+        .collect()
+    );
+    let required: BTreeSet<&str> = schema["required"]
+        .as_array()
+        .expect("the row's required list")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        required,
+        ["path"].into_iter().collect(),
+        "a column a read did not project is advertised as required"
+    );
+    for definition in [
+        "LinkRow",
+        "HeadingRow",
+        "BlockRow",
+        "TagRow",
+        "FindingRow",
+        "BodyText",
+    ] {
+        assert!(
+            schema["$defs"][definition].is_object(),
+            "a row carries no definition of {definition}"
+        );
+    }
+}
+
+/// A link row advertises the syntactic half beside the resolved half, the
+/// resolved half is the bounded head both other carriers advertise, and the
+/// health it carries is the vocabulary rather than a sentence naming it.
+#[test]
+fn a_link_row_advertises_the_targets_and_the_health_read_off_them() {
+    let schema = schema_of::<LinkRow>();
+    assert_eq!(
+        property_names(&schema),
+        [
+            "family", "embed", "protocol", "target", "title", "anchor", "span", "targets",
+            "health",
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
+        schema["properties"]["targets"]["$ref"].as_str(),
+        Some("#/$defs/CandidateHead"),
+        "a link row restates the head rather than referring to it"
+    );
+    assert_eq!(
+        schema["$defs"]["CandidateHead"]["properties"]["candidates"]["maxItems"].as_u64(),
+        Some(CANDIDATE_HEAD as u64),
+        "a link row's head is advertised without the bound it keeps"
+    );
+    assert_eq!(
+        schema["properties"]["health"]["$ref"].as_str(),
+        Some("#/$defs/LinkHealth")
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<LinkHealth>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a health branch is not a pinned string: {branch}"))
+        })),
+        sorted(["healthy", "broken", "ambiguous"])
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<LinkFamily>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a family branch is not a pinned string: {branch}"))
+        })),
+        sorted(["wikilink", "markdown"])
+    );
+}
+
+#[test]
+fn the_document_facts_advertise_their_vocabularies() {
+    assert_eq!(
+        property_names(&schema_of::<Span>()),
+        ["line", "column", "byte_offset"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<HeadingRow>()),
+        ["level", "text", "slug", "span"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<BlockRow>()),
+        ["id", "span"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<TagRow>()),
+        ["name", "source", "span"].into_iter().collect()
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<TagSource>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a source branch is not a pinned string: {branch}"))
+        })),
+        sorted(["body", "frontmatter"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<FieldValue>(), "kind")),
+        sorted(["scalar", "sequence", "map", "null", "absent"])
+    );
+}
+
+/// A field value is a recursive tree, and the schema says so: a sequence's
+/// items and a map's entries refer to the value type itself rather than to a
+/// string a consumer would have to parse a second time.
+#[test]
+fn a_field_value_advertises_a_tree_rather_than_json_in_a_string() {
+    let schema = schema_of::<FieldValue>();
+    let branch = |kind: &str| {
+        branches(&schema)
+            .iter()
+            .find(|branch| tag_constant(branch, "kind") == Some(kind))
+            .unwrap_or_else(|| panic!("the {kind} branch"))
+            .clone()
+    };
+    let sequence = branch("sequence");
+    assert_eq!(
+        property_names(&sequence),
+        ["kind", "items"].into_iter().collect()
+    );
+    assert_eq!(
+        sequence["properties"]["items"]["items"]["$ref"].as_str(),
+        Some("#"),
+        "a sequence does not hold field values: {sequence}"
+    );
+    let map = branch("map");
+    assert_eq!(
+        property_names(&map),
+        ["kind", "entries"].into_iter().collect()
+    );
+    assert_eq!(
+        map["properties"]["entries"]["additionalProperties"]["$ref"].as_str(),
+        Some("#"),
+        "a map does not hold field values: {map}"
+    );
+    assert!(
+        !schema.to_string().contains("raw_json"),
+        "a field value advertises JSON in a string: {schema}"
+    );
+}
+
+// ── The finding row ──────────────────────────────────────────────────────
+
+/// The head advertises the ceiling its read path keeps, so a surface
+/// validating a head against the schema refuses the same wider head this
+/// crate refuses to read. The bound is read off the constant here rather than
+/// written down a second time: the schema and [`CANDIDATE_HEAD`] are one
+/// spelling, and the number itself is pinned where the constant is.
+///
+/// The description is pinned for the reason the name's is: this is a
+/// hand-written schema, so the sentence the schema carries states the ladder
+/// order and the total rule on its own, and nothing else holds it to them.
+#[test]
+fn a_candidate_head_advertises_the_ceiling_it_is_read_through() {
+    let schema = schema_of::<CandidateHead>();
+    assert_eq!(
+        schema["description"].as_str(),
+        Some(
+            "The bounded head of the documents a target could have named, with how many there were. The candidates are in the resolution ladder's deterministic order and stop at the ceiling this schema advertises, and the total beside them is never below the candidates carried: a smaller total heads nothing, and the read refuses it."
+        ),
+        "the hand-written head states less than the read enforces: {schema}"
+    );
+    let candidates = &schema["properties"]["candidates"];
+    assert_eq!(candidates["type"].as_str(), Some("array"));
+    assert_eq!(
+        candidates["maxItems"].as_u64(),
+        Some(CANDIDATE_HEAD as u64),
+        "the head does not advertise the ceiling it is read through: {schema}"
+    );
+    assert_eq!(
+        candidates["items"]["$ref"].as_str(),
+        Some("#/$defs/Candidate"),
+        "the head restates a candidate rather than referring to it: {schema}"
+    );
+}
+
+/// A finding row advertises the bounded head, the total that makes it a head,
+/// and the hint that names what enumerates the rest.
+#[test]
+fn a_finding_row_advertises_its_bounded_head_and_its_hint() {
+    let schema = schema_of::<FindingRow>();
+    assert_eq!(
+        property_names(&schema),
+        [
+            "id",
+            "kind",
+            "severity",
+            "path",
+            "target",
+            "span",
+            "head",
+            "hint",
+            "message",
+            "generation",
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
+        schema["properties"]["head"]["$ref"].as_str(),
+        Some("#/$defs/CandidateHead")
+    );
+    let head = schema_of::<CandidateHead>();
+    assert_eq!(
+        property_names(&head),
+        ["candidates", "total"].into_iter().collect()
+    );
+    assert_eq!(
+        head["properties"]["candidates"]["type"].as_str(),
+        Some("array")
+    );
+    assert!(
+        schema["$defs"]["Candidate"].is_object(),
+        "a finding row carries no definition of a candidate: {schema}"
+    );
+    assert_eq!(
+        property_names(&schema_of::<Candidate>()),
+        ["path", "suffix"].into_iter().collect()
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<Hint>(), "hint")),
+        ["resolves"]
+    );
+}
+
+/// The two target refusals advertise the typed target, and the ambiguous one
+/// advertises the same head and hint a finding row carries.
+#[test]
+fn the_target_refusals_advertise_the_typed_target_they_are_about() {
+    let schema = schema_of::<ErrorDetail>();
+    let branch = |code: &str| {
+        branches(&schema)
+            .iter()
+            .find(|branch| tag_constant(branch, "code") == Some(code))
+            .unwrap_or_else(|| panic!("the {code} branch"))
+            .clone()
+    };
+    let ambiguous = branch("vault/ambiguous-target");
+    assert_eq!(
+        property_names(&ambiguous),
+        ["code", "target", "head", "hint"].into_iter().collect()
+    );
+    assert_eq!(
+        ambiguous["properties"]["head"]["$ref"].as_str(),
+        Some("#/$defs/CandidateHead"),
+        "a refusal restates the head rather than referring to it"
+    );
+    assert_eq!(
+        ambiguous["properties"]["target"]["$ref"].as_str(),
+        Some("#/$defs/ResolutionTarget")
+    );
+    assert_eq!(
+        ambiguous["properties"]["hint"]["$ref"].as_str(),
+        Some("#/$defs/Hint")
+    );
+    let unknown = branch("vault/unknown-target");
+    assert_eq!(
+        property_names(&unknown),
+        ["code", "target"].into_iter().collect()
+    );
+}
+
+// ── The six read verbs ───────────────────────────────────────────────────
+
+/// Each params type advertises the whole of what a request carries, the vault
+/// first, so a surface renders a verb from one type rather than assembling a
+/// request out of parts it chose.
+#[test]
+fn every_read_params_advertises_the_whole_of_what_a_request_carries() {
+    assert_eq!(
+        property_names(&schema_of::<FindParams>()),
+        ["vault", "predicates", "sort", "columns", "limit", "after"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<SearchParams>()),
+        [
+            "vault",
+            "query",
+            "predicates",
+            "rungs",
+            "min_score",
+            "columns",
+            "limit",
+            "after",
+        ]
+        .into_iter()
+        .collect(),
+        "a search advertises an order it does not hold"
+    );
+    assert_eq!(
+        property_names(&schema_of::<GetParams>()),
+        ["vault", "target", "columns", "collection", "limit", "after"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<CountParams>()),
+        ["vault", "predicates", "by", "limit", "after"]
+            .into_iter()
+            .collect(),
+        "a count advertises a projection it hydrates nothing for"
+    );
+    assert_eq!(
+        property_names(&schema_of::<ValidateParams>()),
+        [
+            "vault",
+            "predicates",
+            "kinds",
+            "severity",
+            "summary",
+            "limit",
+            "after",
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<DescribeParams>()),
+        ["vault", "facets", "limit", "after"].into_iter().collect()
+    );
+}
+
+/// The order a `find` runs in is a key and a direction, and `search` carries
+/// neither: a ranked answer is ordered by its ranking.
+#[test]
+fn an_order_advertises_its_key_and_its_direction() {
+    assert_eq!(
+        property_names(&schema_of::<Sort>()),
+        ["key", "direction"].into_iter().collect()
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<SortKey>(), "by")),
+        sorted(["field", "path"])
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<Direction>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a direction branch is not a pinned string: {branch}"))
+        })),
+        sorted(["ascending", "descending"])
+    );
+}
+
+/// The rung set advertises the resolved set and refers to the rung vocabulary
+/// rather than restating it. The preset spellings are a surface's rendering
+/// and are advertised nowhere here.
+#[test]
+fn a_rung_set_advertises_the_resolved_set_and_no_preset() {
+    let schema = schema_of::<RungSet>();
+    assert_eq!(property_names(&schema), ["rungs"].into_iter().collect());
+    assert_eq!(
+        schema["properties"]["rungs"]["type"].as_str(),
+        Some("array")
+    );
+    assert_eq!(
+        schema["properties"]["rungs"]["minItems"].as_u64(),
+        Some(1),
+        "the set advertises a ladder that runs no rung: {schema}"
+    );
+    assert!(
+        schema["$defs"]["Rung"].is_object(),
+        "a rung set carries no definition of a rung: {schema}"
+    );
+    for preset in ["hybrid", "semantic"] {
+        assert!(
+            !schema.to_string().contains(preset),
+            "the set advertises the preset spelling `{preset}`"
+        );
+    }
+}
+
+/// A hit advertises the path, the score its order sorts by, and the projected
+/// row where one was asked for.
+#[test]
+fn a_hit_advertises_its_score_and_its_optional_row() {
+    let schema = schema_of::<Hit>();
+    assert_eq!(
+        property_names(&schema),
+        ["path", "score", "document"].into_iter().collect()
+    );
+    let required: BTreeSet<&str> = schema["required"]
+        .as_array()
+        .expect("the hit's required list")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(required, ["path", "score"].into_iter().collect());
+}
+
+/// A get report advertises its `shape` tag, and the collection shape names the
+/// collection it paged once: the page's own tag, with no selector beside it.
+#[test]
+fn a_get_report_advertises_its_shape_tag() {
+    let schema = schema_of::<GetReport>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "shape")),
+        sorted(["record", "section", "block", "collection"])
+    );
+    let collection = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "shape") == Some("collection"))
+        .expect("the collection branch");
+    assert_eq!(
+        property_names(collection),
+        ["shape", "path", "page"].into_iter().collect(),
+        "the collection report advertises a selector beside the page that names one"
+    );
+    let block = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "shape") == Some("block"))
+        .expect("the block branch");
+    assert_eq!(
+        property_names(block),
+        ["shape", "path", "block", "body"].into_iter().collect()
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<CollectionPage>(), "of")),
+        sorted(["links", "headings", "blocks", "tags", "findings"])
+    );
+    assert_eq!(
+        sorted(
+            branches(&schema_of::<CollectionSelector>())
+                .iter()
+                .map(|branch| string_constant(branch).unwrap_or_else(|| panic!(
+                    "a selector branch is not a pinned string: {branch}"
+                )))
+        ),
+        sorted(["links", "headings", "blocks", "tags", "findings"])
+    );
+}
+
+/// A count advertises what it groups by and what a tally holds: one value per
+/// group key, and the count.
+#[test]
+fn a_count_advertises_its_grouping_and_its_tally() {
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<GroupKey>(), "by")),
+        sorted(["field", "tag"])
+    );
+    assert_eq!(
+        property_names(&schema_of::<Tally>()),
+        ["group", "count"].into_iter().collect()
+    );
+}
+
+/// A validate report advertises its `shape` tag, and the summary carries the
+/// tally of kinds that `count` does not.
+#[test]
+fn a_validate_report_advertises_its_shape_tag() {
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<ValidateReport>(), "shape")),
+        sorted(["findings", "summary"])
+    );
+    assert_eq!(
+        property_names(&schema_of::<KindTally>()),
+        ["kind", "severity", "count"].into_iter().collect()
+    );
+}
+
+/// A facet advertises its `facet` tag, one branch per thing a vault says about
+/// itself or its documents carry, and the declared field advertises the typed
+/// declaration rather than a sentence naming it.
+#[test]
+fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
+    let schema = schema_of::<Facet>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "facet")),
+        sorted([
+            "declared_field",
+            "observed_field",
+            "declared_tag",
+            "tag_pattern",
+            "folder",
+            "path_rule",
+            "undeclared_tags",
+        ])
+    );
+    let declared = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "facet") == Some("declared_field"))
+        .expect("the declared_field branch");
+    assert_eq!(
+        property_names(declared),
+        ["facet", "key", "field_type", "required", "one_of"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        declared["properties"]["field_type"]["$ref"].as_str(),
+        Some("#/$defs/FieldType")
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<FieldType>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a type branch is not a pinned string: {branch}"))
+        })),
+        sorted(["text", "number", "boolean", "date", "tags"])
+    );
+    assert_eq!(
+        sorted(
+            branches(&schema_of::<ContainerKind>())
+                .iter()
+                .map(|branch| string_constant(branch).unwrap_or_else(|| panic!(
+                    "a container branch is not a pinned string: {branch}"
+                )))
+        ),
+        sorted(["scalar", "sequence", "map"])
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<PathRuleKind>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a rule branch is not a pinned string: {branch}"))
+        })),
+        ["ambiguity_ignore"]
+    );
+    let undeclared = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "facet") == Some("undeclared_tags"))
+        .expect("the undeclared_tags branch");
+    assert_eq!(
+        undeclared["properties"]["stance"]["$ref"].as_str(),
+        Some("#/$defs/TagStance")
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<TagStance>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a stance branch is not a pinned string: {branch}"))
+        })),
+        sorted(["allow", "report"])
+    );
+}
+
+/// Every paged read report is a page of its own row type, so a surface
+/// publishing a verb publishes the continuation with the rows.
+#[test]
+fn every_paged_read_report_is_a_page_of_its_row() {
+    for (report, row) in [
+        (schema_of::<FindReport>(), "DocumentRow"),
+        (schema_of::<SearchReport>(), "Hit"),
+        (schema_of::<CountReport>(), "Tally"),
+        (schema_of::<DescribeReport>(), "Facet"),
+    ] {
+        assert_eq!(
+            property_names(&report),
+            ["rows", "next", "moved"].into_iter().collect()
+        );
+        assert!(
+            report["$defs"][row].is_object(),
+            "the page carries no definition of {row}: {report}"
+        );
+        assert!(
+            report["$defs"]["Cursor"].is_object(),
+            "the page carries no definition of the cursor: {report}"
+        );
+    }
 }

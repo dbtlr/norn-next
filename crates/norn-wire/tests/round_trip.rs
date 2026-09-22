@@ -14,19 +14,24 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Addressing, Anchor, AnswerReading, AttachMode, ControlFile, Cursor, CursorKey,
-    CursorOrderChanged, EngineSection, ErrorDetail, ErrorEnvelope, FacetKind, FindingKind,
-    FindingScope, Freshness, LadderDeclaration, MaintainerIdentity, ModelIdentity, Moved,
-    NonFiniteScore, NotReady, Page, PollBackend, Predicate, ReasonCode, ReloadFailure, ReloadStage,
-    RequestScope, ResolutionTarget, Rung, RungReport, SchemaSource, Score, Severity, Snapshot,
+    Addressing, Anchor, AnswerReading, AttachMode, BlockRow, BodyText, CANDIDATE_HEAD, Candidate,
+    CandidateHead, Collection, CollectionPage, CollectionSelector, Column, ContainerKind,
+    ControlFile, CountParams, Cursor, CursorKey, CursorOrderChanged, DescribeParams, Direction,
+    DocumentPath, DocumentRow, EmptyLadder, EngineSection, ErrorDetail, ErrorEnvelope, Facet,
+    FacetKind, FieldType, FieldValue, FindParams, FindingKind, FindingRow, FindingScope, Freshness,
+    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LadderDeclaration,
+    LinkFamily, LinkHealth, LinkRow, MaintainerIdentity, ModelIdentity, Moved, NonFiniteScore,
+    NotReady, Page, PathRuleKind, PollBackend, Predicate, ReasonCode, ReloadFailure, ReloadStage,
+    RequestScope, ResolutionTarget, Rung, RungReport, RungSet, SchemaSource, Score, SearchParams,
+    Severity, Snapshot, Sort, SortKey, Span, TagRow, TagSource, TagStance, Tally, TotalBelowHead,
     TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
-    UnknownSeverity, UnknownVerb, Unsatisfied, UntrustedReason, VaultAddress, VaultAnswer,
-    VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
+    UnknownSeverity, UnknownVerb, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport,
+    VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
 /// Every cause a lost watcher carries.
@@ -118,6 +123,8 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::HostReaderUnavailable,
         ReasonCode::HostRegistryUnwritable,
         ReasonCode::VaultAmbiguousRoot,
+        ReasonCode::VaultAmbiguousTarget,
+        ReasonCode::VaultUnknownTarget,
         ReasonCode::VaultReloadBusy,
         ReasonCode::VaultReloadFailed,
         ReasonCode::VaultCursorOrderChanged,
@@ -179,6 +186,15 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::reader_unavailable("this coverage mints no read handle"),
         ErrorDetail::registry_unwritable("the registry file is read-only"),
         ErrorDetail::ambiguous_root([name("notes"), name("vault")]),
+        ErrorDetail::ambiguous_target(
+            target("glossary"),
+            head(
+                [candidate("notes/glossary"), candidate("archive/glossary")],
+                4,
+            ),
+            Hint::resolves(target("glossary")),
+        ),
+        ErrorDetail::unknown_target(target("glossary")),
         ErrorDetail::reload_busy(),
         ErrorDetail::cursor_order_changed(CursorOrderChanged::new(
             "fp-1",
@@ -313,6 +329,8 @@ fn facet_kinds() -> Vec<FacetKind> {
         FacetKind::DeclaredTag,
         FacetKind::Folder,
         FacetKind::PathRule,
+        FacetKind::TagPattern,
+        FacetKind::UndeclaredTags,
     ]
 }
 
@@ -332,7 +350,7 @@ fn cursor_keys() -> Vec<CursorKey> {
         CursorKey::document(Some("2026-01-01".to_string()), "notes/a.md"),
         CursorKey::document(None, "notes/a.md"),
         CursorKey::hit(score(0.5), "notes/a.md"),
-        CursorKey::tally(["note".to_string(), "open".to_string()]),
+        CursorKey::tally([Some("note".to_string()), None]),
         CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", 7),
         CursorKey::ordinal(3),
     ];
@@ -429,8 +447,347 @@ fn unsatisfied_parts() -> Vec<Unsatisfied> {
         Unsatisfied::malformed_glob("docs/[", "the character class does not close"),
         Unsatisfied::impossible_path("/etc/passwd"),
         Unsatisfied::missing_section("Design"),
+        Unsatisfied::missing_block("a1"),
         Unsatisfied::resolves_not_applicable(target("norn/glossary")),
     ]
+}
+
+/// One document path a vector names a document by, parsed through the grammar
+/// the type keeps.
+fn path(text: &str) -> DocumentPath {
+    DocumentPath::new(text).expect("a legal document path")
+}
+
+/// One position, which every row that names one names the same way.
+fn span() -> Span {
+    Span::new(3, 1, 42)
+}
+
+/// Every part of a document a read can ask to have on a row.
+fn columns() -> Vec<Column> {
+    vec![
+        Column::path(),
+        Column::field("due"),
+        Column::body(),
+        Column::links(),
+        Column::headings(),
+        Column::blocks(),
+        Column::tags(),
+        Column::findings(),
+        Column::fields(),
+    ]
+}
+
+/// Every reading a resolved link's health takes.
+fn link_healths() -> Vec<LinkHealth> {
+    vec![
+        LinkHealth::Healthy,
+        LinkHealth::Broken,
+        LinkHealth::Ambiguous,
+    ]
+}
+
+/// Every grammar a link is written in.
+fn link_families() -> Vec<LinkFamily> {
+    vec![LinkFamily::Wikilink, LinkFamily::Markdown]
+}
+
+/// Every home a tag is read from.
+fn tag_sources() -> Vec<TagSource> {
+    vec![TagSource::Body, TagSource::Frontmatter]
+}
+
+/// Every container a frontmatter value sits in, and the two leaves that carry
+/// no text beside them. The map holds a sequence and the sequence holds a map,
+/// so the census walks the tree rather than its root alone.
+fn field_values() -> Vec<FieldValue> {
+    vec![
+        FieldValue::scalar("note"),
+        FieldValue::sequence([
+            FieldValue::scalar("a"),
+            FieldValue::map([("b".to_string(), FieldValue::scalar("c"))]),
+        ]),
+        nested_field_value(),
+        FieldValue::null(),
+        FieldValue::absent(),
+    ]
+}
+
+/// A map holding a sequence holding a map, which is the deepest shape the
+/// vocabulary admits without admitting a second parse.
+fn nested_field_value() -> FieldValue {
+    FieldValue::map([(
+        "outer".to_string(),
+        FieldValue::sequence([
+            FieldValue::scalar("first"),
+            FieldValue::map([
+                ("inner".to_string(), FieldValue::scalar("deep")),
+                ("missing".to_string(), FieldValue::absent()),
+            ]),
+        ]),
+    )])
+}
+
+/// One link row per health, built through the constructor that derives it
+/// from the total of the bounded head beside it.
+fn link_rows() -> Vec<LinkRow> {
+    [
+        head([], 0),
+        head([candidate("notes/a")], 1),
+        head([candidate("notes/a"), candidate("archive/a")], 2),
+    ]
+    .into_iter()
+    .map(link_row)
+    .collect()
+}
+
+/// A link row resolving to `targets`, built through the constructor that
+/// derives its health.
+fn link_row(targets: CandidateHead) -> LinkRow {
+    LinkRow::new(
+        LinkFamily::Wikilink,
+        false,
+        None,
+        "a",
+        Some("A".to_string()),
+        Some(Anchor::heading("Design")),
+        span(),
+        targets,
+    )
+}
+
+/// The candidates a link row's head carries, as the bytes a reader is handed.
+fn candidate_values(paths: &[&str]) -> Vec<serde_json::Value> {
+    paths
+        .iter()
+        .map(|path| serde_json::json!({"path": path, "suffix": "a"}))
+        .collect()
+}
+
+/// A link row as bytes, with the head and the health named apart so a test can
+/// hand the reader halves that disagree.
+fn link_row_json(health: &str, candidates: &[serde_json::Value], total: u64) -> String {
+    serde_json::json!({
+        "family": "wikilink",
+        "embed": false,
+        "protocol": null,
+        "target": "a",
+        "title": null,
+        "anchor": null,
+        "span": {"line": 1, "column": 1, "byte_offset": 0},
+        "targets": {"candidates": candidates, "total": total},
+        "health": health,
+    })
+    .to_string()
+}
+
+/// Every hint a bounded head points a client at.
+fn hints() -> Vec<Hint> {
+    vec![Hint::resolves(target("norn/glossary"))]
+}
+
+/// One candidate, which the two bounded heads are built out of.
+fn candidate(text: &str) -> Candidate {
+    Candidate::new(path(&format!("{text}.md")), text)
+}
+
+/// A candidate head, built through the constructor that bounds it.
+fn head(candidates: impl IntoIterator<Item = Candidate>, total: u64) -> CandidateHead {
+    CandidateHead::new(candidates, total).expect("a head no larger than its total")
+}
+
+/// The head a finding that is not about resolution carries: no candidate, out
+/// of none.
+fn no_head() -> CandidateHead {
+    head([], 0)
+}
+
+/// A finding row, carrying the head the constructor bounded.
+fn finding_row() -> FindingRow {
+    FindingRow::new(
+        7,
+        FindingKind::UndeclaredTag,
+        Severity::Warning,
+        path("notes/a.md"),
+        Some("draft".to_string()),
+        Some(span()),
+        head(
+            [candidate("notes/glossary"), candidate("archive/glossary")],
+            9,
+        ),
+        Some(Hint::resolves(target("glossary"))),
+        "the tag is not declared",
+        12,
+    )
+}
+
+/// Every nested collection a request pages by ordinal.
+fn collection_selectors() -> Vec<CollectionSelector> {
+    vec![
+        CollectionSelector::Links,
+        CollectionSelector::Headings,
+        CollectionSelector::Blocks,
+        CollectionSelector::Tags,
+        CollectionSelector::Findings,
+    ]
+}
+
+/// One heading row, which two shapes carry.
+fn heading_row() -> HeadingRow {
+    HeadingRow::new(2, "Design", "design", span())
+}
+
+/// One page of each nested collection.
+fn collection<T>(items: Vec<T>, total: u64) -> Collection<T>
+where
+    T: schemars::JsonSchema + Serialize + DeserializeOwned,
+{
+    Collection::new(items, total).expect("a total no smaller than its items")
+}
+
+/// A body cut to `byte_length`, built through the constructor that checks it.
+fn body(text: &str, byte_length: u64) -> BodyText {
+    BodyText::new(text, byte_length).expect("a length no smaller than its text")
+}
+
+fn collection_pages() -> Vec<CollectionPage> {
+    vec![
+        CollectionPage::links(Page::new(link_rows(), None, vec![])),
+        CollectionPage::headings(Page::new(vec![heading_row()], None, vec![])),
+        CollectionPage::blocks(Page::new(
+            vec![BlockRow::new("a1", Some(span()))],
+            None,
+            vec![],
+        )),
+        CollectionPage::tags(Page::new(
+            vec![TagRow::new("draft", TagSource::Body, None)],
+            None,
+            vec![],
+        )),
+        CollectionPage::findings(Page::new(vec![finding_row()], None, vec![])),
+    ]
+}
+
+/// A document row carrying every column a projection can ask for.
+fn whole_document_row() -> DocumentRow {
+    DocumentRow::new(path("notes/a.md"))
+        .with_fields(BTreeMap::from([(
+            "type".to_string(),
+            FieldValue::scalar("note"),
+        )]))
+        .with_body(body("Design\n", 4096))
+        .with_links(collection(link_rows(), 9))
+        .with_headings(collection(vec![heading_row()], 1))
+        .with_blocks(collection(vec![BlockRow::new("a1", None)], 1))
+        .with_tags(collection(
+            vec![TagRow::new("draft", TagSource::Frontmatter, Some(span()))],
+            1,
+        ))
+        .with_findings(collection(vec![finding_row()], 1))
+}
+
+/// Every shape a `get` answers with.
+fn get_reports() -> Vec<GetReport> {
+    let mut reports = vec![
+        GetReport::record(whole_document_row()),
+        GetReport::section(
+            path("notes/a.md"),
+            heading_row(),
+            body("the section body", 16),
+        ),
+        GetReport::block(
+            path("notes/a.md"),
+            BlockRow::new("a1", Some(span())),
+            body("the block body", 14),
+        ),
+    ];
+    reports.extend(
+        collection_pages()
+            .into_iter()
+            .map(|page| GetReport::collection(path("notes/a.md"), page)),
+    );
+    reports
+}
+
+/// Every shape a `validate` answers with.
+fn validate_reports() -> Vec<ValidateReport> {
+    vec![
+        ValidateReport::findings(Page::new(vec![finding_row()], None, vec![])),
+        ValidateReport::summary([KindTally::new(
+            FindingKind::UndeclaredTag,
+            Severity::Warning,
+            3,
+        )]),
+    ]
+}
+
+/// Every key a `find` orders by.
+fn sort_keys() -> Vec<SortKey> {
+    vec![SortKey::field("due"), SortKey::path()]
+}
+
+/// Every way an order runs.
+fn directions() -> Vec<Direction> {
+    vec![Direction::Ascending, Direction::Descending]
+}
+
+/// Every key a `count` groups by.
+fn group_keys() -> Vec<GroupKey> {
+    vec![GroupKey::field("type"), GroupKey::tag()]
+}
+
+/// Every type a vault's schema declares a field under.
+fn field_types() -> Vec<FieldType> {
+    FieldType::ALL.to_vec()
+}
+
+/// Every container an observed field's values sit in.
+fn container_kinds() -> Vec<ContainerKind> {
+    vec![
+        ContainerKind::Scalar,
+        ContainerKind::Sequence,
+        ContainerKind::Map,
+    ]
+}
+
+/// Every rule a path rule states.
+fn path_rule_kinds() -> Vec<PathRuleKind> {
+    vec![PathRuleKind::AmbiguityIgnore]
+}
+
+/// Every facet a `describe` reports, one per shape.
+fn facets() -> Vec<Facet> {
+    let mut facets: Vec<Facet> = field_types()
+        .into_iter()
+        .map(|field_type| Facet::declared_field("due", field_type, true, None))
+        .collect();
+    facets.push(Facet::declared_field(
+        "status",
+        FieldType::Text,
+        false,
+        Some(vec!["draft".to_string(), "live".to_string()]),
+    ));
+    facets.extend(
+        container_kinds()
+            .into_iter()
+            .map(|container| Facet::observed_field("due", container)),
+    );
+    facets.push(Facet::declared_tag("area"));
+    facets.push(Facet::tag_pattern("person/**"));
+    facets.push(Facet::folder("journal", Some("One per day".to_string())));
+    facets.push(Facet::folder("archive", None));
+    facets.extend(
+        path_rule_kinds()
+            .into_iter()
+            .map(|rule| Facet::path_rule(rule, "archive/**")),
+    );
+    facets.extend(tag_stances().into_iter().map(Facet::undeclared_tags));
+    facets
+}
+
+/// Every stance a vault takes on a tag its facet does not admit.
+fn tag_stances() -> Vec<TagStance> {
+    TagStance::ALL.to_vec()
 }
 
 fn round_trip<T>(value: &T)
@@ -682,6 +1039,150 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<VaultAddress>(Some("by")),
         "the addresses built here are not the addresses the vocabulary holds"
+    );
+    assert_eq!(
+        columns()
+            .iter()
+            .map(|column| tag_string(column, "col"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<Column>(Some("col")),
+        "the columns built here are not the columns the vocabulary holds"
+    );
+    assert_eq!(
+        link_healths()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<LinkHealth>(None),
+        "the healths built here are not the healths the vocabulary holds"
+    );
+    assert_eq!(
+        link_families()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<LinkFamily>(None),
+        "the families built here are not the families the vocabulary holds"
+    );
+    assert_eq!(
+        tag_sources()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<TagSource>(None),
+        "the tag sources built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        field_values()
+            .iter()
+            .map(|value| tag_string(value, "kind"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<FieldValue>(Some("kind")),
+        "the field values built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        hints()
+            .iter()
+            .map(|hint| tag_string(hint, "hint"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<Hint>(Some("hint")),
+        "the hints built here are not the hints the vocabulary holds"
+    );
+    assert_eq!(
+        collection_selectors()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<CollectionSelector>(None),
+        "the selectors built here are not the selectors the vocabulary holds"
+    );
+    assert_eq!(
+        collection_pages()
+            .iter()
+            .map(|page| tag_string(page, "of"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<CollectionPage>(Some("of")),
+        "the collection pages built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        get_reports()
+            .iter()
+            .map(|report| tag_string(report, "shape"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<GetReport>(Some("shape")),
+        "the get reports built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        validate_reports()
+            .iter()
+            .map(|report| tag_string(report, "shape"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<ValidateReport>(Some("shape")),
+        "the validate reports built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        sort_keys()
+            .iter()
+            .map(|key| tag_string(key, "by"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<SortKey>(Some("by")),
+        "the sort keys built here are not the keys the vocabulary holds"
+    );
+    assert_eq!(
+        directions()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<Direction>(None),
+        "the directions built here are not the directions the vocabulary holds"
+    );
+    assert_eq!(
+        group_keys()
+            .iter()
+            .map(|key| tag_string(key, "by"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<GroupKey>(Some("by")),
+        "the group keys built here are not the keys the vocabulary holds"
+    );
+    assert_eq!(
+        field_types()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<FieldType>(None),
+        "the field types built here are not the types the vocabulary holds"
+    );
+    assert_eq!(
+        container_kinds()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<ContainerKind>(None),
+        "the containers built here are not the containers the vocabulary holds"
+    );
+    assert_eq!(
+        path_rule_kinds()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<PathRuleKind>(None),
+        "the path rules built here are not the rules the vocabulary holds"
+    );
+    assert_eq!(
+        facets()
+            .iter()
+            .map(|facet| tag_string(facet, "facet"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<Facet>(Some("facet")),
+        "the facets built here are not the facets the vocabulary holds"
+    );
+    assert_eq!(
+        tag_stances()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<TagStance>(None),
+        "the stances built here are not the stances the vocabulary holds"
     );
 }
 
@@ -2317,5 +2818,1162 @@ fn ambiguous_root_candidates_ascend_whatever_order_they_arrive_in() {
             name("notes"),
         ])),
         r#"{"code":"vault/ambiguous-root","candidates":["archive","notes","vault"]}"#
+    );
+}
+
+// ── The document row and the columns it is projected onto ────────────────
+
+#[test]
+fn every_document_shape_survives_the_round_trip() {
+    for column in columns() {
+        round_trip(&column);
+    }
+    for value in field_values() {
+        round_trip(&value);
+    }
+    for row in link_rows() {
+        round_trip(&row);
+    }
+    for health in link_healths() {
+        round_trip(&health);
+    }
+    for family in link_families() {
+        round_trip(&family);
+    }
+    for source in tag_sources() {
+        round_trip(&source);
+    }
+    round_trip(&span());
+    round_trip(&heading_row());
+    round_trip(&BlockRow::new("a1", Some(span())));
+    round_trip(&TagRow::new("draft", TagSource::Body, None));
+    round_trip(&whole_document_row());
+    round_trip(&DocumentRow::new(path("notes/a.md")));
+}
+
+/// A path is the string itself, and the read path is the grammar: the one
+/// string that names nothing has no representation on either side of the seam.
+/// What else a path may hold is the store's grammar and is not re-checked
+/// here, so a path a vault could not have is carried rather than refused.
+#[test]
+fn a_document_path_is_the_string_it_renders_as_and_is_not_empty() {
+    assert_eq!(wire(&path("notes/a.md")), r#""notes/a.md""#);
+    assert_eq!(path("notes/a.md").as_str(), "notes/a.md");
+    assert_eq!(path("notes/a.md").to_string(), "notes/a.md");
+    assert!(
+        serde_json::from_str::<DocumentPath>(r#""""#).is_err(),
+        "the empty string was read as a document path"
+    );
+    let refusal = DocumentPath::new("").expect_err("an empty document path");
+    assert_eq!(refusal.what(), "document path");
+    for text in ["../a.md", "a b.md"] {
+        let json = format!("\"{text}\"");
+        assert!(
+            serde_json::from_str::<DocumentPath>(&json).is_ok(),
+            "`{text}` was refused by a grammar this type does not keep"
+        );
+    }
+}
+
+/// A document path is relative to the vault root, which is what the schema
+/// publishes, so a path that starts at a filesystem root is refused where one
+/// is built and where one is read alike.
+#[test]
+fn a_rooted_document_path_is_no_document_path() {
+    let refusal = DocumentPath::new("/etc/passwd").expect_err("a rooted document path");
+    assert_eq!(refusal.what(), "document path");
+    assert_eq!(
+        refusal.problem(),
+        "a document path is relative to the vault root"
+    );
+    for text in ["/etc/passwd", "/", "/notes/a.md"] {
+        assert!(
+            DocumentPath::new(text).is_err(),
+            "`{text}` was built as a document path"
+        );
+        let json = format!("\"{text}\"");
+        assert!(
+            serde_json::from_str::<DocumentPath>(&json).is_err(),
+            "`{text}` was read back as a document path"
+        );
+    }
+}
+
+/// A column is an object tagged `col`, and the one that names a key carries it
+/// beside the tag rather than as the tag.
+#[test]
+fn a_column_is_an_object_tagged_col() {
+    assert_eq!(wire(&Column::path()), r#"{"col":"path"}"#);
+    assert_eq!(wire(&Column::fields()), r#"{"col":"fields"}"#);
+    assert_eq!(
+        wire(&Column::field("due")),
+        r#"{"col":"field","key":"due"}"#
+    );
+    assert!(
+        serde_json::from_str::<Column>(r#"{"col":"backlinks"}"#).is_err(),
+        "a column nobody minted read back as one"
+    );
+}
+
+/// A collection of a row type two of which are one value is a value two of
+/// which are one, so a consumer compares two pages of blocks the way it
+/// compares two blocks. The bound holds wherever the row holds it: a
+/// collection of hits carries a score and is `PartialEq` alone, so this is a
+/// compile-time check rather than a comparison.
+#[test]
+fn a_collection_of_an_equatable_row_is_equatable() {
+    fn equatable<T: Eq>() {}
+    equatable::<Collection<BlockRow>>();
+    equatable::<Collection<FindingRow>>();
+    assert_eq!(
+        collection(vec![BlockRow::new("a1", None)], 1),
+        collection(vec![BlockRow::new("a1", None)], 1)
+    );
+}
+
+/// Every column a document row is projected onto holds a row type two of
+/// which are one value — a path, a frontmatter tree, a body, and the four
+/// collections — so the row itself is a value two of which are one. No column
+/// carries a score, which is the one thing in the vocabulary that is near
+/// without being equal, so this is a compile-time check rather than a
+/// comparison.
+#[test]
+fn a_document_row_is_equatable() {
+    fn equatable<T: Eq>() {}
+    equatable::<DocumentRow>();
+    let row = DocumentRow::new(path("notes/a.md"))
+        .with_fields(BTreeMap::from([(
+            "type".to_string(),
+            FieldValue::scalar("note"),
+        )]))
+        .with_body(body("hello", 5));
+    assert_eq!(row, row.clone());
+}
+
+/// A nested collection says in band what it cut. The items are the head and
+/// the total is the vault's count, so a row whose links were bounded reports
+/// the bound rather than handing back a short list that reads as the whole.
+#[test]
+fn a_collection_reports_the_cut_through_its_total() {
+    let whole = collection(vec![BlockRow::new("a1", None)], 1);
+    assert!(!whole.is_truncated());
+    let cut = collection(vec![BlockRow::new("a1", None)], 12);
+    assert!(cut.is_truncated());
+    assert_eq!(
+        wire(&cut),
+        r#"{"items":[{"id":"a1","span":null}],"total":12}"#
+    );
+}
+
+/// The total is what makes the items a head, so a total below them heads
+/// nothing: it is refused where a collection is built and where one is read
+/// alike, rather than landing as a row claiming to have been cut to more than
+/// it holds.
+#[test]
+fn a_collection_total_below_its_items_heads_nothing() {
+    let refusal = Collection::new(
+        vec![BlockRow::new("a1", None), BlockRow::new("a2", None)],
+        1,
+    )
+    .expect_err("a total below its items");
+    assert_eq!(refusal.head(), 2);
+    assert_eq!(refusal.total(), 1);
+    assert_eq!(
+        TotalBelowHead::to_string(&refusal),
+        "a head of 2 cannot be the head of 1"
+    );
+    assert!(
+        serde_json::from_str::<Collection<BlockRow>>(
+            r#"{"items":[{"id":"a1","span":null},{"id":"a2","span":null}],"total":1}"#
+        )
+        .is_err(),
+        "a collection claiming a total below its items read back"
+    );
+    assert!(
+        serde_json::from_str::<Collection<BlockRow>>(
+            r#"{"items":[{"id":"a1","span":null},{"id":"a2","span":null}],"total":2}"#
+        )
+        .is_ok(),
+        "a collection whose total is its own count refused the read"
+    );
+}
+
+/// A body reports the cut the handler's per-row ceiling made: the text is the
+/// head and the byte length is the whole body's, so a length below the text
+/// beside it heads nothing and refuses where one is built and where one is
+/// read alike.
+#[test]
+fn a_body_reports_the_cut_through_its_byte_length() {
+    let whole = body("Design\n", 7);
+    assert!(!whole.is_truncated());
+    assert_eq!(whole.text(), "Design\n");
+    assert_eq!(whole.byte_length(), 7);
+    let cut = body("Design\n", 4096);
+    assert!(cut.is_truncated());
+    assert_eq!(wire(&cut), r#"{"text":"Design\n","byte_length":4096}"#);
+    round_trip(&cut);
+
+    let refusal = BodyText::new("Design\n", 3).expect_err("a length below its text");
+    assert_eq!(refusal.head(), 7);
+    assert_eq!(refusal.total(), 3);
+    assert!(
+        serde_json::from_str::<BodyText>(r#"{"text":"Design\n","byte_length":3}"#).is_err(),
+        "a body claiming a length below its text read back"
+    );
+}
+
+/// Health is read off the documents a target resolved to, and the derivation
+/// is the whole of it: none is broken, one is healthy, and more than one is
+/// ambiguous.
+#[test]
+fn a_links_health_is_the_count_of_what_it_resolves_to() {
+    let rows = link_rows();
+    assert_eq!(rows.len(), link_healths().len());
+    assert_eq!(rows[0].health(), LinkHealth::Broken);
+    assert_eq!(rows[1].health(), LinkHealth::Healthy);
+    assert_eq!(rows[2].health(), LinkHealth::Ambiguous);
+    assert_eq!(LinkHealth::of_targets(0), LinkHealth::Broken);
+    assert_eq!(LinkHealth::of_targets(1), LinkHealth::Healthy);
+    assert_eq!(LinkHealth::of_targets(400), LinkHealth::Ambiguous);
+}
+
+/// The count the health is read off is the head's total, not the candidates
+/// the head carries: a target that named nine documents is ambiguous on a row
+/// whose head stops at five and on a row whose head carries one of them,
+/// because what the health describes is the class rather than the part of it
+/// that fit.
+#[test]
+fn a_links_health_is_the_heads_total_rather_than_its_length() {
+    let nine: Vec<Candidate> = (0..9)
+        .map(|index| candidate(&format!("notes/g{index}")))
+        .collect();
+    let five_of_nine = head(nine.clone(), 9);
+    assert_eq!(five_of_nine.candidates().len(), CANDIDATE_HEAD);
+    assert_eq!(link_row(five_of_nine).health(), LinkHealth::Ambiguous);
+    let one_of_nine = head(nine.into_iter().take(1), 9);
+    assert_eq!(link_row(one_of_nine).health(), LinkHealth::Ambiguous);
+    assert_eq!(
+        link_row(head([candidate("notes/a")], 1)).health(),
+        LinkHealth::Healthy
+    );
+    assert_eq!(link_row(head([], 0)).health(), LinkHealth::Broken);
+}
+
+/// The two halves of one fact cannot arrive disagreeing: a row whose `health`
+/// is not the health of the documents beside it is refused entire rather than
+/// read into a value that says two things about one link.
+#[test]
+fn a_link_whose_health_is_not_its_targets_refuses_the_read() {
+    for (health, paths, total) in [
+        ("broken", &[][..], 0),
+        ("healthy", &["notes/a.md"][..], 1),
+        ("ambiguous", &["notes/a.md", "archive/a.md"][..], 2),
+        ("ambiguous", &["notes/a.md"][..], 9),
+    ] {
+        let json = link_row_json(health, &candidate_values(paths), total);
+        assert!(
+            serde_json::from_str::<LinkRow>(&json).is_ok(),
+            "reading {json} refused a row whose halves agree"
+        );
+    }
+    for (health, paths, total) in [
+        ("healthy", &[][..], 0),
+        ("broken", &["notes/a.md"][..], 1),
+        ("healthy", &["notes/a.md", "archive/a.md"][..], 2),
+        ("healthy", &["notes/a.md"][..], 9),
+    ] {
+        let json = link_row_json(health, &candidate_values(paths), total);
+        assert!(
+            serde_json::from_str::<LinkRow>(&json).is_err(),
+            "reading {json} produced a row whose halves disagree"
+        );
+    }
+}
+
+/// The bound the head keeps is the link row's too: a row carrying more
+/// candidates than the bound is bytes nothing here minted, and the row refuses
+/// the read through the head nested in it rather than landing a payload no
+/// bound covers. The head cut to the bound reads back, total and all.
+#[test]
+fn a_link_row_whose_head_is_wider_than_the_bound_refuses_the_read() {
+    let nine: Vec<serde_json::Value> = (0..9)
+        .map(|index| serde_json::json!({"path": format!("notes/g{index}.md"), "suffix": "g"}))
+        .collect();
+    let json = link_row_json("ambiguous", &nine, 9);
+    assert!(
+        serde_json::from_str::<LinkRow>(&json).is_err(),
+        "reading {json} produced a link row no bound covers"
+    );
+    let json = link_row_json("ambiguous", &nine[..CANDIDATE_HEAD], 9);
+    let read: LinkRow =
+        serde_json::from_str(&json).unwrap_or_else(|error| panic!("reading {json}: {error}"));
+    assert_eq!(read.targets.candidates().len(), CANDIDATE_HEAD);
+    assert_eq!(read.targets.total(), 9);
+    assert!(read.targets.is_truncated());
+    assert_eq!(read.health(), LinkHealth::Ambiguous);
+}
+
+/// A column the read did not project is left out of the bytes entirely, so a
+/// client tells a column it did not ask for from a column the document does
+/// not have. The path is carried whatever was asked for.
+#[test]
+fn an_unprojected_column_is_absent_from_the_row() {
+    let bare = DocumentRow::new(path("notes/a.md"));
+    assert_eq!(wire(&bare), r#"{"path":"notes/a.md"}"#);
+    let projected = bare.clone().with_body(body("hello", 5));
+    assert_eq!(
+        wire(&projected),
+        r#"{"path":"notes/a.md","body":{"text":"hello","byte_length":5}}"#
+    );
+    let read: DocumentRow =
+        serde_json::from_str(r#"{"path":"notes/a.md"}"#).expect("a row projecting nothing");
+    assert_eq!(read, bare);
+    assert_eq!(read.body, None);
+}
+
+/// A frontmatter value crosses tagged by the container it sits in: a scalar
+/// as the text it is written as, a sequence as a sequence of values, and a
+/// map as a mapping of nested values, never as JSON in a string.
+#[test]
+fn a_field_value_is_an_object_tagged_kind() {
+    assert_eq!(
+        wire(&FieldValue::scalar("note")),
+        r#"{"kind":"scalar","raw":"note"}"#
+    );
+    assert_eq!(
+        wire(&FieldValue::sequence([FieldValue::scalar("a")])),
+        r#"{"kind":"sequence","items":[{"kind":"scalar","raw":"a"}]}"#
+    );
+    assert_eq!(
+        wire(&FieldValue::map([(
+            "a".to_string(),
+            FieldValue::scalar("1")
+        )])),
+        r#"{"kind":"map","entries":{"a":{"kind":"scalar","raw":"1"}}}"#
+    );
+    assert_eq!(wire(&FieldValue::null()), r#"{"kind":"null"}"#);
+    assert_eq!(wire(&FieldValue::absent()), r#"{"kind":"absent"}"#);
+}
+
+/// A field written with no value and a field the document never wrote are two
+/// values, not one. A projection that folded them together would leave a
+/// client unable to tell an empty frontmatter key from a missing one, so the
+/// two leaves are compared here as well as pinned in bytes.
+#[test]
+fn a_present_null_is_not_an_absent_field() {
+    assert_ne!(FieldValue::null(), FieldValue::absent());
+    round_trip(&FieldValue::null());
+    let row = DocumentRow::new(path("notes/a.md")).with_fields(BTreeMap::from([
+        ("due".to_string(), FieldValue::null()),
+        ("area".to_string(), FieldValue::absent()),
+    ]));
+    assert_eq!(
+        wire(&row),
+        concat!(
+            r#"{"path":"notes/a.md","fields":{"area":{"kind":"absent"},"#,
+            r#""due":{"kind":"null"}}}"#
+        )
+    );
+    round_trip(&row);
+}
+
+/// A nested value is a value, all the way down: a map holding a sequence
+/// holding a map crosses as the tree it is and is read back as the same tree,
+/// so a client reads a nested frontmatter value the way it reads a flat one
+/// rather than parsing a string a second time.
+#[test]
+fn a_nested_field_value_crosses_as_a_tree_rather_than_as_json_in_a_string() {
+    let value = nested_field_value();
+    round_trip(&value);
+    assert_eq!(
+        wire(&value),
+        concat!(
+            r#"{"kind":"map","entries":{"outer":{"kind":"sequence","items":["#,
+            r#"{"kind":"scalar","raw":"first"},"#,
+            r#"{"kind":"map","entries":{"inner":{"kind":"scalar","raw":"deep"},"#,
+            r#""missing":{"kind":"absent"}}}]}}}"#
+        )
+    );
+    assert!(
+        !wire(&value).contains(r#"raw_json"#),
+        "a map crossed as JSON in a string"
+    );
+}
+
+// ── The finding row and its bounded head ─────────────────────────────────
+
+#[test]
+fn every_finding_row_shape_survives_the_round_trip() {
+    round_trip(&finding_row());
+    for hint in hints() {
+        round_trip(&hint);
+    }
+    round_trip(&candidate("notes/glossary"));
+    round_trip(&no_head());
+    round_trip(&head([candidate("notes/glossary")], 9));
+}
+
+/// The head is bounded where one is built, so a producer handing over more
+/// candidates than the bound does not widen it. The total is untouched: it is
+/// what makes the head a head.
+#[test]
+fn a_candidate_list_is_bounded_at_the_head_wherever_it_is_built() {
+    let many: Vec<Candidate> = (0..12)
+        .map(|index| candidate(&format!("notes/g{index}")))
+        .collect();
+    let bounded = head(many, 12);
+    assert_eq!(bounded.candidates().len(), CANDIDATE_HEAD);
+    assert_eq!(bounded.total(), 12);
+    assert!(bounded.is_truncated());
+
+    let row = FindingRow::new(
+        1,
+        FindingKind::UndeclaredTag,
+        Severity::Error,
+        path("notes/a.md"),
+        None,
+        None,
+        bounded.clone(),
+        None,
+        "ambiguous",
+        3,
+    );
+    let detail = ErrorDetail::ambiguous_target(
+        target("glossary"),
+        bounded,
+        Hint::resolves(target("glossary")),
+    );
+    for json in [
+        serde_json::to_value(&row).expect("a row as JSON"),
+        serde_json::to_value(&detail).expect("a detail as JSON"),
+    ] {
+        assert_eq!(
+            json["head"]["candidates"].as_array().map(Vec::len),
+            Some(CANDIDATE_HEAD)
+        );
+        assert_eq!(json["head"]["total"].as_u64(), Some(12));
+    }
+}
+
+/// The bound is the vocabulary's, so it holds on the way in as well as on the
+/// way out: bytes carrying nine candidates are bytes nothing here minted, and
+/// the finding row and the refusal refuse them rather than reading a head no bound
+/// covers.
+#[test]
+fn a_head_wider_than_the_bound_refuses_the_read() {
+    let nine: Vec<serde_json::Value> = (0..9)
+        .map(|index| serde_json::json!({"path": format!("notes/g{index}.md"), "suffix": "g"}))
+        .collect();
+    let five = &nine[..CANDIDATE_HEAD];
+    let head_json = |candidates: &[serde_json::Value], total: u64| serde_json::json!({"candidates": candidates, "total": total});
+    let row_json = |candidates: &[serde_json::Value], total: u64| {
+        serde_json::json!({
+            "id": 1,
+            "kind": "document/undeclared-tag",
+            "severity": "error",
+            "path": "notes/a.md",
+            "target": null,
+            "span": null,
+            "head": head_json(candidates, total),
+            "hint": null,
+            "message": "ambiguous",
+            "generation": 3,
+        })
+        .to_string()
+    };
+    let detail_json = |candidates: &[serde_json::Value], total: u64| {
+        serde_json::json!({
+            "code": "vault/ambiguous-target",
+            "target": "glossary",
+            "head": head_json(candidates, total),
+            "hint": {"hint": "resolves", "target": "glossary"},
+        })
+        .to_string()
+    };
+
+    for json in [row_json(&nine, 12), row_json(five, 4)] {
+        assert!(
+            serde_json::from_str::<FindingRow>(&json).is_err(),
+            "reading {json} produced a finding row no bound covers"
+        );
+    }
+    for json in [detail_json(&nine, 12), detail_json(five, 4)] {
+        assert!(
+            serde_json::from_str::<ErrorDetail>(&json).is_err(),
+            "reading {json} produced a refusal no bound covers"
+        );
+    }
+    let json = row_json(five, 12);
+    let row: FindingRow =
+        serde_json::from_str(&json).unwrap_or_else(|error| panic!("reading {json}: {error}"));
+    assert_eq!(row.head.candidates().len(), CANDIDATE_HEAD);
+    assert_eq!(row.head.total(), 12);
+    assert!(row.head.is_truncated());
+    let json = detail_json(five, 12);
+    assert!(
+        serde_json::from_str::<ErrorDetail>(&json).is_ok(),
+        "reading {json} refused a head the bound covers"
+    );
+}
+
+/// A total below the head it heads describes no vault, and the one type both
+/// carriers hold refuses it once.
+#[test]
+fn a_total_below_the_head_it_heads_is_refused() {
+    let two = [candidate("notes/a"), candidate("notes/b")];
+    let refusal = CandidateHead::new(two, 1).expect_err("a total below its head");
+    assert_eq!(refusal.head(), 2);
+    assert_eq!(refusal.total(), 1);
+    assert_eq!(
+        TotalBelowHead::to_string(&refusal),
+        "a head of 2 cannot be the head of 1"
+    );
+}
+
+/// A finding row is the row a report pages, and the typed halves — the kind,
+/// the severity, the path, the head, the hint — cross as themselves rather
+/// than as strings a reader re-parses.
+#[test]
+fn a_finding_row_carries_its_typed_halves() {
+    let row = FindingRow::new(
+        7,
+        FindingKind::UndeclaredTag,
+        Severity::Warning,
+        path("notes/a.md"),
+        Some("draft".to_string()),
+        None,
+        no_head(),
+        Some(Hint::resolves(target("glossary"))),
+        "the tag is not declared",
+        12,
+    );
+    assert!(!row.head.is_truncated());
+    assert_eq!(
+        wire(&row),
+        concat!(
+            r#"{"id":7,"kind":"document/undeclared-tag","severity":"warning","#,
+            r#""path":"notes/a.md","target":"draft","span":null,"#,
+            r#""head":{"candidates":[],"total":0},"#,
+            r#""hint":{"hint":"resolves","target":"glossary"},"#,
+            r#""message":"the tag is not declared","generation":12}"#
+        )
+    );
+}
+
+/// The refusal a target that names more than one document earns carries the
+/// same bounded head and the same hint a finding over that class carries, so
+/// the two say one thing.
+#[test]
+fn an_ambiguous_target_refuses_with_the_head_a_finding_carries() {
+    let envelope = ErrorEnvelope::new(
+        "the target names more than one document",
+        ErrorDetail::ambiguous_target(
+            target("glossary"),
+            head([candidate("notes/glossary")], 2),
+            Hint::resolves(target("glossary")),
+        ),
+    );
+    assert_eq!(
+        wire(&envelope),
+        concat!(
+            r#"{"code":"vault/ambiguous-target","message":"the target names more than one document","#,
+            r#""detail":{"code":"vault/ambiguous-target","target":"glossary","#,
+            r#""head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"}],"total":2},"#,
+            r#""hint":{"hint":"resolves","target":"glossary"}}}"#
+        )
+    );
+    assert_eq!(
+        wire(&ErrorEnvelope::new(
+            "the target names no document",
+            ErrorDetail::unknown_target(target("glossary")),
+        )),
+        concat!(
+            r#"{"code":"vault/unknown-target","message":"the target names no document","#,
+            r#""detail":{"code":"vault/unknown-target","target":"glossary"}}"#
+        )
+    );
+}
+
+/// The crate that declares the bound pins its value, so a surface rendering a
+/// head and a store holding one are bounded at a number this suite would have
+/// to be changed to move.
+#[test]
+fn the_candidate_head_is_five() {
+    assert_eq!(CANDIDATE_HEAD, 5);
+}
+
+// ── The six read verbs ───────────────────────────────────────────────────
+
+#[test]
+fn every_read_report_shape_survives_the_round_trip() {
+    for report in get_reports() {
+        round_trip(&report);
+    }
+    for report in validate_reports() {
+        round_trip(&report);
+    }
+    for page in collection_pages() {
+        round_trip(&page);
+    }
+    for facet in facets() {
+        round_trip(&facet);
+    }
+    for key in sort_keys() {
+        round_trip(&key);
+    }
+    for key in group_keys() {
+        round_trip(&key);
+    }
+    round_trip(&Tally::new([Some("note".to_string()), None], 7));
+    round_trip(&KindTally::new(
+        FindingKind::UndeclaredTag,
+        Severity::Warning,
+        3,
+    ));
+    round_trip(&Hit::new(path("notes/a.md"), score(0.5)));
+    round_trip(&Hit::new(path("notes/a.md"), score(0.5)).with_document(whole_document_row()));
+}
+
+#[test]
+fn every_read_params_shape_survives_the_round_trip() {
+    let vault = VaultAddress::name(name("notes"));
+    round_trip(&FindParams::new(vault.clone()));
+    round_trip(
+        &FindParams::new(vault.clone())
+            .with_predicates(predicates())
+            .with_sort(Sort::new(SortKey::field("due"), Direction::Descending))
+            .with_columns(columns())
+            .with_limit(20)
+            .with_after(cursors().remove(0)),
+    );
+    round_trip(&SearchParams::new(vault.clone(), "norn"));
+    round_trip(
+        &SearchParams::new(vault.clone(), "norn")
+            .with_predicates(predicates())
+            .with_rungs(RungSet::of(rungs()).expect("a ladder that runs a rung"))
+            .with_min_score(score(0.25))
+            .with_columns(columns())
+            .with_limit(20)
+            .with_after(cursors().remove(0)),
+    );
+    round_trip(&GetParams::new(vault.clone(), target("glossary")));
+    round_trip(
+        &GetParams::new(vault.clone(), target("glossary#Design"))
+            .with_columns(columns())
+            .with_collection(CollectionSelector::Links)
+            .with_limit(20)
+            .with_after(cursors().remove(0)),
+    );
+    round_trip(&CountParams::new(vault.clone()));
+    round_trip(
+        &CountParams::new(vault.clone())
+            .with_predicates(predicates())
+            .with_by(group_keys())
+            .with_limit(20)
+            .with_after(cursors().remove(0)),
+    );
+    round_trip(&ValidateParams::new(vault.clone()));
+    round_trip(
+        &ValidateParams::new(vault.clone())
+            .with_predicates(predicates())
+            .with_kinds(finding_kinds())
+            .with_severity(Severity::Error)
+            .summarized()
+            .with_limit(20)
+            .with_after(cursors().remove(0)),
+    );
+    round_trip(&DescribeParams::new(vault.clone()));
+    round_trip(
+        &DescribeParams::new(vault)
+            .with_facets(facet_kinds())
+            .with_limit(20)
+            .with_after(cursors().remove(0)),
+    );
+}
+
+/// Each params type is built by naming what a request cannot be built without,
+/// and every other part has a stated default. A `find` that named only its
+/// vault is every document, ordered by path, projecting the path alone; a
+/// `search` that named only its vault and its query runs the lexical floor.
+#[test]
+fn a_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
+    let vault = VaultAddress::name(name("notes"));
+    let find = FindParams::new(vault.clone());
+    assert_eq!(find.vault, vault);
+    assert!(find.predicates.is_empty());
+    assert!(find.columns.is_empty());
+    assert_eq!(find.sort, None);
+    assert_eq!(find.limit, None);
+    assert_eq!(find.after, None);
+
+    let search = SearchParams::new(vault.clone(), "norn");
+    assert_eq!(search.query, "norn");
+    assert_eq!(search.rungs, RungSet::lexical());
+    assert_eq!(search.min_score, None);
+
+    let validate = ValidateParams::new(vault.clone());
+    assert!(!validate.summary);
+    assert!(ValidateParams::new(vault.clone()).summarized().summary);
+
+    let get = GetParams::new(vault.clone(), target("glossary"));
+    assert_eq!(get.collection, None);
+    assert_eq!(get.limit, None);
+    assert!(CountParams::new(vault.clone()).by.is_empty());
+    assert!(DescribeParams::new(vault).facets.is_empty());
+}
+
+/// A search runs at least the lexical floor, so a set naming no rung is no
+/// ladder: it refuses where one is built and where one is read alike. The
+/// preset spellings are a surface's and never cross.
+#[test]
+fn a_rung_set_that_names_no_rung_is_no_ladder() {
+    assert_eq!(RungSet::of([]).expect_err("an empty ladder"), EmptyLadder);
+    assert_eq!(
+        EmptyLadder::to_string(&EmptyLadder),
+        "a search runs at least the lexical floor"
+    );
+    assert!(
+        serde_json::from_str::<RungSet>(r#"{"rungs":[]}"#).is_err(),
+        "a set naming no rung read back as a ladder"
+    );
+    assert_eq!(wire(&RungSet::lexical()), r#"{"rungs":["lexical"]}"#);
+    assert!(
+        serde_json::from_str::<RungSet>(r#"{"rungs":["hybrid"]}"#).is_err(),
+        "a preset spelling read back as a rung"
+    );
+    round_trip(&RungSet::of(rungs()).expect("a ladder that runs a rung"));
+}
+
+/// The set carries the rungs in ladder order whatever order a caller named
+/// them in, and it holds each rung once.
+#[test]
+fn a_rung_set_is_the_resolved_set_in_ladder_order() {
+    let named = RungSet::of([Rung::Rerank, Rung::Lexical, Rung::Rerank, Rung::Vector])
+        .expect("a ladder that runs a rung");
+    assert_eq!(wire(&named), r#"{"rungs":["lexical","vector","rerank"]}"#);
+}
+
+/// A get report is an object tagged `shape`, and the collection shape names
+/// the collection it paged once: the page's own `of` tag, which
+/// `CollectionPage::selector` is the one derivation of. There is no second
+/// field beside it for the two to disagree in.
+#[test]
+fn a_get_report_names_the_collection_it_paged_once() {
+    for page in collection_pages() {
+        let selector = page.selector();
+        let report = GetReport::collection(path("notes/a.md"), page);
+        let json = serde_json::to_value(&report).expect("a report as JSON");
+        assert_eq!(json["shape"].as_str(), Some("collection"));
+        assert_eq!(
+            json.as_object().map(|report| report.keys().count()),
+            Some(3),
+            "the collection report carries a field beside its path and its page: {json}"
+        );
+        assert!(
+            json.get("selector").is_none(),
+            "the collection report spells its selector a second time: {json}"
+        );
+        assert_eq!(json["page"]["of"], serde_json::to_value(selector).unwrap());
+    }
+    assert_eq!(
+        collection_pages()
+            .iter()
+            .map(CollectionPage::selector)
+            .collect::<Vec<_>>(),
+        collection_selectors()
+    );
+}
+
+/// A `#^block` anchor has a report shape of its own: the block the anchor
+/// named, where it is defined, and its body. A block the document does not
+/// define is an unsatisfied part beside the missing section.
+#[test]
+fn a_block_anchor_is_answered_with_the_block_it_named() {
+    let report = GetReport::block(
+        path("notes/a.md"),
+        BlockRow::new("a1", Some(span())),
+        body("the block body", 14),
+    );
+    assert_eq!(
+        wire(&report),
+        concat!(
+            r#"{"shape":"block","path":"notes/a.md","#,
+            r#""block":{"id":"a1","span":{"line":3,"column":1,"byte_offset":42}},"#,
+            r#""body":{"text":"the block body","byte_length":14}}"#
+        )
+    );
+    assert_eq!(
+        wire(&Unsatisfied::missing_block("a1")),
+        r#"{"part":"missing_block","id":"a1"}"#
+    );
+}
+
+/// A tally carries one value per group key the request named, and `null`
+/// where the document does not carry that key — so a reader lines the tuple up
+/// with the request rather than guessing which key a short tuple skipped.
+#[test]
+fn a_tally_carries_one_value_per_group_key() {
+    assert_eq!(
+        wire(&Tally::new([Some("note".to_string()), None], 7)),
+        r#"{"group":["note",null],"count":7}"#
+    );
+}
+
+/// The row and the key it stops at spell the grouping tuple one way, and
+/// `Tally::cursor_key` is the one function that turns one into the other: a
+/// group member the document does not carry is `null` in the key as it is on
+/// the row, so a continuation names the position the page reached.
+#[test]
+fn a_tally_cursor_key_spells_the_null_group_the_way_the_row_does() {
+    let tally = Tally::new([Some("note".to_string()), None], 7);
+    let key = tally.cursor_key();
+    assert_eq!(
+        key,
+        CursorKey::tally([Some("note".to_string()), None]),
+        "the key a tally stops at is not the tuple it carries"
+    );
+    round_trip(&key);
+    let json = serde_json::to_value(&key).expect("a key as JSON");
+    assert_eq!(json["group"], serde_json::json!(["note", null]));
+    round_trip(&Cursor::new(
+        Snapshot::new("epoch-1", 3, None, None),
+        tally.cursor_key(),
+    ));
+}
+
+/// A validate report is the findings or the tally of them, told apart by the
+/// `shape` tag rather than by which key is present.
+#[test]
+fn a_validate_report_is_an_object_tagged_shape() {
+    assert_eq!(
+        wire(&ValidateReport::summary([KindTally::new(
+            FindingKind::UndeclaredTag,
+            Severity::Warning,
+            3,
+        )])),
+        concat!(
+            r#"{"shape":"summary","by_kind":[{"kind":"document/undeclared-tag","#,
+            r#""severity":"warning","count":3}]}"#
+        )
+    );
+}
+
+/// A facet is an object tagged `facet`, and every facet names the kind a
+/// request selects it by and a cursor orders it under. A tag pattern reports
+/// its own kind rather than the declared-tag one: a pattern and a name are two
+/// shapes, so `--facets tag_pattern` selects the patterns alone.
+#[test]
+fn every_facet_names_the_kind_a_cursor_orders_it_under() {
+    for facet in facets() {
+        let kind = facet.kind();
+        let key = CursorKey::facet(kind, "type");
+        round_trip(&key);
+        let json = serde_json::to_value(&key).expect("a key as JSON");
+        assert_eq!(json["kind"], serde_json::to_value(kind).unwrap());
+    }
+    let kinds: BTreeSet<String> = facets()
+        .iter()
+        .map(|facet| flat_string(&facet.kind()))
+        .collect();
+    assert_eq!(
+        kinds,
+        facet_kinds()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        wire(&Facet::declared_field("due", FieldType::Date, true, None)),
+        r#"{"facet":"declared_field","key":"due","field_type":"date","required":true,"one_of":null}"#
+    );
+    assert_eq!(
+        wire(&Facet::undeclared_tags(TagStance::Report)),
+        r#"{"facet":"undeclared_tags","stance":"report"}"#
+    );
+}
+
+/// The map from a facet to its kind is injective: one kind per shape, so
+/// `--facets` naming a kind names one shape and a page ordered by kind holds
+/// one. Two shapes sharing a kind would make the selection ambiguous.
+#[test]
+fn every_facet_shape_maps_to_a_kind_of_its_own() {
+    let shapes: BTreeSet<String> = facets()
+        .iter()
+        .map(|facet| tag_string(facet, "facet"))
+        .collect();
+    let kinds: BTreeSet<String> = facets()
+        .iter()
+        .map(|facet| flat_string(&facet.kind()))
+        .collect();
+    assert_eq!(
+        kinds.len(),
+        shapes.len(),
+        "two facet shapes report one kind: {shapes:?} map onto {kinds:?}"
+    );
+    assert_eq!(
+        Facet::tag_pattern("person/**").kind(),
+        FacetKind::TagPattern
+    );
+    assert_eq!(
+        Facet::undeclared_tags(TagStance::Allow).kind(),
+        FacetKind::UndeclaredTags
+    );
+}
+
+/// Every facet says where a page of facets stops at it, and the key it says is
+/// the one text the facet itself spells. The key each shape hands back is
+/// pinned here, so a shape keyed by another of its fields — or by a field it
+/// gained — is a change this test reports rather than a page that resumes
+/// somewhere else.
+#[test]
+fn every_facet_says_where_a_page_of_facets_stops_at_it() {
+    for (facet, kind, key) in [
+        (
+            Facet::declared_field("due", FieldType::Date, true, None),
+            FacetKind::DeclaredField,
+            "due",
+        ),
+        (
+            Facet::observed_field("author", ContainerKind::Sequence),
+            FacetKind::ObservedField,
+            "author",
+        ),
+        (Facet::declared_tag("area"), FacetKind::DeclaredTag, "area"),
+        (
+            Facet::tag_pattern("person/**"),
+            FacetKind::TagPattern,
+            "person/**",
+        ),
+        (
+            Facet::folder("journal", Some("One per day".to_string())),
+            FacetKind::Folder,
+            "journal",
+        ),
+        (
+            Facet::path_rule(PathRuleKind::AmbiguityIgnore, "archive/**"),
+            FacetKind::PathRule,
+            "archive/**",
+        ),
+        (
+            Facet::undeclared_tags(TagStance::Allow),
+            FacetKind::UndeclaredTags,
+            "allow",
+        ),
+        (
+            Facet::undeclared_tags(TagStance::Report),
+            FacetKind::UndeclaredTags,
+            "report",
+        ),
+    ] {
+        let cursor_key = facet.cursor_key();
+        assert_eq!(cursor_key, CursorKey::facet(kind, key));
+        round_trip(&cursor_key);
+        let json = serde_json::to_value(&cursor_key).expect("a key as JSON");
+        assert_eq!(json["row"].as_str(), Some("facet"));
+        assert_eq!(json["kind"].as_str(), Some(flat_string(&kind).as_str()));
+        assert_eq!(json["key"].as_str(), Some(key));
+    }
+    for facet in facets() {
+        let json = serde_json::to_value(facet.cursor_key()).expect("a key as JSON");
+        assert_eq!(
+            json["kind"].as_str(),
+            Some(flat_string(&facet.kind()).as_str()),
+            "a facet is keyed under a kind that is not its own: {facet:?}"
+        );
+        assert!(
+            json["key"].as_str().is_some_and(|key| !key.is_empty()),
+            "a facet stops a page at no text at all: {facet:?}"
+        );
+    }
+}
+
+/// A ranked hit carries its document row only where the request projected one,
+/// and the row is left out of the bytes where it did not.
+#[test]
+fn a_hit_carries_a_document_row_only_where_one_was_projected() {
+    assert_eq!(
+        wire(&Hit::new(path("notes/a.md"), score(0.5))),
+        r#"{"path":"notes/a.md","score":0.5}"#
+    );
+    let hydrated = Hit::new(path("notes/a.md"), score(0.5))
+        .with_document(DocumentRow::new(path("notes/a.md")));
+    assert_eq!(
+        wire(&hydrated),
+        r#"{"path":"notes/a.md","score":0.5,"document":{"path":"notes/a.md"}}"#
+    );
+}
+
+// ── Every setter lands, in bytes ─────────────────────────────────────────
+
+/// The vault address every pinned request below names, written once because
+/// six of them name the same one.
+const PINNED_VAULT: &str = r##"{"by":"name","name":"notes"}"##;
+
+/// Every predicate the vocabulary holds, as the four verbs that filter by
+/// them carry it.
+const PINNED_PREDICATES: &str = r##"[{"op":"eq","key":"type","value":"note"},{"op":"not_eq","key":"type","value":"note"},{"op":"in","key":"type","values":["note","task"]},{"op":"has","key":"due"},{"op":"missing","key":"due"},{"op":"before","key":"due","value":"2026-01-01"},{"op":"after","key":"due","value":"2026-01-01"},{"op":"matches","query":"norn NEAR vault"},{"op":"path","glob":"docs/**"},{"op":"links_to","target":"glossary#Design"},{"op":"resolves","target":"norn/glossary"},{"op":"tag","name":"draft"},{"op":"has_finding","kind":"document/undeclared-tag"}]"##;
+
+/// Every column a projection can ask for, as the three verbs that project
+/// them carry it.
+const PINNED_COLUMNS: &str = r##"[{"col":"path"},{"col":"field","key":"due"},{"col":"body"},{"col":"links"},{"col":"headings"},{"col":"blocks"},{"col":"tags"},{"col":"findings"},{"col":"fields"}]"##;
+
+/// The opaque cursor every pinned request continues from.
+const PINNED_AFTER: &str = r##"eyJzbmFwc2hvdCI6eyJlcG9jaCI6ImVwb2NoLTEiLCJnZW5lcmF0aW9uIjoxMiwic2NoZW1hX2ZpbmdlcnByaW50IjoiZnAtMSIsInNpZGVjYXJfcmV2aXNpb24iOjR9LCJrZXkiOnsicm93IjoiZG9jdW1lbnQiLCJzb3J0IjoiMjAyNi0wMS0wMSIsInBhdGgiOiJub3Rlcy9hLm1kIn19"##;
+
+/// **A setter that does nothing is a setter nothing else catches.** A `with_`
+/// method that dropped its argument still type-checks, still hands back a
+/// value a caller can use, and still survives the round trip — the round trip
+/// compares a value to itself, so a request that lost a part equals the
+/// request it became. The bytes are what catch it: each test below builds a
+/// value through every setter its type has and pins what it serializes to, so
+/// a setter that stops landing changes those bytes and fails here.
+
+#[test]
+fn every_find_setter_lands_in_the_bytes() {
+    let request = FindParams::new(VaultAddress::name(name("notes")))
+        .with_predicates(predicates())
+        .with_sort(Sort::new(SortKey::field("due"), Direction::Descending))
+        .with_columns(columns())
+        .with_limit(20)
+        .with_after(cursors().remove(0));
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"vault":"##,
+            PINNED_VAULT,
+            r##","predicates":"##,
+            PINNED_PREDICATES,
+            r##","sort":{"key":{"by":"field","key":"due"},"direction":"descending"},"columns":"##,
+            PINNED_COLUMNS,
+            r##","limit":20,"after":""##,
+            PINNED_AFTER,
+            r##""}"##,
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn every_search_setter_lands_in_the_bytes() {
+    let request = SearchParams::new(VaultAddress::name(name("notes")), "norn")
+        .with_predicates(predicates())
+        .with_rungs(RungSet::of(rungs()).expect("a ladder that runs a rung"))
+        .with_min_score(score(0.25))
+        .with_columns(columns())
+        .with_limit(20)
+        .with_after(cursors().remove(0));
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"vault":"##,
+            PINNED_VAULT,
+            r##","query":"norn","predicates":"##,
+            PINNED_PREDICATES,
+            r##","rungs":{"rungs":["lexical","vector","expansion","rerank"]},"min_score":0.25,"columns":"##,
+            PINNED_COLUMNS,
+            r##","limit":20,"after":""##,
+            PINNED_AFTER,
+            r##""}"##,
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn every_get_setter_lands_in_the_bytes() {
+    let request = GetParams::new(VaultAddress::name(name("notes")), target("glossary#Design"))
+        .with_columns(columns())
+        .with_collection(CollectionSelector::Links)
+        .with_limit(20)
+        .with_after(cursors().remove(0));
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"vault":"##,
+            PINNED_VAULT,
+            r##","target":"glossary#Design","columns":"##,
+            PINNED_COLUMNS,
+            r##","collection":"links","limit":20,"after":""##,
+            PINNED_AFTER,
+            r##""}"##,
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn every_count_setter_lands_in_the_bytes() {
+    let request = CountParams::new(VaultAddress::name(name("notes")))
+        .with_predicates(predicates())
+        .with_by(group_keys())
+        .with_limit(20)
+        .with_after(cursors().remove(0));
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"vault":"##,
+            PINNED_VAULT,
+            r##","predicates":"##,
+            PINNED_PREDICATES,
+            r##","by":[{"by":"field","key":"type"},{"by":"tag"}],"limit":20,"after":""##,
+            PINNED_AFTER,
+            r##""}"##,
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn every_validate_setter_lands_in_the_bytes() {
+    let request = ValidateParams::new(VaultAddress::name(name("notes")))
+        .with_predicates(predicates())
+        .with_kinds(finding_kinds())
+        .with_severity(Severity::Error)
+        .summarized()
+        .with_limit(20)
+        .with_after(cursors().remove(0));
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"vault":"##,
+            PINNED_VAULT,
+            r##","predicates":"##,
+            PINNED_PREDICATES,
+            r##","kinds":["document/path-bytes-not-utf8","document/path-names-no-document","document/body-bytes-not-utf8","document/frontmatter-too-large","document/frontmatter-unclosed","document/frontmatter-unreadable","document/undeclared-tag"],"severity":"error","summary":true,"limit":20,"after":""##,
+            PINNED_AFTER,
+            r##""}"##,
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn every_describe_setter_lands_in_the_bytes() {
+    let request = DescribeParams::new(VaultAddress::name(name("notes")))
+        .with_facets(facet_kinds())
+        .with_limit(20)
+        .with_after(cursors().remove(0));
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"vault":"##,
+            PINNED_VAULT,
+            r##","facets":["declared_field","observed_field","declared_tag","folder","path_rule","tag_pattern","undeclared_tags"],"limit":20,"after":""##,
+            PINNED_AFTER,
+            r##""}"##,
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn every_document_row_setter_lands_in_the_bytes() {
+    let request = whole_document_row();
+    assert_eq!(
+        wire(&request),
+        [
+            r##"{"path":"notes/a.md","fields":{"type":{"kind":"scalar","raw":"note"}},"body":{"text":"Design\n","byte_length":4096},"links":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"}],"total":1},"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"},{"path":"archive/a.md","suffix":"archive/a"}],"total":2},"health":"ambiguous"}],"total":9},"headings":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"blocks":{"items":[{"id":"a1","span":null}],"total":1},"tags":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12}],"total":1}}"##,
+        ]
+        .concat()
     );
 }

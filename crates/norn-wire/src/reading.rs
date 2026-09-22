@@ -25,10 +25,23 @@
 //! a rung has is decided by which rung it is, so a shape that admits a
 //! request-time rung with a lag admits a report no answer can produce.
 //!
+//! **A rung's declaration order is ladder order, and `Ord` is derived from
+//! it.** The floor is declared first and each rung after it is declared where
+//! it stands on the ladder, so the derived ordering a [`RungSet`](crate::RungSet)
+//! sorts by is the order the ladder runs in rather than an alphabet. A rung
+//! added later is declared at its ladder position, not appended: appending it
+//! would leave the derived order saying it runs last whatever the ladder does.
+//!
 //! **The engine section is what the host was delivered, not what a file
 //! says.** It is the reading the status verb reports and the reading a vector
 //! refusal is composed against, so "the vault has no engine" and "the vault's
 //! engine section is malformed" are two answers rather than one.
+//!
+//! [`EngineSection`] is plain rather than `#[non_exhaustive]`, on the same
+//! terms as [`FindingScope`](crate::FindingScope): every reading here composes
+//! with an engine's own refusal to say what a client should do about it, and a
+//! composer that has not decided what a new reading means should fail to
+//! compile rather than fall into a default arm.
 //!
 //! Nothing produces a section today. The host retains the reading at config
 //! dispatch once the `search` handler's engine seams land there (NORN-230),
@@ -41,11 +54,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::trust::TrustState;
 
-/// A rung of a vault's search ladder.
+/// A rung of a vault's search ladder, in the order the ladder runs them.
 ///
 /// On the wire a rung is the flat string itself: `"lexical"`, `"vector"`,
-/// `"expansion"`, `"rerank"`.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+/// `"expansion"`, `"rerank"`. A rung the ladder gains is spelled at the
+/// position it runs at.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Rung {
@@ -243,12 +259,6 @@ impl AnswerReading {
 ///
 /// On the wire a section is an object tagged `state`:
 /// `{"state":"absent"}`, `{"state":"malformed","detail":"…"}`.
-///
-/// Plain rather than `#[non_exhaustive]`, on the same terms as
-/// [`FindingScope`](crate::FindingScope): every reading here composes with an
-/// engine's own refusal to say what a client should do about it, and a
-/// composer that has not decided what a new reading means should fail to
-/// compile rather than fall into a default arm.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum EngineSection {

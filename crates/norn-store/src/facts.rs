@@ -471,9 +471,11 @@ pub struct FindingFacts {
 /// A finding's candidate list is a **bounded head**: the first five in
 /// deterministic order, and a total.
 ///
-/// The bound holds at rest exactly as it holds on the wire. A payload bounded
-/// only at the rendering step is a payload the second consumer emits unbounded.
-pub const CANDIDATE_HEAD: usize = 5;
+/// The bound holds at rest exactly as it holds on the wire, and it is the
+/// wire's number rather than a second one written here: a payload bounded
+/// only at the rendering step is a payload the second consumer emits
+/// unbounded, and two spellings of the bound could disagree.
+pub const CANDIDATE_HEAD: usize = norn_wire::CANDIDATE_HEAD;
 
 /// A finding as it stands, with the head of its candidates.
 #[derive(Clone, Debug, Eq, PartialEq)]

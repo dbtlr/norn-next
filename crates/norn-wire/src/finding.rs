@@ -21,6 +21,13 @@
 //! A client reading the findings at a path branches on that: a place-scoped
 //! finding there says no document is derived at it, and a document-scoped one
 //! says the document beside it is derived with something missing.
+//!
+//! [`FindingScope`] is plain rather than `#[non_exhaustive]`: a producer or a
+//! reader that has not decided what a new scope means should fail to compile
+//! rather than fall into a default arm. The rationale sits here because a doc
+//! comment on the type is published as the schema `description` an MCP
+//! consumer reads, and what governs Rust destructuring is not something that
+//! consumer can see or write.
 
 use std::fmt;
 
@@ -130,10 +137,6 @@ pub enum FindingKind {
 /// The two scopes differ in one thing: whether a document row at the subject
 /// withholds the finding. Everything else — how a finding is recorded, read,
 /// filtered and discarded — is the same for both.
-///
-/// Plain rather than `#[non_exhaustive]`: a producer or a reader that has not
-/// decided what a new scope means should fail to compile rather than fall into
-/// a default arm.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingScope {

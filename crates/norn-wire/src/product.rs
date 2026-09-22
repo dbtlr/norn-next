@@ -89,6 +89,12 @@ pub enum Unsatisfied {
         /// The section the request named.
         section: String,
     },
+    /// The request asked for a block the document does not define.
+    #[non_exhaustive]
+    MissingBlock {
+        /// The block identifier the request named, without its `^`.
+        id: String,
+    },
     /// The request carried a resolution part on a verb that answers no
     /// resolution. It is meaningful on `find` alone; `count` and `validate`
     /// report it here.
@@ -147,6 +153,11 @@ impl Unsatisfied {
         Unsatisfied::MissingSection {
             section: section.into(),
         }
+    }
+
+    /// The document defines no block `id`.
+    pub fn missing_block(id: impl Into<String>) -> Self {
+        Unsatisfied::MissingBlock { id: id.into() }
     }
 
     /// This verb answers no resolution of `target`.

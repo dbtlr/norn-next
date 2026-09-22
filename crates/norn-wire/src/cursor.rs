@@ -92,6 +92,10 @@ pub enum FacetKind {
     Folder,
     /// A path rule the vault's schema states.
     PathRule,
+    /// A pattern the vault's tag facet admits beyond its literal names.
+    TagPattern,
+    /// What the vault says about a tag its facet does not admit.
+    UndeclaredTags,
 }
 
 /// A number that is no relevance score.
@@ -189,8 +193,9 @@ pub enum CursorKey {
     /// A tally row: the grouping tuple.
     #[non_exhaustive]
     Tally {
-        /// The values the row is grouped by, in the grouping's own order.
-        group: Vec<String>,
+        /// The values the row is grouped by, in the grouping's own order, and
+        /// `null` where the document does not carry that key.
+        group: Vec<Option<String>>,
     },
     /// A finding row: the kind, then the path, then the finding's identifier.
     #[non_exhaustive]
@@ -236,7 +241,7 @@ impl CursorKey {
     }
 
     /// A tally row stopped at the grouping tuple `group`.
-    pub fn tally(group: impl IntoIterator<Item = String>) -> Self {
+    pub fn tally(group: impl IntoIterator<Item = Option<String>>) -> Self {
         CursorKey::Tally {
             group: group.into_iter().collect(),
         }

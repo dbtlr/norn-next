@@ -712,3 +712,53 @@ fn a_pathological_pattern_matches_in_bounded_time() {
         "matching took {spent:?}"
     );
 }
+
+/// The declared field types this crate reads and the ones the wire carries are
+/// two lists, and they name one vocabulary.
+///
+/// `norn-wire` links nothing in the workspace, so the type a `describe` facet
+/// reports is spelled there as well as here and neither definition is derived
+/// from the other. This is where the two are held equal: both lists are walked
+/// by the spelling a schema writes, so a type added on one side alone fails
+/// here rather than crossing the seam as a spelling the other side has no
+/// reader for.
+#[test]
+fn the_declared_field_types_are_the_ones_the_wire_carries() {
+    let here: Vec<&str> = FieldType::ALL.iter().map(|kind| kind.as_str()).collect();
+    let wire: Vec<&str> = norn_wire::FieldType::ALL
+        .iter()
+        .map(norn_wire::FieldType::as_str)
+        .collect();
+    assert_eq!(
+        here, wire,
+        "the field types this crate reads are not the ones the wire carries"
+    );
+    for kind in FieldType::ALL {
+        assert_eq!(FieldType::named(kind.as_str()), Some(kind));
+    }
+}
+
+/// The stances on an undeclared tag this crate reads and the ones the wire
+/// carries are two lists, and they name one vocabulary.
+///
+/// The same seam as the field types above: a `describe` facet reports what the
+/// schema says about a tag it did not declare, and `norn-wire` spells that
+/// vocabulary again rather than reaching for this one. Both lists are walked by
+/// the spelling a schema writes, so a stance added on one side alone fails here
+/// rather than crossing the seam as a spelling the other side has no reader
+/// for.
+#[test]
+fn the_undeclared_tag_stances_are_the_ones_the_wire_carries() {
+    let here: Vec<&str> = UndeclaredTags::ALL
+        .iter()
+        .map(|stance| stance.as_str())
+        .collect();
+    let wire: Vec<&str> = norn_wire::TagStance::ALL
+        .iter()
+        .map(norn_wire::TagStance::as_str)
+        .collect();
+    assert_eq!(
+        here, wire,
+        "the stances this crate reads are not the ones the wire carries"
+    );
+}
