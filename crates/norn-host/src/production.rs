@@ -330,6 +330,12 @@ impl ProductionEntryOps {
         match registration.poll_backend {
             Some(PollBackend::Poll) => watch_polling,
             None => watch,
+            // The vocabulary is `norn-wire`'s and grows there. No other member
+            // exists in this build, and a registration cannot name one: the
+            // registry reader parses the field through this same vocabulary
+            // and refuses a string outside it. A member arriving without an
+            // entrypoint here is covered natively rather than not at all.
+            Some(_) => watch,
         }
     }
 

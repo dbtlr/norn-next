@@ -369,34 +369,13 @@ fn digest_component(bytes: &[u8]) -> String {
 
 /// `path`, if it is a path machine-local state can be expressed over.
 ///
-/// Two demands, and they are one function because every path this crate
-/// records or builds under has both. **Absolute**, because a relative path
-/// names a different directory to every process that reads it and this state
-/// is read by a service, a CLI and a shim in three different ones.
-/// **UTF-8**, because a recorded path is written into a TOML file and read
-/// back out of one: bytes that are not text do not survive that round trip,
-/// and rendering them lossily would report success while writing a different
-/// path from the one that was asked for.
-///
-/// `subject` names which path it is, so the refusal reads as a sentence about
-/// the caller's argument rather than about a rule.
+/// The grammar is `norn-wire`'s — absolute, and UTF-8 — and this is the same
+/// refusal read as one of this crate's, so a caller working over machine-local
+/// state handles one error type rather than two. `subject` names which path it
+/// is, so the refusal reads as a sentence about the caller's argument rather
+/// than about a rule.
 pub(crate) fn absolute_path(path: PathBuf, subject: &'static str) -> Result<PathBuf, ConfigError> {
-    if path.to_str().is_none() {
-        return Err(ConfigError::IllegalPath {
-            path,
-            subject,
-            problem: "a path here is written into a text file and read back, so it is UTF-8",
-        });
-    }
-    if !path.is_absolute() {
-        return Err(ConfigError::IllegalPath {
-            path,
-            subject,
-            problem: "a path here is absolute, because it is read by processes whose working \
-                      directories differ",
-        });
-    }
-    Ok(path)
+    Ok(norn_wire::absolute_path(path, subject)?)
 }
 
 /// The XDG base directories the given environment names.

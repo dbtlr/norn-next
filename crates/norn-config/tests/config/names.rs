@@ -77,13 +77,17 @@ fn a_path_that_is_not_absolute_utf8_is_refused_with_its_subject() {
     for (subject, relative, not_text) in [
         (
             "vault root",
-            VaultRoot::new("notes").err(),
-            VaultRoot::new(mangled.clone()).err(),
+            VaultRoot::new("notes").err().map(ConfigError::from),
+            VaultRoot::new(mangled.clone()).err().map(ConfigError::from),
         ),
         (
             "schema source",
-            SchemaSource::new("schemas/notes.yaml").err(),
-            SchemaSource::new(mangled.clone()).err(),
+            SchemaSource::new("schemas/notes.yaml")
+                .err()
+                .map(ConfigError::from),
+            SchemaSource::new(mangled.clone())
+                .err()
+                .map(ConfigError::from),
         ),
         (
             "config base",
@@ -121,9 +125,10 @@ fn a_path_that_is_not_absolute_utf8_is_refused_with_its_subject() {
 fn an_empty_root_is_refused() {
     for text in ["", "./notes", "../notes"] {
         let error = VaultRoot::new(text).expect_err(&format!("`{text}` is not a vault root"));
-        assert!(
-            matches!(error, ConfigError::IllegalPath { .. }),
-            "`{text}` was refused as something other than an illegal path: {error}"
+        assert_eq!(
+            error.what(),
+            "vault root",
+            "`{text}` was refused as something other than a vault root: {error}"
         );
     }
 }

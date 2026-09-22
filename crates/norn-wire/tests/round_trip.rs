@@ -15,8 +15,9 @@
 
 use norn_wire::{
     AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
-    ReasonCode, Severity, TrustState, UnknownFindingKind, UnknownSeverity, UntrustedReason,
-    VaultName, WarmingPhase, WatcherLossCause,
+    PollBackend, ReasonCode, SchemaSource, Severity, TrustState, UnknownFindingKind,
+    UnknownPollBackend, UnknownSeverity, UntrustedReason, VaultAddress, VaultName, VaultRoot,
+    WarmingPhase, WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -135,6 +136,40 @@ fn vault_names() -> Vec<VaultName> {
         .into_iter()
         .map(|text| VaultName::new(text).expect("a legal vault name"))
         .collect()
+}
+
+/// Every watch backend the vocabulary holds.
+fn poll_backends() -> Vec<PollBackend> {
+    PollBackend::ALL.to_vec()
+}
+
+/// Every root the grammar accepts, spread across the shapes a path takes.
+fn vault_roots() -> Vec<VaultRoot> {
+    [
+        "/",
+        "/home/person/notes",
+        "/home/person/n o t e s",
+        "/tmp/a.b",
+    ]
+    .into_iter()
+    .map(|text| VaultRoot::new(text).expect("an absolute root"))
+    .collect()
+}
+
+/// Every schema source the grammar accepts.
+fn schema_sources() -> Vec<SchemaSource> {
+    ["/home/person/.config/norn/schemas/work.yaml", "/s.yaml"]
+        .into_iter()
+        .map(|text| SchemaSource::new(text).expect("an absolute schema source"))
+        .collect()
+}
+
+/// Every way a request addresses a vault.
+fn vault_addresses() -> Vec<VaultAddress> {
+    let mut addresses: Vec<VaultAddress> =
+        vault_names().into_iter().map(VaultAddress::name).collect();
+    addresses.extend(vault_roots().into_iter().map(VaultAddress::root));
+    addresses
 }
 
 fn round_trip<T>(value: &T)
@@ -267,6 +302,22 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<ErrorDetail>(Some("code")),
         "the details built here are not the details the vocabulary holds"
+    );
+    assert_eq!(
+        poll_backends()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<PollBackend>(None),
+        "the backends built here are not the backends the vocabulary holds"
+    );
+    assert_eq!(
+        vault_addresses()
+            .iter()
+            .map(|address| tag_string(address, "by"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<VaultAddress>(Some("by")),
+        "the addresses built here are not the addresses the vocabulary holds"
     );
 }
 
@@ -877,5 +928,131 @@ fn an_enum_refuses_a_variant_it_does_not_know() {
     assert!(
         serde_json::from_str::<Severity>(r#""urgent""#).is_err(),
         "a severity nobody minted read back as one"
+    );
+}
+
+// ── The address grammar ──────────────────────────────────────────────────
+
+#[test]
+fn every_poll_backend_survives_the_round_trip() {
+    for backend in poll_backends() {
+        round_trip(&backend);
+    }
+}
+
+#[test]
+fn every_vault_root_survives_the_round_trip() {
+    for root in vault_roots() {
+        round_trip(&root);
+    }
+}
+
+#[test]
+fn every_schema_source_survives_the_round_trip() {
+    for source in schema_sources() {
+        round_trip(&source);
+    }
+}
+
+#[test]
+fn every_vault_address_survives_the_round_trip() {
+    for address in vault_addresses() {
+        round_trip(&address);
+    }
+}
+
+/// A backend is the bare value a registration records and renders, with one
+/// spelling shared by serde, display and the walkable vocabulary.
+#[test]
+fn a_poll_backend_is_the_bare_string_it_renders_as() {
+    let strings = ["poll"];
+    assert_eq!(poll_backends().len(), strings.len());
+    for (backend, string) in poll_backends().into_iter().zip(strings) {
+        assert_eq!(backend.as_str(), string);
+        assert_eq!(backend.to_string(), string);
+        assert_eq!(wire(&backend), format!("\"{string}\""));
+        assert_eq!(PollBackend::try_from(string), Ok(backend));
+    }
+    assert_eq!(PollBackend::try_from("inotify"), Err(UnknownPollBackend));
+    assert!(
+        serde_json::from_str::<PollBackend>(r#""inotify""#).is_err(),
+        "a backend nobody minted read back as one"
+    );
+}
+
+/// A root and a schema source are the strings they render as, and the read
+/// path is the grammar: a relative path, an empty one, and bytes that are not
+/// text have no representation on either side of the seam.
+#[test]
+fn a_recorded_path_is_the_string_it_renders_as_and_is_read_through_its_grammar() {
+    assert_eq!(
+        wire(&VaultRoot::new("/home/person/notes").expect("an absolute root")),
+        r#""/home/person/notes""#
+    );
+    assert_eq!(
+        wire(&SchemaSource::new("/s.yaml").expect("an absolute schema source")),
+        r#""/s.yaml""#
+    );
+    for text in ["", "notes", "./notes", "../notes"] {
+        let json = format!("\"{text}\"");
+        assert!(
+            serde_json::from_str::<VaultRoot>(&json).is_err(),
+            "`{text}` was read as a vault root"
+        );
+        assert!(
+            serde_json::from_str::<SchemaSource>(&json).is_err(),
+            "`{text}` was read as a schema source"
+        );
+    }
+}
+
+/// The refusal names the path that was offered, which of the two grammars
+/// refused it, and what that grammar wanted.
+#[test]
+fn a_refused_path_names_what_it_was_meant_to_be() {
+    let refusal = VaultRoot::new("notes").expect_err("a relative root");
+    assert_eq!(refusal.path(), "notes");
+    assert_eq!(refusal.what(), "vault root");
+    assert!(refusal.problem().contains("absolute"), "{refusal}");
+
+    let refusal = SchemaSource::new("s.yaml").expect_err("a relative schema source");
+    assert_eq!(refusal.what(), "schema source");
+    assert_eq!(
+        refusal.to_string(),
+        format!("`s.yaml` is not a schema source: {}", refusal.problem())
+    );
+}
+
+/// The text is the path: a root that crossed is a root the constructor
+/// accepted, so asking for it either way hands back one spelling.
+#[test]
+fn a_root_is_one_spelling_as_text_and_as_a_path() {
+    let root = VaultRoot::new("/home/person/notes").expect("an absolute root");
+    assert_eq!(root.as_str(), "/home/person/notes");
+    assert_eq!(root.as_path().to_str(), Some("/home/person/notes"));
+    assert_eq!(root.to_string(), "/home/person/notes");
+}
+
+/// An address is an object tagged `by`, and the two ways a request names a
+/// vault are told apart by that tag rather than by which key is present.
+#[test]
+fn a_vault_address_is_an_object_tagged_by() {
+    assert_eq!(
+        wire(&VaultAddress::name(name("notes"))),
+        r#"{"by":"name","name":"notes"}"#
+    );
+    assert_eq!(
+        wire(&VaultAddress::root(
+            VaultRoot::new("/home/person/notes").expect("an absolute root")
+        )),
+        r#"{"by":"root","root":"/home/person/notes"}"#
+    );
+    assert!(
+        serde_json::from_str::<VaultAddress>(r#"{"by":"url","url":"norn://notes"}"#).is_err(),
+        "an address nobody minted read back as one"
+    );
+    assert!(
+        serde_json::from_str::<VaultAddress>(r#"{"by":"root","root":"notes"}"#).is_err(),
+        "a relative root read back as an address"
     );
 }

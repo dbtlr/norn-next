@@ -158,12 +158,17 @@
 //! detail's wire tag *is* the code string, and [`ErrorDetail::code`] hands back
 //! the code the detail belongs to.
 
+mod address;
 mod demand;
 mod error;
 mod finding;
 mod name;
 mod trust;
 
+pub use address::{
+    IllegalPath, PollBackend, SchemaSource, UnknownPollBackend, VaultAddress, VaultRoot,
+    absolute_path,
+};
 pub use demand::AttachMode;
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};

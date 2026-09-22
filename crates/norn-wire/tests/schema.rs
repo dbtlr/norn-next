@@ -12,7 +12,8 @@
 
 use norn_wire::{
     AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
-    ReasonCode, Severity, TrustState, UntrustedReason, VaultName, WarmingPhase, WatcherLossCause,
+    PollBackend, ReasonCode, SchemaSource, Severity, TrustState, UntrustedReason, VaultAddress,
+    VaultName, VaultRoot, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -104,6 +105,10 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<ErrorEnvelope>(),
         schema_of::<AttachMode>(),
         schema_of::<VaultName>(),
+        schema_of::<VaultRoot>(),
+        schema_of::<SchemaSource>(),
+        schema_of::<PollBackend>(),
+        schema_of::<VaultAddress>(),
     ] {
         assert!(
             schema.get("$schema").is_some(),
@@ -488,6 +493,80 @@ fn an_envelope_refers_to_the_code_and_the_detail() {
         assert!(
             schema["$defs"][definition].is_object(),
             "the envelope's schema carries no definition of {definition}"
+        );
+    }
+}
+
+// ── The address grammar ──────────────────────────────────────────────────
+
+/// A recorded path advertises the grammar its constructor keeps, in words.
+/// There is no `pattern`: whether a path is absolute is a platform question,
+/// and a regular expression that answered it on one platform would answer it
+/// wrongly on another, admitting paths the reader refuses.
+///
+/// The descriptions are pinned here for the reason the name's is: these are
+/// hand-written schemas, so the sentence the schema carries and the sentence
+/// the type's doc carries are two spellings that nothing else holds equal.
+#[test]
+fn a_recorded_path_advertises_the_grammar_it_is_parsed_through() {
+    for (schema, description) in [
+        (
+            schema_of::<VaultRoot>(),
+            "A vault's root directory: an absolute UTF-8 path.",
+        ),
+        (
+            schema_of::<SchemaSource>(),
+            "Where a vault's schema is read from: an absolute UTF-8 path.",
+        ),
+    ] {
+        assert_eq!(schema["type"].as_str(), Some("string"));
+        assert_eq!(schema["description"].as_str(), Some(description));
+        assert!(
+            schema.get("pattern").is_none(),
+            "a recorded path advertises a pattern: {schema}"
+        );
+    }
+}
+
+#[test]
+fn a_poll_backend_advertises_its_bare_string() {
+    let schema = schema_of::<PollBackend>();
+    let backends: Vec<&str> = branches(&schema)
+        .iter()
+        .map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a backend branch is not a pinned string: {branch}"))
+        })
+        .collect();
+    assert_eq!(sorted(backends.clone()), sorted(["poll"]));
+    assert_eq!(
+        sorted(backends),
+        sorted(PollBackend::ALL.map(|backend| backend.as_str()))
+    );
+}
+
+/// An address advertises its `by` tag, and each branch refers to the grammar
+/// its payload is parsed through rather than restating it as a bare string.
+#[test]
+fn a_vault_address_advertises_its_by_tag_and_the_grammars_behind_it() {
+    let schema = schema_of::<VaultAddress>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "by")),
+        sorted(["name", "root"])
+    );
+    for (tag, field, definition) in [("name", "name", "VaultName"), ("root", "root", "VaultRoot")] {
+        let branch = branches(&schema)
+            .iter()
+            .find(|branch| tag_constant(branch, "by") == Some(tag))
+            .unwrap_or_else(|| panic!("the {tag} branch"));
+        assert_eq!(property_names(branch), ["by", field].into_iter().collect());
+        assert_eq!(
+            branch["properties"][field]["$ref"].as_str(),
+            Some(format!("#/$defs/{definition}").as_str())
+        );
+        assert!(
+            schema["$defs"][definition].is_object(),
+            "the referenced definition is absent: {schema}"
         );
     }
 }

@@ -46,14 +46,14 @@
 //! duplicate class that cannot reach the reader at all.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use toml::{Table, Value};
 
 use crate::document::{self, Document};
 use crate::error::{ConfigError, corrupt};
 use crate::file::{Sensitivity, Stored};
-use crate::{ConfigDirs, VaultName, absolute_path};
+use crate::{ConfigDirs, VaultName};
 
 /// The key of the table holding the entries.
 const VAULTS_KEY: &str = "vaults";
@@ -64,61 +64,15 @@ const POLL_BACKEND_KEY: &str = "poll_backend";
 
 /// A vault's root directory, as recorded.
 ///
-/// Absolute and UTF-8, and nothing more is claimed. Whether it exists, whether
-/// it is a directory, whether it is the same directory as another entry's root
-/// — all three are filesystem questions, and this crate does not ask them.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VaultRoot(PathBuf);
-
-impl VaultRoot {
-    /// The root `path` names, or a refusal if it is not one.
-    ///
-    /// A relative root resolves against whatever directory the reading process
-    /// happens to be in, and machine-local state is read by a service, a CLI
-    /// and a shim that are in three different ones. A root that is not UTF-8
-    /// cannot be written into the file at all: rendering it would substitute
-    /// replacement characters and report a success that recorded a different
-    /// directory.
-    pub fn new(path: impl Into<PathBuf>) -> Result<Self, ConfigError> {
-        Ok(VaultRoot(absolute_path(path.into(), "vault root")?))
-    }
-
-    pub fn as_path(&self) -> &Path {
-        &self.0
-    }
-
-    /// The root as it is written down. Infallible: the constructor refused
-    /// anything that is not text.
-    fn as_str(&self) -> &str {
-        self.0.to_str().expect("a vault root is UTF-8")
-    }
-}
+/// The grammar is `norn-wire`'s and is re-exported here: a root crosses the
+/// client/host seam as well as being written into the registry file, so it is
+/// checked once, there.
+pub use norn_wire::VaultRoot;
 
 /// Where a vault's schema is read from, when it is not the in-vault default.
 ///
-/// The same two demands as [`VaultRoot`], for the same two reasons: the path
-/// is recorded in a text file and resolved by processes in different working
-/// directories. Whether the file exists, and what is in it, belong to whoever
-/// resolves the entry.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SchemaSource(PathBuf);
-
-impl SchemaSource {
-    /// The schema source `path` names, or a refusal if it is not one.
-    pub fn new(path: impl Into<PathBuf>) -> Result<Self, ConfigError> {
-        Ok(SchemaSource(absolute_path(path.into(), "schema source")?))
-    }
-
-    pub fn as_path(&self) -> &Path {
-        &self.0
-    }
-
-    /// The source as it is written down. Infallible: the constructor refused
-    /// anything that is not text.
-    fn as_str(&self) -> &str {
-        self.0.to_str().expect("a schema source is UTF-8")
-    }
-}
+/// The same grammar as [`VaultRoot`], re-exported on the same terms.
+pub use norn_wire::SchemaSource;
 
 /// A filesystem-watch backend an entry pins in place of the platform's native
 /// one.
@@ -126,30 +80,12 @@ impl SchemaSource {
 /// Absence is the native backend, which is why the field is an option rather
 /// than a variant: an entry says nothing about watching unless the native
 /// backend does not work for its root — a network mount, a container bind
-/// mount — and polling is what does.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PollBackend {
-    /// Walk the tree on an interval instead of subscribing to the platform's
-    /// notification API.
-    Poll,
-}
+/// mount — and polling is what does. The vocabulary is `norn-wire`'s and is
+/// re-exported here.
+pub use norn_wire::PollBackend;
 
-impl PollBackend {
-    const POLL: &'static str = "poll";
-
-    fn as_str(self) -> &'static str {
-        match self {
-            PollBackend::Poll => PollBackend::POLL,
-        }
-    }
-
-    fn parse(text: &str) -> Option<Self> {
-        match text {
-            PollBackend::POLL => Some(PollBackend::Poll),
-            _ => None,
-        }
-    }
-}
+/// A path outside the grammar a root or a schema source is held to.
+pub use norn_wire::IllegalPath;
 
 /// One registered vault.
 ///
@@ -250,7 +186,7 @@ impl Registry {
                 };
             let poll_backend =
                 match document::optional_string(path, &context, &table, POLL_BACKEND_KEY)? {
-                    Some(text) => Some(PollBackend::parse(&text).ok_or_else(|| {
+                    Some(text) => Some(PollBackend::try_from(text.as_str()).map_err(|_| {
                         corrupt(
                             path,
                             format!("{context}: `{POLL_BACKEND_KEY}` names no backend: `{text}`"),
