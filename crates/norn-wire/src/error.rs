@@ -36,7 +36,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::cursor::CursorOrderChanged;
 use crate::demand::AttachMode;
-use crate::finding_row::{Candidate, Hint, TotalBelowHead, bounded_head};
+use crate::finding_row::{CandidateHead, Hint};
 use crate::name::VaultName;
 use crate::reading::Rung;
 use crate::reload::ReloadFailure;
@@ -293,12 +293,9 @@ pub enum ErrorDetail {
     AmbiguousTarget {
         /// The target the request named.
         target: ResolutionTarget,
-        /// The head of the documents it resolves to, in the resolution
-        /// ladder's order.
-        candidates: Vec<Candidate>,
-        /// How many documents it resolves to, which is what makes the
-        /// candidates a head.
-        candidates_total: u64,
+        /// The documents it resolves to, in the resolution ladder's order,
+        /// and how many there were.
+        head: CandidateHead,
         /// What to ask to see the whole class.
         hint: Hint,
     },
@@ -437,22 +434,16 @@ impl ErrorDetail {
     }
 
     /// The detail of `vault/ambiguous-target`, for the `target` that resolves
-    /// to `candidates_total` documents, or the reason the head is no head.
+    /// to the documents `head` heads.
     ///
-    /// The head is bounded here by the same function a finding row's is, so
-    /// the refusal and the finding carry one head.
-    pub fn ambiguous_target(
+    /// The head is the type a finding row carries, so the refusal and the
+    /// finding carry one head bounded one way.
+    pub const fn ambiguous_target(
         target: ResolutionTarget,
-        candidates: impl IntoIterator<Item = Candidate>,
-        candidates_total: u64,
+        head: CandidateHead,
         hint: Hint,
-    ) -> Result<Self, TotalBelowHead> {
-        Ok(ErrorDetail::AmbiguousTarget {
-            target,
-            candidates: bounded_head(candidates, candidates_total)?,
-            candidates_total,
-            hint,
-        })
+    ) -> Self {
+        ErrorDetail::AmbiguousTarget { target, head, hint }
     }
 
     /// The detail of `vault/unknown-target`, for the `target` that resolves to
@@ -613,6 +604,7 @@ mod tests {
     use super::*;
 
     use crate::document::DocumentPath;
+    use crate::finding_row::Candidate;
 
     /// The target the two target refusals are read against, parsed through the
     /// grammar the type keeps.
@@ -708,14 +700,16 @@ mod tests {
             ),
             ReasonCode::VaultAmbiguousTarget => ErrorDetail::ambiguous_target(
                 a_target(),
-                [Candidate::new(
-                    DocumentPath::new("notes/glossary.md").expect("a legal document path"),
-                    "notes/glossary",
-                )],
-                2,
+                CandidateHead::new(
+                    [Candidate::new(
+                        DocumentPath::new("notes/glossary.md").expect("a legal document path"),
+                        "notes/glossary",
+                    )],
+                    2,
+                )
+                .expect("a head no larger than its total"),
                 Hint::resolves(a_target()),
-            )
-            .expect("a head no larger than its total"),
+            ),
             ReasonCode::VaultUnknownTarget => ErrorDetail::unknown_target(a_target()),
             ReasonCode::VaultReloadBusy => ErrorDetail::reload_busy(),
             ReasonCode::VaultReloadFailed => {

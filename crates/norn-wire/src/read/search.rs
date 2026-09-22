@@ -9,12 +9,17 @@
 //!
 //! **A search runs at least the lexical floor.** There is nothing an empty set
 //! could mean short of answering nothing at all, so it is refused where a set
-//! is built and where one is read alike.
+//! is built, where one is read, and in the schema a surface validates against
+//! alike.
+//!
+//! **`PartialEq` alone on [`Hit`].** A hit carries a relevance score, and a
+//! score is a number two of which may be near without being one value.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt;
 
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::address::VaultAddress;
@@ -44,7 +49,7 @@ impl std::error::Error for EmptyLadder {}
 /// On the wire a rung set is a plain object holding the rungs themselves:
 /// `{"rungs":["lexical","vector"]}`. The set is not empty: a set naming no
 /// rung is refused rather than read.
-#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct RungSet {
     /// The rungs to run, in ladder order.
@@ -69,6 +74,38 @@ impl RungSet {
     }
 }
 
+impl JsonSchema for RungSet {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("RungSet")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed("norn_wire::RungSet")
+    }
+
+    /// The object a derive would describe, with the floor the reader keeps
+    /// advertised as `minItems`. A derive over a `BTreeSet` says an array of
+    /// rungs with no members at all, so a surface validating against it would
+    /// pass a request this crate refuses to read.
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let rung = generator.subschema_for::<Rung>();
+        json_schema!({
+            "type": "object",
+            "description": "The rungs a search is asked to run.",
+            "properties": {
+                "rungs": {
+                    "type": "array",
+                    "description": "The rungs to run, in ladder order. At least one: every search runs at least the lexical floor.",
+                    "items": rung,
+                    "minItems": 1,
+                    "uniqueItems": true,
+                },
+            },
+            "required": ["rungs"],
+        })
+    }
+}
+
 /// The rung set as it arrives, before it is checked for naming a search at
 /// all. The field name is the set's, so the bytes a reader accepts are the
 /// bytes a writer produces.
@@ -90,10 +127,8 @@ impl<'de> Deserialize<'de> for RungSet {
     }
 }
 
-/// One ranked hit.
-///
-/// `PartialEq` alone: a hit carries a relevance score, and a score is a
-/// number two of which may be near without being one value.
+/// One ranked hit: a document the ladder ranked, at the relevance it ranked
+/// it with.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct Hit {
@@ -101,9 +136,9 @@ pub struct Hit {
     pub path: DocumentPath,
     /// How relevant the ladder judged it, which is what the order sorts by.
     pub score: Score,
-    /// The document's projected row, and `null` where the request projected no
-    /// column.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The document's row, projected onto the columns the request asked for,
+    /// and `null` where the request projected no column.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub document: Option<DocumentRow>,
 }
 

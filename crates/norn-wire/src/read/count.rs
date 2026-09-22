@@ -1,10 +1,15 @@
 //! `count`: how many documents match, grouped by the keys a request names.
+//!
+//! **The grouping tuple has one spelling.** A group member the document does
+//! not carry is `null`, on the row and in the cursor key alike, and
+//! [`Tally::cursor_key`] is the one function that turns the row into the key,
+//! so the two cannot drift into two orders sharing a name.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::address::VaultAddress;
-use crate::cursor::{Cursor, Page};
+use crate::cursor::{Cursor, CursorKey, Page};
 use crate::predicate::Predicate;
 
 /// What a tally is grouped by.
@@ -57,6 +62,18 @@ impl Tally {
             group: group.into_iter().collect(),
             count,
         }
+    }
+
+    /// Where a page of tallies stops at this row.
+    ///
+    /// The destructuring carries no wildcard, so a field added to a tally does
+    /// not compile until this says what the order stops at. The grouping tuple
+    /// is spelled one way on the row and in the key alike — a member the
+    /// document does not carry is `null` in both — so a continuation names the
+    /// position the page actually reached.
+    pub fn cursor_key(&self) -> CursorKey {
+        let Tally { group, count: _ } = self;
+        CursorKey::tally(group.clone())
     }
 }
 

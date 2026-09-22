@@ -1,13 +1,25 @@
 //! `describe`: what a vault declares about itself, and what its documents
 //! carry.
 //!
-//! **[`FieldType`] is a copy of the config crate's enum, and the copy is
-//! deliberate.** The content model is `norn-config`'s, and this crate depends
-//! on nothing in the workspace, so the declared type a facet reports is
-//! spelled again here rather than reached for. Neither definition is derived
-//! from the other; a test in `norn-config` walks both lists and holds them
-//! equal, so a type added on one side without the other fails there rather
+//! **[`FieldType`] and [`TagStance`] are copies of the config crate's enums,
+//! and the copies are deliberate.** The content model is `norn-config`'s, and
+//! this crate depends on nothing in the workspace, so the declared type a
+//! facet reports and the stance it reports on undeclared tags are spelled
+//! again here rather than reached for. Neither definition is derived from the
+//! other; a test in `norn-config` walks each pair of lists and holds them
+//! equal, so a member added on one side without the other fails there rather
 //! than crossing the seam as a spelling no reader has.
+//!
+//! **A facet's kind is injective.** [`Facet::kind`] maps each variant to a
+//! distinct [`FacetKind`], so `--facets` selects exactly one shape and a
+//! facet cursor orders one shape at a time. Two variants sharing a kind would
+//! make a selection ambiguous and an ordered page interleave two row shapes
+//! under one key.
+//!
+//! **A facet's cursor key is the facet's own key.** A declared field's is its
+//! frontmatter key, a folder's is its path, a tag pattern's is the pattern,
+//! and the undeclared-tags facet's is the stance spelling — `allow` or
+//! `report` — which is the one text that facet carries.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -53,6 +65,33 @@ impl FieldType {
             FieldType::Boolean => "boolean",
             FieldType::Date => "date",
             FieldType::Tags => "tags",
+        }
+    }
+}
+
+/// What the vault says about a tag its facet does not admit.
+///
+/// On the wire a stance is the flat string itself: `"allow"`, `"report"`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TagStance {
+    /// Anything may be tagged.
+    Allow,
+    /// A tag outside the vocabulary is a finding.
+    Report,
+}
+
+impl TagStance {
+    /// Every stance the vocabulary holds, in declaration order.
+    pub const ALL: [TagStance; 2] = [TagStance::Allow, TagStance::Report];
+
+    /// The stance as the string it is on the wire, which is the string a
+    /// vault's schema declares it as.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            TagStance::Allow => "allow",
+            TagStance::Report => "report",
         }
     }
 }
@@ -141,6 +180,12 @@ pub enum Facet {
         /// The pattern it states it over.
         pattern: String,
     },
+    /// What the vault's schema says about a tag its facet does not admit.
+    #[non_exhaustive]
+    UndeclaredTags {
+        /// The stance the schema declares.
+        stance: TagStance,
+    },
 }
 
 impl Facet {
@@ -195,20 +240,27 @@ impl Facet {
         }
     }
 
+    /// The schema's `stance` on a tag its facet does not admit.
+    pub const fn undeclared_tags(stance: TagStance) -> Self {
+        Facet::UndeclaredTags { stance }
+    }
+
     /// What this facet is a facet of.
     ///
     /// The match carries no wildcard, so a facet minted without a kind does not
     /// compile: [`FacetKind`] is what a request selects facets by and what a
     /// facet cursor orders by, and this is the one place the two lists are held
-    /// together. A tag pattern reports the declared-tag kind, because a pattern
-    /// is part of what the vault declares its tag vocabulary to be.
+    /// together. The map is injective — one kind per shape — so a request
+    /// naming a kind names one shape and a page ordered by kind holds one.
     pub const fn kind(&self) -> FacetKind {
         match self {
             Facet::DeclaredField { .. } => FacetKind::DeclaredField,
             Facet::ObservedField { .. } => FacetKind::ObservedField,
-            Facet::DeclaredTag { .. } | Facet::TagPattern { .. } => FacetKind::DeclaredTag,
+            Facet::DeclaredTag { .. } => FacetKind::DeclaredTag,
+            Facet::TagPattern { .. } => FacetKind::TagPattern,
             Facet::Folder { .. } => FacetKind::Folder,
             Facet::PathRule { .. } => FacetKind::PathRule,
+            Facet::UndeclaredTags { .. } => FacetKind::UndeclaredTags,
         }
     }
 }

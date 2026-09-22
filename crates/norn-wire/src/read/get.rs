@@ -1,5 +1,11 @@
 //! `get`: one document, addressed by a resolution target.
 //!
+//! **A page names its collection once.** The page's own `of` tag is what says
+//! which collection was paged, and [`CollectionPage::selector`] is the one
+//! derivation of the flat [`CollectionSelector`] a request names one by. A
+//! second field beside the page would be a second spelling of one fact, free
+//! to disagree with the tag under it.
+//!
 //! **A target that names no one document is a refusal, not a report.** The
 //! verb answers about one document, so a target that resolves to more than one
 //! is `vault/ambiguous-target` and a target that resolves to none is
@@ -12,7 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::address::VaultAddress;
 use crate::cursor::{Cursor, Page};
-use crate::document::{BlockRow, Column, DocumentPath, DocumentRow, HeadingRow, LinkRow, TagRow};
+use crate::document::{
+    BlockRow, BodyText, Column, DocumentPath, DocumentRow, HeadingRow, LinkRow, TagRow,
+};
 use crate::finding_row::FindingRow;
 use crate::target::ResolutionTarget;
 
@@ -125,7 +133,8 @@ impl CollectionPage {
 ///
 /// On the wire a report is an object tagged `shape`, and which shape it takes
 /// follows from what the request asked for: a whole record, the section a
-/// heading anchor named, or one page of one nested collection.
+/// heading anchor named, the block a block anchor named, or one page of one
+/// nested collection.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "shape", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -146,16 +155,24 @@ pub enum GetReport {
         heading: HeadingRow,
         /// The section body, from the heading to the next one at its level or
         /// above.
-        body: String,
+        body: BodyText,
+    },
+    /// The block the target's block anchor named.
+    #[non_exhaustive]
+    Block {
+        /// The document the block is in.
+        path: DocumentPath,
+        /// The block identifier the anchor named, and where it is defined.
+        block: BlockRow,
+        /// The block body.
+        body: BodyText,
     },
     /// One page of one nested collection.
     #[non_exhaustive]
     Collection {
         /// The document the collection is on.
         path: DocumentPath,
-        /// Which collection was paged.
-        selector: CollectionSelector,
-        /// The page.
+        /// The page, whose own tag names which collection was paged.
         page: CollectionPage,
     },
 }
@@ -167,24 +184,22 @@ impl GetReport {
     }
 
     /// The section `heading` opens in the document at `path`, holding `body`.
-    pub fn section(path: DocumentPath, heading: HeadingRow, body: impl Into<String>) -> Self {
+    pub const fn section(path: DocumentPath, heading: HeadingRow, body: BodyText) -> Self {
         GetReport::Section {
             path,
             heading,
-            body: body.into(),
+            body,
         }
     }
 
+    /// The `block` in the document at `path`, holding `body`.
+    pub const fn block(path: DocumentPath, block: BlockRow, body: BodyText) -> Self {
+        GetReport::Block { path, block, body }
+    }
+
     /// The `page` of one collection on the document at `path`.
-    ///
-    /// The selector is read off the page rather than passed in, so the two
-    /// name one collection.
     pub const fn collection(path: DocumentPath, page: CollectionPage) -> Self {
-        GetReport::Collection {
-            path,
-            selector: page.selector(),
-            page,
-        }
+        GetReport::Collection { path, page }
     }
 }
 
@@ -201,8 +216,11 @@ pub struct GetParams {
     /// the per-row ceiling.
     pub columns: Vec<Column>,
     /// The one nested collection to page instead of answering a record.
-    /// `null` answers a record or a section.
+    /// `null` answers a record, a section or a block.
     pub collection: Option<CollectionSelector>,
+    /// How many rows of the paged collection at most. `null` leaves the
+    /// ceiling to the host.
+    pub limit: Option<u32>,
     /// Where to continue the paged collection from. `null` starts at its first
     /// row.
     pub after: Option<Cursor>,
@@ -216,6 +234,7 @@ impl GetParams {
             target,
             columns: Vec::new(),
             collection: None,
+            limit: None,
             after: None,
         }
     }
@@ -231,6 +250,13 @@ impl GetParams {
     #[must_use]
     pub const fn with_collection(mut self, collection: CollectionSelector) -> Self {
         self.collection = Some(collection);
+        self
+    }
+
+    /// The request bounded at `limit` rows of the paged collection.
+    #[must_use]
+    pub const fn with_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
         self
     }
 

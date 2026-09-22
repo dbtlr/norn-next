@@ -19,12 +19,16 @@
 //! a caller spells `None` for.
 //!
 //! **A verb's shape is what the verb answers, not what its neighbours
-//! answer.** `find` is the sole verb that hydrates document rows; `search`
-//! carries no sort, because a ranked answer is ordered by its ranking; `count`
-//! carries no columns, because a tally is not a document; `validate` runs no
-//! rule at request time and emits no plan. Each params type says so where a
-//! reader of that verb will look, rather than leaving the partition to be
-//! inferred from six types side by side.
+//! answer.** `find` is the sole verb whose rows *are* documents: they are
+//! ordered by a field and paged by `(sort value, path)`. Three verbs carry a
+//! projected document row without being that verb — a `search` hit and a `get`
+//! record carry a document's projected columns beside their own identity, a
+//! score or a target, and are ordered by their own key. `search` carries no
+//! sort, because a ranked answer is ordered by its ranking; `count` carries no
+//! columns, because a tally is not a document; `validate` runs no rule at
+//! request time and emits no plan. Each params type says so where a reader of
+//! that verb will look, rather than leaving the partition to be inferred from
+//! six types side by side.
 //!
 //! **Links are never a verb.** A link is reached three ways and each of them
 //! is a shape that already exists: `links_to` is a

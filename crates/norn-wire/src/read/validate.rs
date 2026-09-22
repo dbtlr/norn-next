@@ -1,4 +1,7 @@
 //! `validate`: the findings standing over a vault.
+//!
+//! **`PartialEq` alone on [`ValidateReport`].** A page carries the cursor it
+//! continues at, and a cursor carries a relevance score.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -36,9 +39,6 @@ impl KindTally {
 ///
 /// On the wire a report is an object tagged `shape`: the findings themselves,
 /// or the tally of them one kind at a time.
-///
-/// `PartialEq` alone: a page carries the cursor it continues at, and a cursor
-/// carries a relevance score.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "shape", rename_all = "snake_case")]
 #[non_exhaustive]

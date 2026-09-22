@@ -14,7 +14,16 @@
 //! so in band rather than handing back a short list that reads as the whole of
 //! one. Where the cut falls is the handler's — it is a bound on the work one
 //! row costs, not a fact about the vocabulary — and what is spelled here is
-//! only that the cut is reported.
+//! only that the cut is reported. A total below the items it heads describes
+//! no document, so it is refused where a collection is built and where one is
+//! read alike.
+//!
+//! **A body is a head and a total too.** [`BodyText`] carries the text that
+//! fit and how many bytes the whole body has, so a body cut to a per-row
+//! ceiling says so in band rather than crossing as a string a client cannot
+//! tell a whole document from. The ceiling that cuts it is the handler's, the
+//! same way a collection's is; what is spelled here is that the cut is
+//! reported.
 //!
 //! **Link health is computed, never stored.** Resolution runs at read time
 //! over syntactic link facts, so the health of a link is a fact about the
@@ -23,12 +32,22 @@
 //! from the targets beside it, and reads it back the same way, so the two
 //! halves of one fact cannot arrive disagreeing.
 //!
-//! **A frontmatter value crosses as the text it is written as.** The content
+//! **A frontmatter value crosses as the tree it is written as.** The content
 //! model — which fields are numbers, which are dates, how two of them compare
 //! — is the vault schema's and lives behind the store. [`FieldValue`] says
-//! only what container the value sits in, because that is decidable from the
-//! document alone and a client rendering a row needs it; a map crosses as its
-//! canonical JSON rather than as a shape this crate would have to re-express.
+//! only what container each value sits in and what text each leaf is written
+//! as, because that is decidable from the document alone and a client
+//! rendering a row needs it. A map is a map of values and a sequence is a
+//! sequence of them, all the way down: nothing here is JSON in a string, so a
+//! client reads a nested value the way it reads a flat one rather than parsing
+//! a second time.
+//!
+//! **A field value is filled from the document row's canonical frontmatter
+//! projection.** The projection is what a row's values are read off, one read
+//! of it per row, which is the projection's purpose rather than a second parse
+//! of the document. The projection pillar's presence rows answer whether a
+//! document carries a key at all and which container it sits in; the values
+//! themselves come from the projection.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -48,6 +67,10 @@ const DOCUMENT_PATH: &str = "document path";
 /// What the grammar here wants: something rather than nothing.
 const EMPTY: &str = "a document path names something rather than nothing";
 
+/// What the grammar here wants: a path under the vault root rather than one
+/// that starts at a filesystem root.
+const ROOTED: &str = "a document path is relative to the vault root";
+
 /// Where a document stands in its vault, as the store spells it.
 ///
 /// On the wire a path is the string itself: `"notes/a.md"`. It is relative to
@@ -59,10 +82,18 @@ pub struct DocumentPath(String);
 
 impl DocumentPath {
     /// The path `text` spells, or the reason it spells none.
+    ///
+    /// Two rules, and they are the two the schema advertises: a path names
+    /// something, and it is relative to the vault root. A path starting at a
+    /// filesystem root names a place no vault holds a document at, so the
+    /// sentence the schema publishes is true of what this reader accepts.
     pub fn new(text: impl AsRef<str>) -> Result<Self, IllegalPath> {
         let text = text.as_ref();
         if text.is_empty() {
             return Err(IllegalPath::new(text, DOCUMENT_PATH, EMPTY));
+        }
+        if text.starts_with('/') {
+            return Err(IllegalPath::new(text, DOCUMENT_PATH, ROOTED));
         }
         Ok(DocumentPath(text.to_string()))
     }
@@ -108,14 +139,14 @@ impl JsonSchema for DocumentPath {
         Cow::Borrowed("norn_wire::DocumentPath")
     }
 
-    /// A string with a floor of one character, which is the whole of what this
-    /// reader checks. There is no `pattern`: the rest of what a document path
-    /// may hold is the store's grammar, and advertising a regular expression
-    /// for it here would make a second definition of it.
+    /// A string with a floor of one character. There is no `pattern`: the two
+    /// rules this reader keeps are stated in the description, and the rest of
+    /// what a document path may hold is the store's grammar, which a regular
+    /// expression here would make a second definition of.
     fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
         json_schema!({
             "type": "string",
-            "description": "Where a document stands in its vault, relative to the vault root. Not empty.",
+            "description": "Where a document stands in its vault, relative to the vault root. Not empty, and never starting with a slash.",
             "minLength": 1,
         })
     }
@@ -230,13 +261,61 @@ impl Column {
     }
 }
 
+/// A total that is smaller than the head it heads.
+///
+/// The total is what makes a bounded head a head, so a total below the number
+/// of rows kept describes nothing: there is no reading of it under which the
+/// head is a head of anything. Every bounded head in the vocabulary — a
+/// nested [`Collection`] on a row, and the
+/// [`CandidateHead`](crate::CandidateHead) a finding and a refusal carry —
+/// refuses through this one type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TotalBelowHead {
+    head: usize,
+    total: u64,
+}
+
+impl TotalBelowHead {
+    /// How many rows the head kept.
+    pub const fn head(&self) -> usize {
+        self.head
+    }
+
+    /// The total that was claimed for it.
+    pub const fn total(&self) -> u64 {
+        self.total
+    }
+
+    /// `total`, if it can be the total `head` rows head.
+    pub(crate) const fn check(head: usize, total: u64) -> Result<(), Self> {
+        if total < head as u64 {
+            return Err(TotalBelowHead { head, total });
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for TotalBelowHead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "a head of {} cannot be the head of {}",
+            self.head, self.total
+        )
+    }
+}
+
+impl std::error::Error for TotalBelowHead {}
+
 /// One nested collection on a row: the rows that fit, and how many there were.
 ///
 /// On the wire a collection is a plain object: `{"items":[…],"total":12}`.
 /// `total` is the count in the vault, so a collection whose items are fewer
-/// than its total was cut to fit the row.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-#[serde(bound(serialize = "T: Serialize", deserialize = "T: DeserializeOwned"))]
+/// than its total was cut to fit the row. A total below the items beside it is
+/// refused: it is what makes the items a head, and a smaller one heads
+/// nothing.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(bound(serialize = "T: Serialize"))]
 #[non_exhaustive]
 pub struct Collection<T: JsonSchema + Serialize + DeserializeOwned> {
     /// The rows this collection carries on the row.
@@ -246,14 +325,105 @@ pub struct Collection<T: JsonSchema + Serialize + DeserializeOwned> {
 }
 
 impl<T: JsonSchema + Serialize + DeserializeOwned> Collection<T> {
-    /// The `items` that fit on the row, out of `total` the document has.
-    pub const fn new(items: Vec<T>, total: u64) -> Self {
-        Collection { items, total }
+    /// The `items` that fit on the row, out of `total` the document has, or
+    /// the reason `total` heads nothing.
+    pub fn new(items: Vec<T>, total: u64) -> Result<Self, TotalBelowHead> {
+        TotalBelowHead::check(items.len(), total)?;
+        Ok(Collection { items, total })
     }
 
     /// Whether the document has rows this collection does not carry.
     pub fn is_truncated(&self) -> bool {
         (self.items.len() as u64) < self.total
+    }
+}
+
+/// The collection as it arrives, before its total is checked against the items
+/// it heads. The field names and order are the collection's, so the bytes a
+/// reader accepts are the bytes a writer produces.
+#[derive(Deserialize)]
+#[serde(bound(deserialize = "T: DeserializeOwned"))]
+struct CollectionFields<T> {
+    items: Vec<T>,
+    total: u64,
+}
+
+impl<'de, T: JsonSchema + Serialize + DeserializeOwned> Deserialize<'de> for Collection<T> {
+    /// A collection arrives as its head and its total and is read back through
+    /// the same check the constructor holds: a total below the items beside it
+    /// heads nothing, so it refuses the read rather than landing as a row that
+    /// claims to have been cut to more than it holds.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = CollectionFields::<T>::deserialize(deserializer)?;
+        Collection::new(fields.items, fields.total).map_err(D::Error::custom)
+    }
+}
+
+/// A document body, as the text that fit and how many bytes the whole of it
+/// has.
+///
+/// On the wire a body is a plain object:
+/// `{"text":"# Design\n","byte_length":4096}`. `byte_length` is the body's
+/// length in the document, so a body whose text is shorter was cut to fit the
+/// row. A length below the text beside it is refused: it is what makes the
+/// text a head, and a smaller one heads nothing.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct BodyText {
+    /// The body text this row carries.
+    text: String,
+    /// How many bytes the whole body has, which is what makes the text a head.
+    byte_length: u64,
+}
+
+impl BodyText {
+    /// The `text` that fit, out of a body of `byte_length` bytes, or the
+    /// reason `byte_length` heads nothing.
+    pub fn new(text: impl Into<String>, byte_length: u64) -> Result<Self, TotalBelowHead> {
+        let text = text.into();
+        TotalBelowHead::check(text.len(), byte_length)?;
+        Ok(BodyText { text, byte_length })
+    }
+
+    /// The body text this row carries.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// How many bytes the whole body has.
+    pub const fn byte_length(&self) -> u64 {
+        self.byte_length
+    }
+
+    /// Whether the body has bytes this text does not carry.
+    pub fn is_truncated(&self) -> bool {
+        (self.text.len() as u64) < self.byte_length
+    }
+}
+
+/// The body as it arrives, before its length is checked against the text it
+/// heads. The field names and order are the body's, so the bytes a reader
+/// accepts are the bytes a writer produces.
+#[derive(Deserialize)]
+struct BodyTextFields {
+    text: String,
+    byte_length: u64,
+}
+
+impl<'de> Deserialize<'de> for BodyText {
+    /// A body arrives as its text and its length and is read back through the
+    /// same check the constructor holds: a length below the text beside it
+    /// heads nothing, so it refuses the read rather than landing as a body
+    /// that claims to have been cut to less than it carries.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = BodyTextFields::deserialize(deserializer)?;
+        BodyText::new(fields.text, fields.byte_length).map_err(D::Error::custom)
     }
 }
 
@@ -506,11 +676,13 @@ impl TagRow {
     }
 }
 
-/// What one frontmatter field holds, as the text it is written as and the
-/// container it sits in.
+/// What one frontmatter field holds: the container each value sits in, and
+/// the text each leaf is written as.
 ///
 /// On the wire a value is an object tagged `kind`:
-/// `{"kind":"scalar","raw":"note"}`, `{"kind":"absent"}`.
+/// `{"kind":"scalar","raw":"note"}`, `{"kind":"absent"}`. A sequence holds
+/// values and a map holds values by key, so a nested value is read the way a
+/// flat one is.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -521,18 +693,17 @@ pub enum FieldValue {
         /// The value as written.
         raw: String,
     },
-    /// A sequence of values, each as the text it is written as.
+    /// A sequence of values.
     #[non_exhaustive]
     Sequence {
-        /// The values as written, in the order the document writes them.
-        items: Vec<String>,
+        /// The values, in the order the document writes them.
+        items: Vec<FieldValue>,
     },
-    /// A mapping, as the canonical JSON it projects to.
+    /// A mapping of values, by key.
     #[non_exhaustive]
     Map {
-        /// The map's canonical JSON. The frontmatter value model is the
-        /// store's, and it is not re-expressed here.
-        raw_json: String,
+        /// The values the mapping holds, by the key each one is written under.
+        entries: BTreeMap<String, FieldValue>,
     },
     /// The document does not carry the field.
     Absent {},
@@ -545,16 +716,16 @@ impl FieldValue {
     }
 
     /// The sequence of `items`.
-    pub fn sequence(items: impl IntoIterator<Item = String>) -> Self {
+    pub fn sequence(items: impl IntoIterator<Item = FieldValue>) -> Self {
         FieldValue::Sequence {
             items: items.into_iter().collect(),
         }
     }
 
-    /// The map whose canonical JSON is `raw_json`.
-    pub fn map(raw_json: impl Into<String>) -> Self {
+    /// The mapping holding `entries`.
+    pub fn map(entries: impl IntoIterator<Item = (String, FieldValue)>) -> Self {
         FieldValue::Map {
-            raw_json: raw_json.into(),
+            entries: entries.into_iter().collect(),
         }
     }
 
@@ -575,25 +746,25 @@ pub struct DocumentRow {
     /// Where the document stands in its vault.
     pub path: DocumentPath,
     /// Every frontmatter field the document carries, by key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fields: Option<BTreeMap<String, FieldValue>>,
-    /// The document's body text.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
+    /// The document's body text, with how many bytes the whole of it has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<BodyText>,
     /// The links the document carries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub links: Option<Collection<LinkRow>>,
     /// The headings the document carries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub headings: Option<Collection<HeadingRow>>,
     /// The block identifiers the document defines.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Collection<BlockRow>>,
     /// The tags the document carries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Collection<TagRow>>,
     /// The findings standing over the document.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub findings: Option<Collection<FindingRow>>,
 }
 
@@ -624,8 +795,8 @@ impl DocumentRow {
 
     /// The row with its body projected.
     #[must_use]
-    pub fn with_body(mut self, body: impl Into<String>) -> Self {
-        self.body = Some(body.into());
+    pub fn with_body(mut self, body: BodyText) -> Self {
+        self.body = Some(body);
         self
     }
 

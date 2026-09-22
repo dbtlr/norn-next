@@ -25,6 +25,13 @@
 //! a rung has is decided by which rung it is, so a shape that admits a
 //! request-time rung with a lag admits a report no answer can produce.
 //!
+//! **A rung's declaration order is ladder order, and `Ord` is derived from
+//! it.** The floor is declared first and each rung after it is declared where
+//! it stands on the ladder, so the derived ordering a [`RungSet`](crate::RungSet)
+//! sorts by is the order the ladder runs in rather than an alphabet. A rung
+//! added later is declared at its ladder position, not appended: appending it
+//! would leave the derived order saying it runs last whatever the ladder does.
+//!
 //! **The engine section is what the host was delivered, not what a file
 //! says.** It is the reading the status verb reports and the reading a vector
 //! refusal is composed against, so "the vault has no engine" and "the vault's
@@ -41,10 +48,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::trust::TrustState;
 
-/// A rung of a vault's search ladder.
+/// A rung of a vault's search ladder, in the order the ladder runs them.
 ///
 /// On the wire a rung is the flat string itself: `"lexical"`, `"vector"`,
-/// `"expansion"`, `"rerank"`.
+/// `"expansion"`, `"rerank"`. A rung the ladder gains is spelled at the
+/// position it runs at.
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
 )]

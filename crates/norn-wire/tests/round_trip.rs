@@ -14,19 +14,19 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Addressing, Anchor, AnswerReading, AttachMode, BlockRow, CANDIDATE_HEAD, Candidate, Collection,
-    CollectionPage, CollectionSelector, Column, ContainerKind, ControlFile, CountParams, Cursor,
-    CursorKey, CursorOrderChanged, DescribeParams, Direction, DocumentPath, DocumentRow,
-    EmptyLadder, EngineSection, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType,
-    FieldValue, FindParams, FindingKind, FindingRow, FindingScope, Freshness, GetParams, GetReport,
-    GroupKey, HeadingRow, Hint, Hit, KindTally, LadderDeclaration, LinkFamily, LinkHealth, LinkRow,
-    MaintainerIdentity, ModelIdentity, Moved, NonFiniteScore, NotReady, Page, PathRuleKind,
-    PollBackend, Predicate, ReasonCode, ReloadFailure, ReloadStage, RequestScope, ResolutionTarget,
-    Rung, RungReport, RungSet, SchemaSource, Score, SearchParams, Severity, Snapshot, Sort,
-    SortKey, Span, TagRow, TagSource, Tally, TotalBelowHead, TrustState, UnknownAddressing,
-    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
-    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer,
-    VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
+    Addressing, Anchor, AnswerReading, AttachMode, BlockRow, BodyText, CANDIDATE_HEAD, Candidate,
+    CandidateHead, Collection, CollectionPage, CollectionSelector, Column, ContainerKind,
+    ControlFile, CountParams, Cursor, CursorKey, CursorOrderChanged, DescribeParams, Direction,
+    DocumentPath, DocumentRow, EmptyLadder, EngineSection, ErrorDetail, ErrorEnvelope, Facet,
+    FacetKind, FieldType, FieldValue, FindParams, FindingKind, FindingRow, FindingScope, Freshness,
+    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LadderDeclaration,
+    LinkFamily, LinkHealth, LinkRow, MaintainerIdentity, ModelIdentity, Moved, NonFiniteScore,
+    NotReady, Page, PathRuleKind, PollBackend, Predicate, ReasonCode, ReloadFailure, ReloadStage,
+    RequestScope, ResolutionTarget, Rung, RungReport, RungSet, SchemaSource, Score, SearchParams,
+    Severity, Snapshot, Sort, SortKey, Span, TagRow, TagSource, TagStance, Tally, TotalBelowHead,
+    TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
+    UnknownSeverity, UnknownVerb, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport,
+    VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -188,11 +188,12 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::ambiguous_root([name("notes"), name("vault")]),
         ErrorDetail::ambiguous_target(
             target("glossary"),
-            [candidate("notes/glossary"), candidate("archive/glossary")],
-            4,
+            head(
+                [candidate("notes/glossary"), candidate("archive/glossary")],
+                4,
+            ),
             Hint::resolves(target("glossary")),
-        )
-        .expect("a head no larger than its total"),
+        ),
         ErrorDetail::unknown_target(target("glossary")),
         ErrorDetail::reload_busy(),
         ErrorDetail::cursor_order_changed(CursorOrderChanged::new(
@@ -328,6 +329,8 @@ fn facet_kinds() -> Vec<FacetKind> {
         FacetKind::DeclaredTag,
         FacetKind::Folder,
         FacetKind::PathRule,
+        FacetKind::TagPattern,
+        FacetKind::UndeclaredTags,
     ]
 }
 
@@ -347,7 +350,7 @@ fn cursor_keys() -> Vec<CursorKey> {
         CursorKey::document(Some("2026-01-01".to_string()), "notes/a.md"),
         CursorKey::document(None, "notes/a.md"),
         CursorKey::hit(score(0.5), "notes/a.md"),
-        CursorKey::tally(["note".to_string(), "open".to_string()]),
+        CursorKey::tally([Some("note".to_string()), None]),
         CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", 7),
         CursorKey::ordinal(3),
     ];
@@ -444,6 +447,7 @@ fn unsatisfied_parts() -> Vec<Unsatisfied> {
         Unsatisfied::malformed_glob("docs/[", "the character class does not close"),
         Unsatisfied::impossible_path("/etc/passwd"),
         Unsatisfied::missing_section("Design"),
+        Unsatisfied::missing_block("a1"),
         Unsatisfied::resolves_not_applicable(target("norn/glossary")),
     ]
 }
@@ -494,13 +498,33 @@ fn tag_sources() -> Vec<TagSource> {
 }
 
 /// Every container a frontmatter value sits in, and the absence beside them.
+/// The map holds a sequence and the sequence holds a map, so the census walks
+/// the tree rather than its root alone.
 fn field_values() -> Vec<FieldValue> {
     vec![
         FieldValue::scalar("note"),
-        FieldValue::sequence(["a".to_string(), "b".to_string()]),
-        FieldValue::map(r#"{"a":1}"#),
+        FieldValue::sequence([
+            FieldValue::scalar("a"),
+            FieldValue::map([("b".to_string(), FieldValue::scalar("c"))]),
+        ]),
+        nested_field_value(),
         FieldValue::absent(),
     ]
+}
+
+/// A map holding a sequence holding a map, which is the deepest shape the
+/// vocabulary admits without admitting a second parse.
+fn nested_field_value() -> FieldValue {
+    FieldValue::map([(
+        "outer".to_string(),
+        FieldValue::sequence([
+            FieldValue::scalar("first"),
+            FieldValue::map([
+                ("inner".to_string(), FieldValue::scalar("deep")),
+                ("missing".to_string(), FieldValue::absent()),
+            ]),
+        ]),
+    )])
 }
 
 /// One link row per health, built through the constructor that derives it.
@@ -536,7 +560,18 @@ fn candidate(text: &str) -> Candidate {
     Candidate::new(path(&format!("{text}.md")), text)
 }
 
-/// A finding row, built through the constructor that bounds its head.
+/// A candidate head, built through the constructor that bounds it.
+fn head(candidates: impl IntoIterator<Item = Candidate>, total: u64) -> CandidateHead {
+    CandidateHead::new(candidates, total).expect("a head no larger than its total")
+}
+
+/// The head a finding that is not about resolution carries: no candidate, out
+/// of none.
+fn no_head() -> CandidateHead {
+    head([], 0)
+}
+
+/// A finding row, carrying the head the constructor bounded.
 fn finding_row() -> FindingRow {
     FindingRow::new(
         7,
@@ -545,13 +580,14 @@ fn finding_row() -> FindingRow {
         path("notes/a.md"),
         Some("draft".to_string()),
         Some(span()),
-        [candidate("notes/glossary"), candidate("archive/glossary")],
-        9,
+        head(
+            [candidate("notes/glossary"), candidate("archive/glossary")],
+            9,
+        ),
         Some(Hint::resolves(target("glossary"))),
         "the tag is not declared",
         12,
     )
-    .expect("a head no larger than its total")
 }
 
 /// Every nested collection a request pages by ordinal.
@@ -571,6 +607,18 @@ fn heading_row() -> HeadingRow {
 }
 
 /// One page of each nested collection.
+fn collection<T>(items: Vec<T>, total: u64) -> Collection<T>
+where
+    T: schemars::JsonSchema + Serialize + DeserializeOwned,
+{
+    Collection::new(items, total).expect("a total no smaller than its items")
+}
+
+/// A body cut to `byte_length`, built through the constructor that checks it.
+fn body(text: &str, byte_length: u64) -> BodyText {
+    BodyText::new(text, byte_length).expect("a length no smaller than its text")
+}
+
 fn collection_pages() -> Vec<CollectionPage> {
     vec![
         CollectionPage::links(Page::new(link_rows(), None, vec![])),
@@ -596,22 +644,31 @@ fn whole_document_row() -> DocumentRow {
             "type".to_string(),
             FieldValue::scalar("note"),
         )]))
-        .with_body("# Design\n")
-        .with_links(Collection::new(link_rows(), 9))
-        .with_headings(Collection::new(vec![heading_row()], 1))
-        .with_blocks(Collection::new(vec![BlockRow::new("a1", None)], 1))
-        .with_tags(Collection::new(
+        .with_body(body("Design\n", 4096))
+        .with_links(collection(link_rows(), 9))
+        .with_headings(collection(vec![heading_row()], 1))
+        .with_blocks(collection(vec![BlockRow::new("a1", None)], 1))
+        .with_tags(collection(
             vec![TagRow::new("draft", TagSource::Frontmatter, Some(span()))],
             1,
         ))
-        .with_findings(Collection::new(vec![finding_row()], 1))
+        .with_findings(collection(vec![finding_row()], 1))
 }
 
 /// Every shape a `get` answers with.
 fn get_reports() -> Vec<GetReport> {
     let mut reports = vec![
         GetReport::record(whole_document_row()),
-        GetReport::section(path("notes/a.md"), heading_row(), "the section body"),
+        GetReport::section(
+            path("notes/a.md"),
+            heading_row(),
+            body("the section body", 16),
+        ),
+        GetReport::block(
+            path("notes/a.md"),
+            BlockRow::new("a1", Some(span())),
+            body("the block body", 14),
+        ),
     ];
     reports.extend(
         collection_pages()
@@ -693,7 +750,13 @@ fn facets() -> Vec<Facet> {
             .into_iter()
             .map(|rule| Facet::path_rule(rule, "archive/**")),
     );
+    facets.extend(tag_stances().into_iter().map(Facet::undeclared_tags));
     facets
+}
+
+/// Every stance a vault takes on a tag its facet does not admit.
+fn tag_stances() -> Vec<TagStance> {
+    TagStance::ALL.to_vec()
 }
 
 fn round_trip<T>(value: &T)
@@ -1081,6 +1144,14 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<Facet>(Some("facet")),
         "the facets built here are not the facets the vocabulary holds"
+    );
+    assert_eq!(
+        tag_stances()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<TagStance>(None),
+        "the stances built here are not the stances the vocabulary holds"
     );
 }
 
@@ -2764,11 +2835,35 @@ fn a_document_path_is_the_string_it_renders_as_and_is_not_empty() {
     );
     let refusal = DocumentPath::new("").expect_err("an empty document path");
     assert_eq!(refusal.what(), "document path");
-    for text in ["/etc/passwd", "../a.md", "a b.md"] {
+    for text in ["../a.md", "a b.md"] {
         let json = format!("\"{text}\"");
         assert!(
             serde_json::from_str::<DocumentPath>(&json).is_ok(),
             "`{text}` was refused by a grammar this type does not keep"
+        );
+    }
+}
+
+/// A document path is relative to the vault root, which is what the schema
+/// publishes, so a path that starts at a filesystem root is refused where one
+/// is built and where one is read alike.
+#[test]
+fn a_rooted_document_path_is_no_document_path() {
+    let refusal = DocumentPath::new("/etc/passwd").expect_err("a rooted document path");
+    assert_eq!(refusal.what(), "document path");
+    assert_eq!(
+        refusal.problem(),
+        "a document path is relative to the vault root"
+    );
+    for text in ["/etc/passwd", "/", "/notes/a.md"] {
+        assert!(
+            DocumentPath::new(text).is_err(),
+            "`{text}` was built as a document path"
+        );
+        let json = format!("\"{text}\"");
+        assert!(
+            serde_json::from_str::<DocumentPath>(&json).is_err(),
+            "`{text}` was read back as a document path"
         );
     }
 }
@@ -2794,13 +2889,70 @@ fn a_column_is_an_object_tagged_col() {
 /// the bound rather than handing back a short list that reads as the whole.
 #[test]
 fn a_collection_reports_the_cut_through_its_total() {
-    let whole = Collection::new(vec![BlockRow::new("a1", None)], 1);
+    let whole = collection(vec![BlockRow::new("a1", None)], 1);
     assert!(!whole.is_truncated());
-    let cut = Collection::new(vec![BlockRow::new("a1", None)], 12);
+    let cut = collection(vec![BlockRow::new("a1", None)], 12);
     assert!(cut.is_truncated());
     assert_eq!(
         wire(&cut),
         r#"{"items":[{"id":"a1","span":null}],"total":12}"#
+    );
+}
+
+/// The total is what makes the items a head, so a total below them heads
+/// nothing: it is refused where a collection is built and where one is read
+/// alike, rather than landing as a row claiming to have been cut to more than
+/// it holds.
+#[test]
+fn a_collection_total_below_its_items_heads_nothing() {
+    let refusal = Collection::new(
+        vec![BlockRow::new("a1", None), BlockRow::new("a2", None)],
+        1,
+    )
+    .expect_err("a total below its items");
+    assert_eq!(refusal.head(), 2);
+    assert_eq!(refusal.total(), 1);
+    assert_eq!(
+        TotalBelowHead::to_string(&refusal),
+        "a head of 2 cannot be the head of 1"
+    );
+    assert!(
+        serde_json::from_str::<Collection<BlockRow>>(
+            r#"{"items":[{"id":"a1","span":null},{"id":"a2","span":null}],"total":1}"#
+        )
+        .is_err(),
+        "a collection claiming a total below its items read back"
+    );
+    assert!(
+        serde_json::from_str::<Collection<BlockRow>>(
+            r#"{"items":[{"id":"a1","span":null},{"id":"a2","span":null}],"total":2}"#
+        )
+        .is_ok(),
+        "a collection whose total is its own count refused the read"
+    );
+}
+
+/// A body reports the cut the handler's per-row ceiling made: the text is the
+/// head and the byte length is the whole body's, so a length below the text
+/// beside it heads nothing and refuses where one is built and where one is
+/// read alike.
+#[test]
+fn a_body_reports_the_cut_through_its_byte_length() {
+    let whole = body("Design\n", 7);
+    assert!(!whole.is_truncated());
+    assert_eq!(whole.text(), "Design\n");
+    assert_eq!(whole.byte_length(), 7);
+    let cut = body("Design\n", 4096);
+    assert!(cut.is_truncated());
+    assert_eq!(wire(&cut), r#"{"text":"Design\n","byte_length":4096}"#);
+    round_trip(&cut);
+
+    let refusal = BodyText::new("Design\n", 3).expect_err("a length below its text");
+    assert_eq!(refusal.head(), 7);
+    assert_eq!(refusal.total(), 3);
+    assert!(
+        serde_json::from_str::<BodyText>(r#"{"text":"Design\n","byte_length":3}"#).is_err(),
+        "a body claiming a length below its text read back"
     );
 }
 
@@ -2869,8 +3021,11 @@ fn a_link_whose_health_is_not_its_targets_refuses_the_read() {
 fn an_unprojected_column_is_absent_from_the_row() {
     let bare = DocumentRow::new(path("notes/a.md"));
     assert_eq!(wire(&bare), r#"{"path":"notes/a.md"}"#);
-    let projected = bare.clone().with_body("hello");
-    assert_eq!(wire(&projected), r#"{"path":"notes/a.md","body":"hello"}"#);
+    let projected = bare.clone().with_body(body("hello", 5));
+    assert_eq!(
+        wire(&projected),
+        r#"{"path":"notes/a.md","body":{"text":"hello","byte_length":5}}"#
+    );
     let read: DocumentRow =
         serde_json::from_str(r#"{"path":"notes/a.md"}"#).expect("a row projecting nothing");
     assert_eq!(read, bare);
@@ -2887,14 +3042,40 @@ fn a_field_value_is_an_object_tagged_kind() {
         r#"{"kind":"scalar","raw":"note"}"#
     );
     assert_eq!(
-        wire(&FieldValue::sequence(["a".to_string()])),
-        r#"{"kind":"sequence","items":["a"]}"#
+        wire(&FieldValue::sequence([FieldValue::scalar("a")])),
+        r#"{"kind":"sequence","items":[{"kind":"scalar","raw":"a"}]}"#
     );
     assert_eq!(
-        wire(&FieldValue::map(r#"{"a":1}"#)),
-        r#"{"kind":"map","raw_json":"{\"a\":1}"}"#
+        wire(&FieldValue::map([(
+            "a".to_string(),
+            FieldValue::scalar("1")
+        )])),
+        r#"{"kind":"map","entries":{"a":{"kind":"scalar","raw":"1"}}}"#
     );
     assert_eq!(wire(&FieldValue::absent()), r#"{"kind":"absent"}"#);
+}
+
+/// A nested value is a value, all the way down: a map holding a sequence
+/// holding a map crosses as the tree it is and is read back as the same tree,
+/// so a client reads a nested frontmatter value the way it reads a flat one
+/// rather than parsing a string a second time.
+#[test]
+fn a_nested_field_value_crosses_as_a_tree_rather_than_as_json_in_a_string() {
+    let value = nested_field_value();
+    round_trip(&value);
+    assert_eq!(
+        wire(&value),
+        concat!(
+            r#"{"kind":"map","entries":{"outer":{"kind":"sequence","items":["#,
+            r#"{"kind":"scalar","raw":"first"},"#,
+            r#"{"kind":"map","entries":{"inner":{"kind":"scalar","raw":"deep"},"#,
+            r#""missing":{"kind":"absent"}}}]}}}"#
+        )
+    );
+    assert!(
+        !wire(&value).contains(r#"raw_json"#),
+        "a map crossed as JSON in a string"
+    );
 }
 
 // ── The finding row and its bounded head ─────────────────────────────────
@@ -2906,16 +3087,23 @@ fn every_finding_row_shape_survives_the_round_trip() {
         round_trip(&hint);
     }
     round_trip(&candidate("notes/glossary"));
+    round_trip(&no_head());
+    round_trip(&head([candidate("notes/glossary")], 9));
 }
 
-/// The head is bounded where a row is built, so a producer handing over more
-/// than five candidates does not widen the row. The total is untouched: it is
-/// what makes the head a head.
+/// The head is bounded where one is built, so a producer handing over more
+/// than five candidates does not widen it. The total is untouched: it is what
+/// makes the head a head.
 #[test]
 fn a_candidate_list_is_bounded_at_the_head_wherever_it_is_built() {
     let many: Vec<Candidate> = (0..12)
         .map(|index| candidate(&format!("notes/g{index}")))
         .collect();
+    let bounded = head(many, 12);
+    assert_eq!(bounded.candidates().len(), CANDIDATE_HEAD);
+    assert_eq!(bounded.total(), 12);
+    assert!(bounded.is_truncated());
+
     let row = FindingRow::new(
         1,
         FindingKind::UndeclaredTag,
@@ -2923,72 +3111,106 @@ fn a_candidate_list_is_bounded_at_the_head_wherever_it_is_built() {
         path("notes/a.md"),
         None,
         None,
-        many.clone(),
-        12,
+        bounded.clone(),
         None,
         "ambiguous",
         3,
-    )
-    .expect("a head no larger than its total");
-    assert_eq!(row.candidates.len(), CANDIDATE_HEAD);
-    assert_eq!(row.candidates_total, 12);
-    assert!(row.is_truncated());
-
+    );
     let detail = ErrorDetail::ambiguous_target(
         target("glossary"),
-        many,
-        12,
+        bounded,
         Hint::resolves(target("glossary")),
-    )
-    .expect("a head no larger than its total");
-    let json = serde_json::to_value(&detail).expect("a detail as JSON");
-    assert_eq!(
-        json["candidates"].as_array().map(Vec::len),
-        Some(CANDIDATE_HEAD)
     );
-    assert_eq!(json["candidates_total"].as_u64(), Some(12));
+    for json in [
+        serde_json::to_value(&row).expect("a row as JSON"),
+        serde_json::to_value(&detail).expect("a detail as JSON"),
+    ] {
+        assert_eq!(
+            json["head"]["candidates"].as_array().map(Vec::len),
+            Some(CANDIDATE_HEAD)
+        );
+        assert_eq!(json["head"]["total"].as_u64(), Some(12));
+    }
 }
 
-/// A total below the head it heads describes no vault, and both shapes that
-/// carry a head refuse it for the same reason.
+/// The bound is the vocabulary's, so it holds on the way in as well as on the
+/// way out: bytes carrying nine candidates are bytes nothing here minted, and
+/// both carriers of a head refuse them rather than reading a head no bound
+/// covers.
+#[test]
+fn a_head_wider_than_the_bound_refuses_the_read() {
+    let nine: Vec<serde_json::Value> = (0..9)
+        .map(|index| serde_json::json!({"path": format!("notes/g{index}.md"), "suffix": "g"}))
+        .collect();
+    let five = &nine[..CANDIDATE_HEAD];
+    let head_json = |candidates: &[serde_json::Value], total: u64| serde_json::json!({"candidates": candidates, "total": total});
+    let row_json = |candidates: &[serde_json::Value], total: u64| {
+        serde_json::json!({
+            "id": 1,
+            "kind": "document/undeclared-tag",
+            "severity": "error",
+            "path": "notes/a.md",
+            "target": null,
+            "span": null,
+            "head": head_json(candidates, total),
+            "hint": null,
+            "message": "ambiguous",
+            "generation": 3,
+        })
+        .to_string()
+    };
+    let detail_json = |candidates: &[serde_json::Value], total: u64| {
+        serde_json::json!({
+            "code": "vault/ambiguous-target",
+            "target": "glossary",
+            "head": head_json(candidates, total),
+            "hint": {"hint": "resolves", "target": "glossary"},
+        })
+        .to_string()
+    };
+
+    for json in [row_json(&nine, 12), row_json(five, 4)] {
+        assert!(
+            serde_json::from_str::<FindingRow>(&json).is_err(),
+            "reading {json} produced a finding row no bound covers"
+        );
+    }
+    for json in [detail_json(&nine, 12), detail_json(five, 4)] {
+        assert!(
+            serde_json::from_str::<ErrorDetail>(&json).is_err(),
+            "reading {json} produced a refusal no bound covers"
+        );
+    }
+    let json = row_json(five, 12);
+    let row: FindingRow =
+        serde_json::from_str(&json).unwrap_or_else(|error| panic!("reading {json}: {error}"));
+    assert_eq!(row.head.candidates().len(), CANDIDATE_HEAD);
+    assert_eq!(row.head.total(), 12);
+    assert!(row.head.is_truncated());
+    let json = detail_json(five, 12);
+    assert!(
+        serde_json::from_str::<ErrorDetail>(&json).is_ok(),
+        "reading {json} refused a head the bound covers"
+    );
+}
+
+/// A total below the head it heads describes no vault, and the one type both
+/// carriers hold refuses it once.
 #[test]
 fn a_total_below_the_head_it_heads_is_refused() {
     let two = [candidate("notes/a"), candidate("notes/b")];
-    let refusal = FindingRow::new(
-        1,
-        FindingKind::UndeclaredTag,
-        Severity::Error,
-        path("notes/a.md"),
-        None,
-        None,
-        two.clone(),
-        1,
-        None,
-        "ambiguous",
-        3,
-    )
-    .expect_err("a total below its head");
+    let refusal = CandidateHead::new(two, 1).expect_err("a total below its head");
     assert_eq!(refusal.head(), 2);
     assert_eq!(refusal.total(), 1);
     assert_eq!(
-        refusal,
-        ErrorDetail::ambiguous_target(
-            target("glossary"),
-            two,
-            1,
-            Hint::resolves(target("glossary")),
-        )
-        .expect_err("a total below its head")
-    );
-    assert_eq!(
         TotalBelowHead::to_string(&refusal),
-        "a candidate head of 2 cannot be the head of 1 candidates"
+        "a head of 2 cannot be the head of 1"
     );
 }
 
 /// A finding row is the row a report pages, and the typed halves — the kind,
-/// the severity, the path, the hint — cross as themselves rather than as
-/// strings a reader re-parses.
+/// the severity, the path, the head, the hint — cross as themselves rather
+/// than as strings a reader re-parses.
 #[test]
 fn a_finding_row_carries_its_typed_halves() {
     let row = FindingRow::new(
@@ -2998,20 +3220,19 @@ fn a_finding_row_carries_its_typed_halves() {
         path("notes/a.md"),
         Some("draft".to_string()),
         None,
-        [],
-        0,
+        no_head(),
         Some(Hint::resolves(target("glossary"))),
         "the tag is not declared",
         12,
-    )
-    .expect("a head no larger than its total");
-    assert!(!row.is_truncated());
+    );
+    assert!(!row.head.is_truncated());
     assert_eq!(
         wire(&row),
         concat!(
             r#"{"id":7,"kind":"document/undeclared-tag","severity":"warning","#,
-            r#""path":"notes/a.md","target":"draft","span":null,"candidates":[],"#,
-            r#""candidates_total":0,"hint":{"hint":"resolves","target":"glossary"},"#,
+            r#""path":"notes/a.md","target":"draft","span":null,"#,
+            r#""head":{"candidates":[],"total":0},"#,
+            r#""hint":{"hint":"resolves","target":"glossary"},"#,
             r#""message":"the tag is not declared","generation":12}"#
         )
     );
@@ -3026,19 +3247,17 @@ fn an_ambiguous_target_refuses_with_the_head_a_finding_carries() {
         "the target names more than one document",
         ErrorDetail::ambiguous_target(
             target("glossary"),
-            [candidate("notes/glossary")],
-            2,
+            head([candidate("notes/glossary")], 2),
             Hint::resolves(target("glossary")),
-        )
-        .expect("a head no larger than its total"),
+        ),
     );
     assert_eq!(
         wire(&envelope),
         concat!(
             r#"{"code":"vault/ambiguous-target","message":"the target names more than one document","#,
             r#""detail":{"code":"vault/ambiguous-target","target":"glossary","#,
-            r#""candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"}],"#,
-            r#""candidates_total":2,"hint":{"hint":"resolves","target":"glossary"}}}"#
+            r#""head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"}],"total":2},"#,
+            r#""hint":{"hint":"resolves","target":"glossary"}}}"#
         )
     );
     assert_eq!(
@@ -3051,6 +3270,14 @@ fn an_ambiguous_target_refuses_with_the_head_a_finding_carries() {
             r#""detail":{"code":"vault/unknown-target","target":"glossary"}}"#
         )
     );
+}
+
+/// The crate that declares the bound pins its value, so a surface rendering a
+/// head and a store holding one are bounded at a number this suite would have
+/// to be changed to move.
+#[test]
+fn the_candidate_head_is_five() {
+    assert_eq!(CANDIDATE_HEAD, 5);
 }
 
 // ── The six read verbs ───────────────────────────────────────────────────
@@ -3112,6 +3339,7 @@ fn every_read_params_shape_survives_the_round_trip() {
         &GetParams::new(vault.clone(), target("glossary#Design"))
             .with_columns(columns())
             .with_collection(CollectionSelector::Links)
+            .with_limit(20)
             .with_after(cursors().remove(0)),
     );
     round_trip(&CountParams::new(vault.clone()));
@@ -3167,6 +3395,7 @@ fn a_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
 
     let get = GetParams::new(vault.clone(), target("glossary"));
     assert_eq!(get.collection, None);
+    assert_eq!(get.limit, None);
     assert!(CountParams::new(vault.clone()).by.is_empty());
     assert!(DescribeParams::new(vault).facets.is_empty());
 }
@@ -3203,8 +3432,9 @@ fn a_rung_set_is_the_resolved_set_in_ladder_order() {
 }
 
 /// A get report is an object tagged `shape`, and the collection shape names
-/// the collection it paged in both the selector and the page's own tag — one
-/// reading, because the constructor takes the selector off the page.
+/// the collection it paged once: the page's own `of` tag, which
+/// `CollectionPage::selector` is the one derivation of. There is no second
+/// field beside it for the two to disagree in.
 #[test]
 fn a_get_report_names_the_collection_it_paged_once() {
     for page in collection_pages() {
@@ -3212,8 +3442,16 @@ fn a_get_report_names_the_collection_it_paged_once() {
         let report = GetReport::collection(path("notes/a.md"), page);
         let json = serde_json::to_value(&report).expect("a report as JSON");
         assert_eq!(json["shape"].as_str(), Some("collection"));
-        assert_eq!(json["selector"], serde_json::to_value(selector).unwrap());
-        assert_eq!(json["selector"], json["page"]["of"]);
+        assert_eq!(
+            json.as_object().map(|report| report.keys().count()),
+            Some(3),
+            "the collection report carries a field beside its path and its page: {json}"
+        );
+        assert!(
+            json.get("selector").is_none(),
+            "the collection report spells its selector a second time: {json}"
+        );
+        assert_eq!(json["page"]["of"], serde_json::to_value(selector).unwrap());
     }
     assert_eq!(
         collection_pages()
@@ -3221,6 +3459,30 @@ fn a_get_report_names_the_collection_it_paged_once() {
             .map(CollectionPage::selector)
             .collect::<Vec<_>>(),
         collection_selectors()
+    );
+}
+
+/// A `#^block` anchor has a report shape of its own: the block the anchor
+/// named, where it is defined, and its body. A block the document does not
+/// define is an unsatisfied part beside the missing section.
+#[test]
+fn a_block_anchor_is_answered_with_the_block_it_named() {
+    let report = GetReport::block(
+        path("notes/a.md"),
+        BlockRow::new("a1", Some(span())),
+        body("the block body", 14),
+    );
+    assert_eq!(
+        wire(&report),
+        concat!(
+            r#"{"shape":"block","path":"notes/a.md","#,
+            r#""block":{"id":"a1","span":{"line":3,"column":1,"byte_offset":42}},"#,
+            r#""body":{"text":"the block body","byte_length":14}}"#
+        )
+    );
+    assert_eq!(
+        wire(&Unsatisfied::missing_block("a1")),
+        r#"{"part":"missing_block","id":"a1"}"#
     );
 }
 
@@ -3233,6 +3495,28 @@ fn a_tally_carries_one_value_per_group_key() {
         wire(&Tally::new([Some("note".to_string()), None], 7)),
         r#"{"group":["note",null],"count":7}"#
     );
+}
+
+/// The row and the key it stops at spell the grouping tuple one way, and
+/// `Tally::cursor_key` is the one function that turns one into the other: a
+/// group member the document does not carry is `null` in the key as it is on
+/// the row, so a continuation names the position the page reached.
+#[test]
+fn a_tally_cursor_key_spells_the_null_group_the_way_the_row_does() {
+    let tally = Tally::new([Some("note".to_string()), None], 7);
+    let key = tally.cursor_key();
+    assert_eq!(
+        key,
+        CursorKey::tally([Some("note".to_string()), None]),
+        "the key a tally stops at is not the tuple it carries"
+    );
+    round_trip(&key);
+    let json = serde_json::to_value(&key).expect("a key as JSON");
+    assert_eq!(json["group"], serde_json::json!(["note", null]));
+    round_trip(&Cursor::new(
+        Snapshot::new("epoch-1", 3, None, None),
+        tally.cursor_key(),
+    ));
 }
 
 /// A validate report is the findings or the tally of them, told apart by the
@@ -3277,13 +3561,57 @@ fn every_facet_names_the_kind_a_cursor_orders_it_under() {
             .collect::<BTreeSet<_>>()
     );
     assert_eq!(
-        Facet::tag_pattern("person/**").kind(),
-        FacetKind::DeclaredTag
-    );
-    assert_eq!(
         wire(&Facet::declared_field("due", FieldType::Date, true, None)),
         r#"{"facet":"declared_field","key":"due","field_type":"date","required":true,"one_of":null}"#
     );
+    assert_eq!(
+        wire(&Facet::undeclared_tags(TagStance::Report)),
+        r#"{"facet":"undeclared_tags","stance":"report"}"#
+    );
+}
+
+/// The map from a facet to its kind is injective: one kind per shape, so
+/// `--facets` naming a kind names one shape and a page ordered by kind holds
+/// one. Two shapes sharing a kind would make the selection ambiguous.
+#[test]
+fn every_facet_shape_maps_to_a_kind_of_its_own() {
+    let shapes: BTreeSet<String> = facets()
+        .iter()
+        .map(|facet| tag_string(facet, "facet"))
+        .collect();
+    let kinds: BTreeSet<String> = facets()
+        .iter()
+        .map(|facet| flat_string(&facet.kind()))
+        .collect();
+    assert_eq!(
+        kinds.len(),
+        shapes.len(),
+        "two facet shapes report one kind: {shapes:?} map onto {kinds:?}"
+    );
+    assert_eq!(
+        Facet::tag_pattern("person/**").kind(),
+        FacetKind::TagPattern
+    );
+    assert_eq!(
+        Facet::undeclared_tags(TagStance::Allow).kind(),
+        FacetKind::UndeclaredTags
+    );
+}
+
+/// The undeclared-tags facet is ordered by the stance spelling, which is the
+/// one text it carries, so a facet cursor over that kind names a position the
+/// facet itself spells.
+#[test]
+fn the_undeclared_tags_facet_is_keyed_by_its_stance() {
+    for stance in tag_stances() {
+        let facet = Facet::undeclared_tags(stance);
+        let key = CursorKey::facet(facet.kind(), stance.as_str());
+        round_trip(&key);
+        let json = serde_json::to_value(&key).expect("a key as JSON");
+        assert_eq!(json["kind"].as_str(), Some("undeclared_tags"));
+        assert_eq!(json["key"].as_str(), Some(stance.as_str()));
+        assert_eq!(json["key"].as_str(), Some(flat_string(&stance).as_str()));
+    }
 }
 
 /// A ranked hit carries its document row only where the request projected one,

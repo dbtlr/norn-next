@@ -11,17 +11,18 @@
 //! restating it.
 
 use norn_wire::{
-    Addressing, Anchor, AnswerReading, AttachMode, BlockRow, Candidate, Collection, CollectionPage,
-    CollectionSelector, Column, ContainerKind, CountParams, CountReport, Cursor, CursorKey,
-    DescribeParams, DescribeReport, Direction, DocumentPath, DocumentRow, EngineSection,
-    ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindReport,
-    FindingKind, FindingRow, FindingScope, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, KindTally, LinkFamily, LinkHealth, LinkRow, MaintainerIdentity, Moved, NotReady,
-    Page, PathRuleKind, PollBackend, Predicate, ReasonCode, ReloadFailure, RequestScope,
-    ResolutionTarget, Rung, RungReport, RungSet, SchemaSource, Score, SearchParams, SearchReport,
-    Severity, Snapshot, Sort, SortKey, Span, TagRow, TagSource, Tally, TrustState, Unsatisfied,
-    UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName,
-    VaultRoot, Verb, WarmingPhase, WatcherLossCause,
+    Addressing, Anchor, AnswerReading, AttachMode, BlockRow, BodyText, Candidate, CandidateHead,
+    Collection, CollectionPage, CollectionSelector, Column, ContainerKind, CountParams,
+    CountReport, Cursor, CursorKey, DescribeParams, DescribeReport, Direction, DocumentPath,
+    DocumentRow, EngineSection, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType,
+    FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope, Freshness,
+    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LinkFamily, LinkHealth,
+    LinkRow, MaintainerIdentity, Moved, NotReady, Page, PathRuleKind, PollBackend, Predicate,
+    ReasonCode, ReloadFailure, RequestScope, ResolutionTarget, Rung, RungReport, RungSet,
+    SchemaSource, Score, SearchParams, SearchReport, Severity, Snapshot, Sort, SortKey, Span,
+    TagRow, TagSource, TagStance, Tally, TrustState, Unsatisfied, UntrustedReason, ValidateParams,
+    ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, Verb, WarmingPhase,
+    WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -143,6 +144,7 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<Span>(),
         schema_of::<Column>(),
         schema_of::<Collection<String>>(),
+        schema_of::<BodyText>(),
         schema_of::<LinkHealth>(),
         schema_of::<LinkFamily>(),
         schema_of::<LinkRow>(),
@@ -153,6 +155,7 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<FieldValue>(),
         schema_of::<DocumentRow>(),
         schema_of::<Candidate>(),
+        schema_of::<CandidateHead>(),
         schema_of::<Hint>(),
         schema_of::<FindingRow>(),
         schema_of::<Direction>(),
@@ -170,6 +173,7 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<FieldType>(),
         schema_of::<ContainerKind>(),
         schema_of::<PathRuleKind>(),
+        schema_of::<TagStance>(),
         schema_of::<Facet>(),
     ] {
         assert!(
@@ -868,6 +872,8 @@ fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
             "declared_tag",
             "folder",
             "path_rule",
+            "tag_pattern",
+            "undeclared_tags",
         ])
     );
     assert_eq!(
@@ -1033,6 +1039,7 @@ fn an_unsatisfied_part_advertises_its_part_tag() {
             "malformed_glob",
             "impossible_path",
             "missing_section",
+            "missing_block",
             "resolves_not_applicable",
         ])
     );
@@ -1148,12 +1155,14 @@ fn a_document_path_advertises_the_grammar_it_is_parsed_through() {
     assert_eq!(schema["type"].as_str(), Some("string"));
     assert_eq!(schema["minLength"].as_u64(), Some(1));
     assert!(schema.get("pattern").is_none(), "{schema}");
-    assert!(
-        schema["description"]
-            .as_str()
-            .is_some_and(|text| text.contains("Not empty")),
-        "{schema}"
-    );
+    for sentence in ["Not empty", "relative to the vault root"] {
+        assert!(
+            schema["description"]
+                .as_str()
+                .is_some_and(|text| text.contains(sentence)),
+            "the description does not say `{sentence}`: {schema}"
+        );
+    }
 }
 
 /// A column advertises its `col` tag, one branch per part of a document a read
@@ -1190,6 +1199,21 @@ fn a_collection_advertises_its_items_and_its_total() {
     );
 }
 
+/// A body advertises its head and the whole body's length beside it, so a
+/// surface publishing a row publishes what a cut body looks like with it.
+#[test]
+fn a_body_advertises_its_text_and_the_length_of_the_whole() {
+    let schema = schema_of::<BodyText>();
+    assert_eq!(
+        property_names(&schema),
+        ["text", "byte_length"].into_iter().collect()
+    );
+    assert_eq!(
+        schema["properties"]["text"]["type"].as_str(),
+        Some("string")
+    );
+}
+
 /// The row advertises the path and one property per column, and refers to the
 /// row types its collections hold rather than restating them.
 #[test]
@@ -1214,7 +1238,14 @@ fn a_document_row_advertises_its_path_and_one_property_per_column() {
         ["path"].into_iter().collect(),
         "a column a read did not project is advertised as required"
     );
-    for definition in ["LinkRow", "HeadingRow", "BlockRow", "TagRow", "FindingRow"] {
+    for definition in [
+        "LinkRow",
+        "HeadingRow",
+        "BlockRow",
+        "TagRow",
+        "FindingRow",
+        "BodyText",
+    ] {
         assert!(
             schema["$defs"][definition].is_object(),
             "a row carries no definition of {definition}"
@@ -1287,6 +1318,45 @@ fn the_document_facts_advertise_their_vocabularies() {
     );
 }
 
+/// A field value is a recursive tree, and the schema says so: a sequence's
+/// items and a map's entries refer to the value type itself rather than to a
+/// string a consumer would have to parse a second time.
+#[test]
+fn a_field_value_advertises_a_tree_rather_than_json_in_a_string() {
+    let schema = schema_of::<FieldValue>();
+    let branch = |kind: &str| {
+        branches(&schema)
+            .iter()
+            .find(|branch| tag_constant(branch, "kind") == Some(kind))
+            .unwrap_or_else(|| panic!("the {kind} branch"))
+            .clone()
+    };
+    let sequence = branch("sequence");
+    assert_eq!(
+        property_names(&sequence),
+        ["kind", "items"].into_iter().collect()
+    );
+    assert_eq!(
+        sequence["properties"]["items"]["items"]["$ref"].as_str(),
+        Some("#"),
+        "a sequence does not hold field values: {sequence}"
+    );
+    let map = branch("map");
+    assert_eq!(
+        property_names(&map),
+        ["kind", "entries"].into_iter().collect()
+    );
+    assert_eq!(
+        map["properties"]["entries"]["additionalProperties"]["$ref"].as_str(),
+        Some("#"),
+        "a map does not hold field values: {map}"
+    );
+    assert!(
+        !schema.to_string().contains("raw_json"),
+        "a field value advertises JSON in a string: {schema}"
+    );
+}
+
 // ── The finding row ──────────────────────────────────────────────────────
 
 /// A finding row advertises the bounded head, the total that makes it a head,
@@ -1303,8 +1373,7 @@ fn a_finding_row_advertises_its_bounded_head_and_its_hint() {
             "path",
             "target",
             "span",
-            "candidates",
-            "candidates_total",
+            "head",
             "hint",
             "message",
             "generation",
@@ -1313,7 +1382,16 @@ fn a_finding_row_advertises_its_bounded_head_and_its_hint() {
         .collect()
     );
     assert_eq!(
-        schema["properties"]["candidates"]["type"].as_str(),
+        schema["properties"]["head"]["$ref"].as_str(),
+        Some("#/$defs/CandidateHead")
+    );
+    let head = schema_of::<CandidateHead>();
+    assert_eq!(
+        property_names(&head),
+        ["candidates", "total"].into_iter().collect()
+    );
+    assert_eq!(
+        head["properties"]["candidates"]["type"].as_str(),
         Some("array")
     );
     assert!(
@@ -1345,9 +1423,12 @@ fn the_target_refusals_advertise_the_typed_target_they_are_about() {
     let ambiguous = branch("vault/ambiguous-target");
     assert_eq!(
         property_names(&ambiguous),
-        ["code", "target", "candidates", "candidates_total", "hint"]
-            .into_iter()
-            .collect()
+        ["code", "target", "head", "hint"].into_iter().collect()
+    );
+    assert_eq!(
+        ambiguous["properties"]["head"]["$ref"].as_str(),
+        Some("#/$defs/CandidateHead"),
+        "a refusal restates the head rather than referring to it"
     );
     assert_eq!(
         ambiguous["properties"]["target"]["$ref"].as_str(),
@@ -1395,7 +1476,7 @@ fn every_read_params_advertises_the_whole_of_what_a_request_carries() {
     );
     assert_eq!(
         property_names(&schema_of::<GetParams>()),
-        ["vault", "target", "columns", "collection", "after"]
+        ["vault", "target", "columns", "collection", "limit", "after"]
             .into_iter()
             .collect()
     );
@@ -1458,6 +1539,11 @@ fn a_rung_set_advertises_the_resolved_set_and_no_preset() {
         schema["properties"]["rungs"]["type"].as_str(),
         Some("array")
     );
+    assert_eq!(
+        schema["properties"]["rungs"]["minItems"].as_u64(),
+        Some(1),
+        "the set advertises a ladder that runs no rung: {schema}"
+    );
     assert!(
         schema["$defs"]["Rung"].is_object(),
         "a rung set carries no definition of a rung: {schema}"
@@ -1489,13 +1575,13 @@ fn a_hit_advertises_its_score_and_its_optional_row() {
 }
 
 /// A get report advertises its `shape` tag, and the collection shape names the
-/// collection it paged both as a selector and as the page's own tag.
+/// collection it paged once: the page's own tag, with no selector beside it.
 #[test]
 fn a_get_report_advertises_its_shape_tag() {
     let schema = schema_of::<GetReport>();
     assert_eq!(
         sorted(tag_constants(&schema, "shape")),
-        sorted(["record", "section", "collection"])
+        sorted(["record", "section", "block", "collection"])
     );
     let collection = branches(&schema)
         .iter()
@@ -1503,7 +1589,16 @@ fn a_get_report_advertises_its_shape_tag() {
         .expect("the collection branch");
     assert_eq!(
         property_names(collection),
-        ["shape", "path", "selector", "page"].into_iter().collect()
+        ["shape", "path", "page"].into_iter().collect(),
+        "the collection report advertises a selector beside the page that names one"
+    );
+    let block = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "shape") == Some("block"))
+        .expect("the block branch");
+    assert_eq!(
+        property_names(block),
+        ["shape", "path", "block", "body"].into_iter().collect()
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<CollectionPage>(), "of")),
@@ -1564,6 +1659,7 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
             "tag_pattern",
             "folder",
             "path_rule",
+            "undeclared_tags",
         ])
     );
     let declared = branches(&schema)
@@ -1603,6 +1699,21 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
                 .unwrap_or_else(|| panic!("a rule branch is not a pinned string: {branch}"))
         })),
         ["ambiguity_ignore"]
+    );
+    let undeclared = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "facet") == Some("undeclared_tags"))
+        .expect("the undeclared_tags branch");
+    assert_eq!(
+        undeclared["properties"]["stance"]["$ref"].as_str(),
+        Some("#/$defs/TagStance")
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<TagStance>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a stance branch is not a pinned string: {branch}"))
+        })),
+        sorted(["allow", "report"])
     );
 }
 
