@@ -27,12 +27,24 @@
 //! onto `a`–`z`; every other byte compares as itself. Unix path names are byte
 //! strings, not necessarily UTF-8, so preserving non-ASCII bytes avoids
 //! inventing a lossy Unicode policy while still covering the case behavior
-//! Norn promises. The limit that buys is exact and worth naming: a volume that
-//! folds case in Unicode resolves `café.md` and `CAFÉ.md` to one entry while
-//! this fold reads them as two, so on such a root the two spellings are one
-//! file the vault sees under two keys. Widening the fold is a change to this
-//! module and to the stored keys derived from it, never a local choice made at
-//! a comparison site.
+//! Norn promises.
+//!
+//! **A volume's wider fold is outside the contract.** Some roots resolve more
+//! than ASCII case to one entry — Unicode case, and on APFS the NFC and NFD
+//! spellings of one name — and each such volume folds by its own table, which
+//! no fold shipped here matches and which the one-entry proof below cannot
+//! prove. So this module folds nothing beyond ASCII on any root, and on such a
+//! root a document's identity is **the spelling the tree lists**: `café.md`
+//! and `CAFÉ.md` are one entry to the volume, and the one the directory renders
+//! is the document. A spelling only the volume resolves names no document — a
+//! link or a request spelled that way is broken or not found, and a walk that
+//! reads such a spelling as standing is wrong: a stat on a folding volume
+//! answers for every spelling of an entry, where the directory's listing
+//! answers only for the one it renders — so a subtree descent that proves its
+//! components by stat lets a caller's volume-only spelling descend as if it
+//! stood. Widening the fold is a change to this module,
+//! to the store's collation and the keys it folds, and to the contract sample
+//! both are pinned to, never a local choice made at a comparison site.
 //!
 //! **Whether the fold is applied at all is proven, not assumed.** The key
 //! folds only where an existing directory entry demonstrates that the root
