@@ -201,17 +201,24 @@ fn every_wire_type_derives_a_schema() {
 
 /// Every `description` the schemas carry, at every depth, with the pointer it
 /// sits at so a failure names where to look.
+///
+/// `description` is a JSON Schema keyword and a field name a wire type may
+/// carry at once: a schema property named `description` sits at
+/// `properties/description` and holds a whole sub-schema of its own. The walk
+/// therefore descends into every object and array value without exception, and
+/// collects text only where the key is `description` and the value is a
+/// string, so a property by that name is walked rather than mistaken for the
+/// keyword and skipped.
 fn descriptions(schema: &Value, at: String, found: &mut Vec<(String, String)>) {
     match schema {
         Value::Object(members) => {
             for (key, value) in members {
-                if key == "description" {
-                    if let Some(text) = value.as_str() {
-                        found.push((at.clone(), text.to_string()));
-                    }
-                } else {
-                    descriptions(value, format!("{at}/{key}"), found);
+                if key == "description"
+                    && let Some(text) = value.as_str()
+                {
+                    found.push((at.clone(), text.to_string()));
                 }
+                descriptions(value, format!("{at}/{key}"), found);
             }
         }
         Value::Array(items) => {
@@ -223,14 +230,9 @@ fn descriptions(schema: &Value, at: String, found: &mut Vec<(String, String)>) {
     }
 }
 
-/// A description is what an MCP consumer reads, and schemars lifts it verbatim
-/// out of the doc comment on a type, a variant or a field. A Rust intralink
-/// survives that lift as its own source text, naming a symbol the consumer
-/// cannot follow and has no vocabulary for, so a bracketed link of either
-/// spelling is a description that leaked maintainer documentation. Rationale
-/// belongs in module documentation, which schemars does not lift.
-#[test]
-fn no_published_description_carries_a_rust_intralink() {
+/// Every description the wire schemas publish, each with the pointer it sits
+/// at.
+fn published_descriptions() -> Vec<(String, String)> {
     let mut found = Vec::new();
     for schema in every_wire_schema() {
         let title = schema
@@ -244,12 +246,110 @@ fn no_published_description_carries_a_rust_intralink() {
         !found.is_empty(),
         "the census walked no descriptions at all"
     );
-    for (at, description) in &found {
+    found
+}
+
+/// Whether a description carries a Rust intralink, in any spelling rustdoc
+/// accepts: a shortcut link, which opens with a bracketed backtick, and a
+/// reference link whose target is a Rust path. `](crate:` covers the `crate::`
+/// spelling as well as the bare `crate:` one rustdoc also resolves. A vault's
+/// own link grammars — `[[target]]` and `[title](target)` — are wire
+/// documentation rather than intralinks and carry none of these.
+fn publishes_an_intralink(description: &str) -> bool {
+    description.contains("[`")
+        || description.contains("](crate:")
+        || description.contains("](super::")
+}
+
+/// Whether a description carries a Rust attribute. An attribute is maintainer
+/// documentation about the Rust type: a consumer reading the schema cannot see
+/// one, cannot write one, and has no vocabulary for what it governs.
+fn publishes_an_attribute(description: &str) -> bool {
+    description.contains("#[")
+}
+
+/// A description is what an MCP consumer reads, and schemars lifts it verbatim
+/// out of the doc comment on a type, a variant or a field. A Rust intralink
+/// survives that lift as its own source text, naming a symbol the consumer
+/// cannot follow and has no vocabulary for, so a bracketed link of either
+/// spelling is a description that leaked maintainer documentation. Rationale
+/// belongs in module documentation, which schemars does not lift.
+#[test]
+fn no_published_description_carries_a_rust_intralink() {
+    for (at, description) in &published_descriptions() {
         assert!(
-            !description.contains("](crate::") && !description.contains("[`"),
+            !publishes_an_intralink(description),
             "the description at {at} publishes a Rust intralink: {description}"
         );
     }
+}
+
+/// A description is lifted out of a doc comment, so maintainer rationale
+/// about the Rust shape leaks the same way an intralink does. An attribute is
+/// that rationale at its plainest: `#[non_exhaustive]` governs what a Rust
+/// caller may destructure and says nothing about the bytes a consumer reads.
+/// Rationale belongs in module documentation, which schemars does not lift.
+#[test]
+fn no_published_description_carries_a_rust_attribute() {
+    for (at, description) in &published_descriptions() {
+        assert!(
+            !publishes_an_attribute(description),
+            "the description at {at} publishes a Rust attribute: {description}"
+        );
+    }
+}
+
+/// The census reads the spellings a Rust intralink takes and leaves the
+/// vault's own link grammars alone, which are wire vocabulary a description is
+/// entitled to name.
+#[test]
+fn the_intralink_census_reads_every_spelling_a_rust_link_takes() {
+    for leaked in [
+        "the head [`CandidateHead`] carries",
+        "see [the head](crate::finding_row::CandidateHead)",
+        "see [the head](crate:finding_row)",
+        "see [the head](super::CandidateHead)",
+    ] {
+        assert!(
+            publishes_an_intralink(leaked),
+            "the census reads no intralink in: {leaked}"
+        );
+    }
+    for kept in [
+        "A wikilink, `[[target]]`.",
+        "An inline Markdown link, `[title](target)`.",
+    ] {
+        assert!(
+            !publishes_an_intralink(kept),
+            "the census reads a link grammar as an intralink: {kept}"
+        );
+    }
+}
+
+/// A wire type may carry a field named `description`, and its sub-schema is
+/// where a leak would hide if the walk read the name as the JSON Schema
+/// keyword and stopped.
+#[test]
+fn the_census_walks_a_schema_property_named_description() {
+    let schema = serde_json::json!({
+        "title": "Facet",
+        "description": "A facet of the vault's schema.",
+        "properties": {
+            "description": {
+                "type": "string",
+                "description": "What the schema says the folder is for.",
+            },
+        },
+    });
+    let mut found = Vec::new();
+    descriptions(&schema, "Facet".to_string(), &mut found);
+    assert!(
+        found.contains(&(
+            "Facet/properties/description".to_string(),
+            "What the schema says the folder is for.".to_string()
+        )),
+        "the census walked past the sub-schema of a property named description: {found:?}"
+    );
 }
 
 // ── The tag representation ───────────────────────────────────────────────
