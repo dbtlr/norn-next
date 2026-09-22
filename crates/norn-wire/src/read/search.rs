@@ -1,4 +1,15 @@
 //! `search`: ranked hits for a query, answered from the vault's ladder.
+//!
+//! **The wire carries the resolved rung set, never a preset.** The spellings a
+//! person types — `lexical`, `semantic`, `hybrid` — and the `--no-<rung>`
+//! subtraction that trims them are Layer 6 renderings: a surface expands them
+//! into the rungs they name before it builds a request, so two surfaces cannot
+//! expand one preset two ways and a preset arriving here would be a second
+//! vocabulary for the one the ladder already has.
+//!
+//! **A search runs at least the lexical floor.** There is nothing an empty set
+//! could mean short of answering nothing at all, so it is refused where a set
+//! is built and where one is read alike.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -30,15 +41,9 @@ impl std::error::Error for EmptyLadder {}
 
 /// The rungs a search is asked to run.
 ///
-/// On the wire a rung set is a plain object holding the resolved set:
-/// `{"rungs":["lexical","vector"]}`. It is the rungs themselves and never a
-/// preset: `lexical`, `semantic` and `hybrid`, and the `--no-<rung>`
-/// subtraction that trims them, are spellings a surface expands before it
-/// builds a request, so two surfaces cannot expand one preset two ways.
-///
-/// The set is not empty. A search runs at least the lexical floor, and a set
-/// that names nothing is refused where one is built and where one is read
-/// alike.
+/// On the wire a rung set is a plain object holding the rungs themselves:
+/// `{"rungs":["lexical","vector"]}`. The set is not empty: a set naming no
+/// rung is refused rather than read.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct RungSet {

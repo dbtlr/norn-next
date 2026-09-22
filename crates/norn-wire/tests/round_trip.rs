@@ -14,19 +14,24 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Addressing, Anchor, AnswerReading, AttachMode, ControlFile, Cursor, CursorKey,
-    CursorOrderChanged, EngineSection, ErrorDetail, ErrorEnvelope, FacetKind, FindingKind,
-    FindingScope, Freshness, LadderDeclaration, MaintainerIdentity, ModelIdentity, Moved,
-    NonFiniteScore, NotReady, Page, PollBackend, Predicate, ReasonCode, ReloadFailure, ReloadStage,
-    RequestScope, ResolutionTarget, Rung, RungReport, SchemaSource, Score, Severity, Snapshot,
-    TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
-    UnknownSeverity, UnknownVerb, Unsatisfied, UntrustedReason, VaultAddress, VaultAnswer,
+    Addressing, Anchor, AnswerReading, AttachMode, BlockRow, CANDIDATE_HEAD, Candidate, Collection,
+    CollectionPage, CollectionSelector, Column, ContainerKind, ControlFile, CountParams, Cursor,
+    CursorKey, CursorOrderChanged, DescribeParams, Direction, DocumentPath, DocumentRow,
+    EmptyLadder, EngineSection, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType,
+    FieldValue, FindParams, FindingKind, FindingRow, FindingScope, Freshness, GetParams, GetReport,
+    GroupKey, HeadingRow, Hint, Hit, KindTally, LadderDeclaration, LinkFamily, LinkHealth, LinkRow,
+    MaintainerIdentity, ModelIdentity, Moved, NonFiniteScore, NotReady, Page, PathRuleKind,
+    PollBackend, Predicate, ReasonCode, ReloadFailure, ReloadStage, RequestScope, ResolutionTarget,
+    Rung, RungReport, RungSet, SchemaSource, Score, SearchParams, Severity, Snapshot, Sort,
+    SortKey, Span, TagRow, TagSource, Tally, TotalBelowHead, TrustState, UnknownAddressing,
+    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
+    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer,
     VaultName, VaultRoot, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
 /// Every cause a lost watcher carries.
@@ -118,6 +123,8 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::HostReaderUnavailable,
         ReasonCode::HostRegistryUnwritable,
         ReasonCode::VaultAmbiguousRoot,
+        ReasonCode::VaultAmbiguousTarget,
+        ReasonCode::VaultUnknownTarget,
         ReasonCode::VaultReloadBusy,
         ReasonCode::VaultReloadFailed,
         ReasonCode::VaultCursorOrderChanged,
@@ -179,6 +186,14 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::reader_unavailable("this coverage mints no read handle"),
         ErrorDetail::registry_unwritable("the registry file is read-only"),
         ErrorDetail::ambiguous_root([name("notes"), name("vault")]),
+        ErrorDetail::ambiguous_target(
+            target("glossary"),
+            [candidate("notes/glossary"), candidate("archive/glossary")],
+            4,
+            Hint::resolves(target("glossary")),
+        )
+        .expect("a head no larger than its total"),
+        ErrorDetail::unknown_target(target("glossary")),
         ErrorDetail::reload_busy(),
         ErrorDetail::cursor_order_changed(CursorOrderChanged::new(
             "fp-1",
@@ -433,6 +448,254 @@ fn unsatisfied_parts() -> Vec<Unsatisfied> {
     ]
 }
 
+/// One document path a vector names a document by, parsed through the grammar
+/// the type keeps.
+fn path(text: &str) -> DocumentPath {
+    DocumentPath::new(text).expect("a legal document path")
+}
+
+/// One position, which every row that names one names the same way.
+fn span() -> Span {
+    Span::new(3, 1, 42)
+}
+
+/// Every part of a document a read can ask to have on a row.
+fn columns() -> Vec<Column> {
+    vec![
+        Column::path(),
+        Column::field("due"),
+        Column::body(),
+        Column::links(),
+        Column::headings(),
+        Column::blocks(),
+        Column::tags(),
+        Column::findings(),
+        Column::fields(),
+    ]
+}
+
+/// Every reading a resolved link's health takes.
+fn link_healths() -> Vec<LinkHealth> {
+    vec![
+        LinkHealth::Healthy,
+        LinkHealth::Broken,
+        LinkHealth::Ambiguous,
+    ]
+}
+
+/// Every grammar a link is written in.
+fn link_families() -> Vec<LinkFamily> {
+    vec![LinkFamily::Wikilink, LinkFamily::Markdown]
+}
+
+/// Every home a tag is read from.
+fn tag_sources() -> Vec<TagSource> {
+    vec![TagSource::Body, TagSource::Frontmatter]
+}
+
+/// Every container a frontmatter value sits in, and the absence beside them.
+fn field_values() -> Vec<FieldValue> {
+    vec![
+        FieldValue::scalar("note"),
+        FieldValue::sequence(["a".to_string(), "b".to_string()]),
+        FieldValue::map(r#"{"a":1}"#),
+        FieldValue::absent(),
+    ]
+}
+
+/// One link row per health, built through the constructor that derives it.
+fn link_rows() -> Vec<LinkRow> {
+    [
+        vec![],
+        vec![path("notes/a.md")],
+        vec![path("notes/a.md"), path("archive/a.md")],
+    ]
+    .into_iter()
+    .map(|targets| {
+        LinkRow::new(
+            LinkFamily::Wikilink,
+            false,
+            None,
+            "a",
+            Some("A".to_string()),
+            Some(Anchor::heading("Design")),
+            span(),
+            targets,
+        )
+    })
+    .collect()
+}
+
+/// Every hint a bounded head points a client at.
+fn hints() -> Vec<Hint> {
+    vec![Hint::resolves(target("norn/glossary"))]
+}
+
+/// One candidate, which the two bounded heads are built out of.
+fn candidate(text: &str) -> Candidate {
+    Candidate::new(path(&format!("{text}.md")), text)
+}
+
+/// A finding row, built through the constructor that bounds its head.
+fn finding_row() -> FindingRow {
+    FindingRow::new(
+        7,
+        FindingKind::UndeclaredTag,
+        Severity::Warning,
+        path("notes/a.md"),
+        Some("draft".to_string()),
+        Some(span()),
+        [candidate("notes/glossary"), candidate("archive/glossary")],
+        9,
+        Some(Hint::resolves(target("glossary"))),
+        "the tag is not declared",
+        12,
+    )
+    .expect("a head no larger than its total")
+}
+
+/// Every nested collection a request pages by ordinal.
+fn collection_selectors() -> Vec<CollectionSelector> {
+    vec![
+        CollectionSelector::Links,
+        CollectionSelector::Headings,
+        CollectionSelector::Blocks,
+        CollectionSelector::Tags,
+        CollectionSelector::Findings,
+    ]
+}
+
+/// One heading row, which two shapes carry.
+fn heading_row() -> HeadingRow {
+    HeadingRow::new(2, "Design", "design", span())
+}
+
+/// One page of each nested collection.
+fn collection_pages() -> Vec<CollectionPage> {
+    vec![
+        CollectionPage::links(Page::new(link_rows(), None, vec![])),
+        CollectionPage::headings(Page::new(vec![heading_row()], None, vec![])),
+        CollectionPage::blocks(Page::new(
+            vec![BlockRow::new("a1", Some(span()))],
+            None,
+            vec![],
+        )),
+        CollectionPage::tags(Page::new(
+            vec![TagRow::new("draft", TagSource::Body, None)],
+            None,
+            vec![],
+        )),
+        CollectionPage::findings(Page::new(vec![finding_row()], None, vec![])),
+    ]
+}
+
+/// A document row carrying every column a projection can ask for.
+fn whole_document_row() -> DocumentRow {
+    DocumentRow::new(path("notes/a.md"))
+        .with_fields(BTreeMap::from([(
+            "type".to_string(),
+            FieldValue::scalar("note"),
+        )]))
+        .with_body("# Design\n")
+        .with_links(Collection::new(link_rows(), 9))
+        .with_headings(Collection::new(vec![heading_row()], 1))
+        .with_blocks(Collection::new(vec![BlockRow::new("a1", None)], 1))
+        .with_tags(Collection::new(
+            vec![TagRow::new("draft", TagSource::Frontmatter, Some(span()))],
+            1,
+        ))
+        .with_findings(Collection::new(vec![finding_row()], 1))
+}
+
+/// Every shape a `get` answers with.
+fn get_reports() -> Vec<GetReport> {
+    let mut reports = vec![
+        GetReport::record(whole_document_row()),
+        GetReport::section(path("notes/a.md"), heading_row(), "the section body"),
+    ];
+    reports.extend(
+        collection_pages()
+            .into_iter()
+            .map(|page| GetReport::collection(path("notes/a.md"), page)),
+    );
+    reports
+}
+
+/// Every shape a `validate` answers with.
+fn validate_reports() -> Vec<ValidateReport> {
+    vec![
+        ValidateReport::findings(Page::new(vec![finding_row()], None, vec![])),
+        ValidateReport::summary([KindTally::new(
+            FindingKind::UndeclaredTag,
+            Severity::Warning,
+            3,
+        )]),
+    ]
+}
+
+/// Every key a `find` orders by.
+fn sort_keys() -> Vec<SortKey> {
+    vec![SortKey::field("due"), SortKey::path()]
+}
+
+/// Every way an order runs.
+fn directions() -> Vec<Direction> {
+    vec![Direction::Ascending, Direction::Descending]
+}
+
+/// Every key a `count` groups by.
+fn group_keys() -> Vec<GroupKey> {
+    vec![GroupKey::field("type"), GroupKey::tag()]
+}
+
+/// Every type a vault's schema declares a field under.
+fn field_types() -> Vec<FieldType> {
+    FieldType::ALL.to_vec()
+}
+
+/// Every container an observed field's values sit in.
+fn container_kinds() -> Vec<ContainerKind> {
+    vec![
+        ContainerKind::Scalar,
+        ContainerKind::Sequence,
+        ContainerKind::Map,
+    ]
+}
+
+/// Every rule a path rule states.
+fn path_rule_kinds() -> Vec<PathRuleKind> {
+    vec![PathRuleKind::AmbiguityIgnore]
+}
+
+/// Every facet a `describe` reports, one per shape.
+fn facets() -> Vec<Facet> {
+    let mut facets: Vec<Facet> = field_types()
+        .into_iter()
+        .map(|field_type| Facet::declared_field("due", field_type, true, None))
+        .collect();
+    facets.push(Facet::declared_field(
+        "status",
+        FieldType::Text,
+        false,
+        Some(vec!["draft".to_string(), "live".to_string()]),
+    ));
+    facets.extend(
+        container_kinds()
+            .into_iter()
+            .map(|container| Facet::observed_field("due", container)),
+    );
+    facets.push(Facet::declared_tag("area"));
+    facets.push(Facet::tag_pattern("person/**"));
+    facets.push(Facet::folder("journal", Some("One per day".to_string())));
+    facets.push(Facet::folder("archive", None));
+    facets.extend(
+        path_rule_kinds()
+            .into_iter()
+            .map(|rule| Facet::path_rule(rule, "archive/**")),
+    );
+    facets
+}
+
 fn round_trip<T>(value: &T)
 where
     T: Serialize + DeserializeOwned + Debug + PartialEq,
@@ -682,6 +945,142 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<VaultAddress>(Some("by")),
         "the addresses built here are not the addresses the vocabulary holds"
+    );
+    assert_eq!(
+        columns()
+            .iter()
+            .map(|column| tag_string(column, "col"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<Column>(Some("col")),
+        "the columns built here are not the columns the vocabulary holds"
+    );
+    assert_eq!(
+        link_healths()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<LinkHealth>(None),
+        "the healths built here are not the healths the vocabulary holds"
+    );
+    assert_eq!(
+        link_families()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<LinkFamily>(None),
+        "the families built here are not the families the vocabulary holds"
+    );
+    assert_eq!(
+        tag_sources()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<TagSource>(None),
+        "the tag sources built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        field_values()
+            .iter()
+            .map(|value| tag_string(value, "kind"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<FieldValue>(Some("kind")),
+        "the field values built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        hints()
+            .iter()
+            .map(|hint| tag_string(hint, "hint"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<Hint>(Some("hint")),
+        "the hints built here are not the hints the vocabulary holds"
+    );
+    assert_eq!(
+        collection_selectors()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<CollectionSelector>(None),
+        "the selectors built here are not the selectors the vocabulary holds"
+    );
+    assert_eq!(
+        collection_pages()
+            .iter()
+            .map(|page| tag_string(page, "of"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<CollectionPage>(Some("of")),
+        "the collection pages built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        get_reports()
+            .iter()
+            .map(|report| tag_string(report, "shape"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<GetReport>(Some("shape")),
+        "the get reports built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        validate_reports()
+            .iter()
+            .map(|report| tag_string(report, "shape"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<ValidateReport>(Some("shape")),
+        "the validate reports built here are not the ones the vocabulary holds"
+    );
+    assert_eq!(
+        sort_keys()
+            .iter()
+            .map(|key| tag_string(key, "by"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<SortKey>(Some("by")),
+        "the sort keys built here are not the keys the vocabulary holds"
+    );
+    assert_eq!(
+        directions()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<Direction>(None),
+        "the directions built here are not the directions the vocabulary holds"
+    );
+    assert_eq!(
+        group_keys()
+            .iter()
+            .map(|key| tag_string(key, "by"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<GroupKey>(Some("by")),
+        "the group keys built here are not the keys the vocabulary holds"
+    );
+    assert_eq!(
+        field_types()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<FieldType>(None),
+        "the field types built here are not the types the vocabulary holds"
+    );
+    assert_eq!(
+        container_kinds()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<ContainerKind>(None),
+        "the containers built here are not the containers the vocabulary holds"
+    );
+    assert_eq!(
+        path_rule_kinds()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<PathRuleKind>(None),
+        "the path rules built here are not the rules the vocabulary holds"
+    );
+    assert_eq!(
+        facets()
+            .iter()
+            .map(|facet| tag_string(facet, "facet"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<Facet>(Some("facet")),
+        "the facets built here are not the facets the vocabulary holds"
     );
 }
 
@@ -2317,5 +2716,588 @@ fn ambiguous_root_candidates_ascend_whatever_order_they_arrive_in() {
             name("notes"),
         ])),
         r#"{"code":"vault/ambiguous-root","candidates":["archive","notes","vault"]}"#
+    );
+}
+
+// ── The document row and the columns it is projected onto ────────────────
+
+#[test]
+fn every_document_shape_survives_the_round_trip() {
+    for column in columns() {
+        round_trip(&column);
+    }
+    for value in field_values() {
+        round_trip(&value);
+    }
+    for row in link_rows() {
+        round_trip(&row);
+    }
+    for health in link_healths() {
+        round_trip(&health);
+    }
+    for family in link_families() {
+        round_trip(&family);
+    }
+    for source in tag_sources() {
+        round_trip(&source);
+    }
+    round_trip(&span());
+    round_trip(&heading_row());
+    round_trip(&BlockRow::new("a1", Some(span())));
+    round_trip(&TagRow::new("draft", TagSource::Body, None));
+    round_trip(&whole_document_row());
+    round_trip(&DocumentRow::new(path("notes/a.md")));
+}
+
+/// A path is the string itself, and the read path is the grammar: the one
+/// string that names nothing has no representation on either side of the seam.
+/// What else a path may hold is the store's grammar and is not re-checked
+/// here, so a path a vault could not have is carried rather than refused.
+#[test]
+fn a_document_path_is_the_string_it_renders_as_and_is_not_empty() {
+    assert_eq!(wire(&path("notes/a.md")), r#""notes/a.md""#);
+    assert_eq!(path("notes/a.md").as_str(), "notes/a.md");
+    assert_eq!(path("notes/a.md").to_string(), "notes/a.md");
+    assert!(
+        serde_json::from_str::<DocumentPath>(r#""""#).is_err(),
+        "the empty string was read as a document path"
+    );
+    let refusal = DocumentPath::new("").expect_err("an empty document path");
+    assert_eq!(refusal.what(), "document path");
+    for text in ["/etc/passwd", "../a.md", "a b.md"] {
+        let json = format!("\"{text}\"");
+        assert!(
+            serde_json::from_str::<DocumentPath>(&json).is_ok(),
+            "`{text}` was refused by a grammar this type does not keep"
+        );
+    }
+}
+
+/// A column is an object tagged `col`, and the one that names a key carries it
+/// beside the tag rather than as the tag.
+#[test]
+fn a_column_is_an_object_tagged_col() {
+    assert_eq!(wire(&Column::path()), r#"{"col":"path"}"#);
+    assert_eq!(wire(&Column::fields()), r#"{"col":"fields"}"#);
+    assert_eq!(
+        wire(&Column::field("due")),
+        r#"{"col":"field","key":"due"}"#
+    );
+    assert!(
+        serde_json::from_str::<Column>(r#"{"col":"backlinks"}"#).is_err(),
+        "a column nobody minted read back as one"
+    );
+}
+
+/// A nested collection says in band what it cut. The items are the head and
+/// the total is the vault's count, so a row whose links were bounded reports
+/// the bound rather than handing back a short list that reads as the whole.
+#[test]
+fn a_collection_reports_the_cut_through_its_total() {
+    let whole = Collection::new(vec![BlockRow::new("a1", None)], 1);
+    assert!(!whole.is_truncated());
+    let cut = Collection::new(vec![BlockRow::new("a1", None)], 12);
+    assert!(cut.is_truncated());
+    assert_eq!(
+        wire(&cut),
+        r#"{"items":[{"id":"a1","span":null}],"total":12}"#
+    );
+}
+
+/// Health is read off the documents a target resolved to, and the derivation
+/// is the whole of it: none is broken, one is healthy, and more than one is
+/// ambiguous.
+#[test]
+fn a_links_health_is_the_count_of_what_it_resolves_to() {
+    let rows = link_rows();
+    assert_eq!(rows.len(), link_healths().len());
+    assert_eq!(rows[0].health(), LinkHealth::Broken);
+    assert_eq!(rows[1].health(), LinkHealth::Healthy);
+    assert_eq!(rows[2].health(), LinkHealth::Ambiguous);
+    assert_eq!(LinkHealth::of_targets(0), LinkHealth::Broken);
+    assert_eq!(LinkHealth::of_targets(1), LinkHealth::Healthy);
+    assert_eq!(LinkHealth::of_targets(400), LinkHealth::Ambiguous);
+}
+
+/// The two halves of one fact cannot arrive disagreeing: a row whose `health`
+/// is not the health of the documents beside it is refused entire rather than
+/// read into a value that says two things about one link.
+#[test]
+fn a_link_whose_health_is_not_its_targets_refuses_the_read() {
+    let row = |health: &str, targets: &[&str]| {
+        serde_json::json!({
+            "family": "wikilink",
+            "embed": false,
+            "protocol": null,
+            "target": "a",
+            "title": null,
+            "anchor": null,
+            "span": {"line": 1, "column": 1, "byte_offset": 0},
+            "targets": targets,
+            "health": health,
+        })
+        .to_string()
+    };
+    for (health, targets) in [
+        ("broken", &[][..]),
+        ("healthy", &["notes/a.md"][..]),
+        ("ambiguous", &["notes/a.md", "archive/a.md"][..]),
+    ] {
+        let json = row(health, targets);
+        assert!(
+            serde_json::from_str::<LinkRow>(&json).is_ok(),
+            "reading {json} refused a row whose halves agree"
+        );
+    }
+    for (health, targets) in [
+        ("healthy", &[][..]),
+        ("broken", &["notes/a.md"][..]),
+        ("healthy", &["notes/a.md", "archive/a.md"][..]),
+    ] {
+        let json = row(health, targets);
+        assert!(
+            serde_json::from_str::<LinkRow>(&json).is_err(),
+            "reading {json} produced a row whose halves disagree"
+        );
+    }
+}
+
+/// A column the read did not project is left out of the bytes entirely, so a
+/// client tells a column it did not ask for from a column the document does
+/// not have. The path is carried whatever was asked for.
+#[test]
+fn an_unprojected_column_is_absent_from_the_row() {
+    let bare = DocumentRow::new(path("notes/a.md"));
+    assert_eq!(wire(&bare), r#"{"path":"notes/a.md"}"#);
+    let projected = bare.clone().with_body("hello");
+    assert_eq!(wire(&projected), r#"{"path":"notes/a.md","body":"hello"}"#);
+    let read: DocumentRow =
+        serde_json::from_str(r#"{"path":"notes/a.md"}"#).expect("a row projecting nothing");
+    assert_eq!(read, bare);
+    assert_eq!(read.body, None);
+}
+
+/// A frontmatter value crosses as the text it is written as, tagged by the
+/// container it sits in. A map crosses as its canonical JSON, which is a
+/// string here rather than a shape this crate would have to re-express.
+#[test]
+fn a_field_value_is_an_object_tagged_kind() {
+    assert_eq!(
+        wire(&FieldValue::scalar("note")),
+        r#"{"kind":"scalar","raw":"note"}"#
+    );
+    assert_eq!(
+        wire(&FieldValue::sequence(["a".to_string()])),
+        r#"{"kind":"sequence","items":["a"]}"#
+    );
+    assert_eq!(
+        wire(&FieldValue::map(r#"{"a":1}"#)),
+        r#"{"kind":"map","raw_json":"{\"a\":1}"}"#
+    );
+    assert_eq!(wire(&FieldValue::absent()), r#"{"kind":"absent"}"#);
+}
+
+// ── The finding row and its bounded head ─────────────────────────────────
+
+#[test]
+fn every_finding_row_shape_survives_the_round_trip() {
+    round_trip(&finding_row());
+    for hint in hints() {
+        round_trip(&hint);
+    }
+    round_trip(&candidate("notes/glossary"));
+}
+
+/// The head is bounded where a row is built, so a producer handing over more
+/// than five candidates does not widen the row. The total is untouched: it is
+/// what makes the head a head.
+#[test]
+fn a_candidate_list_is_bounded_at_the_head_wherever_it_is_built() {
+    let many: Vec<Candidate> = (0..12)
+        .map(|index| candidate(&format!("notes/g{index}")))
+        .collect();
+    let row = FindingRow::new(
+        1,
+        FindingKind::UndeclaredTag,
+        Severity::Error,
+        path("notes/a.md"),
+        None,
+        None,
+        many.clone(),
+        12,
+        None,
+        "ambiguous",
+        3,
+    )
+    .expect("a head no larger than its total");
+    assert_eq!(row.candidates.len(), CANDIDATE_HEAD);
+    assert_eq!(row.candidates_total, 12);
+    assert!(row.is_truncated());
+
+    let detail = ErrorDetail::ambiguous_target(
+        target("glossary"),
+        many,
+        12,
+        Hint::resolves(target("glossary")),
+    )
+    .expect("a head no larger than its total");
+    let json = serde_json::to_value(&detail).expect("a detail as JSON");
+    assert_eq!(
+        json["candidates"].as_array().map(Vec::len),
+        Some(CANDIDATE_HEAD)
+    );
+    assert_eq!(json["candidates_total"].as_u64(), Some(12));
+}
+
+/// A total below the head it heads describes no vault, and both shapes that
+/// carry a head refuse it for the same reason.
+#[test]
+fn a_total_below_the_head_it_heads_is_refused() {
+    let two = [candidate("notes/a"), candidate("notes/b")];
+    let refusal = FindingRow::new(
+        1,
+        FindingKind::UndeclaredTag,
+        Severity::Error,
+        path("notes/a.md"),
+        None,
+        None,
+        two.clone(),
+        1,
+        None,
+        "ambiguous",
+        3,
+    )
+    .expect_err("a total below its head");
+    assert_eq!(refusal.head(), 2);
+    assert_eq!(refusal.total(), 1);
+    assert_eq!(
+        refusal,
+        ErrorDetail::ambiguous_target(
+            target("glossary"),
+            two,
+            1,
+            Hint::resolves(target("glossary")),
+        )
+        .expect_err("a total below its head")
+    );
+    assert_eq!(
+        TotalBelowHead::to_string(&refusal),
+        "a candidate head of 2 cannot be the head of 1 candidates"
+    );
+}
+
+/// A finding row is the row a report pages, and the typed halves — the kind,
+/// the severity, the path, the hint — cross as themselves rather than as
+/// strings a reader re-parses.
+#[test]
+fn a_finding_row_carries_its_typed_halves() {
+    let row = FindingRow::new(
+        7,
+        FindingKind::UndeclaredTag,
+        Severity::Warning,
+        path("notes/a.md"),
+        Some("draft".to_string()),
+        None,
+        [],
+        0,
+        Some(Hint::resolves(target("glossary"))),
+        "the tag is not declared",
+        12,
+    )
+    .expect("a head no larger than its total");
+    assert!(!row.is_truncated());
+    assert_eq!(
+        wire(&row),
+        concat!(
+            r#"{"id":7,"kind":"document/undeclared-tag","severity":"warning","#,
+            r#""path":"notes/a.md","target":"draft","span":null,"candidates":[],"#,
+            r#""candidates_total":0,"hint":{"hint":"resolves","target":"glossary"},"#,
+            r#""message":"the tag is not declared","generation":12}"#
+        )
+    );
+}
+
+/// The refusal a target that names more than one document earns carries the
+/// same bounded head and the same hint a finding over that class carries, so
+/// the two say one thing.
+#[test]
+fn an_ambiguous_target_refuses_with_the_head_a_finding_carries() {
+    let envelope = ErrorEnvelope::new(
+        "the target names more than one document",
+        ErrorDetail::ambiguous_target(
+            target("glossary"),
+            [candidate("notes/glossary")],
+            2,
+            Hint::resolves(target("glossary")),
+        )
+        .expect("a head no larger than its total"),
+    );
+    assert_eq!(
+        wire(&envelope),
+        concat!(
+            r#"{"code":"vault/ambiguous-target","message":"the target names more than one document","#,
+            r#""detail":{"code":"vault/ambiguous-target","target":"glossary","#,
+            r#""candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"}],"#,
+            r#""candidates_total":2,"hint":{"hint":"resolves","target":"glossary"}}}"#
+        )
+    );
+    assert_eq!(
+        wire(&ErrorEnvelope::new(
+            "the target names no document",
+            ErrorDetail::unknown_target(target("glossary")),
+        )),
+        concat!(
+            r#"{"code":"vault/unknown-target","message":"the target names no document","#,
+            r#""detail":{"code":"vault/unknown-target","target":"glossary"}}"#
+        )
+    );
+}
+
+// ── The six read verbs ───────────────────────────────────────────────────
+
+#[test]
+fn every_read_report_shape_survives_the_round_trip() {
+    for report in get_reports() {
+        round_trip(&report);
+    }
+    for report in validate_reports() {
+        round_trip(&report);
+    }
+    for page in collection_pages() {
+        round_trip(&page);
+    }
+    for facet in facets() {
+        round_trip(&facet);
+    }
+    for key in sort_keys() {
+        round_trip(&key);
+    }
+    for key in group_keys() {
+        round_trip(&key);
+    }
+    round_trip(&Tally::new([Some("note".to_string()), None], 7));
+    round_trip(&KindTally::new(
+        FindingKind::UndeclaredTag,
+        Severity::Warning,
+        3,
+    ));
+    round_trip(&Hit::new(path("notes/a.md"), score(0.5)));
+    round_trip(&Hit::new(path("notes/a.md"), score(0.5)).with_document(whole_document_row()));
+}
+
+#[test]
+fn every_read_params_shape_survives_the_round_trip() {
+    let vault = VaultAddress::name(name("notes"));
+    round_trip(&FindParams::new(vault.clone()));
+    round_trip(
+        &FindParams::new(vault.clone())
+            .with_predicates(predicates())
+            .with_sort(Sort::new(SortKey::field("due"), Direction::Descending))
+            .with_columns(columns())
+            .with_limit(20)
+            .with_after(cursors().remove(0)),
+    );
+    round_trip(&SearchParams::new(vault.clone(), "norn"));
+    round_trip(
+        &SearchParams::new(vault.clone(), "norn")
+            .with_predicates(predicates())
+            .with_rungs(RungSet::of(rungs()).expect("a ladder that runs a rung"))
+            .with_min_score(score(0.25))
+            .with_columns(columns())
+            .with_limit(20)
+            .with_after(cursors().remove(0)),
+    );
+    round_trip(&GetParams::new(vault.clone(), target("glossary")));
+    round_trip(
+        &GetParams::new(vault.clone(), target("glossary#Design"))
+            .with_columns(columns())
+            .with_collection(CollectionSelector::Links)
+            .with_after(cursors().remove(0)),
+    );
+    round_trip(&CountParams::new(vault.clone()));
+    round_trip(
+        &CountParams::new(vault.clone())
+            .with_predicates(predicates())
+            .with_by(group_keys())
+            .with_limit(20)
+            .with_after(cursors().remove(0)),
+    );
+    round_trip(&ValidateParams::new(vault.clone()));
+    round_trip(
+        &ValidateParams::new(vault.clone())
+            .with_predicates(predicates())
+            .with_kinds(finding_kinds())
+            .with_severity(Severity::Error)
+            .summarized()
+            .with_limit(20)
+            .with_after(cursors().remove(0)),
+    );
+    round_trip(&DescribeParams::new(vault.clone()));
+    round_trip(
+        &DescribeParams::new(vault)
+            .with_facets(facet_kinds())
+            .with_limit(20)
+            .with_after(cursors().remove(0)),
+    );
+}
+
+/// Each params type is built by naming what a request cannot be built without,
+/// and every other part has a stated default. A `find` that named only its
+/// vault is every document, ordered by path, projecting the path alone; a
+/// `search` that named only its vault and its query runs the lexical floor.
+#[test]
+fn a_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
+    let vault = VaultAddress::name(name("notes"));
+    let find = FindParams::new(vault.clone());
+    assert_eq!(find.vault, vault);
+    assert!(find.predicates.is_empty());
+    assert!(find.columns.is_empty());
+    assert_eq!(find.sort, None);
+    assert_eq!(find.limit, None);
+    assert_eq!(find.after, None);
+
+    let search = SearchParams::new(vault.clone(), "norn");
+    assert_eq!(search.query, "norn");
+    assert_eq!(search.rungs, RungSet::lexical());
+    assert_eq!(search.min_score, None);
+
+    let validate = ValidateParams::new(vault.clone());
+    assert!(!validate.summary);
+    assert!(ValidateParams::new(vault.clone()).summarized().summary);
+
+    let get = GetParams::new(vault.clone(), target("glossary"));
+    assert_eq!(get.collection, None);
+    assert!(CountParams::new(vault.clone()).by.is_empty());
+    assert!(DescribeParams::new(vault).facets.is_empty());
+}
+
+/// A search runs at least the lexical floor, so a set naming no rung is no
+/// ladder: it refuses where one is built and where one is read alike. The
+/// preset spellings are a surface's and never cross.
+#[test]
+fn a_rung_set_that_names_no_rung_is_no_ladder() {
+    assert_eq!(RungSet::of([]).expect_err("an empty ladder"), EmptyLadder);
+    assert_eq!(
+        EmptyLadder::to_string(&EmptyLadder),
+        "a search runs at least the lexical floor"
+    );
+    assert!(
+        serde_json::from_str::<RungSet>(r#"{"rungs":[]}"#).is_err(),
+        "a set naming no rung read back as a ladder"
+    );
+    assert_eq!(wire(&RungSet::lexical()), r#"{"rungs":["lexical"]}"#);
+    assert!(
+        serde_json::from_str::<RungSet>(r#"{"rungs":["hybrid"]}"#).is_err(),
+        "a preset spelling read back as a rung"
+    );
+    round_trip(&RungSet::of(rungs()).expect("a ladder that runs a rung"));
+}
+
+/// The set carries the rungs in ladder order whatever order a caller named
+/// them in, and it holds each rung once.
+#[test]
+fn a_rung_set_is_the_resolved_set_in_ladder_order() {
+    let named = RungSet::of([Rung::Rerank, Rung::Lexical, Rung::Rerank, Rung::Vector])
+        .expect("a ladder that runs a rung");
+    assert_eq!(wire(&named), r#"{"rungs":["lexical","vector","rerank"]}"#);
+}
+
+/// A get report is an object tagged `shape`, and the collection shape names
+/// the collection it paged in both the selector and the page's own tag — one
+/// reading, because the constructor takes the selector off the page.
+#[test]
+fn a_get_report_names_the_collection_it_paged_once() {
+    for page in collection_pages() {
+        let selector = page.selector();
+        let report = GetReport::collection(path("notes/a.md"), page);
+        let json = serde_json::to_value(&report).expect("a report as JSON");
+        assert_eq!(json["shape"].as_str(), Some("collection"));
+        assert_eq!(json["selector"], serde_json::to_value(selector).unwrap());
+        assert_eq!(json["selector"], json["page"]["of"]);
+    }
+    assert_eq!(
+        collection_pages()
+            .iter()
+            .map(CollectionPage::selector)
+            .collect::<Vec<_>>(),
+        collection_selectors()
+    );
+}
+
+/// A tally carries one value per group key the request named, and `null`
+/// where the document does not carry that key — so a reader lines the tuple up
+/// with the request rather than guessing which key a short tuple skipped.
+#[test]
+fn a_tally_carries_one_value_per_group_key() {
+    assert_eq!(
+        wire(&Tally::new([Some("note".to_string()), None], 7)),
+        r#"{"group":["note",null],"count":7}"#
+    );
+}
+
+/// A validate report is the findings or the tally of them, told apart by the
+/// `shape` tag rather than by which key is present.
+#[test]
+fn a_validate_report_is_an_object_tagged_shape() {
+    assert_eq!(
+        wire(&ValidateReport::summary([KindTally::new(
+            FindingKind::UndeclaredTag,
+            Severity::Warning,
+            3,
+        )])),
+        concat!(
+            r#"{"shape":"summary","by_kind":[{"kind":"document/undeclared-tag","#,
+            r#""severity":"warning","count":3}]}"#
+        )
+    );
+}
+
+/// A facet is an object tagged `facet`, and every facet names the kind a
+/// request selects it by and a cursor orders it under. A tag pattern reports
+/// the declared-tag kind: a pattern is part of what the vault declares its tag
+/// vocabulary to be.
+#[test]
+fn every_facet_names_the_kind_a_cursor_orders_it_under() {
+    for facet in facets() {
+        let kind = facet.kind();
+        let key = CursorKey::facet(kind, "type");
+        round_trip(&key);
+        let json = serde_json::to_value(&key).expect("a key as JSON");
+        assert_eq!(json["kind"], serde_json::to_value(kind).unwrap());
+    }
+    let kinds: BTreeSet<String> = facets()
+        .iter()
+        .map(|facet| flat_string(&facet.kind()))
+        .collect();
+    assert_eq!(
+        kinds,
+        facet_kinds()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        Facet::tag_pattern("person/**").kind(),
+        FacetKind::DeclaredTag
+    );
+    assert_eq!(
+        wire(&Facet::declared_field("due", FieldType::Date, true, None)),
+        r#"{"facet":"declared_field","key":"due","field_type":"date","required":true,"one_of":null}"#
+    );
+}
+
+/// A ranked hit carries its document row only where the request projected one,
+/// and the row is left out of the bytes where it did not.
+#[test]
+fn a_hit_carries_a_document_row_only_where_one_was_projected() {
+    assert_eq!(
+        wire(&Hit::new(path("notes/a.md"), score(0.5))),
+        r#"{"path":"notes/a.md","score":0.5}"#
+    );
+    let hydrated = Hit::new(path("notes/a.md"), score(0.5))
+        .with_document(DocumentRow::new(path("notes/a.md")));
+    assert_eq!(
+        wire(&hydrated),
+        r#"{"path":"notes/a.md","score":0.5,"document":{"path":"notes/a.md"}}"#
     );
 }
