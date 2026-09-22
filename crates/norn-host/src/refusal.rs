@@ -827,6 +827,35 @@ mod reload_tests {
                 ControlFile::Schema,
                 norn_wire::ReloadStage::Apply,
             ),
+            (
+                ReloadError::ConfigParse(norn_config::vault::VaultConfigError::InvalidToml {
+                    message: "bad".to_string(),
+                }),
+                ControlFile::Config,
+                norn_wire::ReloadStage::Parse,
+            ),
+            (
+                ReloadError::ConfigRead(norn_fs::Refusal::Environment {
+                    operation: "reading the config",
+                    path: std::path::PathBuf::from("/vault/.norn/config.toml"),
+                    kind: std::io::ErrorKind::PermissionDenied,
+                    raw_os_error: None,
+                    message: "denied".to_string(),
+                }),
+                ControlFile::Config,
+                norn_wire::ReloadStage::Read,
+            ),
+            (
+                ReloadError::SchemaRead(norn_fs::Refusal::Environment {
+                    operation: "reading the schema",
+                    path: std::path::PathBuf::from("/vault/.norn/schema.yaml"),
+                    kind: std::io::ErrorKind::NotFound,
+                    raw_os_error: None,
+                    message: "missing".to_string(),
+                }),
+                ControlFile::Schema,
+                norn_wire::ReloadStage::Read,
+            ),
         ] {
             let envelope = ReloadRefusal::Core(error.clone())
                 .answer(&name("notes"))
