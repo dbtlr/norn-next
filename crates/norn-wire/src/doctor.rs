@@ -34,7 +34,7 @@ use std::fmt;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::error::{NameSet, TooFewNames};
+use crate::error::NameSet;
 use crate::name::VaultName;
 use crate::reading::EngineSection;
 use crate::status::{EngineStatus, RollUp};
@@ -88,18 +88,12 @@ pub enum RegistryProblem {
 }
 
 impl RegistryProblem {
-    /// The registrations `aliases` all reach one root, in name order and each
-    /// named once, or the reason those names are no duplicate root.
+    /// The registrations `aliases` all reach one root.
     ///
-    /// A root more than one registration reaches is reached by at least two
-    /// distinct names, so fewer than two is refused rather than filed as a
-    /// problem naming one registration or none.
-    pub fn duplicate_root(
-        aliases: impl IntoIterator<Item = VaultName>,
-    ) -> Result<Self, TooFewNames> {
-        Ok(RegistryProblem::DuplicateRoot {
-            aliases: NameSet::new(aliases)?,
-        })
+    /// The floor is the set's: a caller that holds one has names a duplicate
+    /// root can be spelled with, so there is nothing left for this to refuse.
+    pub fn duplicate_root(aliases: NameSet) -> Self {
+        RegistryProblem::DuplicateRoot { aliases }
     }
 
     /// The root of `name` could not be read, for `detail`.

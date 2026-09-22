@@ -216,6 +216,11 @@ impl NameSet {
     /// The collision `names` are between, or the reason those names are no
     /// collision.
     ///
+    /// This is the one place the floor of two is judged. The shapes that carry
+    /// a set take it already judged and refuse nothing themselves, so a
+    /// collision that cannot be spelled is refused where the names are
+    /// collected rather than at each shape that renders them.
+    ///
     /// The names come out ascending and each named once, so the ascending
     /// order the carrying fields promise holds for every producer rather than
     /// for the ones that sorted first, and what is measured against the floor
@@ -459,17 +464,12 @@ pub enum ErrorDetail {
 }
 
 impl ErrorDetail {
-    /// The detail of `host/duplicate-root`, for the colliding `aliases`, or
-    /// the reason those names are no collision.
+    /// The detail of `host/duplicate-root`, for the colliding `aliases`.
     ///
-    /// A root more than one registration reaches is reached by at least two
-    /// distinct names, so fewer than two is refused rather than carried.
-    pub fn duplicate_root(
-        aliases: impl IntoIterator<Item = VaultName>,
-    ) -> Result<Self, TooFewNames> {
-        Ok(ErrorDetail::DuplicateRoot {
-            aliases: NameSet::new(aliases)?,
-        })
+    /// The floor is the set's: a caller that holds one has names a collision
+    /// can be spelled with, so there is nothing left for this to refuse.
+    pub fn duplicate_root(aliases: NameSet) -> Self {
+        ErrorDetail::DuplicateRoot { aliases }
     }
 
     /// The detail of `host/entry-untrusted`, for `reason`.
@@ -524,17 +524,12 @@ impl ErrorDetail {
     }
 
     /// The detail of `vault/ambiguous-root`, for the `candidates` the
-    /// directory resolves under, or the reason those names are no ambiguity.
+    /// directory resolves under.
     ///
-    /// A directory more than one registration contains is contained by at
-    /// least two distinct registrations, so fewer than two is refused rather
-    /// than carried.
-    pub fn ambiguous_root(
-        candidates: impl IntoIterator<Item = VaultName>,
-    ) -> Result<Self, TooFewNames> {
-        Ok(ErrorDetail::AmbiguousRoot {
-            candidates: NameSet::new(candidates)?,
-        })
+    /// The floor is the set's: a caller that holds one has names an ambiguity
+    /// can be spelled with, so there is nothing left for this to refuse.
+    pub fn ambiguous_root(candidates: NameSet) -> Self {
+        ErrorDetail::AmbiguousRoot { candidates }
     }
 
     /// The detail of `vault/ambiguous-target`, for the `target` that resolves
@@ -703,6 +698,15 @@ mod tests {
     use crate::document::DocumentPath;
     use crate::finding_row::Candidate;
 
+    /// The two names the two collision refusals are read against, judged
+    /// through the floor the set keeps.
+    fn two_names() -> NameSet {
+        NameSet::new(
+            ["notes", "vault"].map(|text| VaultName::new(text).expect("a legal vault name")),
+        )
+        .expect("two distinct names")
+    }
+
     /// The target the two target refusals are read against, parsed through the
     /// grammar the type keeps.
     fn a_target() -> ResolutionTarget {
@@ -764,10 +768,7 @@ mod tests {
     /// not compile.
     fn a_detail(code: &ReasonCode) -> ErrorDetail {
         match code {
-            ReasonCode::HostDuplicateRoot => ErrorDetail::duplicate_root(
-                ["notes", "vault"].map(|text| VaultName::new(text).expect("a legal vault name")),
-            )
-            .expect("two distinct colliding names"),
+            ReasonCode::HostDuplicateRoot => ErrorDetail::duplicate_root(two_names()),
             ReasonCode::HostEntryUntrusted => {
                 ErrorDetail::entry_untrusted(UntrustedReason::WatcherOverflow)
             }
@@ -793,10 +794,7 @@ mod tests {
             ReasonCode::HostRegistryUnwritable => {
                 ErrorDetail::registry_unwritable("the registry file is read-only")
             }
-            ReasonCode::VaultAmbiguousRoot => ErrorDetail::ambiguous_root(
-                ["notes", "vault"].map(|text| VaultName::new(text).expect("a legal vault name")),
-            )
-            .expect("two distinct candidate names"),
+            ReasonCode::VaultAmbiguousRoot => ErrorDetail::ambiguous_root(two_names()),
             ReasonCode::VaultAmbiguousTarget => ErrorDetail::ambiguous_target(
                 a_target(),
                 CandidateHead::new(

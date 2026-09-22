@@ -3,41 +3,42 @@ use std::path::Path;
 
 use norn_config::registry::{Entry, Registry};
 use norn_fs::{Identity, Refusal, path_identity};
-use norn_wire::VaultName;
+use norn_wire::{NameSet, TooFewNames, VaultName};
 
 /// Every registry name that resolves to one filesystem root.
 ///
-/// The names are ascending and each appears once. [`AliasConflict::new`] is
-/// the one place that order and that uniqueness are established, so a conflict
-/// raised by classifying the whole registry and a conflict raised by one
-/// attach meeting another alias's claim are the same fact in the same shape.
+/// The conflict holds the wire's own [`NameSet`], so the two or more names, the
+/// ascending order and the uniqueness are the value's rather than this type's
+/// to keep, and the refusal a conflict is rendered as is built from the set
+/// without judging it again. A conflict raised by classifying the whole
+/// registry and a conflict raised by one attach meeting another alias's claim
+/// are the same fact in the same shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AliasConflict {
-    aliases: Vec<VaultName>,
+    aliases: NameSet,
 }
 
 impl AliasConflict {
-    /// The conflict the `aliases` name.
+    /// The conflict the `aliases` name, or the reason those names are no
+    /// conflict.
     ///
-    /// The names come out deduplicated and ascending, and the refusal that
-    /// acts on a conflict is what both of those carry. `refuse_conflict` takes
-    /// one entry gate per alias and holds them all at once: a name appearing
-    /// twice would have that one thread wait on a lock it is already holding,
-    /// and ascending order is what makes two concurrent refusals over
-    /// overlapping alias sets take the gates they share in the same order
-    /// rather than in opposite ones.
-    pub fn new(aliases: impl IntoIterator<Item = VaultName>) -> Self {
-        Self {
-            aliases: aliases
-                .into_iter()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-        }
+    /// A root one name reaches is a root nothing collides over, so a caller
+    /// that collected fewer than two distinct names has no conflict to raise
+    /// and is told so here rather than carrying a refusal that names one
+    /// vault. `refuse_conflict` takes one entry gate per alias and holds them
+    /// all at once: a name appearing twice would have that one thread wait on
+    /// a lock it is already holding, and ascending order is what makes two
+    /// concurrent refusals over overlapping alias sets take the gates they
+    /// share in the same order rather than in opposite ones. The set keeps
+    /// both.
+    pub fn new(aliases: impl IntoIterator<Item = VaultName>) -> Result<Self, TooFewNames> {
+        Ok(Self {
+            aliases: NameSet::new(aliases)?,
+        })
     }
 
     /// Every registered name that reaches the one root, ascending.
-    pub fn aliases(&self) -> &[VaultName] {
+    pub fn aliases(&self) -> &NameSet {
         &self.aliases
     }
 }
@@ -138,8 +139,13 @@ fn conflicts_from_identities(
     identities: BTreeMap<Identity, BTreeSet<VaultName>>,
 ) -> BTreeMap<VaultName, AliasConflict> {
     let mut conflicts = BTreeMap::new();
-    for aliases in identities.into_values().filter(|names| names.len() > 1) {
-        let conflict = AliasConflict::new(aliases.iter().cloned());
+    // A root one registration reaches is no conflict, and the floor the
+    // conflict keeps is what says so: the names an identity gathered either
+    // make a conflict or there was never one to record.
+    for aliases in identities.into_values() {
+        let Ok(conflict) = AliasConflict::new(aliases.iter().cloned()) else {
+            continue;
+        };
         for alias in aliases {
             conflicts.insert(alias, conflict.clone());
         }
@@ -168,6 +174,39 @@ mod tests {
         )
     }
 
+    /// A conflict is between at least two registrations, and the floor is the
+    /// name set's: a caller that collected one name or none has no conflict to
+    /// raise and is told so at construction, so no later reader holds a
+    /// duplicate-root refusal that names one vault.
+    #[test]
+    fn a_conflict_refuses_a_root_only_one_registration_reaches() {
+        let alpha = VaultName::new("alpha").unwrap();
+        assert!(AliasConflict::new([]).is_err());
+        assert!(AliasConflict::new([alpha.clone()]).is_err());
+        assert!(AliasConflict::new([alpha.clone(), alpha.clone()]).is_err());
+        let beta = VaultName::new("beta").unwrap();
+        assert_eq!(
+            AliasConflict::new([beta.clone(), alpha.clone()])
+                .expect("two distinct registrations")
+                .aliases()
+                .names(),
+            [alpha, beta]
+        );
+    }
+
+    /// A root only one registration reaches is recorded as no conflict at all,
+    /// which is the same floor read off the registry rather than off a caller.
+    #[test]
+    fn a_root_one_registration_reaches_records_no_conflict() {
+        let entries = [entry("alpha", "/tmp")];
+        assert!(
+            recheck_over(&entries, &VaultName::new("alpha").unwrap())
+                .unwrap()
+                .conflict
+                .is_none()
+        );
+    }
+
     #[test]
     fn every_alias_is_refused_and_names_the_whole_conflict() {
         let entries = [entry("alpha", "/tmp"), entry("beta", "/tmp/.")];
@@ -181,7 +220,8 @@ mod tests {
                     .unwrap()
                     .conflict
                     .unwrap()
-                    .aliases(),
+                    .aliases()
+                    .names(),
                 expected
             );
         }
@@ -291,7 +331,8 @@ mod tests {
                 .expect("an unrelated refusal must not reach the healthy root")
                 .conflict
                 .unwrap()
-                .aliases(),
+                .aliases()
+                .names(),
             vec![healthy_name, alias_name]
         );
         assert!(recheck_over(&entries, &refused_name).is_err());
@@ -330,7 +371,8 @@ mod tests {
                 .unwrap()
                 .conflict
                 .unwrap()
-                .aliases(),
+                .aliases()
+                .names(),
             vec![alpha, beta]
         );
     }

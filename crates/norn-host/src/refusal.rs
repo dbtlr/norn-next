@@ -78,11 +78,7 @@ impl Demand {
             Demand::DuplicateRoot(conflict) => Err(ErrorEnvelope::new(
                 "more than one registered name resolves to this vault's root, so none of them \
                  is served",
-                // An `AliasConflict` is raised only where one root is reached
-                // by more than one registered name, so the names it carries
-                // are the two or more the detail is built from.
-                ErrorDetail::duplicate_root(conflict.aliases().iter().cloned())
-                    .expect("an alias conflict names the two or more registrations that collide"),
+                ErrorDetail::duplicate_root(conflict.aliases().clone()),
             )),
             Demand::IdentityRefused(refusal) => Err(ErrorEnvelope::new(
                 "the registry cannot read this vault's root",
@@ -326,7 +322,7 @@ fn answer_state(state: TrustState) -> Result<TrustState, ErrorEnvelope> {
 
 #[cfg(test)]
 mod tests {
-    use norn_wire::{AttachMode, MaintainerIdentity, WarmingPhase, WatcherLossCause};
+    use norn_wire::{AttachMode, MaintainerIdentity, NameSet, WarmingPhase, WatcherLossCause};
 
     use crate::registry::AliasConflict;
 
@@ -334,6 +330,16 @@ mod tests {
 
     fn name(text: &str) -> VaultName {
         VaultName::new(text).expect("a legal vault name")
+    }
+
+    /// Two colliding names, as the set a collision is spelled with.
+    fn two_names(first: &str, second: &str) -> NameSet {
+        NameSet::new([name(first), name(second)]).expect("two distinct colliding names")
+    }
+
+    /// The conflict two colliding registrations raise.
+    fn a_conflict(first: &str, second: &str) -> AliasConflict {
+        AliasConflict::new([name(first), name(second)]).expect("two distinct colliding names")
     }
 
     /// The name every sample below is answered under, and the name the one
@@ -464,11 +470,8 @@ mod tests {
                 )),
             ),
             (
-                Demand::DuplicateRoot(AliasConflict::new([name("alpha"), name("beta")])),
-                Some(
-                    ErrorDetail::duplicate_root([name("alpha"), name("beta")])
-                        .expect("two distinct colliding names"),
-                ),
+                Demand::DuplicateRoot(a_conflict("alpha", "beta")),
+                Some(ErrorDetail::duplicate_root(two_names("alpha", "beta"))),
             ),
             (
                 Demand::IdentityRefused("the root cannot be read".to_string()),
