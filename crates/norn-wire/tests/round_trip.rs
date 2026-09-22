@@ -23,12 +23,12 @@ use norn_wire::{
     FieldType, FieldValue, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints,
     Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LadderDeclaration,
     LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, ModelIdentity,
-    Moved, NonFiniteScore, NotReady, Page, PathRuleKind, PollBackend, Predicate, Published,
-    ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
-    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace, RequestScope,
-    ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport, RungSet,
-    SchemaSource, Score, SearchParams, SetParams, SetReport, Severity, Snapshot, Sort, SortKey,
-    Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead,
+    Moved, NoProblems, NonFiniteScore, NotReady, Page, PathRuleKind, PollBackend, Predicate,
+    Published, ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem,
+    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace,
+    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport,
+    RungSet, SchemaSource, Score, SearchParams, SetParams, SetReport, Severity, Snapshot, Sort,
+    SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead,
     TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
     UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
     ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
@@ -4292,7 +4292,7 @@ fn registry_problems() -> Vec<RegistryProblem> {
 fn registry_sanities() -> Vec<RegistrySanity> {
     vec![
         RegistrySanity::sound(),
-        RegistrySanity::problems(registry_problems()),
+        RegistrySanity::problems(registry_problems()).expect("problems that name one"),
     ]
 }
 
@@ -4979,7 +4979,8 @@ fn a_doctor_registry_reading_pins_its_problems_and_its_engines() {
         RegistrySanity::problems([RegistryProblem::duplicate_root([
             name("vault"),
             name("notes"),
-        ])]),
+        ])])
+        .expect("problems that name one"),
         [
             EngineHealth::new(
                 name("vault"),
@@ -5048,14 +5049,46 @@ fn a_fully_set_vault_status_pins_every_setter() {
     );
 }
 
+/// A sound registry is a shape of its own, so a problems reading that names no
+/// problem is a second spelling of `sound` and is refused at both doors: where
+/// the reading is built and where one arrives over the wire.
+#[test]
+fn a_registry_sanity_naming_no_problem_is_refused_at_both_doors() {
+    assert_eq!(RegistrySanity::problems([]), Err(NoProblems));
+
+    let refusal = serde_json::from_str::<RegistrySanity>(r#"{"state":"problems","problems":[]}"#)
+        .expect_err("a problems reading naming no problem")
+        .to_string();
+    assert!(
+        refusal.contains(&NoProblems.to_string()),
+        "the refusal `{refusal}` does not carry the reason the list names no reading"
+    );
+
+    serde_json::from_str::<RegistrySanity>(
+        r#"{"state":"problems","problems":[{"problem":"root_missing","name":"notes"}]}"#,
+    )
+    .expect("a problems reading naming one problem");
+
+    let inside_a_reading = concat!(
+        r#"{"roll_up":{"vaults":0,"ready":0,"warming":0,"untrusted":0,"parked":0,"#,
+        r#""unattached":0,"attention":[]},"#,
+        r#""registry":{"state":"problems","problems":[]},"engines":[]}"#
+    );
+    assert!(
+        serde_json::from_str::<DoctorRegistryReport>(inside_a_reading).is_err(),
+        "a registry reading read back a problems reading that names no problem"
+    );
+}
+
 /// A sound registry is a shape of its own rather than an empty problem list.
 #[test]
 fn a_registry_sanity_is_an_object_tagged_state() {
     assert_eq!(wire(&RegistrySanity::sound()), r#"{"state":"sound"}"#);
     assert_eq!(
-        wire(&RegistrySanity::problems([RegistryProblem::root_missing(
-            name("notes")
-        )])),
+        wire(
+            &RegistrySanity::problems([RegistryProblem::root_missing(name("notes"))])
+                .expect("problems that name one")
+        ),
         r#"{"state":"problems","problems":[{"problem":"root_missing","name":"notes"}]}"#
     );
 }

@@ -28,8 +28,11 @@
 //! **A verb that asks for nothing still has a params type**, so `doctor` is
 //! spelled by a params type and a report type as every other verb is.
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::fmt;
+
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::name::VaultName;
 use crate::reading::EngineSection;
@@ -110,11 +113,28 @@ impl RegistryProblem {
     }
 }
 
+/// A problem list naming no problem.
+///
+/// A sound registry and a registry with problems are two answers, and an empty
+/// problem list is not how "sound" is spelled: a reading that names nothing
+/// wrong is `sound`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NoProblems;
+
+impl fmt::Display for NoProblems {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a registry with problems names at least one; a sound registry is `sound` rather than an empty list")
+    }
+}
+
+impl std::error::Error for NoProblems {}
+
 /// Whether the registry itself is in order.
 ///
 /// On the wire a sanity reading is an object tagged `state`:
-/// `{"state":"sound"}`, `{"state":"problems","problems":[…]}`.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+/// `{"state":"sound"}`, `{"state":"problems","problems":[…]}`. The problem
+/// list is not empty: a reading naming no problem is refused rather than read.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RegistrySanity {
@@ -135,10 +155,94 @@ impl RegistrySanity {
         RegistrySanity::Sound {}
     }
 
-    /// These `problems` stand over the registry.
-    pub fn problems(problems: impl IntoIterator<Item = RegistryProblem>) -> Self {
-        RegistrySanity::Problems {
-            problems: problems.into_iter().collect(),
+    /// These `problems` stand over the registry, or the reason the list names
+    /// no reading at all.
+    pub fn problems(
+        problems: impl IntoIterator<Item = RegistryProblem>,
+    ) -> Result<Self, NoProblems> {
+        let problems: Vec<RegistryProblem> = problems.into_iter().collect();
+        if problems.is_empty() {
+            return Err(NoProblems);
+        }
+        Ok(RegistrySanity::Problems { problems })
+    }
+}
+
+impl JsonSchema for RegistrySanity {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("RegistrySanity")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed("norn_wire::RegistrySanity")
+    }
+
+    /// The two branches a derive would describe, with the floor the reader
+    /// keeps advertised as `minItems`. A derive says an array of problems with
+    /// no members at all, so a surface validating against it would pass a
+    /// reading this crate refuses to read.
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let problem = generator.subschema_for::<RegistryProblem>();
+        json_schema!({
+            "description": "Whether the registry itself is in order.\n\nOn the wire a sanity reading is an object tagged `state`:\n`{\"state\":\"sound\"}`, `{\"state\":\"problems\",\"problems\":[…]}`. The problem\nlist is not empty: a reading naming no problem is refused rather than read.",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "description": "Every registration names a root of its own, and every root is there and\nreadable.",
+                    "properties": {
+                        "state": {
+                            "type": "string",
+                            "const": "sound",
+                        },
+                    },
+                    "required": ["state"],
+                },
+                {
+                    "type": "object",
+                    "description": "These are what is wrong.",
+                    "properties": {
+                        "state": {
+                            "type": "string",
+                            "const": "problems",
+                        },
+                        "problems": {
+                            "type": "array",
+                            "description": "What is wrong, at least one.",
+                            "items": problem,
+                            "minItems": 1,
+                        },
+                    },
+                    "required": ["state", "problems"],
+                },
+            ],
+        })
+    }
+}
+
+/// The sanity reading as it arrives, before the problem list is checked for
+/// naming a problem at all. The tag and the field names are the reading's own,
+/// so the bytes a reader accepts are the bytes a writer produces.
+#[derive(Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum RegistrySanityFields {
+    Sound {},
+    Problems { problems: Vec<RegistryProblem> },
+}
+
+impl<'de> Deserialize<'de> for RegistrySanity {
+    /// A reading arrives as the branch it names and is read back through the
+    /// same grammar the constructors hold: a problem list naming no problem is
+    /// no reading, so it refuses the read rather than landing as a second
+    /// spelling of `sound`.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match RegistrySanityFields::deserialize(deserializer)? {
+            RegistrySanityFields::Sound {} => Ok(RegistrySanity::sound()),
+            RegistrySanityFields::Problems { problems } => {
+                RegistrySanity::problems(problems).map_err(D::Error::custom)
+            }
         }
     }
 }

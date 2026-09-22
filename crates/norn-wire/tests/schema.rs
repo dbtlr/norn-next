@@ -2247,6 +2247,16 @@ fn a_doctor_registry_report_advertises_the_registry_it_read() {
         sorted(tag_constants(&schema_of::<RegistryProblem>(), "problem")),
         sorted(["duplicate_root", "root_unreadable", "root_missing"])
     );
+    let sanity = schema_of::<RegistrySanity>();
+    let problems = branches(&sanity)
+        .iter()
+        .find(|branch| tag_constant(branch, "state") == Some("problems"))
+        .unwrap_or_else(|| panic!("the sanity reading advertises no problems branch: {sanity}"));
+    assert_eq!(
+        problems["properties"]["problems"]["minItems"].as_u64(),
+        Some(1),
+        "the problems branch advertises a list that names no problem: {sanity}"
+    );
     assert_eq!(
         property_names(&schema_of::<EngineHealth>()),
         ["name", "section", "engine"].into_iter().collect()

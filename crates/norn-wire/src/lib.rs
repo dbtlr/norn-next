@@ -103,7 +103,8 @@
 //!   [`VaultName`], [`VaultRoot`], [`SchemaSource`], [`DocumentPath`],
 //!   [`ResolutionTarget`], [`Directory`] and [`Score`] refuse a string outside
 //!   their grammar,
-//!   [`RungSet`] refuses a ladder that runs no rung, and five shapes refuse a
+//!   [`RungSet`] refuses a ladder that runs no rung and [`RegistrySanity`]
+//!   refuses a problem list that names no problem, and five shapes refuse a
 //!   value whose halves disagree: [`ErrorEnvelope`], whose code must be its
 //!   detail's, [`LinkRow`], whose health must be the health of the total
 //!   documents its head heads, [`RollUp`], whose five counts must sum to the
@@ -117,12 +118,13 @@
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
 //!   advertised schema and the emitted bytes are one description. It too is
 //!   written by hand where a derive would advertise a shape the reader does
-//!   not accept. Nine types do: the grammars [`VaultName`], [`VaultRoot`],
+//!   not accept. Ten types do: the grammars [`VaultName`], [`VaultRoot`],
 //!   [`SchemaSource`], [`Directory`], [`DocumentPath`] and
 //!   [`ResolutionTarget`] advertise the pattern or floor their constructors
 //!   hold; [`Cursor`] is one opaque string
-//!   rather than the fields a derive would emit; [`RungSet`] carries the
-//!   `minItems` floor its read path keeps; and [`CandidateHead`] carries the
+//!   rather than the fields a derive would emit; [`RungSet`] and
+//!   [`RegistrySanity`] carry the
+//!   `minItems` floor their read paths keep; and [`CandidateHead`] carries the
 //!   `maxItems` ceiling its read path keeps, read off [`CANDIDATE_HEAD`] so
 //!   the bound has one spelling.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.
@@ -356,7 +358,8 @@ pub use cursor::{
 };
 pub use demand::AttachMode;
 pub use doctor::{
-    DoctorRegistryParams, DoctorRegistryReport, EngineHealth, RegistryProblem, RegistrySanity,
+    DoctorRegistryParams, DoctorRegistryReport, EngineHealth, NoProblems, RegistryProblem,
+    RegistrySanity,
 };
 pub use document::{
     BlockRow, BodyText, Collection, Column, DocumentPath, DocumentRow, FieldValue, HeadingRow,
