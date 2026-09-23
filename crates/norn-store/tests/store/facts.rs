@@ -366,6 +366,65 @@ fn declares_column(declared: &str, column: &str) -> bool {
         .any(|token| token == column)
 }
 
+/// The columns an index is declared over and the partial predicate it holds,
+/// whitespace folded, so the reading does not depend on how the statement is
+/// wrapped. `None` is an index over every row of its table.
+fn index_shape(declared: &[String], index: &str) -> (String, Option<String>) {
+    let statement = declared
+        .iter()
+        .find(|statement| statement.contains(&format!("INDEX {index} ")))
+        .unwrap_or_else(|| panic!("`{index}` has no create statement"));
+    let folded = statement
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+    let open = folded.find('(').expect("an index names its columns");
+    let close = open + folded[open..].find(')').expect("the column list closes");
+    let columns = folded[open + 1..close].to_string();
+    let predicate = folded[close..]
+        .split_once(" WHERE ")
+        .map(|(_, predicate)| predicate.to_string());
+    (columns, predicate)
+}
+
+/// Each field-pillar index holds only the rows its reads can match: a value
+/// seek never walks presence rows, a presence seek never walks value rows, and
+/// a field sort pages the marker rows alone. The predicate is what a seek on
+/// the index is allowed to skip, so dropping one widens every read of it.
+#[test]
+fn a_field_index_holds_only_the_rows_its_reads_match() {
+    let declared = ddl::statements();
+    // The negative control: an index over every row reads as having no
+    // predicate, so the check below is known to tell a partial index from a
+    // whole one rather than finding a predicate everywhere.
+    assert_eq!(
+        index_shape(&declared, "documents_path"),
+        ("path".to_string(), None),
+        "the index reader finds a predicate on an index that declares none"
+    );
+    for (index, columns, predicate) in [
+        ("document_fields_raw", "key, raw", "raw IS NOT NULL"),
+        ("document_fields_typed", "key, typed", "typed IS NOT NULL"),
+        (
+            "document_fields_least_raw",
+            "key, raw, path",
+            "least_raw = 1",
+        ),
+        (
+            "document_fields_least_typed",
+            "key, typed, path",
+            "least_typed = 1",
+        ),
+        ("document_fields_presence", "key", "ordinal = 0"),
+    ] {
+        assert_eq!(
+            index_shape(&declared, index),
+            (columns.to_string(), Some(predicate.to_string())),
+            "`{index}` is not declared over `({columns}) WHERE {predicate}`"
+        );
+    }
+}
+
 /// The columns nothing reads are not columns. The stem and the segment count are
 /// functions of the path, derived where the path is read, so a second home for
 /// either is a spelling that can disagree with it.
