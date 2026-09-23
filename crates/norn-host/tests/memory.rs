@@ -123,6 +123,10 @@ fn the_gate_profile_attaches_inside_its_memory_bar() {
         ],
     );
     assert!(
+        peak > 0,
+        "the attaching child reported no peak resident set, so the ceiling holds no reading"
+    );
+    assert!(
         baselines::fits(peak, baselines::ATTACH_PEAK_RSS_CEILING_BYTES),
         "attaching `realistic` peaked at {} MiB against a {} MiB bar",
         baselines::mebibytes(peak),
@@ -201,6 +205,10 @@ fn the_gate_profile_reads_inside_its_memory_bar() {
                 baselines::mebibytes(baselines::READ_PEAK_RSS_CEILING_BYTES),
             ),
         ],
+    );
+    assert!(
+        peak > 0,
+        "the reading child reported no peak resident set, so the ceiling holds no reading"
     );
     assert!(
         baselines::fits(peak, baselines::READ_PEAK_RSS_CEILING_BYTES),
