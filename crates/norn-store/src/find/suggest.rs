@@ -10,8 +10,10 @@ const OFFERED: usize = 3;
 ///
 /// **The one rule for a suggestion.** A candidate is a key whose Levenshtein
 /// distance from `asked` is at most two — one edit being one character
-/// inserted, removed or replaced — with both compared case-insensitively, so
-/// `Status` offers `status` at distance zero. At most three are offered,
+/// inserted, removed or replaced — with both compared with ASCII case folded,
+/// so `Status` offers `status` at distance zero. Case outside ASCII is not
+/// folded, as the store's case-insensitive path identity does not fold it:
+/// `É` and `é` are one edit apart. At most three are offered,
 /// ordered by distance and then by the key's own bytes, so the list is the
 /// same for the same universe however the universe was enumerated. A key the
 /// universe holds twice is offered once.
@@ -19,11 +21,11 @@ pub(crate) fn did_you_mean<'a>(
     asked: &str,
     universe: impl IntoIterator<Item = &'a str>,
 ) -> Vec<String> {
-    let asked: Vec<char> = asked.to_lowercase().chars().collect();
+    let asked: Vec<char> = asked.to_ascii_lowercase().chars().collect();
     let mut near: Vec<(usize, &str)> = universe
         .into_iter()
         .filter_map(|key| {
-            let folded: Vec<char> = key.to_lowercase().chars().collect();
+            let folded: Vec<char> = key.to_ascii_lowercase().chars().collect();
             within(&asked, &folded, NEAREST).map(|distance| (distance, key))
         })
         .collect();
@@ -82,13 +84,17 @@ mod tests {
         assert!(suggest("tag", &["tagsss"]).is_empty());
     }
 
-    /// Case is folded before the edits are counted, and the key is offered as
-    /// the universe spells it.
+    /// ASCII case is folded before the edits are counted, and the key is
+    /// offered as the universe spells it. Case outside ASCII is an edit.
     #[test]
-    fn case_is_not_an_edit() {
+    fn ascii_case_is_not_an_edit() {
         assert_eq!(suggest("Status", &["status"]), ["status"]);
         assert_eq!(suggest("due", &["DUE", "Due-date"]), ["DUE"]);
-        assert_eq!(suggest("ÉTAT", &["état"]), ["état"]);
+        assert_eq!(suggest("ÉTAT", &["état"]), ["état"], "one edit, at É");
+        assert!(
+            suggest("ÄÖÜ", &["äöü"]).is_empty(),
+            "three letters outside ASCII are three edits"
+        );
     }
 
     /// Nearest first, then by the key's bytes, and three at most.

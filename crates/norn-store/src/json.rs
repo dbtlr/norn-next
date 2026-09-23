@@ -275,13 +275,13 @@ fn write_string(text: &str, out: &mut String) {
 /// The fields a canonical projection's top-level map holds, each as the tree
 /// of values the wire carries it as.
 ///
-/// **The reader of the text [`canonical_json`] writes**, and of nothing
-/// looser: a string crosses as its content, a number and a boolean as the
-/// digits and the word the projection spelled, a null as
-/// [`FieldValue::Null`], and a sequence and a map as the containers they
-/// are. A scalar's text is therefore the field pillar's raw text for the same
-/// value, so a projected value and the value a predicate matched are one
-/// spelling. A projection whose top level is not a map carries no fields, as
+/// **The reader of the text [`canonical_json`] writes.** A string crosses as
+/// its content, a number and a boolean as the digits and the word the
+/// projection spelled, a null as [`FieldValue::Null`], and a sequence and a
+/// map as the containers they are. A number reads only in the plain decimal
+/// spelling the projection writes, and any other spelling is damage, so a
+/// scalar's text is the field pillar's raw text for the same value, and a
+/// projected value and the value a predicate matched are one spelling. A projection whose top level is not a map carries no fields, as
 /// it derives no field rows.
 ///
 /// The walk recurses once per level of nesting, and refuses a text nested past
@@ -408,15 +408,45 @@ impl ProjectionReader<'_> {
             Some(b'f') => self.word("false").map(|()| FieldValue::scalar("false")),
             Some(b'-' | b'0'..=b'9') => {
                 let start = self.at;
-                while matches!(
-                    self.peek(),
-                    Some(b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
-                ) {
-                    self.at += 1;
-                }
+                self.number()?;
                 Ok(FieldValue::scalar(&self.text[start..self.at]))
             }
             _ => Err(self.damaged("expected a value")),
+        }
+    }
+
+    /// A number in the one spelling [`canonical_json`] writes: an optional
+    /// minus, an integer part with no leading zero, and an optional fraction
+    /// of at least one digit. No exponent, no plus, and nothing after it that
+    /// would continue a number.
+    fn number(&mut self) -> Result<(), crate::StoreError> {
+        if self.peek() == Some(b'-') {
+            self.at += 1;
+        }
+        match self.peek() {
+            Some(b'0') => self.at += 1,
+            Some(b'1'..=b'9') => self.digits(),
+            _ => return Err(self.damaged("a number without an integer part")),
+        }
+        if self.peek() == Some(b'.') {
+            self.at += 1;
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(self.damaged("a fraction without digits"));
+            }
+            self.digits();
+        }
+        if matches!(
+            self.peek(),
+            Some(b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+        ) {
+            return Err(self.damaged("a number the projection does not spell"));
+        }
+        Ok(())
+    }
+
+    fn digits(&mut self) {
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.at += 1;
         }
     }
 
@@ -600,5 +630,50 @@ mod tests {
             "]".repeat(MAX_FRONTMATTER_DEPTH)
         );
         assert!(projected_fields(&bounded).is_ok());
+    }
+
+    /// **A number reads only in the spelling the projection writes**: an
+    /// optional minus, an integer part with no leading zero, and an optional
+    /// fraction of at least one digit. Any other spelling JSON admits, or does
+    /// not, is damage, because its text would cross as a raw text the field
+    /// pillar never holds for the same value.
+    #[test]
+    fn a_number_reads_only_in_the_projections_spelling() {
+        for written in [
+            FrontmatterValue::Int(0),
+            FrontmatterValue::Int(-12),
+            FrontmatterValue::Int(i64::MIN),
+            FrontmatterValue::Float(-0.0),
+            FrontmatterValue::Float(0.5),
+            FrontmatterValue::Float(1e300),
+            FrontmatterValue::Float(-1e-300),
+        ] {
+            let text = canonical_json(&FrontmatterValue::Map(vec![(
+                "n".to_string(),
+                written.clone(),
+            )]))
+            .expect("a projection");
+            let spelled = text
+                .strip_prefix("{\"n\":")
+                .and_then(|rest| rest.strip_suffix('}'))
+                .expect("one field");
+            assert_eq!(
+                projected_fields(&text).expect("a read")["n"],
+                FieldValue::scalar(spelled),
+                "{written:?}"
+            );
+        }
+        for loose in [
+            "1e5", "1E5", "1.5e-3", "01", "-01", "00", "1.", "-", "-.5", "1.2.3", "--1", "1-2",
+            "1+2", "0x1",
+        ] {
+            assert!(
+                matches!(
+                    projected_fields(&format!("{{\"n\":{loose}}}")),
+                    Err(crate::StoreError::Damaged { .. })
+                ),
+                "`{loose}` read as a number"
+            );
+        }
     }
 }

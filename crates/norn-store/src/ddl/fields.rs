@@ -56,9 +56,12 @@
 //! container and the only one that carries no value; the `CHECK`s hold that
 //! split, and hold that a marker stands only on a row with the value it marks.
 //!
-//! `path` is the document's own path, written beside its id by the same
-//! statement, so a row can be ordered and compared by the path it stands at
-//! without a join to `documents`.
+//! `path` is the document's own path, copied beside its id, so a row can be
+//! ordered and compared by the path it stands at without a join to
+//! `documents`. The copy cannot go stale: the document upsert conflicts on
+//! `path` and never rewrites it, so a path never moves under an id, and a
+//! document that moves is a death at one path and a birth at another, whose
+//! rows the cascade takes and the birth writes again.
 //!
 //! # Indexes, each the seek one read makes
 //!
