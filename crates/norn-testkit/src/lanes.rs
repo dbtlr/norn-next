@@ -305,7 +305,8 @@ fn lane_steps(workflow: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The features a target's own source puts any of itself behind.
+/// The features a target's own source puts any of itself behind, or the
+/// first feature gate in it this reader cannot read.
 ///
 /// Read off the attributes rather than off a table, because the file itself
 /// is the only place that fact is stated. A suite that is
@@ -316,18 +317,87 @@ fn lane_steps(workflow: &str) -> Vec<(String, String)> {
 /// lane that runs the suite without the feature does not run what the file
 /// says it runs. A `#[cfg(not(feature = "..."))]` item is the build without
 /// the feature, and asks for nothing.
-fn features_a_target_needs(source: &str) -> BTreeSet<String> {
-    source
-        .lines()
-        .map(str::trim)
-        .filter_map(|line| {
-            let rest = line
-                .strip_prefix("#![cfg(feature = \"")
-                .or_else(|| line.strip_prefix("#[cfg(feature = \""))?;
-            let (feature, _) = rest.split_once('"')?;
-            Some(feature.to_string())
-        })
-        .collect()
+///
+/// **An unreadable gate is refused rather than skipped.** Those two shapes,
+/// outer or inner, are the whole of what this reads. Any other `cfg` or
+/// `cfg_attr` attribute that mentions a feature — `all(..)`, `any(..)`, a
+/// `cfg_attr` whose predicate names one, or a spelling other than the literal
+/// one — is an error naming its line, since reading it as asking for nothing
+/// would let a step that drops the feature pass.
+fn features_a_target_needs(source: &str) -> Result<BTreeSet<String>, String> {
+    let mut needed = BTreeSet::new();
+    for (at, attribute) in cfg_attributes(source) {
+        if !attribute.contains("feature") {
+            continue;
+        }
+        let gate = attribute
+            .strip_prefix("#!")
+            .or_else(|| attribute.strip_prefix('#'))
+            .unwrap_or(&attribute);
+        if let Some(feature) = quoted_between(gate, "[cfg(feature = \"", "\")]") {
+            needed.insert(feature.to_string());
+        } else if quoted_between(gate, "[cfg(not(feature = \"", "\"))]").is_none() {
+            return Err(format!(
+                "line {at} gates on a feature in a shape this reader does not read, so the \
+                 feature a lane step must name cannot be known: `{attribute}`. Spell the gate \
+                 `#[cfg(feature = \"...\")]` or `#[cfg(not(feature = \"...\"))]`"
+            ));
+        }
+    }
+    Ok(needed)
+}
+
+/// Every `cfg` and `cfg_attr` attribute in `source` as `(line, attribute)`,
+/// with the line 1-based and an attribute that spans lines joined onto the
+/// one it opens on, whitespace collapsed.
+///
+/// An attribute ends where its brackets balance, so a gate rustfmt wrapped
+/// across lines is read whole rather than by its first line alone.
+fn cfg_attributes(source: &str) -> Vec<(usize, String)> {
+    let mut attributes = Vec::new();
+    let mut lines = source.lines().enumerate();
+    while let Some((at, line)) = lines.next() {
+        let line = line.trim();
+        let opens = ["#[cfg(", "#[cfg_attr(", "#![cfg(", "#![cfg_attr("]
+            .iter()
+            .any(|shape| line.starts_with(shape));
+        if !opens {
+            continue;
+        }
+        let mut text = String::new();
+        let mut depth = 0_i64;
+        let mut rest = line.to_string();
+        'attribute: loop {
+            for (offset, character) in rest.char_indices() {
+                match character {
+                    '[' => depth += 1,
+                    ']' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 && character == ']' {
+                    text.push_str(&rest[..=offset]);
+                    break 'attribute;
+                }
+            }
+            text.push_str(&rest);
+            match lines.next() {
+                Some((_, next)) => {
+                    rest = next.trim().to_string();
+                    text.push(' ');
+                }
+                None => break,
+            }
+        }
+        attributes.push((at + 1, text));
+    }
+    attributes
+}
+
+/// The text between `open` and `close` when `text` is exactly the two around
+/// one name with no quote in it.
+fn quoted_between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let name = text.strip_prefix(open)?.strip_suffix(close)?;
+    (!name.is_empty() && !name.contains('"')).then_some(name)
 }
 
 /// The step body each lane invocation sits in, as `(package, target, body)`.
@@ -466,7 +536,8 @@ pub fn assert_lane_steps_name_the_features_their_targets_need(
         let source_path = manifest_dir.join("tests").join(format!("{stem}.rs"));
         let source = std::fs::read_to_string(&source_path)
             .unwrap_or_else(|e| panic!("reading {}: {e}", source_path.display()));
-        let needed = features_a_target_needs(&source);
+        let needed = features_a_target_needs(&source)
+            .unwrap_or_else(|unreadable| panic!("{}: {unreadable}", source_path.display()));
         if needed.is_empty() {
             continue;
         }
@@ -825,13 +896,61 @@ mod tests {
         .join("\n");
         assert_eq!(
             features_a_target_needs(&source),
-            BTreeSet::from([
+            Ok(BTreeSet::from([
                 "inside-a-helper".to_string(),
                 "one-case".to_string(),
                 "whole-file".to_string(),
-            ])
+            ]))
         );
-        assert!(features_a_target_needs("#[cfg(unix)]\nfn a_case() {}").is_empty());
+        assert_eq!(
+            features_a_target_needs("#[cfg(unix)]\nfn a_case() {}"),
+            Ok(BTreeSet::new())
+        );
+    }
+
+    /// **A feature gate the reader cannot read is refused, naming its line.**
+    /// A gate in any shape but the two literal ones would otherwise read as
+    /// asking for nothing, and a step that dropped its feature would pass.
+    #[test]
+    fn a_feature_gate_in_a_shape_the_reader_does_not_read_is_refused() {
+        for (gate, line) in [
+            ("#[cfg(all(unix, feature = \"hidden\"))]", 2),
+            ("#![cfg(any(feature = \"a\", feature = \"b\"))]", 2),
+            ("#[cfg_attr(feature = \"hidden\", ignore)]", 2),
+            (
+                "#[cfg_attr(not(feature = \"hidden\"), allow(dead_code))]",
+                2,
+            ),
+            ("#[cfg(feature=\"hidden\")]", 2),
+            ("#[cfg(all(\n    unix,\n    feature = \"hidden\"\n))]", 2),
+        ] {
+            let source = format!("#![cfg(unix)]\n{gate}\nfn a_case() {{}}\n");
+            let refusal = features_a_target_needs(&source).expect_err(&format!(
+                "`{gate}` was read as a gate this reader understands"
+            ));
+            assert!(
+                refusal.starts_with(&format!("line {line} ")),
+                "the refusal of `{gate}` names another line: {refusal}"
+            );
+        }
+    }
+
+    /// **A gate that names no feature is not a feature gate**, however it is
+    /// shaped or wrapped.
+    #[test]
+    fn a_gate_that_names_no_feature_asks_for_nothing() {
+        let source = [
+            "#![cfg(any(target_os = \"linux\", target_os = \"macos\"))]",
+            "#[cfg(all(",
+            "    unix,",
+            "    target_os = \"linux\"",
+            "))]",
+            "fn a_case() {}",
+            "#[cfg_attr(unix, allow(dead_code))]",
+            "fn a_helper() {}",
+        ]
+        .join("\n");
+        assert_eq!(features_a_target_needs(&source), Ok(BTreeSet::new()));
     }
 
     /// **A body stops at its own step.** A later job's job-level `env:` is
