@@ -157,9 +157,41 @@ pub(crate) struct Seeded {
 
 impl Seeded {
     pub(crate) fn new(label: &str) -> Self {
+        Self::with_bulk(label, 0)
+    }
+
+    /// The fixture and `bulk` more documents under `bulk/`, each carrying a
+    /// `count` and the tag `bulk`, every other one a `status` too: enough rows
+    /// in every table a page reads that a step through any of them end to end
+    /// is counted many times over.
+    fn with_bulk(label: &str, bulk: usize) -> Self {
         let scratch = Scratch::new(label);
         let mut store = scratch.open();
         seed(&mut store);
+        let declared = declared();
+        let documents: Vec<_> = (0..bulk)
+            .map(|at| {
+                let mut fields = vec![("count", FrontmatterValue::Int(at as i64))];
+                if at % 2 == 0 {
+                    fields.push(("status", string("filed")));
+                }
+                let mut facts = document(
+                    &format!("bulk/{at:03}.md"),
+                    &format!("hash-bulk-{at}"),
+                    "a body\n",
+                )
+                .with_frontmatter(Some(map(fields)), &declared);
+                facts.tags.push(TagFact {
+                    name: "bulk".to_string(),
+                    source: TagSource::Body,
+                    span: None,
+                });
+                facts
+            })
+            .collect();
+        if !documents.is_empty() {
+            write_documents(&mut store.begin_request(), &documents);
+        }
         let reader = Arc::new(
             store
                 .open_reader()
@@ -1293,6 +1325,115 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
             });
         }
     }
+}
+
+// ---- the work bar ----
+
+/// Whether `statement` is a page section rather than a probe or a hydration.
+fn is_page(statement: FindStatement) -> bool {
+    matches!(
+        statement,
+        FindStatement::PathPage(_)
+            | FindStatement::FieldValuePage(..)
+            | FindStatement::FieldMissingPage(..)
+    )
+}
+
+/// Every order a page can be read in: the path in either direction, and each
+/// field order's key in either direction.
+fn page_orders() -> Vec<FindParams> {
+    let mut orders = vec![
+        sorted(SortKey::path(), Direction::Ascending),
+        sorted(SortKey::path(), Direction::Descending),
+    ];
+    orders.extend(
+        FIELD_BARS
+            .iter()
+            .map(|bar| sorted(SortKey::field(bar.key), bar.direction)),
+    );
+    orders
+}
+
+/// Judge a page with no filter by what SQLite counted running it: no step
+/// through a loop no constraint bounds, and no sort.
+fn judge_unfiltered_work(seeded: &Seeded, params: &FindParams) {
+    let work = seeded.page(params).work;
+    assert_eq!(
+        (work.page_full_scan_steps, work.page_sorts),
+        (0, 0),
+        "a page with no filter scanned or sorted: {work:?} for {params:?}"
+    );
+}
+
+/// Judge a filtered page by what SQLite counted running it: no step through a
+/// loop no constraint bounds, and at most one sort per page statement it ran.
+fn judge_filtered_work(seeded: &Seeded, params: &FindParams) {
+    let work = seeded.page(params).work;
+    let sections = seeded
+        .plans(params)
+        .iter()
+        .filter(|plan| is_page(plan.statement))
+        .count() as u64;
+    assert_eq!(
+        work.page_full_scan_steps, 0,
+        "a filtered page stepped through a full scan: {work:?} for {params:?}"
+    );
+    assert!(
+        work.page_sorts <= sections,
+        "a filtered page sorted more than once per page statement ({sections} ran): \
+         {work:?} for {params:?}"
+    );
+}
+
+/// **A page's work is judged by what SQLite counted running it, not by the
+/// plan's words.** Over a vault large enough that a read of any relation end
+/// to end is counted many times over, every page shape — the path page in
+/// either direction, each field order's valued and missing sections in either
+/// direction, first pages and continuations alike — steps through no full scan
+/// and sorts nothing. Every filter shape, in every form the filter bar spells
+/// it, applied to a page in each of those orders, steps through no full scan
+/// either, and sorts at most once per page statement.
+///
+/// Controls: `documents_path_nocase` dropped, the path page with no filter
+/// reads another order and the unfiltered bar fails; `document_tags_name`
+/// dropped, the tag part reads its table end to end and the filtered bar
+/// fails.
+#[test]
+fn a_page_steps_through_no_full_scan_and_sorts_only_where_a_filter_narrows_it() {
+    let mut seeded = Seeded::with_bulk("find-page-work", 64);
+    for order in page_orders() {
+        judge_unfiltered_work(&seeded, &order);
+        for bar in filter_bars() {
+            for (part, _, _) in &bar.probes {
+                judge_filtered_work(&seeded, &order.clone().with_predicates([part.clone()]));
+            }
+        }
+    }
+    for (_, direction, _) in PAGE_BARS {
+        let params = sorted(SortKey::path(), *direction);
+        judge_unfiltered_work(&seeded, &seeded.resumed(&params, None, "notes/B.md"));
+    }
+    for bar in FIELD_BARS {
+        let params = sorted(SortKey::field(bar.key), bar.direction);
+        judge_unfiltered_work(&seeded, &seeded.resumed(&params, Some("m"), "notes/a.md"));
+        judge_unfiltered_work(&seeded, &seeded.resumed(&params, None, "notes/a.md"));
+    }
+
+    // Control: the index the path order is held by, gone.
+    seeded.drop_index("documents_path_nocase");
+    for (_, direction, _) in PAGE_BARS {
+        let params = sorted(SortKey::path(), *direction);
+        failure_of("documents_path_nocase dropped", || {
+            judge_unfiltered_work(&seeded, &params)
+        });
+    }
+
+    // Control: the index the tag part seeks, gone.
+    seeded.drop_index("document_tags_name");
+    let tagged = request().with_predicates([Predicate::tag("bulk")]);
+    failure_of("document_tags_name dropped", || {
+        judge_filtered_work(&seeded, &tagged)
+    });
 }
 
 // ---- what a page answers ----

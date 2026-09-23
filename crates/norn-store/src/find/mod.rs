@@ -124,7 +124,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use norn_db::EmittedPlan;
 use norn_db::rusqlite::types::Value;
-use norn_db::rusqlite::{self, Row, params_from_iter};
+use norn_db::rusqlite::{self, Row, StatementStatus, params_from_iter};
 use norn_wire::{
     Column, Cursor, CursorKey, CursorOrderChanged, Direction, DocumentRow, FindParams, FindReport,
     Moved, Page, Pattern, Predicate, SortKey, Unsatisfied,
@@ -559,6 +559,37 @@ pub(super) struct Ran {
     filters: Vec<FindFilter>,
     sql: String,
     values: Vec<Value>,
+    /// What SQLite counted while the statement was stepped, read once every
+    /// row it answers has been read.
+    stepped: Stepped,
+}
+
+/// What SQLite counts while one statement is stepped, read off the
+/// statement's own status before it is dropped.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Stepped {
+    /// Steps forward through a loop no constraint bounds: a table read end to
+    /// end, or an index read end to end.
+    full_scan_steps: u64,
+    /// Sorts the statement ran: a temporary B-tree an `ORDER BY` filled
+    /// because no index hands its rows back in order.
+    sorts: u64,
+    /// Virtual-machine operations the statement ran, whatever they did.
+    vm_steps: u64,
+}
+
+impl Stepped {
+    /// The counts `statement` holds, having been stepped to its end.
+    fn of(statement: &rusqlite::Statement<'_>) -> Self {
+        // SQLite keeps each count unsigned and hands it back as a C `int`, so
+        // the bits read back as the unsigned count they are.
+        let count = |status| u64::from(statement.get_status(status) as u32);
+        Stepped {
+            full_scan_steps: count(StatementStatus::FullscanStep),
+            sorts: count(StatementStatus::Sort),
+            vm_steps: count(StatementStatus::VmStep),
+        }
+    }
 }
 
 impl Ran {
@@ -569,6 +600,7 @@ impl Ran {
             filters: Vec::new(),
             sql,
             values,
+            stepped: Stepped::default(),
         }
     }
 
@@ -679,8 +711,7 @@ impl Snapshot {
         let fields = self.projected_keys(&projection, declared, lookups, &mut compiled)?;
 
         let mut work = FindWork::default();
-        let (keys, next, read) = self.page_keys(&compiled, limit, resume.as_ref(), lookups)?;
-        work.keys_read = read;
+        let (keys, next) = self.page_keys(&compiled, limit, resume.as_ref(), lookups, &mut work)?;
         let order = compiled.field_order();
         let snapshot = self.reading_facts(order, lookups)?;
         let next =
@@ -701,9 +732,11 @@ impl Snapshot {
     /// Run `ran`, counted on this snapshot and recorded at the end of `record`
     /// before it is prepared, and read each row it answers through `read`.
     ///
-    /// Every statement a find runs is run here, and what is prepared is the text the record holds, bound to the values it
-    /// holds: [`Snapshot::find_plans`] explains the record, so the plan of a
-    /// statement is the plan of what ran.
+    /// Every statement a find runs is run here, and what is prepared is the
+    /// text the record holds, bound to the values it holds:
+    /// [`Snapshot::find_plans`] explains the record, so the plan of a
+    /// statement is the plan of what ran. Once every row is read, the record
+    /// takes what SQLite counted stepping it ([`Stepped`]).
     pub(super) fn run_statement<T>(
         &mut self,
         record: &mut Vec<Ran>,
@@ -712,10 +745,13 @@ impl Snapshot {
     ) -> rusqlite::Result<Vec<T>> {
         self.count_statement();
         record.push(ran);
-        let ran = record.last().expect("the statement was just recorded");
+        let ran = record.last_mut().expect("the statement was just recorded");
         let mut statement = self.connection().prepare(&ran.sql)?;
-        let rows = statement.query_map(params_from_iter(ran.values.iter()), read)?;
-        rows.collect()
+        let rows = statement
+            .query_map(params_from_iter(ran.values.iter()), read)?
+            .collect::<rusqlite::Result<Vec<T>>>()?;
+        ran.stepped = Stepped::of(&statement);
+        Ok(rows)
     }
 
     /// Judge the cursor a request continues against the request's `order` on
@@ -1008,16 +1044,19 @@ impl Snapshot {
         })
     }
 
-    /// One page of keys: at most `limit`, where the next page starts, and how
-    /// many keys the section statements handed back — one past the bound where
-    /// a next page exists.
+    /// One page of keys: at most `limit`, and where the next page starts.
+    ///
+    /// `work` takes what the section statements cost: the keys they handed
+    /// back — one past the bound where a next page exists — and what SQLite
+    /// counted stepping them.
     fn page_keys(
         &mut self,
         compiled: &Compiled<'_>,
         limit: usize,
         at: Option<&FindPosition>,
         lookups: &mut Lookups,
-    ) -> Result<(Vec<FoundKey>, Option<FindPosition>, u64), StoreError> {
+        work: &mut FindWork,
+    ) -> Result<(Vec<FoundKey>, Option<FindPosition>), StoreError> {
         let mut keys: Vec<FoundKey> = Vec::new();
         if !compiled.matches_nothing {
             for (statement, start) in sections(compiled.order, at) {
@@ -1035,16 +1074,18 @@ impl Snapshot {
                 let section =
                     Ran::new(statement, (sql, values)).narrowed_by(compiled.filter_shapes());
                 keys.extend(self.read_keys(&mut lookups.ran, section)?);
+                let ran = lookups.ran.last().expect("the section was just recorded");
+                work.page_stepped(ran.stepped);
             }
         }
-        let read = keys.len() as u64;
+        work.keys_read = keys.len() as u64;
         let next = if keys.len() > limit {
             keys.truncate(limit);
             keys.last().map(FoundKey::position)
         } else {
             None
         };
-        Ok((keys, next, read))
+        Ok((keys, next))
     }
 
     /// Run one page section.

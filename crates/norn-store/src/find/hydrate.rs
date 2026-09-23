@@ -27,7 +27,7 @@ use super::statement::{
     DocumentColumns, FindStatement, Nested, compose_documents, compose_nested_head,
     compose_nested_total,
 };
-use super::{FoundKey, Projection, Ran};
+use super::{FoundKey, Projection, Ran, Stepped};
 use crate::error::{self, StoreError};
 use crate::facts::{Span, TagSource};
 use crate::json::projected_fields;
@@ -52,18 +52,43 @@ pub const BODY_ROW_CEILING: usize = 65_536;
 ///
 /// The instrument a caller reads what a page cost off: how many statements the
 /// find ran on its snapshot, how many keys its page statements handed back —
-/// one past the bound where a next page exists — how many document rows it
-/// hydrated, and how many rows of each nested table it read.
+/// one past the bound where a next page exists — what SQLite counted stepping
+/// those page statements, how many document rows it hydrated, and how many
+/// rows of each nested table it read.
+///
+/// **The page counters are the page's cost as SQLite ran it**, read off each
+/// page statement's own status once its rows are read, and summed over the
+/// page statements the find ran. They are counters rather than a plan's
+/// words, so a pair of finds over two vault sizes reads whether a page's work
+/// grows with the vault by comparing them.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FindWork {
     /// The statements the find ran, each counted on the snapshot as it ran.
     pub statements: u64,
     /// The document keys the page statements handed back.
     pub keys_read: u64,
+    /// Steps the page statements took through a loop no constraint bounds —
+    /// a table or an index read end to end. A page seeks, so this is zero.
+    pub page_full_scan_steps: u64,
+    /// Sorts the page statements ran: a temporary B-tree an order filled
+    /// because no index handed its rows back in that order.
+    pub page_sorts: u64,
+    /// Virtual-machine operations the page statements ran: the whole of what
+    /// SQLite did for the page, whatever it did it on.
+    pub page_vm_steps: u64,
     /// The document rows the hydration read.
     pub documents_hydrated: u64,
     /// The nested-table rows the hydration read, by table.
     pub nested_rows: NestedRows,
+}
+
+impl FindWork {
+    /// Add what SQLite counted stepping one page statement.
+    pub(super) fn page_stepped(&mut self, stepped: Stepped) {
+        self.page_full_scan_steps += stepped.full_scan_steps;
+        self.page_sorts += stepped.sorts;
+        self.page_vm_steps += stepped.vm_steps;
+    }
 }
 
 /// Nested-table rows read, one count per table.

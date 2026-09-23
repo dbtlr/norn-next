@@ -453,7 +453,13 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
             found.work.statements,
             snapshot.counters().statements_executed() - before
         );
-        (found.rows.len(), found.work)
+        // The virtual-machine steps are SQLite's own count of its operations,
+        // which no case here states; the size-independence pair reads them.
+        let work = FindWork {
+            page_vm_steps: 0,
+            ..found.work
+        };
+        (found.rows.len(), work)
     };
     let nested = |tags, headings, blocks| NestedRows {
         tags,
@@ -468,6 +474,9 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
             FindWork {
                 statements: 2,
                 keys_read: 3,
+                page_full_scan_steps: 0,
+                page_sorts: 0,
+                page_vm_steps: 0,
                 documents_hydrated: 0,
                 nested_rows: nested(0, 0, 0),
             }
@@ -480,6 +489,9 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
             FindWork {
                 statements: 3,
                 keys_read: 3,
+                page_full_scan_steps: 0,
+                page_sorts: 0,
+                page_vm_steps: 0,
                 documents_hydrated: 2,
                 nested_rows: nested(0, 0, 0),
             }
@@ -498,6 +510,9 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
             FindWork {
                 statements: 3,
                 keys_read: 3,
+                page_full_scan_steps: 0,
+                page_sorts: 1,
+                page_vm_steps: 0,
                 documents_hydrated: 2,
                 nested_rows: nested(0, 0, 0),
             }
@@ -514,6 +529,9 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
             FindWork {
                 statements: 3,
                 keys_read: 4,
+                page_full_scan_steps: 0,
+                page_sorts: 0,
+                page_vm_steps: 0,
                 documents_hydrated: 3,
                 nested_rows: nested(0, 0, 0),
             }
@@ -527,6 +545,9 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
             FindWork {
                 statements: 3,
                 keys_read: 3,
+                page_full_scan_steps: 0,
+                page_sorts: 0,
+                page_vm_steps: 0,
                 documents_hydrated: 0,
                 nested_rows: nested(1, 0, 0),
             }
