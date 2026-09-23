@@ -1643,6 +1643,75 @@ mod tests {
         }
     }
 
+    /// A store holding `documents`, each derived through the host's own
+    /// declaration of `schema` and [`plan_document`] and written in one
+    /// changeset, and the find a request over it answers: the found paths, in
+    /// page order.
+    struct DerivedVault {
+        _scratch: norn_testkit::scratch::Scratch,
+        _store: norn_store::Store,
+        reader: std::sync::Arc<norn_store::SnapshotReader>,
+        declared: Declared,
+    }
+
+    impl DerivedVault {
+        fn new(label: &str, schema: &[u8], documents: &[(&str, String)]) -> Self {
+            let declared =
+                Declared::new(VaultSchema::parse(schema).expect("a schema declaring typed fields"));
+            let scratch = norn_testkit::scratch::Scratch::new(label);
+            let mut store =
+                norn_store::Store::open(scratch.join("store.sqlite3")).expect("a store");
+            let changes: Vec<Change> = documents
+                .iter()
+                .map(|(path, bytes)| {
+                    let hash = norn_fs::ContentHash::of(bytes.as_bytes()).to_string();
+                    plan_document(
+                        Path::new(path),
+                        path,
+                        bytes.as_bytes(),
+                        hash,
+                        None,
+                        &declared,
+                    )
+                    .change
+                    .expect("a document that derives")
+                })
+                .collect();
+            store
+                .begin_request()
+                .apply_increment(norn_store::IncrementProvenance::Derived, changes, &[])
+                .expect("writing the derived documents");
+            let reader = std::sync::Arc::new(store.open_reader().reader.expect("a reader"));
+            DerivedVault {
+                _scratch: scratch,
+                _store: store,
+                reader,
+                declared,
+            }
+        }
+
+        fn request() -> norn_wire::FindParams {
+            norn_wire::FindParams::new(norn_wire::VaultAddress::name(
+                norn_wire::VaultName::new("compared").expect("a vault name"),
+            ))
+        }
+
+        fn find(&self, params: norn_wire::FindParams) -> Vec<String> {
+            self.reader
+                .try_take()
+                .expect("an idle reader")
+                .establish()
+                .snapshot
+                .expect("a snapshot")
+                .find(&params, self.declared.fields())
+                .expect("a find")
+                .rows
+                .into_iter()
+                .map(|row| row.path.as_str().to_string())
+                .collect()
+        }
+    }
+
     /// The documents the comparison case derives, and what each writes under
     /// `when` (a date), `weight` (a number) and `code` (text). The raw text is
     /// what the in-process rule reads; the store reads the same bytes through
@@ -1679,62 +1748,26 @@ mod tests {
     #[test]
     fn the_stores_typed_order_and_the_in_process_comparison_are_one_rule() {
         use std::cmp::Ordering;
-        use std::sync::Arc;
 
         use norn_config::schema::{ComparisonSignal, FieldType, TypedValue};
-        use norn_store::{IncrementProvenance, Store};
-        use norn_wire::{Direction, FindParams, Predicate, Sort, SortKey, VaultAddress, VaultName};
+        use norn_wire::{Direction, Predicate, Sort, SortKey};
 
-        let declared = Declared::new(
-            VaultSchema::parse(
-                b"version: 1\nfields:\n  when:\n    type: date\n  weight:\n    type: number\n  code:\n    type: text\n",
-            )
-            .expect("a schema declaring typed fields"),
-        );
-        let scratch = norn_testkit::scratch::Scratch::new("norn-host-comparison");
-        let mut store = Store::open(scratch.join("store.sqlite3")).expect("a store");
-        let changes: Vec<Change> = COMPARED
+        let documents: Vec<(&str, String)> = COMPARED
             .iter()
             .map(|(path, when, weight, code)| {
-                let bytes =
-                    format!("---\nwhen: {when}\nweight: {weight}\ncode: {code}\n---\nbody\n");
-                let hash = norn_fs::ContentHash::of(bytes.as_bytes()).to_string();
-                plan_document(
-                    Path::new(path),
-                    path,
-                    bytes.as_bytes(),
-                    hash,
-                    None,
-                    &declared,
+                (
+                    *path,
+                    format!("---\nwhen: {when}\nweight: {weight}\ncode: {code}\n---\nbody\n"),
                 )
-                .change
-                .expect("a document that derives")
             })
             .collect();
-        store
-            .begin_request()
-            .apply_increment(IncrementProvenance::Derived, changes, &[])
-            .expect("writing the derived documents");
-        let reader = Arc::new(store.open_reader().reader.expect("a reader"));
-        let find = |params: FindParams| -> Vec<String> {
-            reader
-                .try_take()
-                .expect("an idle reader")
-                .establish()
-                .snapshot
-                .expect("a snapshot")
-                .find(&params, declared.fields())
-                .expect("a find")
-                .rows
-                .into_iter()
-                .map(|row| row.path.as_str().to_string())
-                .collect()
-        };
-        let request = || {
-            FindParams::new(VaultAddress::name(
-                VaultName::new("compared").expect("a vault name"),
-            ))
-        };
+        let vault = DerivedVault::new(
+            "norn-host-comparison",
+            b"version: 1\nfields:\n  when:\n    type: date\n  weight:\n    type: number\n  code:\n    type: text\n",
+            &documents,
+        );
+        let find = |params| vault.find(params);
+        let request = DerivedVault::request;
         let unquoted = |raw: &str| raw.trim_matches('"').to_string();
         let typed = |kind: FieldType, raw: &str| {
             kind.read(&unquoted(raw))
@@ -1875,5 +1908,53 @@ mod tests {
             )])),
             ["b.md", "e.md", "f.md", "g.md"]
         );
+    }
+
+    /// **Matching is symmetric in the shape of the stored value.** A value
+    /// written bare and the same value written inside a sequence are one value
+    /// to an equality, an inequality and a membership part, under a declared
+    /// number and under text alike: every scalar a key holds is a value of the
+    /// key, so `[9]` holds nine as `9` does, and `[3, 9.0]` holds it too.
+    #[test]
+    fn a_value_written_bare_and_inside_a_sequence_meet_one_part_alike() {
+        use norn_wire::Predicate;
+
+        let documents: Vec<(&str, String)> = [
+            ("bare.md", "9", "a"),
+            ("bracketed.md", "[9]", "[a]"),
+            ("among.md", "[3, 9.0]", "[b, a]"),
+            ("other.md", "3", "b"),
+        ]
+        .into_iter()
+        .map(|(path, weight, code)| {
+            (
+                path,
+                format!("---\nweight: {weight}\ncode: {code}\n---\nbody\n"),
+            )
+        })
+        .collect();
+        let vault = DerivedVault::new(
+            "norn-host-stored-shape",
+            b"version: 1\nfields:\n  weight:\n    type: number\n  code:\n    type: text\n",
+            &documents,
+        );
+        let find = |part: Predicate| vault.find(DerivedVault::request().with_predicates([part]));
+        for (key, value) in [("weight", "9"), ("code", "a")] {
+            assert_eq!(
+                find(Predicate::equal_to(key, value)),
+                ["among.md", "bare.md", "bracketed.md"],
+                "`{key}` equal to {value}"
+            );
+            assert_eq!(
+                find(Predicate::in_any(key, [value.to_string()])),
+                ["among.md", "bare.md", "bracketed.md"],
+                "`{key}` in [{value}]"
+            );
+            assert_eq!(
+                find(Predicate::not_equal_to(key, value)),
+                ["other.md"],
+                "`{key}` not equal to {value}"
+            );
+        }
     }
 }

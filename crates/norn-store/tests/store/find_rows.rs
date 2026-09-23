@@ -205,7 +205,10 @@ fn a_cursor_among_other_rows_is_refused() {
 /// **A page of `limit` rows hydrates exactly `limit` document rows, and reads
 /// no table whose column was not named.** The page statement reads one key
 /// past the bound, which is how it knows a next page exists; the hydration
-/// reads the bound. A path alone is carried by the keys and hydrates nothing.
+/// reads the bound, a path part narrowing the page included: the glob is a
+/// filter inside the page statement, so it narrows the keys the bound counts
+/// rather than voiding the bound. A path alone is carried by the keys and
+/// hydrates nothing.
 /// Each nested collection reads its own table and no other, and the work
 /// instrument's statements are the snapshot counter's.
 #[test]
@@ -241,6 +244,24 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
     );
     assert_eq!(
         work(&request().with_limit(2).with_columns([Column::body()])),
+        (
+            2,
+            FindWork {
+                statements: 2,
+                keys_read: 3,
+                documents_hydrated: 2,
+                nested_rows: nested(0, 0, 0),
+            }
+        )
+    );
+    // Three documents stand under `notes/`; the page holds two of them.
+    assert_eq!(
+        work(
+            &request()
+                .with_predicates([Predicate::path("notes/*.md")])
+                .with_limit(2)
+                .with_columns([Column::body()])
+        ),
         (
             2,
             FindWork {

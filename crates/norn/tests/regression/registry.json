@@ -409,10 +409,12 @@
       "sources": ["NRN-a61", "NRN-a62", "NRN-a60", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the two lifetimes the property is stated over exist: crates/norn-store/src/increment.rs stamps one generation across every row a changeset writes, and crates/norn-host/src/lifecycle.rs holds an attachment across the work that reaches it. What has no subject is everything that would be compiled — no matcher, no predicate field type and no field universe is compiled anywhere, because crates/norn-serve is not in the workspace and nothing carries a query. The counters the property reads are not in crates/norn-store/src/counters.rs either: that vocabulary counts derivation, and a compile, an open and a parse are not members of it.",
+        "reason": "the two lifetimes the property is stated over exist: crates/norn-store/src/increment.rs stamps one generation across every row a changeset writes, and crates/norn-host/src/lifecycle.rs holds an attachment across the work that reaches it. A query is compiled now, by the find builder: crates/norn-store/src/find/glob.rs parses a path glob once per statement and keeps it as the match function's auxiliary data for every row after the first, and crates/norn-store/src/find/mod.rs decides whether a key is in the field universe by a declaration lookup or one indexed existence seek. What has no subject is a request to carry a compile across and the counters the property reads: nothing dispatches a query, because crates/norn-serve is not in the workspace, and crates/norn-store/src/counters.rs counts derivation and statements, not a compile, an open or a parse.",
         "grounds": [
           { "present": "crates/norn-store/src/increment.rs" },
           { "present": "crates/norn-host/src/lifecycle.rs" },
+          { "present": "crates/norn-store/src/find/glob.rs" },
+          { "present": "crates/norn-store/src/find/mod.rs" },
           { "present": "crates/norn-store/src/counters.rs" },
           { "absent": "crates/norn-serve" }
         ]
@@ -732,10 +734,11 @@
       "sources": ["NRN-122", "NRN-123", "NRN-124", "NRN-57", "NRN-216", "NRN-167", "NRN-168", "NRN-440", "NRN-510"],
       "binding": {
         "status": "dormant",
-        "reason": "the indexed half of a resolver exists: crates/norn-store/src/path.rs reduces a suffix target to the prefix its candidates share, crates/norn-store/src/ddl/documents.rs indexes the key it probes, and crates/norn-wire/src/finding.rs already spells what an ambiguous answer looks like — a bounded head of candidates with its total. Nothing answers a target string: crates/norn-serve is not in the workspace, so no verb resolves, no candidate set is refused with its candidates named, and no plan is built from a resolved path.",
+        "reason": "the indexed half of a resolver exists: crates/norn-store/src/path.rs reduces a suffix target to the prefix its candidates share, crates/norn-store/src/ddl/documents.rs indexes the key it probes, crates/norn-store/src/find/mod.rs enumerates a target's ambiguity class through that same probe as a find's resolves part, and crates/norn-wire/src/finding.rs already spells what an ambiguous answer looks like — a bounded head of candidates with its total. Nothing resolves a target to one document: crates/norn-serve is not in the workspace, so no verb resolves, no candidate set is refused with its candidates named, and no plan is built from a resolved path.",
         "grounds": [
           { "present": "crates/norn-store/src/path.rs" },
           { "present": "crates/norn-store/src/ddl/documents.rs" },
+          { "present": "crates/norn-store/src/find/mod.rs" },
           { "present": "crates/norn-wire/src/finding.rs" },
           { "absent": "crates/norn-serve" }
         ]
@@ -749,10 +752,11 @@
       "sources": ["NRN-42"],
       "binding": {
         "status": "dormant",
-        "reason": "the failure is a distinct state and one consumer already holds it as one: crates/norn-text/src/diagnostic.rs is the state, and crates/norn-host/src/production.rs carries it into derived state rather than dropping the document, so an illegible document is derived and legible as illegible. The consumers that could collapse it have no subject: no query result exists to drop a document from, and no second mutation arm exists to disagree with a first, because crates/norn-serve is not in the workspace. Carve-out: a frontmatter tag string the grammar does not describe yields no tag AND no diagnostic, by ruling — judging such a string is validation's venue, so its silence is a decision rather than a collapsed failure.",
+        "reason": "the failure is a distinct state and one consumer already holds it as one: crates/norn-text/src/diagnostic.rs is the state, and crates/norn-host/src/production.rs carries it into derived state rather than dropping the document, so an illegible document is derived and legible as illegible. A query result exists now, and it does not drop the document: crates/norn-store/src/find/mod.rs pages every document a part admits, and a document whose frontmatter did not read holds no field, so a field part judges it as missing the key — the diagnostic that says why is reachable through a has_finding part, and a row's findings column is refused until the link and finding columns land. The consumers that could collapse the state have no verb to do it through, and no second mutation arm exists to disagree with a first, because crates/norn-serve is not in the workspace. Carve-out: a frontmatter tag string the grammar does not describe yields no tag AND no diagnostic, by ruling — judging such a string is validation's venue, so its silence is a decision rather than a collapsed failure.",
         "grounds": [
           { "present": "crates/norn-text/src/diagnostic.rs" },
           { "present": "crates/norn-host/src/production.rs" },
+          { "present": "crates/norn-store/src/find/mod.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -780,10 +784,10 @@
       "sources": ["NRN-a60", "NRN-a61", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the readers project into typed rows: crates/norn-store/src/facts.rs is what a read hands back, and a page carries the columns its shape declares. Neither boundary the property measures exists. No reader takes its projection from a requested output shape, because nothing requests one; and no wire report carries a document at all — crates/norn-wire/src/lib.rs spells trust, refusals and findings and no read answer — so peak resident set and wire bytes for a body-less verb have no verb to be measured over, with crates/norn-serve not in the workspace.",
+        "reason": "the find builder takes its projection from the columns a request names: crates/norn-store/src/find/hydrate.rs reads the frontmatter projection, the head of the body and each nested collection only where a column names it, and crates/norn-wire/src/document.rs spells the row a find answers with. Neither boundary the property measures has a subject: peak resident set and wire bytes for a body-less verb need a verb to be measured over, and crates/norn-serve is not in the workspace.",
         "grounds": [
-          { "present": "crates/norn-store/src/facts.rs" },
-          { "present": "crates/norn-wire/src/lib.rs" },
+          { "present": "crates/norn-store/src/find/hydrate.rs" },
+          { "present": "crates/norn-wire/src/document.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -1175,8 +1179,13 @@
       "property": "Ordering and paging are expressed once, in SQL, and every verb offering them routes through that seam. Rows hydrated are at most the page size whatever the filter shape: a path glob never voids a limit, and no verb re-implements sort and page in memory after full hydration.",
       "sources": ["NORN-a1", "NRN-a60"],
       "binding": {
-        "status": "dormant",
-        "reason": "no read builder emits SQL and no verb pages."
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/find.rs::a_page_holds_its_bound_and_counts_each_statement_it_runs",
+          "crates/norn-store/tests/store/find.rs::a_path_page_seeks_the_case_insensitive_index_in_either_direction",
+          "crates/norn-store/tests/store/find.rs::a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path",
+          "crates/norn-store/tests/store/find_rows.rs::a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table"
+        ]
       }
     },
     {
@@ -1187,9 +1196,11 @@
       "sources": ["NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the substrate stores the content: the documents table in crates/norn-store/src/ddl/documents.rs carries a body column that is TEXT NOT NULL, and the full-text pillar indexes it. What has no subject is the reader — no read verb exists to bill a warm filesystem read to, and no file is settled to declare one, so the name of that verb is not pre-committed here.",
+        "reason": "the substrate stores the content and a read takes it from there: the documents table in crates/norn-store/src/ddl/documents.rs carries a body column that is TEXT NOT NULL, and the find builder reads a projected body off that column in crates/norn-store/src/find/hydrate.rs, with no filesystem read. What has no subject is the verb the property bills a warm filesystem read to: no read verb is dispatched, because crates/norn-serve is not in the workspace, so there is no warm request whose filesystem-read counter could be read at zero.",
         "grounds": [
-          { "present": "crates/norn-store/src/ddl/documents.rs" }
+          { "present": "crates/norn-store/src/ddl/documents.rs" },
+          { "present": "crates/norn-store/src/find/hydrate.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -1200,8 +1211,13 @@
       "property": "One comparison semantics governs every engine: SQL-bound and in-process comparison agree on every case, including numeric-versus-text equality, pinned by explicit tests. Matching is symmetric in the shape of the stored value, so a bracket-wrapped and a plain spelling of one value compare alike in both directions, and date filters are chronologically correct regardless of offset — or the lexical contract is explicit and signalled on mixed-offset input.",
       "sources": ["NRN-110", "NRN-28", "NRN-427", "norn-legacy annoyances log", "norn-legacy engineering learnings"],
       "binding": {
-        "status": "dormant",
-        "reason": "no query layer compares values."
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/derivation.rs::the_stores_typed_order_and_the_in_process_comparison_are_one_rule",
+          "crates/norn-host/src/derivation.rs::a_value_written_bare_and_inside_a_sequence_meet_one_part_alike",
+          "crates/norn-config/tests/config/schema.rs::equality_ordering_and_the_sort_key_are_one_relation",
+          "crates/norn-config/tests/config/schema.rs::a_comparison_between_a_stated_and_an_unstated_offset_is_signalled"
+        ]
       }
     },
     {
@@ -1212,7 +1228,11 @@
       "sources": ["NRN-a60", "NRN-a61", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "no read verb probes for existence."
+        "reason": "the existence checks that exist are select-one-shaped: crates/norn-store/src/find/statement.rs spells a find's known-key probe and its bare-directory probe as EXISTS over index seeks, and a find hydrates each document its page holds once, with each nested collection and the body cut to a per-row ceiling. What has no subject is the rest of the property: nothing asks whether any error exists, nothing resolves a target within a request, and there is no request whose allocation could be measured against its response, because crates/norn-serve, which dispatches a read verb, is not in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-store/src/find/statement.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -1223,7 +1243,12 @@
       "sources": ["NRN-452", "NRN-451", "NRN-332"],
       "binding": {
         "status": "dormant",
-        "reason": "no machine format is emitted."
+        "reason": "the wire answer carries completeness in band: crates/norn-wire/src/document.rs spells a nested collection's total and a cut body's whole length beside what a row carries, crates/norn-wire/src/cursor.rs spells the cursor a page continues from, and a find's cursor resumes at the successor of the last row it returned, against the snapshot it was minted on. What has no subject is a machine format: what reaches stdout is rendered by crates/norn-client, which is not in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-wire/src/document.rs" },
+          { "present": "crates/norn-wire/src/cursor.rs" },
+          { "absent": "crates/norn-client" }
+        ]
       }
     },
     {
@@ -1234,7 +1259,11 @@
       "sources": ["NORN-a1", "NRN-a60", "NRN-a61", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "no verb accepts a narrowing argument."
+        "reason": "a find's parts narrow its work rather than its output: crates/norn-store/src/find/mod.rs compiles each part into a membership test one index seek answers, inside the page statement it narrows. The property is stated over every verb — validate over one path, repair over the requested paths — and no verb takes a narrowing argument, because crates/norn-serve is not in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-store/src/find/mod.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -1245,7 +1274,11 @@
       "sources": ["NRN-a59", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no read surface to answer."
+        "reason": "the one read builder answers in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others. The property is stated over each read verb, and no read verb exists: search, get, count, validate and describe have no builder, and nothing dispatches a verb, because crates/norn-serve is not in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-store/src/find/mod.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -1255,8 +1288,12 @@
       "property": "A verb's core predicate compiles to a SQL where-clause the database answers, with rows hydrated equal to rows returned. Held as a positive control: the read shape every other read verb is measured against.",
       "sources": ["NRN-a60"],
       "binding": {
-        "status": "dormant",
-        "reason": "no read builder exists to hold to the shape."
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/find.rs::every_filter_seeks_the_index_its_values_are_bounds_for",
+          "crates/norn-store/tests/store/find.rs::each_filter_answers_the_documents_its_part_names",
+          "crates/norn-store/tests/store/find_rows.rs::a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table"
+        ]
       }
     },
     {
@@ -1267,7 +1304,11 @@
       "sources": ["NRN-a59", "NRN-a60", "NRN-a62", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "no aggregate read surface exists."
+        "reason": "the one read builder, crates/norn-store/src/find, answers a page of documents rather than a cardinality: nothing counts, groups or answers distinct values. The aggregate builder a count answers from is not built, and its home is pre-committed as crates/norn-store/src/count, beside the find builder.",
+        "grounds": [
+          { "present": "crates/norn-store/src/find" },
+          { "absent": "crates/norn-store/src/count" }
+        ]
       }
     },
     {
@@ -1278,8 +1319,14 @@
       "property": "The field universe is exact — schema keys united with observed keys — and the diagnostic is a biconditional: a request component is reported unsatisfiable exactly when it is unsatisfiable. An unknown sort, column or predicate key never silently degrades a result, a malformed glob is never swallowed into a zero-match answer, a path filter that cannot match by construction — a bare directory where the grammar matches globs — is reported rather than answered with a silent empty set, and a missing named section is a distinguishable miss rather than a silent whole-document substitution. The diagnostic reaches every surface, and the exit code distinguishes not-fully-satisfiable from satisfiable-with-zero-matches, which stays success.",
       "sources": ["NRN-s14", "NRN-367", "NRN-374", "NRN-428", "NRN-427", "NRN-44", "NRN-392", "NRN-452", "NRN-399", "norn-legacy annoyances log"],
       "binding": {
-        "status": "dormant",
-        "reason": "no query surface parses a sort or projection key."
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/find_rows.rs::every_unknown_key_is_reported_with_the_keys_near_it",
+          "crates/norn-store/tests/store/find_rows.rs::a_path_part_that_cannot_match_is_reported_and_one_matching_nothing_is_not",
+          "crates/norn-store/tests/store/find.rs::a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault",
+          "crates/norn-store/tests/store/find.rs::a_known_key_and_the_field_universe_read_the_presence_rows_alone",
+          "crates/norn-store/src/find/suggest.rs::nearest_first_then_by_key_and_three_at_most"
+        ]
       }
     },
     {
