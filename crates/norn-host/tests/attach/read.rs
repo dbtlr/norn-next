@@ -38,16 +38,14 @@ pub fn bounded_find(vault: &VaultName) -> FindParams {
         .with_limit(FIND_LIMIT)
 }
 
-/// The pages of one find read on one snapshot, and the statements they ran
-/// on it.
+/// The pages of one find read on one snapshot.
 pub struct Pages {
     pub pages: Vec<Found>,
-    pub statements_executed: u64,
 }
 
 impl Pages {
-    /// What the pages read, summed name by name, beside the statements the
-    /// snapshot counted running them.
+    /// What the pages read, summed name by name under the names
+    /// [`FindWork::readings`](norn_store::FindWork::readings) gives them.
     pub fn readings(&self) -> CounterSnapshot {
         let mut readings = CounterSnapshot::new();
         for page in &self.pages {
@@ -55,37 +53,60 @@ impl Pages {
                 readings.set(name, readings.get(name) + value);
             }
         }
-        readings.set("snapshot_statements_executed", self.statements_executed);
         readings
     }
 }
 
-/// Read up to `count` pages of `params` on `snapshot`, each continuing the
-/// cursor the one before it minted, stopping early at a page that mints none.
+/// Read up to `count` pages of `params` on `snapshot` and keep every one.
 pub fn pages(
-    snapshot: &mut Snapshot,
+    snapshot: &Snapshot,
     params: &FindParams,
     declared: &DeclaredFields,
-    count: usize,
+    count: u64,
 ) -> Pages {
+    let mut pages = Vec::new();
+    each_page(snapshot, params, declared, count, |page| pages.push(page));
+    Pages { pages }
+}
+
+/// Read up to `count` pages of `params` on `snapshot`, each continuing the
+/// cursor the one before it minted, stopping early at a page that mints none,
+/// and hand each page to `visit` as it is read. A page `visit` does not keep
+/// is gone before the next one is read.
+///
+/// **Every statement a page ran is one the snapshot counted.** The snapshot's
+/// own statement count across the pages equals the sum of the statements the
+/// pages report, and a read that ran one on the snapshot beside the find, or
+/// a find whose report missed one, is refused here. It is a consistency check
+/// on the report rather than a second reading of it.
+pub fn each_page(
+    snapshot: &Snapshot,
+    params: &FindParams,
+    declared: &DeclaredFields,
+    count: u64,
+    mut visit: impl FnMut(Found),
+) {
     let started = snapshot.counters().statements_executed();
-    let mut pages: Vec<Found> = Vec::with_capacity(count);
-    while pages.len() < count {
-        let request = match pages.last() {
+    let mut reported = 0;
+    let mut after = None;
+    for _ in 0..count {
+        let request = match after.take() {
             None => params.clone(),
-            Some(page) => match &page.next {
-                Some(next) => params.clone().with_after(next.clone()),
-                None => break,
-            },
+            Some(cursor) => params.clone().with_after(cursor),
         };
-        pages.push(
-            snapshot
-                .find(&request, declared)
-                .unwrap_or_else(|refusal| panic!("the find was refused: {refusal}")),
-        );
+        let page = snapshot
+            .find(&request, declared)
+            .unwrap_or_else(|refusal| panic!("the find was refused: {refusal}"));
+        reported += page.work.statements;
+        after = page.next.clone();
+        visit(page);
+        if after.is_none() {
+            break;
+        }
     }
-    Pages {
-        pages,
-        statements_executed: snapshot.counters().statements_executed() - started,
-    }
+    assert_eq!(
+        snapshot.counters().statements_executed() - started,
+        reported,
+        "the snapshot counted other statements than the pages report running"
+    );
 }

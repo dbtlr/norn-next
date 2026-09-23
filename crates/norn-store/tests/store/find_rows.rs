@@ -153,7 +153,7 @@ fn a_cursor_continues_exactly_against_the_snapshot_it_was_minted_on() {
         let whole = paths(&seeded.found(&params));
         assert_eq!(whole.len(), 5);
 
-        let mut snapshot = seeded.snapshot();
+        let snapshot = seeded.snapshot();
         let mut drained = Vec::new();
         let mut after: Option<Cursor> = None;
         let typed = matches!(&params.sort, Some(sort) if sort.key == SortKey::field("count"));
@@ -446,7 +446,7 @@ fn a_cursor_among_other_rows_is_refused() {
 fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
     let seeded = Seeded::new("find-hydration-work");
     let work = |params: &FindParams| {
-        let mut snapshot = seeded.snapshot();
+        let snapshot = seeded.snapshot();
         let before = snapshot.counters().statements_executed();
         let found = snapshot.find(params, &declared()).expect("a page");
         assert_eq!(

@@ -147,7 +147,7 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     let declared = the_pinned_declaration(&mut store);
 
     let before = vault_work(&host);
-    let mut hold = host
+    let hold = host
         .begin_read(vault.name())
         .expect("a live attachment answers a read");
     assert_eq!(
@@ -166,7 +166,7 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     let tasks = bounded_find(vault.name())
         .with_predicates([Predicate::equal_to("type", "task")])
         .with_columns([Column::fields(), Column::tags()]);
-    let read = pages(hold.snapshot_mut(), &tasks, &declared, 2);
+    let read = pages(hold.snapshot(), &tasks, &declared, 2);
 
     // The passes over the store run beside the hold rather than through it: a
     // request is opened from `&mut Store`, and that is where a derivation
@@ -544,7 +544,7 @@ fn find_shapes(label: &str, profile: &norn_fixtures::Profile) -> FindShapes {
     assert_the_attachment_derived_the_profile(&mut store, profile);
     let declared = the_pinned_declaration(&mut store);
 
-    let mut hold = host
+    let hold = host
         .begin_read(vault.name())
         .expect("a live attachment answers a read");
     let bounded = bounded_find(vault.name()).with_columns([Column::fields()]);
@@ -555,9 +555,9 @@ fn find_shapes(label: &str, profile: &norn_fixtures::Profile) -> FindShapes {
         .clone()
         .with_sort(Sort::new(SortKey::field("created"), Direction::Ascending));
     FindShapes {
-        bounded: pages(hold.snapshot_mut(), &bounded, &declared, 2),
-        whole: pages(hold.snapshot_mut(), &whole, &declared, 1),
-        walked: pages(hold.snapshot_mut(), &walked, &declared, 1),
+        bounded: pages(hold.snapshot(), &bounded, &declared, 2),
+        whole: pages(hold.snapshot(), &whole, &declared, 1),
+        walked: pages(hold.snapshot(), &walked, &declared, 1),
     }
 }
 

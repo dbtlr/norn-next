@@ -163,7 +163,7 @@ impl Snapshot {
     /// the vault's field universe holds. Each statement it runs is recorded in
     /// `record`.
     pub(super) fn hydrate(
-        &mut self,
+        &self,
         keys: &[FoundKey],
         projection: &Projection<'_>,
         fields: &[&str],
@@ -233,7 +233,7 @@ impl Snapshot {
 
     /// The document rows `ids` name, reading `columns` of each.
     fn read_documents(
-        &mut self,
+        &self,
         ids: &[i64],
         columns: DocumentColumns,
         work: &mut FindWork,
@@ -264,7 +264,7 @@ impl Snapshot {
     /// total: counted where the ceiling filled the head, and the head's own
     /// length where it did not.
     fn read_nested<T>(
-        &mut self,
+        &self,
         nested: Nested,
         ids: &[i64],
         item: fn(&Row<'_>) -> Reading<T>,

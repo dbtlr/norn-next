@@ -673,7 +673,7 @@ impl Snapshot {
     /// keeps no index of; and a bound that does not read as its key's declared
     /// type.
     pub fn find(
-        &mut self,
+        &self,
         params: &FindParams,
         declared: &DeclaredFields,
     ) -> Result<Found, FindRefusal> {
@@ -694,7 +694,7 @@ impl Snapshot {
     /// ran twice is listed twice. An explain is a report about a statement
     /// rather than a run of it, so it is not counted.
     pub fn find_plans(
-        &mut self,
+        &self,
         params: &FindParams,
         declared: &DeclaredFields,
     ) -> Result<Vec<FindPlan>, FindRefusal> {
@@ -717,7 +717,7 @@ impl Snapshot {
     /// The find [`Snapshot::find`] answers and [`Snapshot::find_plans`]
     /// explains, recording every statement it runs in `lookups`.
     fn run_find(
-        &mut self,
+        &self,
         params: &FindParams,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
@@ -760,7 +760,7 @@ impl Snapshot {
     /// statement is the plan of what ran. Once every row is read, the record
     /// takes what SQLite counted stepping it ([`Stepped`]).
     pub(super) fn run_statement<T>(
-        &mut self,
+        &self,
         record: &mut Vec<Ran>,
         ran: Ran,
         read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
@@ -773,7 +773,7 @@ impl Snapshot {
     /// failed before it was stepped — preparing its text or binding its
     /// values — or while it was stepped.
     fn run_statement_staged<T>(
-        &mut self,
+        &self,
         record: &mut Vec<Ran>,
         ran: Ran,
         read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
@@ -816,7 +816,7 @@ impl Snapshot {
     /// other way. Both gaps are the wire's, and NORN-244 closes them by naming
     /// the order's key and direction in the cursor.
     fn judge(
-        &mut self,
+        &self,
         cursor: &Cursor,
         order: PageOrder<'_>,
         lookups: &mut Lookups,
@@ -850,7 +850,7 @@ impl Snapshot {
     /// the epoch and the write generation, and the active fingerprint where
     /// the order is typed.
     fn reading_facts(
-        &mut self,
+        &self,
         order: Option<FieldOrder>,
         lookups: &mut Lookups,
     ) -> Result<norn_wire::Snapshot, StoreError> {
@@ -872,7 +872,7 @@ impl Snapshot {
 
     /// The active fingerprint, read once per request; `None` where no schema
     /// is pinned.
-    fn fingerprint(&mut self, lookups: &mut Lookups) -> Result<Option<String>, StoreError> {
+    fn fingerprint(&self, lookups: &mut Lookups) -> Result<Option<String>, StoreError> {
         if let Some(fingerprint) = &lookups.fingerprint {
             return Ok(fingerprint.clone());
         }
@@ -896,7 +896,7 @@ impl Snapshot {
     /// document. A declared key asks the snapshot nothing; any other is one
     /// existence seek, asked once per request.
     fn is_known(
-        &mut self,
+        &self,
         key: &str,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
@@ -918,7 +918,7 @@ impl Snapshot {
 
     /// Run one yes-or-no probe, which answers exactly one row.
     fn ask(
-        &mut self,
+        &self,
         record: &mut Vec<Ran>,
         probe: Ran,
         operation: &'static str,
@@ -936,7 +936,7 @@ impl Snapshot {
     /// The field universe: every declared key, and every key a document
     /// carries.
     fn field_universe(
-        &mut self,
+        &self,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
     ) -> Result<BTreeSet<String>, StoreError> {
@@ -958,7 +958,7 @@ impl Snapshot {
     /// suggestions drawn from the field universe — which is read once, and
     /// only where some key is unknown.
     fn resolve(
-        &mut self,
+        &self,
         reports: Vec<Report>,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
@@ -990,7 +990,7 @@ impl Snapshot {
     /// The keys `projection` names that are known, in its order; each unknown
     /// one is reported on `compiled`.
     fn projected_keys<'p>(
-        &mut self,
+        &self,
         projection: &Projection<'p>,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
@@ -1016,7 +1016,7 @@ impl Snapshot {
     /// A field sort's order is the declaration's for its key: typed where the
     /// key is declared with a typed order, raw otherwise.
     fn compile<'a>(
-        &mut self,
+        &self,
         params: &'a FindParams,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
@@ -1092,7 +1092,7 @@ impl Snapshot {
     /// back — one past the bound where a next page exists — and what SQLite
     /// counted stepping them.
     fn page_keys(
-        &mut self,
+        &self,
         compiled: &Compiled<'_>,
         limit: usize,
         at: Option<&FindPosition>,
@@ -1131,11 +1131,7 @@ impl Snapshot {
     }
 
     /// Run one page section.
-    fn read_keys(
-        &mut self,
-        record: &mut Vec<Ran>,
-        section: Ran,
-    ) -> Result<Vec<FoundKey>, StoreError> {
+    fn read_keys(&self, record: &mut Vec<Ran>, section: Ran) -> Result<Vec<FoundKey>, StoreError> {
         self.run_statement(record, section, |row| {
             Ok(FoundKey {
                 document: row.get(0)?,
@@ -1154,7 +1150,7 @@ impl Snapshot {
     /// part probes whether the full-text engine parses its query: the other
     /// parts bind nothing the snapshot has to be asked for.
     fn compile_predicate(
-        &mut self,
+        &self,
         predicate: &Predicate,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
@@ -1273,7 +1269,7 @@ impl Snapshot {
     /// met stepping the prepared probe can be the request's, and it is read as
     /// that exactly where [`query_problem`] says so.
     fn match_problem(
-        &mut self,
+        &self,
         query: &str,
         lookups: &mut Lookups,
     ) -> Result<Option<String>, StoreError> {
@@ -1304,7 +1300,7 @@ impl Snapshot {
     /// other characters in the holes, and the refusals the grammar makes are
     /// about the separators and segments a hole does not change.
     fn unmatchable_path(
-        &mut self,
+        &self,
         pattern: &Pattern,
         lookups: &mut Lookups,
     ) -> Result<Option<Unsatisfied>, StoreError> {

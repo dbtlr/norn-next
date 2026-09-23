@@ -60,7 +60,7 @@ mod baselines;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use attach::read::{FIND_LIMIT, bounded_find, the_pinned_declaration};
+use attach::read::{FIND_LIMIT, bounded_find, each_page, the_pinned_declaration};
 use norn_testkit::process::{Run, Sandbox};
 use norn_wire::Column;
 
@@ -355,28 +355,15 @@ fn read_and_report(root: &Path) {
     let _lease = attach::attach_and_wait(&host, vault.name());
     let declared = the_pinned_declaration(&mut vault.store());
 
-    let mut hold = host
+    let hold = host
         .begin_read(vault.name())
         .expect("a live attachment answers a read");
     let params = bounded_find(vault.name()).with_columns([Column::fields(), Column::tags()]);
     let mut read = ReadReport::default();
-    let mut after = None;
-    while read.pages < READ_PAGES {
-        let request = match after.take() {
-            None => params.clone(),
-            Some(cursor) => params.clone().with_after(cursor),
-        };
-        let found = hold
-            .snapshot_mut()
-            .find(&request, &declared)
-            .unwrap_or_else(|refusal| panic!("the find was refused: {refusal}"));
-        read.rows += found.work.documents_hydrated;
+    each_page(hold.snapshot(), &params, &declared, READ_PAGES, |page| {
+        read.rows += page.work.documents_hydrated;
         read.pages += 1;
-        match found.next {
-            Some(next) => after = Some(next),
-            None => break,
-        }
-    }
+    });
     println!("{}", read.line());
 }
 
