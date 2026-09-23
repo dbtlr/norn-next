@@ -637,16 +637,6 @@ struct Lookups {
 }
 
 impl Snapshot {
-    /// The pinned vault-schema fingerprint, or `None` where no schema is
-    /// pinned. One point read on this snapshot, counted on it.
-    pub fn active_fingerprint(&mut self) -> Result<Option<String>, StoreError> {
-        self.count_statement();
-        Ok(norn_db::meta::get_meta(
-            self.connection(),
-            ddl::meta::VAULT_SCHEMA_FINGERPRINT,
-        )?)
-    }
-
     /// One page of the documents `params` asks for, as rows carrying the
     /// columns it projects, in its order, continuing its cursor.
     ///
