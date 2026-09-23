@@ -68,7 +68,8 @@
 //! written, and it then still has to be *freed*: a recursive drop would recurse
 //! once per level and abort the process on a value this API accepted, which would
 //! make the refusal a crash one statement later rather than an error a caller
-//! reads.
+//! reads. Reading a projection back ([`projected_fields`]) is a walk over text
+//! the writer already bounded, so it recurses and refuses past the same bound.
 
 /// A frontmatter value, as the store takes it.
 ///
@@ -269,4 +270,335 @@ fn write_string(text: &str, out: &mut String) {
         }
     }
     out.push('"');
+}
+
+/// The fields a canonical projection's top-level map holds, each as the tree
+/// of values the wire carries it as.
+///
+/// **The reader of the text [`canonical_json`] writes**, and of nothing
+/// looser: a string crosses as its content, a number and a boolean as the
+/// digits and the word the projection spelled, a null as
+/// [`FieldValue::Null`], and a sequence and a map as the containers they
+/// are. A scalar's text is therefore the field pillar's raw text for the same
+/// value, so a projected value and the value a predicate matched are one
+/// spelling. A projection whose top level is not a map carries no fields, as
+/// it derives no field rows.
+///
+/// The walk recurses once per level of nesting, and refuses a text nested past
+/// [`MAX_FRONTMATTER_DEPTH`] as the writer does, so the recursion is bounded
+/// by what a projection can hold. Text that is not JSON is not a projection
+/// this crate wrote, and is reported as damage.
+pub(crate) fn projected_fields(
+    text: &str,
+) -> Result<std::collections::BTreeMap<String, norn_wire::FieldValue>, crate::StoreError> {
+    let mut reader = ProjectionReader {
+        text,
+        at: 0,
+        depth: 0,
+    };
+    reader.skip_space();
+    let fields = if reader.peek() == Some(b'{') {
+        let norn_wire::FieldValue::Map { entries, .. } = reader.value()? else {
+            unreachable!("an object reads as a map")
+        };
+        entries
+    } else {
+        reader.value()?;
+        std::collections::BTreeMap::new()
+    };
+    reader.skip_space();
+    if reader.at != text.len() {
+        return Err(reader.damaged("text after the value"));
+    }
+    Ok(fields)
+}
+
+/// A cursor over one projection's text.
+struct ProjectionReader<'a> {
+    text: &'a str,
+    at: usize,
+    depth: usize,
+}
+
+impl ProjectionReader<'_> {
+    fn peek(&self) -> Option<u8> {
+        self.text.as_bytes().get(self.at).copied()
+    }
+
+    fn skip_space(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+            self.at += 1;
+        }
+    }
+
+    fn damaged(&self, problem: &str) -> crate::StoreError {
+        crate::StoreError::Damaged {
+            what: format!(
+                "`documents.frontmatter` is not a projection this store writes: {problem} at \
+                 byte {}",
+                self.at
+            ),
+        }
+    }
+
+    fn expect(&mut self, byte: u8) -> Result<(), crate::StoreError> {
+        if self.peek() == Some(byte) {
+            self.at += 1;
+            Ok(())
+        } else {
+            Err(self.damaged(&format!("expected `{}`", byte as char)))
+        }
+    }
+
+    fn value(&mut self) -> Result<norn_wire::FieldValue, crate::StoreError> {
+        use norn_wire::FieldValue;
+
+        self.skip_space();
+        match self.peek() {
+            Some(b'{') => self.nested(|reader| {
+                let mut entries = std::collections::BTreeMap::new();
+                reader.at += 1;
+                reader.skip_space();
+                if reader.peek() == Some(b'}') {
+                    reader.at += 1;
+                    return Ok(FieldValue::map(entries));
+                }
+                loop {
+                    reader.skip_space();
+                    let key = reader.string()?;
+                    reader.skip_space();
+                    reader.expect(b':')?;
+                    let value = reader.value()?;
+                    entries.insert(key, value);
+                    reader.skip_space();
+                    match reader.peek() {
+                        Some(b',') => reader.at += 1,
+                        Some(b'}') => {
+                            reader.at += 1;
+                            return Ok(FieldValue::map(entries));
+                        }
+                        _ => return Err(reader.damaged("expected `,` or `}`")),
+                    }
+                }
+            }),
+            Some(b'[') => self.nested(|reader| {
+                let mut items = Vec::new();
+                reader.at += 1;
+                reader.skip_space();
+                if reader.peek() == Some(b']') {
+                    reader.at += 1;
+                    return Ok(FieldValue::sequence(items));
+                }
+                loop {
+                    items.push(reader.value()?);
+                    reader.skip_space();
+                    match reader.peek() {
+                        Some(b',') => reader.at += 1,
+                        Some(b']') => {
+                            reader.at += 1;
+                            return Ok(FieldValue::sequence(items));
+                        }
+                        _ => return Err(reader.damaged("expected `,` or `]`")),
+                    }
+                }
+            }),
+            Some(b'"') => Ok(FieldValue::scalar(self.string()?)),
+            Some(b'n') => self.word("null").map(|()| FieldValue::null()),
+            Some(b't') => self.word("true").map(|()| FieldValue::scalar("true")),
+            Some(b'f') => self.word("false").map(|()| FieldValue::scalar("false")),
+            Some(b'-' | b'0'..=b'9') => {
+                let start = self.at;
+                while matches!(
+                    self.peek(),
+                    Some(b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+                ) {
+                    self.at += 1;
+                }
+                Ok(FieldValue::scalar(&self.text[start..self.at]))
+            }
+            _ => Err(self.damaged("expected a value")),
+        }
+    }
+
+    /// Read one container one level deeper, refusing past the projection's
+    /// bound.
+    fn nested(
+        &mut self,
+        read: impl FnOnce(&mut Self) -> Result<norn_wire::FieldValue, crate::StoreError>,
+    ) -> Result<norn_wire::FieldValue, crate::StoreError> {
+        self.depth += 1;
+        if self.depth > MAX_FRONTMATTER_DEPTH {
+            return Err(self.damaged("nesting past the projection's bound"));
+        }
+        let value = read(self);
+        self.depth -= 1;
+        value
+    }
+
+    fn word(&mut self, word: &str) -> Result<(), crate::StoreError> {
+        if self.text[self.at..].starts_with(word) {
+            self.at += word.len();
+            Ok(())
+        } else {
+            Err(self.damaged("expected a value"))
+        }
+    }
+
+    /// A JSON string's content, its escapes read back.
+    fn string(&mut self) -> Result<String, crate::StoreError> {
+        self.expect(b'"')?;
+        let mut content = String::new();
+        loop {
+            let rest = &self.text[self.at..];
+            let run = rest
+                .find(['"', '\\'])
+                .ok_or_else(|| self.damaged("an unclosed string"))?;
+            content.push_str(&rest[..run]);
+            self.at += run;
+            if self.peek() == Some(b'"') {
+                self.at += 1;
+                return Ok(content);
+            }
+            self.at += 1;
+            let escaped = self
+                .peek()
+                .ok_or_else(|| self.damaged("an unclosed escape"))?;
+            self.at += 1;
+            match escaped {
+                b'"' => content.push('"'),
+                b'\\' => content.push('\\'),
+                b'/' => content.push('/'),
+                b'b' => content.push('\u{8}'),
+                b'f' => content.push('\u{c}'),
+                b'n' => content.push('\n'),
+                b'r' => content.push('\r'),
+                b't' => content.push('\t'),
+                b'u' => {
+                    let high = self.code_unit()?;
+                    let character = if (0xD800..0xDC00).contains(&high) {
+                        self.expect(b'\\')?;
+                        self.expect(b'u')?;
+                        let low = self.code_unit()?;
+                        char::decode_utf16([high, low]).next().and_then(Result::ok)
+                    } else {
+                        char::from_u32(u32::from(high))
+                    };
+                    content.push(character.ok_or_else(|| self.damaged("an unpaired surrogate"))?);
+                }
+                _ => return Err(self.damaged("an unknown escape")),
+            }
+        }
+    }
+
+    /// The four hex digits of a `\u` escape.
+    fn code_unit(&mut self) -> Result<u16, crate::StoreError> {
+        let digits = self
+            .text
+            .get(self.at..self.at + 4)
+            .and_then(|digits| u16::from_str_radix(digits, 16).ok())
+            .ok_or_else(|| self.damaged("a `\\u` escape without four hex digits"))?;
+        self.at += 4;
+        Ok(digits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use norn_wire::FieldValue;
+
+    use super::*;
+
+    fn string(text: &str) -> FrontmatterValue {
+        FrontmatterValue::String(text.to_string())
+    }
+
+    /// **What the projection writes, the reader reads back as the wire's
+    /// tree**: every scalar as the text the field pillar's raw column holds
+    /// for it, a null as a null, and the containers as containers, escapes and
+    /// characters outside the Basic Multilingual Plane included.
+    #[test]
+    fn a_projection_reads_back_as_the_fields_it_was_written_from() {
+        let value = FrontmatterValue::Map(vec![
+            ("title".to_string(), string("a \"quoted\"\\ line\n\u{1}é𝄞")),
+            ("count".to_string(), FrontmatterValue::Int(-3)),
+            ("ratio".to_string(), FrontmatterValue::Float(1.0)),
+            ("done".to_string(), FrontmatterValue::Bool(false)),
+            ("gone".to_string(), FrontmatterValue::Null),
+            (
+                "list".to_string(),
+                FrontmatterValue::Sequence(vec![
+                    FrontmatterValue::Int(1),
+                    FrontmatterValue::Sequence(Vec::new()),
+                ]),
+            ),
+            (
+                "nested".to_string(),
+                FrontmatterValue::Map(vec![("inner".to_string(), FrontmatterValue::Bool(true))]),
+            ),
+        ]);
+        let text = canonical_json(&value).expect("a projection");
+        let expected: BTreeMap<String, FieldValue> = [
+            (
+                "title".to_string(),
+                FieldValue::scalar("a \"quoted\"\\ line\n\u{1}é𝄞"),
+            ),
+            ("count".to_string(), FieldValue::scalar("-3")),
+            ("ratio".to_string(), FieldValue::scalar("1.0")),
+            ("done".to_string(), FieldValue::scalar("false")),
+            ("gone".to_string(), FieldValue::null()),
+            (
+                "list".to_string(),
+                FieldValue::sequence([FieldValue::scalar("1"), FieldValue::sequence([])]),
+            ),
+            (
+                "nested".to_string(),
+                FieldValue::map([("inner".to_string(), FieldValue::scalar("true"))]),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(projected_fields(&text).expect("a read"), expected);
+        assert_eq!(
+            projected_fields(r#"{"pair":"\ud834\udd1e"}"#).expect("a read")["pair"],
+            FieldValue::scalar("𝄞")
+        );
+    }
+
+    /// A projection whose top level is no map carries no fields, and text that
+    /// is not one is damage.
+    #[test]
+    fn only_a_map_carries_fields_and_what_is_not_json_is_damage() {
+        assert!(projected_fields("[1,2]").expect("a read").is_empty());
+        assert!(projected_fields("\"text\"").expect("a read").is_empty());
+        for broken in [
+            "{",
+            "{\"a\":}",
+            "{\"a\":1} x",
+            "\"\\q\"",
+            "[1,",
+            "{\"a\" 1}",
+        ] {
+            assert!(
+                matches!(
+                    projected_fields(broken),
+                    Err(crate::StoreError::Damaged { .. })
+                ),
+                "`{broken}` read as a projection"
+            );
+        }
+        let deep = format!(
+            "{}{}",
+            "[".repeat(MAX_FRONTMATTER_DEPTH + 1),
+            "]".repeat(MAX_FRONTMATTER_DEPTH + 1)
+        );
+        assert!(projected_fields(&deep).is_err());
+        let bounded = format!(
+            "{}{}",
+            "[".repeat(MAX_FRONTMATTER_DEPTH),
+            "]".repeat(MAX_FRONTMATTER_DEPTH)
+        );
+        assert!(projected_fields(&bounded).is_ok());
+    }
 }

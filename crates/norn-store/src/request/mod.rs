@@ -116,7 +116,7 @@ const BELOW_EVERY_GENERATION: i64 = 0;
 
 /// A row reading that can fail twice: the driver may not produce the row, and
 /// the row may hold a value this schema does not describe.
-type Reading<T> = rusqlite::Result<Result<T, StoreError>>;
+pub(crate) type Reading<T> = rusqlite::Result<Result<T, StoreError>>;
 
 /// The columns every finding reader selects, in the order [`stored_finding`]
 /// reads them.
@@ -2339,7 +2339,7 @@ fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
     }))
 }
 
-fn stored_heading(row: &Row<'_>) -> Reading<HeadingFact> {
+pub(crate) fn stored_heading(row: &Row<'_>) -> Reading<HeadingFact> {
     Ok(Ok(HeadingFact {
         text: row.get(0)?,
         slug: row.get(1)?,
@@ -2354,7 +2354,7 @@ fn stored_heading(row: &Row<'_>) -> Reading<HeadingFact> {
     }))
 }
 
-fn stored_block(row: &Row<'_>) -> Reading<BlockFact> {
+pub(crate) fn stored_block(row: &Row<'_>) -> Reading<BlockFact> {
     Ok(Ok(BlockFact {
         block_id: row.get(0)?,
         span: optional_span(row, 1)?,
@@ -2382,7 +2382,7 @@ fn stored_field(row: &Row<'_>) -> Reading<FieldRow> {
     }))
 }
 
-fn stored_tag(row: &Row<'_>) -> Reading<TagFact> {
+pub(crate) fn stored_tag(row: &Row<'_>) -> Reading<TagFact> {
     let written: String = row.get(1)?;
     let Some(source) = TagSource::from_str(&written) else {
         return Ok(Err(unreadable("document_tags.source", &written)));

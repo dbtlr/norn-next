@@ -19,6 +19,7 @@ mod equivalence;
 mod facts;
 mod fields;
 mod find;
+mod find_rows;
 mod increments;
 mod lifecycle;
 mod pillars;

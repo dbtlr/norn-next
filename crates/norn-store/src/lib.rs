@@ -33,9 +33,11 @@
 //!   consumer pages it at its own rate, triages on the fingerprints it projects,
 //!   and keeps [`Store::epoch`] beside its cursor: a position is meaningless in
 //!   a database that was discarded and built again.
-//! - [`Snapshot::find_keys`] — the find builder: a request's conjunction and
-//!   order compiled into index seeks on a read snapshot, answering a page of
-//!   document keys. [`Snapshot::find_plans`] hands out the plan of every
+//! - [`Snapshot::find`] — the find builder: a request's conjunction and order
+//!   compiled into index seeks on a read snapshot, answering a page of rows
+//!   projected onto the columns it names, the cursor the next page continues,
+//!   and the parts it could not apply. [`Snapshot::find_keys`] is its paging
+//!   half alone, and [`Snapshot::find_plans`] hands out the plan of every
 //!   statement it runs, which is what its `EXPLAIN` bars are asserted through.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
@@ -63,10 +65,6 @@
 //! - **Tombstone retention.** When a death has outlived the disorder it was
 //!   recorded to survive is a policy over generations, and nothing here decides
 //!   it: a tombstone is kept until something says otherwise.
-//! - **A find's rows.** The find builder answers keys; hydrating the rows a
-//!   page found, judging and minting the wire cursor around it, and reporting
-//!   a request's unknown keys are the composition above
-//!   [`Snapshot::find_keys`], not yet here.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
 
 pub mod ddl;
@@ -99,8 +97,9 @@ pub use faults::induced_failure;
 pub use feed::FeedRead;
 pub use fields::{DeclaredFields, FieldContainer, FieldRow, FieldRows, TypedOrder};
 pub use find::{
-    DEFAULT_PAGE, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindFilter, FindPlan, FindPosition,
-    FindRefusal, FindStatement, FoundKey, KeyPage, PageDirection, Resume,
+    BODY_ROW_CEILING, DEFAULT_PAGE, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindFilter,
+    FindPlan, FindPosition, FindRefusal, FindStatement, FindWork, Found, FoundKey, KeyPage,
+    NESTED_ROW_CEILING, Nested, NestedRows, PageDirection, Resume,
 };
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};

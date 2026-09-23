@@ -14,30 +14,31 @@ use std::sync::Arc;
 use crate::common::{Scratch, document, violation, write_documents};
 use norn_store::{
     DEFAULT_PAGE, DeclaredFields, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindFilter, FindPlan,
-    FindPosition, FindRefusal, FindStatement, FrontmatterValue, KeyPage, MAX_PAGE, PageDirection,
-    Resume, Snapshot, SnapshotReader, Store, TagFact, TagSource, TypedOrder, induced_failure,
+    FindPosition, FindRefusal, FindStatement, FrontmatterValue, KeyPage, MAX_PAGE, Nested,
+    PageDirection, Resume, Snapshot, SnapshotReader, Store, TagFact, TagSource, TypedOrder,
+    induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    Direction, FindParams, FindingKind, Pattern, Predicate, ResolutionTarget, Sort, SortKey,
-    Unsatisfied, VaultAddress, VaultName,
+    Column, Direction, FindParams, FindingKind, Pattern, Predicate, ResolutionTarget, Sort,
+    SortKey, Unsatisfied, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
 
-fn request() -> FindParams {
+pub(crate) fn request() -> FindParams {
     FindParams::new(VaultAddress::name(
         VaultName::new("notes").expect("a vault name"),
     ))
 }
 
-fn sorted(key: SortKey, direction: Direction) -> FindParams {
+pub(crate) fn sorted(key: SortKey, direction: Direction) -> FindParams {
     request().with_sort(Sort::new(key, direction))
 }
 
 /// An order that reads a raw value as an integer: `"10"` stands before `"9"` as
 /// text and after it as a number, so the two orders part on the fixture.
-fn integer_order() -> TypedOrder {
+pub(crate) fn integer_order() -> TypedOrder {
     TypedOrder::new(|raw| {
         raw.parse::<i64>()
             .ok()
@@ -46,13 +47,13 @@ fn integer_order() -> TypedOrder {
 }
 
 /// `status` declared as text, and `count` declared with a typed order.
-fn declared() -> DeclaredFields {
+pub(crate) fn declared() -> DeclaredFields {
     DeclaredFields::none()
         .declare("status")
         .declare_typed("count", integer_order())
 }
 
-fn map(entries: Vec<(&str, FrontmatterValue)>) -> FrontmatterValue {
+pub(crate) fn map(entries: Vec<(&str, FrontmatterValue)>) -> FrontmatterValue {
     FrontmatterValue::Map(
         entries
             .into_iter()
@@ -61,11 +62,11 @@ fn map(entries: Vec<(&str, FrontmatterValue)>) -> FrontmatterValue {
     )
 }
 
-fn string(text: &str) -> FrontmatterValue {
+pub(crate) fn string(text: &str) -> FrontmatterValue {
     FrontmatterValue::String(text.to_string())
 }
 
-fn integers(values: &[i64]) -> FrontmatterValue {
+pub(crate) fn integers(values: &[i64]) -> FrontmatterValue {
     FrontmatterValue::Sequence(values.iter().copied().map(FrontmatterValue::Int).collect())
 }
 
@@ -79,7 +80,7 @@ fn integers(values: &[i64]) -> FrontmatterValue {
 /// | `notes/c.md` | `open` | `nine` | |
 /// | `other/glossary.md` | | | a finding |
 /// | `other/v1.2.md` | `done` | `[]` | |
-fn seed(store: &mut Store) {
+pub(crate) fn seed(store: &mut Store) {
     let declared = declared();
     let mut tagged = document("notes/a.md", "hash-a", "the interloper walked in\n")
         .with_frontmatter(
@@ -129,14 +130,14 @@ fn seed(store: &mut Store) {
 }
 
 /// A seeded store and the read handle its snapshots are established on.
-struct Seeded {
+pub(crate) struct Seeded {
     _scratch: Scratch,
-    store: Store,
+    pub(crate) store: Store,
     reader: Arc<SnapshotReader>,
 }
 
 impl Seeded {
-    fn new(label: &str) -> Self {
+    pub(crate) fn new(label: &str) -> Self {
         let scratch = Scratch::new(label);
         let mut store = scratch.open();
         seed(&mut store);
@@ -153,7 +154,7 @@ impl Seeded {
         }
     }
 
-    fn snapshot(&self) -> Snapshot {
+    pub(crate) fn snapshot(&self) -> Snapshot {
         self.reader
             .try_take()
             .expect("a handle nothing is reading holds its connection")
@@ -176,7 +177,7 @@ impl Seeded {
             .collect()
     }
 
-    fn plans(&self, params: &FindParams, resume: Option<&Resume>) -> Vec<FindPlan> {
+    pub(crate) fn plans(&self, params: &FindParams, resume: Option<&Resume>) -> Vec<FindPlan> {
         self.snapshot()
             .find_plans(params, &declared(), resume)
             .expect("the plans of a request")
@@ -264,6 +265,15 @@ fn statement_barred_by(statement: FindStatement) -> &'static str {
         FindStatement::FieldValuePage(..) | FindStatement::FieldMissingPage(..) => {
             "a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path"
         }
+        FindStatement::KnownKey | FindStatement::FieldUniverse => {
+            "a_known_key_and_the_field_universe_read_the_presence_rows_alone"
+        }
+        FindStatement::BareDirectory => "a_bare_directory_probe_is_two_seeks_of_the_path_index",
+        FindStatement::HydrateDocuments
+        | FindStatement::NestedHead(_)
+        | FindStatement::NestedTotal(_) => {
+            "hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index"
+        }
     }
 }
 
@@ -289,7 +299,9 @@ fn filter_barred_by(filter: FindFilter) -> &'static str {
 /// **Every statement and every filter the builder names carries a bar**, and
 /// one bar judges each. The path-page bar judges the statements [`PAGE_BARS`]
 /// names and the fingerprint read; the field-sort bar judges both sections of
-/// every [`FIELD_BARS`] entry; the filter bar judges [`filter_bars`]. A bar
+/// every [`FIELD_BARS`] entry; the key-probe bar judges [`KEY_PROBES`]; the
+/// bare-directory bar its one probe; the hydration bar
+/// [`hydration_statements`]; the filter bar judges [`filter_bars`]. A bar
 /// ranges over the order and the direction a statement carries, and those are
 /// not slots, so each bar's statements are read as the set of slots it
 /// reaches: across the bars, those sets cover the enumeration exactly once,
@@ -298,7 +310,7 @@ fn filter_barred_by(filter: FindFilter) -> &'static str {
 /// bars claim fills a slot twice.
 #[test]
 fn the_find_bars_cover_every_statement_and_filter_once() {
-    let per_bar: [Vec<FindStatement>; 2] = [
+    let per_bar: [Vec<FindStatement>; 5] = [
         std::iter::once(FindStatement::ActiveFingerprint)
             .chain(PAGE_BARS.iter().map(|(statement, ..)| *statement))
             .collect(),
@@ -306,6 +318,9 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
             .iter()
             .flat_map(|bar| [bar.valued, bar.missing])
             .collect(),
+        KEY_PROBES.to_vec(),
+        vec![FindStatement::BareDirectory],
+        hydration_statements(),
     ];
     let mut slots: Vec<usize> = Vec::new();
     for statements in &per_bar {
@@ -348,9 +363,12 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
     assert_eq!(
         bars,
         [
+            "a_bare_directory_probe_is_two_seeks_of_the_path_index",
             "a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path",
+            "a_known_key_and_the_field_universe_read_the_presence_rows_alone",
             "a_path_page_seeks_the_case_insensitive_index_in_either_direction",
             "every_filter_seeks_the_index_its_values_are_bounds_for",
+            "hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index",
         ]
         .into_iter()
         .collect()
@@ -612,6 +630,210 @@ fn a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path() {
                 judge_valued(&plan_of(&plans, bar.valued), bar)
             });
         }
+    }
+}
+
+// ---- the probe bars ----
+
+/// The statements that ask whether a key is known and what the field universe
+/// holds.
+const KEY_PROBES: [FindStatement; 2] = [FindStatement::KnownKey, FindStatement::FieldUniverse];
+
+/// **Whether a key is known, and what the field universe holds, are read off
+/// the presence rows alone.** Whether a key is known is one existence seek of
+/// `document_fields_presence` at the key. The universe is a walk of the same
+/// index that seeks past each key to the next — `(key>?)` at every step — so
+/// it reads one entry per distinct key, never the rows that carry them, and
+/// never the table. A declared key asks neither.
+///
+/// Controls: the presence index dropped, both statements read something else.
+#[test]
+fn a_known_key_and_the_field_universe_read_the_presence_rows_alone() {
+    let mut seeded = Seeded::new("find-key-probes");
+    // `seen` is declared nowhere and no document carries it, so the request
+    // asks whether it is known and, finding it is not, walks the universe.
+    let params = request().with_predicates([Predicate::has("seen")]);
+    let judge_known = |plans: &[FindPlan]| {
+        let known = plan_of(plans, FindStatement::KnownKey);
+        known.assert_no_full_scan();
+        known.assert_searches_through("document_fields", Access::Index("document_fields_presence"));
+        known.assert_search_constraint("document_fields", "(key=?)");
+    };
+    let judge_universe = |plans: &[FindPlan]| {
+        let universe = plan_of(plans, FindStatement::FieldUniverse);
+        universe.assert_no_full_scan_of("document_fields");
+        universe.assert_no_temp_btree();
+        universe
+            .assert_searches_through("document_fields", Access::Index("document_fields_presence"));
+        universe.assert_search_constraint("document_fields", "(key>?)");
+        assert_eq!(
+            universe.searches_of("document_fields").len(),
+            2,
+            "the universe reaches the presence rows other than by its first and its next \
+             seek: {:?}",
+            universe.rows()
+        );
+    };
+    let plans = seeded.plans(&params, None);
+    judge_known(&plans);
+    judge_universe(&plans);
+
+    let declared_only = seeded.plans(
+        &request()
+            .with_predicates([Predicate::has("status")])
+            .with_sort(Sort::new(SortKey::field("count"), Direction::Ascending)),
+        None,
+    );
+    assert!(
+        declared_only
+            .iter()
+            .all(|plan| !KEY_PROBES.contains(&plan.statement)),
+        "a declared key asked the snapshot whether it is known: {declared_only:?}"
+    );
+
+    seeded.drop_index("document_fields_presence");
+    let plans = seeded.plans(&params, None);
+    failure_of("document_fields_presence dropped, the key probe", || {
+        judge_known(&plans)
+    });
+    failure_of("document_fields_presence dropped, the universe", || {
+        judge_universe(&plans)
+    });
+}
+
+/// **A bare-directory probe is two seeks of the path index**: one at the path,
+/// which finds no document there, and one of the range beneath it, which finds
+/// one that stands under it. Each is judged on the rows its own subquery reads.
+///
+/// Controls: `documents_path` dropped, neither seek is one.
+#[test]
+fn a_bare_directory_probe_is_two_seeks_of_the_path_index() {
+    let mut seeded = Seeded::new("find-bare-directory");
+    let params = request().with_predicates([Predicate::path("notes")]);
+    let judge = |plan: &QueryPlan| {
+        plan.assert_no_full_scan();
+        let at = rows_of(plan, "da");
+        at.assert_searches_through("documents", Access::Index("documents_path"));
+        at.assert_search_constraint("documents", "(path=?)");
+        let under = rows_of(plan, "du");
+        under.assert_searches_through("documents", Access::Index("documents_path"));
+        under.assert_search_constraint("documents", "(path>? AND path<?)");
+    };
+    judge(&plan_of(
+        &seeded.plans(&params, None),
+        FindStatement::BareDirectory,
+    ));
+    // A glob with a wildcard is no directory, and asks nothing.
+    assert!(
+        seeded
+            .plans(
+                &request().with_predicates([Predicate::path("notes/*")]),
+                None
+            )
+            .iter()
+            .all(|plan| plan.statement != FindStatement::BareDirectory)
+    );
+
+    seeded.drop_index("documents_path");
+    let plan = plan_of(&seeded.plans(&params, None), FindStatement::BareDirectory);
+    failure_of("documents_path dropped", || judge(&plan));
+}
+
+/// Every hydration statement: the document rows, and each collection's head
+/// and total.
+fn hydration_statements() -> Vec<FindStatement> {
+    std::iter::once(FindStatement::HydrateDocuments)
+        .chain(Nested::ALL.into_iter().flat_map(|nested| {
+            [
+                FindStatement::NestedHead(nested),
+                FindStatement::NestedTotal(nested),
+            ]
+        }))
+        .collect()
+}
+
+/// The index a collection's head and total seek.
+fn ordinal_index(nested: Nested) -> String {
+    format!("{}_document_ordinal", nested.table())
+}
+
+/// **A page's rows are read by row id, and each collection by its ordinal
+/// index.** The document rows are primary-key seeks of the page's ids. A
+/// collection's head seeks `(document, ordinal)` for each id with the ceiling
+/// as the ordinal's bound, so a document's rows past it are never reached; its
+/// total counts the same index, and never the table.
+///
+/// Controls: the document plan rebuilt with its row-id seek as a scan; each
+/// ordinal index dropped, its head and total read something else.
+#[test]
+fn hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index() {
+    let mut seeded = Seeded::new("find-hydration");
+    let params = request().with_columns([
+        Column::fields(),
+        Column::body(),
+        Column::tags(),
+        Column::headings(),
+        Column::blocks(),
+    ]);
+    let judge_documents = |plan: &QueryPlan| {
+        plan.assert_no_full_scan();
+        plan.assert_searches_through("documents", Access::RowId);
+        plan.assert_search_constraint("documents", "(rowid=?)");
+    };
+    let judge_head = |plans: &[FindPlan], nested: Nested| {
+        let index = ordinal_index(nested);
+        let head = plan_of(plans, FindStatement::NestedHead(nested));
+        head.assert_no_full_scan();
+        head.assert_searches_through(nested.table(), Access::Index(&index));
+        head.assert_search_constraint(nested.table(), "(document=? AND ordinal<?)");
+    };
+    let judge_total = |plans: &[FindPlan], nested: Nested| {
+        let index = ordinal_index(nested);
+        let total = plan_of(plans, FindStatement::NestedTotal(nested));
+        total.assert_no_full_scan();
+        total.assert_searches_through(nested.table(), Access::Index(&index));
+        total.assert_search_constraint(nested.table(), "(document=?)");
+    };
+    let plans = seeded.plans(&params, None);
+    let documents = plan_of(&plans, FindStatement::HydrateDocuments);
+    judge_documents(&documents);
+    for nested in Nested::ALL {
+        judge_head(&plans, nested);
+        judge_total(&plans, nested);
+    }
+
+    // Control: the row-id seek taken out of the document plan.
+    let scanned = QueryPlan::new(
+        documents.sql(),
+        documents
+            .rows()
+            .iter()
+            .map(|row| {
+                PlanRow::new(
+                    row.id,
+                    row.parent,
+                    row.detail
+                        .replace("SEARCH d USING INTEGER PRIMARY KEY (rowid=?)", "SCAN d"),
+                )
+            })
+            .collect(),
+    );
+    failure_of("a document hydration that scans", || {
+        judge_documents(&scanned)
+    });
+
+    // Control: each ordinal index, dropped.
+    for nested in Nested::ALL {
+        seeded.drop_index(&ordinal_index(nested));
+        let plans = seeded.plans(&params, None);
+        failure_of(
+            &format!("{} dropped, the head", ordinal_index(nested)),
+            || judge_head(&plans, nested),
+        );
+        failure_of(
+            &format!("{} dropped, the total", ordinal_index(nested)),
+            || judge_total(&plans, nested),
+        );
     }
 }
 
