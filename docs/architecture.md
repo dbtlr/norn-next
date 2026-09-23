@@ -762,15 +762,15 @@ must not hold, so a page they alone narrow seeks its order index as a page with 
 does and tests each row against them. Two bars hold this, one on the plans and one on the
 work SQLite counted running the page: no page statement reads `documents` end to end or
 steps through a full scan, no page without a filter builds a temporary B-tree or sorts, and
-a filtered page reaches its rows by the keys its filter's seek handed it and sorts at most
-once per page statement. Each filter is one index seek, judged on the rows its own subquery
-reads: equality, inequality and membership on `(key, raw)`, or on `(key, typed)` where the
-key carries a typed order; presence and absence on the presence rows; a `before` or `after`
-bound on the order's value column; full text through the index's own `MATCH` selection; a
-path glob on the range its literal prefix opens in the path index; a resolution target on
-each suffix range its class opens; a tag by name; and a finding by kind under the active
-fingerprint. The full-text match shape is barred as that filter, and suffix/stem resolve and
-findings-for-path are read through statements the seam above bars.
+a page driven by a filter's seek for the rows it keeps reaches them by that seek's keys
+handed it and sorts at most once per page statement. Each filter is one index seek, judged
+on the rows its own subquery reads: equality, inequality and membership on `(key, raw)`, or
+on `(key, typed)` where the key carries a typed order; presence and absence on the presence
+rows; a `before` or `after` bound on the order's value column; full text through the index's
+own `MATCH` selection; a path glob on the range its literal prefix opens in the path index;
+a resolution target on each suffix range its class opens; a tag by name; and a finding by
+kind under the active fingerprint. The full-text match shape is barred as that filter, and
+suffix/stem resolve and findings-for-path are read through statements the seam above bars.
 
 **Count-by-field and links-to carry no bar**: no builder emits either, and a find refuses
 a links-to part by name, because the link index it would filter by does not exist. The
