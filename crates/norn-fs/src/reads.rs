@@ -49,8 +49,8 @@ pub struct ReadTally {
     pub document_opens: u64,
     /// The stats those same two acts take, and only those: the `fstat`
     /// `open_regular_at` reads a reached file's kind from, the `statat`
-    /// it tells a symbolic link from a non-directory with, [`crate::path_kind`]'s
-    /// stat of the root an invalidation names, and the walk's own five — the
+    /// it tells a symbolic link from a non-directory with, [`crate::Vault::reach`]'s
+    /// stat of the last name of a path a caller supplied, and the walk's own five — the
     /// frontier entry it is about to classify, a directory entry whose kind the
     /// stream did not report, the re-stat that pages an entry, the target of
     /// a symbolic link it is classifying, and the `fstat` of a file the walk
@@ -65,6 +65,15 @@ pub struct ReadTally {
     /// Directory entries a walk took off a directory stream, `.` and `..`
     /// excluded. Enumeration only: what the walk then does with an entry is
     /// counted by the two fields above or by nothing.
+    ///
+    /// A walk takes entries for two reasons and both are here: the pages it
+    /// enumerates, and the listing a descent on a folding root reads to confirm
+    /// one caller-supplied name. They share a field because they are one act
+    /// against one stream and because no bar reads this to mean paging alone —
+    /// the crate's own paging bar counts a paging loop it drives itself, and
+    /// the host's churn bounds are stated over documents opened and rows
+    /// written. A reader that needs the two apart splits the field rather than
+    /// inferring the split.
     pub walk_dirents: u64,
 }
 

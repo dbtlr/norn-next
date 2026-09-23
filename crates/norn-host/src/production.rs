@@ -1309,29 +1309,49 @@ fn scoped_increment(
             continue;
         }
         // **What this leg may read is what the vault walk reaches**, and the
-        // vault is asked rather than re-read here: an excluded root, a shadow
-        // basename and a symbolic link on the way down are one refusal with one
-        // spelling, in norn-fs. Under a refused root no walk of this vault
-        // yields anything, so the rows there die and nothing is derived — the
-        // answer a build from zero gives. The findings in that range go with
-        // them: a refusal that stands is a reading of every place beneath it,
-        // and a build from zero holds no finding at one either.
-        if let Some(skip) = vault.skip_reaching(path).map_err(effect)? {
-            pending.flush()?;
-            prune_refused_root(
-                pending.store,
-                root,
-                exclusions,
-                skip.path().as_path(),
-                skip.reason().stands(),
-                policy,
-                progress,
-                store_order(sensitivity),
-                pending.account,
-            )?;
-            refused.push(skip);
-            continue;
-        }
+        // vault is asked once for it rather than re-read here: an excluded
+        // root, a shadow basename and a symbolic link on the way down are one
+        // refusal with one spelling, in norn-fs, and the kind at the end of the
+        // path comes off the same descent. Under a refused root no walk of this
+        // vault yields anything, so the rows there die and nothing is derived —
+        // the answer a build from zero gives. The findings in that range go
+        // with them: a refusal that stands is a reading of every place beneath
+        // it, and a build from zero holds no finding at one either.
+        //
+        // **The kind is read at a spelling the vault's own tree lists.** A root
+        // that folds beyond ASCII resolves several spellings of one entry while
+        // the fold that decides identity is ASCII case alone, so a stat spelled
+        // by a report answers about an entry the directory lists under another
+        // name. The vault confirms every name against the listing that renders
+        // it, so a spelling only the volume resolves reads here as the nothing a
+        // walk of this vault finds there.
+        //
+        // **A batch whose only spelling of a document is one the tree does not
+        // list derives nothing at all.** Nothing is read at that spelling and
+        // the rows it addresses die; the document's own row stands where the
+        // tree renders it, and it is derived when a report names that spelling
+        // or when the next whole-vault heal walks it. That is the from-zero
+        // reading: a derivation over this tree holds one row for one entry, at
+        // the name the directory lists.
+        let kind = match vault.reach(path).map_err(effect)? {
+            norn_fs::Reach::Refused(skip) => {
+                pending.flush()?;
+                prune_refused_root(
+                    pending.store,
+                    root,
+                    exclusions,
+                    skip.path().as_path(),
+                    skip.reason().stands(),
+                    policy,
+                    progress,
+                    store_order(sensitivity),
+                    pending.account,
+                )?;
+                refused.push(skip);
+                continue;
+            }
+            norn_fs::Reach::Stands(kind) => kind,
+        };
         // Both the identity and the range it addresses are read before anything
         // that would use them, because what a spelling names and what it holds
         // are different questions: `..md` names no document and is still where
@@ -1342,7 +1362,7 @@ fn scoped_increment(
             .to_str()
             .and_then(|spelling| DirectoryPrefix::new(spelling).ok());
         let scope = addressed_scope(&identity, &prefix);
-        match norn_fs::path_kind(&root.join(path)).map_err(effect)? {
+        match kind {
             norn_fs::PathKind::Directory => {
                 pending.flush()?;
                 match scope {
@@ -1752,7 +1772,7 @@ fn addressed_scope<'a>(
 /// **A reason that does not stand is asked for, never assumed.** A root that
 /// merely vanished says nothing about what is at it now, so the rows beneath it
 /// converge the way they converge for any name nothing is at while the findings
-/// stay standing: this registers no scope for one. [`Vault::skip_reaching`]
+/// stay standing: this registers no scope for one. [`Vault::reach`]
 /// answers no such reason today, and `stands` is asked here rather than relied
 /// on, so a reason class added later decides at this seam instead of silently
 /// widening it.
@@ -7086,7 +7106,7 @@ mod tests {
     /// zero holds none of.
     ///
     /// This is the leg [`prune_refused_root`] runs, which the case rooted at
-    /// the link itself never reaches: `skip_reaching` reads ancestors and the
+    /// the link itself never reaches: `reach` reads ancestors and the
     /// shadow leaf, so a dirty path that *is* the link answers with no notation
     /// at all and lands in the kind arm instead.
     #[cfg(unix)]
@@ -8849,9 +8869,10 @@ mod tests {
     }
 
     /// **The bar on a dirty root named through a link.** A watcher backend that
-    /// follows links reports paths through one, and a directory it names is
-    /// still a directory to `path_kind`. The heal it schedules converges on the
-    /// rows the vault heal holds, which under a link is none.
+    /// follows links reports paths through one, and the kernel resolves such a
+    /// path to a real directory. The vault does not: its reading of the walk
+    /// stops at the link's own name, and every leg below reads what the vault
+    /// heal reads there, which is nothing.
     ///
     /// The forbidden shape is deriving documents there. The vault walk enters no
     /// link, so every such document would be a row the next vault heal prunes,
@@ -9730,6 +9751,126 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **A batch carrying a spelling only the volume resolves lands one row, at
+    /// the name the tree renders.**
+    ///
+    /// The fold is ASCII, so a rename that flips non-ASCII case leaves the batch
+    /// two roots where an ASCII flip leaves one: two identities here, one entry
+    /// on a volume that folds further. A stat answers at both, and the listing
+    /// answers at the rendered one — so the retired spelling reaches nothing and
+    /// the rows under it die, while the rendered spelling carries the document.
+    #[test]
+    fn a_batch_holding_a_spelling_only_the_volume_resolves_lands_the_rendered_one() {
+        let f = Fixture::new("volume-only-file-spelling");
+        if norn_fs::PathNormalizer::detect(&f.vault())
+            .unwrap()
+            .case_sensitivity()
+            != norn_fs::CaseSensitivity::Insensitive
+        {
+            return;
+        }
+        let retired = "caf\u{e9}.md";
+        let rendered = "CAF\u{c9}.md";
+        fs::write(f.vault().join(retired), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(stored_paths(&mut attachment.store), [retired]);
+        fs::rename(f.vault().join(retired), f.vault().join(rendered)).unwrap();
+
+        let normalizer = norn_fs::PathNormalizer::detect(f.vault().as_path()).unwrap();
+        let mut batch = norn_fs::Batch::default();
+        batch.merge(norn_fs::Batch::vault_removal(
+            normalizer.normalize(Path::new(retired)).unwrap(),
+        ));
+        batch.merge(norn_fs::Batch::vault_change(
+            normalizer.normalize(Path::new(rendered)).unwrap(),
+        ));
+        assert_eq!(
+            batch.vault_roots().len(),
+            2,
+            "the fold is ASCII, so these are two roots"
+        );
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            batch.vault_roots(),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            [rendered],
+            "one document, one row, at the spelling the tree lists"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **The confirmation runs at every name, not only the last one.**
+    ///
+    /// A volume resolves a directory's unlisted spelling as readily as a file's,
+    /// and a name under one is reached through it — so a descent that proved
+    /// only the leaf would open `\u{c9}CLAIR` from the spelling `\u{e9}clair`
+    /// and derive the document beneath it twice, once under each. The vault
+    /// confirms each component against the listing that renders it, so the
+    /// unlisted root reaches nothing and the rows it addresses die.
+    #[test]
+    fn a_batch_naming_a_directory_only_the_volume_resolves_lands_the_rendered_row() {
+        let f = Fixture::new("volume-only-directory-spelling");
+        if norn_fs::PathNormalizer::detect(&f.vault())
+            .unwrap()
+            .case_sensitivity()
+            != norn_fs::CaseSensitivity::Insensitive
+        {
+            return;
+        }
+        let retired = "\u{e9}clair";
+        let rendered = "\u{c9}CLAIR";
+        fs::create_dir(f.vault().join(retired)).unwrap();
+        fs::write(f.vault().join(retired).join("note.md"), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            [format!("{retired}/note.md")]
+        );
+        fs::rename(f.vault().join(retired), f.vault().join(rendered)).unwrap();
+        fs::write(f.vault().join(rendered).join("note.md"), "revised body").unwrap();
+
+        let normalizer = norn_fs::PathNormalizer::detect(f.vault().as_path()).unwrap();
+        let mut batch = norn_fs::Batch::default();
+        for spelling in [format!("{retired}/note.md"), format!("{rendered}/note.md")] {
+            batch.merge(norn_fs::Batch::vault_change(
+                normalizer.normalize(Path::new(&spelling)).unwrap(),
+            ));
+        }
+        assert_eq!(
+            batch.vault_roots().len(),
+            2,
+            "the fold is ASCII, so these are two roots"
+        );
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            batch.vault_roots(),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            [format!("{rendered}/note.md")],
+            "one document, one row, under the directory the tree lists"
+        );
+        ops.detach(&name, attachment);
+    }
+
     /// **A covering root answers for a place the walk reads nothing through.**
     ///
     /// Subsumption stands on the covering root's leg reaching everything the
@@ -9805,7 +9946,7 @@ mod tests {
     /// stands at the from-zero answer. Two of the three reach it at the vault's
     /// reading of the walk — an exclusion root covers the path, and a link
     /// stops the descent at its own name — and the third is a last name the
-    /// vault leaves whole for [`norn_fs::path_kind`], which reads a pipe as
+    /// vault reads through [`norn_fs::Vault::reach`], which reads a pipe as
     /// something other than a regular file.
     ///
     /// The watcher is why the exclusion row is a dirty root at all: it admits

@@ -113,8 +113,7 @@ pub use identity::{Identity, PostState, path_identity};
 pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
 pub use path::{CaseSensitivity, NormalizedPath, NormalizerError, PathError, PathNormalizer};
 pub use read::{
-    PathKind, ReadAndHash, path_kind, read_and_hash, read_if_present_and_hash,
-    read_optional_and_hash,
+    PathKind, ReadAndHash, read_and_hash, read_if_present_and_hash, read_optional_and_hash,
 };
 pub use refusal::Refusal;
 pub use shadow::{
@@ -122,8 +121,8 @@ pub use shadow::{
     is_shadow_name, sweep_fallback_root, sweep_fallback_tree,
 };
 pub use walk::{
-    FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Vault, Walk, WalkError,
-    WalkFact, walk, walk_subtree,
+    FileFact, FileKind, FileStat, LinkKind, Reach, ReadFile, SkipFact, SkipReason, Vault, Walk,
+    WalkError, WalkFact, walk, walk_subtree,
 };
 pub use watch::{
     Batch, OwnWrites, RescanScope, Subscription, SubscriptionState, WatchError, watch,
