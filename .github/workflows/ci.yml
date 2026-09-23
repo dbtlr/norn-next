@@ -191,6 +191,11 @@ jobs:
   # against hand-written SQL tests a string nobody executes — so the bars land
   # with the builders that emit the SQL they judge.
   #
+  # A find run through a live hold reads no vault document either, measured by
+  # the host's own account of what its jobs derived and read; that account is
+  # read only behind `induced-failure`, so the suite is behind it and this step
+  # names it.
+  #
   # The cases live in this job alone, `#[ignore]`d with a `counter-lane case:`
   # reason so the build job's workspace suite does not attach thousands of
   # documents beside every other test. The script is what makes the wholesale
@@ -206,6 +211,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Counter bars
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
+        env:
+          LANE_FEATURES: induced-failure
 
   # A real gate. Each subject runs as a child under the testkit's process
   # harness, and what is read is the peak resident set the kernel accounted to
