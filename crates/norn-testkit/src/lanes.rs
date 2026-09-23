@@ -305,17 +305,25 @@ fn lane_steps(workflow: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The features a target's own source puts the whole file behind.
+/// The features a target's own source puts any of itself behind.
 ///
-/// Read off the inner attributes rather than off a table: a suite that is
+/// Read off the attributes rather than off a table, because the file itself
+/// is the only place that fact is stated. A suite that is
 /// `#![cfg(feature = "...")]` compiles to zero tests without the feature, and
-/// the file itself is the only place that fact is stated.
-fn features_a_target_is_behind(source: &str) -> BTreeSet<String> {
+/// a case or helper that is `#[cfg(feature = "...")]` compiles to something
+/// other than what the suite measures with it: a case that is missing, or a
+/// helper whose other spelling refuses the case at run time. Either way a
+/// lane that runs the suite without the feature does not run what the file
+/// says it runs. A `#[cfg(not(feature = "..."))]` item is the build without
+/// the feature, and asks for nothing.
+fn features_a_target_needs(source: &str) -> BTreeSet<String> {
     source
         .lines()
         .map(str::trim)
         .filter_map(|line| {
-            let rest = line.strip_prefix("#![cfg(feature = \"")?;
+            let rest = line
+                .strip_prefix("#![cfg(feature = \"")
+                .or_else(|| line.strip_prefix("#[cfg(feature = \""))?;
             let (feature, _) = rest.split_once('"')?;
             Some(feature.to_string())
         })
@@ -427,7 +435,8 @@ const LANE_FEATURES: &str = "LANE_FEATURES";
 /// zero tests measures nothing it claims to.
 ///
 /// The pairing is between two files that never mention each other: the suite
-/// states the feature it is behind in its own `#![cfg(...)]`, and the workflow
+/// states the feature it is behind in its own `#![cfg(...)]`, or a case or
+/// helper of it in its own `#[cfg(...)]`, and the workflow
 /// states the features it builds with in the step's `LANE_FEATURES`. Nothing
 /// else reads the pair, so a feature dropped from a step is silent — the suite
 /// compiles away, `lane-suite.sh`'s zero-pass guard catches it at whatever hour
@@ -457,7 +466,7 @@ pub fn assert_lane_steps_name_the_features_their_targets_need(
         let source_path = manifest_dir.join("tests").join(format!("{stem}.rs"));
         let source = std::fs::read_to_string(&source_path)
             .unwrap_or_else(|e| panic!("reading {}: {e}", source_path.display()));
-        let needed = features_a_target_is_behind(&source);
+        let needed = features_a_target_needs(&source);
         if needed.is_empty() {
             continue;
         }
@@ -474,8 +483,10 @@ pub fn assert_lane_steps_name_the_features_their_targets_need(
                 assert!(
                     missing.is_empty(),
                     "a lane step runs `{package}`'s `{target}` and its `{LANE_FEATURES}` does not \
-                     name {missing:?}, which that suite is behind. Without the feature the target \
-                     compiles to zero tests and the step reports having measured nothing"
+                     name {missing:?}, which that suite or a case or helper of it is behind. \
+                     Without the feature the step does not run what the suite says it runs: a \
+                     whole file compiles to zero tests, and a case or helper behind it is missing \
+                     or refuses"
                 );
             }
         }
@@ -586,9 +597,9 @@ pub fn assert_lane_steps_agree(manifest_dir: &Path, package: &str, lanes: &[(&st
 #[cfg(test)]
 mod tests {
     use super::{
-        LANE_PREFIXES_BY_PACKAGE, check_ignore_reason, features_a_step_names, ignore_attributes,
-        lane_step_bodies, lane_steps, packages_outside_the_rows, reason,
-        unrecognized_ignore_attribute_lines,
+        LANE_PREFIXES_BY_PACKAGE, check_ignore_reason, features_a_step_names,
+        features_a_target_needs, ignore_attributes, lane_step_bodies, lane_steps,
+        packages_outside_the_rows, reason, unrecognized_ignore_attribute_lines,
     };
     use crate::regression::LANE_IGNORE_PREFIXES;
     use std::collections::BTreeSet;
@@ -792,6 +803,35 @@ mod tests {
             features_a_step_names(body),
             BTreeSet::from(["induced-failure".to_string()])
         );
+    }
+
+    /// **A suite needs every feature any part of it is behind.** A whole file,
+    /// a case, and a helper a case calls each ask for their feature; the
+    /// spelling a build without the feature compiles asks for nothing.
+    #[test]
+    fn a_target_needs_the_features_its_file_cases_and_helpers_are_behind() {
+        let source = [
+            "#![cfg(feature = \"whole-file\")]",
+            "#[cfg(feature = \"one-case\")]",
+            "#[test]",
+            "fn a_case() {}",
+            "fn a_helper() {",
+            "    #[cfg(feature = \"inside-a-helper\")]",
+            "    arm();",
+            "}",
+            "#[cfg(not(feature = \"only-without\"))]",
+            "fn refuse() {}",
+        ]
+        .join("\n");
+        assert_eq!(
+            features_a_target_needs(&source),
+            BTreeSet::from([
+                "inside-a-helper".to_string(),
+                "one-case".to_string(),
+                "whole-file".to_string(),
+            ])
+        );
+        assert!(features_a_target_needs("#[cfg(unix)]\nfn a_case() {}").is_empty());
     }
 
     /// **A body stops at its own step.** A later job's job-level `env:` is

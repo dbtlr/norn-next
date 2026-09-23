@@ -61,7 +61,9 @@ fn the_lane_steps_ci_runs_are_the_stems_this_table_names() {
 /// `host_soak.rs` is a whole file behind `induced-failure` — the load arms
 /// `norn-fs`'s watcher seam to trip the recovery it is required to measure —
 /// so a step that drops the feature runs zero tests and the night's bars
-/// evaluate nothing. The pairing has no other reader.
+/// evaluate nothing. `counter_gate.rs` reads the host's account through a
+/// helper behind the same feature, so a step that drops it runs a case that
+/// refuses. The pairing has no other reader.
 #[test]
 fn the_lane_steps_name_the_features_their_suites_are_behind() {
     norn_testkit::lanes::assert_lane_steps_name_the_features_their_targets_need(
