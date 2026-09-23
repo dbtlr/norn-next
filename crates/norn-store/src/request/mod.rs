@@ -131,7 +131,7 @@ const STORED_DOCUMENT_COLUMNS: &str = "path, content_hash, byte_length, body_off
 ///
 /// A class or a path can hold more findings than SQLite's 32766-parameter
 /// bound leaves room for in one statement — the candidate and class reads bind
-/// one parameter per id — so [`Request::findings`] chunks rather than binding
+/// one parameter per id — so a findings read chunks its ids rather than binding
 /// the whole list at once. Every chunk holds between one id and this many, so
 /// those are the statements [`ExplainedStatement::FindingCandidates`] and
 /// [`ExplainedStatement::FindingClasses`] name.
