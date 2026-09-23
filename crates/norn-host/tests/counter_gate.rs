@@ -48,11 +48,11 @@
 //! Each generated tree sits in a testkit sandbox, which is a unix-only harness,
 //! and the lane that runs these cases is a Linux one.
 //!
-//! **The suite is behind `induced-failure`**, because the host's account of
-//! what its jobs derived and read is read only there; the lane step names the
-//! feature, and `norn-host --test lanes` holds it to that.
+//! **The read-through-a-hold bar reads the host's account**, which a build
+//! reads only behind `induced-failure`, so the lane step names the feature. A
+//! build without it compiles every case and refuses that one when it runs,
+//! rather than passing it having read nothing.
 #![cfg(unix)]
-#![cfg(feature = "induced-failure")]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
 mod attach;
@@ -62,7 +62,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use attach::read::{FIND_LIMIT, Pages, bounded_find, pages, the_pinned_declaration};
-use norn_host::{Demand, EvidenceReading};
+use norn_host::Demand;
 use norn_store::{
     Change, DocumentFacts, DocumentPath, ExplainedStatement, IncrementProvenance, MAX_PAGE, Store,
     StoredDocument, StoredPathOrder, class_probe,
@@ -146,7 +146,7 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     let subject = a_derived_document(&mut store);
     let declared = the_pinned_declaration(&mut store);
 
-    let before = host.evidence();
+    let before = vault_work(&host);
     let mut hold = host
         .begin_read(vault.name())
         .expect("a live attachment answers a read");
@@ -175,17 +175,18 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     let first = a_warm_pass(&mut store, &subject);
     let second = a_warm_pass(&mut store, &subject);
     drop(hold);
-    let spent = host.evidence().since(before);
+    let read_off_the_vault = before
+        .delta(&vault_work(&host))
+        .expect("two readings of one account");
 
     record_the_counters("a warm request under a live attachment, first pass", &first);
     record_the_counters(
         "a warm request under a live attachment, second pass",
         &second,
     );
-    let vault_work = derivation_off_the_vault(&spent);
     record_the_counters(
         "a find through a live hold, the host's account",
-        &vault_work,
+        &read_off_the_vault,
     );
     record_the_counters("a find through a live hold, its work", &read.readings());
 
@@ -234,11 +235,11 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
             row.path.as_str()
         );
     }
-    vault_work.assert_all_zero("a find through a live hold");
+    read_off_the_vault.assert_all_zero("a find through a live hold");
 
     // **The other half of that zero.** A document written into the vault under
     // the same attachment is derived by the host, and the same reading moves.
-    let before = host.evidence();
+    let before = vault_work(&host);
     std::fs::write(
         vault.path().join("counter-gate-derived.md"),
         "---\ntitle: derived\n---\n\na body\n",
@@ -248,8 +249,10 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
         "the host to derive the document written under its attachment",
         attach::state_budget(DERIVATION_LIMIT),
         || {
-            let spent = host.evidence().since(before);
-            if spent.documents_derived > 0 && spent.changesets_applied > 0 {
+            let spent = before
+                .delta(&vault_work(&host))
+                .expect("two readings of one account");
+            if spent.get("documents_derived") > 0 && spent.get("changesets_applied") > 0 {
                 Observed::Met(spent)
             } else {
                 Observed::pending(format!("the host's account reads {spent:?}"))
@@ -257,7 +260,6 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
         },
     )
     .unwrap_or_else(|failure| panic!("{failure}"));
-    let moved = derivation_off_the_vault(&moved);
     record_the_counters("a document written under a live attachment", &moved);
     assert!(
         moved.get("documents_derived") > 0 && moved.get("documents_upserted") > 0,
@@ -277,18 +279,34 @@ const DERIVATION_LIMIT: Duration = Duration::from_secs(60);
 ///
 /// Watcher polls, stats and directory entries are left out: a live attachment
 /// polls its watcher whatever anybody reads, and a poll reads no document.
-fn derivation_off_the_vault(spent: &EvidenceReading) -> CounterSnapshot {
+///
+/// Each value is a running total over the host's life, so what a stretch of
+/// work moved is the delta between two readings.
+#[cfg(feature = "induced-failure")]
+fn vault_work(host: &attach::ServingHost) -> CounterSnapshot {
+    let account = host.evidence();
     [
-        ("documents_derived", spent.documents_derived),
-        ("document_opens", spent.document_opens),
-        ("changesets_applied", spent.changesets_applied),
-        ("documents_upserted", spent.documents_upserted),
-        ("documents_deleted", spent.documents_deleted),
-        ("tombstones_recorded", spent.tombstones_recorded),
-        ("findings_discarded", spent.findings_discarded),
+        ("documents_derived", account.documents_derived),
+        ("document_opens", account.document_opens),
+        ("changesets_applied", account.changesets_applied),
+        ("documents_upserted", account.documents_upserted),
+        ("documents_deleted", account.documents_deleted),
+        ("tombstones_recorded", account.tombstones_recorded),
+        ("findings_discarded", account.findings_discarded),
     ]
     .into_iter()
     .collect()
+}
+
+/// A build without `induced-failure` carries no reader of the host's account,
+/// so a case that reads it is refused rather than passed having read nothing.
+#[cfg(not(feature = "induced-failure"))]
+fn vault_work(_: &attach::ServingHost) -> CounterSnapshot {
+    panic!(
+        "this case reads the host's account of what its jobs derived and read off the vault, \
+         which a build reads only behind `induced-failure`: run the lane with \
+         `LANE_FEATURES=induced-failure`"
+    )
 }
 
 /// One warm read-only pass over `store`, and what it derived.

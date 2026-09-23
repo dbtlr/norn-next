@@ -193,8 +193,8 @@ jobs:
   #
   # A find run through a live hold reads no vault document either, measured by
   # the host's own account of what its jobs derived and read; that account is
-  # read only behind `induced-failure`, so the suite is behind it and this step
-  # names it.
+  # read only behind `induced-failure`, so this step names the feature, and the
+  # case refuses to run in a build without it.
   #
   # The cases live in this job alone, `#[ignore]`d with a `counter-lane case:`
   # reason so the build job's workspace suite does not attach thousands of
