@@ -175,12 +175,16 @@ fn unrecognized_ignore_attribute_lines(source: &str) -> Vec<(usize, &str)> {
 /// (`ignore = "`) or as a bare token set off by non-identifier characters, so
 /// `ignored` and `ignorance` never match.
 fn mentions_ignore(line: &str) -> bool {
-    if line.contains("ignore = \"") {
-        return true;
-    }
-    line.match_indices("ignore").any(|(start, matched)| {
-        let before_is_ident = line[..start].chars().next_back().is_some_and(is_ident_char);
-        let after_is_ident = line[start + matched.len()..]
+    line.contains("ignore = \"") || names_token(line, "ignore")
+}
+
+/// Whether `text` holds `token` as a whole identifier, set off on both sides
+/// by non-identifier characters, so `feature` is not found in `target_feature`
+/// and `ignore` is not found in `ignored`.
+fn names_token(text: &str, token: &str) -> bool {
+    text.match_indices(token).any(|(start, matched)| {
+        let before_is_ident = text[..start].chars().next_back().is_some_and(is_ident_char);
+        let after_is_ident = text[start + matched.len()..]
             .chars()
             .next()
             .is_some_and(is_ident_char);
@@ -318,16 +322,20 @@ fn lane_steps(workflow: &str) -> Vec<(String, String)> {
 /// says it runs. A `#[cfg(not(feature = "..."))]` item is the build without
 /// the feature, and asks for nothing.
 ///
+/// An attribute gates on a Cargo feature when it names the `feature` key as a
+/// whole identifier. `target_feature` names a CPU feature of the target, not a
+/// Cargo feature, so a gate on it asks for nothing.
+///
 /// **An unreadable gate is refused rather than skipped.** Those two shapes,
 /// outer or inner, are the whole of what this reads. Any other `cfg` or
-/// `cfg_attr` attribute that mentions a feature — `all(..)`, `any(..)`, a
+/// `cfg_attr` attribute that names the `feature` key — `all(..)`, `any(..)`, a
 /// `cfg_attr` whose predicate names one, or a spelling other than the literal
 /// one — is an error naming its line, since reading it as asking for nothing
 /// would let a step that drops the feature pass.
 fn features_a_target_needs(source: &str) -> Result<BTreeSet<String>, String> {
     let mut needed = BTreeSet::new();
     for (at, attribute) in cfg_attributes(source) {
-        if !attribute.contains("feature") {
+        if !names_token(&attribute, "feature") {
             continue;
         }
         let gate = attribute
@@ -951,6 +959,27 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(features_a_target_needs(&source), Ok(BTreeSet::new()));
+    }
+
+    /// **`target_feature` names no Cargo feature.** A gate on a target feature
+    /// asks a lane step for nothing, alone or inside `all(..)`, while an
+    /// `all(..)` that does name a Cargo feature is still refused.
+    #[test]
+    fn a_target_feature_gate_asks_for_nothing() {
+        let source = [
+            "#[cfg(target_feature = \"avx2\")]",
+            "fn a_case() {}",
+            "#[cfg(all(unix, target_feature = \"avx2\"))]",
+            "fn a_helper() {}",
+        ]
+        .join("\n");
+        assert_eq!(features_a_target_needs(&source), Ok(BTreeSet::new()));
+        let refusal = features_a_target_needs("#[cfg(all(unix, feature = \"x\"))]\nfn a_case() {}")
+            .expect_err("an `all(..)` naming a Cargo feature was read as asking for nothing");
+        assert!(
+            refusal.starts_with("line 1 "),
+            "the refusal names another line: {refusal}"
+        );
     }
 
     /// **A body stops at its own step.** A later job's job-level `env:` is
