@@ -79,8 +79,9 @@
 //!   of the table.
 //! - `document_fields_least_raw` and `document_fields_least_typed` hold the
 //!   marker rows alone, one per document and key, by `(key, value, path)`: a
-//!   field sort pages one of them from a `(value, path)` position with no sort
-//!   step, and a document whose field holds a set is read once.
+//!   field sort's valued section pages one of them from a `(value, path)`
+//!   position with no sort step, and a document whose field holds a set is
+//!   read once.
 //! - `document_fields_presence` holds the presence rows alone, by `key`:
 //!   `has` and `missing` are one seek on it, and the keys the vault holds are
 //!   its distinct leading column.

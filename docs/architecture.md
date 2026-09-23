@@ -741,14 +741,20 @@ each carrying a plan bar with a negative control run against it, and a census th
 every statement slot and every filter slot to exactly one bar. The statements are the active-fingerprint point read; the path page, a seek of the
 case-insensitive path index in either direction; a field sort's two sections — the valued
 section, a seek of the raw or the typed order's least-value marker index from a
-`(value, path)` position, and the missing section, a seek of the path index; the known-key
+`(value, path)` position, and the missing section, a walk of the path index from a path
+position that probes each document's marker row; the known-key
 probe and the field-universe walk, both reading the presence rows alone; the bare-directory
 probe, two seeks of the path index; the match probe, one read of the full-text index
 through its `MATCH` selection, which is where a query the engine cannot parse is met before
 the page runs; and the hydration of the rows a page returns — the
 document rows by id, and each projected nested collection's head and total by its
-`(document, ordinal)` index. A page with no filter is a seek of its order index, and sorts
-nothing. A page with a filter drives from the filter's seek and sorts the matched set: its
+`(document, ordinal)` index. A page with no filter reads its order index in page order, and
+sorts nothing: the path page and a field sort's valued section seek it and stop at the
+page's bound. A field sort's missing section passes every document that carries the key to
+reach one that does not, so an ascending first page, which reads the missing section first,
+costs a walk proportional to the documents carrying the key where few or none miss it. A
+drain pays that walk once, and it is the price of ordering a document missing the sort
+field as `NULL` orders: first ascending, last descending. A page with a filter drives from the filter's seek and sorts the matched set: its
 cost is bounded by the match count, which is what a narrowing part narrows. Inequality and
 absence seek the documents a page must not hold, so a page they alone narrow seeks its order
 index as a page with no filter does and tests each row against them. Two bars hold this,

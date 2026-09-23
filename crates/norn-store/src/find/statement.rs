@@ -34,8 +34,9 @@ pub enum FindStatement {
     /// order's marker index.
     FieldValuePage(FieldOrder, PageDirection),
     /// The documents a field sort holds no value for under the order, in path
-    /// order on `documents_path`. They stand before every valued document
-    /// ascending and after every one descending.
+    /// order on `documents_path`: a walk of it that probes each document's
+    /// marker row, passing every document that carries the key. They stand
+    /// before every valued document ascending and after every one descending.
     FieldMissingPage(FieldOrder, PageDirection),
     /// Whether any document carries a key the declaration does not name: one
     /// existence seek of `document_fields_presence`.

@@ -30,6 +30,16 @@
 //! holds one row more than its bound, and the extra row is what says a next
 //! page exists.
 //!
+//! **The missing section's walk is the price of ordering missing as `NULL`.**
+//! The valued section is a seek of the marker index, and stops at the page's
+//! bound. The missing section is a walk of the path index that probes each
+//! document's marker row, so it passes every document carrying the key to
+//! reach the next one that does not. An ascending first page reads the missing
+//! section first, so where few or no documents miss the key it costs a walk
+//! proportional to the documents that carry it. A drain pays that walk once:
+//! each continuation resumes where the last page stopped, and one past the
+//! missing section resumes in the valued section.
+//!
 //! **Which order a field sort uses** is the typed one where the declaration
 //! gives the key a typed order and the raw text's otherwise, on every page: the
 //! order is the request's, and a continuation's cursor is judged against it.

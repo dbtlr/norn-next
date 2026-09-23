@@ -1436,6 +1436,42 @@ fn a_page_steps_through_no_full_scan_and_sorts_only_where_a_filter_narrows_it() 
     });
 }
 
+/// The VM steps the first page of `count` in `direction`, one row long,
+/// took over the fixture and `bulk` more documents carrying `count`.
+fn first_page_vm_steps(bulk: usize, direction: Direction) -> u64 {
+    let seeded = Seeded::with_bulk(&format!("find-missing-walk-{bulk}"), bulk);
+    seeded
+        .page(&sorted(SortKey::field("count"), direction).with_limit(1))
+        .work
+        .page_vm_steps
+}
+
+/// **A field sort's missing section costs a walk of the documents that carry
+/// the key, where it stands first.** A document missing the sort field orders
+/// as `NULL` does: first ascending, last descending. So an ascending first
+/// page reads the missing section first, and that section walks the path
+/// index testing each document's marker, passing every document that carries
+/// the key to reach the few that do not; a descending first page reads the
+/// valued section first, a seek of the marker index that stops at the page's
+/// bound. Over the fixture and 50, then 500, more documents carrying `count`,
+/// the ascending one-row first page's VM steps grow with the vault, and the
+/// descending one's do not.
+#[test]
+fn an_ascending_field_page_walks_the_documents_carrying_its_key_before_its_first_row() {
+    let ascending = [50, 500].map(|bulk| first_page_vm_steps(bulk, Direction::Ascending));
+    let descending = [50, 500].map(|bulk| first_page_vm_steps(bulk, Direction::Descending));
+    assert!(
+        ascending[1] > ascending[0] * 5,
+        "the ascending first page's VM steps did not grow with the documents carrying its key: \
+         {ascending:?}. This pins the documented cost of ordering missing as NULL, not a defect"
+    );
+    assert_eq!(
+        descending[0], descending[1],
+        "the descending first page's VM steps grew with the vault: {descending:?}. The valued \
+         section is a seek of the marker index that stops at the page's bound"
+    );
+}
+
 /// The alias a page statement reads its own rows under: `f` for a field
 /// sort's valued section, which reads the marker rows, and `d` otherwise.
 fn page_alias(statement: FindStatement) -> &'static str {
