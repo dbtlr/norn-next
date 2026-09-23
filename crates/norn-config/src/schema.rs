@@ -160,11 +160,13 @@ impl VaultSchema {
 
     /// The declared fields, in key order.
     ///
-    /// Read by derivation, which hands the store the typed order each declared
-    /// type carries so the field pillar's typed column is filled under this
-    /// schema. `describe` reads it too once it is built, as the declared half
-    /// of the field universe it reports; the current call graph does not reach
-    /// that consumer because the read surface's handlers do not exist yet.
+    /// Read by derivation, which hands the store the declared keys and the
+    /// typed order each typed one carries: the field pillar's typed column is
+    /// filled under this schema, and a find reads the declared keys as the
+    /// declared half of the field universe it judges a key against. `describe`
+    /// reports that universe once it is built; the current call graph does not
+    /// reach that consumer because the read surface's handlers do not exist
+    /// yet.
     pub fn fields(&self) -> impl Iterator<Item = (&str, &DeclaredField)> {
         self.fields.iter().map(|(key, field)| (key.as_str(), field))
     }
@@ -192,9 +194,10 @@ impl VaultSchema {
     /// The paths the resolution ladder does not count as candidates.
     ///
     /// **Read by the resolution ladder, and backlinks and findings apply the
-    /// same exclusion.** The current call graph does not reach it: the read
-    /// surface and its builders — the resolution ladder among them — do not
-    /// exist yet, and no derivation reads a path rule.
+    /// same exclusion.** The current call graph does not reach it: no
+    /// resolution ladder is built — a find's `resolves` part enumerates a
+    /// target's suffix class and does not read this set — and no derivation
+    /// reads a path rule.
     pub fn ambiguity_ignore(&self) -> &[Pattern] {
         &self.ambiguity_ignore
     }

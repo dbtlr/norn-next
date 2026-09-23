@@ -66,6 +66,11 @@
 //!   recorded to survive is a policy over generations, and nothing here decides
 //!   it: a tombstone is kept until something says otherwise.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
+//! - **The read shapes no builder emits.** The find builder is the one read
+//!   builder: nothing here counts by field, and nothing indexes a link's
+//!   target, so a find refuses a `links_to` part and a row's link and finding
+//!   columns by name. That refusal is a dormant carrier whose consumer is
+//!   NORN-229, the task that builds the link index.
 
 pub mod ddl;
 
