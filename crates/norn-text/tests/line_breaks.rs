@@ -208,6 +208,11 @@ fn a_section_replace_writes_the_documents_terminator_over_every_caller_break() {
         .replace_section("A", "one\rtwo\nthree")
         .expect("the replace holds");
     assert_eq!(crlf, "# A\r\none\r\ntwo\r\nthree\r\n");
+
+    let cr = Document::parse("# A\rold\r")
+        .replace_section("A", "one\ntwo\r\nthree")
+        .expect("the replace holds");
+    assert_eq!(cr, "# A\rone\rtwo\rthree\r");
 }
 
 /// The post-image check the replace makes compares lines on the same rule the
@@ -247,9 +252,9 @@ fn a_replace_leaves_a_lone_cr_heading_line_byte_identical() {
         edited.starts_with("# A\r"),
         "the heading line was respelled: {edited:?}"
     );
-    // The document holds no `\n` before the edit, so it classifies as `Lf` and
-    // the replaced content is written with `\n`. Only the content changed.
-    assert_eq!(edited, "# A\rone\ntwo\n");
+    // The document is written with lone `\r`, so it classifies as `Cr` and the
+    // replaced content is written with `\r`. Only the content changed.
+    assert_eq!(edited, "# A\rone\rtwo\r");
 }
 
 /// Blank lines separated by a lone `\r` are blank, so a section's content
@@ -299,9 +304,9 @@ fn a_lone_cr_block_sequence_reports_a_range_for_every_item() {
 
 /// A closing `---` fence after a lone `\r` closes the block.
 ///
-/// The opening fence is terminated by `\n` or `\r\n`, so the document that
-/// reaches this site is a mixed one — which is exactly the document an editor
-/// that rewrites one line produces.
+/// The document here is a mixed one, its opening fence terminated by `\n` and
+/// its closing fence by `\r` — which is exactly the document an editor that
+/// rewrites one line produces.
 #[test]
 fn a_closing_fence_after_a_lone_cr_closes_the_block() {
     let document = Document::parse("---\ntitle: x\r---\nbody\n");
@@ -369,6 +374,98 @@ fn rendering_adds_no_terminator_to_a_body_that_already_ends_a_line() {
     assert_eq!(rendered("prose"), "---\n---\nprose\n");
 }
 
+// ── The CR-only write path ───────────────────────────────────────────────
+
+/// A document broken by lone `\r` alone.
+const CR_ONLY: &str = "---\rtitle: hello\rother: x\r---\r# Alpha\rprose\r";
+
+/// The fence opens on a lone `\r`, so a CR-only document carries the
+/// frontmatter its bytes carry, and the terminator an edit writes into it is
+/// the one it is written with.
+///
+/// Both halves are one defect: a document whose block goes unrecognized has a
+/// second block synthesized above it, and a document recognized under a
+/// terminator it does not use has LF welded into CR bytes.
+#[test]
+fn a_cr_only_document_opens_its_fence_and_reads_as_cr() {
+    let document = Document::parse(CR_ONLY);
+    assert!(
+        document.frontmatter_refusal().is_none(),
+        "{:?}",
+        document.frontmatter_refusal()
+    );
+    assert_eq!(
+        document.frontmatter(),
+        Some(&Value::Map(
+            [("title", "hello"), ("other", "x")].into_iter().collect()
+        ))
+    );
+    assert_eq!(document.body(), "# Alpha\rprose\r");
+    assert_eq!(document.line_ending(), LineEnding::Cr);
+}
+
+/// Setting a field a CR-only document already carries rewrites that field's
+/// value where it stands: one block, the same field order, and no `\n`
+/// anywhere.
+#[test]
+fn setting_a_present_field_of_a_cr_only_document_edits_in_place_and_keeps_cr() {
+    let edited = Document::parse(CR_ONLY)
+        .set_field("title", &Value::String("new".into()))
+        .expect("the field is editable");
+    assert_eq!(edited, "---\rtitle: new\rother: x\r---\r# Alpha\rprose\r");
+    assert!(!edited.contains('\n'), "{edited:?}");
+}
+
+/// A field the document does not carry is added under the terminator the
+/// document uses, so the synthesized line is CR-terminated like its
+/// neighbours.
+#[test]
+fn adding_a_field_to_a_cr_only_document_keeps_cr() {
+    let edited = Document::parse(CR_ONLY)
+        .set_field("added", &Value::Int(7))
+        .expect("a field is addable");
+    assert!(edited.contains("added: 7\r"), "{edited:?}");
+    assert!(!edited.contains('\n'), "{edited:?}");
+    assert_eq!(edited.matches("---\r").count(), 2, "{edited:?}");
+}
+
+/// Removing a present field of a CR-only document removes it, rather than
+/// answering that a field the document carries is absent.
+#[test]
+fn removing_a_field_from_a_cr_only_document_removes_it_and_keeps_cr() {
+    let edited = Document::parse(CR_ONLY)
+        .remove_field("title")
+        .expect("the field is present");
+    assert_eq!(edited, "---\rother: x\r---\r# Alpha\rprose\r");
+    assert!(!edited.contains('\n'), "{edited:?}");
+}
+
+/// A section replacement into a CR-only document writes the document's
+/// terminator, whatever the content's own lines are broken by.
+#[test]
+fn replacing_a_section_of_a_cr_only_document_writes_cr() {
+    let edited = Document::parse(CR_ONLY)
+        .replace_section("Alpha", "one\ntwo\n")
+        .expect("the section resolves");
+    assert_eq!(
+        edited,
+        "---\rtitle: hello\rother: x\r---\r# Alpha\rone\rtwo\r"
+    );
+    assert!(!edited.contains('\n'), "{edited:?}");
+}
+
+/// A mixed document takes its terminator from the first break it carries,
+/// whichever of the three that is.
+#[test]
+fn a_mixed_document_classifies_by_the_first_break_it_carries() {
+    assert_eq!(Document::parse("a\rb\nc\r\n").line_ending(), LineEnding::Cr);
+    assert_eq!(Document::parse("a\nb\rc\r\n").line_ending(), LineEnding::Lf);
+    assert_eq!(
+        Document::parse("a\r\nb\rc\n").line_ending(),
+        LineEnding::Crlf
+    );
+}
+
 // ── One definition, and no seventh site ──────────────────────────────────
 
 /// Every `.rs` file of the crate, pinned at compile time.
@@ -406,28 +503,22 @@ const SOURCES: &[(&str, &str)] = &[
     ("src/value.rs", include_str!("../src/value.rs")),
 ];
 
-/// The two files allowed to decide what a line break is, each for a stated
-/// reason.
+/// The one file allowed to decide what a line break is, with the reason it is
+/// allowed.
 ///
-/// `span.rs` defines the rule. `line_ending.rs` classifies a document into the
-/// two terminator spellings a synthesis path can write, which is a question
-/// about `\n` by construction — see its own documentation for why that is not
-/// the break rule.
-const RULE_OWNERS: &[(&str, &str)] = &[
-    ("src/span.rs", "defines the crate's line break rule"),
-    (
-        "src/line_ending.rs",
-        "classifies a document's terminator spelling, which is a question about \\n",
-    ),
-];
+/// Every other file of the crate is scanned, `line_ending.rs` included: it
+/// spells the rule's three breaks as the terminators a synthesis path writes
+/// and decides which one a document uses by asking `span.rs`, so it holds no
+/// rule and earns no wholesale exemption. The literals it spells are exempted
+/// one at a time below, like every other site's.
+const RULE_OWNERS: &[(&str, &str)] = &[("src/span.rs", "defines the crate's line break rule")];
 
 /// A `\n` literal the scan does not report, by the exact source line carrying
 /// it and why it is exempt.
 ///
-/// Three of the four are not line rules at all — two escape-table entries and
-/// a count over text a decoder already normalized. The fourth is a line rule,
-/// a deliberately narrower one than the crate's, carried here so it is visible
-/// rather than invisible; its reason says which.
+/// None of the four is a line rule: two are escape-table entries, the third
+/// counts breaks in text a decoder already normalized, and the fourth spells a
+/// terminator an edit writes.
 ///
 /// Matching on the line's text rather than its number keeps an exemption
 /// attached to the code it excuses: moving the code carries it, and rewriting
@@ -449,9 +540,9 @@ const EXEMPT_LINES: &[(&str, &str, &str)] = &[
         "counts breaks in a value YAML already decoded, where every break is \\n",
     ),
     (
-        "src/frontmatter/extract.rs",
-        r"rest.strip_prefix('\n')",
-        "the opening-fence rule, which admits \\n and \\r\\n and not a lone \\r",
+        "src/line_ending.rs",
+        r#"LineEnding::Lf => "\n","#,
+        "a terminator spelling an edit writes, not a rule for where a line ends",
     ),
 ];
 
@@ -474,14 +565,14 @@ fn despaced(line: &str) -> String {
     line.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
-/// Outside the two files that own the rule, no source line decides what a line
-/// is on `\n` alone.
+/// Outside the file that owns the rule, no source line decides what a line is
+/// on `\n` alone.
 ///
 /// The scan is keyed on the rule rather than on a list of function names: a
 /// `\n` literal standing on a line that never mentions `\r` is a line rule
 /// with half the rule missing, however it is spelled — `split_inclusive`,
 /// `split_once`, `splitn`, `ends_with`, `find`, a byte-slice `split`, or a
-/// hand-rolled loop. That is why the four exemptions below are exemptions
+/// hand-rolled loop. That is why the four exemptions above are exemptions
 /// rather than a longer ban list: each is a `\n` literal that is not deciding
 /// where a line ends.
 ///

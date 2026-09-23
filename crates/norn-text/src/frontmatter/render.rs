@@ -30,6 +30,7 @@ use std::fmt;
 
 use crate::frontmatter::fields::{ValueStyle, reparse};
 use crate::line_ending::LineEnding;
+use crate::span::trailing_break;
 use crate::value::{Mapping, Value};
 
 /// The YAML lexical context a scalar is emitted into.
@@ -381,7 +382,7 @@ pub fn render_document(
         // Whether the body's last line is already terminated is the crate's
         // break rule, so a body ending in a lone `\r` ends a line and gets no
         // second terminator welded onto it.
-        if !body.ends_with(['\n', '\r']) {
+        if trailing_break(body).is_none() {
             out.push_str(terminator);
         }
     }
