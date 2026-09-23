@@ -13,7 +13,7 @@ use norn_db::rusqlite::{CachedStatement, OptionalExtension, Transaction, params}
 use crate::counters::{Counter, DerivationCounters};
 use crate::error::{self, StoreError};
 use crate::facts::{DocumentFacts, FindingFacts, Invalidation, Provenance};
-use crate::fields::{DeclaredFields, FieldRow, FieldRows};
+use crate::fields::FieldRow;
 use crate::hash;
 use crate::json;
 use crate::path::{ClassKey, DocumentPath};
@@ -467,12 +467,7 @@ fn upsert(
     tally: &mut Tally,
 ) -> Result<(), StoreError> {
     refuse_a_document_that_does_not_add_up(facts)?;
-    refuse_field_rows_another_value_derives(facts)?;
-    let projection = facts
-        .frontmatter
-        .as_ref()
-        .map(json::canonical_json)
-        .transpose()?;
+    let projection = facts.frontmatter().map(json::canonical_json).transpose()?;
     let projection_hash = projection.as_deref().map(hash::sub_fingerprint);
 
     let document: i64 = statements
@@ -570,7 +565,7 @@ fn upsert(
             .map_err(|error| error::sql("writing a tag row", error))?;
     }
 
-    for row in facts.fields.rows() {
+    for row in facts.fields().rows() {
         let (container, raw, typed, least_raw, least_typed) = match row {
             FieldRow::Presence { container, .. } => {
                 (Some(container.as_str()), None, None, false, false)
@@ -610,7 +605,7 @@ fn upsert(
     tally.heading_rows += facts.headings.len() as u64;
     tally.block_rows += facts.blocks.len() as u64;
     tally.tag_rows += facts.tags.len() as u64;
-    tally.field_rows += facts.fields.rows().len() as u64;
+    tally.field_rows += facts.fields().rows().len() as u64;
     if projection.is_some() {
         tally.projections += 1;
     }
@@ -681,27 +676,6 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
         what: "the byte length a document's body offset and body account for",
         limit: widest(accounted),
         given: widest(facts.byte_length),
-    })
-}
-
-/// Refuse a document whose field rows are not the rows its own frontmatter
-/// derives.
-///
-/// The rows ride beside the value they are derived from, so the two can be
-/// handed over apart; a pair that disagrees describes no document, and the
-/// rows it would leave answer a predicate about a value the document does not
-/// carry. The store derives the rows again with no declaration and compares
-/// everything but the typed half, which is the one half it cannot derive
-/// without the schema the caller holds. The comparison is a check rather than a
-/// derivation — what is written is the rows the caller handed over — so it
-/// moves no counter, and a `Composed` changeset reads what a `Derived` one does.
-fn refuse_field_rows_another_value_derives(facts: &DocumentFacts) -> Result<(), StoreError> {
-    let derived = FieldRows::derive(facts.frontmatter.as_ref(), &DeclaredFields::none());
-    if facts.fields.agree_untyped(&derived) {
-        return Ok(());
-    }
-    Err(StoreError::Disagreement {
-        what: "a document's field rows and the frontmatter they were handed beside",
     })
 }
 

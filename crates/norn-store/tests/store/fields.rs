@@ -7,8 +7,8 @@
 
 use crate::common::{Scratch, document, path, record_death, write_document};
 use norn_store::{
-    Change, DeclaredFields, DocumentFacts, FieldContainer, FieldRow, FieldRows, FrontmatterValue,
-    IncrementProvenance, Provenance, StoreError, TypedOrder,
+    DeclaredFields, DocumentFacts, FieldContainer, FieldRow, FieldRows, FrontmatterValue,
+    Provenance, TypedOrder,
 };
 
 /// A presence row, as the rows are compared.
@@ -345,59 +345,25 @@ fn a_moved_pin_clears_every_typed_value_and_nothing_else() {
         .expect("a store whose typed values a pin cleared");
 }
 
-/// **Field rows another value derives are refused.** The rows ride beside the
-/// frontmatter they were derived from, and a pair that disagrees describes no
-/// document: a value set without its rows, or rows derived from another value,
-/// is refused as a disagreement and nothing is written. Rows that differ from
-/// the value's own only in their typed half are the document's, whatever typed
-/// order produced them.
+/// **A document's field rows are the rows its frontmatter derives.** The
+/// value and its rows are set together and only together, so setting a
+/// document's frontmatter again replaces its rows with the new value's, and
+/// taking the value away takes the rows with it.
 #[test]
-fn field_rows_another_value_derives_are_refused() {
-    let scratch = Scratch::new("field-refusal");
-    let mut store = scratch.open();
-    let none = DeclaredFields::none();
-
-    let mut unrowed = document("docs/unrowed.md", "hash-1", "a body\n");
-    unrowed.frontmatter = Some(map(vec![("title", string("bare"))]));
-    let mut swapped = fielded(
-        "docs/swapped.md",
-        "hash-1",
-        map(vec![("title", string("one"))]),
-        &none,
-    );
-    swapped.frontmatter = Some(map(vec![("title", string("another"))]));
-
-    for facts in [unrowed, swapped] {
-        let subject = facts.path.clone();
-        let error = store
-            .begin_request()
-            .apply_increment(IncrementProvenance::Derived, [Change::Upsert(facts)], &[])
-            .expect_err("a document whose field rows another value derives");
-        let StoreError::Entry { problem, .. } = &error else {
-            panic!("the refusal does not say which entry it came from: {error:?}");
-        };
-        assert!(
-            matches!(**problem, StoreError::Disagreement { .. }),
-            "{problem:?}"
-        );
-        assert_eq!(
-            store
-                .begin_request()
-                .stored_document(&subject)
-                .expect("reading a document"),
-            None,
-            "a refused document was written"
-        );
-    }
-
+fn a_documents_rows_are_the_rows_its_frontmatter_derives() {
     let typed = DeclaredFields::none().declare_typed("rank", integer_order());
-    write_document(
-        &mut store.begin_request(),
-        &fielded(
-            "docs/typed.md",
-            "hash-1",
-            map(vec![("rank", string("4"))]),
-            &typed,
-        ),
-    );
+    let one = map(vec![("title", string("one")), ("rank", string("4"))]);
+    let another = map(vec![("title", string("another"))]);
+
+    let facts = fielded("docs/a.md", "hash-1", one.clone(), &typed);
+    assert_eq!(facts.frontmatter(), Some(&one));
+    assert_eq!(facts.fields(), &FieldRows::derive(Some(&one), &typed));
+
+    let facts = facts.with_frontmatter(Some(another.clone()), &typed);
+    assert_eq!(facts.frontmatter(), Some(&another));
+    assert_eq!(facts.fields(), &FieldRows::derive(Some(&another), &typed));
+
+    let facts = facts.with_frontmatter(None, &typed);
+    assert_eq!(facts.frontmatter(), None);
+    assert!(facts.fields().is_empty());
 }

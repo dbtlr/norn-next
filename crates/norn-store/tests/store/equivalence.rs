@@ -244,7 +244,7 @@ fn a_changed_typed_field_value_is_a_divergence() {
             "draft",
             norn_store::TypedOrder::new(|raw| Some(format!("typed {raw}"))),
         );
-        let frontmatter = facts.frontmatter.clone();
+        let frontmatter = facts.frontmatter().cloned();
         let facts = facts.with_frontmatter(frontmatter, &typed);
         let mut request = store.begin_request();
         write_document(&mut request, &facts);

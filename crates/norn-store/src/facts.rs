@@ -174,6 +174,33 @@ pub struct TagFact {
 }
 
 /// Everything one document says, as the store takes it.
+///
+/// A document's frontmatter and field rows are read, never assigned: a
+/// caller that could assign one could leave it disagreeing with the other.
+///
+/// ```compile_fail,E0616
+/// use norn_store::{DocumentFacts, DocumentPath};
+///
+/// let mut facts = DocumentFacts::new(
+///     DocumentPath::new("a.md").expect("a path"),
+///     "hash",
+///     "body",
+///     4,
+/// );
+/// facts.frontmatter = None;
+/// ```
+///
+/// ```compile_fail,E0616
+/// use norn_store::{DocumentFacts, DocumentPath, FieldRows};
+///
+/// let mut facts = DocumentFacts::new(
+///     DocumentPath::new("a.md").expect("a path"),
+///     "hash",
+///     "body",
+///     4,
+/// );
+/// facts.fields = FieldRows::default();
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct DocumentFacts {
     pub path: DocumentPath,
@@ -194,8 +221,9 @@ pub struct DocumentFacts {
     /// is relative to.
     pub body_offset: u64,
     /// The frontmatter value tree, or `None` where there is no projection to
-    /// make — no block, or a block that did not parse.
-    pub frontmatter: Option<FrontmatterValue>,
+    /// make — no block, or a block that did not parse. Private, and set with
+    /// `fields` through [`DocumentFacts::with_frontmatter`] alone.
+    frontmatter: Option<FrontmatterValue>,
     /// How many **frontmatter-scoped** diagnostics the parse raised, which is
     /// what discriminates the two things `frontmatter: None` can mean: zero is
     /// "there was no block", and nonzero is "there was a block and it did not
@@ -212,18 +240,18 @@ pub struct DocumentFacts {
     pub blocks: Vec<BlockFact>,
     /// Tags in the order they were read, both homes.
     pub tags: Vec<TagFact>,
-    /// The field rows `frontmatter` derives. The two are set together through
-    /// [`DocumentFacts::with_frontmatter`], and a pair that disagrees is
-    /// refused where the document is written: rows another value derives
-    /// describe no document.
-    pub fields: FieldRows,
+    /// The field rows `frontmatter` derives. Private, and set with
+    /// `frontmatter` through [`DocumentFacts::with_frontmatter`] alone, so the
+    /// rows a document carries are the rows its own frontmatter derives: no
+    /// caller can hand over one without the other.
+    fields: FieldRows,
 }
 
 impl DocumentFacts {
     /// A document with no derived facts at all: the row, its body, its size, and
-    /// nothing else. The fact lists and the frontmatter are then assigned by the
-    /// caller, which keeps a document with none of them from having to name four
-    /// empty vectors.
+    /// nothing else. The fact lists are then assigned by the caller, which keeps
+    /// a document with none of them from having to name four empty vectors, and
+    /// the frontmatter is set through [`DocumentFacts::with_frontmatter`].
     ///
     /// `byte_length` is taken rather than defaulted from `body`. The two are the
     /// same number only for a document with no frontmatter block, and a default
@@ -264,6 +292,17 @@ impl DocumentFacts {
         self.fields = FieldRows::derive(frontmatter.as_ref(), declared);
         self.frontmatter = frontmatter;
         self
+    }
+
+    /// The frontmatter value tree, or `None` where there is no projection to
+    /// make.
+    pub fn frontmatter(&self) -> Option<&FrontmatterValue> {
+        self.frontmatter.as_ref()
+    }
+
+    /// The field rows the frontmatter derives, typed half included.
+    pub fn fields(&self) -> &FieldRows {
+        &self.fields
     }
 }
 

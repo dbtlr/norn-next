@@ -1,11 +1,11 @@
 //! The field pillar's rows, derived from one document's frontmatter value.
 //!
 //! [`FieldRows::derive`] is the one place a document's field rows are made.
-//! The host calls it where it plans a document, so it can hand the rows the
-//! typed order its pinned schema declares; the increment calls it again with no
-//! declaration to check that the rows it was handed are the rows the document's
-//! own frontmatter derives. One function on both sides is what keeps the two
-//! from being two readings of one value.
+//! [`crate::DocumentFacts::with_frontmatter`] calls it where the host plans a
+//! document, under the typed order its pinned schema declares, and is the one
+//! way a document's frontmatter and rows are set: both are private to the
+//! facts, so the rows a document carries are the rows its own frontmatter
+//! derives, and the increment writes them as handed.
 //!
 //! # What a document's rows are
 //!
@@ -134,28 +134,6 @@ impl FieldRow {
             FieldRow::Value { ordinal, .. } => *ordinal,
         }
     }
-
-    /// The same row with its typed half removed, which is the half the store
-    /// cannot derive without a declaration.
-    fn untyped(&self) -> FieldRow {
-        match self {
-            FieldRow::Presence { .. } => self.clone(),
-            FieldRow::Value {
-                key,
-                ordinal,
-                raw,
-                least_raw,
-                ..
-            } => FieldRow::Value {
-                key: key.clone(),
-                ordinal: *ordinal,
-                raw: raw.clone(),
-                typed: None,
-                least_raw: *least_raw,
-                least_typed: false,
-            },
-        }
-    }
 }
 
 /// Every field row one document derives, in key order and, under a key, in
@@ -235,17 +213,6 @@ impl FieldRows {
     /// Whether the document derives no field rows at all.
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
-    }
-
-    /// Whether these rows and `other` are the same rows once the typed half of
-    /// each is set aside.
-    pub(crate) fn agree_untyped(&self, other: &FieldRows) -> bool {
-        self.rows.len() == other.rows.len()
-            && self
-                .rows
-                .iter()
-                .zip(&other.rows)
-                .all(|(mine, theirs)| mine.untyped() == theirs.untyped())
     }
 }
 

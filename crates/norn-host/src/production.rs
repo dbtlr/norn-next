@@ -8203,7 +8203,7 @@ mod tests {
             &DeclaredFields::none(),
         )
         .expect("a document derives");
-        assert!(derived.facts.frontmatter.is_none());
+        assert!(derived.facts.frontmatter().is_none());
         assert_eq!(derived.facts.frontmatter_diagnostic_count, 1);
         assert_eq!(
             derived
@@ -8252,7 +8252,7 @@ mod tests {
             )
             .expect("a document whose block went unread still derives");
             assert!(
-                derived.facts.frontmatter.is_none(),
+                derived.facts.frontmatter().is_none(),
                 "{kind} produced a projection"
             );
             assert_eq!(

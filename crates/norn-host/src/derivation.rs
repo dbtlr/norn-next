@@ -1343,7 +1343,7 @@ mod tests {
         let tagged = derive("---\n!x k: 1\nk: 2\n---\n# heading\n");
         for (spelling, derived) in [("plain", &plain), ("tagged", &tagged)] {
             assert!(
-                derived.facts.frontmatter.is_none(),
+                derived.facts.frontmatter().is_none(),
                 "the {spelling} duplicate produced a projection"
             );
             assert_eq!(
@@ -1412,8 +1412,7 @@ mod tests {
         let deepest = derive(&block_nesting(refused - 1));
         let projection = deepest
             .facts
-            .frontmatter
-            .as_ref()
+            .frontmatter()
             .expect("the deepest block the text layer reads produced no projection");
         norn_store::canonical_json(projection)
             .expect("the deepest block the text layer reads is past the store's bound");
@@ -1490,7 +1489,7 @@ mod tests {
         .unwrap();
         let facts = derived.facts;
         assert!(derived.unread_frontmatter.is_none());
-        assert!(facts.frontmatter.is_some());
+        assert!(facts.frontmatter().is_some());
         assert_eq!(facts.headings.len(), 1);
         assert_eq!(facts.links.len(), 1);
         assert_eq!(facts.blocks.len(), 1);
@@ -1524,7 +1523,7 @@ mod tests {
             .facts;
             let read = String::from_utf8(source).unwrap();
             assert_eq!(
-                facts.frontmatter.is_some(),
+                facts.frontmatter().is_some(),
                 projection,
                 "the projection of `{read}` is not what the block is"
             );
