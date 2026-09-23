@@ -1304,6 +1304,7 @@ fn an_unsatisfied_part_advertises_its_part_tag() {
             "unknown_predicate_key",
             "bare_directory",
             "malformed_glob",
+            "malformed_query",
             "impossible_path",
             "missing_section",
             "missing_block",

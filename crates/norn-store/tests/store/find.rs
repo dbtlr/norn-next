@@ -295,6 +295,9 @@ fn statement_barred_by(statement: FindStatement) -> &'static str {
             "a_known_key_and_the_field_universe_read_the_presence_rows_alone"
         }
         FindStatement::BareDirectory => "a_bare_directory_probe_is_two_seeks_of_the_path_index",
+        FindStatement::MatchProbe => {
+            "a_match_probe_reads_the_full_text_index_through_its_selection"
+        }
         FindStatement::HydrateDocuments
         | FindStatement::NestedHead(_)
         | FindStatement::NestedTotal(_) => {
@@ -347,8 +350,8 @@ fn forms_of(filter: FindFilter) -> Vec<FindFilter> {
 /// one bar judges each. The path-page bar judges the statements [`PAGE_BARS`]
 /// names and the fingerprint read; the field-sort bar judges both sections of
 /// every [`FIELD_BARS`] entry; the key-probe bar judges [`KEY_PROBES`]; the
-/// bare-directory bar its one probe; the hydration bar
-/// [`hydration_statements`]; the filter bar judges [`filter_bars`]. A bar
+/// bare-directory bar and the match-probe bar their one probe each; the
+/// hydration bar [`hydration_statements`]; the filter bar judges [`filter_bars`]. A bar
 /// ranges over the order and the direction a statement carries, and those are
 /// not slots, so each bar's statements are read as the set of slots it
 /// reaches: across the bars, those sets cover the enumeration exactly once,
@@ -359,7 +362,7 @@ fn forms_of(filter: FindFilter) -> Vec<FindFilter> {
 /// bars claim fills a slot twice.
 #[test]
 fn the_find_bars_cover_every_statement_and_filter_once() {
-    let per_bar: [Vec<FindStatement>; 5] = [
+    let per_bar: [Vec<FindStatement>; 6] = [
         std::iter::once(FindStatement::ActiveFingerprint)
             .chain(PAGE_BARS.iter().map(|(statement, ..)| *statement))
             .collect(),
@@ -369,6 +372,7 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
             .collect(),
         KEY_PROBES.to_vec(),
         vec![FindStatement::BareDirectory],
+        vec![FindStatement::MatchProbe],
         hydration_statements(),
     ];
     let mut slots: Vec<usize> = Vec::new();
@@ -429,6 +433,7 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
             "a_bare_directory_probe_is_two_seeks_of_the_path_index",
             "a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path",
             "a_known_key_and_the_field_universe_read_the_presence_rows_alone",
+            "a_match_probe_reads_the_full_text_index_through_its_selection",
             "a_path_page_seeks_the_case_insensitive_index_in_either_direction",
             "every_filter_seeks_the_index_its_values_are_bounds_for",
             "hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index",
@@ -793,6 +798,53 @@ fn a_bare_directory_probe_is_two_seeks_of_the_path_index() {
     seeded.drop_index("documents_path");
     let plan = plan_of(&seeded.plans(&params, None), FindStatement::BareDirectory);
     failure_of("documents_path dropped", || judge(&plan));
+}
+
+/// **A match probe is one read of the full-text index through its `MATCH`
+/// selection**, which is the step at which the engine parses the query: the
+/// probe reads no relation end to end, and asks the index nothing but the
+/// query. Only a match part probes; a request without one asks nothing.
+///
+/// Control: the plan rebuilt with its `MATCH` selection taken out, the read
+/// the engine would make without parsing the query, fails the bar.
+#[test]
+fn a_match_probe_reads_the_full_text_index_through_its_selection() {
+    let seeded = Seeded::new("find-match-probe");
+    let judge = |plan: &QueryPlan| {
+        plan.assert_no_full_scan();
+        assert!(
+            plan.rows().iter().any(|row| matches!(
+                row.scan_target(),
+                Some(norn_testkit::explain::ScanTarget::VirtualTable { specification, .. })
+                    if specification.starts_with('M')
+            )),
+            "the match probe does not read `documents_fts` through its MATCH selection: {:?}\n\
+             emitted SQL: {}",
+            plan.rows(),
+            plan.sql()
+        );
+    };
+    let params = request().with_predicates([Predicate::matches("interloper")]);
+    let probe = plan_of(&seeded.plans(&params, None), FindStatement::MatchProbe);
+    judge(&probe);
+    assert!(
+        seeded
+            .plans(&request().with_predicates([Predicate::tag("draft")]), None)
+            .iter()
+            .all(|plan| plan.statement != FindStatement::MatchProbe)
+    );
+
+    let unselected = QueryPlan::new(
+        probe.sql(),
+        probe
+            .rows()
+            .iter()
+            .map(|row| PlanRow::new(row.id, row.parent, row.detail.replace("0:M1", "0:")))
+            .collect(),
+    );
+    failure_of("a match probe with no MATCH selection", || {
+        judge(&unselected)
+    });
 }
 
 /// Every hydration statement: the document rows, and each collection's head
@@ -1489,6 +1541,71 @@ fn a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault
             Unsatisfied::malformed_glob("", "a pattern cannot be empty"),
         ]
     );
+}
+
+/// **A match part whose query the full-text engine cannot parse is reported
+/// with the engine's words, and the page is answered without it.** A dangling
+/// operator and an unterminated phrase are each a query the engine refuses to
+/// read; the page they stand in holds every document the rest of the request
+/// names, and the probe that read the query is the statement the plans list.
+/// A query the engine reads is applied: it narrows the page and reports
+/// nothing.
+#[test]
+fn a_malformed_full_text_query_is_reported_and_the_page_answered_without_it() {
+    let seeded = Seeded::new("find-malformed-query");
+    let everything = seeded.paths(&request());
+    let tagged = seeded.paths(&request().with_predicates([Predicate::tag("draft")]));
+    assert!(everything.len() > tagged.len(), "{everything:?}");
+    for query in ["interloper AND", "\"interloper"] {
+        let page = seeded.page(
+            &request().with_predicates([Predicate::matches(query)]),
+            None,
+        );
+        let paths: Vec<&str> = page.keys.iter().map(|key| key.path()).collect();
+        assert_eq!(paths, everything, "{query:?} filtered the page");
+        let [
+            Unsatisfied::MalformedQuery {
+                query: named,
+                problem,
+                ..
+            },
+        ] = page.unsatisfied.as_slice()
+        else {
+            panic!(
+                "{query:?} was not reported as malformed: {:?}",
+                page.unsatisfied
+            );
+        };
+        assert_eq!(named, query);
+        assert!(!problem.is_empty(), "{query:?} carries no problem");
+
+        let beside = seeded.page(
+            &request().with_predicates([Predicate::matches(query), Predicate::tag("draft")]),
+            None,
+        );
+        let paths: Vec<&str> = beside.keys.iter().map(|key| key.path()).collect();
+        assert_eq!(paths, tagged, "{query:?} beside a tag part");
+        assert_eq!(beside.unsatisfied.len(), 1, "{:?}", beside.unsatisfied);
+
+        let plans = seeded.plans(
+            &request().with_predicates([Predicate::matches(query)]),
+            None,
+        );
+        plan_of(&plans, FindStatement::MatchProbe);
+        assert!(
+            !plan_of(&plans, FindStatement::PathPage(PageDirection::Ascending))
+                .sql()
+                .contains("documents_fts"),
+            "the page statement still spells the malformed part"
+        );
+    }
+    let page = seeded.page(
+        &request().with_predicates([Predicate::matches("interloper")]),
+        None,
+    );
+    let paths: Vec<&str> = page.keys.iter().map(|key| key.path()).collect();
+    assert_eq!(paths, ["notes/a.md"]);
+    assert!(page.unsatisfied.is_empty(), "{:?}", page.unsatisfied);
 }
 
 /// **A part the store keeps no index of, or a value that names no place in

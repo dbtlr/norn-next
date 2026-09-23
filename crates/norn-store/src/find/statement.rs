@@ -47,6 +47,11 @@ pub enum FindStatement {
     /// under and no document: one seek of `documents_path` at the path, and
     /// one of the range beneath it.
     BareDirectory,
+    /// Whether the full-text engine parses a match part's query: one
+    /// selection of `documents_fts` through its `MATCH` constraint, stepped
+    /// until it answers whether any document matches, which is where the
+    /// engine parses the query and reports a query it cannot parse.
+    MatchProbe,
     /// The document rows a page found, by row id, carrying only the columns
     /// the projection names: the frontmatter projection, the head of the body
     /// and the body's length.
@@ -61,7 +66,7 @@ pub enum FindStatement {
 }
 
 /// How many statement shapes [`FindStatement::all`] holds.
-pub const FIND_STATEMENTS: usize = 10;
+pub const FIND_STATEMENTS: usize = 11;
 
 impl FindStatement {
     /// Every statement shape, in slot order.
@@ -78,6 +83,7 @@ impl FindStatement {
             Self::KnownKey,
             Self::FieldUniverse,
             Self::BareDirectory,
+            Self::MatchProbe,
             Self::HydrateDocuments,
             Self::NestedHead(Nested::Tags),
             Self::NestedTotal(Nested::Tags),
@@ -95,9 +101,10 @@ impl FindStatement {
             Self::KnownKey => 4,
             Self::FieldUniverse => 5,
             Self::BareDirectory => 6,
-            Self::HydrateDocuments => 7,
-            Self::NestedHead(_) => 8,
-            Self::NestedTotal(_) => 9,
+            Self::MatchProbe => 7,
+            Self::HydrateDocuments => 8,
+            Self::NestedHead(_) => 9,
+            Self::NestedTotal(_) => 10,
         };
         assert!(
             slot < FIND_STATEMENTS,
@@ -437,6 +444,7 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
         | FindStatement::KnownKey
         | FindStatement::FieldUniverse
         | FindStatement::BareDirectory
+        | FindStatement::MatchProbe
         | FindStatement::HydrateDocuments
         | FindStatement::NestedHead(_)
         | FindStatement::NestedTotal(_) => {
@@ -581,6 +589,21 @@ pub(crate) fn compose_bare_directory(path: &str, lower: &str, upper: &str) -> (S
             Value::Text(lower.to_string()),
             Value::Text(upper.to_string()),
         ],
+    )
+}
+
+/// [`FindStatement::MatchProbe`]: whether any document matches the full-text
+/// `query`.
+///
+/// The answer is not what the probe is run for: the engine parses a query when
+/// the selection is first stepped, so a statement that stepped no row — one
+/// bounded by `LIMIT 0`, which SQLite answers without opening the selection —
+/// would pass a query the page's own statement then fails on. `EXISTS` stops
+/// at the first match, so the probe reads at most one.
+pub(crate) fn compose_match_probe(query: &str) -> (String, Vec<Value>) {
+    (
+        "SELECT EXISTS (SELECT 1 FROM documents_fts WHERE documents_fts MATCH ?1)".to_string(),
+        vec![Value::Text(query.to_string())],
     )
 }
 

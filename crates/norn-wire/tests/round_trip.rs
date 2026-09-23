@@ -481,6 +481,7 @@ fn unsatisfied_parts() -> Vec<Unsatisfied> {
         Unsatisfied::unknown_predicate_key("due", vec!["date".to_string()]),
         Unsatisfied::bare_directory("docs"),
         Unsatisfied::malformed_glob("docs/[", "the character class does not close"),
+        Unsatisfied::malformed_query("design AND", "fts5: syntax error near \"\""),
         Unsatisfied::impossible_path("/etc/passwd"),
         Unsatisfied::missing_section("Design"),
         Unsatisfied::missing_block("a1"),
@@ -2875,6 +2876,13 @@ fn an_unsatisfied_part_is_an_object_tagged_part() {
     assert_eq!(
         wire(&Unsatisfied::bare_directory("docs")),
         r#"{"part":"bare_directory","path":"docs"}"#
+    );
+    assert_eq!(
+        wire(&Unsatisfied::malformed_query(
+            "design AND",
+            "fts5: syntax error near \"\""
+        )),
+        r#"{"part":"malformed_query","query":"design AND","problem":"fts5: syntax error near \"\""}"#
     );
     assert_eq!(
         wire(&Unsatisfied::resolves_not_applicable(target(

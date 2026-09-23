@@ -73,6 +73,11 @@
 //!   stands is none of these: it is a part that can be applied and matches no
 //!   document, and it is answered as that — an empty page, not a report.
 //! - **A resolution target that is not a suffix address** names no document.
+//! - **A match part whose query the full-text engine cannot parse** is
+//!   malformed. Whether it parses is asked before the page runs, by one probe
+//!   of the full-text index; a malformed query's part is reported with the
+//!   engine's words and the page is answered without it, as an unknown
+//!   predicate key's is.
 //!
 //! A `resolves` part enumerates the target's ambiguity class through its suffix
 //! probe, both reductions of a dotted leaf included, and compares suffix keys
@@ -134,7 +139,7 @@ pub use statement::{
 };
 use statement::{
     Filter, Section, SectionStart, compose_bare_directory, compose_documents, compose_known_key,
-    compose_nested_head, compose_nested_total, compose_page, compose_universe,
+    compose_match_probe, compose_nested_head, compose_nested_total, compose_page, compose_universe,
 };
 
 /// How many rows a page holds when a request names no bound.
@@ -232,8 +237,9 @@ pub struct KeyPage {
     /// The parts of the request that could not be applied as asked, in the
     /// order the request names them: the sort key, then the conjunction's
     /// parts. A page whose conjunction holds a part no document can satisfy is
-    /// empty; an unknown key's part is reported and the page is answered
-    /// without it.
+    /// empty; an unknown key's part, and a match part whose query the
+    /// full-text engine cannot parse, are reported and the page is answered
+    /// without them.
     pub unsatisfied: Vec<Unsatisfied>,
 }
 
@@ -440,7 +446,11 @@ impl Compiled<'_> {
 /// A compiled part of the conjunction.
 enum Part {
     Filter(Filter),
+    /// A part no document can satisfy: reported, and every section is empty.
     MatchesNothing(Unsatisfied),
+    /// A part that cannot be applied as asked: reported, and the page is
+    /// answered without it.
+    Unapplied(Unsatisfied),
 }
 
 /// The columns a request projects, read once.
@@ -630,7 +640,8 @@ impl Snapshot {
     /// The statements are composed by the same calls the find runs, over the
     /// same compiled request, and explained on this snapshot's read-only
     /// connection. The probes a compile asks — the fingerprint, whether a key
-    /// is known, the field universe, whether a path is a bare directory — run
+    /// is known, the field universe, whether a path is a bare directory,
+    /// whether a full-text query parses — run
     /// here as they run there, and are counted; each is listed once per time
     /// it ran. A page statement is listed wherever the page could reach it from
     /// `resume`, whether or not the rows would have filled the page before it;
@@ -990,6 +1001,7 @@ impl Snapshot {
                     matches_nothing = true;
                     reports.push(Report::Part(part));
                 }
+                Part::Unapplied(part) => reports.push(Report::Part(part)),
             }
         }
         Ok(Compiled {
@@ -1060,9 +1072,10 @@ impl Snapshot {
     /// One part of the conjunction as the filter a statement spells, or the
     /// report that it matches nothing.
     ///
-    /// Only a finding part reads the fingerprint, and only a path part with
-    /// no wildcard probes whether it names a bare directory: the other parts
-    /// bind nothing the snapshot has to be asked for.
+    /// Only a finding part reads the fingerprint, only a path part with no
+    /// wildcard probes whether it names a bare directory, and only a match
+    /// part probes whether the full-text engine parses its query: the other
+    /// parts bind nothing the snapshot has to be asked for.
     fn compile_predicate(
         &mut self,
         predicate: &Predicate,
@@ -1120,7 +1133,13 @@ impl Snapshot {
                 };
                 filter(shape, vec![text(key), Value::Text(bound)])
             }
-            Predicate::Matches { query, .. } => filter(FindFilter::FullText, vec![text(query)]),
+            Predicate::Matches { query, .. } => match self.match_problem(query, lookups)? {
+                Some(problem) => Ok(Part::Unapplied(Unsatisfied::malformed_query(
+                    query.clone(),
+                    problem,
+                ))),
+                None => filter(FindFilter::FullText, vec![text(query)]),
+            },
             Predicate::Path { glob, .. } => match Pattern::parse(glob) {
                 Err(problem) => Ok(Part::MatchesNothing(Unsatisfied::malformed_glob(
                     glob.clone(),
@@ -1168,6 +1187,42 @@ impl Snapshot {
         }
     }
 
+    /// What the full-text engine says is wrong with `query`, or `None` where it
+    /// parses. One [`FindStatement::MatchProbe`], counted on this snapshot and
+    /// kept for [`Snapshot::find_plans`].
+    ///
+    /// A statement that does not prepare is the store's problem and refused as
+    /// one; a query the engine cannot parse is the request's, and is read as
+    /// that exactly where [`query_problem`] says so.
+    fn match_problem(
+        &mut self,
+        query: &str,
+        lookups: &mut Lookups,
+    ) -> Result<Option<String>, StoreError> {
+        const OPERATION: &str = "asking whether a full-text query parses";
+        let (sql, values) = compose_match_probe(query);
+        self.count_statement();
+        let answered = self
+            .connection()
+            .prepare(&sql)
+            .map_err(|problem| error::sql(OPERATION, problem))?
+            .query_row(params_from_iter(values.iter().cloned()), |row| {
+                row.get::<_, bool>(0)
+            });
+        lookups.probes.push(Probe {
+            statement: FindStatement::MatchProbe,
+            sql,
+            values,
+        });
+        match answered {
+            Ok(_) => Ok(None),
+            Err(problem) => match query_problem(&problem) {
+                Some(said) => Ok(Some(said)),
+                None => Err(error::sql(OPERATION, problem)),
+            },
+        }
+    }
+
     /// The report a parsed glob is answered with where it can match nothing by
     /// construction, or `None` where it can be applied.
     ///
@@ -1206,6 +1261,27 @@ impl Snapshot {
             return Ok(Some(Unsatisfied::impossible_path(source)));
         }
         Ok(None)
+    }
+}
+
+/// What `problem`, met stepping a prepared [`FindStatement::MatchProbe`], says
+/// is wrong with the query it bound, or `None` where it is a problem of the
+/// store's.
+///
+/// The full-text engine parses a query when the probe is stepped, and reports
+/// every query it cannot read — `fts5: syntax error near …`, an unterminated
+/// string, a column filter naming no column — as the plain `SQLITE_ERROR`, with
+/// its words as the message. A damaged index, a failed read, a busy or an
+/// interrupted connection each report a code of their own, and stay the
+/// store's.
+fn query_problem(problem: &norn_db::rusqlite::Error) -> Option<String> {
+    match problem {
+        norn_db::rusqlite::Error::SqliteFailure(failure, message)
+            if failure.extended_code == norn_db::rusqlite::ffi::SQLITE_ERROR =>
+        {
+            Some(message.clone().unwrap_or_else(|| failure.to_string()))
+        }
+        _ => None,
     }
 }
 
@@ -1280,5 +1356,48 @@ fn sections<'a>(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use norn_db::rusqlite::{Error, ffi};
+
+    use super::query_problem;
+
+    fn failure(extended_code: i32, message: &str) -> Error {
+        Error::SqliteFailure(ffi::Error::new(extended_code), Some(message.to_string()))
+    }
+
+    /// The engine's words for a query it cannot read are the request's
+    /// problem; a damaged index, a failed read, a busy or an interrupted
+    /// connection is the store's, whatever its message says.
+    #[test]
+    fn only_a_query_the_engine_cannot_read_is_the_requests_problem() {
+        for said in [
+            "fts5: syntax error near \"\"",
+            "unterminated string",
+            "no such column: title",
+        ] {
+            assert_eq!(
+                query_problem(&failure(ffi::SQLITE_ERROR, said)).as_deref(),
+                Some(said)
+            );
+        }
+        for code in [
+            ffi::SQLITE_CORRUPT_VTAB,
+            ffi::SQLITE_CORRUPT,
+            ffi::SQLITE_IOERR_READ,
+            ffi::SQLITE_BUSY,
+            ffi::SQLITE_INTERRUPT,
+            ffi::SQLITE_NOMEM,
+        ] {
+            assert_eq!(
+                query_problem(&failure(code, "fts5: syntax error near \"\"")),
+                None,
+                "code {code} was read as the request's"
+            );
+        }
+        assert_eq!(query_problem(&Error::QueryReturnedNoRows), None);
     }
 }

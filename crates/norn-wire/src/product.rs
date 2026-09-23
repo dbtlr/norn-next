@@ -77,6 +77,15 @@ pub enum Unsatisfied {
         /// What about it does not parse, in words.
         problem: String,
     },
+    /// A match part named a full-text query the engine cannot parse, so that
+    /// part filtered nothing.
+    #[non_exhaustive]
+    MalformedQuery {
+        /// The query the request named.
+        query: String,
+        /// What about it does not parse, in the engine's words.
+        problem: String,
+    },
     /// A path part named a path no document in this vault can have.
     #[non_exhaustive]
     ImpossiblePath {
@@ -139,6 +148,15 @@ impl Unsatisfied {
     pub fn malformed_glob(glob: impl Into<String>, problem: impl Into<String>) -> Self {
         Unsatisfied::MalformedGlob {
             glob: glob.into(),
+            problem: problem.into(),
+        }
+    }
+
+    /// A match part named `query`, which the full-text engine cannot parse,
+    /// for `problem`.
+    pub fn malformed_query(query: impl Into<String>, problem: impl Into<String>) -> Self {
+        Unsatisfied::MalformedQuery {
+            query: query.into(),
             problem: problem.into(),
         }
     }

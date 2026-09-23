@@ -734,7 +734,7 @@ reporting surface no task has opened.
 None of those is a query shape's bar. **The predicate + sort + page shape has a builder**:
 the find builder compiles a request's conjunction, order and page bound into statements a
 read snapshot runs, and names them in an enumeration of its own under the same discipline —
-ten statements and twelve filter shapes, each explained through the same composer the find
+eleven statements and twelve filter shapes, each explained through the same composer the find
 runs, on the read-only connection, each carrying a plan bar with a negative control run
 against it, and a census that holds every statement slot and every filter slot to exactly
 one bar. The statements are the active-fingerprint point read; the path page, a seek of the
@@ -742,7 +742,9 @@ case-insensitive path index in either direction; a field sort's two sections —
 section, a seek of the raw or the typed order's least-value marker index from a
 `(value, path)` position, and the missing section, a seek of the path index; the known-key
 probe and the field-universe walk, both reading the presence rows alone; the bare-directory
-probe, two seeks of the path index; and the hydration of the rows a page returns — the
+probe, two seeks of the path index; the match probe, one read of the full-text index
+through its `MATCH` selection, which is where a query the engine cannot parse is met before
+the page runs; and the hydration of the rows a page returns — the
 document rows by id, and each projected nested collection's head and total by its
 `(document, ordinal)` index. No page sorts. Each filter is a membership test one index seek
 answers, judged on the rows its own subquery reads: equality, inequality and membership on
