@@ -18,7 +18,9 @@ use crate::request::range_predicate_from;
 /// holds each shape once, [`FindStatement::slot`] is exhaustive over the enum,
 /// and [`FIND_STATEMENTS`] is the count a census is checked against. A page's
 /// filters are spelled inside the page statement they narrow, and are named by
-/// [`FindFilter`].
+/// [`FindFilter`]. Each page statement below is named by the index it seeks
+/// with no filter; a filter that keeps what it seeks drives the statement
+/// instead, and the statement sorts what that seek handed it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FindStatement {
     /// The pinned vault-schema fingerprint, read on the snapshot: what a
@@ -215,7 +217,8 @@ pub enum FindFilter {
     /// The document carries the tag, on `document_tags_name`.
     Tag,
     /// A finding of the kind stands over the document under the active
-    /// fingerprint, on `findings_vault_schema_fingerprint`.
+    /// fingerprint, on `findings_vault_schema_fingerprint`, each finding's
+    /// path read back to its document on `documents_path`.
     Finding,
 }
 
@@ -240,6 +243,14 @@ impl FindFilter {
             Self::Tag,
             Self::Finding,
         ]
+    }
+
+    /// Whether this filter excludes: its seek reaches the documents a page
+    /// must not hold rather than the ones it keeps, so a page is never driven
+    /// from it. Inequality and absence exclude; every other filter keeps what
+    /// its seek reaches.
+    pub fn excludes(self) -> bool {
+        matches!(self, Self::NotEqual(_) | Self::Absent)
     }
 
     /// Where this filter stands in [`Self::all`]. Exhaustive, so a shape added
@@ -279,18 +290,10 @@ pub(crate) struct Filter {
     pub(crate) values: Vec<Value>,
 }
 
-/// The columns a filter tests: the page's document id, and its path.
-#[derive(Clone, Copy)]
-struct Subject {
-    id: &'static str,
-    path: &'static str,
-}
-
 impl Filter {
-    /// This filter's fragment over `subject`, its placeholders numbered by
-    /// `binder`.
-    fn spell(&self, subject: Subject, binder: &mut Binder) -> String {
-        let Subject { id, path } = subject;
+    /// This filter's fragment: a membership test of `id`, the column holding
+    /// the page's document id, its placeholders numbered by `binder`.
+    fn spell(&self, id: &str, binder: &mut Binder) -> String {
         // The number this fragment's first value takes: a fragment's values
         // are bound in the order it names them, so they number from here.
         let first = binder.next_number();
@@ -380,8 +383,10 @@ impl Filter {
             FindFilter::Finding => {
                 let (fingerprint, kind) = (next(), next());
                 format!(
-                    "{path} IN (SELECT fg.path FROM findings AS fg
-                     WHERE fg.vault_schema_fingerprint = {fingerprint} AND fg.kind = {kind})"
+                    "{id} IN (SELECT df.id FROM documents AS df
+                     WHERE df.path IN (SELECT fg.path FROM findings AS fg
+                         WHERE fg.vault_schema_fingerprint = {fingerprint}
+                           AND fg.kind = {kind}))"
                 )
             }
         }
@@ -436,10 +441,29 @@ pub(crate) struct Section<'a> {
 /// ascending — the empty text — and above every row descending — an empty
 /// blob, which SQLite orders after every text. So the text does not branch on
 /// whether the section resumes, and the plan is the same either way.
+///
+/// **A section narrowed by a filter that keeps what it seeks is driven from
+/// that seek.** The section's own order index is spelled out of reach — the
+/// term that would seek it stands behind a unary `+`, which SQLite reads as
+/// the same value and never as an index constraint — so the section reaches
+/// each document the filter's seek handed it by that document's key and sorts
+/// them: its cost is the filter's matches, not the order index's rows. A
+/// section with no filter, or narrowed only by filters that exclude
+/// ([`FindFilter::excludes`]), seeks its order index and tests each row it
+/// reads.
 pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
     let mut binder = Binder::default();
     let text = |value: Option<&str>| value.map_or(Value::Null, |value| Value::Text(value.into()));
-    let (head, ordering, subject) = match section.statement {
+    let order_seek = if section
+        .filters
+        .iter()
+        .any(|filter| !filter.shape.excludes())
+    {
+        "+"
+    } else {
+        ""
+    };
+    let (head, ordering, id) = match section.statement {
         FindStatement::ActiveFingerprint
         | FindStatement::KnownKey
         | FindStatement::FieldUniverse
@@ -456,15 +480,13 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             (
                 format!(
                     "SELECT d.id, d.path, NULL FROM documents AS d
-                     WHERE d.path {comparison}= COALESCE({after}, {beyond}) COLLATE NOCASE
+                     WHERE {order_seek}d.path {comparison}= COALESCE({after}, {beyond})
+                           COLLATE NOCASE
                        AND ({after} IS NULL OR d.path {comparison} {after} COLLATE NOCASE
                             OR d.path {comparison} {after})"
                 ),
                 format!("d.path COLLATE NOCASE{descending}, d.path{descending}"),
-                Subject {
-                    id: "d.id",
-                    path: "d.path",
-                },
+                "d.id",
             )
         }
         FindStatement::FieldValuePage(order, direction) => {
@@ -476,15 +498,12 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             (
                 format!(
                     "SELECT f.document, f.path, f.{column} FROM document_fields AS f
-                     WHERE f.key = {key} AND f.{marker} = 1
+                     WHERE f.key = {key} AND {order_seek}f.{marker} = 1
                        AND (f.{column}, f.path) {comparison}
                            (COALESCE({sort}, {beyond}), COALESCE({after}, {beyond}))"
                 ),
                 format!("f.{column}{descending}, f.path{descending}"),
-                Subject {
-                    id: "f.document",
-                    path: "f.path",
-                },
+                "f.document",
             )
         }
         FindStatement::FieldMissingPage(order, direction) => {
@@ -495,15 +514,12 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             (
                 format!(
                     "SELECT d.id, d.path, NULL FROM documents AS d
-                     WHERE d.path {comparison} COALESCE({after}, {beyond})
+                     WHERE {order_seek}d.path {comparison} COALESCE({after}, {beyond})
                        AND NOT EXISTS (SELECT 1 FROM document_fields AS m
                            WHERE m.document = d.id AND m.key = {key} AND m.{marker} = 1)"
                 ),
                 format!("d.path{descending}"),
-                Subject {
-                    id: "d.id",
-                    path: "d.path",
-                },
+                "d.id",
             )
         }
     };
@@ -513,7 +529,7 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
         .map(|filter| {
             format!(
                 "\n                       AND {}",
-                filter.spell(subject, &mut binder)
+                filter.spell(id, &mut binder)
             )
         })
         .collect();

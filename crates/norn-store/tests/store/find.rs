@@ -1436,6 +1436,109 @@ fn a_page_steps_through_no_full_scan_and_sorts_only_where_a_filter_narrows_it() 
     });
 }
 
+/// The alias a page statement reads its own rows under: `f` for a field
+/// sort's valued section, which reads the marker rows, and `d` otherwise.
+fn page_alias(statement: FindStatement) -> &'static str {
+    match statement {
+        FindStatement::FieldValuePage(..) => "f",
+        _ => "d",
+    }
+}
+
+/// Judge a page statement narrowed by a filter that keeps what it seeks: its
+/// own rows are reached one by one, by the document id each match the filter's
+/// seek handed it carries — the row id, or the document and key of its marker
+/// row — so the page reads nothing of its order index and sorts the matches,
+/// once.
+fn judge_driven_by_filter(page: &QueryPlan, alias: &str) {
+    page.assert_no_full_scan_of("documents");
+    let own = rows_of(page, alias);
+    assert!(
+        !own.rows().is_empty()
+            && own.rows().iter().all(|row| matches!(
+                row.constraint(),
+                Some("(rowid=?)" | "(document=? AND key=?)")
+            )),
+        "the page does not reach its rows by the keys its filter's seek handed it: {:?}\n\
+         emitted SQL: {}",
+        page.rows(),
+        page.sql()
+    );
+    let sorts = page
+        .rows()
+        .iter()
+        .filter(|row| row.detail.contains("TEMP B-TREE"))
+        .count();
+    assert!(
+        sorts <= 1,
+        "the page sorts more than once: {:?}\nemitted SQL: {}",
+        page.rows(),
+        page.sql()
+    );
+}
+
+/// **A page with no filter is a seek of its order index; a page with a filter
+/// drives from the filter's seek and sorts the matched set.** Every page
+/// statement of every order, with no filter, builds no temporary B-tree. With
+/// a filter that keeps what it seeks — every filter shape but inequality and
+/// absence, in every form the filter bar spells it — every page statement
+/// reaches its own rows by the key each match carries and never reads
+/// `documents` end to end, so what it sorts is the filter's seek output and
+/// its cost is the match count. A page narrowed only by inequality or absence
+/// has no seek of what it keeps, and reads its order index as a page with no
+/// filter does: no temporary B-tree.
+///
+/// Controls: a page with no filter, which seeks its order index, fails the
+/// driven bar; `documents_path_nocase` dropped, the path page with no filter
+/// sorts and fails the unfiltered bar.
+#[test]
+fn a_filtered_page_drives_from_its_filter_and_an_unfiltered_page_seeks_its_order() {
+    let mut seeded = Seeded::new("find-page-driver");
+    for order in page_orders() {
+        for plan in seeded.plans(&order) {
+            if is_page(plan.statement) {
+                self::plan(&plan).assert_no_temp_btree();
+            }
+        }
+        for bar in filter_bars() {
+            for (part, shape, _) in &bar.probes {
+                let params = order.clone().with_predicates([part.clone()]);
+                for page in seeded.plans(&params) {
+                    if !is_page(page.statement) {
+                        continue;
+                    }
+                    if shape.excludes() {
+                        self::plan(&page).assert_no_temp_btree();
+                    } else {
+                        judge_driven_by_filter(&self::plan(&page), page_alias(page.statement));
+                    }
+                }
+            }
+        }
+    }
+
+    // Control: a page no filter narrows seeks its order index.
+    for order in page_orders() {
+        for page in seeded.plans(&order) {
+            if is_page(page.statement) {
+                failure_of("a page with no filter", || {
+                    judge_driven_by_filter(&self::plan(&page), page_alias(page.statement))
+                });
+            }
+        }
+    }
+
+    // Control: the index the path order is held by, gone.
+    seeded.drop_index("documents_path_nocase");
+    let page = plan_of(
+        &seeded.plans(&request()),
+        FindStatement::PathPage(PageDirection::Ascending),
+    );
+    failure_of("documents_path_nocase dropped", || {
+        page.assert_no_temp_btree()
+    });
+}
+
 // ---- what a page answers ----
 
 /// **A document whose sort field holds a set appears once, at its least value,

@@ -7,15 +7,21 @@
 //! row id, the path and the value the page is ordered by — in the order the
 //! request states, and where the next page starts.
 //!
-//! # A page is sections, each one index seek
+//! # A page is sections, each one seek
+//!
+//! **A page with no filter is a seek of its order index**, and its rows come
+//! off the index in page order, so nothing sorts. **A page with a filter
+//! drives from the filter's seek and sorts the matched set**, so its cost is
+//! bounded by the match count, which is what a narrowing part narrows.
 //!
 //! A path order is one section: `documents_path_nocase`, the path folded by
 //! ASCII case with the bytewise path as the tie-break, so the order is total.
 //!
 //! A field order is two. The **valued** section reads the key's marker rows —
 //! each document's least value under the order, one row per document — in
-//! `(value, path)` order on the order's marker index, so a document whose field
-//! holds a set appears once, at its least value. The **missing** section reads
+//! `(value, path)` order, on the order's marker index where no filter drives
+//! the page, so a document whose field holds a set appears once, at its least
+//! value. The **missing** section reads
 //! the documents holding no value under the order — the key absent, every value
 //! null, or, under the typed order, no value that reads as the declared type —
 //! in bytewise path order. The missing section stands before the valued one
@@ -40,11 +46,18 @@
 //! comparison; a value that does not read as the type names no place in the
 //! order and is refused. A key with no typed order compares raw text.
 //!
-//! # A filter is a membership test one seek answers
+//! # A filter is one seek, and a page drives from it
 //!
 //! Each part of the conjunction narrows every section by the rows one index
 //! seek of its own reaches — [`FindFilter`] names each and the index it
-//! seeks — so a part costs the rows it matches, never the vault. A part that
+//! seeks — so a part costs the rows it matches, never the vault. A section a
+//! part narrows reaches each document the part's seek handed it by the
+//! document's key, and sorts them in the page's order: the order index is not
+//! read at all. Inequality and absence are the exception
+//! ([`FindFilter::excludes`]): their seek reaches the documents a page must
+//! not hold, so there is no seek of what they keep, and a section they alone
+//! narrow seeks its order index as a section with no filter does and tests
+//! each row against them. A part that
 //! can match nothing by construction is reported in [`Found::unsatisfied`]
 //! and the page is empty: a conjunction holding it matches no document, and
 //! the report is what keeps that from reading as a vault with nothing in it.

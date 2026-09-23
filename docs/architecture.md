@@ -746,8 +746,16 @@ probe, two seeks of the path index; the match probe, one read of the full-text i
 through its `MATCH` selection, which is where a query the engine cannot parse is met before
 the page runs; and the hydration of the rows a page returns — the
 document rows by id, and each projected nested collection's head and total by its
-`(document, ordinal)` index. No page sorts. Each filter is a membership test one index seek
-answers, judged on the rows its own subquery reads: equality, inequality and membership on
+`(document, ordinal)` index. A page with no filter is a seek of its order index, and sorts
+nothing. A page with a filter drives from the filter's seek and sorts the matched set: its
+cost is bounded by the match count, which is what a narrowing part narrows. Inequality and
+absence seek the documents a page must not hold, so a page they alone narrow seeks its order
+index as a page with no filter does and tests each row against them. Two bars hold this,
+one on the plans and one on the work SQLite counted running the page: no page statement
+reads `documents` end to end or steps through a full scan, no page without a filter builds a
+temporary B-tree or sorts, and a filtered page reaches its rows by the keys its filter's seek
+handed it and sorts at most once per page statement. Each filter is one index seek, judged
+on the rows its own subquery reads: equality, inequality and membership on
 `(key, raw)`, or on `(key, typed)` where the key carries a typed order; presence and
 absence on the presence rows; a `before` or `after` bound on the order's value column; full
 text through the index's own `MATCH` selection; a path glob on the range its literal prefix
