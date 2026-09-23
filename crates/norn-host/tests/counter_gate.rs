@@ -293,40 +293,26 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     let derived = the_host_spends(
         &host,
         "derive the document written under its attachment",
-        |spent| spent.get("documents_derived") > 0 && spent.get("documents_upserted") > 0,
+        &[
+            "documents_derived",
+            "document_opens",
+            "changesets_applied",
+            "documents_upserted",
+        ],
     );
     record_the_counters("a document written under a live attachment", &derived);
-    for count in [
-        "documents_derived",
-        "document_opens",
-        "changesets_applied",
-        "documents_upserted",
-    ] {
-        assert!(
-            derived.get(count) > 0,
-            "the host derived a document written under its attachment and `{count}` did not move: \
-             {derived:?}"
-        );
-    }
 
     std::fs::remove_file(&written).expect("removing the written document");
     let deleted = the_host_spends(
         &host,
         "delete the document removed under its attachment",
-        |spent| spent.get("documents_deleted") > 0,
+        &[
+            "changesets_applied",
+            "documents_deleted",
+            "tombstones_recorded",
+        ],
     );
     record_the_counters("a document removed under a live attachment", &deleted);
-    for count in [
-        "changesets_applied",
-        "documents_deleted",
-        "tombstones_recorded",
-    ] {
-        assert!(
-            deleted.get(count) > 0,
-            "the host deleted a document removed under its attachment and `{count}` did not \
-             move: {deleted:?}"
-        );
-    }
 }
 
 /// How many statements each page of the live-hold find runs, on the first
@@ -343,13 +329,14 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
 /// more than a page's rows.
 const STATEMENTS_PER_PAGE: u64 = 6;
 
-/// What the host's account moved from now until `done` holds of it, waiting
-/// for a job the host runs on its own.
-fn the_host_spends(
-    host: &attach::ServingHost,
-    what: &str,
-    done: impl Fn(&CounterSnapshot) -> bool,
-) -> CounterSnapshot {
+/// What the host's account moved from now until every one of `counts` has
+/// moved, waiting for a job the host runs on its own.
+///
+/// The wait is for the whole set rather than for any one of it: the host folds
+/// a job's counts into its account one at a time, so a reading taken part-way
+/// through that fold shows some of a job's counts and not yet the rest. A
+/// count that never moves exhausts the wait, and the failure names it.
+fn the_host_spends(host: &attach::ServingHost, what: &str, counts: &[&str]) -> CounterSnapshot {
     let before = vault_work(host);
     wait_until(
         &format!("the host to {what}"),
@@ -358,10 +345,17 @@ fn the_host_spends(
             let spent = before
                 .delta(&vault_work(host))
                 .expect("two readings of one account");
-            if done(&spent) {
+            let unmoved: Vec<&str> = counts
+                .iter()
+                .copied()
+                .filter(|count| spent.get(count) == 0)
+                .collect();
+            if unmoved.is_empty() {
                 Observed::Met(spent)
             } else {
-                Observed::pending(format!("the host's account reads {spent:?}"))
+                Observed::pending(format!(
+                    "{unmoved:?} have not moved, and the host's account reads {spent:?}"
+                ))
             }
         },
     )
