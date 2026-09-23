@@ -664,6 +664,9 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::VaultSchemaPin => {
             "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for"
         }
+        ExplainedStatement::FindingCandidates(_) | ExplainedStatement::FindingClasses(_) => {
+            "a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead"
+        }
     }
 }
 
@@ -682,6 +685,14 @@ const ENUMERATIONS: &[ExplainedStatement<'static>] = &[
 const FEEDS: &[ExplainedStatement<'static>] = &[
     ExplainedStatement::DocumentFeedPage,
     ExplainedStatement::TombstoneFeedPage,
+];
+
+/// The two statements a findings read collects each finding's detail through,
+/// once per chunk of ids, named once so the plan bar and the census judge the
+/// same pair. Each is spelled by how many ids its chunk holds.
+const FINDING_DETAIL: &[fn(usize) -> ExplainedStatement<'static>] = &[
+    ExplainedStatement::FindingCandidates,
+    ExplainedStatement::FindingClasses,
 ];
 
 /// **Every statement findings maintenance runs reaches its rows through an
@@ -909,12 +920,14 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     .chain(ENUMERATIONS.iter().copied())
     .chain(FEEDS.iter().copied())
     .chain(ExplainedStatement::point_reads(&subject))
+    .chain(FINDING_DETAIL.iter().map(|detail| detail(1)))
     .map(barred_by)
     .collect();
     assert_eq!(
         bars,
         [
             "a_feed_page_walks_its_covering_index_and_reads_no_row",
+            "a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead",
             "a_heal_page_seeks_the_index_that_holds_its_order",
             "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for",
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
@@ -1019,7 +1032,7 @@ fn the_point_read_census_holds_every_statement_that_says_it_is_one() {
     let probe = class_probe("glossary").expect("a class stem");
     let kinds = [FindingKind::PathNamesNoDocument];
 
-    let every = ExplainedStatement::all(&subject, &probe, &kinds);
+    let every = ExplainedStatement::all(&subject, &probe, &kinds, 1);
     assert_eq!(every.len(), norn_store::STATEMENTS);
     for (position, statement) in every.iter().enumerate() {
         assert_eq!(
@@ -1127,7 +1140,9 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::StoredSuffixKeyPage
         | ExplainedStatement::IndexedTermPage
         | ExplainedStatement::DocumentFeedPage
-        | ExplainedStatement::TombstoneFeedPage => None,
+        | ExplainedStatement::TombstoneFeedPage
+        | ExplainedStatement::FindingCandidates(_)
+        | ExplainedStatement::FindingClasses(_) => None,
     }
 }
 
@@ -1140,12 +1155,12 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
 /// Four assertions per statement, and the last two are what make it a bar
 /// rather than a description:
 ///
-/// - It does not read its table end to end, and it searches that table.
+/// - It does not read its table end to end, and the step that searches that
+///   table runs through [`PointReadBar::access`].
 /// - The step that searches the table carries an **equality** constraint. A
 ///   search alone is not a point read: a range over the same index reports the
-///   same `SEARCH … USING INDEX` row, and for the pinned-schema read — whose
-///   `WITHOUT ROWID` primary key has no index name — the constraint is the only
-///   thing there is to judge.
+///   same `SEARCH … USING INDEX` row, and a range over a `WITHOUT ROWID`
+///   primary key the same `SEARCH … USING PRIMARY KEY` row.
 /// - It sorts only where [`PointReadBar::sorts`] says its stated order is one
 ///   no index holds, so a reader that grew a sorter over an order an index
 ///   already gave it reddens here.
@@ -1184,6 +1199,60 @@ fn a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for() {
         read.assert_uses_index(expected.table, expected.access);
         if !expected.sorts {
             read.assert_no_temp_btree();
+        }
+    }
+}
+
+/// **A finding's detail is read by primary key, a chunk of ids at a time.**
+/// Every findings read — one path's, one class's, and the page that drains the
+/// table — collects each finding's candidate head and class memberships through
+/// these two statements, once per chunk of the findings it found. A chunk that
+/// reached its rows by reading the detail tables end to end would make every
+/// findings read cost every finding the store holds.
+///
+/// Both tables are `WITHOUT ROWID` and keyed by `(finding, …)`, so the ids lead
+/// each primary key: one seek per id, and the rows come off each seek in the
+/// order the statement states, so nothing sorts. `finding_classes` carries a
+/// second index as well, on `class_key`, which is the direction a class read
+/// seeks; a chunk holds no class key, so the bar names the primary key and a
+/// plan that answered out of the class index fails it.
+///
+/// The bar ranges over every chunk size a read can emit, from one id to
+/// [`norn_store::FINDING_ID_CHUNK`]: the statement text is spelled by the size,
+/// and a one-id list is a different statement to the planner than a longer one.
+/// A size outside that range is not a statement any reader runs, and the seam
+/// refuses to explain one.
+#[test]
+fn a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead() {
+    let scratch = Scratch::new("finding-detail-plans");
+    let mut store = scratch.open();
+    let request = store.begin_request();
+
+    for detail in FINDING_DETAIL {
+        let table = match detail(1) {
+            ExplainedStatement::FindingCandidates(_) => "finding_candidates",
+            ExplainedStatement::FindingClasses(_) => "finding_classes",
+            other => panic!("`FINDING_DETAIL` names {other:?}, which is not a detail read"),
+        };
+        for ids in 1..=norn_store::FINDING_ID_CHUNK {
+            let chunk = plan(
+                request
+                    .emitted_plan(detail(ids))
+                    .expect("a query plan for a finding-detail chunk"),
+            );
+            chunk.assert_no_full_scan();
+            chunk.assert_uses_index(table, Access::PrimaryKey);
+            chunk.assert_search_constraint(table, "(finding=?)");
+            chunk.assert_no_temp_btree();
+        }
+        for outside in [0, norn_store::FINDING_ID_CHUNK + 1] {
+            assert!(
+                matches!(
+                    request.emitted_plan(detail(outside)),
+                    Err(StoreError::Bound { .. })
+                ),
+                "a chunk of {outside} ids is not one a reader emits, and the seam explained it"
+            );
         }
     }
 }

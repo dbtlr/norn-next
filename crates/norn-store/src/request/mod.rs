@@ -132,13 +132,15 @@ const STORED_DOCUMENT_COLUMNS: &str = "path, content_hash, byte_length, body_off
 /// A class or a path can hold more findings than SQLite's 32766-parameter
 /// bound leaves room for in one statement — the candidate and class reads bind
 /// one parameter per id — so [`Request::findings`] chunks rather than binding
-/// the whole list at once.
+/// the whole list at once. Every chunk holds between one id and this many, so
+/// those are the statements [`ExplainedStatement::FindingCandidates`] and
+/// [`ExplainedStatement::FindingClasses`] name.
 #[cfg(not(test))]
-const FINDING_ID_CHUNK: usize = 500;
+pub const FINDING_ID_CHUNK: usize = 500;
 /// Shrunk under test, so a unit test can cross a chunk boundary without
 /// writing tens of thousands of rows to do it.
 #[cfg(test)]
-const FINDING_ID_CHUNK: usize = 4;
+pub const FINDING_ID_CHUNK: usize = 4;
 
 /// One request's worth of work against a store.
 pub struct Request<'a> {
@@ -1177,16 +1179,9 @@ impl<'a> Request<'a> {
         }
 
         for chunk in ids.chunks(FINDING_ID_CHUNK) {
-            let placeholders = (1..=chunk.len())
-                .map(|index| format!("?{index}"))
-                .collect::<Vec<String>>()
-                .join(", ");
             let candidates = self.read_all(
-                &format!(
-                    "SELECT finding, path, suffix FROM finding_candidates
-                     WHERE finding IN ({placeholders}) ORDER BY finding, rank"
-                ),
-                params_from_iter(chunk.iter()),
+                &finding_candidates_sql(chunk.len()),
+                finding_id_parameters(chunk),
                 stored_candidate,
                 "reading a finding's candidates",
             )?;
@@ -1196,11 +1191,8 @@ impl<'a> Request<'a> {
                 }
             }
             let classes = self.read_all(
-                &format!(
-                    "SELECT finding, class_key FROM finding_classes
-                     WHERE finding IN ({placeholders}) ORDER BY finding, class_key"
-                ),
-                params_from_iter(chunk.iter()),
+                &finding_classes_sql(chunk.len()),
+                finding_id_parameters(chunk),
                 stored_class,
                 "reading a finding's classes",
             )?;
@@ -1593,6 +1585,46 @@ const STORED_TOMBSTONE_SQL: &str = "SELECT path, last_content_hash, provenance, 
 /// the set the seek already bounded.
 fn stored_findings_sql() -> String {
     format!("SELECT {FINDING_COLUMNS} FROM findings WHERE path = ?1 ORDER BY generation, id")
+}
+
+/// The statement a findings read emits for the candidate heads of a chunk of
+/// `ids` findings.
+///
+/// The ids lead the primary key `(finding, rank)`, so the chunk is one seek per
+/// id and the rows come off each seek in the order the reader states.
+fn finding_candidates_sql(ids: usize) -> String {
+    format!(
+        "SELECT finding, path, suffix FROM finding_candidates
+         WHERE finding IN ({}) ORDER BY finding, rank",
+        finding_id_placeholders(ids)
+    )
+}
+
+/// The statement a findings read emits for the class memberships of a chunk of
+/// `ids` findings.
+///
+/// The ids lead the primary key `(finding, class_key)`, which is the finding
+/// direction of the table; `finding_classes_class_key` is the class direction
+/// and holds nothing this read is keyed by.
+fn finding_classes_sql(ids: usize) -> String {
+    format!(
+        "SELECT finding, class_key FROM finding_classes
+         WHERE finding IN ({}) ORDER BY finding, class_key",
+        finding_id_placeholders(ids)
+    )
+}
+
+/// One placeholder per id of a chunk, numbered from one.
+fn finding_id_placeholders(ids: usize) -> String {
+    (1..=ids)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// A chunk's ids in the order [`finding_id_placeholders`] numbers them.
+fn finding_id_parameters(chunk: &[i64]) -> impl Params + '_ {
+    params_from_iter(chunk.iter())
 }
 
 /// The statement [`Request::suffix_candidates`] emits for a probe of
