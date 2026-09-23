@@ -32,8 +32,9 @@
 //!   `norn-fs` on its own thread and moves nothing in the host's account of what
 //!   its jobs derived and read off the vault, and each page runs a pinned number
 //!   of statements. Each zero is measured rather than structural: a document
-//!   read on the same thread moves the first, and a document written and then
-//!   removed under the same attachment moves the second.
+//!   read and a walk of the root on the same thread move the first, and a
+//!   document written and then removed under the same attachment moves the
+//!   second.
 //! - **Size independence.** One bounded write costs the same at 300 documents
 //!   and at 2000, and so does one unfiltered find paged newest first. A ceiling
 //!   passes anything under it; a pair fails the moment the two scales stop
@@ -141,8 +142,10 @@ fn a_warm_request_over_an_attached_vault_finishes_at_zero() {
 /// that ran a statement per row it hydrated fails here at any scale.
 ///
 /// Each zero is measured rather than structural, and its control moves every
-/// count it asserts. On this thread, the same window around one document
-/// read through `norn-fs` reads that open. In the host's account, a document
+/// count it asserts. On this thread, the same window around one document read
+/// through `norn-fs` moves the opens and the stats, and a walk of the
+/// registration root through the walker the host attaches with moves the
+/// directory entries. In the host's account, a document
 /// written into the vault under the same attachment moves the documents
 /// derived, the files opened, the changesets and the upserts; removing it
 /// again moves the deletes and the tombstones.
@@ -260,16 +263,26 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     read_off_the_vault.assert_all_zero("a find through a live hold, in the host's account");
 
     // **The other half of the thread's zero.** The same window around one
-    // document read through `norn-fs` reads the open.
+    // document read and one walk of the registration root, both through
+    // `norn-fs`, moves every count the zero asserts.
     let window = ReadWindow::open();
     norn_fs::read_and_hash(vault.path(), Path::new(subject.path.as_str()))
         .expect("reading a document the attachment derived");
-    let one_read = thread_reads(window.finish());
-    record_the_counters("one document read through norn-fs", &one_read);
-    assert!(
-        one_read.get("document_opens") > 0,
-        "a document read through norn-fs on this thread moved no open: {one_read:?}"
+    for fact in norn_fs::walk(vault.path(), &[]).expect("walking the registration root") {
+        fact.expect("a walk of the registration root");
+    }
+    let reached = thread_reads(window.finish());
+    record_the_counters(
+        "one document read and one walk of the root through norn-fs",
+        &reached,
     );
+    for count in ["document_opens", "stats", "walk_dirents"] {
+        assert!(
+            reached.get(count) > 0,
+            "a document read and a walk through norn-fs on this thread did not move `{count}`: \
+             {reached:?}"
+        );
+    }
 
     // **The other half of the account's zero.** A document written into the
     // vault under the same attachment is derived by the host, and removing it
