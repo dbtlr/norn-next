@@ -175,26 +175,30 @@ jobs:
 
   # The counter half is a real gate, over the path a request really takes: a
   # generated vault tree on disk, a production attachment that walked it, and
-  # the derived store that attachment left behind. Two bars run at profiles the
-  # per-PR lane owns. A warm request over the ~2k-document realistic profile
-  # finishes with every derivation counter at zero. The store's read paths
-  # derive nothing by construction today, so that bar is a canary rather than a
-  # number the current code strains against: it binds the day a read path starts
-  # deriving, and fails that as a correctness break rather than reporting it as a
-  # slowdown. And one bounded write costs the same at 300 documents as at 2000 —
-  # the sharper of the two, because a ceiling passes anything under it and a pair
-  # fails the moment two scales stop moving together. Both are counts: a counter
-  # says the same thing on a loaded runner, which a clock does not.
+  # the derived store that attachment left behind. Three bars run at profiles
+  # the per-PR lane owns. A warm request over the ~2k-document realistic
+  # profile finishes with every derivation counter at zero, over a detached
+  # store and again under a live attachment. The store's read paths derive
+  # nothing by construction today, so that bar is a canary rather than a number
+  # the current code strains against: it binds the day a read path starts
+  # deriving, and fails that as a correctness break rather than reporting it as
+  # a slowdown. A find run through a live read hold reads nothing through
+  # norn-fs on its own thread, lands nothing in the host's account of its jobs,
+  # and runs a pinned number of statements a page. And one bounded write, and
+  # one bounded find, cost the same at 300 documents as at 2000 — the sharper
+  # bar, because a ceiling passes anything under it and a pair fails the moment
+  # two scales stop moving together. All three are counts: a counter says the
+  # same thing on a loaded runner, which a clock does not.
   #
-  # The plan half waits on the Layer 3 read builders. An `EXPLAIN` assertion is
-  # worth something only against the statement a builder emitted — a gate
-  # against hand-written SQL tests a string nobody executes — so the bars land
-  # with the builders that emit the SQL they judge.
+  # The plan bars live in the store's own suites, beside the read builders that
+  # emit the SQL they judge. An `EXPLAIN` assertion is worth something only
+  # against the statement a builder emitted; a gate against hand-written SQL
+  # tests a string nobody executes.
   #
-  # A find run through a live hold reads no vault document either, measured by
-  # the host's own account of what its jobs derived and read; that account is
-  # read only behind `induced-failure`, so this step names the feature, and the
-  # case refuses to run in a build without it.
+  # The host's account of its jobs is read only behind `induced-failure`, so
+  # this step names the feature. A build without it refuses the case that reads
+  # the account, and the lane table's own test holds this step to every feature
+  # the suite puts a case or a helper behind.
   #
   # The cases live in this job alone, `#[ignore]`d with a `counter-lane case:`
   # reason so the build job's workspace suite does not attach thousands of
@@ -217,13 +221,15 @@ jobs:
   # A real gate. Each subject runs as a child under the testkit's process
   # harness, and what is read is the peak resident set the kernel accounted to
   # that child; a peak read off the test process would include cargo's runner
-  # and every case beside it. Every subject faces the same two instruments at
-  # profiles under 5k documents: a checked-in ceiling at the ~2k-document
-  # realistic profile, and the ratio between the 300-document and ~2k-document
-  # profiles. The ratio is the sharp instrument — a ceiling passes anything
-  # that fits under it, and a ratio fails the moment two scales stop moving
-  # together. Every bar is authored and moves only by a reviewed edit; the
-  # readings behind them are in each crate's own tests/baselines/mod.rs.
+  # and every case beside it. Every subject faces a checked-in ceiling at the
+  # ~2k-document realistic profile and a ratio, at profiles under 5k documents.
+  # A subject whose cost could grow with the vault is paired across the
+  # 300-document and ~2k-document profiles; a read is paired with the
+  # attach-only peak at the same profile, which cancels the attach and leaves
+  # the read. The ratio is the sharp instrument — a ceiling passes anything
+  # that fits under it, and a ratio fails the moment its two readings stop
+  # moving together. Every bar is authored and moves only by a reviewed edit;
+  # the readings behind them are in each crate's own tests/baselines/mod.rs.
   #
   # The cases live in this job alone. They are `#[ignore]`d with a
   # `memory-lane case:` reason so the build job's workspace suite does not run
@@ -234,13 +240,14 @@ jobs:
   # otherwise this lane would run certify.yml's wall-clock assertion. The script
   # is what makes that wholesale run fail when it ran nothing.
   #
-  # Three subjects run here: the fixture generator, the norn-fs streaming walk,
-  # and a host attaching a generated vault — the first subject that measures a
+  # Four subjects run here: the fixture generator, the norn-fs streaming walk,
+  # a host attaching a generated vault — the first subject that measures a
   # whole vault's worth of work, where the generator and the walk each measure
-  # one pass over a tree. The child that attaches adopts a tree its parent
-  # generated, so what the kernel accounts to it is the attachment and not the
-  # generation. The >=5k scale and the recorded peak-memory readings stay in
-  # certify.yml, where a clock is legal to read.
+  # one pass over a tree — and a host reading the vault it attached through a
+  # live hold. A child that attaches adopts a tree its parent generated, so
+  # what the kernel accounts to it is the attachment and not the generation.
+  # The >=5k scale and the recorded peak-memory readings stay in certify.yml,
+  # where a clock is legal to read.
   memory:
     name: memory invariant
     runs-on: ubuntu-latest
@@ -254,5 +261,5 @@ jobs:
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1
       - name: Walker memory bars
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
-      - name: Attach memory bars
+      - name: Host memory bars
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1

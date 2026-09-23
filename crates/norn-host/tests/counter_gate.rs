@@ -7,7 +7,7 @@
 //! production attachment that walked it, and the derived store that attachment
 //! left behind.
 //!
-//! Two bars, both counts:
+//! Three bars, all counts:
 //!
 //! - **Zero on warm.** A request that only reads derives nothing, over the
 //!   ~2k-document `realistic` profile — the scale the gates assert against. It
@@ -15,25 +15,29 @@
 //!   still serving are different subjects: once over the rows an attachment left
 //!   behind, and once with the entry still attached under a held demand, across
 //!   two passes so a cost paid on first touch is separated from the steady state.
-//!   **The counters answer for derivation, not for reading.** The vocabulary
-//!   counts rows written and facts discarded, and no member counts rows read, so
-//!   a reader whose row count grew with the tree still reads zero here: what this
-//!   bar holds is that a warm read derives nothing. The store's pillars suite
-//!   holds the read's own cost shape, in two carriers. A work bar drains the
-//!   heal page, the four pillar enumerations and the two change feeds a row at
-//!   a time through `Request::read_steps`, and states each cost as a line in
-//!   the rows drained. Plan bars over the ten keyed point reads assert an
-//!   equality seek on the key each was given — through a named index for eight
-//!   of them, and through a primary key for the field rows and the
-//!   pinned-schema read.
+//!   **The derivation counters answer for derivation, not for reading.** They
+//!   count rows written and facts discarded, and none counts rows read, so a
+//!   reader whose row count grew with the tree still reads zero on them: what
+//!   this bar holds is that a warm read derives nothing. A read's own cost is
+//!   held where it is counted. The store's pillars suite holds the pillar
+//!   reads': a work bar drains the heal page, the four pillar enumerations and
+//!   the two change feeds a row at a time through `Request::read_steps` and
+//!   states each cost as a line in the rows drained, and plan bars over the ten
+//!   keyed point reads assert an equality seek on the key each was given —
+//!   through a named index for eight of them, and through a primary key for the
+//!   field rows and the pinned-schema read. The store's find suites hold each
+//!   find statement's plan, and the two bars below hold a find's work.
 //! - **A read through a live hold reads no vault document.** A find run on a
-//!   production hold's snapshot, under a live attachment, moves nothing in the
-//!   host's own account of what its jobs derived and read off the vault. That
-//!   account is measured rather than structural: a document written under the
-//!   same attachment moves it.
+//!   production hold's snapshot, under a live attachment, reads nothing through
+//!   `norn-fs` on its own thread and moves nothing in the host's account of what
+//!   its jobs derived and read off the vault, and each page runs a pinned number
+//!   of statements. Each zero is measured rather than structural: a document
+//!   read on the same thread moves the first, and a document written and then
+//!   removed under the same attachment moves the second.
 //! - **Size independence.** One bounded write costs the same at 300 documents
-//!   and at 2000, and so does one bounded find. A ceiling passes anything under
-//!   it; a pair fails the moment the two scales stop moving together.
+//!   and at 2000, and so does one unfiltered find paged newest first. A ceiling
+//!   passes anything under it; a pair fails the moment the two scales stop
+//!   moving together.
 //!
 //! **Every reading is recorded, zero included.** A gate that passes says only
 //! that nothing moved; which counters were asked and what each read is the
@@ -544,7 +548,9 @@ fn one_probe_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnap
 /// carrying every field, then the page its cursor continues. What is compared
 /// is every count the find's work carries — the statements, the keys its page
 /// statements handed back, what SQLite counted stepping them, and the rows it
-/// hydrated — beside the statements the snapshot counted. The order matches
+/// hydrated. The snapshot's own statement count is held equal to the
+/// statements the pages report as they are read, a consistency check on the
+/// report rather than a second reading of it. The order matches
 /// every document at both scales, far more than a page, so what bounds the
 /// hydration is the page and never the match count.
 ///

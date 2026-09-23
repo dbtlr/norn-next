@@ -92,10 +92,12 @@ pub struct EvidenceReading {
     /// a quarantine, or a block it could not read.
     ///
     /// **The one site a vault document's bytes reach derivation** is where
-    /// this moves, and every job that derives runs under an attribution
-    /// window, so it is zero across any stretch in which the host derived no
-    /// document from the vault and nonzero across any in which it did,
-    /// whichever job derived it.
+    /// this is tallied. Every job that derives runs under an attribution
+    /// window and folds its tally into the account when it ends, so what a
+    /// stretch between two readings moved is what the jobs that ended inside
+    /// it derived: zero where none of them derived a document from the vault,
+    /// and nonzero where one did, whichever job it was. A job still running
+    /// when the stretch closes reaches a later reading.
     pub documents_derived: u64,
     /// Changesets that landed. A changeset is the unit of atomicity, so this is
     /// how many times a job committed something.
