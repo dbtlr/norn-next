@@ -1473,8 +1473,8 @@ fn a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault
 }
 
 /// **A part the store keeps no index of, or a value that names no place in
-/// its key's order, is refused.** `links_to` waits for the link index, which
-/// lands with the task that builds it, and the refusal names both.
+/// its key's order, is refused.** `links_to` filters by a link's target, which
+/// the store keeps no index of, and the refusal names that fact.
 #[test]
 fn a_part_the_store_cannot_answer_is_refused_by_name() {
     let seeded = Seeded::new("find-refusals");
@@ -1492,8 +1492,11 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
         refusal,
         FindRefusal::NotIndexed {
             fact: "a link's target",
-            consumer: "NORN-229",
         }
+    );
+    assert_eq!(
+        refusal.to_string(),
+        "the store keeps no index of a link's target"
     );
     let refusal = seeded
         .snapshot()

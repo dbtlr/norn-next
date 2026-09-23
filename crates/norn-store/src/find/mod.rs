@@ -279,16 +279,20 @@ pub struct FindPlan {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum FindRefusal {
-    /// The request names a fact the store keeps no index of.
+    /// The request filters by a fact the store keeps no index of.
     ///
-    /// A **dormant carrier**: the link index a `links_to` part filters by, and
-    /// the link and finding columns a row projects, land with `consumer`, which
-    /// is the task that builds them; until then no request naming one can be
-    /// answered, and saying so is the answer.
-    NotIndexed {
-        fact: &'static str,
-        consumer: &'static str,
-    },
+    /// A **dormant carrier** for the link index NORN-229 builds: `links` stores
+    /// a link's target raw and unindexed, so no seek answers a `links_to` part,
+    /// and nothing reaches the part's filter until that index stands. Until
+    /// then no request naming one can be answered, and saying so is the answer.
+    NotIndexed { fact: &'static str },
+    /// The request names a row column a find does not project yet.
+    ///
+    /// A **dormant carrier** for the resolved link and finding columns NORN-229
+    /// builds: the store holds a document's link and finding rows, but a find's
+    /// row carries neither column until the link index resolves what a link
+    /// names, so no row composition reads them yet.
+    NotProjected { column: &'static str },
     /// A value a comparing part names — an equality, an inequality, a
     /// membership or a `before`/`after` bound — on a key declared with a typed
     /// order does not read as that type, so it names no place in the key's
@@ -308,11 +312,11 @@ pub enum FindRefusal {
 impl std::fmt::Display for FindRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FindRefusal::NotIndexed { fact, consumer } => {
-                write!(
-                    formatter,
-                    "the store keeps no index of {fact} (lands with {consumer})"
-                )
+            FindRefusal::NotIndexed { fact } => {
+                write!(formatter, "the store keeps no index of {fact}")
+            }
+            FindRefusal::NotProjected { column } => {
+                write!(formatter, "{column} is not yet projected onto a find's row")
             }
             FindRefusal::UnreadableBound { key, value } => write!(
                 formatter,
@@ -342,10 +346,6 @@ impl From<StoreError> for FindRefusal {
         FindRefusal::Store(problem)
     }
 }
-
-/// The task that builds the link index a `links_to` part waits for, and the
-/// link and finding columns a row projects.
-const LINK_INDEX_CONSUMER: &str = "NORN-229";
 
 /// The order a page runs in.
 #[derive(Clone, Copy, Debug)]
@@ -449,15 +449,13 @@ impl<'a> Projection<'a> {
                     nested.insert(2);
                 }
                 Column::Links {} => {
-                    return Err(FindRefusal::NotIndexed {
-                        fact: "a document's links",
-                        consumer: LINK_INDEX_CONSUMER,
+                    return Err(FindRefusal::NotProjected {
+                        column: "the links column",
                     });
                 }
                 Column::Findings {} => {
-                    return Err(FindRefusal::NotIndexed {
-                        fact: "the findings standing over a document",
-                        consumer: LINK_INDEX_CONSUMER,
+                    return Err(FindRefusal::NotProjected {
+                        column: "the findings column",
                     });
                 }
                 _ => return Err(FindRefusal::UnknownPart { part: "a column" }),
@@ -1073,7 +1071,6 @@ impl Snapshot {
             },
             Predicate::LinksTo { .. } => Err(FindRefusal::NotIndexed {
                 fact: "a link's target",
-                consumer: LINK_INDEX_CONSUMER,
             }),
             Predicate::Resolves { target, .. } => match suffix_probe(target.address()) {
                 Err(_) => Ok(Part::MatchesNothing(Unsatisfied::impossible_path(

@@ -390,28 +390,32 @@ fn a_row_carries_the_columns_it_names_read_off_the_projection() {
     );
 }
 
-/// **A link or finding column is refused by name**, as a `links_to` part is:
-/// the indexes those columns read land with the task that builds them.
+/// **A link or finding column is refused by name** as a column a find does not
+/// project yet, and its refusal reads as that fact.
 #[test]
 fn a_link_or_finding_column_is_refused_by_name() {
     let seeded = Seeded::new("find-dormant-columns");
-    for (column, fact) in [
-        (Column::links(), "a document's links"),
-        (Column::findings(), "the findings standing over a document"),
+    for (column, named, reads) in [
+        (
+            Column::links(),
+            "the links column",
+            "the links column is not yet projected onto a find's row",
+        ),
+        (
+            Column::findings(),
+            "the findings column",
+            "the findings column is not yet projected onto a find's row",
+        ),
     ] {
-        assert_eq!(
-            seeded
-                .snapshot()
-                .find(
-                    &request().with_columns([Column::body(), column]),
-                    &declared()
-                )
-                .expect_err("a dormant column"),
-            FindRefusal::NotIndexed {
-                fact,
-                consumer: "NORN-229",
-            }
-        );
+        let refusal = seeded
+            .snapshot()
+            .find(
+                &request().with_columns([Column::body(), column]),
+                &declared(),
+            )
+            .expect_err("a dormant column");
+        assert_eq!(refusal, FindRefusal::NotProjected { column: named });
+        assert_eq!(refusal.to_string(), reads);
     }
 }
 
