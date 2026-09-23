@@ -15,7 +15,7 @@ use norn_store::{
     class_probe, induced_failure, suffix_probe,
 };
 use norn_testkit::equivalence::assert_operationally_valid;
-use norn_testkit::explain::{PlanRow, QueryPlan};
+use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_testkit::readings;
 use norn_testkit::work::WorkBar;
 use norn_wire::FindingKind;
@@ -718,7 +718,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     candidates.assert_no_full_scan_of("documents");
     candidates.assert_searches("documents");
-    candidates.assert_uses_index("documents_suffix_key");
+    candidates.assert_uses_index("documents", Access::Index("documents_suffix_key"));
 
     let findings = plan(
         request
@@ -729,9 +729,13 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     findings.assert_no_full_scan_of("findings");
     findings.assert_searches("findings");
-    findings.assert_uses_index("finding_classes_class_key");
     // The class direction seeks the membership index and reaches each finding by
     // row id, which is the order the reader states — so nothing sorts.
+    findings.assert_uses_index(
+        "finding_classes",
+        Access::Index("finding_classes_class_key"),
+    );
+    findings.assert_uses_index("findings", Access::RowId);
     findings.assert_no_temp_btree();
 
     // The class-scoped discard reads the same membership range as the read
@@ -746,7 +750,11 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     class_discard.assert_no_full_scan_of("findings");
     class_discard.assert_no_full_scan_of("finding_classes");
-    class_discard.assert_uses_index("finding_classes_class_key");
+    class_discard.assert_uses_index(
+        "finding_classes",
+        Access::Index("finding_classes_class_key"),
+    );
+    class_discard.assert_uses_index("findings", Access::RowId);
 
     // The subject-scoped discard an increment runs once per changed path seeks
     // `findings_path`, so a changeset of fifty thousand entries is that many
@@ -761,7 +769,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     subject_discard.assert_no_full_scan_of("findings");
     subject_discard.assert_searches("findings");
-    subject_discard.assert_uses_index("findings_path");
+    subject_discard.assert_uses_index("findings", Access::Index("findings_path"));
 
     // Naming kinds narrows what the discard takes and not how it reaches it: the
     // path is the seek in both forms and the kinds filter the rows it reached,
@@ -776,7 +784,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     kind_discard.assert_no_full_scan_of("findings");
     kind_discard.assert_searches("findings");
-    kind_discard.assert_uses_index("findings_path");
+    kind_discard.assert_uses_index("findings", Access::Index("findings_path"));
 
     // A two-reduction probe is two seeks rather than one wider read.
     let two = plan(
@@ -788,9 +796,9 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     two.assert_no_full_scan_of("documents");
     assert_eq!(
-        two.rows()
+        two.searches_of("documents")
             .iter()
-            .filter(|row| row.index() == Some("documents_suffix_key"))
+            .filter(|row| row.access() == Some(Access::Index("documents_suffix_key")))
             .count(),
         2,
         "a two-reduction probe did not open two ranges: {:?}",
@@ -858,8 +866,8 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             subjects.assert_no_table_scan();
             subjects.assert_no_full_scan_of("documents");
             subjects.assert_searches("documents");
-            subjects.assert_uses_index("findings_path");
-            subjects.assert_uses_index("documents_path");
+            subjects.assert_uses_index("findings", Access::Index("findings_path"));
+            subjects.assert_uses_index("documents", Access::Index("documents_path"));
             subjects.assert_no_temp_btree();
             // The cursor is a bound on `findings_path` rather than a filter over
             // it, so a page seeks the index in every scope and both orders —
@@ -984,14 +992,14 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
             .expect("a query plan"),
     );
     tombstones.assert_searches("tombstones");
-    tombstones.assert_uses_index("tombstones_path");
+    tombstones.assert_uses_index("tombstones", Access::Index("tombstones_path"));
     let suffix_keys = plan(
         request
             .emitted_plan(ExplainedStatement::StoredSuffixKeyPage)
             .expect("a query plan"),
     );
     suffix_keys.assert_searches("documents");
-    suffix_keys.assert_uses_index("documents_path");
+    suffix_keys.assert_uses_index("documents", Access::Index("documents_path"));
 }
 
 /// **The point-read census is exactly the statements that say they are point
@@ -1037,12 +1045,10 @@ fn the_point_read_census_holds_every_statement_that_says_it_is_one() {
 struct PointReadBar {
     /// The table the statement reaches its rows in.
     table: &'static str,
-    /// The index the seek runs through, or [`None`] where the seek runs
-    /// through a primary key. `meta` is `WITHOUT ROWID`, so its rows live in
-    /// the key b-tree itself and SQLite reports `USING PRIMARY KEY` with no
-    /// name for [`QueryPlan::assert_uses_index`] to match. The scan, search
-    /// and constraint assertions carry that entry whole.
-    index: Option<&'static str>,
+    /// What the seek runs through: a declared index, or for `meta` — which is
+    /// `WITHOUT ROWID`, so its rows live in the key b-tree itself — the
+    /// primary key.
+    access: Access<'static>,
     /// The constraint an equality seek of this statement's key prints. It is
     /// what separates a point read from a range: `path>?` opens a cursor on
     /// the same index as `path=?` and reports the same index name, so a bar
@@ -1068,7 +1074,7 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
     let seek = |table, index, constraint| {
         Some(PointReadBar {
             table,
-            index: Some(index),
+            access: Access::Index(index),
             constraint,
             sorts: false,
         })
@@ -1100,13 +1106,13 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         // The subject's own findings, and the one entry that sorts.
         ExplainedStatement::StoredFindings(_) => Some(PointReadBar {
             table: "findings",
-            index: Some("findings_path"),
+            access: Access::Index("findings_path"),
             constraint: "(path=?)",
             sorts: true,
         }),
         ExplainedStatement::VaultSchemaPin => Some(PointReadBar {
             table: "meta",
-            index: None,
+            access: Access::PrimaryKey,
             constraint: "(key=?)",
             sorts: false,
         }),
@@ -1175,9 +1181,7 @@ fn a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for() {
         read.assert_no_full_scan_of(expected.table);
         read.assert_searches(expected.table);
         read.assert_search_constraint(expected.table, expected.constraint);
-        if let Some(index) = expected.index {
-            read.assert_uses_index(index);
-        }
+        read.assert_uses_index(expected.table, expected.access);
         if !expected.sorts {
             read.assert_no_temp_btree();
         }
@@ -1347,24 +1351,21 @@ fn a_feed_page_walks_its_covering_index_and_reads_no_row() {
         page.assert_no_table_scan();
         page.assert_no_full_scan();
         page.assert_no_temp_btree();
-        match statement {
-            ExplainedStatement::DocumentFeedPage => {
-                page.assert_searches("documents");
-                page.assert_uses_index("documents_change_feed");
-            }
-            ExplainedStatement::TombstoneFeedPage => {
-                page.assert_searches("tombstones");
-                page.assert_uses_index("tombstones_change_feed");
-            }
+        let (table, index) = match statement {
+            ExplainedStatement::DocumentFeedPage => ("documents", "documents_change_feed"),
+            ExplainedStatement::TombstoneFeedPage => ("tombstones", "tombstones_change_feed"),
             other => panic!("`FEEDS` names {other:?}, which is not a feed"),
-        }
-        // The index answers the page whole. SQLite says so itself, and it is the
-        // difference between a page that costs its own columns and one that
-        // costs a row lookup per row it returns.
+        };
+        page.assert_searches(table);
+        page.assert_uses_index(table, Access::Index(index));
+        // The index answers the page whole. SQLite says so itself, on the row
+        // that searches the feed's table, and it is the difference between a
+        // page that costs its own columns and one that costs a row lookup per
+        // row it returns.
         assert!(
-            page.rows()
-                .iter()
-                .any(|row| row.detail.contains("COVERING INDEX")),
+            page.searches_of(table).iter().any(|row| row
+                .detail
+                .contains(&format!("USING COVERING INDEX {index} "))),
             "the page reads the row for columns the index was declared to carry: {:?}",
             page.rows()
         );
@@ -1710,10 +1711,13 @@ fn a_heal_page_seeks_the_index_that_holds_its_order() {
             // index that is, is the vault's proven case behaviour: a bytewise
             // vault pages through the unique path index, and a vault that folds
             // ASCII case pages through the index declared under the same fold.
-            page.assert_uses_index(match order {
-                norn_store::StoredPathOrder::Sensitive => "documents_path",
-                norn_store::StoredPathOrder::AsciiCaseInsensitive => "documents_path_nocase",
-            });
+            page.assert_uses_index(
+                "documents",
+                Access::Index(match order {
+                    norn_store::StoredPathOrder::Sensitive => "documents_path",
+                    norn_store::StoredPathOrder::AsciiCaseInsensitive => "documents_path_nocase",
+                }),
+            );
             page.assert_no_temp_btree();
         }
     }

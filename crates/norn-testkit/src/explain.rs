@@ -68,6 +68,39 @@ pub enum ScanTarget<'a> {
     ValuesClause,
 }
 
+/// What a `SEARCH` or `SCAN` row reads its relation through, where the row
+/// says.
+///
+/// SQLite spells four of these after `USING`, and each is a different fact
+/// about the step. Only a declared index carries a name; the other three are
+/// named by what they are, so a bar can pin any of them without matching text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Access<'a> {
+    /// An index the schema declares, by its name: `USING INDEX i` or
+    /// `USING COVERING INDEX i`.
+    Index(&'a str),
+    /// The primary key of a `WITHOUT ROWID` table: `USING PRIMARY KEY`. Such
+    /// a table's rows live in its key b-tree, which the schema gives no name,
+    /// so this is the only spelling a seek of that key has.
+    PrimaryKey,
+    /// The row id of a rowid table: `USING INTEGER PRIMARY KEY`.
+    RowId,
+    /// An index SQLite built for this one statement: `USING AUTOMATIC
+    /// COVERING INDEX`, or its partial form. It has no name.
+    AutomaticIndex,
+}
+
+impl fmt::Display for Access<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Access::Index(name) => write!(f, "index `{name}`"),
+            Access::PrimaryKey => f.write_str("the primary key"),
+            Access::RowId => f.write_str("the row id"),
+            Access::AutomaticIndex => f.write_str("an automatic index"),
+        }
+    }
+}
+
 impl PlanRow {
     pub fn new(id: i64, parent: i64, detail: impl Into<String>) -> Self {
         PlanRow {
@@ -119,24 +152,41 @@ impl PlanRow {
         rest.split_whitespace().next()
     }
 
-    /// The index this row reads through, if it names one.
+    /// What this row reads its relation through, if it says.
     ///
-    /// An index SQLite built for this statement has no name; the row reads
-    /// `USING AUTOMATIC COVERING INDEX` and reports `None` here and `true`
-    /// from [`PlanRow::uses_automatic_index`]. So does a rowid lookup, which
-    /// reads `USING INTEGER PRIMARY KEY`.
-    pub fn index(&self) -> Option<&str> {
+    /// A row that says nothing reads the relation's own b-tree in key order:
+    /// a plain `SCAN t`, including a scan of a `WITHOUT ROWID` table, whose
+    /// primary key SQLite names only when it searches it.
+    pub fn access(&self) -> Option<Access<'_>> {
         let (_, rest) = self.detail.split_once(" USING ")?;
+        if rest.starts_with("AUTOMATIC ") {
+            return Some(Access::AutomaticIndex);
+        }
+        if rest.starts_with("INTEGER PRIMARY KEY") {
+            return Some(Access::RowId);
+        }
+        if rest.starts_with("PRIMARY KEY") {
+            return Some(Access::PrimaryKey);
+        }
         let rest = rest.strip_prefix("COVERING ").unwrap_or(rest);
         let rest = rest.strip_prefix("INDEX ")?;
         let name = rest.split_whitespace().next().unwrap_or(rest);
-        (!name.starts_with('(')).then_some(name)
+        (!name.starts_with('(')).then_some(Access::Index(name))
+    }
+
+    /// The declared index this row reads through, if it reads through one.
+    /// Every other [`Access`] reports `None` here.
+    pub fn index(&self) -> Option<&str> {
+        match self.access()? {
+            Access::Index(name) => Some(name),
+            Access::PrimaryKey | Access::RowId | Access::AutomaticIndex => None,
+        }
     }
 
     /// Whether this row reads through an index SQLite built for the
     /// statement rather than one the schema declares.
     pub fn uses_automatic_index(&self) -> bool {
-        self.detail.contains(" USING AUTOMATIC ")
+        self.access() == Some(Access::AutomaticIndex)
     }
 
     /// The constraint the row was given, as SQLite prints it: the
@@ -288,14 +338,22 @@ impl QueryPlan {
         );
     }
 
-    /// **The index bar.** The plan reaches `table` by a search rather than a
+    /// Every step that searches `table`, with each row's name resolved through
+    /// the statement's aliases.
+    pub fn searches_of(&self, table: &str) -> Vec<&PlanRow> {
+        let table = bare_name(table);
+        self.rows
+            .iter()
+            .filter(|row| row.searches().map(|name| self.table_of(name)) == Some(table))
+            .collect()
+    }
+
+    /// **The search bar.** The plan reaches `table` by a search rather than a
     /// scan, which is the difference an index makes.
     pub fn assert_searches(&self, table: &str) {
         let table = bare_name(table);
         assert!(
-            self.rows
-                .iter()
-                .any(|row| row.searches().map(|name| self.table_of(name)) == Some(table)),
+            !self.searches_of(table).is_empty(),
             "the plan does not search `{table}`: {}\nemitted SQL: {}",
             rows_display(&self.rows.iter().collect::<Vec<_>>()),
             self.sql
@@ -309,9 +367,7 @@ impl QueryPlan {
     /// same index as `path=?` and reports the same `SEARCH … USING INDEX` row,
     /// so [`QueryPlan::assert_uses_index`] and [`QueryPlan::assert_searches`]
     /// both green a reader that seeks to a key and then walks the rest of the
-    /// table. The constraint text is where the two come apart, and it is the
-    /// only place a `WITHOUT ROWID` primary-key seek can be judged at all —
-    /// that row names no index.
+    /// table. The constraint text is where the two come apart.
     ///
     /// The constraint is read off the steps that search `table` and nowhere
     /// else, so an equality seek of some other relation in the same plan
@@ -319,18 +375,9 @@ impl QueryPlan {
     /// fails, for the same reason [`QueryPlan::assert_searches`] does.
     pub fn assert_search_constraint(&self, table: &str, constraint: &str) {
         let table = bare_name(table);
-        let searches: Vec<&PlanRow> = self
-            .rows
-            .iter()
-            .filter(|row| row.searches().map(|name| self.table_of(name)) == Some(table))
-            .collect();
-        assert!(
-            !searches.is_empty(),
-            "the plan does not search `{table}`: {}\nemitted SQL: {}",
-            rows_display(&self.rows.iter().collect::<Vec<_>>()),
-            self.sql
-        );
-        let wrong: Vec<&PlanRow> = searches
+        self.assert_searches(table);
+        let wrong: Vec<&PlanRow> = self
+            .searches_of(table)
             .into_iter()
             .filter(|row| row.constraint() != Some(constraint))
             .collect();
@@ -343,12 +390,30 @@ impl QueryPlan {
         );
     }
 
-    /// The plan reads through the named index.
-    pub fn assert_uses_index(&self, index: &str) {
+    /// **The index bar.** A step that searches `table` reads it through
+    /// `access`.
+    ///
+    /// The judgment is taken on the rows that search `table` and nowhere
+    /// else. A plan names indexes on several rows, and an index named on some
+    /// other row — the membership index a subquery seeks, say, while the outer
+    /// table is reached by row id — says nothing about how `table` was
+    /// reached. A plan that does not search `table` at all fails, for the
+    /// reason [`QueryPlan::assert_searches`] does.
+    ///
+    /// One table can be searched more than once in one plan, each time for a
+    /// different reason: a discard reads its membership rows through the class
+    /// index, and the cascade it fires reaches the same table's rows by primary
+    /// key. Each of those is a fact the plan states, so each is one assertion,
+    /// and a search this bar is not asked about is left to the bar that is.
+    pub fn assert_uses_index(&self, table: &str, access: Access<'_>) {
+        let table = bare_name(table);
+        self.assert_searches(table);
+        let searches = self.searches_of(table);
         assert!(
-            self.rows.iter().any(|row| row.index() == Some(index)),
-            "the plan does not use index `{index}`: {}\nemitted SQL: {}",
-            rows_display(&self.rows.iter().collect::<Vec<_>>()),
+            searches.iter().any(|row| row.access() == Some(access)),
+            "no step searching `{table}` reads it through {access}: {}\n\
+             emitted SQL: {}",
+            rows_display(&searches),
             self.sql
         );
     }
@@ -897,7 +962,75 @@ mod tests {
         let row = PlanRow::new(3, 0, "SEARCH documents USING INTEGER PRIMARY KEY (rowid=?)");
         assert_eq!(row.searches(), Some("documents"));
         assert_eq!(row.index(), None);
+        assert_eq!(row.access(), Some(Access::RowId));
         assert!(!row.uses_automatic_index());
+    }
+
+    /// A `WITHOUT ROWID` table's primary key has no name in the schema, and it
+    /// is still a fact the row states: it is neither a named index nor the row
+    /// id, and it is not an absence of access either.
+    #[test]
+    fn a_primary_key_search_is_its_own_access() {
+        let row = PlanRow::new(3, 0, "SEARCH finding_classes USING PRIMARY KEY (finding=?)");
+        assert_eq!(row.searches(), Some("finding_classes"));
+        assert_eq!(row.access(), Some(Access::PrimaryKey));
+        assert_eq!(row.index(), None);
+        assert_eq!(row.constraint(), Some("(finding=?)"));
+        assert!(!row.uses_automatic_index());
+        // A plain scan of the same table names nothing.
+        assert_eq!(PlanRow::new(3, 0, "SCAN finding_classes").access(), None);
+    }
+
+    /// `finding_classes` carries a primary key and a secondary index, so a bar
+    /// has to say which of the two its seek runs through, and each answer
+    /// refuses the other.
+    #[test]
+    fn a_primary_key_bar_and_a_named_index_bar_refuse_each_other() {
+        let by_key = QueryPlan::new(
+            "SELECT finding, class_key FROM finding_classes WHERE finding IN (?1, ?2)",
+            rows(&["SEARCH finding_classes USING PRIMARY KEY (finding=?)"]),
+        );
+        by_key.assert_uses_index("finding_classes", Access::PrimaryKey);
+        let failure = std::panic::catch_unwind({
+            let by_key = by_key.clone();
+            move || {
+                by_key.assert_uses_index(
+                    "finding_classes",
+                    Access::Index("finding_classes_class_key"),
+                )
+            }
+        })
+        .expect_err("a primary-key seek is not a seek of the secondary index");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("a formatted assertion message");
+        assert!(
+            message.contains("reads it through index `finding_classes_class_key`"),
+            "{message}"
+        );
+
+        let by_index = QueryPlan::new(
+            "SELECT finding FROM finding_classes WHERE class_key >= ?1",
+            rows(&[
+                "SEARCH finding_classes USING COVERING INDEX finding_classes_class_key (class_key>?)",
+            ]),
+        );
+        by_index.assert_uses_index(
+            "finding_classes",
+            Access::Index("finding_classes_class_key"),
+        );
+        let failure = std::panic::catch_unwind(move || {
+            by_index.assert_uses_index("finding_classes", Access::PrimaryKey)
+        })
+        .expect_err("a secondary-index seek is not a primary-key seek");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("a formatted assertion message");
+        assert!(
+            message
+                .contains("no step searching `finding_classes` reads it through the primary key"),
+            "{message}"
+        );
     }
 
     /// An index SQLite builds for one statement has no name, and saying it
@@ -907,6 +1040,7 @@ mod tests {
         let row = PlanRow::new(3, 0, "SEARCH b USING AUTOMATIC COVERING INDEX (x=?)");
         assert_eq!(row.searches(), Some("b"));
         assert_eq!(row.index(), None);
+        assert_eq!(row.access(), Some(Access::AutomaticIndex));
         assert_eq!(row.constraint(), Some("(x=?)"));
         assert!(row.uses_automatic_index());
     }
@@ -921,7 +1055,8 @@ mod tests {
         plan.assert_no_table_scan();
         plan.assert_no_full_scan_of("documents");
         plan.assert_searches("documents");
-        plan.assert_uses_index("documents_stem");
+        plan.assert_uses_index("documents", Access::Index("documents_stem"));
+        plan.assert_uses_index("links", Access::Index("links_source"));
         plan.assert_no_temp_btree();
     }
 
@@ -944,10 +1079,77 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "does not use index `documents_stem`")]
+    #[should_panic(expected = "reads it through index `documents_stem`")]
     fn a_plan_reading_another_index_fails_the_index_bar() {
         plan(&["SEARCH documents USING INDEX documents_path (path=?)"])
-            .assert_uses_index("documents_stem");
+            .assert_uses_index("documents", Access::Index("documents_stem"));
+    }
+
+    /// The index is judged on the row that searches the named table. Here the
+    /// membership table is sought through its index and the findings table is
+    /// reached by row id, so the index names a row — just not the row that
+    /// reaches `findings`.
+    #[test]
+    #[should_panic(expected = "no step searching `findings` reads it through index \
+                               `finding_classes_class_key`")]
+    fn an_index_named_on_another_tables_row_does_not_answer_the_index_bar() {
+        QueryPlan::new(
+            "SELECT id FROM findings WHERE id IN (SELECT finding FROM finding_classes \
+             WHERE class_key >= ?1)",
+            rows(&[
+                "SEARCH findings USING INTEGER PRIMARY KEY (rowid=?)",
+                "LIST SUBQUERY 1",
+                "SEARCH finding_classes USING COVERING INDEX finding_classes_class_key \
+                 (class_key>?)",
+            ]),
+        )
+        .assert_uses_index("findings", Access::Index("finding_classes_class_key"));
+    }
+
+    /// A table the plan scans is not searched through anything, however many
+    /// other rows name the index the bar asks about.
+    #[test]
+    #[should_panic(expected = "does not search `documents`")]
+    fn a_scanned_table_fails_the_index_bar_whatever_another_row_names() {
+        QueryPlan::new(
+            "SELECT d.path FROM documents d JOIN links l ON l.target = d.stem",
+            rows(&["SCAN d", "SEARCH l USING INDEX links_target (target=?)"]),
+        )
+        .assert_uses_index("documents", Access::Index("links_target"));
+    }
+
+    /// A table searched twice for two reasons answers for each access it is
+    /// searched through, and for no other.
+    #[test]
+    fn a_table_searched_two_ways_answers_the_index_bar_for_each_and_no_other() {
+        let discard = QueryPlan::new(
+            "DELETE FROM findings WHERE id IN (SELECT finding FROM finding_classes \
+             WHERE class_key >= ?1)",
+            rows(&[
+                "SEARCH findings USING INTEGER PRIMARY KEY (rowid=?)",
+                "LIST SUBQUERY 1",
+                "SEARCH finding_classes USING COVERING INDEX finding_classes_class_key \
+                 (class_key>?)",
+                "SEARCH finding_classes USING PRIMARY KEY (finding=?)",
+            ]),
+        );
+        discard.assert_uses_index(
+            "finding_classes",
+            Access::Index("finding_classes_class_key"),
+        );
+        discard.assert_uses_index("finding_classes", Access::PrimaryKey);
+        discard.assert_uses_index("findings", Access::RowId);
+        let failure = std::panic::catch_unwind(move || {
+            discard.assert_uses_index("finding_classes", Access::AutomaticIndex)
+        })
+        .expect_err("no search of the table reads it through an automatic index");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("a formatted assertion message");
+        assert!(
+            message.contains("no step searching `finding_classes` reads it through an automatic"),
+            "{message}"
+        );
     }
 
     /// The index bar cannot tell a point read from a range: both report
@@ -956,11 +1158,11 @@ mod tests {
     #[test]
     fn the_constraint_bar_separates_an_equality_seek_from_a_range_over_the_same_index() {
         let equality = plan(&["SEARCH documents USING INDEX documents_stem (stem=?)"]);
-        equality.assert_uses_index("documents_stem");
+        equality.assert_uses_index("documents", Access::Index("documents_stem"));
         equality.assert_search_constraint("documents", "(stem=?)");
 
         let range = plan(&["SEARCH documents USING INDEX documents_stem (stem>?)"]);
-        range.assert_uses_index("documents_stem");
+        range.assert_uses_index("documents", Access::Index("documents_stem"));
         let failure = std::panic::catch_unwind(move || {
             range.assert_search_constraint("documents", "(stem=?)")
         })
@@ -974,12 +1176,13 @@ mod tests {
         );
     }
 
-    /// The primary key of a `WITHOUT ROWID` table has no index name, so the
-    /// constraint is the only thing that says the seek was a point read.
+    /// A primary-key seek is judged by its constraint the same as an index
+    /// seek is: the access says which b-tree, the constraint says a point read.
     #[test]
     fn a_primary_key_seek_is_judged_by_its_constraint() {
-        plan(&["SEARCH meta USING PRIMARY KEY (key=?)"])
-            .assert_search_constraint("meta", "(key=?)");
+        let seek = plan(&["SEARCH meta USING PRIMARY KEY (key=?)"]);
+        seek.assert_uses_index("meta", Access::PrimaryKey);
+        seek.assert_search_constraint("meta", "(key=?)");
     }
 
     /// The constraint is read off the step that searches the named table, so
