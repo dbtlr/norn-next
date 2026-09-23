@@ -77,8 +77,8 @@ pub enum Unsatisfied {
         /// What about it does not parse, in words.
         problem: String,
     },
-    /// A match part named a full-text query the engine cannot parse, so that
-    /// part filtered nothing.
+    /// A match part named a full-text query the engine cannot parse, so no
+    /// document satisfies that part.
     #[non_exhaustive]
     MalformedQuery {
         /// The query the request named.

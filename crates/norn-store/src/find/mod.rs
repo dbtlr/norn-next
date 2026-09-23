@@ -57,16 +57,21 @@
 //! ([`FindFilter::excludes`]): their seek reaches the documents a page must
 //! not hold, so there is no seek of what they keep, and a section they alone
 //! narrow seeks its order index as a section with no filter does and tests
-//! each row against them. A part that
-//! can match nothing by construction is reported in [`Found::unsatisfied`]
-//! and the page is empty: a conjunction holding it matches no document, and
-//! the report is what keeps that from reading as a vault with nothing in it.
+//! each row against them.
 //!
 //! # A part that cannot be applied is reported, never dropped in silence
 //!
-//! **The report is a biconditional**: a part is reported exactly where it
-//! cannot be applied as asked, and a part that can be is never reported, even
-//! where it matches nothing.
+//! **The report is a biconditional**: a part is reported in
+//! [`Found::unsatisfied`] exactly where it cannot be applied as asked, and a
+//! part that can be is never reported, even where it matches nothing.
+//!
+//! **A conjunction's part that cannot be applied empties the page.** A part
+//! with no meaning narrows the answer to nothing, so a caller never receives
+//! rows broader than it asked for, and the report is what keeps the empty page
+//! from reading as a vault with nothing in it. **A key outside the field
+//! universe is the one exception**: it is reported, and the page is answered
+//! as the first entry below states, a predicate key's part filtering nothing.
+//! Every other entry below empties the page.
 //!
 //! - **A key outside the field universe** — the keys the declaration names
 //!   and the keys some document carries — is reported with the keys near it
@@ -89,8 +94,7 @@
 //! - **A match part whose query the full-text engine cannot parse** is
 //!   malformed. Whether it parses is asked before the page runs, by one probe
 //!   of the full-text index; a malformed query's part is reported with the
-//!   engine's words and the page is answered without it, as an unknown
-//!   predicate key's is.
+//!   engine's words, and the page is empty, as a malformed glob's is.
 //!
 //! A `resolves` part enumerates the target's ambiguity class through its suffix
 //! probe, both reductions of a dotted leaf included, and compares suffix keys
@@ -489,11 +493,9 @@ impl Compiled<'_> {
 /// A compiled part of the conjunction.
 enum Part {
     Filter(Filter),
-    /// A part no document can satisfy: reported, and every section is empty.
+    /// A part that cannot be applied as asked, so no document satisfies it:
+    /// reported, and every section is empty.
     MatchesNothing(Unsatisfied),
-    /// A part that cannot be applied as asked: reported, and the page is
-    /// answered without it.
-    Unapplied(Unsatisfied),
 }
 
 /// The columns a request projects, read once.
@@ -1036,7 +1038,6 @@ impl Snapshot {
                     matches_nothing = true;
                     reports.push(Report::Part(part));
                 }
-                Part::Unapplied(part) => reports.push(Report::Part(part)),
             }
         }
         Ok(Compiled {
@@ -1172,7 +1173,7 @@ impl Snapshot {
                 filter(shape, vec![text(key), Value::Text(bound)])
             }
             Predicate::Matches { query, .. } => match self.match_problem(query, lookups)? {
-                Some(problem) => Ok(Part::Unapplied(Unsatisfied::malformed_query(
+                Some(problem) => Ok(Part::MatchesNothing(Unsatisfied::malformed_query(
                     query.clone(),
                     problem,
                 ))),

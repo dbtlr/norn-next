@@ -1849,21 +1849,28 @@ fn a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault
 }
 
 /// **A match part whose query the full-text engine cannot parse is reported
-/// with the engine's words, and the page is answered without it.** A dangling
-/// operator and an unterminated phrase are each a query the engine refuses to
-/// read; the page they stand in holds every document the rest of the request
-/// names, and the probe that read the query is the statement the plans list.
-/// A query the engine reads is applied: it narrows the page and reports
-/// nothing.
+/// with the engine's words, and the page is empty**, as a malformed glob's is:
+/// a part with no meaning narrows the answer to nothing, so the page is never
+/// broader than the request. A dangling operator and an unterminated phrase
+/// are each a query the engine refuses to read; the page they stand in holds
+/// no row and no cursor, beside another part or alone, and the probe that read
+/// the query is the one statement a page runs for it. A query the engine reads
+/// is applied: it narrows the page and reports nothing.
 #[test]
-fn a_malformed_full_text_query_is_reported_and_the_page_answered_without_it() {
+fn a_malformed_full_text_query_is_reported_and_empties_the_page() {
     let seeded = Seeded::new("find-malformed-query");
-    let everything = seeded.paths(&request());
-    let tagged = seeded.paths(&request().with_predicates([Predicate::tag("draft")]));
-    assert!(everything.len() > tagged.len(), "{everything:?}");
+    // A bound below the vault's size, so a page answered without the part
+    // would carry a cursor, and a tag part that alone holds a row.
+    let bounded = || request().with_limit(1);
+    assert!(seeded.page(&bounded()).next.is_some());
+    assert_eq!(
+        seeded.paths(&bounded().with_predicates([Predicate::tag("draft")])),
+        ["notes/a.md"]
+    );
     for query in ["interloper AND", "\"interloper"] {
-        let page = seeded.page(&request().with_predicates([Predicate::matches(query)]));
-        assert_eq!(row_paths(&page), everything, "{query:?} filtered the page");
+        let page = seeded.page(&bounded().with_predicates([Predicate::matches(query)]));
+        assert!(page.rows.is_empty(), "{query:?}: {:?}", row_paths(&page));
+        assert!(page.next.is_none(), "{query:?} minted a cursor");
         let [
             Unsatisfied::MalformedQuery {
                 query: named,
@@ -1881,17 +1888,22 @@ fn a_malformed_full_text_query_is_reported_and_the_page_answered_without_it() {
         assert!(!problem.is_empty(), "{query:?} carries no problem");
 
         let beside = seeded
-            .page(&request().with_predicates([Predicate::matches(query), Predicate::tag("draft")]));
-        assert_eq!(row_paths(&beside), tagged, "{query:?} beside a tag part");
-        assert_eq!(beside.unsatisfied.len(), 1, "{:?}", beside.unsatisfied);
+            .page(&bounded().with_predicates([Predicate::matches(query), Predicate::tag("draft")]));
+        assert!(
+            beside.rows.is_empty(),
+            "{query:?} beside a tag part: {:?}",
+            row_paths(&beside)
+        );
+        assert!(beside.next.is_none(), "{query:?} beside a tag part");
+        assert_eq!(beside.unsatisfied, page.unsatisfied);
 
-        let plans = seeded.plans(&request().with_predicates([Predicate::matches(query)]));
+        let plans = seeded.plans(&bounded().with_predicates([Predicate::matches(query)]));
         plan_of(&plans, FindStatement::MatchProbe);
         assert!(
-            !plan_of(&plans, FindStatement::PathPage(PageDirection::Ascending))
-                .sql()
-                .contains("documents_fts"),
-            "the page statement still spells the malformed part"
+            plans
+                .iter()
+                .all(|plan| !matches!(plan.statement, FindStatement::PathPage(_))),
+            "an empty page still ran a page statement: {plans:?}"
         );
     }
     let page = seeded.page(&request().with_predicates([Predicate::matches("interloper")]));
