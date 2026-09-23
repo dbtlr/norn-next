@@ -14,8 +14,10 @@ use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, StoreError,
     class_probe, induced_failure, suffix_probe,
 };
+use std::num::NonZeroUsize;
+
 use norn_testkit::equivalence::assert_operationally_valid;
-use norn_testkit::explain::{PlanRow, QueryPlan};
+use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_testkit::readings;
 use norn_testkit::work::WorkBar;
 use norn_wire::FindingKind;
@@ -664,6 +666,9 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::VaultSchemaPin => {
             "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for"
         }
+        ExplainedStatement::FindingCandidates(_) | ExplainedStatement::FindingClasses(_) => {
+            "a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead"
+        }
     }
 }
 
@@ -683,6 +688,40 @@ const FEEDS: &[ExplainedStatement<'static>] = &[
     ExplainedStatement::DocumentFeedPage,
     ExplainedStatement::TombstoneFeedPage,
 ];
+
+/// The two statements a findings read collects each finding's detail through,
+/// once per chunk of ids, named once so the plan bar and the census judge the
+/// same pair. Each is spelled by how many ids its chunk holds.
+const FINDING_DETAIL: &[fn(NonZeroUsize) -> ExplainedStatement<'static>] = &[
+    ExplainedStatement::FindingCandidates,
+    ExplainedStatement::FindingClasses,
+];
+
+/// The seek a findings delete fires into one of the two detail tables.
+///
+/// Both tables reference `findings(id)` with `ON DELETE CASCADE` and lead their
+/// primary key with that reference, so a deleted finding's detail rows are one
+/// equality seek of the key away. The plan reports the cascade as a search of
+/// the detail table, and a cascade that fell to reading the table end to end
+/// would make every discard cost every finding's detail the store holds.
+///
+/// The judgment is taken on one row: some step that searches `table` runs
+/// through the primary key with the equality constraint on `finding`. A table
+/// the discard also searches for another reason — the membership rows a class
+/// discard selects its findings through — keeps that search, and it is judged
+/// by the assertion that names it.
+fn assert_cascade_seeks_the_primary_key(plan: &QueryPlan, table: &str) {
+    plan.assert_no_full_scan_of(table);
+    plan.assert_searches_through(table, Access::PrimaryKey);
+    assert!(
+        plan.searches_of(table).iter().any(|row| {
+            row.access() == Some(Access::PrimaryKey) && row.constraint() == Some("(finding=?)")
+        }),
+        "no step searching `{table}` seeks its primary key by `finding`: {:?}\nemitted SQL: {}",
+        plan.searches_of(table),
+        plan.sql()
+    );
+}
 
 /// **Every statement findings maintenance runs reaches its rows through an
 /// index.** The bar is asserted against the statement the store actually
@@ -718,7 +757,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     candidates.assert_no_full_scan_of("documents");
     candidates.assert_searches("documents");
-    candidates.assert_uses_index("documents_suffix_key");
+    candidates.assert_searches_through("documents", Access::Index("documents_suffix_key"));
 
     let findings = plan(
         request
@@ -729,9 +768,13 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     findings.assert_no_full_scan_of("findings");
     findings.assert_searches("findings");
-    findings.assert_uses_index("finding_classes_class_key");
     // The class direction seeks the membership index and reaches each finding by
     // row id, which is the order the reader states — so nothing sorts.
+    findings.assert_searches_through(
+        "finding_classes",
+        Access::Index("finding_classes_class_key"),
+    );
+    findings.assert_searches_through("findings", Access::RowId);
     findings.assert_no_temp_btree();
 
     // The class-scoped discard reads the same membership range as the read
@@ -746,7 +789,13 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     class_discard.assert_no_full_scan_of("findings");
     class_discard.assert_no_full_scan_of("finding_classes");
-    class_discard.assert_uses_index("finding_classes_class_key");
+    class_discard.assert_searches_through(
+        "finding_classes",
+        Access::Index("finding_classes_class_key"),
+    );
+    class_discard.assert_searches_through("findings", Access::RowId);
+    assert_cascade_seeks_the_primary_key(&class_discard, "finding_candidates");
+    assert_cascade_seeks_the_primary_key(&class_discard, "finding_classes");
 
     // The subject-scoped discard an increment runs once per changed path seeks
     // `findings_path`, so a changeset of fifty thousand entries is that many
@@ -761,7 +810,9 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     subject_discard.assert_no_full_scan_of("findings");
     subject_discard.assert_searches("findings");
-    subject_discard.assert_uses_index("findings_path");
+    subject_discard.assert_searches_through("findings", Access::Index("findings_path"));
+    assert_cascade_seeks_the_primary_key(&subject_discard, "finding_candidates");
+    assert_cascade_seeks_the_primary_key(&subject_discard, "finding_classes");
 
     // Naming kinds narrows what the discard takes and not how it reaches it: the
     // path is the seek in both forms and the kinds filter the rows it reached,
@@ -776,7 +827,9 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     kind_discard.assert_no_full_scan_of("findings");
     kind_discard.assert_searches("findings");
-    kind_discard.assert_uses_index("findings_path");
+    kind_discard.assert_searches_through("findings", Access::Index("findings_path"));
+    assert_cascade_seeks_the_primary_key(&kind_discard, "finding_candidates");
+    assert_cascade_seeks_the_primary_key(&kind_discard, "finding_classes");
 
     // A two-reduction probe is two seeks rather than one wider read.
     let two = plan(
@@ -788,9 +841,9 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     two.assert_no_full_scan_of("documents");
     assert_eq!(
-        two.rows()
+        two.searches_of("documents")
             .iter()
-            .filter(|row| row.index() == Some("documents_suffix_key"))
+            .filter(|row| row.access() == Some(Access::Index("documents_suffix_key")))
             .count(),
         2,
         "a two-reduction probe did not open two ranges: {:?}",
@@ -858,8 +911,8 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             subjects.assert_no_table_scan();
             subjects.assert_no_full_scan_of("documents");
             subjects.assert_searches("documents");
-            subjects.assert_uses_index("findings_path");
-            subjects.assert_uses_index("documents_path");
+            subjects.assert_searches_through("findings", Access::Index("findings_path"));
+            subjects.assert_searches_through("documents", Access::Index("documents_path"));
             subjects.assert_no_temp_btree();
             // The cursor is a bound on `findings_path` rather than a filter over
             // it, so a page seeks the index in every scope and both orders —
@@ -880,9 +933,16 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     // `ExplainedStatement` does not compile until its author names the test that
     // covers it. Every test is named here, so a variant cannot be routed to a
     // bar that does not exist.
+    //
+    // The statements the bars judge are the ones named inline above and in
+    // the heal bar, and the lists the other bars iterate. Together they cover
+    // every slot of `ExplainedStatement::all` exactly once, so a statement
+    // dropped from a list its bar iterates leaves a slot empty here rather
+    // than leaving the bar one statement narrower without a word.
     let probe = class_probe("glossary").expect("a class stem");
     let subject = path("one/glossary.md");
-    let bars: std::collections::BTreeSet<&str> = [
+    let width = NonZeroUsize::MIN;
+    let judged: Vec<ExplainedStatement<'_>> = [
         ExplainedStatement::SuffixCandidates(&probe),
         ExplainedStatement::FindingsInClass(&probe),
         ExplainedStatement::ClassDiscard(&probe),
@@ -901,12 +961,22 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     .chain(ENUMERATIONS.iter().copied())
     .chain(FEEDS.iter().copied())
     .chain(ExplainedStatement::point_reads(&subject))
-    .map(barred_by)
+    .chain(FINDING_DETAIL.iter().map(|detail| detail(width)))
     .collect();
+    let mut slots: Vec<usize> = judged.iter().map(|statement| statement.slot()).collect();
+    slots.sort_unstable();
+    assert_eq!(
+        slots,
+        (0..norn_store::STATEMENTS).collect::<Vec<usize>>(),
+        "the statements the bars judge do not cover every slot of the seam exactly once, so \
+         some statement is judged twice or by no bar at all: {judged:?}"
+    );
+    let bars: std::collections::BTreeSet<&str> = judged.into_iter().map(barred_by).collect();
     assert_eq!(
         bars,
         [
             "a_feed_page_walks_its_covering_index_and_reads_no_row",
+            "a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead",
             "a_heal_page_seeks_the_index_that_holds_its_order",
             "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for",
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
@@ -984,14 +1054,14 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
             .expect("a query plan"),
     );
     tombstones.assert_searches("tombstones");
-    tombstones.assert_uses_index("tombstones_path");
+    tombstones.assert_searches_through("tombstones", Access::Index("tombstones_path"));
     let suffix_keys = plan(
         request
             .emitted_plan(ExplainedStatement::StoredSuffixKeyPage)
             .expect("a query plan"),
     );
     suffix_keys.assert_searches("documents");
-    suffix_keys.assert_uses_index("documents_path");
+    suffix_keys.assert_searches_through("documents", Access::Index("documents_path"));
 }
 
 /// **The point-read census is exactly the statements that say they are point
@@ -1011,7 +1081,7 @@ fn the_point_read_census_holds_every_statement_that_says_it_is_one() {
     let probe = class_probe("glossary").expect("a class stem");
     let kinds = [FindingKind::PathNamesNoDocument];
 
-    let every = ExplainedStatement::all(&subject, &probe, &kinds);
+    let every = ExplainedStatement::all(&subject, &probe, &kinds, NonZeroUsize::MIN);
     assert_eq!(every.len(), norn_store::STATEMENTS);
     for (position, statement) in every.iter().enumerate() {
         assert_eq!(
@@ -1037,12 +1107,10 @@ fn the_point_read_census_holds_every_statement_that_says_it_is_one() {
 struct PointReadBar {
     /// The table the statement reaches its rows in.
     table: &'static str,
-    /// The index the seek runs through, or [`None`] where the seek runs
-    /// through a primary key. `meta` is `WITHOUT ROWID`, so its rows live in
-    /// the key b-tree itself and SQLite reports `USING PRIMARY KEY` with no
-    /// name for [`QueryPlan::assert_uses_index`] to match. The scan, search
-    /// and constraint assertions carry that entry whole.
-    index: Option<&'static str>,
+    /// What the seek runs through: a declared index, or for `meta` — which is
+    /// `WITHOUT ROWID`, so its rows live in the key b-tree itself — the
+    /// primary key.
+    access: Access<'static>,
     /// The constraint an equality seek of this statement's key prints. It is
     /// what separates a point read from a range: `path>?` opens a cursor on
     /// the same index as `path=?` and reports the same index name, so a bar
@@ -1068,7 +1136,7 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
     let seek = |table, index, constraint| {
         Some(PointReadBar {
             table,
-            index: Some(index),
+            access: Access::Index(index),
             constraint,
             sorts: false,
         })
@@ -1100,13 +1168,13 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         // The subject's own findings, and the one entry that sorts.
         ExplainedStatement::StoredFindings(_) => Some(PointReadBar {
             table: "findings",
-            index: Some("findings_path"),
+            access: Access::Index("findings_path"),
             constraint: "(path=?)",
             sorts: true,
         }),
         ExplainedStatement::VaultSchemaPin => Some(PointReadBar {
             table: "meta",
-            index: None,
+            access: Access::PrimaryKey,
             constraint: "(key=?)",
             sorts: false,
         }),
@@ -1121,7 +1189,9 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::StoredSuffixKeyPage
         | ExplainedStatement::IndexedTermPage
         | ExplainedStatement::DocumentFeedPage
-        | ExplainedStatement::TombstoneFeedPage => None,
+        | ExplainedStatement::TombstoneFeedPage
+        | ExplainedStatement::FindingCandidates(_)
+        | ExplainedStatement::FindingClasses(_) => None,
     }
 }
 
@@ -1131,18 +1201,19 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
 /// that found its rows by stepping over the rows ahead of them would cost the
 /// whole table for every question about one place.
 ///
-/// Four assertions per statement, and the last two are what make it a bar
-/// rather than a description:
+/// Four assertions hold every statement, and a fifth holds eight of the nine:
 ///
 /// - It does not read its table end to end, and it searches that table.
-/// - The step that searches the table carries an **equality** constraint. A
-///   search alone is not a point read: a range over the same index reports the
-///   same `SEARCH … USING INDEX` row, and for the pinned-schema read — whose
-///   `WITHOUT ROWID` primary key has no index name — the constraint is the only
-///   thing there is to judge.
-/// - It sorts only where [`PointReadBar::sorts`] says its stated order is one
-///   no index holds, so a reader that grew a sorter over an order an index
-///   already gave it reddens here.
+/// - The step that searches the table runs through [`PointReadBar::access`]
+///   and carries an **equality** constraint. These two are what make it a bar
+///   rather than a description: a search alone is not a point read, because a
+///   range over the same index reports the same `SEARCH … USING INDEX` row,
+///   and a range over a `WITHOUT ROWID` primary key the same `SEARCH … USING
+///   PRIMARY KEY` row.
+/// - It builds no temporary B-tree. This is the fifth assertion, and it holds
+///   every statement but the one whose [`PointReadBar::sorts`] says its stated
+///   order is one no index holds, so a reader that grew a sorter over an order
+///   an index already gave it reddens here.
 ///
 /// The census is [`ExplainedStatement::point_reads`], which lives beside the
 /// statements rather than here: a bar with its own copy of the list is a bar
@@ -1175,12 +1246,78 @@ fn a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for() {
         read.assert_no_full_scan_of(expected.table);
         read.assert_searches(expected.table);
         read.assert_search_constraint(expected.table, expected.constraint);
-        if let Some(index) = expected.index {
-            read.assert_uses_index(index);
-        }
+        read.assert_searches_through(expected.table, expected.access);
         if !expected.sorts {
             read.assert_no_temp_btree();
         }
+    }
+}
+
+/// **A finding's detail is read by primary key, a chunk of ids at a time.**
+/// Every findings read — one path's, one class's, and the page that drains the
+/// table — collects each finding's candidate head and class memberships through
+/// these two statements, once per chunk of the findings it found. A chunk that
+/// reached its rows by reading the detail tables end to end would make every
+/// findings read cost every finding the store holds.
+///
+/// Both tables are `WITHOUT ROWID` and keyed by `(finding, …)`, so the ids lead
+/// each primary key: one seek per id, and the rows come off each seek in the
+/// order the statement states, so nothing sorts. `finding_classes` carries a
+/// second index as well, on `class_key`, which is the direction a class read
+/// seeks; a chunk holds no class key, so the bar names the primary key and a
+/// plan that answered out of the class index fails it.
+///
+/// The bar ranges over every chunk width a read can emit, from one id to
+/// [`norn_store::FINDING_ID_CHUNK`]: the statement text is spelled by the width,
+/// and a one-id list is a different statement to the planner than a longer one.
+/// So each plan is judged together with the statement it was taken of, which
+/// binds exactly as many ids as the width it was asked for: its last
+/// placeholder is `?n` and there is no `?n+1`. A plan of some narrower
+/// statement would pass every plan assertion here and say nothing about the
+/// width a read runs.
+///
+/// A width above the chunk bound is not a statement any reader runs, and the
+/// seam refuses to explain one. An empty chunk has no spelling at all: the
+/// width is a [`NonZeroUsize`].
+#[test]
+fn a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead() {
+    let scratch = Scratch::new("finding-detail-plans");
+    let mut store = scratch.open();
+    let request = store.begin_request();
+
+    for detail in FINDING_DETAIL {
+        let table = match detail(NonZeroUsize::MIN) {
+            ExplainedStatement::FindingCandidates(_) => "finding_candidates",
+            ExplainedStatement::FindingClasses(_) => "finding_classes",
+            other => panic!("`FINDING_DETAIL` names {other:?}, which is not a detail read"),
+        };
+        for ids in 1..=norn_store::FINDING_ID_CHUNK {
+            let width = NonZeroUsize::new(ids).expect("the range starts at one");
+            let chunk = plan(
+                request
+                    .emitted_plan(detail(width))
+                    .expect("a query plan for a finding-detail chunk"),
+            );
+            assert!(
+                chunk.sql().contains(&format!("?{ids}"))
+                    && !chunk.sql().contains(&format!("?{}", ids + 1)),
+                "the plan judged as a chunk of {ids} ids was taken of a statement that binds \
+                 some other number of them: {}",
+                chunk.sql()
+            );
+            chunk.assert_no_full_scan();
+            chunk.assert_searches_through(table, Access::PrimaryKey);
+            chunk.assert_search_constraint(table, "(finding=?)");
+            chunk.assert_no_temp_btree();
+        }
+        let above = NonZeroUsize::new(norn_store::FINDING_ID_CHUNK + 1).expect("above one");
+        assert!(
+            matches!(
+                request.emitted_plan(detail(above)),
+                Err(StoreError::Bound { given, .. }) if given == above.get()
+            ),
+            "a chunk of {above} ids is not one a reader emits, and the seam explained it"
+        );
     }
 }
 
@@ -1347,24 +1484,21 @@ fn a_feed_page_walks_its_covering_index_and_reads_no_row() {
         page.assert_no_table_scan();
         page.assert_no_full_scan();
         page.assert_no_temp_btree();
-        match statement {
-            ExplainedStatement::DocumentFeedPage => {
-                page.assert_searches("documents");
-                page.assert_uses_index("documents_change_feed");
-            }
-            ExplainedStatement::TombstoneFeedPage => {
-                page.assert_searches("tombstones");
-                page.assert_uses_index("tombstones_change_feed");
-            }
+        let (table, index) = match statement {
+            ExplainedStatement::DocumentFeedPage => ("documents", "documents_change_feed"),
+            ExplainedStatement::TombstoneFeedPage => ("tombstones", "tombstones_change_feed"),
             other => panic!("`FEEDS` names {other:?}, which is not a feed"),
-        }
-        // The index answers the page whole. SQLite says so itself, and it is the
-        // difference between a page that costs its own columns and one that
-        // costs a row lookup per row it returns.
+        };
+        page.assert_searches(table);
+        page.assert_searches_through(table, Access::Index(index));
+        // The index answers the page whole. SQLite says so itself, on the row
+        // that searches the feed's table, and it is the difference between a
+        // page that costs its own columns and one that costs a row lookup per
+        // row it returns.
         assert!(
-            page.rows()
-                .iter()
-                .any(|row| row.detail.contains("COVERING INDEX")),
+            page.searches_of(table).iter().any(|row| row
+                .detail
+                .contains(&format!("USING COVERING INDEX {index} "))),
             "the page reads the row for columns the index was declared to carry: {:?}",
             page.rows()
         );
@@ -1710,10 +1844,27 @@ fn a_heal_page_seeks_the_index_that_holds_its_order() {
             // index that is, is the vault's proven case behaviour: a bytewise
             // vault pages through the unique path index, and a vault that folds
             // ASCII case pages through the index declared under the same fold.
-            page.assert_uses_index(match order {
-                norn_store::StoredPathOrder::Sensitive => "documents_path",
-                norn_store::StoredPathOrder::AsciiCaseInsensitive => "documents_path_nocase",
-            });
+            page.assert_searches_through(
+                "documents",
+                Access::Index(match order {
+                    norn_store::StoredPathOrder::Sensitive => "documents_path",
+                    norn_store::StoredPathOrder::AsciiCaseInsensitive => "documents_path_nocase",
+                }),
+            );
+            // The access bar names the index the page searches, and this names
+            // the range it opens there: a lower bound in every scope, and a
+            // bounded scope's upper edge beside it. A search of the same index
+            // that lost its lower bound would still answer the access bar, and
+            // every page would read the index from its start.
+            page.assert_search_constraint(
+                "documents",
+                match scope {
+                    norn_store::SubjectScope::Vault => "(path>?)",
+                    norn_store::SubjectScope::Subtree(_) | norn_store::SubjectScope::Under(_) => {
+                        "(path>? AND path<?)"
+                    }
+                },
+            );
             page.assert_no_temp_btree();
         }
     }

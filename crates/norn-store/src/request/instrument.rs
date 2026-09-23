@@ -17,6 +17,8 @@
 //! bar is read through — the two are certified separately and change for
 //! different reasons.
 
+use std::num::NonZeroUsize;
+
 use norn_db::EmittedPlan;
 use norn_db::rusqlite::{params, params_from_iter};
 use norn_wire::FindingKind;
@@ -25,12 +27,13 @@ use crate::ddl;
 
 use super::{
     DOCUMENT_BLOCKS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINKS_SQL, DOCUMENT_TAGS_SQL,
-    DiscardScope, DocumentPath, FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, MAX_PAGE,
-    Request, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope,
-    SuffixProbe, TOMBSTONE_PAGE_SQL, class_discard_sql, document_feed_sql,
-    document_page_parameters, document_page_sql, feed_page_parameters, finding_page_parameters,
-    finding_page_sql, finding_subject_parameters, finding_subjects_sql, findings_in_class_sql,
-    probe_parameters, stored_document_sql, stored_facts_document_sql, stored_findings_sql,
+    DiscardScope, DocumentPath, FINDING_ID_CHUNK, FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL,
+    MAX_PAGE, Request, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder,
+    SubjectScope, SuffixProbe, TOMBSTONE_PAGE_SQL, class_discard_sql, document_feed_sql,
+    document_page_parameters, document_page_sql, feed_page_parameters, finding_candidates_sql,
+    finding_classes_sql, finding_id_parameters, finding_page_parameters, finding_page_sql,
+    finding_subject_parameters, finding_subjects_sql, findings_in_class_sql, probe_parameters,
+    stored_document_sql, stored_facts_document_sql, stored_findings_sql,
     subject_discard_parameters, subject_discard_sql, suffix_candidates_sql, text_page_parameters,
     tombstone_feed_sql,
 };
@@ -50,6 +53,12 @@ const EXPLAINED_TERM_CURSOR: &str = "explained-page-cursor";
 /// the sequence's own range does; what matters is that the cursor is bound
 /// rather than null.
 const EXPLAINED_FEED_GENERATION: i64 = 1;
+
+/// The first finding id a chunk is explained with. A chunk of `n` ids is
+/// explained with the `n` consecutive ids from here: distinct keys inside the
+/// table's own range, each bound rather than null, which is what a chunk the
+/// readers run holds.
+const EXPLAINED_FIRST_FINDING_ID: i64 = 1;
 
 /// The document row a fact read is explained from.
 ///
@@ -78,6 +87,16 @@ impl<'a> Request<'a> {
         &self,
         statement: ExplainedStatement<'_>,
     ) -> Result<EmittedPlan, StoreError> {
+        if let ExplainedStatement::FindingCandidates(ids) | ExplainedStatement::FindingClasses(ids) =
+            statement
+            && ids.get() > FINDING_ID_CHUNK
+        {
+            return Err(StoreError::Bound {
+                what: "a finding-id chunk",
+                limit: FINDING_ID_CHUNK,
+                given: ids.get(),
+            });
+        }
         let sql = match statement {
             ExplainedStatement::SuffixCandidates(probe) => {
                 suffix_candidates_sql(probe.range_count())
@@ -106,6 +125,8 @@ impl<'a> Request<'a> {
             ExplainedStatement::StoredTombstone(_) => STORED_TOMBSTONE_SQL.to_string(),
             ExplainedStatement::StoredFindings(_) => stored_findings_sql(),
             ExplainedStatement::VaultSchemaPin => norn_db::meta::META_READ_SQL.to_string(),
+            ExplainedStatement::FindingCandidates(ids) => finding_candidates_sql(ids.get()),
+            ExplainedStatement::FindingClasses(ids) => finding_classes_sql(ids.get()),
         };
         let connection = self.store.connection();
         Ok(match statement {
@@ -206,6 +227,11 @@ impl<'a> Request<'a> {
             ExplainedStatement::VaultSchemaPin => {
                 norn_db::emitted_plan(connection, &sql, params![ddl::meta::VAULT_SCHEMA_BYTES])
             }
+            ExplainedStatement::FindingCandidates(ids)
+            | ExplainedStatement::FindingClasses(ids) => {
+                let chunk: Vec<i64> = (EXPLAINED_FIRST_FINDING_ID..).take(ids.get()).collect();
+                norn_db::emitted_plan(connection, &sql, finding_id_parameters(&chunk))
+            }
         }?)
     }
 
@@ -243,7 +269,18 @@ impl<'a> Request<'a> {
     /// the paged readers are. Taking an [`Request::emitted_plan`] contributes
     /// nothing either.
     pub fn read_steps(&self) -> u64 {
-        self.read_steps.get()
+        self.read_work.steps.get()
+    }
+
+    /// How many statements this request's multi-row reads have run, counted
+    /// over the same statements [`Request::read_steps`] counts the steps of.
+    ///
+    /// It is the reading a bar over how a reader splits its work into
+    /// statements is taken through, and nothing outside this crate's own tests
+    /// reads it.
+    #[cfg(test)]
+    pub(crate) fn read_statements(&self) -> u64 {
+        self.read_work.statements.get()
     }
 }
 
@@ -251,8 +288,9 @@ impl<'a> Request<'a> {
 /// statement is bound to.
 ///
 /// The parameters ride the variant because a plan is taken of a statement as it
-/// is executed: the probe readers range over a [`SuffixProbe`], and the
-/// increment's subject-axis discard is keyed by one path.
+/// is executed: the probe readers range over a [`SuffixProbe`], the
+/// increment's subject-axis discard is keyed by one path, and a finding-detail
+/// read is spelled by how many ids its chunk holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExplainedStatement<'a> {
     /// [`Request::suffix_candidates`].
@@ -321,6 +359,24 @@ pub enum ExplainedStatement<'a> {
     /// it reports. One statement covers all three: the key rides the parameter
     /// rather than the text.
     VaultSchemaPin,
+    /// The candidate heads of a chunk of this many findings, which
+    /// [`Request::stored_findings`], [`Request::findings_in_class`] and
+    /// [`Request::stored_findings_after`] read once per chunk of the findings
+    /// their first statement found. A chunk holds from one id to
+    /// [`FINDING_ID_CHUNK`]: the width is nonzero by its type, and a width
+    /// above the chunk bound is refused as [`StoreError::Bound`].
+    ///
+    /// An empty chunk is not a statement any reader runs, so it has no
+    /// spelling here at all:
+    ///
+    /// ```compile_fail,E0308
+    /// norn_store::ExplainedStatement::FindingCandidates(0);
+    /// ```
+    FindingCandidates(NonZeroUsize),
+    /// The class memberships of a chunk of this many findings, read beside
+    /// [`ExplainedStatement::FindingCandidates`] by the same three readers,
+    /// and spelled by a nonzero width for the same reason.
+    FindingClasses(NonZeroUsize),
 }
 
 /// How many keyed point reads this seam names.
@@ -334,7 +390,7 @@ pub const POINT_READS: usize = 9;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 21;
+pub const STATEMENTS: usize = 23;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -347,14 +403,16 @@ impl<'a> ExplainedStatement<'a> {
     /// [`Self::slot`] — exhaustive over this enum — is what binds a variant to
     /// its place in it.
     ///
-    /// The parameters are the ones a statement cannot be spelled without. The
-    /// scope, the order and the discard scope are not parameters: a statement's
-    /// place in this enumeration does not depend on which of them it carries,
-    /// and the bars that care about those axes range over them themselves.
+    /// The parameters are the ones a statement cannot be spelled without, and
+    /// `ids` is the width of a finding-id chunk. The scope, the order and the
+    /// discard scope are not parameters: a statement's place in this
+    /// enumeration does not depend on which of them it carries, and the bars
+    /// that care about those axes range over them themselves.
     pub fn all(
         subject: &'a DocumentPath,
         probe: &'a SuffixProbe,
         kinds: &'a [FindingKind],
+        ids: NonZeroUsize,
     ) -> [Self; STATEMENTS] {
         [
             Self::SuffixCandidates(probe),
@@ -382,6 +440,8 @@ impl<'a> ExplainedStatement<'a> {
             Self::StoredTombstone(subject),
             Self::StoredFindings(subject),
             Self::VaultSchemaPin,
+            Self::FindingCandidates(ids),
+            Self::FindingClasses(ids),
         ]
     }
 
@@ -415,6 +475,8 @@ impl<'a> ExplainedStatement<'a> {
             Self::StoredTombstone(_) => 18,
             Self::StoredFindings(_) => 19,
             Self::VaultSchemaPin => 20,
+            Self::FindingCandidates(_) => 21,
+            Self::FindingClasses(_) => 22,
         };
         assert!(
             slot < STATEMENTS,
@@ -444,7 +506,8 @@ impl<'a> ExplainedStatement<'a> {
     }
 
     /// Whether this statement answers about a key its caller already holds,
-    /// rather than draining a page or ranging over a probe.
+    /// rather than draining a page, ranging over a probe or answering about a
+    /// chunk of keys at once.
     ///
     /// The `match` is exhaustive, so a variant added to this enum has to say
     /// which of the two it is. A statement that says it is a point read belongs
@@ -473,7 +536,9 @@ impl<'a> ExplainedStatement<'a> {
             | Self::StoredSuffixKeyPage
             | Self::IndexedTermPage
             | Self::DocumentFeedPage
-            | Self::TombstoneFeedPage => false,
+            | Self::TombstoneFeedPage
+            | Self::FindingCandidates(_)
+            | Self::FindingClasses(_) => false,
         }
     }
 }

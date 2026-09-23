@@ -131,23 +131,34 @@ const STORED_DOCUMENT_COLUMNS: &str = "path, content_hash, byte_length, body_off
 ///
 /// A class or a path can hold more findings than SQLite's 32766-parameter
 /// bound leaves room for in one statement — the candidate and class reads bind
-/// one parameter per id — so [`Request::findings`] chunks rather than binding
-/// the whole list at once.
+/// one parameter per id — so a findings read chunks its ids rather than binding
+/// the whole list at once. Every chunk holds between one id and this many, so
+/// those are the statements [`ExplainedStatement::FindingCandidates`] and
+/// [`ExplainedStatement::FindingClasses`] name.
 #[cfg(not(test))]
-const FINDING_ID_CHUNK: usize = 500;
+pub const FINDING_ID_CHUNK: usize = 500;
 /// Shrunk under test, so a unit test can cross a chunk boundary without
 /// writing tens of thousands of rows to do it.
 #[cfg(test)]
-const FINDING_ID_CHUNK: usize = 4;
+pub const FINDING_ID_CHUNK: usize = 4;
 
 /// One request's worth of work against a store.
 pub struct Request<'a> {
     store: &'a mut Store,
     counters: DerivationCounters,
-    /// The engine work this request's paged reads have cost, read back by
-    /// [`Request::read_steps`]. A [`Cell`] because the readers take `&self` —
-    /// the connection they borrow is a field of the same struct.
-    read_steps: Cell<u64>,
+    /// The engine work this request's multi-row reads have cost.
+    read_work: ReadWork,
+}
+
+/// What the multi-row reader has run on one request's behalf: the virtual-machine
+/// steps [`Request::read_steps`] reads back, and how many statements took them.
+///
+/// Each count is a [`Cell`] because the readers take `&self` — the connection
+/// they borrow is a field of the same struct.
+#[derive(Default)]
+struct ReadWork {
+    steps: Cell<u64>,
+    statements: Cell<u64>,
 }
 
 impl<'a> Request<'a> {
@@ -155,7 +166,7 @@ impl<'a> Request<'a> {
         Request {
             store,
             counters: DerivationCounters::default(),
-            read_steps: Cell::new(0),
+            read_work: ReadWork::default(),
         }
     }
 
@@ -656,7 +667,7 @@ impl<'a> Request<'a> {
             body,
             links: Self::read_all_on(
                 &transaction,
-                &self.read_steps,
+                &self.read_work,
                 DOCUMENT_LINKS_SQL,
                 params![id],
                 stored_link,
@@ -664,7 +675,7 @@ impl<'a> Request<'a> {
             )?,
             headings: Self::read_all_on(
                 &transaction,
-                &self.read_steps,
+                &self.read_work,
                 DOCUMENT_HEADINGS_SQL,
                 params![id],
                 stored_heading,
@@ -672,7 +683,7 @@ impl<'a> Request<'a> {
             )?,
             blocks: Self::read_all_on(
                 &transaction,
-                &self.read_steps,
+                &self.read_work,
                 DOCUMENT_BLOCKS_SQL,
                 params![id],
                 stored_block,
@@ -680,7 +691,7 @@ impl<'a> Request<'a> {
             )?,
             tags: Self::read_all_on(
                 &transaction,
-                &self.read_steps,
+                &self.read_work,
                 DOCUMENT_TAGS_SQL,
                 params![id],
                 stored_tag,
@@ -1177,16 +1188,9 @@ impl<'a> Request<'a> {
         }
 
         for chunk in ids.chunks(FINDING_ID_CHUNK) {
-            let placeholders = (1..=chunk.len())
-                .map(|index| format!("?{index}"))
-                .collect::<Vec<String>>()
-                .join(", ");
             let candidates = self.read_all(
-                &format!(
-                    "SELECT finding, path, suffix FROM finding_candidates
-                     WHERE finding IN ({placeholders}) ORDER BY finding, rank"
-                ),
-                params_from_iter(chunk.iter()),
+                &finding_candidates_sql(chunk.len()),
+                finding_id_parameters(chunk),
                 stored_candidate,
                 "reading a finding's candidates",
             )?;
@@ -1196,11 +1200,8 @@ impl<'a> Request<'a> {
                 }
             }
             let classes = self.read_all(
-                &format!(
-                    "SELECT finding, class_key FROM finding_classes
-                     WHERE finding IN ({placeholders}) ORDER BY finding, class_key"
-                ),
-                params_from_iter(chunk.iter()),
+                &finding_classes_sql(chunk.len()),
+                finding_id_parameters(chunk),
                 stored_class,
                 "reading a finding's classes",
             )?;
@@ -1228,7 +1229,8 @@ impl<'a> Request<'a> {
     }
 
     /// Run a multi-row statement on this request's connection, adding what it
-    /// stepped to [`Request::read_steps`].
+    /// stepped to [`Request::read_steps`] and the statement to the request's
+    /// tally of them.
     fn read_all<T>(
         &self,
         sql: &str,
@@ -1238,7 +1240,7 @@ impl<'a> Request<'a> {
     ) -> Result<Vec<T>, StoreError> {
         Self::read_all_on(
             self.store.connection(),
-            &self.read_steps,
+            &self.read_work,
             sql,
             parameters,
             read,
@@ -1247,10 +1249,10 @@ impl<'a> Request<'a> {
     }
 
     /// The same, on a connection the caller names — a read snapshot's own
-    /// transaction — with the step count still this request's.
+    /// transaction — with the steps and the statement still this request's.
     fn read_all_on<T>(
         connection: &Connection,
-        steps: &Cell<u64>,
+        work: &ReadWork,
         sql: &str,
         parameters: impl Params,
         read: impl FnMut(&Row<'_>) -> Reading<T>,
@@ -1281,7 +1283,9 @@ impl<'a> Request<'a> {
         // and dropping that count would let a reader that refuses on every page
         // cost nothing a bar could see.
         let stepped = statement.get_status(StatementStatus::VmStep);
-        steps.set(steps.get().saturating_add(stepped.max(0) as u64));
+        work.steps
+            .set(work.steps.get().saturating_add(stepped.max(0) as u64));
+        work.statements.set(work.statements.get().saturating_add(1));
         match refused {
             Some(problem) => Err(problem),
             None => Ok(found),
@@ -1593,6 +1597,46 @@ const STORED_TOMBSTONE_SQL: &str = "SELECT path, last_content_hash, provenance, 
 /// the set the seek already bounded.
 fn stored_findings_sql() -> String {
     format!("SELECT {FINDING_COLUMNS} FROM findings WHERE path = ?1 ORDER BY generation, id")
+}
+
+/// The statement a findings read emits for the candidate heads of a chunk of
+/// `ids` findings.
+///
+/// The ids lead the primary key `(finding, rank)`, so the chunk is one seek per
+/// id and the rows come off each seek in the order the reader states.
+fn finding_candidates_sql(ids: usize) -> String {
+    format!(
+        "SELECT finding, path, suffix FROM finding_candidates
+         WHERE finding IN ({}) ORDER BY finding, rank",
+        finding_id_placeholders(ids)
+    )
+}
+
+/// The statement a findings read emits for the class memberships of a chunk of
+/// `ids` findings.
+///
+/// The ids lead the primary key `(finding, class_key)`, which is the finding
+/// direction of the table; `finding_classes_class_key` is the class direction
+/// and holds nothing this read is keyed by.
+fn finding_classes_sql(ids: usize) -> String {
+    format!(
+        "SELECT finding, class_key FROM finding_classes
+         WHERE finding IN ({}) ORDER BY finding, class_key",
+        finding_id_placeholders(ids)
+    )
+}
+
+/// One placeholder per id of a chunk, numbered from one.
+fn finding_id_placeholders(ids: usize) -> String {
+    (1..=ids)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// A chunk's ids in the order [`finding_id_placeholders`] numbers them.
+fn finding_id_parameters(chunk: &[i64]) -> impl Params + '_ {
+    params_from_iter(chunk.iter())
 }
 
 /// The statement [`Request::suffix_candidates`] emits for a probe of
@@ -2371,5 +2415,51 @@ mod tests {
                 "finding {index} lost its class at a chunk boundary"
             );
         }
+    }
+
+    /// A findings read runs its two detail statements once per chunk of
+    /// [`FINDING_ID_CHUNK`] ids, and no more often or less.
+    ///
+    /// Ten findings under a chunk bound of 4 are three chunks, so the read is
+    /// the statement that found them and three reads of each detail table. A
+    /// reader that bound every id into one list would run three statements, and
+    /// one that read id by id would run twenty-one.
+    #[test]
+    fn a_findings_read_runs_each_detail_statement_once_per_chunk_of_ids() {
+        let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk-count");
+        let mut store = Store::open_throwaway(root.join("store.sqlite3")).expect("opening a store");
+        let subject = DocumentPath::new("notes.md").expect("a document path");
+        let findings = 10;
+
+        let mut request = store.begin_request();
+        for index in 0..findings {
+            request
+                .record_finding(&FindingFacts {
+                    kind: norn_wire::FindingKind::PathNamesNoDocument,
+                    severity: norn_wire::Severity::Warning,
+                    path: subject.clone(),
+                    class_keys: [ClassKey::new(&format!("class-{index}/")).expect("a class key")]
+                        .into_iter()
+                        .collect(),
+                    target: None,
+                    span: None,
+                    candidates: Vec::new(),
+                    candidates_total: 0,
+                    message: format!("finding {index}"),
+                    detail: None,
+                })
+                .expect("recording a finding");
+        }
+
+        let before = request.read_statements();
+        let found = request.stored_findings(&subject).expect("reading findings");
+        assert_eq!(found.len(), findings);
+        let chunks = findings.div_ceil(FINDING_ID_CHUNK) as u64;
+        assert_eq!(
+            request.read_statements() - before,
+            1 + 2 * chunks,
+            "a read of {findings} findings under a chunk bound of {FINDING_ID_CHUNK} is one \
+             statement that finds them and {chunks} of each detail statement"
+        );
     }
 }
