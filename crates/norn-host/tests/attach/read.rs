@@ -74,11 +74,12 @@ pub fn pages(
 /// and hand each page to `visit` as it is read. A page `visit` does not keep
 /// is gone before the next one is read.
 ///
-/// **Every statement a page ran is one the snapshot counted.** The snapshot's
-/// own statement count across the pages equals the sum of the statements the
-/// pages report, and a read that ran one on the snapshot beside the find, or
-/// a find whose report missed one, is refused here. It is a consistency check
-/// on the report rather than a second reading of it.
+/// **Every statement the snapshot ran across the pages is one a page
+/// reports.** A page's reported statements are the snapshot's own count
+/// across that find, so the two agree for the finds by construction; what
+/// the equality here catches is a statement `visit` runs on the snapshot
+/// between one find and the next, which no page reports. It is a
+/// consistency check on the report rather than a second reading of it.
 pub fn each_page(
     snapshot: &Snapshot,
     params: &FindParams,
