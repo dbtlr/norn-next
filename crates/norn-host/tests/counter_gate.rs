@@ -62,6 +62,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use attach::read::{FIND_LIMIT, Pages, bounded_find, pages, the_pinned_declaration};
+use norn_fs::reads::{ReadTally, ReadWindow};
 use norn_host::Demand;
 use norn_store::{
     Change, DocumentFacts, DocumentPath, ExplainedStatement, IncrementProvenance, MAX_PAGE, Store,
@@ -119,17 +120,32 @@ fn a_warm_request_over_an_attached_vault_finishes_at_zero() {
 /// demand would be paid for; the second is the steady state the claim is
 /// about, and the pair is what separates them.
 ///
-/// **The find runs through the hold, and is measured by the host.** A hold
-/// hands out a snapshot rather than a request, so no derivation counter is
-/// reachable from one; what a read through a hold could cost the vault is a
-/// job the host ran meanwhile, and the host's account of its jobs is what
-/// reads that. Across the find, the documents the host derived from the vault,
-/// the files it opened for their content and the changesets it landed all
-/// read zero. The zero is measured rather than structural: a document written
-/// into the vault under the same attachment afterwards moves the same reading.
+/// **The find runs through the hold, and reads nothing through `norn-fs`.**
+/// `norn-fs` is the only file reader the host uses, and what it reads is
+/// counted on the thread that asked, so two readings answer for the find. A
+/// read window stands on this thread across the whole workload — both pages
+/// and both passes — and reads no document opened, no stat and no directory
+/// entry: that is the find itself reading nothing through `norn-fs`. The
+/// host's account of its jobs reads what a read through a hold could cost the
+/// vault on another thread — a job the host ran meanwhile — and reads zero
+/// documents derived, files opened for their content, and changesets landed
+/// and what they upserted, deleted and tombstoned. A raw `std::fs` read is
+/// outside both readings: this is a claim about the reader the host has.
+///
+/// **The find's cost is pinned as well as its zero.** Each page runs
+/// [`STATEMENTS_PER_PAGE`] statements and hydrates a whole page, so a find
+/// that ran a statement per row it hydrated fails here at any scale.
+///
+/// Each zero is measured rather than structural, and its control moves every
+/// count it asserts. On this thread, the same window around one document
+/// read through `norn-fs` reads that open. In the host's account, a document
+/// written into the vault under the same attachment moves the documents
+/// derived, the files opened, the changesets and the upserts; removing it
+/// again moves the deletes and the tombstones.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn warm_requests_under_a_live_attachment_finish_at_zero() {
+    the_hosts_account_is_readable();
     let profile = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "counter-gate-live")
         .expect("a sandbox");
@@ -147,6 +163,7 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     let declared = the_pinned_declaration(&mut store);
 
     let before = vault_work(&host);
+    let window = ReadWindow::open();
     let hold = host
         .begin_read(vault.name())
         .expect("a live attachment answers a read");
@@ -175,6 +192,7 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     let first = a_warm_pass(&mut store, &subject);
     let second = a_warm_pass(&mut store, &subject);
     drop(hold);
+    let read_on_this_thread = thread_reads(window.finish());
     let read_off_the_vault = before
         .delta(&vault_work(&host))
         .expect("two readings of one account");
@@ -183,6 +201,10 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     record_the_counters(
         "a warm request under a live attachment, second pass",
         &second,
+    );
+    record_the_counters(
+        "a find through a live hold, read through norn-fs on its thread",
+        &read_on_this_thread,
     );
     record_the_counters(
         "a find through a live hold, the host's account",
@@ -201,32 +223,27 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     first.assert_all_zero("the first warm request under a live attachment");
     second.assert_all_zero("the second warm request under a live attachment");
 
-    // A zero is only a statement about a find that read something.
+    // A zero is only a statement about a find that read something, and what
+    // it read is the shape's own cost.
     assert_eq!(
         read.pages.len(),
         2,
         "the find was meant to read a first page and the one its cursor continues"
     );
-    let first_page = &read.pages[0];
-    assert!(
-        first_page.unsatisfied.is_empty(),
-        "the find could not apply {:?}",
-        first_page.unsatisfied
-    );
-    assert!(
-        first_page.work.statements > 0,
-        "the find ran no statement: {:?}",
-        first_page.work
-    );
-    assert_eq!(
-        first_page.work.documents_hydrated,
-        u64::from(FIND_LIMIT),
-        "`realistic` holds more tasks than a page, so the first page hydrates a whole page"
-    );
-    assert!(
-        !read.pages[1].rows.is_empty(),
-        "the continuation of a full first page returned no row"
-    );
+    for (at, page) in read.pages.iter().enumerate() {
+        assert!(
+            page.unsatisfied.is_empty(),
+            "page {at} of the find could not apply {:?}",
+            page.unsatisfied
+        );
+        assert_eq!(
+            (page.work.statements, page.work.documents_hydrated),
+            (STATEMENTS_PER_PAGE, u64::from(FIND_LIMIT)),
+            "page {at} of the find was meant to run {STATEMENTS_PER_PAGE} statements and hydrate \
+             a page of {FIND_LIMIT} rows, since `realistic` holds more tasks than two pages: {:?}",
+            page.work
+        );
+    }
     for row in read.pages.iter().flat_map(|page| &page.rows) {
         let fields = row.fields.as_ref().expect("the find projected the fields");
         assert!(
@@ -235,37 +252,115 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
             row.path.as_str()
         );
     }
-    read_off_the_vault.assert_all_zero("a find through a live hold");
+    read_on_this_thread.assert_all_zero("a find through a live hold, on its own thread");
+    read_off_the_vault.assert_all_zero("a find through a live hold, in the host's account");
 
-    // **The other half of that zero.** A document written into the vault under
-    // the same attachment is derived by the host, and the same reading moves.
-    let before = vault_work(&host);
-    std::fs::write(
-        vault.path().join("counter-gate-derived.md"),
-        "---\ntitle: derived\n---\n\na body\n",
-    )
-    .expect("writing a document into the vault");
-    let moved = wait_until(
-        "the host to derive the document written under its attachment",
+    // **The other half of the thread's zero.** The same window around one
+    // document read through `norn-fs` reads the open.
+    let window = ReadWindow::open();
+    norn_fs::read_and_hash(vault.path(), Path::new(subject.path.as_str()))
+        .expect("reading a document the attachment derived");
+    let one_read = thread_reads(window.finish());
+    record_the_counters("one document read through norn-fs", &one_read);
+    assert!(
+        one_read.get("document_opens") > 0,
+        "a document read through norn-fs on this thread moved no open: {one_read:?}"
+    );
+
+    // **The other half of the account's zero.** A document written into the
+    // vault under the same attachment is derived by the host, and removing it
+    // is deleted and tombstoned by the host; each moves its counts.
+    let written = vault.path().join("counter-gate-derived.md");
+    std::fs::write(&written, "---\ntitle: derived\n---\n\na body\n")
+        .expect("writing a document into the vault");
+    let derived = the_host_spends(
+        &host,
+        "derive the document written under its attachment",
+        |spent| spent.get("documents_derived") > 0 && spent.get("documents_upserted") > 0,
+    );
+    record_the_counters("a document written under a live attachment", &derived);
+    for count in [
+        "documents_derived",
+        "document_opens",
+        "changesets_applied",
+        "documents_upserted",
+    ] {
+        assert!(
+            derived.get(count) > 0,
+            "the host derived a document written under its attachment and `{count}` did not move: \
+             {derived:?}"
+        );
+    }
+
+    std::fs::remove_file(&written).expect("removing the written document");
+    let deleted = the_host_spends(
+        &host,
+        "delete the document removed under its attachment",
+        |spent| spent.get("documents_deleted") > 0,
+    );
+    record_the_counters("a document removed under a live attachment", &deleted);
+    for count in [
+        "changesets_applied",
+        "documents_deleted",
+        "tombstones_recorded",
+    ] {
+        assert!(
+            deleted.get(count) > 0,
+            "the host deleted a document removed under its attachment and `{count}` did not \
+             move: {deleted:?}"
+        );
+    }
+}
+
+/// How many statements each page of the live-hold find runs, on the first
+/// page and on the page its cursor continues alike.
+///
+/// Six, each once per page and none per row: the pinned schema's fingerprint
+/// the find is judged under; whether a document carries `type`, and whether
+/// one carries `created`, one existence seek each; the page of `created`
+/// marker rows in descending order that the `type` filter narrows; the
+/// document rows the page found, by row id; and the head of each found
+/// document's tags. The cursor the second page continues is judged against
+/// the order it was minted in and becomes the page statement's bound, with no
+/// statement of its own. A statement run per hydrated row would put this at
+/// more than a page's rows.
+const STATEMENTS_PER_PAGE: u64 = 6;
+
+/// What the host's account moved from now until `done` holds of it, waiting
+/// for a job the host runs on its own.
+fn the_host_spends(
+    host: &attach::ServingHost,
+    what: &str,
+    done: impl Fn(&CounterSnapshot) -> bool,
+) -> CounterSnapshot {
+    let before = vault_work(host);
+    wait_until(
+        &format!("the host to {what}"),
         attach::state_budget(DERIVATION_LIMIT),
         || {
             let spent = before
-                .delta(&vault_work(&host))
+                .delta(&vault_work(host))
                 .expect("two readings of one account");
-            if spent.get("documents_derived") > 0 && spent.get("changesets_applied") > 0 {
+            if done(&spent) {
                 Observed::Met(spent)
             } else {
                 Observed::pending(format!("the host's account reads {spent:?}"))
             }
         },
     )
-    .unwrap_or_else(|failure| panic!("{failure}"));
-    record_the_counters("a document written under a live attachment", &moved);
-    assert!(
-        moved.get("documents_derived") > 0 && moved.get("documents_upserted") > 0,
-        "the host derived a document written under its attachment and its account did not move: \
-         {moved:?}"
-    );
+    .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// What one thread read through `norn-fs` while a window stood over it, by
+/// name.
+fn thread_reads(tally: ReadTally) -> CounterSnapshot {
+    [
+        ("document_opens", tally.document_opens),
+        ("stats", tally.stats),
+        ("walk_dirents", tally.walk_dirents),
+    ]
+    .into_iter()
+    .collect()
 }
 
 /// How long the host may take to derive a document written under its
@@ -274,11 +369,13 @@ const DERIVATION_LIMIT: Duration = Duration::from_secs(60);
 
 /// What of the host's account a read that reached the vault through the host
 /// would move: the documents its jobs derived from the vault, the files they
-/// opened for their content, and what the changesets they landed wrote and
-/// discarded.
+/// opened for their content, and what the changesets they landed upserted,
+/// deleted and tombstoned.
 ///
 /// Watcher polls, stats and directory entries are left out: a live attachment
 /// polls its watcher whatever anybody reads, and a poll reads no document.
+/// Findings discarded are left out too: no control here moves them, and a
+/// zero no control moves is not a measurement.
 ///
 /// Each value is a running total over the host's life, so what a stretch of
 /// work moved is the delta between two readings.
@@ -292,16 +389,26 @@ fn vault_work(host: &attach::ServingHost) -> CounterSnapshot {
         ("documents_upserted", account.documents_upserted),
         ("documents_deleted", account.documents_deleted),
         ("tombstones_recorded", account.tombstones_recorded),
-        ("findings_discarded", account.findings_discarded),
     ]
     .into_iter()
     .collect()
 }
 
-/// A build without `induced-failure` carries no reader of the host's account,
-/// so a case that reads it is refused rather than passed having read nothing.
+/// A build without `induced-failure` carries no reader of the host's account.
 #[cfg(not(feature = "induced-failure"))]
 fn vault_work(_: &attach::ServingHost) -> CounterSnapshot {
+    unreachable!("a case that reads the host's account refuses to run without `induced-failure`")
+}
+
+/// A build with `induced-failure` reads the host's account.
+#[cfg(feature = "induced-failure")]
+fn the_hosts_account_is_readable() {}
+
+/// Refuse to run a case that reads the host's account in a build that cannot
+/// read it, before the case generates anything, rather than pass it having
+/// read nothing.
+#[cfg(not(feature = "induced-failure"))]
+fn the_hosts_account_is_readable() {
     panic!(
         "this case reads the host's account of what its jobs derived and read off the vault, \
          which a build reads only behind `induced-failure`: run the lane with \
