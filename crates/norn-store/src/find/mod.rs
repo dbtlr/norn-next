@@ -748,13 +748,31 @@ impl Snapshot {
         ran: Ran,
         read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<Vec<T>> {
+        self.run_statement_staged(record, ran, read)
+            .map_err(StatementFailure::into_inner)
+    }
+
+    /// [`Snapshot::run_statement`], its failure saying whether the statement
+    /// failed before it was stepped — preparing its text or binding its
+    /// values — or while it was stepped.
+    fn run_statement_staged<T>(
+        &mut self,
+        record: &mut Vec<Ran>,
+        ran: Ran,
+        read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>, StatementFailure> {
         self.count_statement();
         record.push(ran);
         let ran = record.last_mut().expect("the statement was just recorded");
-        let mut statement = self.connection().prepare(&ran.sql)?;
+        let mut statement = self
+            .connection()
+            .prepare(&ran.sql)
+            .map_err(StatementFailure::Preparing)?;
         let rows = statement
-            .query_map(params_from_iter(ran.values.iter()), read)?
-            .collect::<rusqlite::Result<Vec<T>>>()?;
+            .query_map(params_from_iter(ran.values.iter()), read)
+            .map_err(StatementFailure::Preparing)?
+            .collect::<rusqlite::Result<Vec<T>>>()
+            .map_err(StatementFailure::Stepping)?;
         ran.stepped = Stepped::of(&statement);
         Ok(rows)
     }
@@ -1229,8 +1247,10 @@ impl Snapshot {
     /// What the full-text engine says is wrong with `query`, or `None` where it
     /// parses. One [`FindStatement::MatchProbe`].
     ///
-    /// A statement that does not prepare is the store's problem and refused as
-    /// one; a query the engine cannot parse is the request's, and is read as
+    /// A probe that does not prepare or bind is the store's problem and
+    /// refused as one, whatever code it failed with: the query is bound as a
+    /// value, so nothing before the probe is stepped reads it. Only a failure
+    /// met stepping the prepared probe can be the request's, and it is read as
     /// that exactly where [`query_problem`] says so.
     fn match_problem(
         &mut self,
@@ -1238,17 +1258,18 @@ impl Snapshot {
         lookups: &mut Lookups,
     ) -> Result<Option<String>, StoreError> {
         const OPERATION: &str = "asking whether a full-text query parses";
-        let answered = self.run_statement(
+        let answered = self.run_statement_staged(
             &mut lookups.ran,
             Ran::new(FindStatement::MatchProbe, compose_match_probe(query)),
             |row| row.get::<_, bool>(0),
         );
         match answered {
             Ok(_) => Ok(None),
-            Err(problem) => match query_problem(&problem) {
+            Err(StatementFailure::Stepping(problem)) => match query_problem(&problem) {
                 Some(said) => Ok(Some(said)),
                 None => Err(error::sql(OPERATION, problem)),
             },
+            Err(StatementFailure::Preparing(problem)) => Err(error::sql(OPERATION, problem)),
         }
     }
 
@@ -1287,6 +1308,24 @@ impl Snapshot {
             return Ok(Some(Unsatisfied::impossible_path(source)));
         }
         Ok(None)
+    }
+}
+
+/// Where a statement a find ran failed.
+enum StatementFailure {
+    /// Before it was stepped: its text did not prepare, or its values did not
+    /// bind.
+    Preparing(rusqlite::Error),
+    /// While it was stepped, or while a row it answered was read.
+    Stepping(rusqlite::Error),
+}
+
+impl StatementFailure {
+    /// The driver's error, wherever it was met.
+    fn into_inner(self) -> rusqlite::Error {
+        match self {
+            StatementFailure::Preparing(problem) | StatementFailure::Stepping(problem) => problem,
+        }
     }
 }
 

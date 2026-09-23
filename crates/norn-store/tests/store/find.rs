@@ -18,7 +18,7 @@ use norn_store::{
     BlockFact, DEFAULT_PAGE, DeclaredFields, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindBound,
     FindFilter, FindPlan, FindRefusal, FindStatement, Found, FrontmatterValue, HeadingFact,
     IN_VALUES_CEILING, MAX_PAGE, NESTED_ROW_CEILING, Nested, PageDirection, Snapshot,
-    SnapshotReader, Span, Store, TagFact, TagSource, TypedOrder, induced_failure,
+    SnapshotReader, Span, Store, StoreError, TagFact, TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -1909,6 +1909,28 @@ fn a_malformed_full_text_query_is_reported_and_empties_the_page() {
     let page = seeded.page(&request().with_predicates([Predicate::matches("interloper")]));
     assert_eq!(row_paths(&page), ["notes/a.md"]);
     assert!(page.unsatisfied.is_empty(), "{:?}", page.unsatisfied);
+}
+
+/// **A full-text index the store cannot read is the store's fault, not a
+/// malformed query.** With `documents_fts` dropped out of band, the probe that
+/// asks whether a match part's query parses does not prepare, and the find is
+/// refused as the store's — never answered as a page reporting the query.
+#[test]
+fn a_full_text_index_that_does_not_prepare_refuses_the_find() {
+    let mut seeded = Seeded::new("find-match-probe-unprepared");
+    induced_failure::execute_out_of_band(&mut seeded.store, "DROP TABLE documents_fts")
+        .unwrap_or_else(|problem| panic!("dropping documents_fts: {problem}"));
+    let answered = seeded.snapshot().find(
+        &request().with_predicates([Predicate::matches("interloper")]),
+        &declared(),
+    );
+    let Err(FindRefusal::Store(StoreError::Sql { operation, message })) = answered else {
+        panic!(
+            "a find over a missing full-text index was not refused as the store's: {answered:?}"
+        );
+    };
+    assert_eq!(operation, "asking whether a full-text query parses");
+    assert!(message.contains("documents_fts"), "{message}");
 }
 
 /// **A part the store keeps no index of, or a value that names no place in
