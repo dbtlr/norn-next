@@ -57,8 +57,10 @@
 //! never reaches a database to judge one.
 //!
 //! Compiling request parameters into SQL — predicates, sorts, pages, the query
-//! shapes that carry `EXPLAIN` bars — is the read builders' job, and they
-//! compose these primitives rather than re-spelling the ranges.
+//! shapes that carry `EXPLAIN` bars — is the find builder's job, on a read
+//! snapshot rather than a request, and it composes these primitives rather than
+//! re-spelling the ranges: a resolution part is a suffix probe's ranges through
+//! the same range predicate.
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
@@ -2187,9 +2189,15 @@ fn text_page_parameters(after: Option<&str>, limit: usize) -> Vec<Value> {
 /// because each range is an index seek and their union is what a two-reduction
 /// target opens.
 fn range_predicate(column: &str, ranges: usize) -> String {
+    range_predicate_from(column, ranges, 1)
+}
+
+/// [`range_predicate`], its parameters numbered from `first`: the spelling a
+/// statement takes that binds other values ahead of the probe's bounds.
+pub(crate) fn range_predicate_from(column: &str, ranges: usize, first: usize) -> String {
     (0..ranges)
         .map(|index| {
-            let (lower, upper) = (index * 2 + 1, index * 2 + 2);
+            let (lower, upper) = (first + index * 2, first + index * 2 + 1);
             format!("({column} >= ?{lower} AND {column} < ?{upper})")
         })
         .collect::<Vec<String>>()

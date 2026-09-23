@@ -50,9 +50,25 @@
 //! statement, so a row can be ordered and compared by the path it stands at
 //! without a join to `documents`.
 //!
-//! `document_fields_typed` holds the rows that carry a typed value, which is
-//! the set a pin clears: the clear reads that index and never the rest of the
-//! table.
+//! # Indexes, each the seek one read makes
+//!
+//! Every index leads with `key`, because every read of the pillar is about one
+//! key, and ends with `path`, so rows under one value come off the index in path
+//! order. The table is `WITHOUT ROWID`, so each index also carries the primary
+//! key: a read that wants the document id reads it off the index.
+//!
+//! - `document_fields_raw` is every row by `(key, raw)`: an equality, a
+//!   membership and a raw `before`/`after` bound are one seek on it.
+//! - `document_fields_typed` holds the rows that carry a typed value, by
+//!   `(key, typed)`: a typed bound seeks it, and it is the set a pin clears, so
+//!   the clear reads that index and never the rest of the table.
+//! - `document_fields_least_raw` and `document_fields_least_typed` hold the
+//!   marker rows alone, one per document and key, by `(key, value, path)`: a
+//!   field sort pages one of them from a `(value, path)` position with no sort
+//!   step, and a document whose field holds a set is read once.
+//! - `document_fields_presence` holds the presence rows alone, by
+//!   `(key, path)`: `has` and `missing` are one seek on it, and the keys the
+//!   vault holds are its distinct leading column.
 
 use crate::fields::FieldContainer;
 
@@ -81,8 +97,18 @@ pub(crate) fn statements() -> Vec<String> {
     CHECK (least_typed = 0 OR typed IS NOT NULL)
 ) WITHOUT ROWID"
         ),
+        "CREATE INDEX document_fields_raw ON document_fields(key, raw, path)".to_string(),
         "CREATE INDEX document_fields_typed ON document_fields(key, typed, path)
     WHERE typed IS NOT NULL"
+            .to_string(),
+        "CREATE INDEX document_fields_least_raw ON document_fields(key, raw, path)
+    WHERE least_raw = 1"
+            .to_string(),
+        "CREATE INDEX document_fields_least_typed ON document_fields(key, typed, path)
+    WHERE least_typed = 1"
+            .to_string(),
+        "CREATE INDEX document_fields_presence ON document_fields(key, path)
+    WHERE ordinal = 0"
             .to_string(),
     ]
 }

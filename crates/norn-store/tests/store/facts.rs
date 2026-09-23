@@ -407,7 +407,6 @@ fn a_derived_path_form_has_one_home() {
         "headings_document_slug",
         "headings_document_text",
         "blocks_document_block_id",
-        "document_tags_name",
         "findings_generation",
         "findings_document",
     ] {
@@ -418,12 +417,14 @@ fn a_derived_path_form_has_one_home() {
             "`{absent}` is declared, and no statement in this build reads it"
         );
     }
-    // The six that stay, because a statement in this build reads each: the
+    // The seven that stay, because a statement in this build reads each: the
     // resolution ladder's range, the order a heal's page seeks on a vault that
     // folds ASCII case, the class direction of findings maintenance, the
-    // schema-key discard's two ranges, and the two change feeds, each of which
-    // is answered out of its own index without the row being read at all.
+    // schema-key discard's two ranges, the two change feeds, each of which is
+    // answered out of its own index without the row being read at all, and the
+    // documents a find's tag part names.
     for present in [
+        "document_tags_name",
         "documents_suffix_key",
         "documents_path_nocase",
         "documents_change_feed",

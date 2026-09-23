@@ -33,6 +33,10 @@
 //!   consumer pages it at its own rate, triages on the fingerprints it projects,
 //!   and keeps [`Store::epoch`] beside its cursor: a position is meaningless in
 //!   a database that was discarded and built again.
+//! - [`Snapshot::find_keys`] — the find builder: a request's conjunction and
+//!   order compiled into index seeks on a read snapshot, answering a page of
+//!   document keys. [`Snapshot::find_plans`] hands out the plan of every
+//!   statement it runs, which is what its `EXPLAIN` bars are asserted through.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -59,12 +63,10 @@
 //! - **Tombstone retention.** When a death has outlived the disorder it was
 //!   recorded to survive is a policy over generations, and nothing here decides
 //!   it: a tombstone is kept until something says otherwise.
-//! - **The read builders.** Compiling request parameters into SQL, with the
-//!   `EXPLAIN` bars that judge the SQL a builder actually emitted, is Layer 3.
-//!   The probe readers here are the range primitives those builders compose;
-//!   they take index bounds, never parameters. What is here already is the seam
-//!   those bars are asserted through — [`Request::emitted_plan`] — because a
-//!   plan cannot be taken by a crate that cannot reach the database.
+//! - **A find's rows.** The find builder answers keys; hydrating the rows a
+//!   page found, judging and minting the wire cursor around it, and reporting
+//!   a request's unknown keys are the composition above
+//!   [`Snapshot::find_keys`], not yet here.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
 
 pub mod ddl;
@@ -76,6 +78,7 @@ mod facts;
 mod faults;
 mod feed;
 mod fields;
+mod find;
 mod hash;
 mod increment;
 mod json;
@@ -95,6 +98,10 @@ pub use facts::{
 pub use faults::induced_failure;
 pub use feed::FeedRead;
 pub use fields::{DeclaredFields, FieldContainer, FieldRow, FieldRows, TypedOrder};
+pub use find::{
+    DEFAULT_PAGE, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindFilter, FindPlan, FindPosition,
+    FindRefusal, FindStatement, FoundKey, KeyPage, PageDirection, Resume,
+};
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 // The open ceremony's own vocabulary, which is this crate's too: a store is

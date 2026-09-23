@@ -191,10 +191,27 @@ impl PlanRow {
 
     /// The constraint the row was given, as SQLite prints it: the
     /// parenthesised tail of the detail, such as `(stem=?)`.
+    ///
+    /// The tail is read as one balanced group from its closing parenthesis
+    /// back to the one that opens it, because a row-value constraint nests:
+    /// `(key=? AND (raw,path)>(?,?))` is one constraint, not its last pair of
+    /// parentheses.
     pub fn constraint(&self) -> Option<&str> {
-        let open = self.detail.rfind('(')?;
-        let close = self.detail[open..].find(')')? + open;
-        Some(&self.detail[open..=close])
+        let close = self.detail.rfind(')')?;
+        let mut depth = 0usize;
+        for (at, character) in self.detail[..=close].char_indices().rev() {
+            match character {
+                ')' => depth += 1,
+                '(' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&self.detail[at..=close]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Whether this row reads its relation end to end.
@@ -1189,6 +1206,33 @@ mod tests {
             range.assert_search_constraint("documents", "(stem=?)")
         })
         .expect_err("a range is not an equality seek");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("a formatted assertion message");
+        assert!(
+            message.contains("does not carry the constraint"),
+            "{message}"
+        );
+    }
+
+    /// A row-value constraint nests one group inside another, and the whole
+    /// group is the constraint: a seek that lost its row-value bound reads as
+    /// the key alone and fails.
+    #[test]
+    fn a_row_value_constraint_is_read_whole() {
+        let keyset =
+            plan(&["SEARCH f USING COVERING INDEX fields_least (key=? AND (raw,path)>(?,?))"]);
+        assert_eq!(
+            keyset.rows()[0].constraint(),
+            Some("(key=? AND (raw,path)>(?,?))")
+        );
+        keyset.assert_search_constraint("f", "(key=? AND (raw,path)>(?,?))");
+
+        let key_alone = plan(&["SEARCH f USING COVERING INDEX fields_least (key=?)"]);
+        let failure = std::panic::catch_unwind(move || {
+            key_alone.assert_search_constraint("f", "(key=? AND (raw,path)>(?,?))")
+        })
+        .expect_err("a seek from the key alone is not a keyset seek");
         let message = failure
             .downcast_ref::<String>()
             .expect("a formatted assertion message");
