@@ -22,7 +22,7 @@ use crate::derivation::{
     Cause, Decided, Declared, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS,
     WALKED_KINDS, document_path, plan_document, plan_quarantine,
 };
-use crate::evidence::{JobEvidence, count_changeset};
+use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
     EntryOps, Established, Establishment, Healing, JobFailure, MintedReader, ProgressReporter,
@@ -2651,7 +2651,8 @@ impl<'s> Pending<'s> {
     /// Derive a document, taking with it the row it can no longer account for.
     ///
     /// The changeset entry and the finding are each queued here when the plan
-    /// carries one.
+    /// carries one. **Every vault document's bytes reach derivation here**, so
+    /// this is where the job's account counts a document derived.
     fn rederive(
         &mut self,
         path: &Path,
@@ -2660,6 +2661,7 @@ impl<'s> Pending<'s> {
         hash: String,
         stored: Option<&DocumentPath>,
     ) {
+        count_document_derived();
         let Plan { change, findings } =
             plan_document(path, spelling, bytes, hash, stored, &self.declared.model);
         if let Some(change) = change {

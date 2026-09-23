@@ -2351,6 +2351,19 @@ impl<O: EntryOps> ReadHold<O> {
             .as_ref()
             .expect("a hold holds its snapshot until it is dropped")
     }
+
+    /// The snapshot this read answers from, to run a read builder on.
+    ///
+    /// A builder counts each statement it runs on the snapshot, so running
+    /// one takes the snapshot mutably. The borrow ends with the hold's own, so
+    /// every statement run through it runs under this hold's adjudication.
+    pub fn snapshot_mut(
+        &mut self,
+    ) -> &mut <<O::Attachment as SnapshotSource>::Reader as ReadSource>::Snapshot {
+        self.snapshot
+            .as_mut()
+            .expect("a hold holds its snapshot until it is dropped")
+    }
 }
 
 impl<O: EntryOps> fmt::Debug for ReadHold<O> {

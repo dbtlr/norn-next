@@ -581,6 +581,40 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
     }
 }
 
+/// **A find's work reads out whole, each count under its own name.** A
+/// harness compares two finds name by name, so every count is present at
+/// whatever value it holds, the nested rows one name per table.
+#[test]
+fn a_finds_work_reads_out_every_count_by_name() {
+    let work = FindWork {
+        statements: 1,
+        keys_read: 2,
+        page_full_scan_steps: 3,
+        page_sorts: 4,
+        page_vm_steps: 5,
+        documents_hydrated: 6,
+        nested_rows: NestedRows {
+            tags: 7,
+            headings: 0,
+            blocks: 9,
+        },
+    };
+    assert_eq!(
+        work.readings().collect::<Vec<_>>(),
+        vec![
+            ("find_statements", 1),
+            ("find_keys_read", 2),
+            ("find_page_full_scan_steps", 3),
+            ("find_page_sorts", 4),
+            ("find_page_vm_steps", 5),
+            ("find_documents_hydrated", 6),
+            ("find_tag_rows", 7),
+            ("find_heading_rows", 0),
+            ("find_block_rows", 9),
+        ]
+    );
+}
+
 /// **A row carries the columns it names, and a field is read off the
 /// projection.** A scalar crosses as the text the pillar holds for it — a
 /// number as its digits, a string without quotes — a sequence as its items,
