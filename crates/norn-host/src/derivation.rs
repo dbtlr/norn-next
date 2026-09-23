@@ -1651,27 +1651,31 @@ mod tests {
     /// The dates part the raw order from the typed one, and mix a stated
     /// offset with an unstated one: `a.md` names 09:00 UTC and `b.md` 10:00 at
     /// no stated offset. The numbers part them too — `10` sorts before `9` as
-    /// text — and `b.md` and `f.md` write nine once as a number and once as a
-    /// string. `code` writes one as a number and once as a string.
-    const COMPARED: [(&str, &str, &str, &str); 6] = [
+    /// text — and `b.md`, `f.md` and `g.md` write nine as an integer, as a
+    /// string and as a float, three raw texts the declared number reads as one
+    /// value. `code` writes one as a number and once as a string.
+    const COMPARED: [(&str, &str, &str, &str); 7] = [
         ("a.md", "2026-03-04T09:00:00Z", "10", "1"),
         ("b.md", "2026-03-04T10:00:00", "9", "\"1\""),
         ("c.md", "2026-03-04T09:30:00+01:00", "9.5", "2"),
         ("d.md", "2026-03-04", "-1", "10"),
         ("e.md", "2026-03-03T23:00:00-05:00", "100", "x"),
         ("f.md", "2026-03-05", "\"9\"", "y"),
+        ("g.md", "2026-03-06", "9.0", "z"),
     ];
 
     /// **One comparison rule governs the store's typed order and the
     /// in-process comparison.** Documents are derived through the host's own
     /// declaration and plan, written through a changeset, and found through
-    /// the builder: a typed sort, both ways, and a typed bound, both ways,
-    /// answer exactly what [`TypedValue::compare`] answers over the same raw
-    /// text — across a mixed-offset pair, which the rule signals and orders by
-    /// reading the unstated side at offset zero, and across a number whose
-    /// text order is not its numeric one. Equality is over the raw text, so
-    /// `1` written as a number and `"1"` written as a string are one value to
-    /// an equality part, as they are to the rule.
+    /// the builder: a typed sort, both ways, and a typed bound, equality,
+    /// inequality and membership part answer exactly what
+    /// [`TypedValue::compare`] answers over the same raw text — across a
+    /// mixed-offset pair, which the rule signals and orders by reading the
+    /// unstated side at offset zero, across a number whose text order is not
+    /// its numeric one, and across `9` and `9.0`, two texts one number. On a
+    /// key declared as text equality is over the raw text, so `1` written as a
+    /// number and `"1"` written as a string are one value to an equality part,
+    /// as they are to the rule.
     #[test]
     fn the_stores_typed_order_and_the_in_process_comparison_are_one_rule() {
         use std::cmp::Ordering;
@@ -1770,21 +1774,41 @@ mod tests {
                 "`{key}` descending is not the rule's order"
             );
 
-            // A bound compares under the same rule, at every value as the
-            // bound: `after` is what the rule calls greater, `before` less.
+            // A bound, an equality and an inequality compare under the same
+            // rule, at every value as the one named: `after` is what the rule
+            // calls greater, `before` less, `eq` equal and `not_eq` anything
+            // else.
+            let answered_by = |wanted: &dyn Fn(&TypedValue) -> bool| {
+                let mut matching: Vec<String> = COMPARED
+                    .iter()
+                    .map(|row| row.0.to_string())
+                    .filter(|path| wanted(&value(path)))
+                    .collect();
+                matching.sort_by_key(|path| path.to_ascii_lowercase());
+                matching
+            };
             for (_, when, weight, _) in COMPARED {
                 let raw = unquoted(if column == 1 { when } else { weight });
                 let bound = typed(kind, &raw);
-                for (predicate, wanted) in [
-                    (Predicate::after(key, raw.clone()), Ordering::Greater),
-                    (Predicate::before(key, raw.clone()), Ordering::Less),
+                let ordering = |found: &TypedValue| found.compare(&bound).ordering;
+                for (predicate, matching) in [
+                    (
+                        Predicate::after(key, raw.clone()),
+                        answered_by(&|found| ordering(found) == Ordering::Greater),
+                    ),
+                    (
+                        Predicate::before(key, raw.clone()),
+                        answered_by(&|found| ordering(found) == Ordering::Less),
+                    ),
+                    (
+                        Predicate::equal_to(key, raw.clone()),
+                        answered_by(&|found| ordering(found) == Ordering::Equal),
+                    ),
+                    (
+                        Predicate::not_equal_to(key, raw.clone()),
+                        answered_by(&|found| ordering(found) != Ordering::Equal),
+                    ),
                 ] {
-                    let mut matching: Vec<String> = COMPARED
-                        .iter()
-                        .map(|row| row.0.to_string())
-                        .filter(|path| value(path).compare(&bound).ordering == wanted)
-                        .collect();
-                    matching.sort_by_key(|path| path.to_ascii_lowercase());
                     assert_eq!(
                         find(request().with_predicates([predicate.clone()])),
                         matching,
@@ -1826,15 +1850,30 @@ mod tests {
                 .ordering,
             Ordering::Equal
         );
+        // On a number, equality is the number's: `9`, `"9"` and `9.0` are
+        // one value to the rule, and to an equality or membership part named
+        // with any of the three spellings.
+        for nine in ["9", "9.0", "\"9\""] {
+            assert_eq!(
+                typed(FieldType::Number, "9")
+                    .compare(&typed(FieldType::Number, nine))
+                    .ordering,
+                Ordering::Equal
+            );
+        }
+        for nine in ["9", "9.0", "09"] {
+            assert_eq!(
+                find(request().with_predicates([Predicate::equal_to("weight", nine)])),
+                ["b.md", "f.md", "g.md"],
+                "`weight` equal to {nine}"
+            );
+        }
         assert_eq!(
-            find(request().with_predicates([Predicate::equal_to("weight", "9")])),
-            ["b.md", "f.md"]
-        );
-        assert_eq!(
-            typed(FieldType::Number, "9")
-                .compare(&typed(FieldType::Number, "\"9\""))
-                .ordering,
-            Ordering::Equal
+            find(request().with_predicates([Predicate::in_any(
+                "weight",
+                ["9.0".to_string(), "1e2".to_string()]
+            )])),
+            ["b.md", "e.md", "f.md", "g.md"]
         );
     }
 }

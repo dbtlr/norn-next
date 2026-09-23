@@ -281,9 +281,9 @@ fn statement_barred_by(statement: FindStatement) -> &'static str {
 /// [`statement_barred_by`] is.
 fn filter_barred_by(filter: FindFilter) -> &'static str {
     match filter {
-        FindFilter::Equal
-        | FindFilter::NotEqual
-        | FindFilter::Member
+        FindFilter::Equal(_)
+        | FindFilter::NotEqual(_)
+        | FindFilter::Member(_)
         | FindFilter::Present
         | FindFilter::Absent
         | FindFilter::Before(_)
@@ -296,6 +296,27 @@ fn filter_barred_by(filter: FindFilter) -> &'static str {
     }
 }
 
+/// Every form a filter slot takes: a filter that compares values compares
+/// under either order, and each order is a form its bar has to probe.
+/// Exhaustive, so a filter added to [`FindFilter`] names its forms here.
+fn forms_of(filter: FindFilter) -> Vec<FindFilter> {
+    let orders = [FieldOrder::Raw, FieldOrder::Typed];
+    match filter {
+        FindFilter::Equal(_) => orders.map(FindFilter::Equal).to_vec(),
+        FindFilter::NotEqual(_) => orders.map(FindFilter::NotEqual).to_vec(),
+        FindFilter::Member(_) => orders.map(FindFilter::Member).to_vec(),
+        FindFilter::Before(_) => orders.map(FindFilter::Before).to_vec(),
+        FindFilter::After(_) => orders.map(FindFilter::After).to_vec(),
+        FindFilter::Present
+        | FindFilter::Absent
+        | FindFilter::FullText
+        | FindFilter::PathGlob
+        | FindFilter::Resolves
+        | FindFilter::Tag
+        | FindFilter::Finding => vec![filter],
+    }
+}
+
 /// **Every statement and every filter the builder names carries a bar**, and
 /// one bar judges each. The path-page bar judges the statements [`PAGE_BARS`]
 /// names and the fingerprint read; the field-sort bar judges both sections of
@@ -305,7 +326,9 @@ fn filter_barred_by(filter: FindFilter) -> &'static str {
 /// ranges over the order and the direction a statement carries, and those are
 /// not slots, so each bar's statements are read as the set of slots it
 /// reaches: across the bars, those sets cover the enumeration exactly once,
-/// and the filter bar's table holds each filter slot exactly once. A statement
+/// and the filter bar's table holds each filter slot exactly once, probing each
+/// of the slot's [`forms_of`] — both orders of a filter that compares values —
+/// and no form of another slot. A statement
 /// dropped from the list a bar iterates leaves a slot empty here, and one two
 /// bars claim fills a slot twice.
 #[test]
@@ -353,6 +376,20 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
     );
     for (slot, filter) in FindFilter::all().into_iter().enumerate() {
         assert_eq!(filter.slot(), slot, "{filter:?} claims another slot");
+    }
+    for bar in filter_bars() {
+        let mut probed: Vec<FindFilter> = Vec::new();
+        for (_, form, _) in &bar.probes {
+            if !probed.contains(form) {
+                probed.push(*form);
+            }
+        }
+        let forms = forms_of(bar.shape);
+        assert!(
+            probed.len() == forms.len() && forms.iter().all(|form| probed.contains(form)),
+            "the bar for {:?} probes {probed:?}, not its forms {forms:?}",
+            bar.shape
+        );
     }
 
     let bars: std::collections::BTreeSet<&str> = judged
@@ -871,34 +908,55 @@ fn field_seek(alias: &'static str, index: &'static str, constraint: &'static str
     }
 }
 
-/// Every filter slot, once. A bound filter is spelled under both orders: `status`
-/// is declared without a type and `count` with one.
+/// Every filter slot, once. A filter that compares values is spelled under both
+/// orders: `status` is declared without a type and `count` with one.
 fn filter_bars() -> Vec<FilterBar> {
     let target = |text: &str| ResolutionTarget::new(text).expect("a target");
     vec![
         FilterBar {
-            shape: FindFilter::Equal,
-            probes: vec![(
-                Predicate::equal_to("status", "open"),
-                FindFilter::Equal,
-                field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
-            )],
+            shape: FindFilter::Equal(FieldOrder::Raw),
+            probes: vec![
+                (
+                    Predicate::equal_to("status", "open"),
+                    FindFilter::Equal(FieldOrder::Raw),
+                    field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
+                ),
+                (
+                    Predicate::equal_to("count", "9"),
+                    FindFilter::Equal(FieldOrder::Typed),
+                    field_seek("fv", "document_fields_typed", "(key=? AND typed=?)"),
+                ),
+            ],
         },
         FilterBar {
-            shape: FindFilter::NotEqual,
-            probes: vec![(
-                Predicate::not_equal_to("status", "open"),
-                FindFilter::NotEqual,
-                field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
-            )],
+            shape: FindFilter::NotEqual(FieldOrder::Raw),
+            probes: vec![
+                (
+                    Predicate::not_equal_to("status", "open"),
+                    FindFilter::NotEqual(FieldOrder::Raw),
+                    field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
+                ),
+                (
+                    Predicate::not_equal_to("count", "9"),
+                    FindFilter::NotEqual(FieldOrder::Typed),
+                    field_seek("fv", "document_fields_typed", "(key=? AND typed=?)"),
+                ),
+            ],
         },
         FilterBar {
-            shape: FindFilter::Member,
-            probes: vec![(
-                Predicate::in_any("status", ["open".to_string(), "done".to_string()]),
-                FindFilter::Member,
-                field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
-            )],
+            shape: FindFilter::Member(FieldOrder::Raw),
+            probes: vec![
+                (
+                    Predicate::in_any("status", ["open".to_string(), "done".to_string()]),
+                    FindFilter::Member(FieldOrder::Raw),
+                    field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
+                ),
+                (
+                    Predicate::in_any("count", ["3".to_string(), "9".to_string()]),
+                    FindFilter::Member(FieldOrder::Typed),
+                    field_seek("fv", "document_fields_typed", "(key=? AND typed=?)"),
+                ),
+            ],
         },
         FilterBar {
             shape: FindFilter::Present,
@@ -1053,7 +1111,7 @@ fn judge_filter(page: &QueryPlan, seek: &Seek) {
 /// **Every filter is a membership test one index seek answers.** Each part of
 /// a conjunction is judged on the rows its own subquery reads, bound by the
 /// alias the filter reads its table under: equality, inequality and membership
-/// seek `(key, raw)`; presence and absence the presence rows by key; a bound
+/// seek `(key, raw)`, or `(key, typed)` on a key with a typed order; presence and absence the presence rows by key; a bound
 /// the order's value column from the key; the full-text part the index's own
 /// `MATCH` selection; the path part the glob's literal-prefix range on
 /// `documents_path`; the resolution part each suffix range the target opens;
@@ -1337,6 +1395,26 @@ fn each_filter_answers_the_documents_its_part_names() {
     // Typed: nine and ten are after five; "nine" is no number and three is not.
     assert_eq!(with(Predicate::after("count", "5")), ["notes/B.md"]);
     assert_eq!(with(Predicate::before("count", "5")), ["notes/a.md"]);
+    // Typed equality is the typed order's: `09` is nine, which `notes/B.md`
+    // holds; `nine` is no number, so no number equals it and every number
+    // differs from it.
+    assert_eq!(with(Predicate::equal_to("count", "09")), ["notes/B.md"]);
+    assert_eq!(
+        with(Predicate::not_equal_to("count", "03")),
+        [
+            "notes/B.md",
+            "notes/c.md",
+            "other/glossary.md",
+            "other/v1.2.md"
+        ]
+    );
+    assert_eq!(
+        with(Predicate::in_any(
+            "count",
+            ["03".to_string(), "010".to_string()]
+        )),
+        ["notes/a.md", "notes/B.md"]
+    );
     assert_eq!(with(Predicate::matches("interloper")), ["notes/a.md"]);
     assert_eq!(
         with(Predicate::path("notes/*.md")),
@@ -1394,7 +1472,7 @@ fn a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault
     );
 }
 
-/// **A part the store keeps no index of, or a bound that names no place in
+/// **A part the store keeps no index of, or a value that names no place in
 /// its key's order, is refused.** `links_to` waits for the link index, which
 /// lands with the task that builds it, and the refusal names both.
 #[test]
@@ -1432,6 +1510,28 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
             value: "many".to_string(),
         }
     );
+    for part in [
+        Predicate::equal_to("count", "many"),
+        Predicate::not_equal_to("count", "many"),
+        Predicate::in_any("count", ["3".to_string(), "many".to_string()]),
+    ] {
+        let refusal = seeded
+            .snapshot()
+            .find_keys(
+                &request().with_predicates([part.clone()]),
+                &declared(),
+                None,
+            )
+            .expect_err("a compared value that reads as no number is refused");
+        assert_eq!(
+            refusal,
+            FindRefusal::UnreadableBound {
+                key: "count".to_string(),
+                value: "many".to_string(),
+            },
+            "{part:?}"
+        );
+    }
 }
 
 /// **A page holds the bound it names, the default where it names none, and at

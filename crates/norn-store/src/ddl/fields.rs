@@ -58,10 +58,12 @@
 //! key: a read that wants the document id reads it off the index.
 //!
 //! - `document_fields_raw` is every row by `(key, raw)`: an equality, a
-//!   membership and a raw `before`/`after` bound are one seek on it.
+//!   membership and a `before`/`after` bound on a key with no typed order are
+//!   one seek on it.
 //! - `document_fields_typed` holds the rows that carry a typed value, by
-//!   `(key, typed)`: a typed bound seeks it, and it is the set a pin clears, so
-//!   the clear reads that index and never the rest of the table.
+//!   `(key, typed)`: the same parts on a key with a typed order seek it, and it
+//!   is the set a pin clears, so the clear reads that index and never the rest
+//!   of the table.
 //! - `document_fields_least_raw` and `document_fields_least_typed` hold the
 //!   marker rows alone, one per document and key, by `(key, value, path)`: a
 //!   field sort pages one of them from a `(value, path)` position with no sort

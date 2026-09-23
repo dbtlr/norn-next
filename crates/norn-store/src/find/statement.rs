@@ -179,14 +179,15 @@ pub enum PageDirection {
 /// [`FindStatement`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FindFilter {
-    /// A value row under the key equals the value: `(key, raw)` on
-    /// `document_fields_raw`.
-    Equal,
-    /// No value row under the key equals the value, a document without the key
-    /// included.
-    NotEqual,
-    /// A value row under the key equals one of the values.
-    Member,
+    /// A value row under the key equals the value under the order: `(key,
+    /// raw)` on `document_fields_raw`, or `(key, typed)` on
+    /// `document_fields_typed` against the value's typed sort key.
+    Equal(FieldOrder),
+    /// No value row under the key equals the value under the order, a
+    /// document without the key included.
+    NotEqual(FieldOrder),
+    /// A value row under the key equals one of the values under the order.
+    Member(FieldOrder),
     /// The document carries the key: its presence row, on
     /// `document_fields_presence`.
     Present,
@@ -215,13 +216,13 @@ pub enum FindFilter {
 pub const FIND_FILTERS: usize = 12;
 
 impl FindFilter {
-    /// Every filter shape, in slot order. A bounded filter is named under the
-    /// raw order; the typed order is the same slot.
+    /// Every filter shape, in slot order. A filter that compares values is
+    /// named under the raw order; the typed order is the same slot.
     pub fn all() -> [Self; FIND_FILTERS] {
         [
-            Self::Equal,
-            Self::NotEqual,
-            Self::Member,
+            Self::Equal(FieldOrder::Raw),
+            Self::NotEqual(FieldOrder::Raw),
+            Self::Member(FieldOrder::Raw),
             Self::Present,
             Self::Absent,
             Self::Before(FieldOrder::Raw),
@@ -238,9 +239,9 @@ impl FindFilter {
     /// to the enum has to take a slot.
     pub fn slot(self) -> usize {
         let slot = match self {
-            Self::Equal => 0,
-            Self::NotEqual => 1,
-            Self::Member => 2,
+            Self::Equal(_) => 0,
+            Self::NotEqual(_) => 1,
+            Self::Member(_) => 2,
             Self::Present => 3,
             Self::Absent => 4,
             Self::Before(_) => 5,
@@ -303,23 +304,26 @@ impl Filter {
             )
         };
         match self.shape {
-            FindFilter::Equal | FindFilter::NotEqual => {
+            FindFilter::Equal(order) | FindFilter::NotEqual(order) => {
+                let column = order.column();
                 let (key, value) = (next(), next());
-                let membership = if self.shape == FindFilter::Equal {
+                let membership = if matches!(self.shape, FindFilter::Equal(_)) {
                     "IN"
                 } else {
                     "NOT IN"
                 };
                 format!(
                     "{id} {membership} (SELECT fv.document FROM document_fields AS fv
-                     WHERE fv.key = {key} AND fv.raw = {value})"
+                     WHERE fv.key = {key} AND fv.{column} = {value})"
                 )
             }
-            FindFilter::Member => {
+            FindFilter::Member(order) => {
+                let column = order.column();
                 let (key, values) = (next(), next());
                 format!(
                     "{id} IN (SELECT fv.document FROM document_fields AS fv
-                     WHERE fv.key = {key} AND fv.raw IN (SELECT value FROM json_each({values})))"
+                     WHERE fv.key = {key}
+                       AND fv.{column} IN (SELECT value FROM json_each({values})))"
                 )
             }
             FindFilter::Present | FindFilter::Absent => {

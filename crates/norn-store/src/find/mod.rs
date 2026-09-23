@@ -30,6 +30,14 @@
 //! [`Resume::order`]: a page begun in raw order goes on in raw order after a
 //! re-pin that gave the key a type, because the raw order has not moved.
 //!
+//! **A part that compares values compares under the key's order.** Equality,
+//! inequality, membership and a `before`/`after` bound on a key the declaration
+//! gives a typed order compare the typed sort key of each value the request
+//! names against the typed column, so `9` and `9.0` under a number are one
+//! value to an equality part exactly as they are to the declared type's
+//! comparison; a value that does not read as the type names no place in the
+//! order and is refused. A key with no typed order compares raw text.
+//!
 //! # A filter is a membership test one seek answers
 //!
 //! Each part of the conjunction narrows every section by the rows one index
@@ -281,8 +289,10 @@ pub enum FindRefusal {
         fact: &'static str,
         consumer: &'static str,
     },
-    /// A `before` or `after` bound on a key declared with a type does not read
-    /// as that type, so it names no place in the key's order.
+    /// A value a comparing part names — an equality, an inequality, a
+    /// membership or a `before`/`after` bound — on a key declared with a typed
+    /// order does not read as that type, so it names no place in the key's
+    /// order.
     UnreadableBound { key: String, value: String },
     /// The cursor was minted under a schema fingerprint the snapshot no longer
     /// reads, so the order its position is a position in no longer exists.
@@ -996,38 +1006,47 @@ impl Snapshot {
         let text = |value: &str| Value::Text(value.to_string());
         let filter =
             |shape: FindFilter, values: Vec<Value>| Ok(Part::Filter(Filter { shape, values }));
+        // The order a key's values compare under, and a request's value as a
+        // place in it: its typed sort key where the key carries a typed order,
+        // its text where it does not.
+        let order = |key: &str| match declared.typed_order(key) {
+            None => FieldOrder::Raw,
+            Some(_) => FieldOrder::Typed,
+        };
+        let compared = |key: &String, value: &String| match declared.typed_order(key) {
+            None => Ok(value.clone()),
+            Some(typed) => typed
+                .sort_key(value)
+                .ok_or_else(|| FindRefusal::UnreadableBound {
+                    key: key.clone(),
+                    value: value.clone(),
+                }),
+        };
         match predicate {
-            Predicate::Eq { key, value, .. } => {
-                filter(FindFilter::Equal, vec![text(key), text(value)])
-            }
-            Predicate::NotEq { key, value, .. } => {
-                filter(FindFilter::NotEqual, vec![text(key), text(value)])
-            }
+            Predicate::Eq { key, value, .. } => filter(
+                FindFilter::Equal(order(key)),
+                vec![text(key), Value::Text(compared(key, value)?)],
+            ),
+            Predicate::NotEq { key, value, .. } => filter(
+                FindFilter::NotEqual(order(key)),
+                vec![text(key), Value::Text(compared(key, value)?)],
+            ),
             Predicate::In { key, values, .. } => {
                 let listed = canonical_json(&FrontmatterValue::Sequence(
                     values
                         .iter()
-                        .cloned()
-                        .map(FrontmatterValue::String)
-                        .collect(),
+                        .map(|value| compared(key, value).map(FrontmatterValue::String))
+                        .collect::<Result<Vec<FrontmatterValue>, FindRefusal>>()?,
                 ))?;
-                filter(FindFilter::Member, vec![text(key), Value::Text(listed)])
+                filter(
+                    FindFilter::Member(order(key)),
+                    vec![text(key), Value::Text(listed)],
+                )
             }
             Predicate::Has { key, .. } => filter(FindFilter::Present, vec![text(key)]),
             Predicate::Missing { key, .. } => filter(FindFilter::Absent, vec![text(key)]),
             Predicate::Before { key, value, .. } | Predicate::After { key, value, .. } => {
-                let (order, bound) = match declared.typed_order(key) {
-                    None => (FieldOrder::Raw, value.clone()),
-                    Some(typed) => (
-                        FieldOrder::Typed,
-                        typed
-                            .sort_key(value)
-                            .ok_or_else(|| FindRefusal::UnreadableBound {
-                                key: key.clone(),
-                                value: value.clone(),
-                            })?,
-                    ),
-                };
+                let (order, bound) = (order(key), compared(key, value)?);
                 let shape = if matches!(predicate, Predicate::Before { .. }) {
                     FindFilter::Before(order)
                 } else {
