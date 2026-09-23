@@ -288,10 +288,12 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     // vault under the same attachment is derived by the host, and removing it
     // is deleted and tombstoned by the host; each moves its counts.
     let written = vault.path().join("counter-gate-derived.md");
-    std::fs::write(&written, "---\ntitle: derived\n---\n\na body\n")
-        .expect("writing a document into the vault");
     let derived = the_host_spends(
         &host,
+        || {
+            std::fs::write(&written, "---\ntitle: derived\n---\n\na body\n")
+                .expect("writing a document into the vault");
+        },
         "derive the document written under its attachment",
         &[
             "documents_derived",
@@ -302,9 +304,9 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     );
     record_the_counters("a document written under a live attachment", &derived);
 
-    std::fs::remove_file(&written).expect("removing the written document");
     let deleted = the_host_spends(
         &host,
+        || std::fs::remove_file(&written).expect("removing the written document"),
         "delete the document removed under its attachment",
         &[
             "changesets_applied",
@@ -329,15 +331,26 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
 /// more than a page's rows.
 const STATEMENTS_PER_PAGE: u64 = 6;
 
-/// What the host's account moved from now until every one of `counts` has
-/// moved, waiting for a job the host runs on its own.
+/// What the host's account moved from just before `act` until every one of
+/// `counts` has moved, waiting for the job the host runs on its own in answer
+/// to `act`.
+///
+/// The baseline is read before `act` runs. The host folds a job's counts into
+/// its account when the job ends, so a baseline read after the act can already
+/// hold the job, and the wait would then never see its counts move.
 ///
 /// The wait is for the whole set rather than for any one of it: the host folds
 /// a job's counts into its account one at a time, so a reading taken part-way
 /// through that fold shows some of a job's counts and not yet the rest. A
 /// count that never moves exhausts the wait, and the failure names it.
-fn the_host_spends(host: &attach::ServingHost, what: &str, counts: &[&str]) -> CounterSnapshot {
+fn the_host_spends(
+    host: &attach::ServingHost,
+    act: impl FnOnce(),
+    what: &str,
+    counts: &[&str],
+) -> CounterSnapshot {
     let before = vault_work(host);
+    act();
     wait_until(
         &format!("the host to {what}"),
         attach::state_budget(DERIVATION_LIMIT),
