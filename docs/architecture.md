@@ -1597,18 +1597,23 @@ fingerprint. Tag rows themselves stay schema-independent parse facts — what a 
 is not what the vault declares about it — so a schema edit re-derives the judgment and never
 the facts.
 
-The **field projection** is the pillar a find's predicates and field orders read. Its
-declaration under [ADR 0021](decisions/0021-derived-indexes-split-into-two-lanes.md): its
-inputs are the document's canonical frontmatter projection and, for the typed column alone,
-the vault's schema content model; derivation is deterministic, one pure function from the
-projection and the declared field types to a presence row per key and a value row per
-scalar; it is maintained inside the document's own changeset; and its invalidation key is
-the frontmatter projection hash for the presence and value rows and the vault schema
-fingerprint for the typed column. **The typed column joins what a re-pin discards**: the
-pin's own transaction clears every typed value and its least-value marker beside the
-findings it discards, and the walk that follows refills them. That is safe because a schema
-reload closes the entry's reader and publishes `Warming` in its `Healing` phase until the
-heal converges, so no read observes a column the walk has half refilled.
+The **field projection** is the pillar a find's predicates and field orders read. **Two
+projections share its one table**, each declared under [ADR
+0021](decisions/0021-derived-indexes-split-into-two-lanes.md). The presence and value rows:
+their input is the document's canonical frontmatter projection; derivation is
+deterministic, one pure function from the projection to a presence row per key and a value
+row per scalar; they are maintained inside the document's own changeset; and their
+invalidation key is the document's content hash, because they are written with the
+document's changeset and rewritten whenever the document is. The typed column and its
+least-value marker: their inputs are the value rows and the vault's schema content model;
+derivation is deterministic, one pure function from a value and its key's declared type;
+they are maintained inside the document's changeset beside the value they type; and their
+invalidation key is the standing schema pin held in `meta`. **The typed column joins what a
+re-pin discards**: the pin's own transaction clears every typed value and its least-value
+marker beside the findings it discards, and the walk that follows refills them. That is safe
+because a schema reload closes the entry's reader and publishes `Warming` in its `Healing`
+phase until the heal converges, so no read observes a column the walk has half refilled.
+
 **Exclusion is a membership boundary**: an excluded place holds no rows, and any row
 standing under an excluded root is pruned by the next leg that ranges over that root —
 the heal that walks it, or an increment a dirty path inside it reaches. An increment

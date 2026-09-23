@@ -4,21 +4,31 @@
 //! What the rows are, and how they are derived, is [`crate::FieldRows`]'s to
 //! state. This area is the table they are written to.
 //!
-//! # The pillar as a lane-1 index projection
+//! # Two lane-1 index projections share the table
 //!
-//! - **Inputs.** The document's canonical frontmatter projection, and, for the
-//!   `typed` column alone, the schema content model's declared field types.
+//! The presence and value rows:
+//!
+//! - **Inputs.** The document's canonical frontmatter projection.
 //! - **Determinism.** Deterministic: the rows are a function of the frontmatter
-//!   value and the declaration, computed by one pure function.
+//!   value, computed by one pure function.
 //! - **Maintenance.** Inside the document's changeset. The rows are written by
 //!   the increment that writes the document row, replaced wholesale with the
 //!   other fact rows on a re-derivation, and taken by the cascade when the
 //!   document dies.
-//! - **Invalidation key.** The frontmatter projection hash for presence and
-//!   value rows: the rows move exactly when the projection does, and a
-//!   re-derivation writes them with it. The vault-schema fingerprint for the
-//!   `typed` column and its marker: a schema pin that moves the fingerprint
-//!   clears every typed value in the pin's own transaction.
+//! - **Invalidation key.** The document's content hash: the rows are written
+//!   with the document's changeset and rewritten whenever the document is.
+//!
+//! The `typed` column and its `least_typed` marker:
+//!
+//! - **Inputs.** The value rows and the schema content model's declared field
+//!   types.
+//! - **Determinism.** Deterministic: a typed value is a function of the raw
+//!   value and its key's declared type.
+//! - **Maintenance.** Inside the document's changeset, written by the same
+//!   statement as the value it types.
+//! - **Invalidation key.** The standing schema pin, held in `meta`: the pin's
+//!   own transaction clears every typed value, and the walk that follows
+//!   refills them.
 //!
 //! # Why clearing the typed column at the pin is safe
 //!
@@ -32,10 +42,10 @@
 //! clears the column and owes no refill, which is the answer an undeclared key
 //! has anyway.
 //!
-//! The rows carry no fingerprint column of their own, unlike `findings`: every
-//! typed value in the store is derived under the one pinned schema, because the
-//! pin clears what the previous one derived, so a per-row key would say the
-//! same thing on every row.
+//! The rows carry no fingerprint column of their own, unlike `findings`: the
+//! typed column's invalidation key is the one pin standing in `meta`, and the
+//! pin clears what the previous one derived, so every typed value in the store
+//! is derived under it and a per-row key would say the same thing on every row.
 //!
 //! # Shape
 //!
