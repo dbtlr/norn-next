@@ -1016,6 +1016,11 @@ fn a_predicate_advertises_its_op_tag_and_the_types_behind_it() {
         property_names(&branch("eq")),
         ["op", "key", "value"].into_iter().collect()
     );
+    assert_eq!(
+        branch("in")["properties"]["values"]["minItems"].as_u64(),
+        Some(1),
+        "the in branch advertises a membership in no value: {schema}"
+    );
     for op in ["links_to", "resolves"] {
         assert_eq!(
             branch(op)["properties"]["target"]["$ref"].as_str(),

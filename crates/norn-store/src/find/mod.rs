@@ -145,8 +145,37 @@ use statement::{
 /// How many rows a page holds when a request names no bound.
 ///
 /// The store's default. A handler may narrow it by naming a bound of its own;
-/// any bound is held to `1..=`[`MAX_PAGE`].
+/// a bound outside `1..=`[`MAX_PAGE`] is refused
+/// ([`FindRefusal::OutOfBound`]), never clamped.
 pub const DEFAULT_PAGE: usize = 100;
+
+/// The most values one membership part may name.
+///
+/// Every value is bound into the part's one statement, so the ceiling is what
+/// bounds that statement's text and its parameters. A part naming more is
+/// refused ([`FindRefusal::OutOfBound`]), and one naming none
+/// ([`FindRefusal::EmptyMembership`]).
+pub const IN_VALUES_CEILING: usize = 256;
+
+/// A count a request names that the store holds to a range.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FindBound {
+    /// The rows a page holds: `1..=`[`MAX_PAGE`].
+    PageRows,
+    /// The values one membership part names: at most [`IN_VALUES_CEILING`].
+    /// A part naming none is refused as [`FindRefusal::EmptyMembership`].
+    MembershipValues,
+}
+
+impl FindBound {
+    /// The most the count may be.
+    pub const fn ceiling(self) -> usize {
+        match self {
+            FindBound::PageRows => MAX_PAGE,
+            FindBound::MembershipValues => IN_VALUES_CEILING,
+        }
+    }
+}
 
 /// Which of a field's two orders a sort or a bound compares under.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -322,6 +351,13 @@ pub enum FindRefusal {
     OrderChanged(CursorOrderChanged),
     /// The cursor names a position among rows that are not documents.
     NotADocumentCursor,
+    /// A membership part on `key` names no value, so no document can satisfy
+    /// it. The wire refuses one on read; this is the refusal of one built
+    /// in-process.
+    EmptyMembership { key: String },
+    /// A count the request names is outside the range `bound` holds it to:
+    /// `given` rows for a page, or `given` values for one membership part.
+    OutOfBound { bound: FindBound, given: usize },
     /// The request carries a part this build of the store does not know.
     UnknownPart { part: &'static str },
     /// The store refused a statement.
@@ -359,6 +395,21 @@ impl std::fmt::Display for FindRefusal {
             FindRefusal::NotADocumentCursor => {
                 formatter.write_str("the cursor names a position among rows that are not documents")
             }
+            FindRefusal::EmptyMembership { key } => {
+                write!(formatter, "the membership part on `{key}` names no value")
+            }
+            FindRefusal::OutOfBound { bound, given } => match bound {
+                FindBound::PageRows => write!(
+                    formatter,
+                    "a page holds 1 to {} rows, and {given} were asked for",
+                    bound.ceiling()
+                ),
+                FindBound::MembershipValues => write!(
+                    formatter,
+                    "a membership part names at most {} values, and {given} were named",
+                    bound.ceiling()
+                ),
+            },
             FindRefusal::UnknownPart { part } => {
                 write!(formatter, "this store does not know {part}")
             }
@@ -557,19 +608,22 @@ impl Snapshot {
     /// snapshot pins: it decides a field sort's order, how a bound is
     /// compared, and — beside the keys documents carry — which keys are known.
     /// The page holds `params.limit` rows, [`DEFAULT_PAGE`] where it names
-    /// none, held to `1..=`[`MAX_PAGE`], and only those rows are hydrated.
+    /// none, and only those rows are hydrated.
     ///
-    /// Refused: a declaration read from another schema than the snapshot
-    /// pins; a cursor among rows that are not documents; a cursor that is not
-    /// a position in the request's order, as the module states; a projected
-    /// column or a part the store keeps no index of; and a bound that does not
-    /// read as its key's declared type.
+    /// Refused: a page bound outside `1..=`[`MAX_PAGE`]; a membership part
+    /// naming no value or more than [`IN_VALUES_CEILING`]; a declaration read
+    /// from another schema than the snapshot pins; a cursor among rows that
+    /// are not documents; a cursor that is not a position in the request's
+    /// order, as the module states; a projected column or a part the store
+    /// keeps no index of; and a bound that does not read as its key's declared
+    /// type.
     pub fn find(
         &mut self,
         params: &FindParams,
         declared: &DeclaredFields,
     ) -> Result<Found, FindRefusal> {
         let started = self.counters().statements_executed();
+        let limit = page_limit(params.limit)?;
         let projection = Projection::of(&params.columns)?;
         let mut lookups = Lookups::default();
         let mut compiled = self.compile(params, declared, &mut lookups)?;
@@ -580,11 +634,8 @@ impl Snapshot {
         let fields = self.projected_keys(&projection, declared, &mut lookups, &mut compiled)?;
 
         let mut work = FindWork::default();
-        let (keys, next, read) = self.page_keys(
-            &compiled,
-            page_limit(params.limit),
-            resume.as_ref().map(|resume| &resume.at),
-        )?;
+        let (keys, next, read) =
+            self.page_keys(&compiled, limit, resume.as_ref().map(|resume| &resume.at))?;
         work.keys_read = read;
         let order = compiled.field_order();
         let snapshot = self.reading_facts(order, &mut lookups)?;
@@ -609,21 +660,19 @@ impl Snapshot {
     /// the wire cursor and hands the position it names over as `resume`, and
     /// hydrates the rows itself. `declared` is the vault's declaration, read
     /// from the schema the snapshot pins, which decides a field sort's order
-    /// and how a bound is compared, and names known keys. The page holds `params.limit` rows, [`DEFAULT_PAGE`]
-    /// where it names none, held to `1..=`[`MAX_PAGE`].
+    /// and how a bound is compared, and names known keys. The page holds
+    /// `params.limit` rows, [`DEFAULT_PAGE`] where it names none, and is
+    /// refused as [`Snapshot::find`] is.
     pub fn find_keys(
         &mut self,
         params: &FindParams,
         declared: &DeclaredFields,
         resume: Option<&Resume>,
     ) -> Result<KeyPage, FindRefusal> {
+        let limit = page_limit(params.limit)?;
         let mut lookups = Lookups::default();
         let compiled = self.compile(params, declared, &mut lookups)?;
-        let (keys, next, _) = self.page_keys(
-            &compiled,
-            page_limit(params.limit),
-            resume.map(|resume| &resume.at),
-        )?;
+        let (keys, next, _) = self.page_keys(&compiled, limit, resume.map(|resume| &resume.at))?;
         let order = compiled.field_order();
         let unsatisfied = self.resolve(compiled.reports, declared, &mut lookups)?;
         Ok(KeyPage {
@@ -655,12 +704,12 @@ impl Snapshot {
         declared: &DeclaredFields,
         resume: Option<&Resume>,
     ) -> Result<Vec<FindPlan>, FindRefusal> {
+        let limit = page_limit(params.limit)?;
         let projection = Projection::of(&params.columns)?;
         let mut lookups = Lookups::default();
         let mut compiled = self.compile(params, declared, &mut lookups)?;
         let fields = self.projected_keys(&projection, declared, &mut lookups, &mut compiled)?;
         self.reading_facts(compiled.field_order(), &mut lookups)?;
-        let limit = page_limit(params.limit);
         let matches_nothing = compiled.matches_nothing;
         let filters = compiled.filter_shapes();
         let mut composed: Vec<(FindStatement, Vec<FindFilter>, String, Vec<Value>)> = Vec::new();
@@ -989,6 +1038,7 @@ impl Snapshot {
         let mut filters = Vec::new();
         let mut matches_nothing = false;
         for predicate in &params.predicates {
+            membership_bound(predicate)?;
             if let Some(key) = predicate_key(predicate)
                 && !self.is_known(key, declared, lookups)?
             {
@@ -1299,13 +1349,38 @@ fn predicate_key(predicate: &Predicate) -> Option<&str> {
     }
 }
 
-/// The page bound a request names, or the default, held to `1..=MAX_PAGE`.
-fn page_limit(limit: Option<u32>) -> usize {
-    limit.map_or(DEFAULT_PAGE, |limit| {
-        usize::try_from(limit)
-            .unwrap_or(MAX_PAGE)
-            .clamp(1, MAX_PAGE)
-    })
+/// The page bound a request names, or [`DEFAULT_PAGE`] where it names none;
+/// a bound outside `1..=`[`MAX_PAGE`] is refused.
+fn page_limit(limit: Option<u32>) -> Result<usize, FindRefusal> {
+    let Some(limit) = limit else {
+        return Ok(DEFAULT_PAGE);
+    };
+    let given = usize::try_from(limit).unwrap_or(usize::MAX);
+    if given == 0 || given > FindBound::PageRows.ceiling() {
+        return Err(FindRefusal::OutOfBound {
+            bound: FindBound::PageRows,
+            given,
+        });
+    }
+    Ok(given)
+}
+
+/// A membership part's values held to `1..=`[`IN_VALUES_CEILING`]; every other
+/// part passes.
+fn membership_bound(predicate: &Predicate) -> Result<(), FindRefusal> {
+    let Predicate::In { key, values, .. } = predicate else {
+        return Ok(());
+    };
+    if values.is_empty() {
+        return Err(FindRefusal::EmptyMembership { key: key.clone() });
+    }
+    if values.len() > FindBound::MembershipValues.ceiling() {
+        return Err(FindRefusal::OutOfBound {
+            bound: FindBound::MembershipValues,
+            given: values.len(),
+        });
+    }
+    Ok(())
 }
 
 /// The key a field order sorts by.

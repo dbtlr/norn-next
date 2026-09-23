@@ -13,10 +13,10 @@ use std::sync::Arc;
 
 use crate::common::{Scratch, document, violation, write_documents};
 use norn_store::{
-    DEFAULT_PAGE, DeclaredFields, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindFilter, FindPlan,
-    FindPosition, FindRefusal, FindStatement, FrontmatterValue, KeyPage, MAX_PAGE, Nested,
-    PageDirection, Resume, Snapshot, SnapshotReader, Store, TagFact, TagSource, TypedOrder,
-    induced_failure,
+    DEFAULT_PAGE, DeclaredFields, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindBound, FindFilter,
+    FindPlan, FindPosition, FindRefusal, FindStatement, FrontmatterValue, IN_VALUES_CEILING,
+    KeyPage, MAX_PAGE, Nested, PageDirection, Resume, Snapshot, SnapshotReader, Store, TagFact,
+    TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -1450,10 +1450,6 @@ fn each_filter_answers_the_documents_its_part_names() {
         ["notes/B.md", "other/v1.2.md"]
     );
     assert_eq!(
-        with(Predicate::in_any("status", Vec::new())),
-        Vec::<String>::new()
-    );
-    assert_eq!(
         with(Predicate::has("count")),
         ["notes/a.md", "notes/B.md", "notes/c.md", "other/v1.2.md"]
     );
@@ -1673,8 +1669,86 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
     }
 }
 
+/// **A count a request names outside the range the store holds it to is
+/// refused, never clamped or read as an empty part.** A page bound of none or
+/// of more than [`MAX_PAGE`] rows, a membership part naming no value, and one
+/// naming more than [`IN_VALUES_CEILING`] are each refused with the fact that
+/// makes them unanswerable; the bounds themselves are answered. The refusal
+/// stands before anything is compiled, so a membership part on a key no
+/// document carries is refused the same way, and the plans a request would
+/// run are refused where the request is.
+#[test]
+fn a_count_outside_its_bound_is_refused_rather_than_clamped() {
+    let seeded = Seeded::new("find-out-of-bound");
+    let refused = |params: &FindParams| {
+        let keys = seeded
+            .snapshot()
+            .find_keys(params, &declared(), None)
+            .expect_err("a count outside its bound is refused");
+        let rows = seeded
+            .snapshot()
+            .find(params, &declared())
+            .expect_err("a count outside its bound is refused");
+        let plans = seeded
+            .snapshot()
+            .find_plans(params, &declared(), None)
+            .expect_err("a count outside its bound is refused");
+        assert_eq!(keys, rows, "{params:?}");
+        assert_eq!(keys, plans, "{params:?}");
+        keys
+    };
+    for limit in [0, MAX_PAGE as u32 + 1, u32::MAX] {
+        assert_eq!(
+            refused(&request().with_limit(limit)),
+            FindRefusal::OutOfBound {
+                bound: FindBound::PageRows,
+                given: limit as usize,
+            },
+            "a page bound of {limit}"
+        );
+    }
+    let answered = seeded
+        .snapshot()
+        .find(&request().with_limit(MAX_PAGE as u32), &declared())
+        .expect("a page of the most rows a page holds");
+    assert_eq!(answered.rows.len(), 5);
+
+    for key in ["status", "nothing"] {
+        assert_eq!(
+            refused(&request().with_predicates([Predicate::in_any(key, Vec::new())])),
+            FindRefusal::EmptyMembership {
+                key: key.to_string()
+            }
+        );
+    }
+    let values = |count: usize| (0..count).map(|value| format!("value-{value}"));
+    assert_eq!(
+        refused(
+            &request()
+                .with_predicates([Predicate::in_any("status", values(IN_VALUES_CEILING + 1))])
+        ),
+        FindRefusal::OutOfBound {
+            bound: FindBound::MembershipValues,
+            given: IN_VALUES_CEILING + 1,
+        }
+    );
+    let most = seeded.page(
+        &request().with_predicates([Predicate::in_any(
+            "status",
+            values(IN_VALUES_CEILING - 1).chain(["open".to_string()]),
+        )]),
+        None,
+    );
+    assert_eq!(
+        most.keys.iter().map(|key| key.path()).collect::<Vec<_>>(),
+        ["notes/a.md", "notes/c.md"]
+    );
+}
+
 /// **A page holds the bound it names, the default where it names none, and at
-/// most [`MAX_PAGE`]; each statement it runs is counted on its snapshot.** A
+/// most [`MAX_PAGE`]** — a bound outside that is refused, which
+/// `a_count_outside_its_bound_is_refused_rather_than_clamped` holds; **each
+/// statement it runs is counted on its snapshot.** A
 /// path page is one statement beside the fingerprint read. A field sort whose
 /// first section does not fill the page reads the second, and one that fills
 /// it stops there.
@@ -1698,8 +1772,8 @@ fn a_page_holds_its_bound_and_counts_each_statement_it_runs() {
     // judged against, and then its sections.
     assert_eq!(count(&request()), (5, false, 2));
     assert_eq!(count(&request().with_limit(2)), (2, true, 2));
-    assert_eq!(count(&request().with_limit(0)), (1, true, 2));
-    assert_eq!(count(&request().with_limit(u32::MAX)), (5, false, 2));
+    assert_eq!(count(&request().with_limit(1)), (1, true, 2));
+    assert_eq!(count(&request().with_limit(MAX_PAGE as u32)), (5, false, 2));
     let by_status = sorted(SortKey::field("status"), Direction::Ascending);
     assert_eq!(count(&by_status), (5, false, 3));
     // Ascending, the missing section's one row does not fill a page of one and

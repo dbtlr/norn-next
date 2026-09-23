@@ -2407,6 +2407,22 @@ fn a_predicate_refuses_a_target_outside_the_grammar() {
     );
 }
 
+/// A membership part naming no value is a part no document satisfies, and the
+/// read path refuses it entire rather than carrying it to a store that would
+/// refuse it later. One value is a membership.
+#[test]
+fn a_membership_part_refuses_bytes_that_name_no_value() {
+    assert!(
+        serde_json::from_str::<Predicate>(r#"{"op":"in","key":"type","values":[]}"#).is_err(),
+        "a membership in no value read back as one"
+    );
+    assert_eq!(
+        serde_json::from_str::<Predicate>(r#"{"op":"in","key":"type","values":["note"]}"#)
+            .expect("a membership in one value"),
+        Predicate::in_any("type", ["note".to_string()])
+    );
+}
+
 // ── The cursor envelope ──────────────────────────────────────────────────
 
 #[test]

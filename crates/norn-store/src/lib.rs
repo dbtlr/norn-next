@@ -103,9 +103,9 @@ pub use faults::induced_failure;
 pub use feed::FeedRead;
 pub use fields::{DeclaredFields, FieldContainer, FieldRow, FieldRows, TypedOrder};
 pub use find::{
-    BODY_ROW_CEILING, DEFAULT_PAGE, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindFilter,
-    FindPlan, FindPosition, FindRefusal, FindStatement, FindWork, Found, FoundKey, KeyPage,
-    NESTED_ROW_CEILING, Nested, NestedRows, PageDirection, Resume,
+    BODY_ROW_CEILING, DEFAULT_PAGE, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindBound,
+    FindFilter, FindPlan, FindPosition, FindRefusal, FindStatement, FindWork, Found, FoundKey,
+    IN_VALUES_CEILING, KeyPage, NESTED_ROW_CEILING, Nested, NestedRows, PageDirection, Resume,
 };
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
