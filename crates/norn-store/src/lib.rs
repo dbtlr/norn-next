@@ -36,9 +36,10 @@
 //! - [`Snapshot::find`] — the find builder: a request's conjunction and order
 //!   compiled into index seeks on a read snapshot, answering a page of rows
 //!   projected onto the columns it names, the cursor the next page continues,
-//!   and the parts it could not apply. [`Snapshot::find_keys`] is its paging
-//!   half alone, and [`Snapshot::find_plans`] hands out the plan of every
-//!   statement it runs, which is what its `EXPLAIN` bars are asserted through.
+//!   and the parts it could not apply. [`Snapshot::find_plans`] runs the same
+//!   find and hands out the plan of every statement it ran, taken of the text
+//!   and values it ran with, which is what its `EXPLAIN` bars are asserted
+//!   through.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -104,8 +105,8 @@ pub use feed::FeedRead;
 pub use fields::{DeclaredFields, FieldContainer, FieldRow, FieldRows, TypedOrder};
 pub use find::{
     BODY_ROW_CEILING, DEFAULT_PAGE, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindBound,
-    FindFilter, FindPlan, FindPosition, FindRefusal, FindStatement, FindWork, Found, FoundKey,
-    IN_VALUES_CEILING, KeyPage, NESTED_ROW_CEILING, Nested, NestedRows, PageDirection, Resume,
+    FindFilter, FindPlan, FindRefusal, FindStatement, FindWork, Found, IN_VALUES_CEILING,
+    NESTED_ROW_CEILING, Nested, NestedRows, PageDirection,
 };
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};

@@ -1,27 +1,29 @@
 //! The find builder: what a page answers, and the plan bars every statement and
 //! filter it emits is judged by.
 //!
-//! Every plan here is one [`Snapshot::find_plans`] took of the statements
-//! [`Snapshot::find_keys`] runs for the same request, on the snapshot's own
-//! read-only connection, so a bar judges the SQL a page actually reads. Each
-//! bar runs its negative control in the same case: the index the bar names is
-//! dropped, or the plan is rebuilt without the row the bar is about, and the
-//! bar is shown to fail.
+//! Every plan here is one [`Snapshot::find_plans`] took of a statement
+//! [`Snapshot::find`] ran for the same request, continuation and all: the text
+//! and values the find recorded as it prepared them, explained on the
+//! snapshot's own read-only connection. So a bar judges the SQL a page actually
+//! read, and a statement is barred by a request that runs it. Each bar runs its
+//! negative control in the same case: the index the bar names is dropped, or
+//! the plan is rebuilt without the row the bar is about, and the bar is shown
+//! to fail.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use crate::common::{Scratch, document, violation, write_documents};
 use norn_store::{
-    DEFAULT_PAGE, DeclaredFields, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindBound, FindFilter,
-    FindPlan, FindPosition, FindRefusal, FindStatement, FrontmatterValue, IN_VALUES_CEILING,
-    KeyPage, MAX_PAGE, Nested, PageDirection, Resume, Snapshot, SnapshotReader, Store, TagFact,
-    TagSource, TypedOrder, induced_failure,
+    BlockFact, DEFAULT_PAGE, DeclaredFields, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindBound,
+    FindFilter, FindPlan, FindRefusal, FindStatement, Found, FrontmatterValue, HeadingFact,
+    IN_VALUES_CEILING, MAX_PAGE, NESTED_ROW_CEILING, Nested, PageDirection, Snapshot,
+    SnapshotReader, Span, Store, TagFact, TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    Column, Direction, FindParams, FindingKind, Pattern, Predicate, ResolutionTarget, Sort,
-    SortKey, Unsatisfied, VaultAddress, VaultName,
+    Column, Cursor, CursorKey, Direction, FindParams, FindingKind, Pattern, Predicate,
+    ResolutionTarget, Sort, SortKey, Unsatisfied, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -180,33 +182,53 @@ impl Seeded {
             .expect("a snapshot")
     }
 
-    fn page(&self, params: &FindParams, resume: Option<&Resume>) -> KeyPage {
+    /// One find of `params` on a fresh snapshot, under the fixture's
+    /// declaration.
+    fn page(&self, params: &FindParams) -> Found {
         self.snapshot()
-            .find_keys(params, &declared(), resume)
-            .expect("a page")
+            .find(params, &declared())
+            .unwrap_or_else(|refusal| panic!("a find of {params:?}: {refusal}"))
     }
 
     fn paths(&self, params: &FindParams) -> Vec<String> {
-        self.page(params, None)
-            .keys
-            .iter()
-            .map(|key| key.path().to_string())
-            .collect()
+        row_paths(&self.page(params))
     }
 
-    pub(crate) fn plans(&self, params: &FindParams, resume: Option<&Resume>) -> Vec<FindPlan> {
-        self.plans_under(params, &declared(), resume)
+    pub(crate) fn plans(&self, params: &FindParams) -> Vec<FindPlan> {
+        self.plans_under(params, &declared())
     }
 
-    fn plans_under(
+    fn plans_under(&self, params: &FindParams, declared: &DeclaredFields) -> Vec<FindPlan> {
+        self.snapshot()
+            .find_plans(params, declared)
+            .expect("the plans of a request")
+    }
+
+    /// `params` continuing from a row ordered by `sort` at `path`, under the
+    /// fixture's declaration.
+    fn resumed(&self, params: &FindParams, sort: Option<&str>, path: &str) -> FindParams {
+        self.resumed_under(params, &declared(), sort, path)
+    }
+
+    /// `params` continuing from a row ordered by `sort` at `path`, with a
+    /// cursor minted in the order `params` reads under `declared`: the reading
+    /// a first page of it answers from, positioned there.
+    fn resumed_under(
         &self,
         params: &FindParams,
         declared: &DeclaredFields,
-        resume: Option<&Resume>,
-    ) -> Vec<FindPlan> {
-        self.snapshot()
-            .find_plans(params, declared, resume)
-            .expect("the plans of a request")
+        sort: Option<&str>,
+        path: &str,
+    ) -> FindParams {
+        let reading = self
+            .snapshot()
+            .find(params, declared)
+            .expect("a first page")
+            .snapshot;
+        params.clone().with_after(Cursor::new(
+            reading,
+            CursorKey::document(sort.map(str::to_string), path),
+        ))
     }
 
     /// Drop `index` on the writer, which is what a negative control judges the
@@ -215,6 +237,15 @@ impl Seeded {
         induced_failure::execute_out_of_band(&mut self.store, &format!("DROP INDEX {index}"))
             .unwrap_or_else(|problem| panic!("dropping {index}: {problem}"));
     }
+}
+
+/// The paths a page's rows stand at, in its order.
+fn row_paths(found: &Found) -> Vec<String> {
+    found
+        .rows
+        .iter()
+        .map(|row| row.path.as_str().to_string())
+        .collect()
 }
 
 /// The plan the store reported for one statement, in the harness's shape.
@@ -477,12 +508,7 @@ const PAGE_BARS: &[(FindStatement, Direction, &str)] = &[
 #[test]
 fn a_path_page_seeks_the_case_insensitive_index_in_either_direction() {
     let mut seeded = Seeded::new("find-path-page");
-    let continuation = Resume {
-        at: FindPosition {
-            sort: None,
-            path: "notes/B.md".to_string(),
-        },
-    };
+    let resumed = |seeded: &Seeded, params: FindParams| seeded.resumed(&params, None, "notes/B.md");
     let judge = |page: &QueryPlan, constraint: &str| {
         page.assert_no_full_scan();
         page.assert_searches_through("documents", Access::Index("documents_path_nocase"));
@@ -490,15 +516,15 @@ fn a_path_page_seeks_the_case_insensitive_index_in_either_direction() {
         page.assert_no_temp_btree();
     };
     for (statement, direction, constraint) in PAGE_BARS {
-        for resume in [None, Some(&continuation)] {
-            let plans = seeded.plans(&sorted(SortKey::path(), *direction), resume);
-            judge(&plan_of(&plans, *statement), constraint);
+        let params = sorted(SortKey::path(), *direction);
+        for params in [params.clone(), resumed(&seeded, params)] {
+            judge(&plan_of(&seeded.plans(&params), *statement), constraint);
         }
     }
     // A request that names no order pages by path, ascending.
     judge(
         &plan_of(
-            &seeded.plans(&request(), None),
+            &seeded.plans(&request()),
             FindStatement::PathPage(PageDirection::Ascending),
         ),
         "(path>?)",
@@ -507,7 +533,6 @@ fn a_path_page_seeks_the_case_insensitive_index_in_either_direction() {
     let fingerprint = plan_of(
         &seeded.plans(
             &request().with_predicates([Predicate::has_finding(FindingKind::BodyBytesNotUtf8)]),
-            None,
         ),
         FindStatement::ActiveFingerprint,
     );
@@ -515,16 +540,16 @@ fn a_path_page_seeks_the_case_insensitive_index_in_either_direction() {
     fingerprint.assert_search_constraint("meta", "(key=?)");
 
     // Control: the continuation's bound taken out of the search it opens.
-    let resumed = plan_of(
-        &seeded.plans(
-            &sorted(SortKey::path(), Direction::Ascending),
-            Some(&continuation),
-        ),
+    let continued = plan_of(
+        &seeded.plans(&resumed(
+            &seeded,
+            sorted(SortKey::path(), Direction::Ascending),
+        )),
         FindStatement::PathPage(PageDirection::Ascending),
     );
     let unbounded = QueryPlan::new(
-        resumed.sql(),
-        resumed
+        continued.sql(),
+        continued
             .rows()
             .iter()
             .map(|row| PlanRow::new(row.id, row.parent, row.detail.replace(" (path>?)", "")))
@@ -537,7 +562,7 @@ fn a_path_page_seeks_the_case_insensitive_index_in_either_direction() {
     // Control: the index the order is held by, gone.
     seeded.drop_index("documents_path_nocase");
     for (statement, direction, constraint) in PAGE_BARS {
-        let plans = seeded.plans(&sorted(SortKey::path(), *direction), None);
+        let plans = seeded.plans(&sorted(SortKey::path(), *direction));
         failure_of("documents_path_nocase dropped", || {
             judge(&plan_of(&plans, *statement), constraint)
         });
@@ -633,32 +658,16 @@ fn a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path() {
     let mut seeded = Seeded::new("find-field-sort");
     for bar in FIELD_BARS {
         let params = sorted(SortKey::field(bar.key), bar.direction);
-        let in_valued = Resume {
-            at: FindPosition {
-                sort: Some("m".to_string()),
-                path: "notes/a.md".to_string(),
-            },
-        };
-        let in_missing = Resume {
-            at: FindPosition {
-                sort: None,
-                path: "notes/a.md".to_string(),
-            },
-        };
-        let first = seeded.plans(&params, None);
+        let in_valued = seeded.resumed(&params, Some("m"), "notes/a.md");
+        let in_missing = seeded.resumed(&params, None, "notes/a.md");
+        let first = seeded.plans(&params);
         judge_valued(&plan_of(&first, bar.valued), bar);
         judge_missing(&plan_of(&first, bar.missing), bar);
-        judge_valued(
-            &plan_of(&seeded.plans(&params, Some(&in_valued)), bar.valued),
-            bar,
-        );
-        judge_missing(
-            &plan_of(&seeded.plans(&params, Some(&in_missing)), bar.missing),
-            bar,
-        );
+        judge_valued(&plan_of(&seeded.plans(&in_valued), bar.valued), bar);
+        judge_missing(&plan_of(&seeded.plans(&in_missing), bar.missing), bar);
 
         // Control: the continuation's `(value, path)` bound taken out.
-        let resumed = plan_of(&seeded.plans(&params, Some(&in_valued)), bar.valued);
+        let resumed = plan_of(&seeded.plans(&in_valued), bar.valued);
         let bound = bar
             .valued_constraint
             .strip_prefix("(key=? AND ")
@@ -686,7 +695,7 @@ fn a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path() {
     for index in ["document_fields_least_raw", "document_fields_least_typed"] {
         seeded.drop_index(index);
         for bar in FIELD_BARS.iter().filter(|bar| bar.marker_index == index) {
-            let plans = seeded.plans(&sorted(SortKey::field(bar.key), bar.direction), None);
+            let plans = seeded.plans(&sorted(SortKey::field(bar.key), bar.direction));
             failure_of(&format!("{index} dropped"), || {
                 judge_valued(&plan_of(&plans, bar.valued), bar)
             });
@@ -735,7 +744,7 @@ fn a_known_key_and_the_field_universe_read_the_presence_rows_alone() {
             universe.rows()
         );
     };
-    let plans = seeded.plans(&params, None);
+    let plans = seeded.plans(&params);
     judge_known(&plans);
     judge_universe(&plans);
 
@@ -743,7 +752,6 @@ fn a_known_key_and_the_field_universe_read_the_presence_rows_alone() {
         &request()
             .with_predicates([Predicate::has("status")])
             .with_sort(Sort::new(SortKey::field("count"), Direction::Ascending)),
-        None,
     );
     assert!(
         declared_only
@@ -753,7 +761,7 @@ fn a_known_key_and_the_field_universe_read_the_presence_rows_alone() {
     );
 
     seeded.drop_index("document_fields_presence");
-    let plans = seeded.plans(&params, None);
+    let plans = seeded.plans(&params);
     failure_of("document_fields_presence dropped, the key probe", || {
         judge_known(&plans)
     });
@@ -781,22 +789,19 @@ fn a_bare_directory_probe_is_two_seeks_of_the_path_index() {
         under.assert_search_constraint("documents", "(path>? AND path<?)");
     };
     judge(&plan_of(
-        &seeded.plans(&params, None),
+        &seeded.plans(&params),
         FindStatement::BareDirectory,
     ));
     // A glob with a wildcard is no directory, and asks nothing.
     assert!(
         seeded
-            .plans(
-                &request().with_predicates([Predicate::path("notes/*")]),
-                None
-            )
+            .plans(&request().with_predicates([Predicate::path("notes/*")]))
             .iter()
             .all(|plan| plan.statement != FindStatement::BareDirectory)
     );
 
     seeded.drop_index("documents_path");
-    let plan = plan_of(&seeded.plans(&params, None), FindStatement::BareDirectory);
+    let plan = plan_of(&seeded.plans(&params), FindStatement::BareDirectory);
     failure_of("documents_path dropped", || judge(&plan));
 }
 
@@ -825,11 +830,11 @@ fn a_match_probe_reads_the_full_text_index_through_its_selection() {
         );
     };
     let params = request().with_predicates([Predicate::matches("interloper")]);
-    let probe = plan_of(&seeded.plans(&params, None), FindStatement::MatchProbe);
+    let probe = plan_of(&seeded.plans(&params), FindStatement::MatchProbe);
     judge(&probe);
     assert!(
         seeded
-            .plans(&request().with_predicates([Predicate::tag("draft")]), None)
+            .plans(&request().with_predicates([Predicate::tag("draft")]))
             .iter()
             .all(|plan| plan.statement != FindStatement::MatchProbe)
     );
@@ -869,13 +874,44 @@ fn ordinal_index(nested: Nested) -> String {
 /// index.** The document rows are primary-key seeks of the page's ids. A
 /// collection's head seeks `(document, ordinal)` for each id with the ceiling
 /// as the ordinal's bound, so a document's rows past it are never reached; its
-/// total counts the same index, and never the table.
+/// total counts the same index, and never the table. A total is counted only
+/// for a document whose head the ceiling filled, so the page holds one whose
+/// every collection fills it, and each total runs.
 ///
 /// Controls: the document plan rebuilt with its row-id seek as a scan; each
 /// ordinal index dropped, its head and total read something else.
 #[test]
 fn hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index() {
     let mut seeded = Seeded::new("find-hydration");
+    let mut full = document("long/full.md", "hash-full", "a body\n");
+    full.tags = (0..NESTED_ROW_CEILING)
+        .map(|index| TagFact {
+            name: format!("t{index:03}"),
+            source: TagSource::Frontmatter,
+            span: None,
+        })
+        .collect();
+    full.headings = (0..NESTED_ROW_CEILING)
+        .map(|index| HeadingFact {
+            level: 2,
+            text: format!("heading {index}"),
+            slug: format!("heading-{index}"),
+            span: Span {
+                line: index as u64 + 1,
+                column: 1,
+                byte_offset: 0,
+            },
+            body_offset: 0,
+            inside_container: false,
+        })
+        .collect();
+    full.blocks = (0..NESTED_ROW_CEILING)
+        .map(|index| BlockFact {
+            block_id: format!("b{index}"),
+            span: None,
+        })
+        .collect();
+    write_documents(&mut seeded.store.begin_request(), &[full]);
     let params = request().with_columns([
         Column::fields(),
         Column::body(),
@@ -902,7 +938,7 @@ fn hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index(
         total.assert_searches_through(nested.table(), Access::Index(&index));
         total.assert_search_constraint(nested.table(), "(document=?)");
     };
-    let plans = seeded.plans(&params, None);
+    let plans = seeded.plans(&params);
     let documents = plan_of(&plans, FindStatement::HydrateDocuments);
     judge_documents(&documents);
     for nested in Nested::ALL {
@@ -933,7 +969,7 @@ fn hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index(
     // Control: each ordinal index, dropped.
     for nested in Nested::ALL {
         seeded.drop_index(&ordinal_index(nested));
-        let plans = seeded.plans(&params, None);
+        let plans = seeded.plans(&params);
         failure_of(
             &format!("{} dropped, the head", ordinal_index(nested)),
             || judge_head(&plans, nested),
@@ -1209,7 +1245,7 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
                     FindStatement::FieldValuePage(FieldOrder::Raw, PageDirection::Ascending),
                 ),
             ] {
-                let plans = seeded.plans(&params.with_predicates([part.clone()]), None);
+                let plans = seeded.plans(&params.with_predicates([part.clone()]));
                 let page = plans
                     .iter()
                     .find(|plan| plan.statement == statement)
@@ -1225,10 +1261,7 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
     }
 
     // Control: the full-text selection taken out of the plan.
-    let plans = seeded.plans(
-        &request().with_predicates([Predicate::matches("interloper")]),
-        None,
-    );
+    let plans = seeded.plans(&request().with_predicates([Predicate::matches("interloper")]));
     let page = plan_of(&plans, FindStatement::PathPage(PageDirection::Ascending));
     let unselected = QueryPlan::new(
         page.sql(),
@@ -1253,7 +1286,7 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
                 seeded.drop_index(index);
                 dropped.push(index);
             }
-            let plans = seeded.plans(&request().with_predicates([part.clone()]), None);
+            let plans = seeded.plans(&request().with_predicates([part.clone()]));
             let page = plan_of(&plans, FindStatement::PathPage(PageDirection::Ascending));
             failure_of(&format!("{index} dropped under {part:?}"), || {
                 judge_filter(&page, seek)
@@ -1283,13 +1316,22 @@ fn a_set_valued_sort_field_orders_a_document_once_at_its_least_value() {
     let read = |direction: Direction, declared: &DeclaredFields, order: FieldOrder| {
         let page = seeded
             .snapshot()
-            .find_keys(&sorted(SortKey::field("count"), direction), declared, None)
+            .find(&sorted(SortKey::field("count"), direction), declared)
             .expect("a page");
-        assert_eq!(page.order, Some(order));
-        page.keys
-            .iter()
-            .map(|key| (key.path().to_string(), key.sort().map(str::to_string)))
-            .collect::<Vec<_>>()
+        // A page in a typed order is read under the pinned schema, and one in
+        // the raw order under none.
+        assert_eq!(
+            page.snapshot.schema_fingerprint.as_deref(),
+            (order == FieldOrder::Typed).then_some(SEED_SCHEMA)
+        );
+        let keys = keyed(&seeded, &SortKey::field("count"), direction, declared);
+        assert_eq!(
+            keys.iter()
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>(),
+            row_paths(&page)
+        );
+        keys
     };
     let row = |path: &str, sort: Option<String>| (path.to_string(), sort);
     let then = |mut first: Vec<(String, Option<String>)>, second: Vec<(String, Option<String>)>| {
@@ -1338,17 +1380,13 @@ fn a_set_valued_sort_field_orders_a_document_once_at_its_least_value() {
             (Direction::Ascending, PageDirection::Ascending),
             (Direction::Descending, PageDirection::Descending),
         ] {
-            let resume = Resume {
-                at: FindPosition {
-                    sort: Some("0".to_string()),
-                    path: "notes/a.md".to_string(),
-                },
-            };
-            let plans = seeded.plans_under(
+            let resumed = seeded.resumed_under(
                 &sorted(SortKey::field("count"), direction),
                 declared,
-                Some(&resume),
+                Some("0"),
+                "notes/a.md",
             );
+            let plans = seeded.plans_under(&resumed, declared);
             let valued = plan_of(&plans, FindStatement::FieldValuePage(order, page_direction));
             let touched = valued.searches_of("document_fields");
             assert!(
@@ -1364,25 +1402,57 @@ fn a_set_valued_sort_field_orders_a_document_once_at_its_least_value() {
     }
 }
 
-/// Every path a request's pages hold, drained a page of `limit` at a time.
-fn drained(seeded: &Seeded, params: &FindParams, limit: u32) -> Vec<(String, Option<String>)> {
-    let params = params.clone().with_limit(limit);
-    let mut rows = Vec::new();
-    let mut resume: Option<Resume> = None;
+/// Each row a request sorted by `key` answers under `declared`, as the key a
+/// page stopping at it names in its cursor: its path, and the value it was
+/// ordered by.
+///
+/// A page of `n` rows names its `n`th row's key. The last row of all ends no
+/// page that has a row after it, so its key is named by the first page of one
+/// row in the other direction, which starts at it.
+fn keyed(
+    seeded: &Seeded,
+    key: &SortKey,
+    direction: Direction,
+    declared: &DeclaredFields,
+) -> Vec<(String, Option<String>)> {
+    let page = |direction: Direction, limit: usize| {
+        let limit = u32::try_from(limit).expect("a page bound");
+        seeded
+            .snapshot()
+            .find(&sorted(key.clone(), direction).with_limit(limit), declared)
+            .expect("a page")
+    };
+    let named = |found: Found| match found.next.as_ref().map(Cursor::key) {
+        Some(CursorKey::Document { sort, path, .. }) => (path.clone(), sort.clone()),
+        other => panic!("a page with a row after it names a document: {other:?}"),
+    };
+    let count = page(direction, MAX_PAGE).rows.len();
+    let reverse = match direction {
+        Direction::Ascending => Direction::Descending,
+        _ => Direction::Ascending,
+    };
+    (1..count)
+        .map(|limit| named(page(direction, limit)))
+        .chain(std::iter::once(named(page(reverse, 1))))
+        .collect()
+}
+
+/// Every path a request's pages hold, drained a page of `limit` at a time,
+/// each page continuing the cursor the one before it minted.
+fn drained(seeded: &Seeded, params: &FindParams, limit: u32) -> Vec<String> {
+    let first = params.clone().with_limit(limit);
+    let mut request = first.clone();
+    let mut paths = Vec::new();
     for _ in 0..32 {
-        let page = seeded.page(&params, resume.as_ref());
-        assert!(page.keys.len() <= limit as usize);
-        rows.extend(
-            page.keys
-                .iter()
-                .map(|key| (key.path().to_string(), key.sort().map(str::to_string))),
-        );
+        let page = seeded.page(&request);
+        assert!(page.rows.len() <= limit as usize);
+        paths.extend(row_paths(&page));
         let Some(next) = page.next else {
-            return rows;
+            return paths;
         };
-        resume = Some(Resume { at: next });
+        request = first.clone().with_after(next);
     }
-    panic!("the pages did not end: {rows:?}");
+    panic!("the pages did not end: {paths:?}");
 }
 
 /// **A continuation resumes exactly where its page stopped.** Drained a row at
@@ -1412,10 +1482,7 @@ fn a_continuation_resumes_exactly_where_its_page_stopped() {
             );
         }
     }
-    let paths: Vec<String> = drained(&seeded, &sorted(SortKey::path(), Direction::Ascending), 1)
-        .into_iter()
-        .map(|(path, _)| path)
-        .collect();
+    let paths = drained(&seeded, &sorted(SortKey::path(), Direction::Ascending), 1);
     assert_eq!(
         paths,
         [
@@ -1525,11 +1592,9 @@ fn each_filter_answers_the_documents_its_part_names() {
 fn a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault() {
     let seeded = Seeded::new("find-unsatisfiable");
     let target = ResolutionTarget::new("../escape").expect("a target");
-    let page = seeded.page(
-        &request().with_predicates([Predicate::resolves(target), Predicate::path("")]),
-        None,
-    );
-    assert!(page.keys.is_empty());
+    let page =
+        seeded.page(&request().with_predicates([Predicate::resolves(target), Predicate::path("")]));
+    assert!(page.rows.is_empty());
     assert_eq!(
         page.unsatisfied,
         vec![
@@ -1553,12 +1618,8 @@ fn a_malformed_full_text_query_is_reported_and_the_page_answered_without_it() {
     let tagged = seeded.paths(&request().with_predicates([Predicate::tag("draft")]));
     assert!(everything.len() > tagged.len(), "{everything:?}");
     for query in ["interloper AND", "\"interloper"] {
-        let page = seeded.page(
-            &request().with_predicates([Predicate::matches(query)]),
-            None,
-        );
-        let paths: Vec<&str> = page.keys.iter().map(|key| key.path()).collect();
-        assert_eq!(paths, everything, "{query:?} filtered the page");
+        let page = seeded.page(&request().with_predicates([Predicate::matches(query)]));
+        assert_eq!(row_paths(&page), everything, "{query:?} filtered the page");
         let [
             Unsatisfied::MalformedQuery {
                 query: named,
@@ -1575,18 +1636,12 @@ fn a_malformed_full_text_query_is_reported_and_the_page_answered_without_it() {
         assert_eq!(named, query);
         assert!(!problem.is_empty(), "{query:?} carries no problem");
 
-        let beside = seeded.page(
-            &request().with_predicates([Predicate::matches(query), Predicate::tag("draft")]),
-            None,
-        );
-        let paths: Vec<&str> = beside.keys.iter().map(|key| key.path()).collect();
-        assert_eq!(paths, tagged, "{query:?} beside a tag part");
+        let beside = seeded
+            .page(&request().with_predicates([Predicate::matches(query), Predicate::tag("draft")]));
+        assert_eq!(row_paths(&beside), tagged, "{query:?} beside a tag part");
         assert_eq!(beside.unsatisfied.len(), 1, "{:?}", beside.unsatisfied);
 
-        let plans = seeded.plans(
-            &request().with_predicates([Predicate::matches(query)]),
-            None,
-        );
+        let plans = seeded.plans(&request().with_predicates([Predicate::matches(query)]));
         plan_of(&plans, FindStatement::MatchProbe);
         assert!(
             !plan_of(&plans, FindStatement::PathPage(PageDirection::Ascending))
@@ -1595,12 +1650,8 @@ fn a_malformed_full_text_query_is_reported_and_the_page_answered_without_it() {
             "the page statement still spells the malformed part"
         );
     }
-    let page = seeded.page(
-        &request().with_predicates([Predicate::matches("interloper")]),
-        None,
-    );
-    let paths: Vec<&str> = page.keys.iter().map(|key| key.path()).collect();
-    assert_eq!(paths, ["notes/a.md"]);
+    let page = seeded.page(&request().with_predicates([Predicate::matches("interloper")]));
+    assert_eq!(row_paths(&page), ["notes/a.md"]);
     assert!(page.unsatisfied.is_empty(), "{:?}", page.unsatisfied);
 }
 
@@ -1612,12 +1663,11 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
     let seeded = Seeded::new("find-refusals");
     let refusal = seeded
         .snapshot()
-        .find_keys(
+        .find(
             &request().with_predicates([Predicate::links_to(
                 ResolutionTarget::new("glossary").expect("a target"),
             )]),
             &declared(),
-            None,
         )
         .expect_err("a links_to part is refused");
     assert_eq!(
@@ -1632,10 +1682,9 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
     );
     let refusal = seeded
         .snapshot()
-        .find_keys(
+        .find(
             &request().with_predicates([Predicate::before("count", "many")]),
             &declared(),
-            None,
         )
         .expect_err("a bound that reads as no number is refused");
     assert_eq!(
@@ -1652,11 +1701,7 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
     ] {
         let refusal = seeded
             .snapshot()
-            .find_keys(
-                &request().with_predicates([part.clone()]),
-                &declared(),
-                None,
-            )
+            .find(&request().with_predicates([part.clone()]), &declared())
             .expect_err("a compared value that reads as no number is refused");
         assert_eq!(
             refusal,
@@ -1681,21 +1726,16 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
 fn a_count_outside_its_bound_is_refused_rather_than_clamped() {
     let seeded = Seeded::new("find-out-of-bound");
     let refused = |params: &FindParams| {
-        let keys = seeded
-            .snapshot()
-            .find_keys(params, &declared(), None)
-            .expect_err("a count outside its bound is refused");
         let rows = seeded
             .snapshot()
             .find(params, &declared())
             .expect_err("a count outside its bound is refused");
         let plans = seeded
             .snapshot()
-            .find_plans(params, &declared(), None)
+            .find_plans(params, &declared())
             .expect_err("a count outside its bound is refused");
-        assert_eq!(keys, rows, "{params:?}");
-        assert_eq!(keys, plans, "{params:?}");
-        keys
+        assert_eq!(rows, plans, "{params:?}");
+        rows
     };
     for limit in [0, MAX_PAGE as u32 + 1, u32::MAX] {
         assert_eq!(
@@ -1732,17 +1772,11 @@ fn a_count_outside_its_bound_is_refused_rather_than_clamped() {
             given: IN_VALUES_CEILING + 1,
         }
     );
-    let most = seeded.page(
-        &request().with_predicates([Predicate::in_any(
-            "status",
-            values(IN_VALUES_CEILING - 1).chain(["open".to_string()]),
-        )]),
-        None,
-    );
-    assert_eq!(
-        most.keys.iter().map(|key| key.path()).collect::<Vec<_>>(),
-        ["notes/a.md", "notes/c.md"]
-    );
+    let most = seeded.page(&request().with_predicates([Predicate::in_any(
+        "status",
+        values(IN_VALUES_CEILING - 1).chain(["open".to_string()]),
+    )]));
+    assert_eq!(row_paths(&most), ["notes/a.md", "notes/c.md"]);
 }
 
 /// **A page holds the bound it names, the default where it names none, and at
@@ -1759,11 +1793,9 @@ fn a_page_holds_its_bound_and_counts_each_statement_it_runs() {
     let count = |params: &FindParams| {
         let mut snapshot = seeded.snapshot();
         let before = snapshot.counters().statements_executed();
-        let page = snapshot
-            .find_keys(params, &declared(), None)
-            .expect("a page");
+        let page = snapshot.find(params, &declared()).expect("a page");
         (
-            page.keys.len(),
+            page.rows.len(),
             page.next.is_some(),
             snapshot.counters().statements_executed() - before,
         )
@@ -1879,15 +1911,14 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
             .collect();
         expected.sort_unstable();
         let page = snapshot
-            .find_keys(
+            .find(
                 &request()
                     .with_predicates([Predicate::path(source.clone())])
                     .with_limit(MAX_PAGE as u32),
                 &DeclaredFields::none(),
-                None,
             )
             .expect("a page");
-        let mut answered: Vec<&str> = page.keys.iter().map(|key| key.path()).collect();
+        let mut answered = row_paths(&page);
         answered.sort_unstable();
         assert_eq!(
             answered, expected,

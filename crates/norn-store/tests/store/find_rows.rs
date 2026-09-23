@@ -533,14 +533,19 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
         )
     );
 
-    // The plans name the same statements: a named collection's head and
-    // total, and nothing of a table no column named.
+    // The plans name the same statements: a named collection's head, no
+    // total where no head filled the ceiling, and nothing of a table no column
+    // named.
     let statements: Vec<FindStatement> = seeded
-        .plans(&request().with_columns([Column::tags()]), None)
+        .plans(&request().with_columns([Column::tags()]))
         .into_iter()
         .map(|plan| plan.statement)
         .collect();
     assert!(statements.contains(&FindStatement::NestedHead(Nested::Tags)));
+    assert!(
+        !statements.contains(&FindStatement::NestedTotal(Nested::Tags)),
+        "a total ran where no head filled the ceiling: {statements:?}"
+    );
     for unnamed in [
         FindStatement::HydrateDocuments,
         FindStatement::NestedHead(Nested::Headings),
@@ -843,7 +848,7 @@ fn every_unknown_key_is_reported_with_the_keys_near_it() {
     let probes = |params: &FindParams| {
         let statements: Vec<FindStatement> = seeded
             .snapshot()
-            .find_plans(params, &declaring_due(), None)
+            .find_plans(params, &declaring_due())
             .expect("plans")
             .into_iter()
             .map(|plan| plan.statement)

@@ -18,16 +18,16 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use norn_db::rusqlite::types::Value;
-use norn_db::rusqlite::{Row, params_from_iter};
+use norn_db::rusqlite::Row;
 use norn_wire::{
     BlockRow, BodyText, Collection, DocumentRow, FieldValue, HeadingRow, TagRow, TotalBelowHead,
 };
 
 use super::statement::{
-    DocumentColumns, Nested, compose_documents, compose_nested_head, compose_nested_total,
+    DocumentColumns, FindStatement, Nested, compose_documents, compose_nested_head,
+    compose_nested_total,
 };
-use super::{FoundKey, Projection};
+use super::{FoundKey, Projection, Ran};
 use crate::error::{self, StoreError};
 use crate::facts::{Span, TagSource};
 use crate::json::projected_fields;
@@ -112,13 +112,15 @@ type Heads<T> = HashMap<i64, Vec<(i64, T)>>;
 impl Snapshot {
     /// The rows of the documents `keys` name, in their order, carrying the
     /// columns `projection` names; `fields` is the field keys it names that
-    /// the vault's field universe holds.
+    /// the vault's field universe holds. Each statement it runs is recorded in
+    /// `record`.
     pub(super) fn hydrate(
         &mut self,
         keys: &[FoundKey],
         projection: &Projection<'_>,
         fields: &[&str],
         work: &mut FindWork,
+        record: &mut Vec<Ran>,
     ) -> Result<Vec<DocumentRow>, StoreError> {
         let ids: Vec<i64> = keys.iter().map(FoundKey::document).collect();
         let columns = DocumentColumns {
@@ -128,7 +130,7 @@ impl Snapshot {
         let mut read = if ids.is_empty() || columns == DocumentColumns::default() {
             HashMap::new()
         } else {
-            self.read_documents(&ids, columns, work)?
+            self.read_documents(&ids, columns, work, record)?
         };
 
         let mut rows = Vec::with_capacity(keys.len());
@@ -156,21 +158,21 @@ impl Snapshot {
         for nested in projection.nested.iter().copied() {
             match nested {
                 Nested::Tags => {
-                    let mut heads = self.read_nested(nested, &ids, tag_row, work)?;
+                    let mut heads = self.read_nested(nested, &ids, tag_row, work, record)?;
                     for (row, id) in rows.iter_mut().zip(&ids) {
                         let (items, total) = heads.remove(id).unwrap_or_default();
                         row.tags = Some(Collection::new(items, total).map_err(cut_below_head)?);
                     }
                 }
                 Nested::Headings => {
-                    let mut heads = self.read_nested(nested, &ids, heading_row, work)?;
+                    let mut heads = self.read_nested(nested, &ids, heading_row, work, record)?;
                     for (row, id) in rows.iter_mut().zip(&ids) {
                         let (items, total) = heads.remove(id).unwrap_or_default();
                         row.headings = Some(Collection::new(items, total).map_err(cut_below_head)?);
                     }
                 }
                 Nested::Blocks => {
-                    let mut heads = self.read_nested(nested, &ids, block_row, work)?;
+                    let mut heads = self.read_nested(nested, &ids, block_row, work, record)?;
                     for (row, id) in rows.iter_mut().zip(&ids) {
                         let (items, total) = heads.remove(id).unwrap_or_default();
                         row.blocks = Some(Collection::new(items, total).map_err(cut_below_head)?);
@@ -187,19 +189,25 @@ impl Snapshot {
         ids: &[i64],
         columns: DocumentColumns,
         work: &mut FindWork,
+        record: &mut Vec<Ran>,
     ) -> Result<HashMap<i64, DocumentColumnsRead>, StoreError> {
         const OPERATION: &str = "reading the document rows a page found";
-        let (sql, values) = compose_documents(ids, columns, BODY_ROW_CEILING);
-        let read = self.read_rows(&sql, values, OPERATION, |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                DocumentColumnsRead {
-                    frontmatter: row.get(1)?,
-                    body_head: row.get(2)?,
-                    body_length: row.get(3)?,
-                },
-            ))
-        })?;
+        let statement = Ran::new(
+            FindStatement::HydrateDocuments,
+            compose_documents(ids, columns, BODY_ROW_CEILING),
+        );
+        let read = self
+            .run_statement(record, statement, |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    DocumentColumnsRead {
+                        frontmatter: row.get(1)?,
+                        body_head: row.get(2)?,
+                        body_length: row.get(3)?,
+                    },
+                ))
+            })
+            .map_err(|problem| error::sql(OPERATION, problem))?;
         work.documents_hydrated += read.len() as u64;
         Ok(read.into_iter().collect())
     }
@@ -213,20 +221,26 @@ impl Snapshot {
         ids: &[i64],
         item: fn(&Row<'_>) -> Reading<T>,
         work: &mut FindWork,
+        record: &mut Vec<Ran>,
     ) -> Result<HashMap<i64, (Vec<T>, u64)>, StoreError> {
         const OPERATION: &str = "reading the nested rows a page projected";
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
         let width = nested.width();
-        let (sql, values) = compose_nested_head(nested, ids, NESTED_ROW_CEILING);
-        let read = self.read_rows(&sql, values, OPERATION, |row| {
-            Ok((
-                row.get::<_, i64>(width)?,
-                row.get::<_, i64>(width + 1)?,
-                item(row)?,
-            ))
-        })?;
+        let head = Ran::new(
+            FindStatement::NestedHead(nested),
+            compose_nested_head(nested, ids, NESTED_ROW_CEILING),
+        );
+        let read = self
+            .run_statement(record, head, |row| {
+                Ok((
+                    row.get::<_, i64>(width)?,
+                    row.get::<_, i64>(width + 1)?,
+                    item(row)?,
+                ))
+            })
+            .map_err(|problem| error::sql(OPERATION, problem))?;
         work.nested_rows.add(nested, read.len() as u64);
         let mut heads: Heads<T> = HashMap::new();
         for (document, ordinal, item) in read {
@@ -241,10 +255,14 @@ impl Snapshot {
         let totals: HashMap<i64, u64> = if cut.is_empty() {
             HashMap::new()
         } else {
-            let (sql, values) = compose_nested_total(nested, &cut);
-            self.read_rows(&sql, values, OPERATION, |row| {
+            let total = Ran::new(
+                FindStatement::NestedTotal(nested),
+                compose_nested_total(nested, &cut),
+            );
+            self.run_statement(record, total, |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?))
-            })?
+            })
+            .map_err(|problem| error::sql(OPERATION, problem))?
             .into_iter()
             .collect()
         };
@@ -261,26 +279,6 @@ impl Snapshot {
                 (document, (head, total))
             })
             .collect())
-    }
-
-    /// Run one hydration statement, counted on this snapshot.
-    fn read_rows<T>(
-        &mut self,
-        sql: &str,
-        values: Vec<Value>,
-        operation: &'static str,
-        read: impl FnMut(&Row<'_>) -> norn_db::rusqlite::Result<T>,
-    ) -> Result<Vec<T>, StoreError> {
-        self.count_statement();
-        let mut statement = self
-            .connection()
-            .prepare(sql)
-            .map_err(|problem| error::sql(operation, problem))?;
-        let rows = statement
-            .query_map(params_from_iter(values), read)
-            .map_err(|problem| error::sql(operation, problem))?;
-        rows.collect::<Result<Vec<T>, _>>()
-            .map_err(|problem| error::sql(operation, problem))
     }
 }
 

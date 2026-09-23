@@ -734,10 +734,10 @@ reporting surface no task has opened.
 None of those is a query shape's bar. **The predicate + sort + page shape has a builder**:
 the find builder compiles a request's conjunction, order and page bound into statements a
 read snapshot runs, and names them in an enumeration of its own under the same discipline —
-eleven statements and twelve filter shapes, each explained through the same composer the find
-runs, on the read-only connection, each carrying a plan bar with a negative control run
-against it, and a census that holds every statement slot and every filter slot to exactly
-one bar. The statements are the active-fingerprint point read; the path page, a seek of the
+eleven statements and twelve filter shapes, each explained as the find ran it (the text and
+values the one site that runs a find's statements recorded) on the read-only connection,
+each carrying a plan bar with a negative control run against it, and a census that holds
+every statement slot and every filter slot to exactly one bar. The statements are the active-fingerprint point read; the path page, a seek of the
 case-insensitive path index in either direction; a field sort's two sections — the valued
 section, a seek of the raw or the typed order's least-value marker index from a
 `(value, path)` position, and the missing section, a seek of the path index; the known-key

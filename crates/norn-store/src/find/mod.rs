@@ -45,7 +45,7 @@
 //! Each part of the conjunction narrows every section by the rows one index
 //! seek of its own reaches — [`FindFilter`] names each and the index it
 //! seeks — so a part costs the rows it matches, never the vault. A part that
-//! can match nothing by construction is reported in [`KeyPage::unsatisfied`]
+//! can match nothing by construction is reported in [`Found::unsatisfied`]
 //! and the page is empty: a conjunction holding it matches no document, and
 //! the report is what keeps that from reading as a vault with nothing in it.
 //!
@@ -89,10 +89,16 @@
 //! [`Snapshot::find`] is the whole request: it judges the wire cursor the
 //! request continues, pages the keys, hydrates the rows the page found —
 //! exactly those, never the one past the bound that says a next page exists —
-//! and mints the cursor the next page continues. [`Snapshot::find_keys`] is
-//! the paging half alone, over a [`Resume`] rather than a cursor. The rows
-//! carry only the columns the request projected ([`hydrate`] states what each
-//! costs), and [`Found::work`] says what the find read.
+//! and mints the cursor the next page continues. The rows carry only the
+//! columns the request projected ([`hydrate`] states what each costs), and
+//! [`Found::work`] says what the find read.
+//!
+//! **A find's plans are of the statements it ran.** A find runs every
+//! statement through one site, which records the statement's shape, its
+//! filters, its text and its bound values in the order it ran them, and
+//! prepares the text it recorded. [`Snapshot::find_plans`] runs the same find
+//! and explains that record, so a plan is never of a second spelling of a
+//! statement, and a section a page never reached is never explained.
 //!
 //! **A cursor names the order it was minted in, and is judged against the
 //! request's.** A page ordered by a typed field is minted under the active
@@ -117,8 +123,8 @@ mod suggest;
 use std::collections::{BTreeMap, BTreeSet};
 
 use norn_db::EmittedPlan;
-use norn_db::rusqlite::params_from_iter;
 use norn_db::rusqlite::types::Value;
+use norn_db::rusqlite::{self, Row, params_from_iter};
 use norn_wire::{
     Column, Cursor, CursorKey, CursorOrderChanged, Direction, DocumentRow, FindParams, FindReport,
     Moved, Page, Pattern, Predicate, SortKey, Unsatisfied,
@@ -138,8 +144,8 @@ pub use statement::{
     FIND_FILTERS, FIND_STATEMENTS, FindFilter, FindStatement, Nested, PageDirection,
 };
 use statement::{
-    Filter, Section, SectionStart, compose_bare_directory, compose_documents, compose_known_key,
-    compose_match_probe, compose_nested_head, compose_nested_total, compose_page, compose_universe,
+    Filter, Section, SectionStart, compose_bare_directory, compose_known_key, compose_match_probe,
+    compose_page, compose_universe,
 };
 
 /// How many rows a page holds when a request names no bound.
@@ -204,25 +210,20 @@ impl FieldOrder {
     }
 }
 
-/// Where a page stopped: the value the last row was ordered by, and its path.
+/// Where a page stopped, or where a continuation resumes: the value the row
+/// was ordered by, and its path. The order it stands in is the request's.
 ///
 /// `sort` is `None` for a row of a path order, and for a row of a field order's
 /// missing section.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FindPosition {
-    pub sort: Option<String>,
-    pub path: String,
-}
-
-/// Where a continuation resumes. The order it resumes in is the request's.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Resume {
-    pub at: FindPosition,
+pub(crate) struct FindPosition {
+    pub(crate) sort: Option<String>,
+    pub(crate) path: String,
 }
 
 /// One document a page found.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FoundKey {
+pub(crate) struct FoundKey {
     /// The document's row id, which is what a page's rows are hydrated by.
     document: i64,
     path: String,
@@ -231,17 +232,12 @@ pub struct FoundKey {
 
 impl FoundKey {
     /// The document's path.
-    pub fn path(&self) -> &str {
+    pub(crate) fn path(&self) -> &str {
         &self.path
     }
 
-    /// The value the page ordered the document by, where it was ordered by one.
-    pub fn sort(&self) -> Option<&str> {
-        self.sort.as_deref()
-    }
-
     /// Where a page that stopped at this document resumes.
-    pub fn position(&self) -> FindPosition {
+    fn position(&self) -> FindPosition {
         FindPosition {
             sort: self.sort.clone(),
             path: self.path.clone(),
@@ -252,24 +248,6 @@ impl FoundKey {
     pub(crate) fn document(&self) -> i64 {
         self.document
     }
-}
-
-/// One page of document keys, in the request's order.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct KeyPage {
-    /// The documents, at most the page bound of them.
-    pub keys: Vec<FoundKey>,
-    /// Where the next page starts, or `None` where this page is the last.
-    pub next: Option<FindPosition>,
-    /// The field order a field sort ran in, and `None` for a path order.
-    pub order: Option<FieldOrder>,
-    /// The parts of the request that could not be applied as asked, in the
-    /// order the request names them: the sort key, then the conjunction's
-    /// parts. A page whose conjunction holds a part no document can satisfy is
-    /// empty; an unknown key's part, and a match part whose query the
-    /// full-text engine cannot parse, are reported and the page is answered
-    /// without them.
-    pub unsatisfied: Vec<Unsatisfied>,
 }
 
 /// What [`Snapshot::find`] answers: a page of rows, where the next begins, and
@@ -306,7 +284,8 @@ impl Found {
     }
 }
 
-/// A statement a request would run, with the plan SQLite reported for it.
+/// A statement a find ran, with the plan SQLite reported for the text and the
+/// values it ran with.
 #[derive(Clone, Debug)]
 pub struct FindPlan {
     pub statement: FindStatement,
@@ -569,25 +548,47 @@ impl<'a> Projection<'a> {
     }
 }
 
-/// A statement one request's compile ran on the snapshot, kept so
-/// [`Snapshot::find_plans`] explains the statement that ran rather than a
-/// second spelling of it.
-struct Probe {
+/// One statement a find ran on its snapshot, as it ran: its shape, the
+/// filters it narrows by, its text and the values bound to it.
+///
+/// [`Snapshot::run_statement`] records one before it prepares the text the
+/// record holds, which is how [`Snapshot::find_plans`] explains the statement
+/// that ran rather than a second spelling of it.
+pub(super) struct Ran {
     statement: FindStatement,
+    filters: Vec<FindFilter>,
     sql: String,
     values: Vec<Value>,
 }
 
-/// What one request asked its snapshot while it was compiled, each question
-/// asked once: the active fingerprint, which keys are known, and every probe
-/// statement that ran.
+impl Ran {
+    /// `statement`, composed as `(sql, values)`, narrowing by no filter.
+    pub(super) fn new(statement: FindStatement, (sql, values): (String, Vec<Value>)) -> Self {
+        Ran {
+            statement,
+            filters: Vec::new(),
+            sql,
+            values,
+        }
+    }
+
+    /// The same statement, narrowing by `filters`.
+    fn narrowed_by(mut self, filters: Vec<FindFilter>) -> Self {
+        self.filters = filters;
+        self
+    }
+}
+
+/// What one request asked its snapshot, each question asked once — the active
+/// fingerprint and which keys are known — and every statement the find ran,
+/// in the order it ran them.
 #[derive(Default)]
 struct Lookups {
     /// The active fingerprint once read, `None` inside where no schema is
     /// pinned.
     fingerprint: Option<Option<String>>,
     known: BTreeMap<String, bool>,
-    probes: Vec<Probe>,
+    ran: Vec<Ran>,
 }
 
 impl Snapshot {
@@ -622,27 +623,70 @@ impl Snapshot {
         params: &FindParams,
         declared: &DeclaredFields,
     ) -> Result<Found, FindRefusal> {
+        self.run_find(params, declared, &mut Lookups::default())
+    }
+
+    /// Every statement [`Snapshot::find`] runs for `params`, in the order it
+    /// runs them, each with the plan SQLite reported for it.
+    ///
+    /// This is the find itself: the same request, judged, compiled, paged and
+    /// hydrated on this snapshot, its cursor `params.after` judged as the find
+    /// judges it, refused where the find is refused, and each statement
+    /// counted as it runs. The plans are then taken, on this snapshot's
+    /// read-only connection, of the very text and values each statement ran
+    /// with. A statement the find did not run is not listed: a section a page
+    /// filled before reaching, a hydration of a page with no rows, and a
+    /// collection's total where no head filled its ceiling. A statement that
+    /// ran twice is listed twice. An explain is a report about a statement
+    /// rather than a run of it, so it is not counted.
+    pub fn find_plans(
+        &mut self,
+        params: &FindParams,
+        declared: &DeclaredFields,
+    ) -> Result<Vec<FindPlan>, FindRefusal> {
+        let mut lookups = Lookups::default();
+        self.run_find(params, declared, &mut lookups)?;
+        let mut plans = Vec::with_capacity(lookups.ran.len());
+        for ran in lookups.ran {
+            let plan =
+                norn_db::emitted_plan(self.connection(), &ran.sql, params_from_iter(ran.values))
+                    .map_err(StoreError::from)?;
+            plans.push(FindPlan {
+                statement: ran.statement,
+                filters: ran.filters,
+                plan,
+            });
+        }
+        Ok(plans)
+    }
+
+    /// The find [`Snapshot::find`] answers and [`Snapshot::find_plans`]
+    /// explains, recording every statement it runs in `lookups`.
+    fn run_find(
+        &mut self,
+        params: &FindParams,
+        declared: &DeclaredFields,
+        lookups: &mut Lookups,
+    ) -> Result<Found, FindRefusal> {
         let started = self.counters().statements_executed();
         let limit = page_limit(params.limit)?;
         let projection = Projection::of(&params.columns)?;
-        let mut lookups = Lookups::default();
-        let mut compiled = self.compile(params, declared, &mut lookups)?;
+        let mut compiled = self.compile(params, declared, lookups)?;
         let (resume, moved) = match &params.after {
             None => (None, Vec::new()),
-            Some(cursor) => self.judge(cursor, compiled.order, &mut lookups)?,
+            Some(cursor) => self.judge(cursor, compiled.order, lookups)?,
         };
-        let fields = self.projected_keys(&projection, declared, &mut lookups, &mut compiled)?;
+        let fields = self.projected_keys(&projection, declared, lookups, &mut compiled)?;
 
         let mut work = FindWork::default();
-        let (keys, next, read) =
-            self.page_keys(&compiled, limit, resume.as_ref().map(|resume| &resume.at))?;
+        let (keys, next, read) = self.page_keys(&compiled, limit, resume.as_ref(), lookups)?;
         work.keys_read = read;
         let order = compiled.field_order();
-        let snapshot = self.reading_facts(order, &mut lookups)?;
+        let snapshot = self.reading_facts(order, lookups)?;
         let next =
             next.map(|at| Cursor::new(snapshot.clone(), CursorKey::document(at.sort, at.path)));
-        let unsatisfied = self.resolve(compiled.reports, declared, &mut lookups)?;
-        let rows = self.hydrate(&keys, &projection, &fields, &mut work)?;
+        let unsatisfied = self.resolve(compiled.reports, declared, lookups)?;
+        let rows = self.hydrate(&keys, &projection, &fields, &mut work, &mut lookups.ran)?;
         work.statements = self.counters().statements_executed() - started;
         Ok(Found {
             rows,
@@ -654,115 +698,24 @@ impl Snapshot {
         })
     }
 
-    /// One page of the documents `params` asks for, as keys, in its order.
+    /// Run `ran`, counted on this snapshot and recorded at the end of `record`
+    /// before it is prepared, and read each row it answers through `read`.
     ///
-    /// `params.after` and `params.columns` are not read here: a caller judges
-    /// the wire cursor and hands the position it names over as `resume`, and
-    /// hydrates the rows itself. `declared` is the vault's declaration, read
-    /// from the schema the snapshot pins, which decides a field sort's order
-    /// and how a bound is compared, and names known keys. The page holds
-    /// `params.limit` rows, [`DEFAULT_PAGE`] where it names none, and is
-    /// refused as [`Snapshot::find`] is.
-    pub fn find_keys(
+    /// Every statement a find runs is run here, and what is prepared is the text the record holds, bound to the values it
+    /// holds: [`Snapshot::find_plans`] explains the record, so the plan of a
+    /// statement is the plan of what ran.
+    pub(super) fn run_statement<T>(
         &mut self,
-        params: &FindParams,
-        declared: &DeclaredFields,
-        resume: Option<&Resume>,
-    ) -> Result<KeyPage, FindRefusal> {
-        let limit = page_limit(params.limit)?;
-        let mut lookups = Lookups::default();
-        let compiled = self.compile(params, declared, &mut lookups)?;
-        let (keys, next, _) = self.page_keys(&compiled, limit, resume.map(|resume| &resume.at))?;
-        let order = compiled.field_order();
-        let unsatisfied = self.resolve(compiled.reports, declared, &mut lookups)?;
-        Ok(KeyPage {
-            keys,
-            next,
-            order,
-            unsatisfied,
-        })
-    }
-
-    /// Every statement [`Snapshot::find`] would run for the same request,
-    /// continuing from `resume`, each with the plan SQLite reported for it.
-    ///
-    /// The statements are composed by the same calls the find runs, over the
-    /// same compiled request, and explained on this snapshot's read-only
-    /// connection. The probes a compile asks — the fingerprint, whether a key
-    /// is known, the field universe, whether a path is a bare directory,
-    /// whether a full-text query parses — run
-    /// here as they run there, and are counted; each is listed once per time
-    /// it ran. A page statement is listed wherever the page could reach it from
-    /// `resume`, whether or not the rows would have filled the page before it;
-    /// a hydration statement is listed for each column the request projects,
-    /// explained with no ids bound, since the ids are the page's and the plan
-    /// does not read them. An explain is a report about a statement rather
-    /// than a run of it, so it is not counted.
-    pub fn find_plans(
-        &mut self,
-        params: &FindParams,
-        declared: &DeclaredFields,
-        resume: Option<&Resume>,
-    ) -> Result<Vec<FindPlan>, FindRefusal> {
-        let limit = page_limit(params.limit)?;
-        let projection = Projection::of(&params.columns)?;
-        let mut lookups = Lookups::default();
-        let mut compiled = self.compile(params, declared, &mut lookups)?;
-        let fields = self.projected_keys(&projection, declared, &mut lookups, &mut compiled)?;
-        self.reading_facts(compiled.field_order(), &mut lookups)?;
-        let matches_nothing = compiled.matches_nothing;
-        let filters = compiled.filter_shapes();
-        let mut composed: Vec<(FindStatement, Vec<FindFilter>, String, Vec<Value>)> = Vec::new();
-        if !matches_nothing {
-            for (statement, start) in sections(compiled.order, resume.map(|resume| &resume.at)) {
-                let (sql, values) = compose_page(&Section {
-                    statement,
-                    key: field_key(compiled.order),
-                    start,
-                    filters: &compiled.filters,
-                    rows: limit + 1,
-                });
-                composed.push((statement, filters.clone(), sql, values));
-            }
-        }
-        self.resolve(compiled.reports, declared, &mut lookups)?;
-        if !matches_nothing {
-            let columns = statement::DocumentColumns {
-                frontmatter: projection.all_fields || !fields.is_empty(),
-                body: projection.body,
-            };
-            if columns != statement::DocumentColumns::default() {
-                let (sql, values) = compose_documents(&[], columns, BODY_ROW_CEILING);
-                composed.push((FindStatement::HydrateDocuments, Vec::new(), sql, values));
-            }
-            for nested in projection.nested.iter().copied() {
-                let (sql, values) = compose_nested_head(nested, &[], NESTED_ROW_CEILING);
-                composed.push((FindStatement::NestedHead(nested), Vec::new(), sql, values));
-                let (sql, values) = compose_nested_total(nested, &[]);
-                composed.push((FindStatement::NestedTotal(nested), Vec::new(), sql, values));
-            }
-        }
-
-        let explain = |snapshot: &Snapshot, sql: &str, values: Vec<Value>| {
-            norn_db::emitted_plan(snapshot.connection(), sql, params_from_iter(values))
-                .map_err(StoreError::from)
-        };
-        let mut plans = Vec::new();
-        for probe in lookups.probes {
-            plans.push(FindPlan {
-                statement: probe.statement,
-                filters: Vec::new(),
-                plan: explain(self, &probe.sql, probe.values)?,
-            });
-        }
-        for (statement, filters, sql, values) in composed {
-            plans.push(FindPlan {
-                statement,
-                filters,
-                plan: explain(self, &sql, values)?,
-            });
-        }
-        Ok(plans)
+        record: &mut Vec<Ran>,
+        ran: Ran,
+        read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<Vec<T>> {
+        self.count_statement();
+        record.push(ran);
+        let ran = record.last().expect("the statement was just recorded");
+        let mut statement = self.connection().prepare(&ran.sql)?;
+        let rows = statement.query_map(params_from_iter(ran.values.iter()), read)?;
+        rows.collect()
     }
 
     /// Judge the cursor a request continues against the request's `order` on
@@ -788,7 +741,7 @@ impl Snapshot {
         cursor: &Cursor,
         order: PageOrder<'_>,
         lookups: &mut Lookups,
-    ) -> Result<(Option<Resume>, Vec<Moved>), FindRefusal> {
+    ) -> Result<(Option<FindPosition>, Vec<Moved>), FindRefusal> {
         let CursorKey::Document { sort, path, .. } = cursor.key() else {
             return Err(FindRefusal::NotADocumentCursor);
         };
@@ -806,11 +759,9 @@ impl Snapshot {
             .continuation(&now)
             .map_err(FindRefusal::OrderChanged)?;
         Ok((
-            Some(Resume {
-                at: FindPosition {
-                    sort: sort.clone(),
-                    path: path.clone(),
-                },
+            Some(FindPosition {
+                sort: sort.clone(),
+                path: path.clone(),
             }),
             moved,
         ))
@@ -846,12 +797,18 @@ impl Snapshot {
         if let Some(fingerprint) = &lookups.fingerprint {
             return Ok(fingerprint.clone());
         }
-        let fingerprint = self.active_fingerprint()?;
-        lookups.probes.push(Probe {
-            statement: FindStatement::ActiveFingerprint,
-            sql: norn_db::meta::META_READ_SQL.to_string(),
-            values: vec![Value::Text(ddl::meta::VAULT_SCHEMA_FINGERPRINT.to_string())],
-        });
+        let read = Ran::new(
+            FindStatement::ActiveFingerprint,
+            (
+                norn_db::meta::META_READ_SQL.to_string(),
+                vec![Value::Text(ddl::meta::VAULT_SCHEMA_FINGERPRINT.to_string())],
+            ),
+        );
+        let fingerprint = self
+            .run_statement(&mut lookups.ran, read, |row| row.get::<_, String>(0))
+            .map_err(|problem| error::sql("reading the pinned schema fingerprint", problem))?
+            .into_iter()
+            .next();
         lookups.fingerprint = Some(fingerprint.clone());
         Ok(fingerprint)
     }
@@ -871,28 +828,28 @@ impl Snapshot {
         if let Some(known) = lookups.known.get(key) {
             return Ok(*known);
         }
-        let (sql, values) = compose_known_key(key);
-        let known = self.ask(&sql, &values, "asking whether a document carries a key")?;
-        lookups.probes.push(Probe {
-            statement: FindStatement::KnownKey,
-            sql,
-            values,
-        });
+        let known = self.ask(
+            &mut lookups.ran,
+            Ran::new(FindStatement::KnownKey, compose_known_key(key)),
+            "asking whether a document carries a key",
+        )?;
         lookups.known.insert(key.to_string(), known);
         Ok(known)
     }
 
-    /// Run one yes-or-no probe, counted on this snapshot.
+    /// Run one yes-or-no probe, which answers exactly one row.
     fn ask(
         &mut self,
-        sql: &str,
-        values: &[Value],
+        record: &mut Vec<Ran>,
+        probe: Ran,
         operation: &'static str,
     ) -> Result<bool, StoreError> {
-        self.count_statement();
-        self.connection()
-            .query_row(sql, params_from_iter(values.iter().cloned()), |row| {
-                row.get(0)
+        self.run_statement(record, probe, |row| row.get::<_, bool>(0))
+            .and_then(|answers| {
+                answers
+                    .into_iter()
+                    .next()
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)
             })
             .map_err(|problem| error::sql(operation, problem))
     }
@@ -905,24 +862,13 @@ impl Snapshot {
         lookups: &mut Lookups,
     ) -> Result<BTreeSet<String>, StoreError> {
         const OPERATION: &str = "reading the keys the vault's documents carry";
-        let (sql, values) = compose_universe();
-        self.count_statement();
-        let carried: Vec<String> = {
-            let mut statement = self
-                .connection()
-                .prepare(&sql)
-                .map_err(|problem| error::sql(OPERATION, problem))?;
-            let rows = statement
-                .query_map(params_from_iter(values.iter().cloned()), |row| row.get(0))
-                .map_err(|problem| error::sql(OPERATION, problem))?;
-            rows.collect::<Result<Vec<String>, _>>()
-                .map_err(|problem| error::sql(OPERATION, problem))?
-        };
-        lookups.probes.push(Probe {
-            statement: FindStatement::FieldUniverse,
-            sql,
-            values,
-        });
+        let carried: Vec<String> = self
+            .run_statement(
+                &mut lookups.ran,
+                Ran::new(FindStatement::FieldUniverse, compose_universe()),
+                |row| row.get(0),
+            )
+            .map_err(|problem| error::sql(OPERATION, problem))?;
         Ok(carried
             .into_iter()
             .chain(declared.keys().map(str::to_string))
@@ -1070,6 +1016,7 @@ impl Snapshot {
         compiled: &Compiled<'_>,
         limit: usize,
         at: Option<&FindPosition>,
+        lookups: &mut Lookups,
     ) -> Result<(Vec<FoundKey>, Option<FindPosition>, u64), StoreError> {
         let mut keys: Vec<FoundKey> = Vec::new();
         if !compiled.matches_nothing {
@@ -1085,7 +1032,9 @@ impl Snapshot {
                     filters: &compiled.filters,
                     rows,
                 });
-                keys.extend(self.read_keys(&sql, values)?);
+                let section =
+                    Ran::new(statement, (sql, values)).narrowed_by(compiled.filter_shapes());
+                keys.extend(self.read_keys(&mut lookups.ran, section)?);
             }
         }
         let read = keys.len() as u64;
@@ -1098,25 +1047,20 @@ impl Snapshot {
         Ok((keys, next, read))
     }
 
-    /// Run one page section, counted on this snapshot.
-    fn read_keys(&mut self, sql: &str, values: Vec<Value>) -> Result<Vec<FoundKey>, StoreError> {
-        const OPERATION: &str = "reading a page of found documents";
-        self.count_statement();
-        let mut statement = self
-            .connection()
-            .prepare(sql)
-            .map_err(|problem| error::sql(OPERATION, problem))?;
-        let rows = statement
-            .query_map(params_from_iter(values), |row| {
-                Ok(FoundKey {
-                    document: row.get(0)?,
-                    path: row.get(1)?,
-                    sort: row.get(2)?,
-                })
+    /// Run one page section.
+    fn read_keys(
+        &mut self,
+        record: &mut Vec<Ran>,
+        section: Ran,
+    ) -> Result<Vec<FoundKey>, StoreError> {
+        self.run_statement(record, section, |row| {
+            Ok(FoundKey {
+                document: row.get(0)?,
+                path: row.get(1)?,
+                sort: row.get(2)?,
             })
-            .map_err(|problem| error::sql(OPERATION, problem))?;
-        rows.collect::<Result<Vec<FoundKey>, _>>()
-            .map_err(|problem| error::sql(OPERATION, problem))
+        })
+        .map_err(|problem| error::sql("reading a page of found documents", problem))
     }
 
     /// One part of the conjunction as the filter a statement spells, or the
@@ -1238,8 +1182,7 @@ impl Snapshot {
     }
 
     /// What the full-text engine says is wrong with `query`, or `None` where it
-    /// parses. One [`FindStatement::MatchProbe`], counted on this snapshot and
-    /// kept for [`Snapshot::find_plans`].
+    /// parses. One [`FindStatement::MatchProbe`].
     ///
     /// A statement that does not prepare is the store's problem and refused as
     /// one; a query the engine cannot parse is the request's, and is read as
@@ -1250,20 +1193,11 @@ impl Snapshot {
         lookups: &mut Lookups,
     ) -> Result<Option<String>, StoreError> {
         const OPERATION: &str = "asking whether a full-text query parses";
-        let (sql, values) = compose_match_probe(query);
-        self.count_statement();
-        let answered = self
-            .connection()
-            .prepare(&sql)
-            .map_err(|problem| error::sql(OPERATION, problem))?
-            .query_row(params_from_iter(values.iter().cloned()), |row| {
-                row.get::<_, bool>(0)
-            });
-        lookups.probes.push(Probe {
-            statement: FindStatement::MatchProbe,
-            sql,
-            values,
-        });
+        let answered = self.run_statement(
+            &mut lookups.ran,
+            Ran::new(FindStatement::MatchProbe, compose_match_probe(query)),
+            |row| row.get::<_, bool>(0),
+        );
         match answered {
             Ok(_) => Ok(None),
             Err(problem) => match query_problem(&problem) {
@@ -1292,17 +1226,14 @@ impl Snapshot {
         let literal = !source.contains(['*', '?']);
         if literal && let Ok(directory) = DirectoryPrefix::new(source) {
             let (lower, upper) = directory.descendant_bounds();
-            let (sql, values) = compose_bare_directory(source, &lower, &upper);
             let bare = self.ask(
-                &sql,
-                &values,
+                &mut lookups.ran,
+                Ran::new(
+                    FindStatement::BareDirectory,
+                    compose_bare_directory(source, &lower, &upper),
+                ),
                 "asking whether a path names a bare directory",
             )?;
-            lookups.probes.push(Probe {
-                statement: FindStatement::BareDirectory,
-                sql,
-                values,
-            });
             if bare {
                 return Ok(Some(Unsatisfied::bare_directory(source)));
             }
