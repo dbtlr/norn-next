@@ -37,10 +37,18 @@
 //! question the vault schema asks, so a finding derived under one schema says
 //! nothing under another.
 //!
+//! **The field pillar is a parse fact with one schema-dependent column.** Its
+//! rows record what a document's frontmatter says, and its `typed` column
+//! records how the pinned schema's declared types order it. That column carries
+//! no key of its own: a pin that moves the fingerprint clears it in the pin's
+//! transaction, so what stands in it was derived under the schema pinned now.
+//! The `fields` area in this tree states the whole of it.
+//!
 //! # Foreign keys are the death-cascade mechanism
 //!
-//! A **parse-fact** row exists only as long as the document it was read from, so
-//! every one of them carries `REFERENCES documents(id) ON DELETE CASCADE`. One
+//! A **parse-fact** row — a field row among them — exists only as long as the
+//! document it was read from, so every one of them carries
+//! `REFERENCES documents(id) ON DELETE CASCADE`. One
 //! operation relies on it: a hard delete removes the document row and the
 //! cascade takes everything derived from it. A re-derivation replaces one
 //! document's fact rows through explicit per-table deletes instead — the row
@@ -55,6 +63,7 @@
 
 pub(crate) mod documents;
 pub(crate) mod facts;
+pub(crate) mod fields;
 pub(crate) mod findings;
 pub(crate) mod fts;
 pub(crate) mod meta;
@@ -84,6 +93,7 @@ const AREAS: &[fn() -> Vec<String>] = &[
     norn_db::meta::statements,
     documents::statements,
     facts::statements,
+    fields::statements,
     tombstones::statements,
     fts::statements,
     findings::statements,

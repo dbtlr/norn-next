@@ -1,9 +1,10 @@
 #![forbid(unsafe_code)]
 //! An SDK for talking to SQL.
 //!
-//! This crate is the first effect seam: it owns the store schema, the three
-//! pillars, what the database-side heal rung means for derived state, and the
-//! derivation counters. **No other crate reaches the derived database**,
+//! This crate is the first effect seam: it owns the store schema, the four
+//! pillars — full text, findings, migrations and the field pillar — what the
+//! database-side heal rung means for derived state, and the derivation
+//! counters. **No other crate reaches the derived database**,
 //! harness included — what a test or a gate needs from the substrate, it gets
 //! through this API.
 //!
@@ -32,6 +33,13 @@
 //!   consumer pages it at its own rate, triages on the fingerprints it projects,
 //!   and keeps [`Store::epoch`] beside its cursor: a position is meaningless in
 //!   a database that was discarded and built again.
+//! - [`Snapshot::find`] — the find builder: a request's conjunction and order
+//!   compiled into index seeks on a read snapshot, answering a page of rows
+//!   projected onto the columns it names, the cursor the next page continues,
+//!   and the parts it could not apply. [`Snapshot::find_plans`] runs the same
+//!   find and hands out the plan of every statement it ran, taken of the text
+//!   and values it ran with, which is what its `EXPLAIN` bars are asserted
+//!   through.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -58,13 +66,13 @@
 //! - **Tombstone retention.** When a death has outlived the disorder it was
 //!   recorded to survive is a policy over generations, and nothing here decides
 //!   it: a tombstone is kept until something says otherwise.
-//! - **The read builders.** Compiling request parameters into SQL, with the
-//!   `EXPLAIN` bars that judge the SQL a builder actually emitted, is Layer 3.
-//!   The probe readers here are the range primitives those builders compose;
-//!   they take index bounds, never parameters. What is here already is the seam
-//!   those bars are asserted through — [`Request::emitted_plan`] — because a
-//!   plan cannot be taken by a crate that cannot reach the database.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
+//! - **The read shapes no builder emits.** The find builder is the one read
+//!   builder: nothing here counts by field. Nothing indexes a link's target,
+//!   so a find refuses a `links_to` part by name, and a find's row projects no
+//!   link or finding column, so it refuses those columns by name. Both
+//!   refusals are dormant carriers whose consumer is NORN-229, the task that
+//!   builds the link index.
 
 pub mod ddl;
 
@@ -74,6 +82,8 @@ mod facts;
 #[cfg(feature = "induced-failure")]
 mod faults;
 mod feed;
+mod fields;
+mod find;
 mod hash;
 mod increment;
 mod json;
@@ -92,6 +102,12 @@ pub use facts::{
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
 pub use feed::FeedRead;
+pub use fields::{DeclaredFields, FieldContainer, FieldRow, FieldRows, TypedOrder};
+pub use find::{
+    BODY_ROW_CEILING, DEFAULT_PAGE, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindBound,
+    FindFilter, FindPlan, FindRefusal, FindStatement, FindWork, Found, IN_VALUES_CEILING,
+    NESTED_ROW_CEILING, Nested, NestedRows, PageDirection,
+};
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 // The open ceremony's own vocabulary, which is this crate's too: a store is

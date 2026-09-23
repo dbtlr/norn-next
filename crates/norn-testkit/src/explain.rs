@@ -66,6 +66,9 @@ pub enum ScanTarget<'a> {
     },
     /// An inline `VALUES` list. It names no relation.
     ValuesClause,
+    /// The one row a `SELECT` without a `FROM` produces, which an `EXISTS`
+    /// probe is the scalar of. It names no relation.
+    ConstantRow,
 }
 
 /// What a `SEARCH` or `SCAN` row reads its relation through, where the row
@@ -122,6 +125,9 @@ impl PlanRow {
         if rest.ends_with("VALUES CLAUSE") {
             return Some(ScanTarget::ValuesClause);
         }
+        if rest == "CONSTANT ROW" {
+            return Some(ScanTarget::ConstantRow);
+        }
         let name = rest.split_whitespace().next()?;
         let tail = rest[name.len()..].trim_start();
         if let Some(spec) = tail.strip_prefix("VIRTUAL TABLE INDEX ") {
@@ -136,11 +142,11 @@ impl PlanRow {
     }
 
     /// The relation this row scans, if it scans a named one. A `VALUES`
-    /// clause names nothing and reports `None`.
+    /// clause and the constant row name nothing and report `None`.
     pub fn scans(&self) -> Option<&str> {
         match self.scan_target()? {
             ScanTarget::Relation(name) | ScanTarget::VirtualTable { name, .. } => Some(name),
-            ScanTarget::ValuesClause => None,
+            ScanTarget::ValuesClause | ScanTarget::ConstantRow => None,
         }
     }
 
@@ -191,10 +197,27 @@ impl PlanRow {
 
     /// The constraint the row was given, as SQLite prints it: the
     /// parenthesised tail of the detail, such as `(stem=?)`.
+    ///
+    /// The tail is read as one balanced group from its closing parenthesis
+    /// back to the one that opens it, because a row-value constraint nests:
+    /// `(key=? AND (raw,path)>(?,?))` is one constraint, not its last pair of
+    /// parentheses.
     pub fn constraint(&self) -> Option<&str> {
-        let open = self.detail.rfind('(')?;
-        let close = self.detail[open..].find(')')? + open;
-        Some(&self.detail[open..=close])
+        let close = self.detail.rfind(')')?;
+        let mut depth = 0usize;
+        for (at, character) in self.detail[..=close].char_indices().rev() {
+            match character {
+                ')' => depth += 1,
+                '(' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&self.detail[at..=close]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Whether this row reads its relation end to end.
@@ -204,7 +227,7 @@ impl PlanRow {
     /// False for a `VALUES` clause and for a constrained virtual-table read.
     pub fn is_unbounded_scan(&self) -> bool {
         match self.scan_target() {
-            None | Some(ScanTarget::ValuesClause) => false,
+            None | Some(ScanTarget::ValuesClause | ScanTarget::ConstantRow) => false,
             Some(ScanTarget::VirtualTable {
                 index_number,
                 specification,
@@ -928,6 +951,20 @@ mod tests {
         .assert_no_full_scan();
     }
 
+    #[test]
+    fn the_constant_row_names_no_table_and_is_not_unbounded() {
+        let row = PlanRow::new(1, 0, "SCAN CONSTANT ROW");
+        assert_eq!(row.scans(), None);
+        assert_eq!(row.scan_target(), Some(ScanTarget::ConstantRow));
+        assert!(!row.is_unbounded_scan());
+        assert!(!row.is_table_scan());
+        // A table the statement calls `CONSTANT` is still a relation.
+        assert_eq!(
+            PlanRow::new(1, 0, "SCAN CONSTANT").scan_target(),
+            Some(ScanTarget::Relation("CONSTANT"))
+        );
+    }
+
     /// A co-routine's own steps are separate rows and are judged there, so
     /// counting the scan of the co-routine as well would fail one plan twice.
     #[test]
@@ -1189,6 +1226,33 @@ mod tests {
             range.assert_search_constraint("documents", "(stem=?)")
         })
         .expect_err("a range is not an equality seek");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("a formatted assertion message");
+        assert!(
+            message.contains("does not carry the constraint"),
+            "{message}"
+        );
+    }
+
+    /// A row-value constraint nests one group inside another, and the whole
+    /// group is the constraint: a seek that lost its row-value bound reads as
+    /// the key alone and fails.
+    #[test]
+    fn a_row_value_constraint_is_read_whole() {
+        let keyset =
+            plan(&["SEARCH f USING COVERING INDEX fields_least (key=? AND (raw,path)>(?,?))"]);
+        assert_eq!(
+            keyset.rows()[0].constraint(),
+            Some("(key=? AND (raw,path)>(?,?))")
+        );
+        keyset.assert_search_constraint("f", "(key=? AND (raw,path)>(?,?))");
+
+        let key_alone = plan(&["SEARCH f USING COVERING INDEX fields_least (key=?)"]);
+        let failure = std::panic::catch_unwind(move || {
+            key_alone.assert_search_constraint("f", "(key=? AND (raw,path)>(?,?))")
+        })
+        .expect_err("a seek from the key alone is not a keyset seek");
         let message = failure
             .downcast_ref::<String>()
             .expect("a formatted assertion message");

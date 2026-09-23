@@ -19,8 +19,8 @@ use norn_store::{
 use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, UntrustedReason, VaultName};
 
 use crate::derivation::{
-    Cause, Decided, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS, WALKED_KINDS,
-    document_path, plan_document, plan_quarantine,
+    Cause, Decided, Declared, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS,
+    WALKED_KINDS, document_path, plan_document, plan_quarantine,
 };
 use crate::evidence::{JobEvidence, count_changeset};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
@@ -2481,7 +2481,7 @@ fn revisit_vacated(
 /// derives therefore judges under the schema it just pinned, with nothing to
 /// keep in step.
 struct Declaration {
-    model: VaultSchema,
+    model: Declared,
     /// The write generation the standing pin was taken at, which is the floor a
     /// row's own generation is schema-stale below.
     floor: i64,
@@ -2495,7 +2495,7 @@ impl Declaration {
             .map_err(store_effect)?;
         let Some(pinned) = pinned else {
             return Ok(Declaration {
-                model: VaultSchema::default(),
+                model: Declared::unpinned(),
                 floor: 0,
             });
         };
@@ -2506,7 +2506,12 @@ impl Declaration {
             // documents under a model nothing could read would mint findings
             // stating a rule the vault never wrote. The author hears about the
             // file from the reload that refuses it.
-            model: VaultSchema::parse(&pinned.bytes).unwrap_or_default(),
+            // The declaration is named by the fingerprint the store pins, which
+            // is what the increment compares its typed values' schema with.
+            model: Declared::pinned(
+                VaultSchema::parse(&pinned.bytes).unwrap_or_default(),
+                pinned.fingerprint,
+            ),
             floor: pinned.generation,
         })
     }
@@ -2529,7 +2534,7 @@ impl Declaration {
     /// A declaration no re-derivation is owed under answers yes for every row:
     /// there is nothing to restore, so re-reading the vault would buy nothing.
     fn judged(&self, generation: i64) -> bool {
-        !self.model.rederives_documents() || generation > self.floor
+        !self.model.schema().rederives_documents() || generation > self.floor
     }
 }
 
@@ -3030,7 +3035,10 @@ mod tests {
     use crate::derivation::{UnreadBlock, map_document};
     use crate::lifecycle::answered;
     use norn_config::registry::{SchemaSource, VaultRoot};
-    use norn_store::{BlockFact, HeadingFact, LinkFact, OpenOutcome, TagFact};
+    use norn_config::schema::FieldType;
+    use norn_store::{
+        BlockFact, DeclaredFields, FieldRow, FieldRows, HeadingFact, LinkFact, OpenOutcome, TagFact,
+    };
     use norn_testkit::scratch::Scratch;
     use norn_testkit::wait::{Budget, Observed, wait_until};
     use std::fs;
@@ -4062,6 +4070,130 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// The field rows the document at `at` stands with, typed half included.
+    fn stored_fields(attachment: &mut ProductionAttachment, at: &str) -> Vec<FieldRow> {
+        attachment
+            .store
+            .begin_request()
+            .stored_facts(&DocumentPath::new(at).unwrap())
+            .unwrap()
+            .expect("the document derives")
+            .fields
+            .rows()
+            .to_vec()
+    }
+
+    /// Each value row's typed key and markers, as `(raw, typed, least raw,
+    /// least typed)`.
+    fn typed_values(rows: &[FieldRow]) -> Vec<(Option<String>, Option<String>, bool, bool)> {
+        rows.iter()
+            .filter_map(|row| match row {
+                FieldRow::Value {
+                    raw,
+                    typed,
+                    least_raw,
+                    least_typed,
+                    ..
+                } => Some((raw.clone(), typed.clone(), *least_raw, *least_typed)),
+                FieldRow::Presence { .. } => None,
+            })
+            .collect()
+    }
+
+    /// **A schema reload fills and clears the typed column through the real
+    /// reload leg, for a document whose bytes never move.** A declaration that
+    /// orders a field by number is one the typed column holds a key for, so the
+    /// pin that installs it owes every document the re-derivation that fills the
+    /// column — and the least typed value is nine where the least raw text is
+    /// `10`. A second declaration that moves the fingerprint clears the column in
+    /// its pin and the heal fills it again. A declaration ordering the field as
+    /// text clears it and owes nothing: the row is not derived again, and what
+    /// stands is the raw half alone.
+    #[test]
+    fn a_schema_reload_fills_the_typed_column_of_a_document_whose_bytes_never_moved() {
+        let f = Fixture::new("typed-column");
+        fs::write(
+            f.vault().join("note.md"),
+            "---\nrating: [9, 10]\n---\n# body\n",
+        )
+        .unwrap();
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        let untyped = vec![
+            (Some("9".to_string()), None, false, false),
+            (Some("10".to_string()), None, true, false),
+        ];
+        assert_eq!(
+            typed_values(&stored_fields(&mut attachment, "note.md")),
+            untyped,
+            "a vault declaring no field holds a typed value"
+        );
+        let number = |raw: &str| Some(FieldType::Number.read(raw).unwrap().sort_key());
+        let typed = vec![
+            (Some("9".to_string()), number("9"), false, true),
+            (Some("10".to_string()), number("10"), true, false),
+        ];
+
+        let before = stored(&mut attachment, "note.md").expect("the document's row");
+        let numbered = "version: 1\nfields:\n  rating:\n    type: number\n";
+        fs::write(f.vault().join(".norn/schema.yaml"), numbered).unwrap();
+        assert_eq!(
+            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ReloadOutcome::SchemaChanged
+        );
+        let after = stored(&mut attachment, "note.md").expect("the document's row");
+        assert_eq!(before.content_hash, after.content_hash);
+        assert!(after.generation > before.generation);
+        assert_eq!(
+            typed_values(&stored_fields(&mut attachment, "note.md")),
+            typed,
+            "the reload that declared a number did not fill the typed column"
+        );
+
+        let before = after;
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            format!("{numbered}# a second declaration\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ReloadOutcome::SchemaChanged
+        );
+        let after = stored(&mut attachment, "note.md").expect("the document's row");
+        assert_eq!(before.content_hash, after.content_hash);
+        assert!(after.generation > before.generation);
+        assert_eq!(
+            typed_values(&stored_fields(&mut attachment, "note.md")),
+            typed,
+            "the heal after a moved pin did not fill again what the pin cleared"
+        );
+
+        let before = after;
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\nfields:\n  rating:\n    type: text\n",
+        )
+        .unwrap();
+        assert_eq!(
+            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ReloadOutcome::SchemaChanged
+        );
+        let after = stored(&mut attachment, "note.md").expect("the document's row");
+        assert_eq!(
+            before.generation, after.generation,
+            "a declaration ordering the field as text derived the row again"
+        );
+        assert_eq!(
+            typed_values(&stored_fields(&mut attachment, "note.md")),
+            untyped,
+            "the pin of a text declaration left a typed value standing"
+        );
+        ops.detach(&name, attachment);
+    }
+
     /// The declaration's own rule, stated directly: a row stamped at or below
     /// the pin's generation owes its judgment again, and one stamped above it
     /// carries the judgment the standing schema asks for. A declaration that
@@ -4069,7 +4201,10 @@ mod tests {
     #[test]
     fn a_row_below_the_pins_generation_owes_its_judgment_again() {
         let judging = Declaration {
-            model: VaultSchema::parse(REPORTING_SCHEMA.as_bytes()).unwrap(),
+            model: Declared::pinned(
+                VaultSchema::parse(REPORTING_SCHEMA.as_bytes()).unwrap(),
+                "reporting",
+            ),
             floor: 7,
         };
         assert!(!judging.judged(6));
@@ -4077,7 +4212,7 @@ mod tests {
         assert!(judging.judged(8));
 
         let silent = Declaration {
-            model: VaultSchema::default(),
+            model: Declared::unpinned(),
             floor: 7,
         };
         assert!(silent.judged(6));
@@ -7747,6 +7882,7 @@ mod tests {
         headings: Vec<HeadingFact>,
         blocks: Vec<BlockFact>,
         tags: Vec<TagFact>,
+        fields: FieldRows,
     }
 
     impl From<norn_store::StoredFacts> for DerivedDocument {
@@ -7758,6 +7894,7 @@ mod tests {
                 headings,
                 blocks,
                 tags,
+                fields,
             } = facts;
             Self {
                 path: document.path,
@@ -7772,6 +7909,7 @@ mod tests {
                 headings,
                 blocks,
                 tags,
+                fields,
             }
         }
     }
@@ -8070,9 +8208,10 @@ mod tests {
             "note.md",
             &source,
             norn_fs::ContentHash::of(&source).to_string(),
+            &DeclaredFields::none(),
         )
         .expect("a document derives");
-        assert!(derived.facts.frontmatter.is_none());
+        assert!(derived.facts.frontmatter().is_none());
         assert_eq!(derived.facts.frontmatter_diagnostic_count, 1);
         assert_eq!(
             derived
@@ -8117,10 +8256,11 @@ mod tests {
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
+                &DeclaredFields::none(),
             )
             .expect("a document whose block went unread still derives");
             assert!(
-                derived.facts.frontmatter.is_none(),
+                derived.facts.frontmatter().is_none(),
                 "{kind} produced a projection"
             );
             assert_eq!(

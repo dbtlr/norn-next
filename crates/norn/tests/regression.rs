@@ -89,7 +89,7 @@ const CASE_TOTAL: usize = 109;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "d757184d3a08285e0e844ec59fde830eba1f0815731717a2ec050c253433eb82";
+const CONTRACT_DIGEST: &str = "c8e72d9bd64634001d08de08bcdcd3e2a0f98c77e4c4316a005fafa28867bcfa";
 
 /// The cases carried by tests today, by name.
 ///
@@ -100,6 +100,7 @@ const CONTRACT_DIGEST: &str = "d757184d3a08285e0e844ec59fde830eba1f0815731717a2e
 /// Compared as a set, because the order cases sit in the file is the file's
 /// business.
 const BOUND_CASES: &[&str] = &[
+    "a-limit-bounds-hydration-through-one-paging-seam",
     "a-measurement-lane-proves-it-measured",
     "a-mutation-confirms-the-file-it-holds-before-it-publishes",
     "a-sidecar-is-keyed-by-its-own-model-and-scoped-by-the-store-epoch",
@@ -116,6 +117,7 @@ const BOUND_CASES: &[&str] = &[
     "harness-waits-have-deadlines",
     "one-field-edit-is-a-one-field-diff",
     "per-file-atomicity-and-durability",
+    "predicate-filtering-in-sql-is-the-known-good-shape",
     "vault-root-containment",
 ];
 
@@ -193,7 +195,7 @@ fn registry() -> Registry {
 ///
 /// Asking cargo what compiled is what makes this a claim about the suite that
 /// runs rather than about the text of a file: one `--list` pair per cited
-/// target, which is eighteen targets across nine packages today.
+/// target.
 #[test]
 fn the_registry_is_structurally_sound() {
     let registry = registry();

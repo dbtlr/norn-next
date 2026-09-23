@@ -1,10 +1,18 @@
-//! The pattern language the schema declares path and tag sets in.
+//! The glob grammar: the one pattern language a `/`-separated name is matched
+//! by.
 //!
-//! One matcher, two uses. A vault schema names path sets — the ambiguity-ignore
-//! set — and tag sets — the patterns a declared tag facet admits beyond its
-//! literal names. Both are `/`-separated hierarchies written the same way by
-//! the same authors, so both are read by one grammar rather than two that drift
-//! apart.
+//! One grammar, three uses. A vault schema names path sets — the
+//! ambiguity-ignore set — and tag sets — the patterns a declared tag facet
+//! admits beyond its literal names — and a request's path part carries a glob
+//! a document's path must match. All three are `/`-separated hierarchies
+//! written by the same people, so all three are read by one grammar rather
+//! than several that drift apart. The grammar lives here because the path
+//! part is spelled here: a request's glob crosses the seam as its text, and
+//! [`Pattern`] is how that text is read wherever it is matched.
+//!
+//! [`Pattern`] is a reading of text, not a value that crosses: the path part
+//! carries the glob as a string, so the pattern carries none of the wire
+//! derives.
 //!
 //! The grammar is the familiar one, stated exactly:
 //!

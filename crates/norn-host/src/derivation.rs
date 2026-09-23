@@ -17,9 +17,10 @@
 //! takes.
 //!
 //! **A plan is a function of the observation and the vault's declaration.**
-//! [`plan_document`] takes the content model of the pinned vault schema beside
-//! the document, because a finding keyed by the schema fingerprint is derived
-//! under the declaration that fingerprint names. The declaration is read off
+//! [`plan_document`] takes the pinned vault schema's [`Declared`] beside the
+//! document, because a finding keyed by the schema fingerprint — and a typed
+//! value a pin of another fingerprint clears — is derived under the
+//! declaration that fingerprint names. The declaration is read off
 //! the store's own pin, so the model a plan derives under and the fingerprint
 //! its findings are stamped with come from one set of bytes.
 //!
@@ -42,8 +43,8 @@ use std::path::Path;
 
 use norn_config::schema::VaultSchema;
 use norn_store::{
-    BlockFact, Change, DiscardScope, DocumentFacts, DocumentPath, FrontmatterValue, HeadingFact,
-    LinkFact, LinkFamily, Provenance, Span, TagFact, TagSource,
+    BlockFact, Change, DeclaredFields, DiscardScope, DocumentFacts, DocumentPath, FrontmatterValue,
+    HeadingFact, LinkFact, LinkFamily, Provenance, Span, TagFact, TagSource, TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, FindingScope, Severity};
@@ -619,7 +620,14 @@ pub(crate) struct Derived {
     pub(crate) unread_frontmatter: Option<UnreadFrontmatter>,
 }
 
-pub(crate) fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<Derived, Quarantine> {
+/// Derive one document's facts from its bytes, the field rows' typed half
+/// under `fields`.
+pub(crate) fn map_document(
+    path: &str,
+    bytes: &[u8],
+    hash: String,
+    fields: &DeclaredFields,
+) -> Result<Derived, Quarantine> {
     // Identity before content: a path that names no document has nothing to
     // say about its own bytes.
     let document_path = document_path(Path::new(path))?;
@@ -641,9 +649,9 @@ pub(crate) fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<Der
             problem: refusal.problem(),
         });
     let scan = document.scan_body();
-    let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64);
+    let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64)
+        .with_frontmatter(document.frontmatter().map(map_value), fields);
     facts.body_offset = document.body_start() as u64;
-    facts.frontmatter = document.frontmatter().map(map_value);
     facts.frontmatter_diagnostic_count = document
         .diagnostics()
         .iter()
@@ -753,19 +761,19 @@ pub(crate) struct Plan {
 /// `path` is the spelling as the vault holds it, which is what a quarantine's
 /// subject is rendered from where the grammar admits no document path.
 ///
-/// `declared` is the content model of the pinned vault schema. It decides the
-/// facet findings alone: a document that does not decode is judged against
-/// nothing, because a vault declaration says what a document's facts must be
-/// and there are no facts.
+/// `declared` is the pinned vault schema's declaration. It decides the facet
+/// findings and the typed half of the field rows: a document that does not
+/// decode is judged against nothing, because a vault declaration says what a
+/// document's facts must be and there are no facts.
 pub(crate) fn plan_document(
     path: &Path,
     spelling: &str,
     bytes: &[u8],
     hash: String,
     stored: Option<&DocumentPath>,
-    declared: &VaultSchema,
+    declared: &Declared,
 ) -> Plan {
-    match map_document(spelling, bytes, hash) {
+    match map_document(spelling, bytes, hash, declared.fields()) {
         Ok(derived) => {
             let subject = derived.facts.path.clone();
             let mut findings = Vec::new();
@@ -781,7 +789,7 @@ pub(crate) fn plan_document(
                     target: None,
                 });
             }
-            findings.extend(plan_tag_facet(&subject, &derived.facts, declared));
+            findings.extend(plan_tag_facet(&subject, &derived.facts, declared.schema()));
             Plan {
                 change: Some(Change::Upsert(derived.facts)),
                 findings,
@@ -795,6 +803,70 @@ pub(crate) fn plan_document(
             findings: vec![plan_quarantine(path, quarantine)],
         },
     }
+}
+
+/// The declaration a plan derives under: the pinned schema's content model,
+/// and the typed orders its declared fields hand the store, named by the
+/// fingerprint the schema is pinned under.
+///
+/// Built once per schema rather than per document, and only through
+/// [`Declared::pinned`] and [`Declared::unpinned`], so the typed orders a plan
+/// fills the field pillar with are always the ones the schema beside them
+/// declares, and carry the fingerprint the store compares with its own pin.
+pub(crate) struct Declared {
+    schema: VaultSchema,
+    fields: DeclaredFields,
+}
+
+impl Declared {
+    /// The declaration `schema` makes, pinned under `fingerprint`.
+    pub(crate) fn pinned(schema: VaultSchema, fingerprint: impl Into<String>) -> Self {
+        let fields = declared_fields(&schema, fingerprint.into());
+        Declared { schema, fields }
+    }
+
+    /// The declaration of a vault with no schema pinned, which declares
+    /// nothing.
+    pub(crate) fn unpinned() -> Self {
+        Declared {
+            schema: VaultSchema::default(),
+            fields: DeclaredFields::none(),
+        }
+    }
+
+    /// The content model.
+    pub(crate) fn schema(&self) -> &VaultSchema {
+        &self.schema
+    }
+
+    /// The declared fields as the store reads them.
+    pub(crate) fn fields(&self) -> &DeclaredFields {
+        &self.fields
+    }
+}
+
+/// The declared fields of `schema`, pinned under `fingerprint`, as the store
+/// reads them: every declared key, and for each whose type does not order as
+/// text, the typed order that type reads a raw value into.
+///
+/// A raw value that does not read as its declared type has no sort key, which
+/// is the store's `NULL`: the document still carries the value, and a typed
+/// order has nothing to place it by.
+fn declared_fields(schema: &VaultSchema, fingerprint: String) -> DeclaredFields {
+    schema.fields().fold(
+        DeclaredFields::under(fingerprint),
+        |declared, (key, field)| {
+            let kind = field.kind();
+            if kind.orders_as_text() {
+                declared.declare(key)
+            } else {
+                declared.declare_typed(
+                    key,
+                    TypedOrder::new(move |raw| kind.read(raw).ok().map(|value| value.sort_key())),
+                )
+            }
+        },
+    )
 }
 
 /// Judge a document's tags against the vault's declared tag facet.
@@ -904,17 +976,20 @@ mod tests {
 
     /// A vault that has declared nothing, which is what most cases here plan
     /// under: the observation alone decides the plan.
-    fn undeclaring() -> VaultSchema {
-        VaultSchema::default()
+    fn undeclaring() -> Declared {
+        Declared::unpinned()
     }
 
     /// A vault whose declared tag vocabulary is `front` and everything under
     /// `area/`, and which reports anything else.
-    fn reporting() -> VaultSchema {
-        VaultSchema::parse(
-            b"version: 1\ntags:\n  declared: [front]\n  patterns: [\"area/**\"]\n  undeclared: report\n",
+    fn reporting() -> Declared {
+        Declared::pinned(
+            VaultSchema::parse(
+                b"version: 1\ntags:\n  declared: [front]\n  patterns: [\"area/**\"]\n  undeclared: report\n",
+            )
+            .expect("a schema declaring a tag facet"),
+            "reporting",
         )
-        .expect("a schema declaring a tag facet")
     }
 
     /// **The two discard sides partition the causes.** The sides are read off
@@ -1073,7 +1148,7 @@ mod tests {
         ] {
             let bytes = source.as_bytes();
             let hash = || norn_fs::ContentHash::of(bytes).to_string();
-            let problem = map_document("note.md", bytes, hash())
+            let problem = map_document("note.md", bytes, hash(), &DeclaredFields::none())
                 .expect("a document whose block went unread still derives")
                 .unread_frontmatter
                 .expect("the block was read by nothing")
@@ -1122,7 +1197,8 @@ mod tests {
 
         let whole = b"---\ntags: [front]\n---\n# Heading\n[[target]] #body\n".as_slice();
         let hash = norn_fs::ContentHash::of(whole).to_string();
-        let derived = map_document("note.md", whole, hash.clone()).expect("a document derives");
+        let derived = map_document("note.md", whole, hash.clone(), &DeclaredFields::none())
+            .expect("a document derives");
         let plan = plan_document(
             Path::new("note.md"),
             "note.md",
@@ -1155,7 +1231,8 @@ mod tests {
 
         let unread = b"---\ntitle: note\n# Heading\n".as_slice();
         let hash = norn_fs::ContentHash::of(unread).to_string();
-        let derived = map_document("note.md", unread, hash.clone()).expect("a document derives");
+        let derived = map_document("note.md", unread, hash.clone(), &DeclaredFields::none())
+            .expect("a document derives");
         let plan = plan_document(
             Path::new("note.md"),
             "note.md",
@@ -1271,6 +1348,7 @@ mod tests {
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
+                &DeclaredFields::none(),
             )
             .expect("a document whose block went unread still derives")
         };
@@ -1278,7 +1356,7 @@ mod tests {
         let tagged = derive("---\n!x k: 1\nk: 2\n---\n# heading\n");
         for (spelling, derived) in [("plain", &plain), ("tagged", &tagged)] {
             assert!(
-                derived.facts.frontmatter.is_none(),
+                derived.facts.frontmatter().is_none(),
                 "the {spelling} duplicate produced a projection"
             );
             assert_eq!(
@@ -1336,6 +1414,7 @@ mod tests {
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
+                &DeclaredFields::none(),
             )
             .expect("a document whose block went unread still derives")
         };
@@ -1346,8 +1425,7 @@ mod tests {
         let deepest = derive(&block_nesting(refused - 1));
         let projection = deepest
             .facts
-            .frontmatter
-            .as_ref()
+            .frontmatter()
             .expect("the deepest block the text layer reads produced no projection");
         norn_store::canonical_json(projection)
             .expect("the deepest block the text layer reads is past the store's bound");
@@ -1375,6 +1453,7 @@ mod tests {
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
+                &DeclaredFields::none(),
             )
             .expect("a document whose block went unread still derives")
             .facts
@@ -1418,11 +1497,12 @@ mod tests {
             "note.md",
             source,
             norn_fs::ContentHash::of(source).to_string(),
+            &DeclaredFields::none(),
         )
         .unwrap();
         let facts = derived.facts;
         assert!(derived.unread_frontmatter.is_none());
-        assert!(facts.frontmatter.is_some());
+        assert!(facts.frontmatter().is_some());
         assert_eq!(facts.headings.len(), 1);
         assert_eq!(facts.links.len(), 1);
         assert_eq!(facts.blocks.len(), 1);
@@ -1450,12 +1530,13 @@ mod tests {
                 "note.md",
                 &source,
                 norn_fs::ContentHash::of(&source).to_string(),
+                &DeclaredFields::none(),
             )
             .unwrap()
             .facts;
             let read = String::from_utf8(source).unwrap();
             assert_eq!(
-                facts.frontmatter.is_some(),
+                facts.frontmatter().is_some(),
                 projection,
                 "the projection of `{read}` is not what the block is"
             );
@@ -1571,6 +1652,350 @@ mod tests {
                 Cause::TagBreach(_) => Severity::Warning,
             };
             assert_eq!(cause.severity(), expected, "`{}`", cause.kind());
+        }
+    }
+
+    /// A store holding `documents`, each derived through the host's own
+    /// declaration of `schema` and [`plan_document`] and written in one
+    /// changeset, and the find a request over it answers: the found paths, in
+    /// page order.
+    struct DerivedVault {
+        _scratch: norn_testkit::scratch::Scratch,
+        _store: norn_store::Store,
+        reader: std::sync::Arc<norn_store::SnapshotReader>,
+        declared: Declared,
+    }
+
+    impl DerivedVault {
+        fn new(label: &str, schema: &[u8], documents: &[(&str, String)]) -> Self {
+            const FINGERPRINT: &str = "compared";
+            let declared = Declared::pinned(
+                VaultSchema::parse(schema).expect("a schema declaring typed fields"),
+                FINGERPRINT,
+            );
+            let scratch = norn_testkit::scratch::Scratch::new(label);
+            let mut store =
+                norn_store::Store::open(scratch.join("store.sqlite3")).expect("a store");
+            store
+                .begin_request()
+                .pin_vault_schema(schema, FINGERPRINT)
+                .expect("pinning the compared schema");
+            let changes: Vec<Change> = documents
+                .iter()
+                .map(|(path, bytes)| {
+                    let hash = norn_fs::ContentHash::of(bytes.as_bytes()).to_string();
+                    plan_document(
+                        Path::new(path),
+                        path,
+                        bytes.as_bytes(),
+                        hash,
+                        None,
+                        &declared,
+                    )
+                    .change
+                    .expect("a document that derives")
+                })
+                .collect();
+            store
+                .begin_request()
+                .apply_increment(norn_store::IncrementProvenance::Derived, changes, &[])
+                .expect("writing the derived documents");
+            let reader = std::sync::Arc::new(store.open_reader().reader.expect("a reader"));
+            DerivedVault {
+                _scratch: scratch,
+                _store: store,
+                reader,
+                declared,
+            }
+        }
+
+        fn request() -> norn_wire::FindParams {
+            norn_wire::FindParams::new(norn_wire::VaultAddress::name(
+                norn_wire::VaultName::new("compared").expect("a vault name"),
+            ))
+        }
+
+        fn find(&self, params: norn_wire::FindParams) -> Vec<String> {
+            self.reader
+                .try_take()
+                .expect("an idle reader")
+                .establish()
+                .snapshot
+                .expect("a snapshot")
+                .find(&params, self.declared.fields())
+                .expect("a find")
+                .rows
+                .into_iter()
+                .map(|row| row.path.as_str().to_string())
+                .collect()
+        }
+    }
+
+    /// One compared document: its path, then the raw text it writes under
+    /// `when`, `weight`, `code` and `flag`.
+    type Compared = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    );
+
+    /// The raw text one compared document writes under one key.
+    type Written = fn(&Compared) -> &'static str;
+
+    /// The documents the comparison case derives, and what each writes under
+    /// `when` (a date), `weight` (a number), `code` (text) and `flag` (a
+    /// boolean). The raw text is what the in-process rule reads; the store
+    /// reads the same bytes through [`plan_document`].
+    ///
+    /// The dates part the raw order from the typed one, and mix a stated
+    /// offset with an unstated one: `a.md` names 09:00 UTC and `b.md` 10:00 at
+    /// no stated offset. The numbers part them too — `10` sorts before `9` as
+    /// text — and `b.md`, `f.md` and `g.md` write nine as an integer, as a
+    /// string and as a float, three raw texts the declared number reads as one
+    /// value. `code` writes one as a number and once as a string. `flag`
+    /// writes booleans bare and as strings padded with a space, which the
+    /// declared boolean reads as the same values and whose raw text sorts
+    /// apart from them: `" true"` before `false` and `"false "` after it.
+    const COMPARED: [Compared; 7] = [
+        ("a.md", "2026-03-04T09:00:00Z", "10", "1", "true"),
+        ("b.md", "2026-03-04T10:00:00", "9", "\"1\"", "false"),
+        ("c.md", "2026-03-04T09:30:00+01:00", "9.5", "2", "\" true\""),
+        ("d.md", "2026-03-04", "-1", "10", "false"),
+        ("e.md", "2026-03-03T23:00:00-05:00", "100", "x", "true"),
+        ("f.md", "2026-03-05", "\"9\"", "y", "\"false \""),
+        ("g.md", "2026-03-06", "9.0", "z", "true"),
+    ];
+
+    /// **One comparison rule governs the store's typed order and the
+    /// in-process comparison.** Documents are derived through the host's own
+    /// declaration and plan, written through a changeset, and found through
+    /// the builder: a typed sort, both ways, and a typed bound, equality,
+    /// inequality and membership part answer exactly what
+    /// [`TypedValue::compare`] answers over the same raw text — across a
+    /// mixed-offset pair, which the rule signals and orders by reading the
+    /// unstated side at offset zero, across a number whose text order is not
+    /// its numeric one, across `9` and `9.0`, two texts one number, and across
+    /// booleans whose raw text is not their boolean order. On a
+    /// key declared as text equality is over the raw text, so `1` written as a
+    /// number and `"1"` written as a string are one value to an equality part,
+    /// as they are to the rule.
+    #[test]
+    fn the_stores_typed_order_and_the_in_process_comparison_are_one_rule() {
+        use std::cmp::Ordering;
+
+        use norn_config::schema::{ComparisonSignal, FieldType, TypedValue};
+        use norn_wire::{Direction, Predicate, Sort, SortKey};
+
+        let documents: Vec<(&str, String)> = COMPARED
+            .iter()
+            .map(|(path, when, weight, code, flag)| {
+                (
+                    *path,
+                    format!(
+                        "---\nwhen: {when}\nweight: {weight}\ncode: {code}\nflag: {flag}\n---\nbody\n"
+                    ),
+                )
+            })
+            .collect();
+        let vault = DerivedVault::new(
+            "norn-host-comparison",
+            b"version: 1\nfields:\n  when:\n    type: date\n  weight:\n    type: number\n  code:\n    type: text\n  flag:\n    type: boolean\n",
+            &documents,
+        );
+        let find = |params| vault.find(params);
+        let request = DerivedVault::request;
+        let unquoted = |raw: &str| raw.trim_matches('"').to_string();
+        let typed = |kind: FieldType, raw: &str| {
+            kind.read(&unquoted(raw))
+                .unwrap_or_else(|_| panic!("`{raw}` reads as {kind}"))
+        };
+
+        // Each typed key, with the raw text a compared row writes under it.
+        let typed_keys: [(&str, FieldType, Written); 3] = [
+            ("when", FieldType::Date, |row| row.1),
+            ("weight", FieldType::Number, |row| row.2),
+            ("flag", FieldType::Boolean, |row| row.4),
+        ];
+        for (key, kind, written) in typed_keys {
+            let value = |path: &str| {
+                let row = COMPARED
+                    .iter()
+                    .find(|row| row.0 == path)
+                    .expect("a compared document");
+                typed(kind, written(row))
+            };
+            // The rule's order: the typed comparison, the path breaking a tie.
+            let mut expected: Vec<String> = COMPARED.iter().map(|row| row.0.to_string()).collect();
+            expected.sort_by(|left, right| {
+                value(left)
+                    .compare(&value(right))
+                    .ordering
+                    .then_with(|| left.cmp(right))
+            });
+            let ascending =
+                find(request().with_sort(Sort::new(SortKey::field(key), Direction::Ascending)));
+            assert_eq!(
+                ascending, expected,
+                "`{key}` ascending is not the rule's order"
+            );
+            let descending =
+                find(request().with_sort(Sort::new(SortKey::field(key), Direction::Descending)));
+            expected.reverse();
+            assert_eq!(
+                descending, expected,
+                "`{key}` descending is not the rule's order"
+            );
+
+            // A bound, an equality and an inequality compare under the same
+            // rule, at every value as the one named: `after` is what the rule
+            // calls greater, `before` less, `eq` equal and `not_eq` anything
+            // else.
+            let answered_by = |wanted: &dyn Fn(&TypedValue) -> bool| {
+                let mut matching: Vec<String> = COMPARED
+                    .iter()
+                    .map(|row| row.0.to_string())
+                    .filter(|path| wanted(&value(path)))
+                    .collect();
+                matching.sort_by_key(|path| path.to_ascii_lowercase());
+                matching
+            };
+            for row in &COMPARED {
+                let raw = unquoted(written(row));
+                let bound = typed(kind, &raw);
+                let ordering = |found: &TypedValue| found.compare(&bound).ordering;
+                for (predicate, matching) in [
+                    (
+                        Predicate::after(key, raw.clone()),
+                        answered_by(&|found| ordering(found) == Ordering::Greater),
+                    ),
+                    (
+                        Predicate::before(key, raw.clone()),
+                        answered_by(&|found| ordering(found) == Ordering::Less),
+                    ),
+                    (
+                        Predicate::equal_to(key, raw.clone()),
+                        answered_by(&|found| ordering(found) == Ordering::Equal),
+                    ),
+                    (
+                        Predicate::not_equal_to(key, raw.clone()),
+                        answered_by(&|found| ordering(found) != Ordering::Equal),
+                    ),
+                ] {
+                    assert_eq!(
+                        find(request().with_predicates([predicate.clone()])),
+                        matching,
+                        "{predicate:?} does not answer what the rule does"
+                    );
+                }
+            }
+        }
+
+        // The mixed-offset pair: the rule signals it, orders the stated 09:00Z
+        // before the unstated 10:00, and the store's order agrees.
+        let comparison = typed(FieldType::Date, "2026-03-04T09:00:00Z")
+            .compare(&typed(FieldType::Date, "2026-03-04T10:00:00"));
+        assert_eq!(comparison.signal, Some(ComparisonSignal::MixedOffset));
+        assert_eq!(comparison.ordering, Ordering::Less);
+        let by_when =
+            find(request().with_sort(Sort::new(SortKey::field("when"), Direction::Ascending)));
+        let at = |path: &str| by_when.iter().position(|found| found == path);
+        assert!(at("a.md") < at("b.md"), "{by_when:?}");
+        // `10` before `9` as text; after it as a number.
+        let by_weight =
+            find(request().with_sort(Sort::new(SortKey::field("weight"), Direction::Ascending)));
+        assert!(
+            by_weight.iter().position(|found| found == "b.md")
+                < by_weight.iter().position(|found| found == "a.md"),
+            "{by_weight:?}"
+        );
+
+        // Numeric-versus-text equality: one written as a number and one as a
+        // string are the one raw text, to the builder's equality and to the
+        // rule alike.
+        assert_eq!(
+            find(request().with_predicates([Predicate::equal_to("code", "1")])),
+            ["a.md", "b.md"]
+        );
+        assert_eq!(
+            TypedValue::Text("1".to_string())
+                .compare(&typed(FieldType::Text, "\"1\""))
+                .ordering,
+            Ordering::Equal
+        );
+        // On a number, equality is the number's: `9`, `"9"` and `9.0` are
+        // one value to the rule, and to an equality or membership part named
+        // with any of the three spellings.
+        for nine in ["9", "9.0", "\"9\""] {
+            assert_eq!(
+                typed(FieldType::Number, "9")
+                    .compare(&typed(FieldType::Number, nine))
+                    .ordering,
+                Ordering::Equal
+            );
+        }
+        for nine in ["9", "9.0", "09"] {
+            assert_eq!(
+                find(request().with_predicates([Predicate::equal_to("weight", nine)])),
+                ["b.md", "f.md", "g.md"],
+                "`weight` equal to {nine}"
+            );
+        }
+        assert_eq!(
+            find(request().with_predicates([Predicate::in_any(
+                "weight",
+                ["9.0".to_string(), "1e2".to_string()]
+            )])),
+            ["b.md", "e.md", "f.md", "g.md"]
+        );
+    }
+
+    /// **Matching is symmetric in the shape of the stored value.** A value
+    /// written bare and the same value written inside a sequence are one value
+    /// to an equality, an inequality and a membership part, under a declared
+    /// number and under text alike: every scalar a key holds is a value of the
+    /// key, so `[9]` holds nine as `9` does, and `[3, 9.0]` holds it too.
+    #[test]
+    fn a_value_written_bare_and_inside_a_sequence_meet_one_part_alike() {
+        use norn_wire::Predicate;
+
+        let documents: Vec<(&str, String)> = [
+            ("bare.md", "9", "a"),
+            ("bracketed.md", "[9]", "[a]"),
+            ("among.md", "[3, 9.0]", "[b, a]"),
+            ("other.md", "3", "b"),
+        ]
+        .into_iter()
+        .map(|(path, weight, code)| {
+            (
+                path,
+                format!("---\nweight: {weight}\ncode: {code}\n---\nbody\n"),
+            )
+        })
+        .collect();
+        let vault = DerivedVault::new(
+            "norn-host-stored-shape",
+            b"version: 1\nfields:\n  weight:\n    type: number\n  code:\n    type: text\n",
+            &documents,
+        );
+        let find = |part: Predicate| vault.find(DerivedVault::request().with_predicates([part]));
+        for (key, value) in [("weight", "9"), ("code", "a")] {
+            assert_eq!(
+                find(Predicate::equal_to(key, value)),
+                ["among.md", "bare.md", "bracketed.md"],
+                "`{key}` equal to {value}"
+            );
+            assert_eq!(
+                find(Predicate::in_any(key, [value.to_string()])),
+                ["among.md", "bare.md", "bracketed.md"],
+                "`{key}` in [{value}]"
+            );
+            assert_eq!(
+                find(Predicate::not_equal_to(key, value)),
+                ["other.md"],
+                "`{key}` not equal to {value}"
+            );
         }
     }
 }

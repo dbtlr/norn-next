@@ -5,7 +5,7 @@ use crate::common::{
     CountingEmbedder, InterferingEmbedder, Scratch, document, path, recompute, record_death,
     write_document,
 };
-use norn_store::FrontmatterValue;
+use norn_store::{DeclaredFields, FrontmatterValue};
 
 /// An empty store drains to an empty sidecar; the drain after it is the
 /// settled all-zero reading.
@@ -58,10 +58,13 @@ fn a_frontmatter_only_edit_does_not_reembed() {
     assert_eq!(embedder.calls(), 1);
 
     let mut edited = document("docs/a.md", "hash-2", "alpha\n");
-    edited.frontmatter = Some(FrontmatterValue::Map(vec![(
-        "title".to_string(),
-        FrontmatterValue::String("Alpha".to_string()),
-    )]));
+    edited = edited.with_frontmatter(
+        Some(FrontmatterValue::Map(vec![(
+            "title".to_string(),
+            FrontmatterValue::String("Alpha".to_string()),
+        )])),
+        &DeclaredFields::none(),
+    );
     write_document(&mut store, &edited);
 
     let report = engine.drain(&mut store.feed_read()).expect("a drain");

@@ -1,4 +1,6 @@
-//! The three pillars: full text, findings, migrations.
+//! The three pillars: full text, findings, migrations — and the plan bars every
+//! statement the store names is judged by, the field pillar's included. What
+//! the field pillar's rows are is the `fields` suite's.
 //!
 //! Each is exercised against a real database, because a pillar's DDL is only
 //! worth what a write and a read of it prove. The findings cases carry the most
@@ -305,7 +307,7 @@ fn a_sub_fingerprint_that_does_not_describe_its_column_is_damage() {
         let mut store = scratch.open();
         let subject = path("docs/norn/glossary.md");
         let mut facts = document(subject.as_str(), "hash-1", "a body\n");
-        facts.frontmatter = titled_frontmatter();
+        facts = facts.with_frontmatter(titled_frontmatter(), &norn_store::DeclaredFields::none());
         write_document(&mut store.begin_request(), &facts);
         store.verify_integrity().expect("a store just written to");
 
@@ -643,6 +645,9 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::FindingSubjectsWithoutRows(..) => {
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for"
         }
+        ExplainedStatement::TypedValueDiscard => {
+            "a_pins_typed_value_clear_reads_only_the_rows_that_hold_one"
+        }
         ExplainedStatement::StoredDocumentPage(..) => {
             "a_heal_page_seeks_the_index_that_holds_its_order"
         }
@@ -661,6 +666,7 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::DocumentHeadings
         | ExplainedStatement::DocumentBlocks
         | ExplainedStatement::DocumentTags
+        | ExplainedStatement::DocumentFields
         | ExplainedStatement::StoredTombstone(_)
         | ExplainedStatement::StoredFindings(_)
         | ExplainedStatement::VaultSchemaPin => {
@@ -947,6 +953,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
         ExplainedStatement::FindingsInClass(&probe),
         ExplainedStatement::ClassDiscard(&probe),
         ExplainedStatement::SubjectDiscard(&subject, DiscardScope::EveryKind),
+        ExplainedStatement::TypedValueDiscard,
         ExplainedStatement::FindingSubjectsWithoutRows(
             norn_store::SubjectScope::Vault,
             &[FindingKind::PathNamesNoDocument],
@@ -979,6 +986,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             "a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead",
             "a_heal_page_seeks_the_index_that_holds_its_order",
             "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for",
+            "a_pins_typed_value_clear_reads_only_the_rows_that_hold_one",
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
         ]
@@ -1164,6 +1172,15 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
             "document_tags_document_ordinal",
             "(document=?)",
         ),
+        // The field pillar is `WITHOUT ROWID` and its primary key leads with
+        // the document, so its read is a seek of that key, in the key and
+        // ordinal order the reader states.
+        ExplainedStatement::DocumentFields => Some(PointReadBar {
+            table: "document_fields",
+            access: Access::PrimaryKey,
+            constraint: "(document=?)",
+            sorts: false,
+        }),
         ExplainedStatement::StoredTombstone(_) => seek("tombstones", "tombstones_path", "(path=?)"),
         // The subject's own findings, and the one entry that sorts.
         ExplainedStatement::StoredFindings(_) => Some(PointReadBar {
@@ -1182,6 +1199,7 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::FindingsInClass(_)
         | ExplainedStatement::ClassDiscard(_)
         | ExplainedStatement::SubjectDiscard(..)
+        | ExplainedStatement::TypedValueDiscard
         | ExplainedStatement::FindingSubjectsWithoutRows(..)
         | ExplainedStatement::StoredDocumentPage(..)
         | ExplainedStatement::StoredFindingPage
@@ -1201,7 +1219,7 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
 /// that found its rows by stepping over the rows ahead of them would cost the
 /// whole table for every question about one place.
 ///
-/// Four assertions hold every statement, and a fifth holds eight of the nine:
+/// Four assertions hold every statement, and a fifth holds nine of the ten:
 ///
 /// - It does not read its table end to end, and it searches that table.
 /// - The step that searches the table runs through [`PointReadBar::access`]
@@ -1251,6 +1269,56 @@ fn a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for() {
             read.assert_no_temp_btree();
         }
     }
+}
+
+/// **A pin's clear of the typed field values reads the rows that hold one, and
+/// never the table.** A pin that moves the schema fingerprint clears every
+/// typed value in its own transaction, and a clear that read the pillar end to
+/// end would make every such pin cost every field row the vault holds — the
+/// rows with no typed value included, which under a schema declaring no typed
+/// field is all of them.
+///
+/// The clear is stated over `typed IS NOT NULL`, which is the typed index's own
+/// predicate, so the index holds exactly the rows it clears. The plan reads that
+/// index end to end, which is the bar: a scan of it is a scan of the typed rows
+/// alone. The control is run in the same case: with the index dropped, the same
+/// statement reads the table, and the bar says so.
+#[test]
+fn a_pins_typed_value_clear_reads_only_the_rows_that_hold_one() {
+    let scratch = Scratch::new("typed-clear-plan");
+    let mut store = scratch.open();
+    let judge = |store: &mut norn_store::Store| {
+        plan(
+            store
+                .begin_request()
+                .emitted_plan(ExplainedStatement::TypedValueDiscard)
+                .expect("a query plan for the typed clear"),
+        )
+    };
+    let reads_the_typed_index = |read: &QueryPlan| {
+        read.table_scans().is_empty()
+            && read.rows().iter().any(|row| {
+                row.scans() == Some("document_fields")
+                    && row.index() == Some("document_fields_typed")
+            })
+    };
+
+    let read = judge(&mut store);
+    assert!(
+        reads_the_typed_index(&read),
+        "the typed clear reads something other than the typed index: {:?}\nemitted SQL: {}",
+        read.rows(),
+        read.sql()
+    );
+
+    induced_failure::execute_out_of_band(&mut store, "DROP INDEX document_fields_typed")
+        .expect("dropping the typed index");
+    let unindexed = judge(&mut store);
+    assert!(
+        !reads_the_typed_index(&unindexed),
+        "the bar holds a clear with no typed index to read: {:?}",
+        unindexed.rows()
+    );
 }
 
 /// **A finding's detail is read by primary key, a chunk of ids at a time.**
@@ -1739,7 +1807,7 @@ fn the_feed_projects_a_fingerprint_per_part_a_consumer_derives_from() {
 
     let plain = document("plain.md", "hash-plain", "one body\n");
     let mut titled = document("titled.md", "hash-titled", "one body\n");
-    titled.frontmatter = titled_frontmatter();
+    titled = titled.with_frontmatter(titled_frontmatter(), &norn_store::DeclaredFields::none());
     write_documents(&mut request, &[plain, titled]);
 
     let fed: std::collections::BTreeMap<String, norn_store::FeedDocument> = request
@@ -1772,7 +1840,8 @@ fn the_feed_projects_a_fingerprint_per_part_a_consumer_derives_from() {
     // Re-deriving the body alone moves the body hash and leaves the projection
     // hash where it was, which is the discrimination the two columns exist for.
     let mut rewritten = document("titled.md", "hash-titled-2", "another body\n");
-    rewritten.frontmatter = titled_frontmatter();
+    rewritten =
+        rewritten.with_frontmatter(titled_frontmatter(), &norn_store::DeclaredFields::none());
     write_document(&mut request, &rewritten);
     let after = request
         .changed_documents_after(None, norn_store::MAX_PAGE)

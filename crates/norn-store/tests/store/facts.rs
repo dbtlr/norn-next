@@ -10,8 +10,8 @@ use crate::common::{
     Scratch, document, document_with_every_fact, path, record_death, span, write_document,
 };
 use norn_store::{
-    BlockFact, Change, DocumentFacts, FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact,
-    LinkFamily, Provenance, StoreError, TagFact, TagSource, ddl,
+    BlockFact, Change, DeclaredFields, DocumentFacts, FrontmatterValue, HeadingFact,
+    IncrementProvenance, LinkFact, LinkFamily, Provenance, StoreError, TagFact, TagSource, ddl,
 };
 
 /// One of every fact shape, written and read back unchanged — including the
@@ -81,7 +81,10 @@ fn an_absent_frontmatter_block_and_an_empty_one_are_different_values() {
     let mut store = scratch.open();
     let absent = document("absent.md", "hash-1", "a body\n");
     let mut empty = document("empty.md", "hash-2", "a body\n");
-    empty.frontmatter = Some(FrontmatterValue::Map(Vec::new()));
+    empty = empty.with_frontmatter(
+        Some(FrontmatterValue::Map(Vec::new())),
+        &DeclaredFields::none(),
+    );
 
     let mut request = store.begin_request();
     write_document(&mut request, &absent);
@@ -123,7 +126,7 @@ fn a_frontmatter_value_past_the_bound_is_refused_and_its_facts_freed() {
     for _ in 0..100_000 {
         value = FrontmatterValue::Sequence(vec![value]);
     }
-    facts.frontmatter = Some(value);
+    facts = facts.with_frontmatter(Some(value), &DeclaredFields::none());
     let subject = facts.path.clone();
 
     let error = store
@@ -195,10 +198,15 @@ fn a_re_derivation_replaces_fact_rows_wholesale() {
         after.document.frontmatter, None,
         "the old projection outlived the block it projected"
     );
+    assert!(
+        after.fields.is_empty(),
+        "the old field rows outlived the frontmatter they were derived from"
+    );
 
-    // Eight fact rows went in and were discarded; the generation moved and the
-    // document is still one document.
-    assert_eq!(request.counters().get("fact_rows_discarded"), Some(8));
+    // Twelve fact rows went in and were discarded — eight token rows and the
+    // four field rows two keys derive; the generation moved and the document is
+    // still one document.
+    assert_eq!(request.counters().get("fact_rows_discarded"), Some(12));
     assert!(after.document.generation > before.generation);
     assert_eq!(request.pillars().expect("a pillar report").documents, 1);
 
@@ -358,6 +366,65 @@ fn declares_column(declared: &str, column: &str) -> bool {
         .any(|token| token == column)
 }
 
+/// The columns an index is declared over and the partial predicate it holds,
+/// whitespace folded, so the reading does not depend on how the statement is
+/// wrapped. `None` is an index over every row of its table.
+fn index_shape(declared: &[String], index: &str) -> (String, Option<String>) {
+    let statement = declared
+        .iter()
+        .find(|statement| statement.contains(&format!("INDEX {index} ")))
+        .unwrap_or_else(|| panic!("`{index}` has no create statement"));
+    let folded = statement
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+    let open = folded.find('(').expect("an index names its columns");
+    let close = open + folded[open..].find(')').expect("the column list closes");
+    let columns = folded[open + 1..close].to_string();
+    let predicate = folded[close..]
+        .split_once(" WHERE ")
+        .map(|(_, predicate)| predicate.to_string());
+    (columns, predicate)
+}
+
+/// Each field-pillar index holds only the rows its reads can match: a value
+/// seek never walks presence rows, a presence seek never walks value rows, and
+/// a field sort pages the marker rows alone. The predicate is what a seek on
+/// the index is allowed to skip, so dropping one widens every read of it.
+#[test]
+fn a_field_index_holds_only_the_rows_its_reads_match() {
+    let declared = ddl::statements();
+    // The negative control: an index over every row reads as having no
+    // predicate, so the check below is known to tell a partial index from a
+    // whole one rather than finding a predicate everywhere.
+    assert_eq!(
+        index_shape(&declared, "documents_path"),
+        ("path".to_string(), None),
+        "the index reader finds a predicate on an index that declares none"
+    );
+    for (index, columns, predicate) in [
+        ("document_fields_raw", "key, raw", "raw IS NOT NULL"),
+        ("document_fields_typed", "key, typed", "typed IS NOT NULL"),
+        (
+            "document_fields_least_raw",
+            "key, raw, path",
+            "least_raw = 1",
+        ),
+        (
+            "document_fields_least_typed",
+            "key, typed, path",
+            "least_typed = 1",
+        ),
+        ("document_fields_presence", "key", "ordinal = 0"),
+    ] {
+        assert_eq!(
+            index_shape(&declared, index),
+            (columns.to_string(), Some(predicate.to_string())),
+            "`{index}` is not declared over `({columns}) WHERE {predicate}`"
+        );
+    }
+}
+
 /// The columns nothing reads are not columns. The stem and the segment count are
 /// functions of the path, derived where the path is read, so a second home for
 /// either is a spelling that can disagree with it.
@@ -399,7 +466,6 @@ fn a_derived_path_form_has_one_home() {
         "headings_document_slug",
         "headings_document_text",
         "blocks_document_block_id",
-        "document_tags_name",
         "findings_generation",
         "findings_document",
     ] {
@@ -410,12 +476,14 @@ fn a_derived_path_form_has_one_home() {
             "`{absent}` is declared, and no statement in this build reads it"
         );
     }
-    // The six that stay, because a statement in this build reads each: the
+    // The seven that stay, because a statement in this build reads each: the
     // resolution ladder's range, the order a heal's page seeks on a vault that
     // folds ASCII case, the class direction of findings maintenance, the
-    // schema-key discard's two ranges, and the two change feeds, each of which
-    // is answered out of its own index without the row being read at all.
+    // schema-key discard's two ranges, the two change feeds, each of which is
+    // answered out of its own index without the row being read at all, and the
+    // documents a find's tag part names.
     for present in [
+        "document_tags_name",
         "documents_suffix_key",
         "documents_path_nocase",
         "documents_change_feed",

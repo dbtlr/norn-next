@@ -11,8 +11,10 @@ use std::collections::BTreeSet;
 use norn_db::rusqlite::{CachedStatement, OptionalExtension, Transaction, params};
 
 use crate::counters::{Counter, DerivationCounters};
+use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{DocumentFacts, FindingFacts, Invalidation, Provenance};
+use crate::fields::FieldRow;
 use crate::hash;
 use crate::json;
 use crate::path::{ClassKey, DocumentPath};
@@ -24,6 +26,7 @@ use crate::store::Store;
 /// The two shapes are the two things that happen to a path: it is derived, or
 /// it is gone.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)] // An upsert is the common entry: boxing it would allocate once per document to shrink the rarer death.
 pub enum Change {
     /// A document as it now stands.
     ///
@@ -213,7 +216,9 @@ pub(crate) fn apply(
             // them.
             let applied = match &change {
                 Change::Upsert(facts) => {
-                    upsert(&mut statements, stamp, recorded_at, facts, &mut tally)
+                    refuse_typed_values_the_pin_does_not_derive(&transaction, facts).and_then(
+                        |()| upsert(&mut statements, stamp, recorded_at, facts, &mut tally),
+                    )
                 }
                 // The death's own provenance, which is a different thing from
                 // the changeset's mark this function was called with.
@@ -273,6 +278,7 @@ pub(crate) fn apply(
     counters.add(Counter::HeadingRowsWritten, tally.heading_rows);
     counters.add(Counter::BlockRowsWritten, tally.block_rows);
     counters.add(Counter::TagRowsWritten, tally.tag_rows);
+    counters.add(Counter::FieldRowsWritten, tally.field_rows);
     counters.add(Counter::FrontmatterProjections, tally.projections);
     counters.add(Counter::FindingsDiscarded, tally.findings_discarded);
     counters.add(Counter::FindingsWritten, findings.len() as u64);
@@ -285,6 +291,7 @@ pub(crate) fn apply(
         affected_classes: tally.affected_classes,
         invalidated: Invalidation {
             findings_discarded: tally.findings_discarded,
+            typed_values_discarded: 0,
         },
     })
 }
@@ -303,6 +310,7 @@ struct Tally {
     heading_rows: u64,
     block_rows: u64,
     tag_rows: u64,
+    field_rows: u64,
     projections: u64,
     findings_discarded: u64,
     affected_classes: BTreeSet<ClassKey>,
@@ -322,6 +330,7 @@ struct Statements<'t> {
     insert_heading: CachedStatement<'t>,
     insert_block: CachedStatement<'t>,
     insert_tag: CachedStatement<'t>,
+    insert_field: CachedStatement<'t>,
     delete_document: CachedStatement<'t>,
     record_tombstone: CachedStatement<'t>,
     /// The subject-scoped findings discard, over one changed path at a time.
@@ -340,6 +349,7 @@ const FACT_DISCARDS: &[&str] = &[
     "DELETE FROM headings WHERE document = ?1",
     "DELETE FROM blocks WHERE document = ?1",
     "DELETE FROM document_tags WHERE document = ?1",
+    "DELETE FROM document_fields WHERE document = ?1",
 ];
 
 impl<'t> Statements<'t> {
@@ -404,6 +414,13 @@ impl<'t> Statements<'t> {
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 "preparing a tag write",
             )?,
+            insert_field: prepared(
+                "INSERT INTO document_fields (
+                     document, key, ordinal, path, container, raw, typed, least_raw,
+                     least_typed
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "preparing a field write",
+            )?,
             // The hash the tombstone carries comes back from the row this
             // removes, so the delete and the record read one value between them.
             delete_document: prepared(
@@ -453,11 +470,7 @@ fn upsert(
     tally: &mut Tally,
 ) -> Result<(), StoreError> {
     refuse_a_document_that_does_not_add_up(facts)?;
-    let projection = facts
-        .frontmatter
-        .as_ref()
-        .map(json::canonical_json)
-        .transpose()?;
+    let projection = facts.frontmatter().map(json::canonical_json).transpose()?;
     let projection_hash = projection.as_deref().map(hash::sub_fingerprint);
 
     let document: i64 = statements
@@ -555,11 +568,47 @@ fn upsert(
             .map_err(|error| error::sql("writing a tag row", error))?;
     }
 
+    for row in facts.fields().rows() {
+        let (container, raw, typed, least_raw, least_typed) = match row {
+            FieldRow::Presence { container, .. } => {
+                (Some(container.as_str()), None, None, false, false)
+            }
+            FieldRow::Value {
+                raw,
+                typed,
+                least_raw,
+                least_typed,
+                ..
+            } => (
+                None,
+                raw.as_deref(),
+                typed.as_deref(),
+                *least_raw,
+                *least_typed,
+            ),
+        };
+        statements
+            .insert_field
+            .execute(params![
+                document,
+                row.key(),
+                row.ordinal(),
+                facts.path.as_str(),
+                container,
+                raw,
+                typed,
+                least_raw,
+                least_typed,
+            ])
+            .map_err(|error| error::sql("writing a field row", error))?;
+    }
+
     tally.documents_upserted += 1;
     tally.link_rows += facts.links.len() as u64;
     tally.heading_rows += facts.headings.len() as u64;
     tally.block_rows += facts.blocks.len() as u64;
     tally.tag_rows += facts.tags.len() as u64;
+    tally.field_rows += facts.fields().rows().len() as u64;
     if projection.is_some() {
         tally.projections += 1;
     }
@@ -630,6 +679,43 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
         what: "the byte length a document's body offset and body account for",
         limit: widest(accounted),
         given: widest(facts.byte_length),
+    })
+}
+
+/// Refuse a document whose typed field values were derived under a schema the
+/// store does not pin.
+///
+/// **The typed column holds only what the pinned schema derives.** A pin
+/// clears it in the pin's own transaction, and the walk refills it under the
+/// new schema, so a typed value derived under any other schema — the one the
+/// pin replaced, or a declaration read before it — would stand in an order no
+/// read names. The pin is read in the transaction the rows are written in, so
+/// no pin can land between the comparison and the write.
+///
+/// Rows carrying no typed value need no agreement: raw text, presence and the
+/// raw marker are a function of the document alone, and a document derived
+/// under no declaration, or under a stale one that types none of its keys,
+/// writes the typed column as a pin leaves it — empty — for the walk to fill.
+fn refuse_typed_values_the_pin_does_not_derive(
+    transaction: &Transaction<'_>,
+    facts: &DocumentFacts,
+) -> Result<(), StoreError> {
+    let typed = facts
+        .fields()
+        .rows()
+        .iter()
+        .any(|row| matches!(row, FieldRow::Value { typed: Some(_), .. }));
+    if !typed {
+        return Ok(());
+    }
+    let pinned: Option<String> =
+        norn_db::meta::get_meta(transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
+    if pinned.as_deref() == facts.fields_schema() {
+        return Ok(());
+    }
+    Err(StoreError::UnpinnedDeclaration {
+        derived_under: facts.fields_schema().map(str::to_string),
+        pinned,
     })
 }
 

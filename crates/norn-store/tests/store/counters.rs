@@ -75,6 +75,7 @@ fn a_document_write_counts_what_it_wrote() {
         reading.nonzero(),
         vec![
             ("documents_upserted", 1),
+            ("field_rows_written", 4),
             ("frontmatter_projections", 1),
             ("heading_rows_written", 2),
             ("link_rows_written", 2),
@@ -175,8 +176,9 @@ fn a_re_derivation_counts_what_it_discarded() {
     let reading = request.finish();
 
     assert_eq!(reading.get("documents_upserted"), Some(2));
-    assert_eq!(reading.get("fact_rows_discarded"), Some(8));
+    assert_eq!(reading.get("fact_rows_discarded"), Some(12));
     assert_eq!(reading.get("link_rows_written"), Some(4));
+    assert_eq!(reading.get("field_rows_written"), Some(8));
 }
 
 /// The same operation over two documents of the same shape reads the same

@@ -9,9 +9,10 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use norn_store::{
-    BlockFact, CandidateFact, Change, ClassKey, DerivationCounters, DocumentFacts, DocumentPath,
-    FindingFacts, FrontmatterValue, HeadingFact, IncrementOutcome, IncrementProvenance, LinkFact,
-    LinkFamily, Provenance, Request, Span, Store, TagFact, TagSource, suffix_probe,
+    BlockFact, CandidateFact, Change, ClassKey, DeclaredFields, DerivationCounters, DocumentFacts,
+    DocumentPath, FindingFacts, FrontmatterValue, HeadingFact, IncrementOutcome,
+    IncrementProvenance, LinkFact, LinkFamily, Provenance, Request, Span, Store, TagFact,
+    TagSource, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::scratch::Scratch as TestkitScratch;
@@ -174,13 +175,16 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
     facts.body_offset = 42;
     facts.byte_length = facts.body_offset + facts.body.len() as u64;
     facts.frontmatter_diagnostic_count = 1;
-    facts.frontmatter = Some(FrontmatterValue::Map(vec![
-        (
-            "title".to_string(),
-            FrontmatterValue::String("Norn".to_string()),
-        ),
-        ("draft".to_string(), FrontmatterValue::Bool(false)),
-    ]));
+    facts = facts.with_frontmatter(
+        Some(FrontmatterValue::Map(vec![
+            (
+                "title".to_string(),
+                FrontmatterValue::String("Norn".to_string()),
+            ),
+            ("draft".to_string(), FrontmatterValue::Bool(false)),
+        ])),
+        &DeclaredFields::none(),
+    );
     facts.links = vec![
         LinkFact {
             family: LinkFamily::Wikilink,

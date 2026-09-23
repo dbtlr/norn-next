@@ -21,7 +21,9 @@
 //! Order is the position in the slice. A fact carries no ordinal of its own
 //! because the store assigns one from the slice index, which is exactly the
 //! emission order the text layer contracts — and because two spellings of a
-//! row's position could disagree.
+//! row's position could disagree. Field rows are the one exception: a field
+//! row's ordinal is its place under its key rather than in a slice, and
+//! [`crate::FieldRows::derive`] — the only thing that makes one — assigns it.
 //!
 //! # In and out are the same types, except where the projection is one-way
 //!
@@ -35,6 +37,7 @@ use std::collections::BTreeSet;
 
 use norn_wire::{FindingKind, Severity};
 
+use crate::fields::{DeclaredFields, FieldRows};
 use crate::json::FrontmatterValue;
 use crate::path::{ClassKey, DocumentPath};
 
@@ -171,6 +174,33 @@ pub struct TagFact {
 }
 
 /// Everything one document says, as the store takes it.
+///
+/// A document's frontmatter and field rows are read, never assigned: a
+/// caller that could assign one could leave it disagreeing with the other.
+///
+/// ```compile_fail,E0616
+/// use norn_store::{DocumentFacts, DocumentPath};
+///
+/// let mut facts = DocumentFacts::new(
+///     DocumentPath::new("a.md").expect("a path"),
+///     "hash",
+///     "body",
+///     4,
+/// );
+/// facts.frontmatter = None;
+/// ```
+///
+/// ```compile_fail,E0616
+/// use norn_store::{DocumentFacts, DocumentPath, FieldRows};
+///
+/// let mut facts = DocumentFacts::new(
+///     DocumentPath::new("a.md").expect("a path"),
+///     "hash",
+///     "body",
+///     4,
+/// );
+/// facts.fields = FieldRows::default();
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct DocumentFacts {
     pub path: DocumentPath,
@@ -191,8 +221,9 @@ pub struct DocumentFacts {
     /// is relative to.
     pub body_offset: u64,
     /// The frontmatter value tree, or `None` where there is no projection to
-    /// make — no block, or a block that did not parse.
-    pub frontmatter: Option<FrontmatterValue>,
+    /// make — no block, or a block that did not parse. Private, and set with
+    /// `fields` through [`DocumentFacts::with_frontmatter`] alone.
+    frontmatter: Option<FrontmatterValue>,
     /// How many **frontmatter-scoped** diagnostics the parse raised, which is
     /// what discriminates the two things `frontmatter: None` can mean: zero is
     /// "there was no block", and nonzero is "there was a block and it did not
@@ -209,13 +240,23 @@ pub struct DocumentFacts {
     pub blocks: Vec<BlockFact>,
     /// Tags in the order they were read, both homes.
     pub tags: Vec<TagFact>,
+    /// The field rows `frontmatter` derives. Private, and set with
+    /// `frontmatter` through [`DocumentFacts::with_frontmatter`] alone, so the
+    /// rows a document carries are the rows its own frontmatter derives: no
+    /// caller can hand over one without the other.
+    fields: FieldRows,
+    /// The fingerprint of the schema `fields` were derived under, or `None`
+    /// where they were derived under no schema. Set with `fields`, and read by
+    /// the increment, which refuses typed values derived under a schema the
+    /// store does not pin.
+    fields_schema: Option<String>,
 }
 
 impl DocumentFacts {
     /// A document with no derived facts at all: the row, its body, its size, and
-    /// nothing else. The fact lists and the frontmatter are then assigned by the
-    /// caller, which keeps a document with none of them from having to name four
-    /// empty vectors.
+    /// nothing else. The fact lists are then assigned by the caller, which keeps
+    /// a document with none of them from having to name four empty vectors, and
+    /// the frontmatter is set through [`DocumentFacts::with_frontmatter`].
     ///
     /// `byte_length` is taken rather than defaulted from `body`. The two are the
     /// same number only for a document with no frontmatter block, and a default
@@ -239,7 +280,43 @@ impl DocumentFacts {
             headings: Vec::new(),
             blocks: Vec::new(),
             tags: Vec::new(),
+            fields: FieldRows::default(),
+            fields_schema: None,
         }
+    }
+
+    /// The same document with `frontmatter` as its value and the field rows it
+    /// derives under `declared`.
+    ///
+    /// The one way the pair is set, so the rows are always the ones the value
+    /// derives; the declaration decides only their typed half, and the facts
+    /// keep the fingerprint of the schema it was read from beside them.
+    pub fn with_frontmatter(
+        mut self,
+        frontmatter: Option<FrontmatterValue>,
+        declared: &DeclaredFields,
+    ) -> Self {
+        self.fields = FieldRows::derive(frontmatter.as_ref(), declared);
+        self.fields_schema = declared.schema().map(str::to_string);
+        self.frontmatter = frontmatter;
+        self
+    }
+
+    /// The frontmatter value tree, or `None` where there is no projection to
+    /// make.
+    pub fn frontmatter(&self) -> Option<&FrontmatterValue> {
+        self.frontmatter.as_ref()
+    }
+
+    /// The field rows the frontmatter derives, typed half included.
+    pub fn fields(&self) -> &FieldRows {
+        &self.fields
+    }
+
+    /// The fingerprint of the schema the field rows were derived under, or
+    /// `None` where they were derived under no schema.
+    pub fn fields_schema(&self) -> Option<&str> {
+        self.fields_schema.as_deref()
     }
 }
 
@@ -299,6 +376,9 @@ pub struct StoredFacts {
     pub headings: Vec<HeadingFact>,
     pub blocks: Vec<BlockFact>,
     pub tags: Vec<TagFact>,
+    /// The field rows, typed half included, in key order and then ordinal
+    /// order.
+    pub fields: FieldRows,
 }
 
 /// How a document's death was learned.
@@ -535,6 +615,10 @@ pub struct Invalidation {
     /// belonging to a class being re-derived. Parse-fact rows carry no schema key
     /// and no class, so none of them is ever counted here.
     pub findings_discarded: u64,
+    /// Field values whose typed sort key the act cleared, because it was derived
+    /// under a different vault schema. Only a schema pin clears one; the row
+    /// and its raw text stay.
+    pub typed_values_discarded: u64,
 }
 
 /// What pinning a vault schema did.

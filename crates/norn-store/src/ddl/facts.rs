@@ -48,8 +48,9 @@
 //! probes it — a document's own path yields the handful of segment-suffixes
 //! that can address it, and the join looks each of them up — but that builder
 //! is Layer 3's, and the crate's own rule is that index support arrives with
-//! the statement whose `EXPLAIN` bar can judge it. The same rule is why no
-//! other lookup column here carries an index today.
+//! the statement whose `EXPLAIN` bar can judge it. The same rule is why the
+//! one other lookup index here is `document_tags_name`, which a find's tag
+//! part seeks and its bar judges.
 //!
 //! Raw also means **unfolded**: `links.target` is compared under `BINARY`, and
 //! `documents` folds nothing either, so the two sides agree about what a name
@@ -88,7 +89,9 @@
 //! Case is preserved, because deciding that `#Work` and `#work` are the same
 //! tag is a matching question and matching happens at the query venue. The
 //! comparison is therefore `BINARY`; a case-folded index is the query venue's
-//! to add along with the query that needs it. `source` says which home the tag
+//! to add along with the query that needs it. `document_tags_name` is the
+//! bytewise one a find's tag part seeks: the documents carrying one name, read
+//! off the index without touching the rows. `source` says which home the tag
 //! came from — a body token or the frontmatter `tags` field — because the two
 //! are read by different grammars and a consumer may care which one an author
 //! used. Frontmatter tags may have no locatable span, so the span columns are
@@ -179,5 +182,6 @@ fn nullable_span_tables() -> Vec<String> {
         ),
         "CREATE UNIQUE INDEX document_tags_document_ordinal ON document_tags(document, ordinal)"
             .to_string(),
+        "CREATE INDEX document_tags_name ON document_tags(name, document)".to_string(),
     ]
 }

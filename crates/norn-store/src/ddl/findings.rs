@@ -17,6 +17,13 @@
 //! the schema. Two open ranges are two index seeks over
 //! `findings_vault_schema_fingerprint`, and they cost the rows they delete.
 //!
+//! The same index carries the kind and the path after the fingerprint, which
+//! is the direction a find's finding part reads: the paths a kind of finding
+//! stands over under the active fingerprint, one seek on the pair and the paths
+//! off the index. The fingerprint leads rather than the kind so that a
+//! statement naming kinds alone — a subject's discard, a walk's page of
+//! subjects — is not offered a kind-led index in place of the path it seeks.
+//!
 //! # `generation` is what a repair plan cites
 //!
 //! A repair plan is compiled against findings as they stood, and it says so by
@@ -174,7 +181,7 @@ const STATEMENTS: &[&str] = &[
        AND (span_line IS NULL) = (span_offset IS NULL))
 )",
     "CREATE INDEX findings_path ON findings(path)",
-    "CREATE INDEX findings_vault_schema_fingerprint ON findings(vault_schema_fingerprint)",
+    "CREATE INDEX findings_vault_schema_fingerprint ON findings(vault_schema_fingerprint, kind, path)",
     "CREATE TABLE finding_classes (
     finding   INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
     class_key TEXT    NOT NULL,

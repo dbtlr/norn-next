@@ -76,6 +76,7 @@ pub(crate) enum Counter {
     HeadingRowsWritten,
     BlockRowsWritten,
     TagRowsWritten,
+    FieldRowsWritten,
     FactRowsDiscarded,
     /// Frontmatter value trees written as canonical JSON. **Storage encoding,
     /// not derivation** — see this module's Composed bar.
@@ -83,6 +84,8 @@ pub(crate) enum Counter {
     TombstonesRecorded,
     FindingsWritten,
     FindingsDiscarded,
+    /// Typed field values a schema pin cleared.
+    TypedValuesDiscarded,
     VaultSchemaPins,
 }
 
@@ -95,11 +98,13 @@ impl Counter {
         Counter::HeadingRowsWritten,
         Counter::BlockRowsWritten,
         Counter::TagRowsWritten,
+        Counter::FieldRowsWritten,
         Counter::FactRowsDiscarded,
         Counter::FrontmatterProjections,
         Counter::TombstonesRecorded,
         Counter::FindingsWritten,
         Counter::FindingsDiscarded,
+        Counter::TypedValuesDiscarded,
         Counter::VaultSchemaPins,
     ];
 
@@ -113,11 +118,13 @@ impl Counter {
             Counter::HeadingRowsWritten => "heading_rows_written",
             Counter::BlockRowsWritten => "block_rows_written",
             Counter::TagRowsWritten => "tag_rows_written",
+            Counter::FieldRowsWritten => "field_rows_written",
             Counter::FactRowsDiscarded => "fact_rows_discarded",
             Counter::FrontmatterProjections => "frontmatter_projections",
             Counter::TombstonesRecorded => "tombstones_recorded",
             Counter::FindingsWritten => "findings_written",
             Counter::FindingsDiscarded => "findings_discarded",
+            Counter::TypedValuesDiscarded => "typed_values_discarded",
             Counter::VaultSchemaPins => "vault_schema_pins",
         }
     }

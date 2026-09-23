@@ -222,6 +222,7 @@ fn error_details() -> Vec<ErrorDetail> {
             Some("fp-2".to_string()),
         )),
         ErrorDetail::cursor_order_changed(CursorOrderChanged::new("fp-1", None)),
+        ErrorDetail::cursor_order_changed(CursorOrderChanged::minted_raw(Some("fp-2".to_string()))),
     ]);
     details.extend(
         not_ready_states()
@@ -480,6 +481,7 @@ fn unsatisfied_parts() -> Vec<Unsatisfied> {
         Unsatisfied::unknown_predicate_key("due", vec!["date".to_string()]),
         Unsatisfied::bare_directory("docs"),
         Unsatisfied::malformed_glob("docs/[", "the character class does not close"),
+        Unsatisfied::malformed_query("design AND", "fts5: syntax error near \"\""),
         Unsatisfied::impossible_path("/etc/passwd"),
         Unsatisfied::missing_section("Design"),
         Unsatisfied::missing_block("a1"),
@@ -2405,6 +2407,22 @@ fn a_predicate_refuses_a_target_outside_the_grammar() {
     );
 }
 
+/// A membership part naming no value is a part no document satisfies, and the
+/// read path refuses it entire rather than carrying it to a store that would
+/// refuse it later. One value is a membership.
+#[test]
+fn a_membership_part_refuses_bytes_that_name_no_value() {
+    assert!(
+        serde_json::from_str::<Predicate>(r#"{"op":"in","key":"type","values":[]}"#).is_err(),
+        "a membership in no value read back as one"
+    );
+    assert_eq!(
+        serde_json::from_str::<Predicate>(r#"{"op":"in","key":"type","values":["note"]}"#)
+            .expect("a membership in one value"),
+        Predicate::in_any("type", ["note".to_string()])
+    );
+}
+
 // ── The cursor envelope ──────────────────────────────────────────────────
 
 #[test]
@@ -2874,6 +2892,13 @@ fn an_unsatisfied_part_is_an_object_tagged_part() {
     assert_eq!(
         wire(&Unsatisfied::bare_directory("docs")),
         r#"{"part":"bare_directory","path":"docs"}"#
+    );
+    assert_eq!(
+        wire(&Unsatisfied::malformed_query(
+            "design AND",
+            "fts5: syntax error near \"\""
+        )),
+        r#"{"part":"malformed_query","query":"design AND","problem":"fts5: syntax error near \"\""}"#
     );
     assert_eq!(
         wire(&Unsatisfied::resolves_not_applicable(target(

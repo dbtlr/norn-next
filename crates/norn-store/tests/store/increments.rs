@@ -1265,7 +1265,8 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
         vec![
             ("block_rows_written", 6),
             ("documents_upserted", 3),
-            ("fact_rows_discarded", 8),
+            ("fact_rows_discarded", 12),
+            ("field_rows_written", 12),
             ("frontmatter_projections", 3),
             ("heading_rows_written", 6),
             ("link_rows_written", 6),

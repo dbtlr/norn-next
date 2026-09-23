@@ -23,7 +23,8 @@
 //! ways.
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::finding::FindingKind;
 use crate::target::ResolutionTarget;
@@ -59,7 +60,9 @@ pub enum Predicate {
     In {
         /// The frontmatter key.
         key: String,
-        /// The values the key may hold, as text.
+        /// The values the key may hold, as text: at least one.
+        #[serde(deserialize_with = "at_least_one_value")]
+        #[schemars(length(min = 1))]
         values: Vec<String>,
     },
     /// The document carries `key` at all.
@@ -100,7 +103,11 @@ pub enum Predicate {
     /// The document's path matches `glob`.
     #[non_exhaustive]
     Path {
-        /// The glob the path must match.
+        /// The glob the path must match, anchored at both ends: `?` matches
+        /// one character that is not `/`, `*` any run of characters holding
+        /// no `/`, and a whole `**` segment any run of segments, none
+        /// included. Every other character matches itself; there is no
+        /// escape.
         glob: String,
     },
     /// The document carries a link whose target is `target`.
@@ -152,6 +159,9 @@ impl Predicate {
     }
 
     /// `key` holds one of `values`.
+    ///
+    /// The read path refuses a membership naming no value; this constructor
+    /// does not, and the store refuses one it is handed.
     pub fn in_any(key: impl Into<String>, values: impl IntoIterator<Item = String>) -> Self {
         Predicate::In {
             key: key.into(),
@@ -216,4 +226,21 @@ impl Predicate {
     pub const fn has_finding(kind: FindingKind) -> Self {
         Predicate::HasFinding { kind }
     }
+}
+
+/// A membership part's values as the read path takes them: at least one. A
+/// membership in no value is a part no document satisfies, so bytes spelling
+/// one are refused where they are read rather than carried to a store that
+/// would refuse them later.
+fn at_least_one_value<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    if values.is_empty() {
+        return Err(D::Error::custom(
+            "a membership part names at least one value",
+        ));
+    }
+    Ok(values)
 }

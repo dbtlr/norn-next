@@ -17,13 +17,15 @@
 //! its own deaths through the operational leg instead.
 //!
 //! Most mutations go through the store's own writer, which is what a caller can
-//! really do. Six fields have no writer that reaches them alone — the full-text
-//! index, which is only ever written through `documents.body`; the recorded size
-//! and body offset, which the store refuses to accept unless they add up with
-//! the body; the two sub-fingerprints, which are stamped from the columns they
-//! hash; and the timestamp, which the store reads off the clock itself. Those
-//! six reach the database through `induced_failure`, the store's own fenced
-//! seam, and each case says why where it does.
+//! really do. Seven fields have no writer that reaches them alone — the
+//! full-text index, which is only ever written through `documents.body`; the
+//! recorded size and body offset, which the store refuses to accept unless they
+//! add up with the body; the frontmatter projection, which the store refuses
+//! beside field rows another value derives; the two sub-fingerprints, which are
+//! stamped from the columns they hash; and the timestamp, which the store reads
+//! off the clock itself. Those seven reach the database through
+//! `induced_failure`, the store's own fenced seam, and each case says why where
+//! it does.
 
 use norn_store::{Provenance, Store, induced_failure};
 use norn_testkit::equivalence::{
@@ -217,15 +219,37 @@ fn a_changed_frontmatter_projection_hash_is_a_divergence() {
 fn a_changed_frontmatter_projection_is_a_divergence() {
     let mut pair = Pair::new("pin-frontmatter");
     let divergence = pair.diverged(|store| {
-        let mut facts = document_with_every_fact("one/glossary.md", "hash-1");
-        facts.frontmatter = Some(norn_store::FrontmatterValue::Map(vec![(
-            "title".to_string(),
-            norn_store::FrontmatterValue::String("Another".to_string()),
-        )]));
+        // The writer derives the field rows from the value it projects, so a
+        // projection that moved through it would move the rows too. The
+        // column is moved alone, its hash left standing.
+        induced_failure::execute_out_of_band(
+            store,
+            "UPDATE documents SET frontmatter = '{\"draft\":false,\"title\":\"Another\"}'
+             WHERE frontmatter IS NOT NULL",
+        )
+        .expect("moving the frontmatter projection alone");
+    });
+    assert_names(&divergence, "document[one/glossary.md].frontmatter");
+}
+
+/// The field rows' typed half is reached by the writer alone: the same
+/// frontmatter written under a declaration that orders a key by a type is the
+/// same document with typed values beside its raw ones.
+#[test]
+fn a_changed_typed_field_value_is_a_divergence() {
+    let mut pair = Pair::new("pin-typed-field");
+    let divergence = pair.diverged(|store| {
+        let facts = document_with_every_fact("one/glossary.md", "hash-1");
+        let typed = norn_store::DeclaredFields::under("schema-fingerprint").declare_typed(
+            "draft",
+            norn_store::TypedOrder::new(|raw| Some(format!("typed {raw}"))),
+        );
+        let frontmatter = facts.frontmatter().cloned();
+        let facts = facts.with_frontmatter(frontmatter, &typed);
         let mut request = store.begin_request();
         write_document(&mut request, &facts);
     });
-    assert_names(&divergence, "document[one/glossary.md].frontmatter");
+    assert_names(&divergence, "document[one/glossary.md].field[");
 }
 
 #[test]

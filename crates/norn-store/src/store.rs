@@ -429,17 +429,30 @@ impl Snapshot {
     /// top of that and refuse the pragma, the attach and the temporary object
     /// a statement would otherwise reach around it with.
     ///
-    /// The read builders are the layer that runs statements here, each of them
-    /// counted on [`Snapshot::counters`] beside the establishing one. They are
-    /// the consuming layer this accessor waits for; until they land the call
-    /// graph reaches it from this module's own cases alone, which is where the
-    /// refusals above are stated.
-    #[allow(dead_code)] // No builder composes statements here yet; this module's cases are the only callers.
+    /// The find builder runs its statements here, and each one it runs is
+    /// counted on [`Snapshot::counters`] beside the establishing one through
+    /// [`Snapshot::count_statement`]. The application-defined functions those
+    /// statements call are registered on this connection when its handle is
+    /// minted, by [`Store::open_reader`].
     pub(crate) fn connection(&self) -> &Connection {
         self.database
             .as_ref()
             .expect("a snapshot holds its connection until it is dropped")
             .connection()
+    }
+
+    /// The database this snapshot reads, from its creation to its discard.
+    pub fn epoch(&self) -> &str {
+        self.reading.epoch()
+    }
+
+    /// Count one statement run on this snapshot's connection.
+    ///
+    /// Counted as it is run, whether or not it answered: a statement that
+    /// waited out the busy timeout and then failed held the connection for
+    /// that wait.
+    pub(crate) fn count_statement(&mut self) {
+        self.counters.count_statement();
     }
 }
 
@@ -635,6 +648,10 @@ impl Store {
     /// write-ahead logging is refused rather than read under a mode its writer
     /// is not using.
     ///
+    /// The application-defined functions the find builder's statements call —
+    /// the path-glob match — are registered on the connection here, before any
+    /// statement runs on it, so every snapshot the handle establishes has them.
+    ///
     /// It is taken from a **live** store, and that is what binds the handle:
     /// the writer holds the file open, so the `-shm` a read-only write-ahead
     /// logging open needs is there to be read. Nothing here concludes a heal
@@ -651,6 +668,10 @@ impl Store {
         let reader = opened
             .adopted
             .map_err(StoreError::from)
+            .and_then(|database| {
+                crate::find::register_functions(database.connection())?;
+                Ok(database)
+            })
             .map(|database| SnapshotReader {
                 epoch: database.epoch().to_string(),
                 connection: Mutex::new(Some(database)),

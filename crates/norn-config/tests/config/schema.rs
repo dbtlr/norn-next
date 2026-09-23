@@ -142,6 +142,37 @@ fn reporting_over_an_empty_vocabulary_judges_no_document() {
     assert!(!schema.rederives_documents());
 }
 
+/// A field declared as text or tags orders as the text it is written as, so
+/// declaring one changes no stored order and a pin of it owes no document a
+/// re-derivation.
+#[test]
+fn a_schema_declaring_only_text_ordered_fields_judges_no_document() {
+    let schema = VaultSchema::parse(
+        b"version: 1\nfields:\n  title:\n    type: text\n  topics:\n    type: tags\n",
+    )
+    .expect("a text-only schema");
+
+    assert_eq!(schema.fields().count(), 2);
+    assert!(FieldType::Text.orders_as_text());
+    assert!(FieldType::Tags.orders_as_text());
+    assert!(!schema.rederives_documents());
+}
+
+/// A field declared with a type that orders otherwise is what the typed column
+/// holds a sort key for, and a pin clears that column: each such type obliges
+/// the re-derivation that refills it, the tag facet reporting nothing.
+#[test]
+fn a_schema_declaring_a_typed_field_rederives_every_document() {
+    for kind in [FieldType::Number, FieldType::Boolean, FieldType::Date] {
+        let bytes = format!("version: 1\nfields:\n  rating:\n    type: {kind}\n");
+        let schema = VaultSchema::parse(bytes.as_bytes()).expect("a typed schema");
+
+        assert!(!kind.orders_as_text(), "{kind}");
+        assert!(!schema.tags().reports_undeclared());
+        assert!(schema.rederives_documents(), "a field declared {kind}");
+    }
+}
+
 #[test]
 fn a_reporting_facet_admits_its_names_and_its_patterns() {
     let schema = VaultSchema::parse(WHOLE).expect("a whole schema");

@@ -34,6 +34,11 @@ publish.workspace = true
 #   could reach around that flag with is left to run. With it they are refused
 #   at statement preparation, and the one read-only pragma a full-text read
 #   needs is the single name allowed through.
+# - `functions` registers the application-defined SQL functions a client's
+#   read statements call, so a match the store's grammar defines — a path glob
+#   — runs inside the statement that pages the rows rather than over rows the
+#   statement already read. The authorizer admits a function call as it admits
+#   a read.
 # - Nothing else. No `serde_json`, no `time`, no `chrono`: a value's shape at
 #   rest is the client's own projection, and a driver convenience that decided
 #   it would be a second spelling of one.

@@ -95,22 +95,6 @@ const SEPARATOR: char = '/';
 /// printable here".
 pub const RENDERED_MARKER: char = '\u{FFFD}';
 
-/// The code point immediately after [`SEPARATOR`], which is what an exclusive
-/// upper bound over a separator-terminated prefix ends with.
-const PAST_SEPARATOR: char = '0';
-
-const _: () = assert!(
-    SEPARATOR as u32 + 1 == PAST_SEPARATOR as u32,
-    "an exclusive upper bound is the prefix with its final separator stepped by one, so the two \
-     characters have to be adjacent"
-);
-
-const _: () = assert!(
-    SEPARATOR.len_utf8() == 1,
-    "the upper bound replaces the final separator with one character, so the separator has to be \
-     one byte for the arithmetic to be a byte step"
-);
-
 /// A vault-root-relative document path, with the derived forms the store
 /// indexes it by.
 ///
@@ -604,32 +588,47 @@ pub fn class_probe(stem: &str) -> Result<SuffixProbe, StoreError> {
 /// The prefix, and the key just past everything it opens.
 ///
 /// `lower` ends with the separator — that is what makes a prefix match
-/// segment-aligned — so the exclusive bound is that separator stepped by one,
-/// and the arithmetic is exact rather than a byte-level search for a successor.
+/// segment-aligned — so its [`prefix_successor`] is that separator stepped to
+/// the next character, and always exists.
 fn bounded(lower: String) -> Range {
     debug_assert!(
         lower.ends_with(SEPARATOR),
         "a probe prefix is separator-terminated: {lower}"
     );
-    let mut upper = lower.clone();
-    upper.pop();
-    upper.push(PAST_SEPARATOR);
+    let upper = prefix_successor(&lower).expect("a separator steps to the character after it");
     Range { lower, upper }
 }
 
 /// The bounds containing everything segment-aligned beneath `path`.
 ///
 /// The separator is load-bearing: `a/ <= key < a0` holds `a/child.md` and not
-/// `ab/child.md`, and the upper bound is that separator stepped by one byte, so
-/// the range is exact rather than a search for a successor key.
+/// `ab/child.md`.
 fn descendant_bounds(path: &str) -> (String, String) {
-    let mut lower = String::with_capacity(path.len() + 1);
-    lower.push_str(path);
-    lower.push(SEPARATOR);
-    let mut upper = lower.clone();
-    upper.pop();
-    upper.push(PAST_SEPARATOR);
+    let Range { lower, upper } = bounded(format!("{path}{SEPARATOR}"));
     (lower, upper)
+}
+
+/// The least text that sorts after every text starting with `prefix`, or
+/// nothing where no text does.
+///
+/// The last character that has a next one is stepped to it, and every
+/// character after it is dropped. In UTF-8 the next character is also the next
+/// text bytewise, so under `BINARY` the result is an exclusive upper bound on
+/// every text starting with `prefix` and on nothing that does not. A prefix
+/// that is empty, or made only of the last character there is, has none.
+///
+/// The one prefix step in the store: a directory's descendant range, a suffix
+/// probe's ranges and a path glob's literal-prefix range are each bounded by it.
+pub(crate) fn prefix_successor(prefix: &str) -> Option<String> {
+    let mut characters: Vec<char> = prefix.chars().collect();
+    while let Some(last) = characters.pop() {
+        let stepped = (u32::from(last) + 1..=u32::from(char::MAX)).find_map(char::from_u32);
+        if let Some(stepped) = stepped {
+            characters.push(stepped);
+            return Some(characters.into_iter().collect());
+        }
+    }
+    None
 }
 
 /// The refusals every vault-root-relative path shares, whatever its leaf names.
@@ -703,4 +702,28 @@ fn control_byte_problem(text: &str) -> Option<&'static str> {
     text.chars()
         .any(char::is_control)
         .then_some("it carries a control character")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A separator steps to the character after it, which is what bounds a
+    /// segment-aligned prefix: `a/` opens up to `a0`.
+    #[test]
+    fn a_separator_terminated_prefix_steps_its_separator() {
+        assert_eq!(prefix_successor("a/"), Some("a0".to_string()));
+        assert_eq!(
+            descendant_bounds("notes"),
+            ("notes/".to_string(), "notes0".to_string())
+        );
+    }
+
+    #[test]
+    fn a_prefix_ending_in_the_last_character_steps_the_one_before_it() {
+        assert_eq!(prefix_successor("a\u{10FFFF}"), Some("b".to_string()));
+        assert_eq!(prefix_successor("\u{10FFFF}"), None);
+        assert_eq!(prefix_successor(""), None);
+        assert_eq!(prefix_successor("\u{D7FF}"), Some("\u{E000}".to_string()));
+    }
 }
