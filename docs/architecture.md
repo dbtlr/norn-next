@@ -774,7 +774,13 @@ suffix/stem resolve and findings-for-path are read through statements the seam a
 
 **Count-by-field and links-to carry no bar**: no builder emits either, and a find refuses
 a links-to part by name, because the link index it would filter by does not exist. The
-warm-zero counter bar does gate per PR, and no query shape carries a timing or a memory
+warm-zero counter bar gates per PR, and the find shape carries four bars of its own. In the
+counter lane, a find through a live read hold reads nothing through `norn-fs` on its own
+thread and lands nothing in the host's account of its jobs, at a pinned number of statements
+a page; and an unfiltered find, paged newest first, counts the same work at 300 documents as
+at 2000. In the memory lane, the two `read-` bars hold a process that attached the
+~2k-document profile and read it through a live hold to an absolute peak ceiling, and to a
+ratio over the peak of the same attach without the read. No query shape carries a timing
 bar.
 
 ### 4. One obvious path

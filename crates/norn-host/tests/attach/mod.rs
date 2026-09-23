@@ -20,6 +20,8 @@
 #![allow(dead_code)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
+pub mod read;
+
 use std::ffi::OsStr;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};

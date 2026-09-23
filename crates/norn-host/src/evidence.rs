@@ -60,6 +60,7 @@ pub struct JobEvidence {
     document_opens: AtomicU64,
     stats: AtomicU64,
     walk_dirents: AtomicU64,
+    documents_derived: AtomicU64,
     changesets_applied: AtomicU64,
     documents_upserted: AtomicU64,
     documents_deleted: AtomicU64,
@@ -86,6 +87,18 @@ pub struct EvidenceReading {
     pub stats: u64,
     /// Directory entries taken off a directory stream.
     pub walk_dirents: u64,
+    /// Vault documents whose bytes a job handed to derivation: one per
+    /// document read and derived, whatever the derivation concluded — facts,
+    /// a quarantine, or a block it could not read.
+    ///
+    /// **The one site a vault document's bytes reach derivation** is where
+    /// this is tallied. Every job that derives runs under an attribution
+    /// window and folds its tally into the account when it ends, so what a
+    /// stretch between two readings moved is what the jobs that ended inside
+    /// it derived: zero where none of them derived a document from the vault,
+    /// and nonzero where one did, whichever job it was. A job still running
+    /// when the stretch closes reaches a later reading.
+    pub documents_derived: u64,
     /// Changesets that landed. A changeset is the unit of atomicity, so this is
     /// how many times a job committed something.
     pub changesets_applied: u64,
@@ -143,6 +156,9 @@ impl EvidenceReading {
             document_opens: self.document_opens.saturating_sub(earlier.document_opens),
             stats: self.stats.saturating_sub(earlier.stats),
             walk_dirents: self.walk_dirents.saturating_sub(earlier.walk_dirents),
+            documents_derived: self
+                .documents_derived
+                .saturating_sub(earlier.documents_derived),
             changesets_applied: self
                 .changesets_applied
                 .saturating_sub(earlier.changesets_applied),
@@ -177,6 +193,7 @@ impl JobEvidence {
             document_opens: get(&self.document_opens),
             stats: get(&self.stats),
             walk_dirents: get(&self.walk_dirents),
+            documents_derived: get(&self.documents_derived),
             changesets_applied: get(&self.changesets_applied),
             documents_upserted: get(&self.documents_upserted),
             documents_deleted: get(&self.documents_deleted),
@@ -220,6 +237,9 @@ impl JobEvidence {
         self.walk_dirents
             .fetch_add(reads.walk_dirents, Ordering::Relaxed);
 
+        self.documents_derived
+            .fetch_add(take_documents_derived(), Ordering::Relaxed);
+
         let changesets = take_changeset_tally();
         self.changesets_applied
             .fetch_add(changesets.applied, Ordering::Relaxed);
@@ -242,6 +262,7 @@ impl JobEvidence {
         // itself.
         let window = ReadWindow::open();
         let _ = take_changeset_tally();
+        let _ = take_documents_derived();
         Attribution {
             account: Arc::clone(self),
             window: Some(window),
@@ -313,6 +334,22 @@ fn take_changeset_tally() -> ChangesetTally {
     CHANGESETS.with(|cell| cell.replace(ChangesetTally::default()))
 }
 
+thread_local! {
+    static DOCUMENTS_DERIVED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Record that one vault document's bytes were handed to derivation.
+///
+/// Tallied on the thread that derived it and folded into the account by the
+/// job that thread runs, as a changeset is.
+pub(crate) fn count_document_derived() {
+    DOCUMENTS_DERIVED.with(|cell| cell.set(cell.get() + 1));
+}
+
+fn take_documents_derived() -> u64 {
+    DOCUMENTS_DERIVED.with(|cell| cell.replace(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +402,23 @@ mod tests {
             count_changeset(&outcome());
         }
         assert_eq!(evidence.read().since(before).changesets_applied, 1);
+    }
+
+    /// A document derived inside a job reaches the account when the job ends,
+    /// and one derived between two jobs belongs to neither.
+    #[test]
+    fn a_document_a_job_derived_reaches_the_account_when_the_job_ends() {
+        let evidence = Arc::new(JobEvidence::default());
+        count_document_derived();
+        {
+            let _job = evidence.attributing();
+            count_document_derived();
+            count_document_derived();
+            assert_eq!(evidence.read().documents_derived, 0);
+        }
+        count_document_derived();
+        drop(evidence.attributing());
+        assert_eq!(evidence.read().documents_derived, 2);
     }
 
     #[test]

@@ -120,6 +120,7 @@ use std::time::{Duration, Instant};
 
 use norn_host::ReloadRefusal;
 use norn_store::Store;
+use norn_testkit::certification::ledger::{ExitBar, NAMED_EXIT_BARS};
 use norn_testkit::churn::{Applied, Family, Folding, Script};
 use norn_testkit::equivalence::{StoreProjection, assert_operationally_valid};
 use norn_testkit::process::Sandbox;
@@ -284,6 +285,12 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             "SOAK_RECOVERY_DOSE" => always_authored(baselines::SOAK_RECOVERY_DOSE),
             "SOAK_RSS_SLOPE_PER_MILLE" => always_authored(baselines::SOAK_RSS_SLOPE_PER_MILLE),
             "FD_BUDGET" => always_authored(baselines::FD_BUDGET),
+            "READ_PEAK_RSS_CEILING_BYTES" => {
+                always_authored(baselines::READ_PEAK_RSS_CEILING_BYTES)
+            }
+            "READ_OVER_ATTACH_PEAK_RSS_PER_MILLE" => {
+                always_authored(baselines::READ_OVER_ATTACH_PEAK_RSS_PER_MILLE)
+            }
             other => panic!(
                 "the ledger names `{other}` in this crate's baselines and nothing here holds its \
                  armed claim to the constant, so the two may drift apart quietly"
@@ -301,6 +308,66 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
     assert!(
         held > 0,
         "no exit bar names this crate's baselines file, so this test holds nothing"
+    );
+}
+
+/// Why `bars` does not meet Layer 3's read exit, or `None` where it does.
+///
+/// **The exit asks for a read that is barred, and barred in earnest**: some
+/// bar the ledger names bars a read through a live hold — a name opening with
+/// `read-` — and every such bar is armed. A roll with no read bar has nothing
+/// to hold a read to, and one whose read bar is unarmed records a reading and
+/// holds nothing against it.
+fn the_read_exit_is_unmet(bars: &[ExitBar]) -> Option<String> {
+    let read: Vec<&ExitBar> = bars
+        .iter()
+        .filter(|bar| bar.name.starts_with("read-"))
+        .collect();
+    if read.is_empty() {
+        return Some("no exit bar the ledger names bars a read".to_string());
+    }
+    let unarmed: Vec<&str> = read
+        .iter()
+        .filter(|bar| !bar.armed)
+        .map(|bar| bar.name)
+        .collect();
+    if unarmed.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "the read bars {unarmed:?} are unarmed, so a run records a read and holds nothing \
+             against it"
+        ))
+    }
+}
+
+/// **Layer 3's read exit.** The ledger names a read bar, and every read bar it
+/// names is armed.
+///
+/// Controls: the same roll with one read bar un-authored fails naming it, and
+/// a roll with no read bar at all fails.
+#[test]
+fn every_read_bar_the_ledger_names_is_armed() {
+    assert_eq!(the_read_exit_is_unmet(NAMED_EXIT_BARS), None);
+
+    let mut unauthored = NAMED_EXIT_BARS.to_vec();
+    let read = unauthored
+        .iter_mut()
+        .find(|bar| bar.name.starts_with("read-"))
+        .expect("the ledger names a read bar");
+    read.armed = false;
+    let name = read.name;
+    let problem = the_read_exit_is_unmet(&unauthored).expect("an unarmed read bar");
+    assert!(problem.contains(name), "{problem}");
+
+    let no_read: Vec<ExitBar> = NAMED_EXIT_BARS
+        .iter()
+        .copied()
+        .filter(|bar| !bar.name.starts_with("read-"))
+        .collect();
+    assert!(
+        the_read_exit_is_unmet(&no_read).is_some(),
+        "a roll naming no read bar met the read exit"
     );
 }
 

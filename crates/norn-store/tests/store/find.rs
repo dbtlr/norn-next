@@ -2105,7 +2105,7 @@ fn a_page_holds_its_bound_and_counts_each_statement_it_runs() {
     let seeded = Seeded::new("find-bound");
     const { assert!(DEFAULT_PAGE >= 5 && DEFAULT_PAGE <= MAX_PAGE) };
     let count = |params: &FindParams| {
-        let mut snapshot = seeded.snapshot();
+        let snapshot = seeded.snapshot();
         let before = snapshot.counters().statements_executed();
         let page = snapshot.find(params, &declared()).expect("a page");
         (
@@ -2207,7 +2207,7 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
             .collect::<Vec<_>>(),
     );
     let reader = Arc::new(store.open_reader().reader.expect("a reader"));
-    let mut snapshot = reader
+    let snapshot = reader
         .try_take()
         .expect("a free handle")
         .establish()

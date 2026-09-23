@@ -441,6 +441,13 @@ pub struct ExitBar {
 ///
 /// The `authored_at` pointer is what the sweep matches on, so a bar that moves
 /// to another file moves its entry with it or fails.
+///
+/// **A name opens with the subject it bars**, so a layer's exit can ask for
+/// the bars of one subject by prefix: `attach-` for attaching a vault,
+/// `read-` for reading one through a live hold, `soak-host-` for the host
+/// under a long mixed load, `soak-settle-` for how long churn takes to settle,
+/// `generator-` for generating a fixture tree, and `text-` for parsing document
+/// text.
 pub const NAMED_EXIT_BARS: &[ExitBar] = &[
     ExitBar {
         name: "attach-peak-rss-ceiling",
@@ -455,6 +462,16 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
     ExitBar {
         name: "attach-fd-budget",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::FD_BUDGET",
+        armed: true,
+    },
+    ExitBar {
+        name: "read-peak-rss-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::READ_PEAK_RSS_CEILING_BYTES",
+        armed: true,
+    },
+    ExitBar {
+        name: "read-over-attach-peak-rss-ratio",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::READ_OVER_ATTACH_PEAK_RSS_PER_MILLE",
         armed: true,
     },
     ExitBar {

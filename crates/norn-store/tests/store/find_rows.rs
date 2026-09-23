@@ -153,7 +153,7 @@ fn a_cursor_continues_exactly_against_the_snapshot_it_was_minted_on() {
         let whole = paths(&seeded.found(&params));
         assert_eq!(whole.len(), 5);
 
-        let mut snapshot = seeded.snapshot();
+        let snapshot = seeded.snapshot();
         let mut drained = Vec::new();
         let mut after: Option<Cursor> = None;
         let typed = matches!(&params.sort, Some(sort) if sort.key == SortKey::field("count"));
@@ -446,7 +446,7 @@ fn a_cursor_among_other_rows_is_refused() {
 fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
     let seeded = Seeded::new("find-hydration-work");
     let work = |params: &FindParams| {
-        let mut snapshot = seeded.snapshot();
+        let snapshot = seeded.snapshot();
         let before = snapshot.counters().statements_executed();
         let found = snapshot.find(params, &declared()).expect("a page");
         assert_eq!(
@@ -579,6 +579,40 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
             "{unnamed:?} in {statements:?}"
         );
     }
+}
+
+/// **A find's work reads out whole, each count under its own name.** A
+/// harness compares two finds name by name, so every count is present at
+/// whatever value it holds, the nested rows one name per table.
+#[test]
+fn a_finds_work_reads_out_every_count_by_name() {
+    let work = FindWork {
+        statements: 1,
+        keys_read: 2,
+        page_full_scan_steps: 3,
+        page_sorts: 4,
+        page_vm_steps: 5,
+        documents_hydrated: 6,
+        nested_rows: NestedRows {
+            tags: 7,
+            headings: 0,
+            blocks: 9,
+        },
+    };
+    assert_eq!(
+        work.readings().collect::<Vec<_>>(),
+        vec![
+            ("find_statements", 1),
+            ("find_keys_read", 2),
+            ("find_page_full_scan_steps", 3),
+            ("find_page_sorts", 4),
+            ("find_page_vm_steps", 5),
+            ("find_documents_hydrated", 6),
+            ("find_tag_rows", 7),
+            ("find_heading_rows", 0),
+            ("find_block_rows", 9),
+        ]
+    );
 }
 
 /// **A row carries the columns it names, and a field is read off the

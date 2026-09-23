@@ -2288,6 +2288,20 @@ pub struct Host<O: EntryOps> {
 /// its reads, and the pin is what keeps an idle teardown from being scheduled
 /// while one is in flight. Both go back where the hold is dropped — a read
 /// that ends, and a read that unwinds, end their hold alike.
+///
+/// **The snapshot stays in the hold.** A read runs on the shared borrow
+/// [`ReadHold::snapshot`] lends, and no mutable borrow exists: through one,
+/// `std::mem::replace` or `std::mem::swap` would take the entry's live
+/// snapshot and its connection out of the hold, to answer after the pin and
+/// the lease went back while a later read on the entry waited for it.
+///
+/// ```compile_fail,E0599
+/// use norn_host::{EntryOps, ReadHold};
+///
+/// fn the_snapshot_is_lent_mutably<O: EntryOps>(hold: &mut ReadHold<O>) {
+///     let _ = hold.snapshot_mut();
+/// }
+/// ```
 pub struct ReadHold<O: EntryOps> {
     entry: Arc<Entry<O::Attachment>>,
     reader: Arc<<O::Attachment as SnapshotSource>::Reader>,
@@ -2345,7 +2359,14 @@ impl<O: EntryOps> ReadHold<O> {
     }
 
     /// The snapshot this read answers from, established under the gate hold
-    /// that granted this hold.
+    /// that granted this hold, and what a read builder runs on.
+    ///
+    /// **A shared borrow, and the only one.** A read builder runs on `&self`,
+    /// so the borrow ends with the hold's own and every statement run through
+    /// it runs under this hold's adjudication. A mutable borrow would let a
+    /// caller swap the snapshot out of the hold and keep answering from it
+    /// after the hold's pin and lease went back, so the hold lends none; the
+    /// absence is pinned on [`ReadHold`].
     pub fn snapshot(&self) -> &<<O::Attachment as SnapshotSource>::Reader as ReadSource>::Snapshot {
         self.snapshot
             .as_ref()

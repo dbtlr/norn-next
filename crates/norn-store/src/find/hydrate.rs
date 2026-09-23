@@ -83,6 +83,29 @@ pub struct FindWork {
 }
 
 impl FindWork {
+    /// The whole reading, name by name, every count present — the shape a
+    /// harness compares, for the reason
+    /// [`DerivationCounters::readings`](crate::DerivationCounters::readings)
+    /// gives: a count one reading carries and another does not is a
+    /// difference rather than a zero.
+    ///
+    /// The nested rows are one reading per table, so a reading names each
+    /// table a hydration can read whether or not this find read it.
+    pub fn readings(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
+        [
+            ("find_statements", self.statements),
+            ("find_keys_read", self.keys_read),
+            ("find_page_full_scan_steps", self.page_full_scan_steps),
+            ("find_page_sorts", self.page_sorts),
+            ("find_page_vm_steps", self.page_vm_steps),
+            ("find_documents_hydrated", self.documents_hydrated),
+            ("find_tag_rows", self.nested_rows.tags),
+            ("find_heading_rows", self.nested_rows.headings),
+            ("find_block_rows", self.nested_rows.blocks),
+        ]
+        .into_iter()
+    }
+
     /// Add what SQLite counted stepping one page statement.
     pub(super) fn page_stepped(&mut self, stepped: Stepped) {
         self.page_full_scan_steps += stepped.full_scan_steps;
@@ -140,7 +163,7 @@ impl Snapshot {
     /// the vault's field universe holds. Each statement it runs is recorded in
     /// `record`.
     pub(super) fn hydrate(
-        &mut self,
+        &self,
         keys: &[FoundKey],
         projection: &Projection<'_>,
         fields: &[&str],
@@ -210,7 +233,7 @@ impl Snapshot {
 
     /// The document rows `ids` name, reading `columns` of each.
     fn read_documents(
-        &mut self,
+        &self,
         ids: &[i64],
         columns: DocumentColumns,
         work: &mut FindWork,
@@ -241,7 +264,7 @@ impl Snapshot {
     /// total: counted where the ceiling filled the head, and the head's own
     /// length where it did not.
     fn read_nested<T>(
-        &mut self,
+        &self,
         nested: Nested,
         ids: &[i64],
         item: fn(&Row<'_>) -> Reading<T>,

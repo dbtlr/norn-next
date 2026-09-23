@@ -1,5 +1,6 @@
-//! The per-PR memory bars for attachment: what attaching a vault costs,
-//! measured rather than asserted, at the profiles the per-PR lane owns.
+//! The per-PR memory bars for attachment and for a read: what attaching a
+//! vault costs, and what reading it through a live hold adds, measured rather
+//! than asserted, at the profiles the per-PR lane owns.
 //!
 //! Peak memory is a function of the working set, not of vault size. Attachment
 //! is the first subject in this workspace that statement can be measured
@@ -16,6 +17,14 @@
 //! moving together. Both profiles are under 5k documents, so both are this
 //! lane's work under ADR 0004's by-kind split.
 //!
+//! **A read is held the same two ways.** A child attaches `realistic`, keeps
+//! it attached, and reads pages of a find through a live hold, each row
+//! carrying its fields and its tags; a ceiling holds that child's peak, and a
+//! ratio holds it to the attach-only child's peak at the same profile. A find
+//! hydrates a page at a time, so what a read adds to a process that attached
+//! is a page's rows rather than the vault's — and the ratio is what catches a
+//! read that grew the process under a ceiling generous enough to pass it.
+//!
 //! # What the measurement charges to whom
 //!
 //! Each reading is of a child process, spawned under the testkit's process
@@ -27,11 +36,13 @@
 //! and a peak read off the test process itself would include cargo's runner and
 //! every case running beside it.
 //!
-//! [`the_gate_profile_attaches_inside_its_memory_bar`] is both a bar and the
-//! harness entry point — the child re-executes that case by name, and the
-//! environment variable is what tells it to attach instead of to measure. One
-//! case doing both is what keeps this suite from carrying a case that passes
-//! trivially in the lane whenever nothing spawned it. **The variable alone does
+//! [`the_gate_profile_attaches_inside_its_memory_bar`] and
+//! [`the_gate_profile_reads_inside_its_memory_bar`] are each both a bar and a
+//! harness entry point — the child re-executes one of them by name, the name
+//! is what says whether it attaches or reads, and the environment variable is
+//! what tells it to do that instead of to measure. One case doing both is what
+//! keeps this suite from carrying a case that passes trivially in the lane
+//! whenever nothing spawned it. **The variable alone does
 //! not select the harness**: it is paired with a token the parent issued beside
 //! the tree, so a variable leaked into the lane's own environment fails loudly
 //! here instead of turning every bar into a harness run.
@@ -49,7 +60,9 @@ mod baselines;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use attach::read::{FIND_LIMIT, bounded_find, each_page, the_pinned_declaration};
 use norn_testkit::process::{Run, Sandbox};
+use norn_wire::Column;
 
 /// The variable that puts this binary in harness mode, carrying the root the
 /// generated tree sits under.
@@ -63,8 +76,16 @@ const HARNESS_ENV: &str = "NORN_HOST_ATTACH_HARNESS";
 /// says a parent in this run issued the harness.
 const HARNESS_TOKEN_ENV: &str = "NORN_HOST_ATTACH_HARNESS_TOKEN";
 
-/// The case the child re-executes, which is the one that reads this constant.
+/// The case an attaching child re-executes, which is the one that reads this
+/// constant.
 const HARNESS_CASE: &str = "the_gate_profile_attaches_inside_its_memory_bar";
+
+/// The case a reading child re-executes, which is the one that reads this
+/// constant.
+const READ_HARNESS_CASE: &str = "the_gate_profile_reads_inside_its_memory_bar";
+
+/// How many pages the reading child reads through the find's cursor.
+const READ_PAGES: u64 = 8;
 
 /// How long a child may take to attach before the harness ends it.
 ///
@@ -100,6 +121,10 @@ fn the_gate_profile_attaches_inside_its_memory_bar() {
                 baselines::mebibytes(baselines::ATTACH_PEAK_RSS_CEILING_BYTES),
             ),
         ],
+    );
+    assert!(
+        peak > 0,
+        "the attaching child reported no peak resident set, so the ceiling holds no reading"
     );
     assert!(
         baselines::fits(peak, baselines::ATTACH_PEAK_RSS_CEILING_BYTES),
@@ -156,18 +181,132 @@ fn peak_memory_holds_flat_from_the_ambiguity_profile_to_the_gate_profile() {
     );
 }
 
+/// **The read ceiling**, and the harness a reading child runs.
+///
+/// With [`HARNESS_ENV`] and its token set this process is the child: it
+/// attaches the tree the variable names, keeps it attached, and reads
+/// [`READ_PAGES`] pages of a find through a live hold instead of measuring
+/// anything.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn the_gate_profile_reads_inside_its_memory_bar() {
+    if let Some(root) = std::env::var_os(HARNESS_ENV) {
+        read_and_report(&attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV));
+        return;
+    }
+
+    let peak = read_peak("read-gate");
+    baselines::record(
+        "gate profile read",
+        &[
+            ("peak resident set (MiB)", baselines::mebibytes(peak)),
+            (
+                "peak resident set ceiling (MiB)",
+                baselines::mebibytes(baselines::READ_PEAK_RSS_CEILING_BYTES),
+            ),
+        ],
+    );
+    assert!(
+        peak > 0,
+        "the reading child reported no peak resident set, so the ceiling holds no reading"
+    );
+    assert!(
+        baselines::fits(peak, baselines::READ_PEAK_RSS_CEILING_BYTES),
+        "attaching and reading `realistic` peaked at {} MiB against a {} MiB bar",
+        baselines::mebibytes(peak),
+        baselines::mebibytes(baselines::READ_PEAK_RSS_CEILING_BYTES)
+    );
+}
+
+/// **What a read adds to the process that attached**, as a ratio rather than
+/// a point.
+///
+/// Both children attach `realistic` the same way; one then reads through a
+/// live hold. A find hydrates a page at a time, so the reading child's peak
+/// sits on the attaching child's, and a read that held the vault's rows would
+/// show as a multiple of it however generous the ceiling above it is.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn reading_the_gate_profile_holds_the_process_near_its_attach_peak() {
+    let attached = attach_peak("read-pair-attach", "realistic");
+    let read = read_peak("read-pair-read");
+    let observed = baselines::per_mille(read, attached);
+
+    baselines::record(
+        "peak memory reading the gate profile, against attaching it",
+        &[
+            ("attach only (MiB)", baselines::mebibytes(attached)),
+            ("attach and read (MiB)", baselines::mebibytes(read)),
+            ("observed ratio", baselines::multiple(observed)),
+            (
+                "ratio bar",
+                baselines::multiple(baselines::READ_OVER_ATTACH_PEAK_RSS_PER_MILLE),
+            ),
+        ],
+    );
+
+    assert!(
+        attached > 0 && read > 0,
+        "a child reported no peak at all, so the pair compares nothing"
+    );
+    assert!(
+        baselines::fits(observed, baselines::READ_OVER_ATTACH_PEAK_RSS_PER_MILLE),
+        "reading `realistic` through a live hold moved the peak by {}x over attaching it, past \
+         the {}x bar: the attach peaked at {} MiB and the read at {} MiB",
+        baselines::multiple(observed),
+        baselines::multiple(baselines::READ_OVER_ATTACH_PEAK_RSS_PER_MILLE),
+        baselines::mebibytes(attached),
+        baselines::mebibytes(read)
+    );
+}
+
 /// Generate `profile`'s tree, attach it in a child, and hand back the peak
 /// resident set the kernel accounted to that child.
+fn attach_peak(label: &str, profile: &str) -> u64 {
+    let documents = norn_fixtures::Profile::by_name(profile)
+        .unwrap_or_else(|| panic!("no profile named `{profile}`"))
+        .docs;
+    let (peak, reported) = child_peak(label, profile, HARNESS_CASE);
+
+    // A bar is only a statement about an attachment that happened. The child
+    // reports what it found derived, so an attach that converged over nothing
+    // does not read as cheap.
+    assert!(
+        reported.contains(&report_line(documents)),
+        "`{profile}` holds {documents} documents and the harness reported: {reported}"
+    );
+    peak
+}
+
+/// Generate the `realistic` tree, attach and read it in a child, and hand back
+/// the peak resident set the kernel accounted to that child.
+///
+/// **A peak is only a statement about a read that happened.** The child
+/// reports the rows it hydrated and the pages it read, and a report that is
+/// missing or read no row fails here rather than reading as a cheap read.
+fn read_peak(label: &str) -> u64 {
+    let (peak, reported) = child_peak(label, "realistic", READ_HARNESS_CASE);
+    let read = ReadReport::from_stdout(&reported).unwrap_or_else(|problem| panic!("{problem}"));
+    assert_eq!(
+        read,
+        ReadReport {
+            rows: READ_PAGES * u64::from(FIND_LIMIT),
+            pages: READ_PAGES,
+        },
+        "`realistic` holds more documents than {READ_PAGES} pages, so every page the harness \
+         read was a whole one"
+    );
+    peak
+}
+
+/// Generate `profile`'s tree, run `case` over it in a child, and hand back the
+/// peak resident set the kernel accounted to that child with what it printed.
 ///
 /// The harness binary is installed into the sandbox before it runs, because the
 /// artifact cargo built is a file a concurrent build may rewrite. The tree goes
 /// inside the sandbox too, so it is removed with it.
-fn attach_peak(label: &str, profile: &str) -> u64 {
+fn child_peak(label: &str, profile: &str, case: &str) -> (u64, String) {
     baselines::assert_the_profile_the_bars_were_authored_on();
-    let documents = norn_fixtures::Profile::by_name(profile)
-        .unwrap_or_else(|| panic!("no profile named `{profile}`"))
-        .docs;
-
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let harness = sandbox
         .install_binary(&std::env::current_exe().expect("this suite's own executable"))
@@ -179,7 +318,7 @@ fn attach_peak(label: &str, profile: &str) -> u64 {
     let outcome = Run::new(&sandbox, &harness)
         // `--ignored` is what makes the filter reach the case at all: the case
         // the child re-executes is ignored, and a plain run would skip it.
-        .args(["--exact", HARNESS_CASE, "--ignored", "--nocapture"])
+        .args(["--exact", case, "--ignored", "--nocapture"])
         .env(HARNESS_ENV, &root)
         .env(HARNESS_TOKEN_ENV, &token)
         .deadline(ATTACH_DEADLINE)
@@ -193,15 +332,7 @@ fn attach_peak(label: &str, profile: &str) -> u64 {
         "the harness wrote more than the capture limit, so what came back is a prefix"
     );
 
-    // A bar is only a statement about an attachment that happened. The child
-    // reports what it found derived, so an attach that converged over nothing
-    // does not read as cheap.
-    let reported = outcome.stdout_text();
-    assert!(
-        reported.contains(&report_line(documents)),
-        "`{profile}` holds {documents} documents and the harness reported: {reported}"
-    );
-    outcome.peak_rss_bytes
+    (outcome.peak_rss_bytes, outcome.stdout_text())
 }
 
 /// The harness: adopt the tree at `root`, attach it, and report what the
@@ -220,4 +351,98 @@ fn attach_and_report(root: &Path) {
 /// What the child prints and the parent looks for.
 fn report_line(documents: usize) -> String {
     format!("attached {documents} documents")
+}
+
+/// The reading harness: adopt the tree at `root`, attach it, and read
+/// [`READ_PAGES`] pages of a find through a live hold, each row carrying its
+/// fields and its tags, one page resident at a time.
+#[allow(clippy::disallowed_macros)] // The child's report is a machine-consumed stream its parent reads.
+fn read_and_report(root: &Path) {
+    let vault = attach::Vault::adopt(root);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let declared = the_pinned_declaration(&mut vault.store());
+
+    let hold = host
+        .begin_read(vault.name())
+        .expect("a live attachment answers a read");
+    let params = bounded_find(vault.name()).with_columns([Column::fields(), Column::tags()]);
+    let mut read = ReadReport::default();
+    each_page(hold.snapshot(), &params, &declared, READ_PAGES, |page| {
+        read.rows += page.work.documents_hydrated;
+        read.pages += 1;
+    });
+    println!("{}", read.line());
+}
+
+/// What a reading child reports: the rows its pages hydrated, and how many
+/// pages it read.
+#[derive(Debug, Default, Eq, PartialEq)]
+struct ReadReport {
+    rows: u64,
+    pages: u64,
+}
+
+impl ReadReport {
+    /// The line the child prints.
+    fn line(&self) -> String {
+        format!("read {} rows hydrated over {} pages", self.rows, self.pages)
+    }
+
+    /// The report a child's output carries, refused where it carries none or
+    /// one of a read that hydrated nothing: a peak over a read that did not
+    /// happen is a peak over an attach.
+    fn from_stdout(stdout: &str) -> Result<Self, String> {
+        let Some(line) = stdout.lines().find(|line| line.starts_with("read ")) else {
+            return Err(format!("the read harness reported no read: {stdout}"));
+        };
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let ["read", rows, "rows", "hydrated", "over", pages, "pages"] = tokens.as_slice() else {
+            return Err(format!(
+                "the read harness reported `{line}`, which is no read report"
+            ));
+        };
+        let count = |text: &str| {
+            text.parse::<u64>()
+                .map_err(|problem| format!("the read harness reported `{line}`: {problem}"))
+        };
+        let report = ReadReport {
+            rows: count(rows)?,
+            pages: count(pages)?,
+        };
+        if report.rows == 0 || report.pages == 0 {
+            return Err(format!(
+                "the read harness reported `{line}`, a read that hydrated nothing, so its peak is \
+                 an attach's"
+            ));
+        }
+        Ok(report)
+    }
+}
+
+/// **The parent refuses a peak it cannot tie to a read.** A child whose output
+/// carries no report, or a report of a read that hydrated no row, fails the
+/// bar rather than passing it as a cheap read; a report the child printed is
+/// read back as printed.
+#[test]
+fn a_read_peak_stands_only_on_a_report_of_rows_read() {
+    let printed = ReadReport {
+        rows: 200,
+        pages: 8,
+    };
+    assert_eq!(
+        ReadReport::from_stdout(&format!("running 1 test\n{}\ntest ok\n", printed.line())),
+        Ok(printed)
+    );
+
+    let missing = ReadReport::from_stdout("running 1 test\ntest ok\n").expect_err("no report");
+    assert!(missing.contains("reported no read"), "{missing}");
+
+    let empty = ReadReport::from_stdout(&ReadReport { rows: 0, pages: 1 }.line())
+        .expect_err("a read of no row");
+    assert!(empty.contains("hydrated nothing"), "{empty}");
+
+    let garbled =
+        ReadReport::from_stdout("read everything\n").expect_err("a line that is no report");
+    assert!(garbled.contains("no read report"), "{garbled}");
 }

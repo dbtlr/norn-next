@@ -7,7 +7,7 @@
 //! production attachment that walked it, and the derived store that attachment
 //! left behind.
 //!
-//! Two bars, both counts:
+//! Three bars, all counts:
 //!
 //! - **Zero on warm.** A request that only reads derives nothing, over the
 //!   ~2k-document `realistic` profile — the scale the gates assert against. It
@@ -15,20 +15,30 @@
 //!   still serving are different subjects: once over the rows an attachment left
 //!   behind, and once with the entry still attached under a held demand, across
 //!   two passes so a cost paid on first touch is separated from the steady state.
-//!   **The counters answer for derivation, not for reading.** The vocabulary
-//!   counts rows written and facts discarded, and no member counts rows read, so
-//!   a reader whose row count grew with the tree still reads zero here: what this
-//!   bar holds is that a warm read derives nothing. The store's pillars suite
-//!   holds the read's own cost shape, in two carriers. A work bar drains the
-//!   heal page, the four pillar enumerations and the two change feeds a row at
-//!   a time through `Request::read_steps`, and states each cost as a line in
-//!   the rows drained. Plan bars over the ten keyed point reads assert an
-//!   equality seek on the key each was given — through a named index for eight
-//!   of them, and through a primary key for the field rows and the
-//!   pinned-schema read.
+//!   **The derivation counters answer for derivation, not for reading.** They
+//!   count rows written and facts discarded, and none counts rows read, so a
+//!   reader whose row count grew with the tree still reads zero on them: what
+//!   this bar holds is that a warm read derives nothing. A read's own cost is
+//!   held where it is counted. The store's pillars suite holds the pillar
+//!   reads': a work bar drains the heal page, the four pillar enumerations and
+//!   the two change feeds a row at a time through `Request::read_steps` and
+//!   states each cost as a line in the rows drained, and plan bars over the ten
+//!   keyed point reads assert an equality seek on the key each was given —
+//!   through a named index for eight of them, and through a primary key for the
+//!   field rows and the pinned-schema read. The store's find suites hold each
+//!   find statement's plan, and the two bars below hold a find's work.
+//! - **A read through a live hold reads no vault document.** A find run on a
+//!   production hold's snapshot, under a live attachment, reads nothing through
+//!   `norn-fs` on its own thread and moves nothing in the host's account of what
+//!   its jobs derived and read off the vault, and each page runs a pinned number
+//!   of statements. Each zero is measured rather than structural: a document
+//!   read and a walk of the root on the same thread move the first, and a
+//!   document written and then removed under the same attachment moves the
+//!   second.
 //! - **Size independence.** One bounded write costs the same at 300 documents
-//!   and at 2000. A ceiling passes anything under it; a pair fails the moment
-//!   the two scales stop moving together.
+//!   and at 2000, and so does one unfiltered find paged newest first. A ceiling
+//!   passes anything under it; a pair fails the moment the two scales stop
+//!   moving together.
 //!
 //! **Every reading is recorded, zero included.** A gate that passes says only
 //! that nothing moved; which counters were asked and what each read is the
@@ -42,6 +52,11 @@
 //!
 //! Each generated tree sits in a testkit sandbox, which is a unix-only harness,
 //! and the lane that runs these cases is a Linux one.
+//!
+//! **The read-through-a-hold bar reads the host's account**, which a build
+//! reads only behind `induced-failure`, so the lane step names the feature. A
+//! build without it compiles every case and refuses that one when it runs,
+//! rather than passing it having read nothing.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -49,15 +64,20 @@ mod attach;
 
 use std::path::Path;
 
+use std::time::Duration;
+
+use attach::read::{FIND_LIMIT, Pages, bounded_find, pages, the_pinned_declaration};
+use norn_fs::reads::{ReadTally, ReadWindow};
 use norn_host::Demand;
 use norn_store::{
-    Change, DocumentFacts, DocumentPath, ExplainedStatement, IncrementProvenance, Store,
+    Change, DocumentFacts, DocumentPath, ExplainedStatement, IncrementProvenance, MAX_PAGE, Store,
     StoredDocument, StoredPathOrder, class_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::process::Sandbox;
 use norn_testkit::scale::{ScaleObservation, SizeIndependencePair};
-use norn_wire::TrustState;
+use norn_testkit::wait::{Observed, wait_until};
+use norn_wire::{Column, Direction, Predicate, Sort, SortKey, TrustState};
 
 /// The document the size-independence pair writes at both scales.
 ///
@@ -89,7 +109,8 @@ fn a_warm_request_over_an_attached_vault_finishes_at_zero() {
 }
 
 /// **The zero-on-warm bar with the host still serving**, and again on a second
-/// pass over the same store.
+/// pass over the same store; and **a find through the live hold reads no vault
+/// document**.
 ///
 /// The case above reads what an attachment left behind: its host is gone by the
 /// time a counter is read, so what it says is that the rows on disk answer
@@ -99,18 +120,39 @@ fn a_warm_request_over_an_attached_vault_finishes_at_zero() {
 /// attachment, or that warmed something on first touch and paid for it, would
 /// move a counter here and nowhere above.
 ///
-/// Two passes, and both are judged. A first pass over a store nothing has read
-/// yet is where a lazily-built index or a cache filled on demand would be paid
-/// for; the second is the steady state the claim is about, and the pair is what
-/// separates them.
+/// Two passes over the store, and both are judged. A first pass over a store
+/// nothing has read yet is where a lazily-built index or a cache filled on
+/// demand would be paid for; the second is the steady state the claim is
+/// about, and the pair is what separates them.
 ///
-/// **What this case does not do is execute its requests through the hold.** It
-/// takes a production hold and asserts the reading that hold carries; the
-/// counted passes run against the store this case opened beside it. The body
-/// below states why that is the shape available and what it costs the claim.
+/// **The find runs through the hold, and reads nothing through `norn-fs`.**
+/// `norn-fs` is the only file reader the host uses, and what it reads is
+/// counted on the thread that asked, so two readings answer for the find. A
+/// read window stands on this thread across the whole workload — both pages
+/// and both passes — and reads no document opened, no stat and no directory
+/// entry: that is the find itself reading nothing through `norn-fs`. The
+/// host's account of its jobs reads what a read through a hold could cost the
+/// vault on another thread — a job the host ran meanwhile — and reads zero
+/// documents derived, files opened for their content, and changesets landed
+/// and what they upserted, deleted and tombstoned. A raw `std::fs` read is
+/// outside both readings: this is a claim about the reader the host has.
+///
+/// **The find's cost is pinned as well as its zero.** Each page runs
+/// [`STATEMENTS_PER_PAGE`] statements and hydrates a whole page, so a find
+/// that ran a statement per row it hydrated fails here at any scale.
+///
+/// Each zero is measured rather than structural, and its control moves every
+/// count it asserts. On this thread, the same window around one document read
+/// through `norn-fs` moves the opens and the stats, and a walk of the
+/// registration root through the walker the host attaches with moves the
+/// directory entries. In the host's account, a document
+/// written into the vault under the same attachment moves the documents
+/// derived, the files opened, the changesets and the upserts; removing it
+/// again moves the deletes and the tombstones.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn warm_requests_under_a_live_attachment_finish_at_zero() {
+    the_hosts_account_is_readable();
     let profile = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "counter-gate-live")
         .expect("a sandbox");
@@ -125,27 +167,10 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     let mut store = vault.store();
     assert_the_attachment_derived_the_profile(&mut store, &profile);
     let subject = a_derived_document(&mut store);
+    let declared = the_pinned_declaration(&mut store);
 
-    // **A production hold stands across the passes, and the passes do not run
-    // through it.** What the hold establishes is that this entry answers a
-    // read: it is minted only over a published `Ready`, it carries the
-    // snapshot a read is answered from, and the reading asserted below says
-    // that snapshot names the database this attachment derived. What it is not
-    // is the executor of the requests counted after it. Those run against the
-    // store this case opened, because a request is opened from `&mut Store`
-    // and a hold hands out a snapshot; the surface that executes a counted
-    // request through a hold belongs to the read builders, and the measured
-    // half of this bar lands with them.
-    //
-    // **So the zero below is structural rather than measured.** A derivation
-    // counter exists only inside a request, a request is opened from `&mut
-    // Store`, and no route from a hold reaches one — a read through a hold
-    // cannot move a counter because there is no counter it can reach. Past
-    // that, every counter's increment sits behind a write statement, and the
-    // read-only open flag, `query_only` and the statement authorizer each
-    // refuse those. This pass confirms the property over the store, which is
-    // the strictly more derivation-capable subject; it is confirmation and not
-    // the evidence the claim rests on.
+    let before = vault_work(&host);
+    let window = ReadWindow::open();
     let hold = host
         .begin_read(vault.name())
         .expect("a live attachment answers a read");
@@ -160,14 +185,39 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
         "the read answered from a database this attachment did not derive"
     );
 
+    // The find a client asks: a predicate, an order and a bound, then the
+    // page its cursor continues, each row carrying its fields and its tags.
+    let tasks = bounded_find(vault.name())
+        .with_predicates([Predicate::equal_to("type", "task")])
+        .with_columns([Column::fields(), Column::tags()]);
+    let read = pages(hold.snapshot(), &tasks, &declared, 2);
+
+    // The passes over the store run beside the hold rather than through it: a
+    // request is opened from `&mut Store`, and that is where a derivation
+    // counter is. They confirm the property over the strictly more
+    // derivation-capable subject.
     let first = a_warm_pass(&mut store, &subject);
     let second = a_warm_pass(&mut store, &subject);
     drop(hold);
+    let read_on_this_thread = thread_reads(window.finish());
+    let read_off_the_vault = before
+        .delta(&vault_work(&host))
+        .expect("two readings of one account");
+
     record_the_counters("a warm request under a live attachment, first pass", &first);
     record_the_counters(
         "a warm request under a live attachment, second pass",
         &second,
     );
+    record_the_counters(
+        "a find through a live hold, read through norn-fs on its thread",
+        &read_on_this_thread,
+    );
+    record_the_counters(
+        "a find through a live hold, the host's account",
+        &read_off_the_vault,
+    );
+    record_the_counters("a find through a live hold, its work", &read.readings());
 
     // The entry is still the one the reads ran against, rather than one the
     // host tore down part-way: a bar over a detached entry is the case above
@@ -179,6 +229,215 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     );
     first.assert_all_zero("the first warm request under a live attachment");
     second.assert_all_zero("the second warm request under a live attachment");
+
+    // A zero is only a statement about a find that read something, and what
+    // it read is the shape's own cost.
+    assert_eq!(
+        read.pages.len(),
+        2,
+        "the find was meant to read a first page and the one its cursor continues"
+    );
+    for (at, page) in read.pages.iter().enumerate() {
+        assert!(
+            page.unsatisfied.is_empty(),
+            "page {at} of the find could not apply {:?}",
+            page.unsatisfied
+        );
+        assert_eq!(
+            (page.work.statements, page.work.documents_hydrated),
+            (STATEMENTS_PER_PAGE, u64::from(FIND_LIMIT)),
+            "page {at} of the find was meant to run {STATEMENTS_PER_PAGE} statements and hydrate \
+             a page of {FIND_LIMIT} rows, since `realistic` holds more tasks than two pages: {:?}",
+            page.work
+        );
+    }
+    for row in read.pages.iter().flat_map(|page| &page.rows) {
+        let fields = row.fields.as_ref().expect("the find projected the fields");
+        assert!(
+            fields.contains_key("type") && row.tags.is_some(),
+            "{} came back without the columns the find projected",
+            row.path.as_str()
+        );
+    }
+    read_on_this_thread.assert_all_zero("a find through a live hold, on its own thread");
+    read_off_the_vault.assert_all_zero("a find through a live hold, in the host's account");
+
+    // **The other half of the thread's zero.** The same window around one
+    // document read and one walk of the registration root, both through
+    // `norn-fs`, moves every count the zero asserts.
+    let window = ReadWindow::open();
+    norn_fs::read_and_hash(vault.path(), Path::new(subject.path.as_str()))
+        .expect("reading a document the attachment derived");
+    for fact in norn_fs::walk(vault.path(), &[]).expect("walking the registration root") {
+        fact.expect("a walk of the registration root");
+    }
+    let reached = thread_reads(window.finish());
+    record_the_counters(
+        "one document read and one walk of the root through norn-fs",
+        &reached,
+    );
+    for count in ["document_opens", "stats", "walk_dirents"] {
+        assert!(
+            reached.get(count) > 0,
+            "a document read and a walk through norn-fs on this thread did not move `{count}`: \
+             {reached:?}"
+        );
+    }
+
+    // **The other half of the account's zero.** A document written into the
+    // vault under the same attachment is derived by the host, and removing it
+    // is deleted and tombstoned by the host; each moves its counts.
+    let written = vault.path().join("counter-gate-derived.md");
+    let derived = the_host_spends(
+        &host,
+        || {
+            std::fs::write(&written, "---\ntitle: derived\n---\n\na body\n")
+                .expect("writing a document into the vault");
+        },
+        "derive the document written under its attachment",
+        &[
+            "documents_derived",
+            "document_opens",
+            "changesets_applied",
+            "documents_upserted",
+        ],
+    );
+    record_the_counters("a document written under a live attachment", &derived);
+
+    let deleted = the_host_spends(
+        &host,
+        || std::fs::remove_file(&written).expect("removing the written document"),
+        "delete the document removed under its attachment",
+        &[
+            "changesets_applied",
+            "documents_deleted",
+            "tombstones_recorded",
+        ],
+    );
+    record_the_counters("a document removed under a live attachment", &deleted);
+}
+
+/// How many statements each page of the live-hold find runs, on the first
+/// page and on the page its cursor continues alike.
+///
+/// Six, each once per page and none per row: the pinned schema's fingerprint
+/// the find is judged under; whether a document carries `type`, and whether
+/// one carries `created`, one existence seek each; the page of `created`
+/// marker rows in descending order that the `type` filter narrows; the
+/// document rows the page found, by row id; and the head of each found
+/// document's tags. The cursor the second page continues is judged against
+/// the order it was minted in and becomes the page statement's bound, with no
+/// statement of its own. A statement run per hydrated row would put this at
+/// more than a page's rows.
+const STATEMENTS_PER_PAGE: u64 = 6;
+
+/// What the host's account moved from just before `act` until every one of
+/// `counts` has moved, waiting for the job the host runs on its own in answer
+/// to `act`.
+///
+/// The baseline is read before `act` runs. The host folds a job's counts into
+/// its account when the job ends, so a baseline read after the act can already
+/// hold the job, and the wait would then never see its counts move.
+///
+/// The wait is for the whole set rather than for any one of it: the host folds
+/// a job's counts into its account one at a time, so a reading taken part-way
+/// through that fold shows some of a job's counts and not yet the rest. A
+/// count that never moves exhausts the wait, and the failure names it.
+fn the_host_spends(
+    host: &attach::ServingHost,
+    act: impl FnOnce(),
+    what: &str,
+    counts: &[&str],
+) -> CounterSnapshot {
+    let before = vault_work(host);
+    act();
+    wait_until(
+        &format!("the host to {what}"),
+        attach::state_budget(DERIVATION_LIMIT),
+        || {
+            let spent = before
+                .delta(&vault_work(host))
+                .expect("two readings of one account");
+            let unmoved: Vec<&str> = counts
+                .iter()
+                .copied()
+                .filter(|count| spent.get(count) == 0)
+                .collect();
+            if unmoved.is_empty() {
+                Observed::Met(spent)
+            } else {
+                Observed::pending(format!(
+                    "{unmoved:?} have not moved, and the host's account reads {spent:?}"
+                ))
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// What one thread read through `norn-fs` while a window stood over it, by
+/// name.
+fn thread_reads(tally: ReadTally) -> CounterSnapshot {
+    [
+        ("document_opens", tally.document_opens),
+        ("stats", tally.stats),
+        ("walk_dirents", tally.walk_dirents),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// How long the host may take to derive a document written under its
+/// attachment. A runaway bound: the watcher polls far more often than this.
+const DERIVATION_LIMIT: Duration = Duration::from_secs(60);
+
+/// What of the host's account a read that reached the vault through the host
+/// would move: the documents its jobs derived from the vault, the files they
+/// opened for their content, and what the changesets they landed upserted,
+/// deleted and tombstoned.
+///
+/// Watcher polls, stats and directory entries are left out: a live attachment
+/// polls its watcher whatever anybody reads, and a poll reads no document.
+/// Findings discarded are left out too: no control here moves them, and a
+/// zero no control moves is not a measurement.
+///
+/// Each value is a running total over the host's life, so what a stretch of
+/// work moved is the delta between two readings.
+#[cfg(feature = "induced-failure")]
+fn vault_work(host: &attach::ServingHost) -> CounterSnapshot {
+    let account = host.evidence();
+    [
+        ("documents_derived", account.documents_derived),
+        ("document_opens", account.document_opens),
+        ("changesets_applied", account.changesets_applied),
+        ("documents_upserted", account.documents_upserted),
+        ("documents_deleted", account.documents_deleted),
+        ("tombstones_recorded", account.tombstones_recorded),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// A build without `induced-failure` carries no reader of the host's account.
+#[cfg(not(feature = "induced-failure"))]
+fn vault_work(_: &attach::ServingHost) -> CounterSnapshot {
+    unreachable!("a case that reads the host's account refuses to run without `induced-failure`")
+}
+
+/// A build with `induced-failure` reads the host's account.
+#[cfg(feature = "induced-failure")]
+fn the_hosts_account_is_readable() {}
+
+/// Refuse to run a case that reads the host's account in a build that cannot
+/// read it, before the case generates anything, rather than pass it having
+/// read nothing.
+#[cfg(not(feature = "induced-failure"))]
+fn the_hosts_account_is_readable() {
+    panic!(
+        "this case reads the host's account of what its jobs derived and read off the vault, \
+         which a build reads only behind `induced-failure`: run the lane with \
+         `LANE_FEATURES=induced-failure`"
+    )
 }
 
 /// One warm read-only pass over `store`, and what it derived.
@@ -299,6 +558,140 @@ fn one_probe_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnap
         &snapshot,
     );
     snapshot
+}
+
+/// **The size-independence bar over a read.** The vault around a bounded find
+/// is not part of what the find costs.
+///
+/// The same find runs through a live hold at `ambiguous` (300 documents) and at
+/// `realistic` (2000): newest `created` first, a page of [`FIND_LIMIT`] rows
+/// carrying every field, then the page its cursor continues. What is compared
+/// is every count the find's work carries — the statements, the keys its page
+/// statements handed back, what SQLite counted stepping them, and the rows it
+/// hydrated. The snapshot's own statement count is held equal to the
+/// statements the pages report as they are read, a consistency check on the
+/// report rather than a second reading of it. The order matches
+/// every document at both scales, far more than a page, so what bounds the
+/// hydration is the page and never the match count.
+///
+/// **The shape is unfiltered because a filter is not size-independent.** A
+/// page a filter narrows drives from the filter's seek and sorts what it
+/// matched, so its cost is the match count, and a predicate matching more than
+/// a page at both scales matches more at the larger one.
+///
+/// Two controls run beside the bar, at the same two attachments, and each must
+/// fail it by the count that grows. A page bounded at the most a page may hold
+/// hydrates the whole vault at 300 documents and a thousand of them at 2000.
+/// And the same order ascending reads the key's missing section first, which
+/// walks every document carrying the key to reach the few that do not.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_bounded_find_costs_the_same_at_both_scales() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let at_small = find_shapes("counter-gate-find-ambiguous", &small);
+    let at_large = find_shapes("counter-gate-find-realistic", &large);
+
+    for (profile, shapes) in [(&small, &at_small), (&large, &at_large)] {
+        assert_eq!(
+            shapes.bounded.pages.len(),
+            2,
+            "`{}` holds more than a page, so the bounded find reads two pages",
+            profile.name
+        );
+        assert!(
+            shapes
+                .bounded
+                .pages
+                .iter()
+                .all(|page| page.work.documents_hydrated == u64::from(FIND_LIMIT)),
+            "a bounded page over `{}` hydrated other than a page of rows",
+            profile.name
+        );
+        record_the_counters(
+            &format!("a bounded find over `{}`", profile.name),
+            &shapes.bounded.readings(),
+        );
+    }
+
+    SizeIndependencePair::new(
+        "a bounded find, two pages",
+        ScaleObservation::new(&small, at_small.bounded.readings()),
+        ScaleObservation::new(&large, at_large.bounded.readings()),
+    )
+    .assert_size_independent();
+
+    let whole = SizeIndependencePair::new(
+        "a find whose page holds the whole vault",
+        ScaleObservation::new(&small, at_small.whole.readings()),
+        ScaleObservation::new(&large, at_large.whole.readings()),
+    )
+    .violations();
+    assert!(
+        whole
+            .iter()
+            .any(|violation| violation.contains("`find_documents_hydrated`")),
+        "a page that hydrates the whole vault passed the pair: {whole:?}"
+    );
+    let walked = SizeIndependencePair::new(
+        "a find that walks the documents carrying its key",
+        ScaleObservation::new(&small, at_small.walked.readings()),
+        ScaleObservation::new(&large, at_large.walked.readings()),
+    )
+    .violations();
+    assert!(
+        walked
+            .iter()
+            .any(|violation| violation.contains("`find_page_vm_steps`")),
+        "a page that walks the vault passed the pair: {walked:?}"
+    );
+    norn_testkit::readings::record(
+        "the size-independence controls",
+        &[
+            ("a page holding the whole vault", whole.join("; ")),
+            ("a page walking the vault", walked.join("; ")),
+        ],
+    );
+}
+
+/// The finds the size-independence pair reads at one scale.
+struct FindShapes {
+    /// The bar's shape: two bounded pages, newest first.
+    bounded: Pages,
+    /// One page bounded at [`MAX_PAGE`].
+    whole: Pages,
+    /// One bounded page, oldest first.
+    walked: Pages,
+}
+
+/// Attach `profile` under a live host and read each [`FindShapes`] shape
+/// through one hold.
+fn find_shapes(label: &str, profile: &norn_fixtures::Profile) -> FindShapes {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let mut store = vault.store();
+    assert_the_attachment_derived_the_profile(&mut store, profile);
+    let declared = the_pinned_declaration(&mut store);
+
+    let hold = host
+        .begin_read(vault.name())
+        .expect("a live attachment answers a read");
+    let bounded = bounded_find(vault.name()).with_columns([Column::fields()]);
+    let whole = bounded
+        .clone()
+        .with_limit(u32::try_from(MAX_PAGE).expect("a page bound fits a wire limit"));
+    let walked = bounded
+        .clone()
+        .with_sort(Sort::new(SortKey::field("created"), Direction::Ascending));
+    FindShapes {
+        bounded: pages(hold.snapshot(), &bounded, &declared, 2),
+        whole: pages(hold.snapshot(), &whole, &declared, 1),
+        walked: pages(hold.snapshot(), &walked, &declared, 1),
+    }
 }
 
 /// Generate `profile`'s tree in a sandbox of its own, attach it, and hand back

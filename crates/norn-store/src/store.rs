@@ -66,6 +66,7 @@
 //! database destroys work to fix nothing. One policy decides which is which —
 //! [`norn_db::is_damaged`] — and every read an open performs goes through it.
 
+use std::cell::Cell;
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
@@ -296,7 +297,7 @@ impl ConnectionTurn {
                 reader,
                 database: Some(database),
                 reading,
-                counters,
+                counters: Cell::new(counters),
             }),
             Err(error) => {
                 let _ = database.close_snapshot();
@@ -396,7 +397,11 @@ pub struct Snapshot {
     /// the reader at the drop that ends the snapshot.
     database: Option<Database>,
     reading: StoreReading,
-    counters: SnapshotCounters,
+    /// What this snapshot cost, counted through `&self`: a read builder runs
+    /// on a shared borrow, so nothing that holds the snapshot lends it out
+    /// mutably. The connection already makes a snapshot `!Sync`, so a `Cell`
+    /// costs it nothing.
+    counters: Cell<SnapshotCounters>,
 }
 
 impl fmt::Debug for Snapshot {
@@ -418,7 +423,7 @@ impl Snapshot {
     /// What this read's snapshot cost: the snapshot itself, and the statements
     /// run on it.
     pub fn counters(&self) -> SnapshotCounters {
-        self.counters
+        self.counters.get()
     }
 
     /// The connection this snapshot's statements run on.
@@ -451,8 +456,10 @@ impl Snapshot {
     /// Counted as it is run, whether or not it answered: a statement that
     /// waited out the busy timeout and then failed held the connection for
     /// that wait.
-    pub(crate) fn count_statement(&mut self) {
-        self.counters.count_statement();
+    pub(crate) fn count_statement(&self) {
+        let mut counters = self.counters.get();
+        counters.count_statement();
+        self.counters.set(counters);
     }
 }
 
