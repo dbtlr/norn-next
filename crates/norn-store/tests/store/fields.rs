@@ -7,8 +7,8 @@
 
 use crate::common::{Scratch, document, path, record_death, write_document};
 use norn_store::{
-    DeclaredFields, DocumentFacts, FieldContainer, FieldRow, FieldRows, FrontmatterValue,
-    Provenance, TypedOrder,
+    Change, DeclaredFields, DocumentFacts, FieldContainer, FieldRow, FieldRows, FrontmatterValue,
+    IncrementProvenance, Provenance, TypedOrder, induced_failure,
 };
 
 /// A presence row, as the rows are compared.
@@ -217,6 +217,36 @@ fn the_raw_and_the_typed_order_mark_their_own_least_value() {
     assert_eq!(stored_fields(&mut request, "docs/ranked.md"), rows);
 }
 
+/// **A tie for the least value goes to the earliest element.** A sequence can
+/// hold its least value more than once; one marker stands per document and
+/// order, and it is on the first element holding that value, under the raw
+/// order and the typed order alike.
+#[test]
+fn a_tie_for_the_least_value_marks_the_earliest_element() {
+    let declared = DeclaredFields::none().declare_typed("rank", integer_order());
+    let value = map(vec![(
+        "rank",
+        FrontmatterValue::Sequence(vec![string("3"), string("5"), string("3")]),
+    )]);
+    let markers: Vec<(u32, bool, bool)> = FieldRows::derive(Some(&value), &declared)
+        .rows()
+        .iter()
+        .filter_map(|row| match row {
+            FieldRow::Value {
+                ordinal,
+                least_raw,
+                least_typed,
+                ..
+            } => Some((*ordinal, *least_raw, *least_typed)),
+            FieldRow::Presence { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        markers,
+        vec![(1, true, true), (2, false, false), (3, false, false)]
+    );
+}
+
 /// **A re-derivation replaces a document's field rows wholesale.** The rows the
 /// first frontmatter derived are gone, and the rows at rest are exactly the ones
 /// the second derives — a key the second value dropped leaves nothing behind.
@@ -246,6 +276,57 @@ fn a_re_derivation_replaces_the_field_rows_wholesale() {
     assert_eq!(
         stored_fields(&mut request, "docs/moving.md"),
         FieldRows::derive(Some(&second), &none)
+    );
+}
+
+/// **A document's field rows are written in its entry, or the document is not
+/// written.** A field row the store refuses fails the changeset, and the
+/// document row written before it in the same entry does not stand: a reader
+/// never meets a document whose field rows are missing. The control is a
+/// document with no frontmatter, which writes no field row and stands under the
+/// same refusal.
+#[test]
+fn a_refused_field_row_leaves_no_document_row() {
+    let scratch = Scratch::new("field-atomic");
+    let mut store = scratch.open();
+    induced_failure::execute_out_of_band(
+        &mut store,
+        "CREATE TRIGGER refuse_field_rows BEFORE INSERT ON document_fields
+         BEGIN SELECT RAISE(ABORT, 'field rows refused'); END",
+    )
+    .expect("installing the refusal");
+    let mut request = store.begin_request();
+
+    write_document(
+        &mut request,
+        &document("docs/plain.md", "hash-1", "a body\n"),
+    );
+
+    let fielded = fielded(
+        "docs/fielded.md",
+        "hash-2",
+        map(vec![("status", string("draft"))]),
+        &DeclaredFields::none(),
+    );
+    let refused =
+        request.apply_increment(IncrementProvenance::Derived, [Change::Upsert(fielded)], &[]);
+    assert!(
+        refused.is_err(),
+        "a changeset whose field row was refused committed"
+    );
+    assert!(
+        request
+            .stored_facts(&path("docs/fielded.md"))
+            .expect("reading a document")
+            .is_none(),
+        "the document stands without the field rows its entry wrote"
+    );
+    assert!(
+        request
+            .stored_facts(&path("docs/plain.md"))
+            .expect("reading a document")
+            .is_some(),
+        "a document with no field rows did not stand under the refusal"
     );
 }
 
