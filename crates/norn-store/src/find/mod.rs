@@ -7,10 +7,12 @@
 //! row id, the path and the value the page is ordered by — in the order the
 //! request states, and where the next page starts.
 //!
-//! # A page is sections, each one seek
+//! # A page is sections, each a seek or a stated walk
 //!
-//! **A page with no filter is a seek of its order index**, and its rows come
-//! off the index in page order, so nothing sorts. **A page with a filter
+//! **A page with no filter reads its order index in page order**, so nothing
+//! sorts: the path page and a field sort's valued section seek it and stop at
+//! the page's bound, and a field sort's missing section walks it, as stated
+//! below. **A page with a filter
 //! drives from the filter's seek and sorts the matched set**, so its cost is
 //! bounded by the match count, which is what a narrowing part narrows.
 //!
@@ -36,9 +38,11 @@
 //! document's marker row, so it passes every document carrying the key to
 //! reach the next one that does not. An ascending first page reads the missing
 //! section first, so where few or no documents miss the key it costs a walk
-//! proportional to the documents that carry it. A drain pays that walk once:
-//! each continuation resumes where the last page stopped, and one past the
-//! missing section resumes in the valued section.
+//! proportional to the documents that carry it. A drain pays that walk at most
+//! twice: a page reads one row past its bound to learn a next page exists, and
+//! the next page resumes from the row it kept, so the gap up to the look-ahead
+//! row is walked again; a continuation past the missing section resumes in the
+//! valued section and never walks it again.
 //!
 //! **Which order a field sort uses** is the typed one where the declaration
 //! gives the key a typed order and the raw text's otherwise, on every page: the

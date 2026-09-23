@@ -753,8 +753,10 @@ sorts nothing: the path page and a field sort's valued section seek it and stop 
 page's bound. A field sort's missing section passes every document that carries the key to
 reach one that does not, so an ascending first page, which reads the missing section first,
 costs a walk proportional to the documents carrying the key where few or none miss it. A
-drain pays that walk once, and it is the price of ordering a document missing the sort
-field as `NULL` orders: first ascending, last descending. A page with a filter drives from the filter's seek and sorts the matched set: its
+drain pays that walk at most twice, because a page reads one row past its bound and the
+next page resumes from the row it kept, and it is the price of ordering a document missing
+the sort field as `NULL` orders: first ascending, last descending. A page with a filter
+drives from the filter's seek and sorts the matched set: its
 cost is bounded by the match count, which is what a narrowing part narrows. Inequality and
 absence seek the documents a page must not hold, so a page they alone narrow seeks its order
 index as a page with no filter does and tests each row against them. Two bars hold this,
