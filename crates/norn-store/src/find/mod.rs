@@ -127,10 +127,13 @@
 //! another fingerprint or under none, a raw or path order's minted under one,
 //! and a path order's carrying a sort value. A raw continuation survives a
 //! re-pin that leaves its key untyped, since the raw order has not moved. A
-//! cursor names no sort key, so two raw field orders are not told apart, and
-//! a path order's cursor continued in a raw field order reads as a position
-//! in the missing section: the cursor's encoding cannot say which order it was
-//! minted in.
+//! cursor names neither its sort key nor its direction, so the cursor's
+//! encoding cannot say which order it was minted in, and two gaps follow. Two
+//! raw field orders are not told apart, and a path order's cursor continued in
+//! a raw field order reads as a position in the missing section. And a cursor
+//! of any order, typed, raw or path, continued in the same order reversed
+//! reads as a position in the reversed order, so an ascending cursor replayed
+//! descending is answered rather than refused.
 
 mod glob;
 mod hydrate;
@@ -789,12 +792,15 @@ impl Snapshot {
     /// carrying a value is refused too. A field order's cursor carrying no sort
     /// value stands in its missing section.
     ///
-    /// **Two raw orders share one spelling.** A cursor names no sort key, so a
-    /// cursor minted in one key's raw order and continued in another key's, or
-    /// a path order's cursor continued in a raw field order — where it reads as
-    /// a position in the missing section — is answered from a position in an
-    /// order it was not minted in. That gap is the wire's, and NORN-244 closes
-    /// it by naming the order in the cursor.
+    /// **A cursor names neither its sort key nor its direction**, so two gaps
+    /// are answered from a position in an order the cursor was not minted in.
+    /// The key: a cursor minted in one key's raw order and continued in
+    /// another key's, or a path order's cursor continued in a raw field order,
+    /// where it reads as a position in the missing section. The direction: a
+    /// cursor of any order continued in the same order reversed, where an
+    /// ascending cursor replayed descending resumes from its position read the
+    /// other way. Both gaps are the wire's, and NORN-244 closes them by naming
+    /// the order's key and direction in the cursor.
     fn judge(
         &mut self,
         cursor: &Cursor,
