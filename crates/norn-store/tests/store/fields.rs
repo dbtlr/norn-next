@@ -8,7 +8,7 @@
 use crate::common::{Scratch, document, path, record_death, write_document};
 use norn_store::{
     Change, DeclaredFields, DocumentFacts, FieldContainer, FieldRow, FieldRows, FrontmatterValue,
-    IncrementProvenance, Provenance, TypedOrder, induced_failure,
+    IncrementProvenance, Provenance, StoreError, TypedOrder, induced_failure,
 };
 
 /// A presence row, as the rows are compared.
@@ -163,7 +163,7 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
 /// declaration does not order by a type carries no typed value at all.
 #[test]
 fn the_raw_and_the_typed_order_mark_their_own_least_value() {
-    let declared = DeclaredFields::none()
+    let declared = DeclaredFields::under("schema-1")
         .declare_typed("rank", integer_order())
         .declare("title");
     let value = map(vec![
@@ -210,6 +210,9 @@ fn the_raw_and_the_typed_order_mark_their_own_least_value() {
     let scratch = Scratch::new("field-markers");
     let mut store = scratch.open();
     let mut request = store.begin_request();
+    request
+        .pin_vault_schema(b"version: 1\n", "schema-1")
+        .expect("pinning a schema");
     write_document(
         &mut request,
         &fielded("docs/ranked.md", "hash-1", value, &declared),
@@ -223,7 +226,7 @@ fn the_raw_and_the_typed_order_mark_their_own_least_value() {
 /// order and the typed order alike.
 #[test]
 fn a_tie_for_the_least_value_marks_the_earliest_element() {
-    let declared = DeclaredFields::none().declare_typed("rank", integer_order());
+    let declared = DeclaredFields::under("schema-1").declare_typed("rank", integer_order());
     let value = map(vec![(
         "rank",
         FrontmatterValue::Sequence(vec![string("3"), string("5"), string("3")]),
@@ -330,6 +333,84 @@ fn a_refused_field_row_leaves_no_document_row() {
     );
 }
 
+/// **Typed values stand only under the schema the store pins.** A document
+/// whose typed field values were derived under another schema than the pinned
+/// one — any schema where none is pinned, or the one a re-pin replaced — is
+/// refused in its entry, naming both fingerprints, and nothing of it stands. A
+/// document whose rows carry no typed value needs no agreement: raw text and
+/// presence are the document's alone, so a declaration that types none of its
+/// keys, or no declaration at all, writes what a pin leaves.
+#[test]
+fn typed_values_derived_under_a_schema_the_store_does_not_pin_are_refused() {
+    let scratch = Scratch::new("field-unpinned-declaration");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let ranked = |declared: &DeclaredFields| {
+        fielded(
+            "docs/ranked.md",
+            "hash-1",
+            map(vec![("rank", string("3"))]),
+            declared,
+        )
+    };
+    let typed_under =
+        |schema: &str| DeclaredFields::under(schema).declare_typed("rank", integer_order());
+    let refusal = |request: &mut norn_store::Request<'_>, declared: &DeclaredFields| {
+        let refused = request
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::Upsert(ranked(declared))],
+                &[],
+            )
+            .expect_err("typed values derived under a schema the store does not pin");
+        assert!(
+            request
+                .stored_facts(&path("docs/ranked.md"))
+                .expect("reading a document")
+                .is_none(),
+            "a refused entry's document stands"
+        );
+        match refused {
+            StoreError::Entry { problem, .. } => *problem,
+            other => panic!("a refusal outside the entry: {other}"),
+        }
+    };
+
+    assert_eq!(
+        refusal(&mut request, &typed_under("schema-1")),
+        StoreError::UnpinnedDeclaration {
+            derived_under: Some("schema-1".to_string()),
+            pinned: None,
+        }
+    );
+
+    request
+        .pin_vault_schema(b"version: 1\n", "schema-2")
+        .expect("pinning a schema");
+    assert_eq!(
+        refusal(&mut request, &typed_under("schema-1")),
+        StoreError::UnpinnedDeclaration {
+            derived_under: Some("schema-1".to_string()),
+            pinned: Some("schema-2".to_string()),
+        }
+    );
+
+    for untyped in [
+        DeclaredFields::none(),
+        DeclaredFields::under("schema-1").declare("rank"),
+    ] {
+        write_document(&mut request, &ranked(&untyped));
+    }
+    write_document(&mut request, &ranked(&typed_under("schema-2")));
+    assert_eq!(
+        stored_fields(&mut request, "docs/ranked.md"),
+        FieldRows::derive(
+            Some(&map(vec![("rank", string("3"))])),
+            &typed_under("schema-2")
+        ),
+    );
+}
+
 /// **A document's field rows die with it.** A death takes the rows through the
 /// cascade: the delete succeeds with foreign keys enforced, the store holds no
 /// row referencing a document that is not there, and the typed values the dead
@@ -340,7 +421,10 @@ fn a_documents_field_rows_die_with_it() {
     let scratch = Scratch::new("field-cascade");
     let mut store = scratch.open();
     let mut request = store.begin_request();
-    let declared = DeclaredFields::none().declare_typed("rank", integer_order());
+    request
+        .pin_vault_schema(b"version: 1\n", "schema-1")
+        .expect("pinning a schema");
+    let declared = DeclaredFields::under("schema-1").declare_typed("rank", integer_order());
     write_document(
         &mut request,
         &fielded(
@@ -362,8 +446,8 @@ fn a_documents_field_rows_die_with_it() {
 
     let pin = store
         .begin_request()
-        .pin_vault_schema(b"version: 1\n", "schema-1")
-        .expect("pinning a schema");
+        .pin_vault_schema(b"version: 1\nfields: {}\n", "schema-2")
+        .expect("re-pinning a schema");
     assert!(pin.repinned);
     assert_eq!(
         pin.invalidated.typed_values_discarded, 0,
@@ -382,7 +466,7 @@ fn a_moved_pin_clears_every_typed_value_and_nothing_else() {
     let scratch = Scratch::new("field-pin");
     let mut store = scratch.open();
     let mut request = store.begin_request();
-    let declared = DeclaredFields::none().declare_typed("rank", integer_order());
+    let declared = DeclaredFields::under("schema-1").declare_typed("rank", integer_order());
     request
         .pin_vault_schema(b"version: 1\n", "schema-1")
         .expect("pinning a schema");
@@ -432,7 +516,7 @@ fn a_moved_pin_clears_every_typed_value_and_nothing_else() {
 /// taking the value away takes the rows with it.
 #[test]
 fn a_documents_rows_are_the_rows_its_frontmatter_derives() {
-    let typed = DeclaredFields::none().declare_typed("rank", integer_order());
+    let typed = DeclaredFields::under("schema-1").declare_typed("rank", integer_order());
     let one = map(vec![("title", string("one")), ("rank", string("4"))]);
     let another = map(vec![("title", string("another"))]);
 

@@ -7,15 +7,83 @@
 
 use norn_store::{
     BODY_ROW_CEILING, BlockFact, DeclaredFields, FindRefusal, FindStatement, FindWork, Found,
-    HeadingFact, NESTED_ROW_CEILING, Nested, NestedRows, Span, TagFact, TagSource,
+    HeadingFact, NESTED_ROW_CEILING, Nested, NestedRows, SnapshotReader, Span, Store, TagFact,
+    TagSource,
 };
 use norn_wire::{
     BlockRow, Column, Cursor, CursorKey, CursorOrderChanged, Direction, FieldValue, FindParams,
-    Moved, Predicate, Snapshot as WireSnapshot, Sort, SortKey, TagRow, Unsatisfied,
+    FindingKind, Moved, Predicate, Snapshot as WireSnapshot, Sort, SortKey, TagRow, Unsatisfied,
 };
 
-use crate::common::{document, write_documents};
-use crate::find::{Seeded, declared, map, request, sorted, string};
+use crate::common::{Scratch, document, violation, write_documents};
+use crate::find::{SEED_SCHEMA, Seeded, declared, integer_order, map, request, sorted, string};
+
+/// The fixture's declaration, read from the schema pinned under `schema`.
+fn declared_under(schema: &str) -> DeclaredFields {
+    DeclaredFields::under(schema)
+        .declare("status")
+        .declare_typed("count", integer_order())
+}
+
+/// The fixture's keys, both ordered by their text, under `schema`.
+fn declared_raw_under(schema: &str) -> DeclaredFields {
+    DeclaredFields::under(schema)
+        .declare("status")
+        .declare("count")
+}
+
+/// A store with no schema pinned, holding three documents under no
+/// declaration, `notes/a.md` with a finding.
+struct Unpinned {
+    _scratch: Scratch,
+    _store: Store,
+    reader: std::sync::Arc<SnapshotReader>,
+}
+
+impl Unpinned {
+    fn new(label: &str) -> Self {
+        let scratch = Scratch::new(label);
+        let mut store = scratch.open();
+        let mut request = store.begin_request();
+        let counted = |at: &str, hash: &str, count: &str| {
+            document(at, hash, "a body\n").with_frontmatter(
+                Some(map(vec![("count", string(count))])),
+                &DeclaredFields::none(),
+            )
+        };
+        write_documents(
+            &mut request,
+            &[
+                counted("notes/a.md", "hash-a", "3"),
+                counted("notes/b.md", "hash-b", "10"),
+                document("notes/c.md", "hash-c", "a body\n"),
+            ],
+        );
+        request
+            .record_finding(&violation("notes/a.md"))
+            .expect("recording a finding");
+        let reader = std::sync::Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
+        Unpinned {
+            _scratch: scratch,
+            _store: store,
+            reader,
+        }
+    }
+
+    fn snapshot(&self) -> norn_store::Snapshot {
+        self.reader
+            .try_take()
+            .expect("a handle nothing is reading holds its connection")
+            .establish()
+            .snapshot
+            .expect("a snapshot")
+    }
+}
 
 impl Seeded {
     /// One find on a fresh snapshot, under the fixture's declaration.
@@ -76,8 +144,8 @@ fn orders() -> Vec<FindParams> {
 /// order, drained two rows at a time on one snapshot, yields the rows one page
 /// holds, with nothing moved at any step; the last page mints no cursor. A
 /// cursor carries the reading it was minted under, and names a schema
-/// fingerprint exactly where the page ran in a typed order — here the empty
-/// one, since the fixture pins no schema.
+/// fingerprint exactly where the page ran in a typed order — here the one the
+/// fixture pins.
 #[test]
 fn a_cursor_continues_exactly_against_the_snapshot_it_was_minted_on() {
     let seeded = Seeded::new("find-cursor-exact");
@@ -98,7 +166,7 @@ fn a_cursor_continues_exactly_against_the_snapshot_it_was_minted_on() {
             assert!(found.moved.is_empty(), "{params:?}: {:?}", found.moved);
             assert_eq!(
                 found.snapshot.schema_fingerprint,
-                typed.then(String::new),
+                typed.then(|| SEED_SCHEMA.to_string()),
                 "{params:?} mints under the wrong order"
             );
             drained.extend(paths(&found));
@@ -137,43 +205,53 @@ fn a_continuation_after_a_write_reports_the_generation_moved() {
 }
 
 /// **A typed cursor refuses once its fingerprint no longer stands; a raw one
-/// survives the re-pin.** The refusal is the wire's, naming both fingerprints.
-/// A raw cursor over `count` — minted where `count` carried no type — goes on
-/// in the raw order after a declaration and a pin that give it one, because
-/// the order it names a position in has not moved.
+/// survives a re-pin that leaves its key untyped.** The refusal is the wire's,
+/// naming both fingerprints. A raw cursor over `count` goes on in the raw order
+/// after a re-pin whose declaration still orders `count` by its text, because
+/// the order it names a position in has not moved; continued under a
+/// declaration that gives `count` a type, it is refused, because the request's
+/// order is now the typed one.
 #[test]
 fn a_typed_cursor_refuses_after_a_re_pin_and_a_raw_one_survives_it() {
     let mut seeded = Seeded::new("find-cursor-re-pin");
     seeded.pin("schema-1");
     let by_count = sorted(SortKey::field("count"), Direction::Ascending).with_limit(2);
-    let typed = seeded.found(&by_count);
+    let typed = seeded.found_under(&by_count, &declared_under("schema-1"));
     assert_eq!(
         typed.snapshot.schema_fingerprint.as_deref(),
         Some("schema-1")
     );
     let typed_cursor = typed.next.expect("a next page");
 
-    let untyped = DeclaredFields::none().declare("status").declare("count");
-    let raw = seeded.found_under(&by_count, &untyped);
+    let raw = seeded.found_under(&by_count, &declared_raw_under("schema-1"));
     assert_eq!(raw.snapshot.schema_fingerprint, None);
     // Raw ascending: the documents with no value first, then "10", "3", "nine".
     assert_eq!(paths(&raw), ["other/glossary.md", "other/v1.2.md"]);
     let raw_cursor = raw.next.expect("a next page");
 
     seeded.pin("schema-2");
-    let refusal = seeded
-        .snapshot()
-        .find(&by_count.clone().with_after(typed_cursor), &declared())
-        .expect_err("a typed cursor under a fingerprint that no longer stands");
+    let refused = |cursor: &Cursor, declared: &DeclaredFields| {
+        seeded
+            .snapshot()
+            .find(&by_count.clone().with_after(cursor.clone()), declared)
+            .expect_err("a cursor that is no position in the request's order")
+    };
     assert_eq!(
-        refusal,
+        refused(&typed_cursor, &declared_under("schema-2")),
         FindRefusal::OrderChanged(CursorOrderChanged::new(
             "schema-1",
             Some("schema-2".to_string())
         ))
     );
+    assert_eq!(
+        refused(&raw_cursor, &declared_under("schema-2")),
+        FindRefusal::OrderChanged(CursorOrderChanged::minted_raw(Some("schema-2".to_string())))
+    );
 
-    let survived = seeded.found(&by_count.with_limit(10).with_after(raw_cursor));
+    let survived = seeded.found_under(
+        &by_count.with_limit(10).with_after(raw_cursor),
+        &declared_raw_under("schema-2"),
+    );
     assert_eq!(survived.moved, [Moved::Generation]);
     assert_eq!(
         paths(&survived),
@@ -181,6 +259,158 @@ fn a_typed_cursor_refuses_after_a_re_pin_and_a_raw_one_survives_it() {
         "the continuation left the raw order it was minted in"
     );
     assert_eq!(survived.snapshot.schema_fingerprint, None);
+}
+
+/// **A cursor is judged against the order its request names, on one
+/// snapshot.** The fixture's declaration orders `count` by a type and `status`
+/// by its text. A raw cursor continued in a typed order, a typed one continued
+/// in a raw order or a path order, and a cursor carrying a sort value continued
+/// in a path order are each refused with the wire's order change; a cursor
+/// carrying no sort value continued in a raw field order stands in its missing
+/// section.
+#[test]
+fn a_cursor_minted_in_another_order_than_the_requests_is_refused() {
+    let seeded = Seeded::new("find-cursor-other-order");
+    let cursor = |params: FindParams| {
+        seeded
+            .found(&params.with_limit(1))
+            .next
+            .expect("a next page")
+    };
+    let by_path = request().with_sort(Sort::new(SortKey::path(), Direction::Ascending));
+    let by_status = sorted(SortKey::field("status"), Direction::Descending);
+    let by_count = sorted(SortKey::field("count"), Direction::Ascending);
+    let path_cursor = cursor(by_path.clone());
+    let raw_cursor = cursor(by_status.clone());
+    let typed_cursor = cursor(by_count.clone());
+    assert!(path_cursor.snapshot().schema_fingerprint.is_none());
+    assert!(matches!(
+        raw_cursor.key(),
+        CursorKey::Document { sort: Some(_), .. }
+    ));
+    assert_eq!(raw_cursor.snapshot().schema_fingerprint, None);
+    assert_eq!(
+        typed_cursor.snapshot().schema_fingerprint.as_deref(),
+        Some(SEED_SCHEMA)
+    );
+
+    let refusal = |params: &FindParams, cursor: &Cursor| {
+        seeded
+            .snapshot()
+            .find(&params.clone().with_after(cursor.clone()), &declared())
+            .expect_err("a cursor that is no position in the request's order")
+    };
+    let seed = || Some(SEED_SCHEMA.to_string());
+    for (params, cursor, changed) in [
+        (
+            &by_count,
+            &raw_cursor,
+            CursorOrderChanged::minted_raw(seed()),
+        ),
+        (
+            &by_count,
+            &path_cursor,
+            CursorOrderChanged::minted_raw(seed()),
+        ),
+        (
+            &by_status,
+            &typed_cursor,
+            CursorOrderChanged::new(SEED_SCHEMA, None),
+        ),
+        (
+            &by_path,
+            &typed_cursor,
+            CursorOrderChanged::new(SEED_SCHEMA, None),
+        ),
+        (&by_path, &raw_cursor, CursorOrderChanged::minted_raw(None)),
+    ] {
+        assert_eq!(
+            refusal(params, cursor),
+            FindRefusal::OrderChanged(changed),
+            "{params:?} continuing {cursor:?}"
+        );
+    }
+
+    // A path order's cursor carries no sort value, which a raw field order
+    // reads as a position in its missing section: the encoding names no key.
+    let continued = seeded.found(&by_status.clone().with_after(path_cursor));
+    assert!(continued.moved.is_empty());
+}
+
+/// **A find's declaration is the one the snapshot pins.** A declaration read
+/// from another schema than the pinned one — or from any schema where none is
+/// pinned, or from none where one is — is refused, naming both fingerprints,
+/// before any page is read.
+#[test]
+fn a_declaration_read_from_another_schema_than_the_pinned_one_is_refused() {
+    let mut seeded = Seeded::new("find-declaration-not-pinned");
+    let refusal = |seeded: &Seeded, declared: &DeclaredFields| {
+        seeded
+            .snapshot()
+            .find(&request(), declared)
+            .expect_err("a declaration the snapshot does not pin")
+    };
+    assert_eq!(
+        refusal(&seeded, &DeclaredFields::none()),
+        FindRefusal::DeclarationNotPinned {
+            declared_under: None,
+            pinned: Some(SEED_SCHEMA.to_string()),
+        }
+    );
+    seeded.pin("schema-1");
+    assert_eq!(
+        refusal(&seeded, &declared()),
+        FindRefusal::DeclarationNotPinned {
+            declared_under: Some(SEED_SCHEMA.to_string()),
+            pinned: Some("schema-1".to_string()),
+        }
+    );
+
+    let unpinned = Unpinned::new("find-declaration-unpinned");
+    assert_eq!(
+        unpinned
+            .snapshot()
+            .find(&request(), &declared())
+            .expect_err("a declaration where no schema is pinned"),
+        FindRefusal::DeclarationNotPinned {
+            declared_under: Some(SEED_SCHEMA.to_string()),
+            pinned: None,
+        }
+    );
+}
+
+/// **A store with no schema pinned mints every cursor under no fingerprint.**
+/// Its declaration declares nothing, so no key has a typed order: a field sort
+/// runs in the raw order, and neither it nor a path order names a fingerprint.
+/// A finding recorded there is stamped with the empty fingerprint, and a
+/// finding part still finds it.
+#[test]
+fn a_store_with_no_schema_pinned_mints_cursors_under_no_fingerprint() {
+    let unpinned = Unpinned::new("find-no-pin");
+    for key in [SortKey::path(), SortKey::field("count")] {
+        for direction in [Direction::Ascending, Direction::Descending] {
+            let params = sorted(key.clone(), direction).with_limit(1);
+            let found = unpinned
+                .snapshot()
+                .find(&params, &DeclaredFields::none())
+                .expect("a page");
+            assert_eq!(found.snapshot.schema_fingerprint, None, "{params:?}");
+            let next = found.next.expect("a next page");
+            assert_eq!(next.snapshot().schema_fingerprint, None, "{params:?}");
+            unpinned
+                .snapshot()
+                .find(&params.with_after(next), &DeclaredFields::none())
+                .expect("a continuation under no schema");
+        }
+    }
+    let with_finding = unpinned
+        .snapshot()
+        .find(
+            &request().with_predicates([Predicate::has_finding(FindingKind::BodyBytesNotUtf8)]),
+            &DeclaredFields::none(),
+        )
+        .expect("a page");
+    assert_eq!(paths(&with_finding), ["notes/a.md"]);
 }
 
 /// A cursor among rows that are not documents names no place in a find.
@@ -210,7 +440,8 @@ fn a_cursor_among_other_rows_is_refused() {
 /// rather than voiding the bound. A path alone is carried by the keys and
 /// hydrates nothing.
 /// Each nested collection reads its own table and no other, and the work
-/// instrument's statements are the snapshot counter's.
+/// instrument's statements are the snapshot counter's, among them the one
+/// point read of the active fingerprint every find judges its declaration by.
 #[test]
 fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
     let seeded = Seeded::new("find-hydration-work");
@@ -235,7 +466,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
         (
             2,
             FindWork {
-                statements: 1,
+                statements: 2,
                 keys_read: 3,
                 documents_hydrated: 0,
                 nested_rows: nested(0, 0, 0),
@@ -247,7 +478,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
         (
             2,
             FindWork {
-                statements: 2,
+                statements: 3,
                 keys_read: 3,
                 documents_hydrated: 2,
                 nested_rows: nested(0, 0, 0),
@@ -265,7 +496,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
         (
             2,
             FindWork {
-                statements: 2,
+                statements: 3,
                 keys_read: 3,
                 documents_hydrated: 2,
                 nested_rows: nested(0, 0, 0),
@@ -281,7 +512,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
         (
             3,
             FindWork {
-                statements: 2,
+                statements: 3,
                 keys_read: 4,
                 documents_hydrated: 3,
                 nested_rows: nested(0, 0, 0),
@@ -294,7 +525,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
         (
             2,
             FindWork {
-                statements: 2,
+                statements: 3,
                 keys_read: 3,
                 documents_hydrated: 0,
                 nested_rows: nested(1, 0, 0),

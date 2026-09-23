@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use norn_db::rusqlite::{CachedStatement, OptionalExtension, Transaction, params};
 
 use crate::counters::{Counter, DerivationCounters};
+use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{DocumentFacts, FindingFacts, Invalidation, Provenance};
 use crate::fields::FieldRow;
@@ -215,7 +216,9 @@ pub(crate) fn apply(
             // them.
             let applied = match &change {
                 Change::Upsert(facts) => {
-                    upsert(&mut statements, stamp, recorded_at, facts, &mut tally)
+                    refuse_typed_values_the_pin_does_not_derive(&transaction, facts).and_then(
+                        |()| upsert(&mut statements, stamp, recorded_at, facts, &mut tally),
+                    )
                 }
                 // The death's own provenance, which is a different thing from
                 // the changeset's mark this function was called with.
@@ -676,6 +679,43 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
         what: "the byte length a document's body offset and body account for",
         limit: widest(accounted),
         given: widest(facts.byte_length),
+    })
+}
+
+/// Refuse a document whose typed field values were derived under a schema the
+/// store does not pin.
+///
+/// **The typed column holds only what the pinned schema derives.** A pin
+/// clears it in the pin's own transaction, and the walk refills it under the
+/// new schema, so a typed value derived under any other schema — the one the
+/// pin replaced, or a declaration read before it — would stand in an order no
+/// read names. The pin is read in the transaction the rows are written in, so
+/// no pin can land between the comparison and the write.
+///
+/// Rows carrying no typed value need no agreement: raw text, presence and the
+/// raw marker are a function of the document alone, and a document derived
+/// under no declaration, or under a stale one that types none of its keys,
+/// writes the typed column as a pin leaves it — empty — for the walk to fill.
+fn refuse_typed_values_the_pin_does_not_derive(
+    transaction: &Transaction<'_>,
+    facts: &DocumentFacts,
+) -> Result<(), StoreError> {
+    let typed = facts
+        .fields()
+        .rows()
+        .iter()
+        .any(|row| matches!(row, FieldRow::Value { typed: Some(_), .. }));
+    if !typed {
+        return Ok(());
+    }
+    let pinned: Option<String> =
+        norn_db::meta::get_meta(transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
+    if pinned.as_deref() == facts.fields_schema() {
+        return Ok(());
+    }
+    Err(StoreError::UnpinnedDeclaration {
+        derived_under: facts.fields_schema().map(str::to_string),
+        pinned,
     })
 }
 

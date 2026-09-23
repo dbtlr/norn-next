@@ -25,10 +25,12 @@
 //! page exists.
 //!
 //! **Which order a field sort uses** is the typed one where the declaration
-//! gives the key a typed order and the raw text's otherwise, on a first page. A
-//! continuation runs in the order it was started in, which it names in
-//! [`Resume::order`]: a page begun in raw order goes on in raw order after a
-//! re-pin that gave the key a type, because the raw order has not moved.
+//! gives the key a typed order and the raw text's otherwise, on every page: the
+//! order is the request's, and a continuation's cursor is judged against it.
+//! **The declaration is the snapshot's.** It names the schema it was read from,
+//! and a find whose declaration is not the one the snapshot pins is refused
+//! ([`FindRefusal::DeclarationNotPinned`]), so a typed order is always the one
+//! the typed column holds.
 //!
 //! **A part that compares values compares under the key's order.** Equality,
 //! inequality, membership and a `before`/`after` bound on a key the declaration
@@ -87,14 +89,20 @@
 //! carry only the columns the request projected ([`hydrate`] states what each
 //! costs), and [`Found::work`] says what the find read.
 //!
-//! **A cursor names the order it was minted in.** A page ordered by a typed
-//! field is minted under the active schema fingerprint and one ordered any
-//! other way under none, so a continuation runs in the typed order while that
-//! fingerprint stands, is refused with the wire's
-//! [`norn_wire::CursorOrderChanged`] once it does not, and a raw-order
-//! continuation survives any re-pin. A store with no pinned schema reads the
-//! empty fingerprint, the one a finding recorded under no schema is stamped
-//! with.
+//! **A cursor names the order it was minted in, and is judged against the
+//! request's.** A page ordered by a typed field is minted under the active
+//! schema fingerprint, and one ordered any other way under none. A store with
+//! no schema pinned mints every cursor under none: its declaration declares
+//! nothing, so no key has a typed order there. A continuation whose cursor is
+//! detectably not a position in the request's order is refused with the wire's
+//! [`norn_wire::CursorOrderChanged`]: a typed order's cursor minted under
+//! another fingerprint or under none, a raw or path order's minted under one,
+//! and a path order's carrying a sort value. A raw continuation survives a
+//! re-pin that leaves its key untyped, since the raw order has not moved. A
+//! cursor names no sort key, so two raw field orders are not told apart, and
+//! a path order's cursor continued in a raw field order reads as a position
+//! in the missing section: the cursor's encoding cannot say which order it was
+//! minted in.
 
 mod glob;
 mod hydrate;
@@ -172,12 +180,9 @@ pub struct FindPosition {
     pub path: String,
 }
 
-/// Where a continuation resumes, and the field order its first page ran in.
-///
-/// The order is read only by a field sort; a path order has one.
+/// Where a continuation resumes. The order it resumes in is the request's.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Resume {
-    pub order: FieldOrder,
     pub at: FindPosition,
 }
 
@@ -298,8 +303,16 @@ pub enum FindRefusal {
     /// order does not read as that type, so it names no place in the key's
     /// order.
     UnreadableBound { key: String, value: String },
-    /// The cursor was minted under a schema fingerprint the snapshot no longer
-    /// reads, so the order its position is a position in no longer exists.
+    /// The declaration the request was compiled under was read from a schema
+    /// other than the one the snapshot pins, so its typed orders are not the
+    /// ones the typed column holds. Each fingerprint is `None` for no schema.
+    DeclarationNotPinned {
+        declared_under: Option<String>,
+        pinned: Option<String>,
+    },
+    /// The cursor is not a position in the order the request reads: it was
+    /// minted under a schema fingerprint the snapshot no longer reads, or in
+    /// another order than the request's.
     OrderChanged(CursorOrderChanged),
     /// The cursor names a position among rows that are not documents.
     NotADocumentCursor,
@@ -322,11 +335,20 @@ impl std::fmt::Display for FindRefusal {
                 formatter,
                 "`{value}` does not read as the type `{key}` is declared with"
             ),
+            FindRefusal::DeclarationNotPinned {
+                declared_under,
+                pinned,
+            } => write!(
+                formatter,
+                "the declaration was read from {}, and the snapshot pins {}",
+                schema_named(declared_under.as_deref()),
+                schema_named(pinned.as_deref())
+            ),
             FindRefusal::OrderChanged(changed) => write!(
                 formatter,
-                "the cursor was minted under the schema `{}`, and the order it continues no \
-                 longer stands",
-                changed.minted_under
+                "the cursor was minted in an order under {}, and the request reads one under {}",
+                schema_named(changed.minted_under.as_deref()),
+                schema_named(changed.current.as_deref())
             ),
             FindRefusal::NotADocumentCursor => {
                 formatter.write_str("the cursor names a position among rows that are not documents")
@@ -340,6 +362,14 @@ impl std::fmt::Display for FindRefusal {
 }
 
 impl std::error::Error for FindRefusal {}
+
+/// A schema fingerprint as a refusal names it: quoted, or "no schema".
+fn schema_named(fingerprint: Option<&str>) -> String {
+    fingerprint.map_or_else(
+        || "no schema".to_string(),
+        |named| format!("the schema `{named}`"),
+    )
+}
 
 impl From<StoreError> for FindRefusal {
     fn from(problem: StoreError) -> Self {
@@ -356,6 +386,16 @@ enum PageOrder<'a> {
         order: FieldOrder,
         direction: PageDirection,
     },
+}
+
+impl PageOrder<'_> {
+    /// The field order a field sort runs in, and `None` for a path order.
+    fn field_order(self) -> Option<FieldOrder> {
+        match self {
+            PageOrder::Path(_) => None,
+            PageOrder::Field { order, .. } => Some(order),
+        }
+    }
 }
 
 /// Where a request named a key.
@@ -393,10 +433,7 @@ impl Compiled<'_> {
 
     /// The field order a field sort runs in, and `None` for a path order.
     fn field_order(&self) -> Option<FieldOrder> {
-        match self.order {
-            PageOrder::Path(_) => None,
-            PageOrder::Field { order, .. } => Some(order),
-        }
+        self.order.field_order()
     }
 }
 
@@ -485,7 +522,9 @@ struct Probe {
 /// statement that ran.
 #[derive(Default)]
 struct Lookups {
-    fingerprint: Option<String>,
+    /// The active fingerprint once read, `None` inside where no schema is
+    /// pinned.
+    fingerprint: Option<Option<String>>,
     known: BTreeMap<String, bool>,
     probes: Vec<Probe>,
 }
@@ -504,16 +543,17 @@ impl Snapshot {
     /// One page of the documents `params` asks for, as rows carrying the
     /// columns it projects, in its order, continuing its cursor.
     ///
-    /// `declared` is the vault's declaration: it decides a first page's field
-    /// order, how a bound is compared, and — beside the keys documents carry —
-    /// which keys are known. The page holds `params.limit` rows,
-    /// [`DEFAULT_PAGE`] where it names none, held to `1..=`[`MAX_PAGE`], and
-    /// only those rows are hydrated.
+    /// `declared` is the vault's declaration, read from the schema the
+    /// snapshot pins: it decides a field sort's order, how a bound is
+    /// compared, and — beside the keys documents carry — which keys are known.
+    /// The page holds `params.limit` rows, [`DEFAULT_PAGE`] where it names
+    /// none, held to `1..=`[`MAX_PAGE`], and only those rows are hydrated.
     ///
-    /// Refused: a cursor among rows that are not documents; a cursor minted in
-    /// a typed order under a fingerprint the snapshot no longer reads; a
-    /// projected column or a part the store keeps no index of; and a bound
-    /// that does not read as its key's declared type.
+    /// Refused: a declaration read from another schema than the snapshot
+    /// pins; a cursor among rows that are not documents; a cursor that is not
+    /// a position in the request's order, as the module states; a projected
+    /// column or a part the store keeps no index of; and a bound that does not
+    /// read as its key's declared type.
     pub fn find(
         &mut self,
         params: &FindParams,
@@ -522,16 +562,19 @@ impl Snapshot {
         let started = self.counters().statements_executed();
         let projection = Projection::of(&params.columns)?;
         let mut lookups = Lookups::default();
+        let mut compiled = self.compile(params, declared, &mut lookups)?;
         let (resume, moved) = match &params.after {
             None => (None, Vec::new()),
-            Some(cursor) => self.judge(cursor, &mut lookups)?,
+            Some(cursor) => self.judge(cursor, compiled.order, &mut lookups)?,
         };
-        let mut compiled = self.compile(params, declared, resume.as_ref(), &mut lookups)?;
         let fields = self.projected_keys(&projection, declared, &mut lookups, &mut compiled)?;
 
         let mut work = FindWork::default();
-        let (keys, next, read) =
-            self.page_keys(&compiled, page_limit(params.limit), resume.as_ref())?;
+        let (keys, next, read) = self.page_keys(
+            &compiled,
+            page_limit(params.limit),
+            resume.as_ref().map(|resume| &resume.at),
+        )?;
         work.keys_read = read;
         let order = compiled.field_order();
         let snapshot = self.reading_facts(order, &mut lookups)?;
@@ -554,9 +597,9 @@ impl Snapshot {
     ///
     /// `params.after` and `params.columns` are not read here: a caller judges
     /// the wire cursor and hands the position it names over as `resume`, and
-    /// hydrates the rows itself. `declared` is the vault's declaration, which
-    /// decides a first page's field order and how a bound is compared, and
-    /// names known keys. The page holds `params.limit` rows, [`DEFAULT_PAGE`]
+    /// hydrates the rows itself. `declared` is the vault's declaration, read
+    /// from the schema the snapshot pins, which decides a field sort's order
+    /// and how a bound is compared, and names known keys. The page holds `params.limit` rows, [`DEFAULT_PAGE`]
     /// where it names none, held to `1..=`[`MAX_PAGE`].
     pub fn find_keys(
         &mut self,
@@ -565,8 +608,12 @@ impl Snapshot {
         resume: Option<&Resume>,
     ) -> Result<KeyPage, FindRefusal> {
         let mut lookups = Lookups::default();
-        let compiled = self.compile(params, declared, resume, &mut lookups)?;
-        let (keys, next, _) = self.page_keys(&compiled, page_limit(params.limit), resume)?;
+        let compiled = self.compile(params, declared, &mut lookups)?;
+        let (keys, next, _) = self.page_keys(
+            &compiled,
+            page_limit(params.limit),
+            resume.map(|resume| &resume.at),
+        )?;
         let order = compiled.field_order();
         let unsatisfied = self.resolve(compiled.reports, declared, &mut lookups)?;
         Ok(KeyPage {
@@ -599,10 +646,7 @@ impl Snapshot {
     ) -> Result<Vec<FindPlan>, FindRefusal> {
         let projection = Projection::of(&params.columns)?;
         let mut lookups = Lookups::default();
-        if resume.is_some_and(|resume| resume.order == FieldOrder::Typed) {
-            self.fingerprint(&mut lookups)?;
-        }
-        let mut compiled = self.compile(params, declared, resume, &mut lookups)?;
+        let mut compiled = self.compile(params, declared, &mut lookups)?;
         let fields = self.projected_keys(&projection, declared, &mut lookups, &mut compiled)?;
         self.reading_facts(compiled.field_order(), &mut lookups)?;
         let limit = page_limit(params.limit);
@@ -661,32 +705,48 @@ impl Snapshot {
         Ok(plans)
     }
 
-    /// Judge the cursor a request continues against this snapshot: where it
-    /// resumes, in the order it was minted in, and what moved since.
+    /// Judge the cursor a request continues against the request's `order` on
+    /// this snapshot: where it resumes, and what moved since.
     ///
-    /// The fingerprint is read only for a cursor minted in a typed order,
-    /// which is the one kind of cursor a fingerprint decides anything about.
+    /// **A cursor is refused wherever it is detectably not a position in
+    /// `order`.** Its fingerprint is the order's: the active fingerprint for a
+    /// typed order, and none for a raw or a path order — so a raw cursor
+    /// continued in a typed order, a typed one continued in a raw or a path
+    /// order, and a typed one minted under a fingerprint the snapshot no longer
+    /// reads are refused. A path order's cursor carries no sort value, so one
+    /// carrying a value is refused too. A field order's cursor carrying no sort
+    /// value stands in its missing section.
+    ///
+    /// **Two raw orders share one spelling.** A cursor names no sort key, so a
+    /// cursor minted in one key's raw order and continued in another key's, or
+    /// a path order's cursor continued in a raw field order — where it reads as
+    /// a position in the missing section — is answered from a position in an
+    /// order it was not minted in. That gap is the wire's, and NORN-244 closes
+    /// it by naming the order in the cursor.
     fn judge(
         &mut self,
         cursor: &Cursor,
+        order: PageOrder<'_>,
         lookups: &mut Lookups,
     ) -> Result<(Option<Resume>, Vec<Moved>), FindRefusal> {
         let CursorKey::Document { sort, path, .. } = cursor.key() else {
             return Err(FindRefusal::NotADocumentCursor);
         };
-        let typed = cursor.snapshot().schema_fingerprint.is_some();
-        let order = if typed {
-            FieldOrder::Typed
-        } else {
-            FieldOrder::Raw
-        };
-        let now = self.reading_facts(typed.then_some(order), lookups)?;
+        let now = self.reading_facts(order.field_order(), lookups)?;
+        let minted_under = cursor.snapshot().schema_fingerprint.as_deref();
+        let path_ordered = matches!(order, PageOrder::Path(_));
+        if minted_under != now.schema_fingerprint.as_deref() || (path_ordered && sort.is_some()) {
+            let current = now.schema_fingerprint.clone();
+            return Err(FindRefusal::OrderChanged(match minted_under {
+                Some(minted_under) => CursorOrderChanged::new(minted_under, current),
+                None => CursorOrderChanged::minted_raw(current),
+            }));
+        }
         let moved = cursor
             .continuation(&now)
             .map_err(FindRefusal::OrderChanged)?;
         Ok((
             Some(Resume {
-                order,
                 at: FindPosition {
                     sort: sort.clone(),
                     path: path.clone(),
@@ -705,7 +765,7 @@ impl Snapshot {
         lookups: &mut Lookups,
     ) -> Result<norn_wire::Snapshot, StoreError> {
         let fingerprint = match order {
-            Some(FieldOrder::Typed) => Some(self.fingerprint(lookups)?),
+            Some(FieldOrder::Typed) => self.fingerprint(lookups)?,
             Some(FieldOrder::Raw) | None => None,
         };
         let generation =
@@ -720,13 +780,13 @@ impl Snapshot {
         ))
     }
 
-    /// The active fingerprint, read once per request; the empty fingerprint
-    /// where no schema is pinned.
-    fn fingerprint(&mut self, lookups: &mut Lookups) -> Result<String, StoreError> {
+    /// The active fingerprint, read once per request; `None` where no schema
+    /// is pinned.
+    fn fingerprint(&mut self, lookups: &mut Lookups) -> Result<Option<String>, StoreError> {
         if let Some(fingerprint) = &lookups.fingerprint {
             return Ok(fingerprint.clone());
         }
-        let fingerprint = self.active_fingerprint()?.unwrap_or_default();
+        let fingerprint = self.active_fingerprint()?;
         lookups.probes.push(Probe {
             statement: FindStatement::ActiveFingerprint,
             sql: norn_db::meta::META_READ_SQL.to_string(),
@@ -864,14 +924,25 @@ impl Snapshot {
         Ok(known)
     }
 
-    /// The request's order and its conjunction, compiled.
+    /// The request's order and its conjunction, compiled under `declared`,
+    /// which is refused where it was read from another schema than the
+    /// snapshot pins.
+    ///
+    /// A field sort's order is the declaration's for its key: typed where the
+    /// key is declared with a typed order, raw otherwise.
     fn compile<'a>(
         &mut self,
         params: &'a FindParams,
         declared: &DeclaredFields,
-        resume: Option<&Resume>,
         lookups: &mut Lookups,
     ) -> Result<Compiled<'a>, FindRefusal> {
+        let pinned = self.fingerprint(lookups)?;
+        if declared.schema() != pinned.as_deref() {
+            return Err(FindRefusal::DeclarationNotPinned {
+                declared_under: declared.schema().map(str::to_string),
+                pinned,
+            });
+        }
         let mut reports = Vec::new();
         let order = match &params.sort {
             None => PageOrder::Path(PageDirection::Ascending),
@@ -893,13 +964,10 @@ impl Snapshot {
                     }
                     SortKey::Field { key, .. } => PageOrder::Field {
                         key,
-                        order: resume.map_or_else(
-                            || match declared.typed_order(key) {
-                                Some(_) => FieldOrder::Typed,
-                                None => FieldOrder::Raw,
-                            },
-                            |resume| resume.order,
-                        ),
+                        order: match declared.typed_order(key) {
+                            Some(_) => FieldOrder::Typed,
+                            None => FieldOrder::Raw,
+                        },
                         direction,
                     },
                     _ => return Err(FindRefusal::UnknownPart { part: "a sort key" }),
@@ -939,11 +1007,11 @@ impl Snapshot {
         &mut self,
         compiled: &Compiled<'_>,
         limit: usize,
-        resume: Option<&Resume>,
+        at: Option<&FindPosition>,
     ) -> Result<(Vec<FoundKey>, Option<FindPosition>, u64), StoreError> {
         let mut keys: Vec<FoundKey> = Vec::new();
         if !compiled.matches_nothing {
-            for (statement, start) in sections(compiled.order, resume.map(|resume| &resume.at)) {
+            for (statement, start) in sections(compiled.order, at) {
                 let rows = limit + 1 - keys.len();
                 if rows == 0 {
                     break;
@@ -1087,7 +1155,12 @@ impl Snapshot {
             Predicate::Tag { name, .. } => filter(FindFilter::Tag, vec![text(name)]),
             Predicate::HasFinding { kind, .. } => filter(
                 FindFilter::Finding,
-                vec![Value::Text(self.fingerprint(lookups)?), text(kind.as_str())],
+                // A finding recorded under no schema is stamped with the
+                // empty fingerprint.
+                vec![
+                    Value::Text(self.fingerprint(lookups)?.unwrap_or_default()),
+                    text(kind.as_str()),
+                ],
             ),
             _ => Err(FindRefusal::UnknownPart {
                 part: "a predicate",

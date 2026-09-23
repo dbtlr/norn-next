@@ -245,6 +245,11 @@ pub struct DocumentFacts {
     /// rows a document carries are the rows its own frontmatter derives: no
     /// caller can hand over one without the other.
     fields: FieldRows,
+    /// The fingerprint of the schema `fields` were derived under, or `None`
+    /// where they were derived under no schema. Set with `fields`, and read by
+    /// the increment, which refuses typed values derived under a schema the
+    /// store does not pin.
+    fields_schema: Option<String>,
 }
 
 impl DocumentFacts {
@@ -276,6 +281,7 @@ impl DocumentFacts {
             blocks: Vec::new(),
             tags: Vec::new(),
             fields: FieldRows::default(),
+            fields_schema: None,
         }
     }
 
@@ -283,13 +289,15 @@ impl DocumentFacts {
     /// derives under `declared`.
     ///
     /// The one way the pair is set, so the rows are always the ones the value
-    /// derives; the declaration decides only their typed half.
+    /// derives; the declaration decides only their typed half, and the facts
+    /// keep the fingerprint of the schema it was read from beside them.
     pub fn with_frontmatter(
         mut self,
         frontmatter: Option<FrontmatterValue>,
         declared: &DeclaredFields,
     ) -> Self {
         self.fields = FieldRows::derive(frontmatter.as_ref(), declared);
+        self.fields_schema = declared.schema().map(str::to_string);
         self.frontmatter = frontmatter;
         self
     }
@@ -303,6 +311,12 @@ impl DocumentFacts {
     /// The field rows the frontmatter derives, typed half included.
     pub fn fields(&self) -> &FieldRows {
         &self.fields
+    }
+
+    /// The fingerprint of the schema the field rows were derived under, or
+    /// `None` where they were derived under no schema.
+    pub fn fields_schema(&self) -> Option<&str> {
+        self.fields_schema.as_deref()
     }
 }
 

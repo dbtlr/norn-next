@@ -2495,7 +2495,7 @@ impl Declaration {
             .map_err(store_effect)?;
         let Some(pinned) = pinned else {
             return Ok(Declaration {
-                model: Declared::new(VaultSchema::default()),
+                model: Declared::unpinned(),
                 floor: 0,
             });
         };
@@ -2506,7 +2506,12 @@ impl Declaration {
             // documents under a model nothing could read would mint findings
             // stating a rule the vault never wrote. The author hears about the
             // file from the reload that refuses it.
-            model: Declared::new(VaultSchema::parse(&pinned.bytes).unwrap_or_default()),
+            // The declaration is named by the fingerprint the store pins, which
+            // is what the increment compares its typed values' schema with.
+            model: Declared::pinned(
+                VaultSchema::parse(&pinned.bytes).unwrap_or_default(),
+                pinned.fingerprint,
+            ),
             floor: pinned.generation,
         })
     }
@@ -4196,7 +4201,10 @@ mod tests {
     #[test]
     fn a_row_below_the_pins_generation_owes_its_judgment_again() {
         let judging = Declaration {
-            model: Declared::new(VaultSchema::parse(REPORTING_SCHEMA.as_bytes()).unwrap()),
+            model: Declared::pinned(
+                VaultSchema::parse(REPORTING_SCHEMA.as_bytes()).unwrap(),
+                "reporting",
+            ),
             floor: 7,
         };
         assert!(!judging.judged(6));
@@ -4204,7 +4212,7 @@ mod tests {
         assert!(judging.judged(8));
 
         let silent = Declaration {
-            model: Declared::new(VaultSchema::default()),
+            model: Declared::unpinned(),
             floor: 7,
         };
         assert!(silent.judged(6));

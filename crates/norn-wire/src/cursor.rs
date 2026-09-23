@@ -55,7 +55,9 @@
 //! names are in a sequence that no longer exists, so the page is refused
 //! rather than answered from a position that means something else. A cursor
 //! minted under no fingerprint was ordered rawly, and a raw order does not
-//! change with the schema, so such a cursor never refuses.
+//! change with the schema, so these rules never refuse such a cursor; an
+//! answer that also judges a cursor against the order its request names
+//! refuses it where that order is typed ([`CursorOrderChanged`]).
 //!
 //! **Two asymmetries follow from those rules.** A cursor minted without a
 //! sidecar revision and continued where a sidecar now answers reports nothing
@@ -336,11 +338,17 @@ pub enum Moved {
 /// position in is not the sequence the answer would walk. The page is refused
 /// rather than answered from a position that means something else, and the two
 /// fingerprints say which order was asked for and which one stands.
+///
+/// An answer that judges a cursor against the order its request names also
+/// refuses a raw cursor continued in a typed order, and a cursor whose key is
+/// not a position in the request's order at all; `minted_under` is `null` for a
+/// cursor minted in an order no schema gives.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct CursorOrderChanged {
-    /// The fingerprint the cursor was minted under.
-    pub minted_under: String,
+    /// The fingerprint the cursor was minted under, and `null` where it was
+    /// minted in an order no schema gives.
+    pub minted_under: Option<String>,
     /// The fingerprint the establishment reads now, and `null` where the order
     /// that stands is raw.
     pub current: Option<String>,
@@ -350,7 +358,15 @@ impl CursorOrderChanged {
     /// An order that changed between `minted_under` and `current`.
     pub fn new(minted_under: impl Into<String>, current: Option<String>) -> Self {
         CursorOrderChanged {
-            minted_under: minted_under.into(),
+            minted_under: Some(minted_under.into()),
+            current,
+        }
+    }
+
+    /// An order that changed from one no schema gives to `current`.
+    pub fn minted_raw(current: Option<String>) -> Self {
+        CursorOrderChanged {
+            minted_under: None,
             current,
         }
     }

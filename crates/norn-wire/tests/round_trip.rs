@@ -222,6 +222,7 @@ fn error_details() -> Vec<ErrorDetail> {
             Some("fp-2".to_string()),
         )),
         ErrorDetail::cursor_order_changed(CursorOrderChanged::new("fp-1", None)),
+        ErrorDetail::cursor_order_changed(CursorOrderChanged::minted_raw(Some("fp-2".to_string()))),
     ]);
     details.extend(
         not_ready_states()

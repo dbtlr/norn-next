@@ -806,21 +806,32 @@ pub(crate) fn plan_document(
 }
 
 /// The declaration a plan derives under: the pinned schema's content model,
-/// and the typed orders its declared fields hand the store.
+/// and the typed orders its declared fields hand the store, named by the
+/// fingerprint the schema is pinned under.
 ///
 /// Built once per schema rather than per document, and only through
-/// [`Declared::new`], so the typed orders a plan fills the field pillar with
-/// are always the ones the schema beside them declares.
+/// [`Declared::pinned`] and [`Declared::unpinned`], so the typed orders a plan
+/// fills the field pillar with are always the ones the schema beside them
+/// declares, and carry the fingerprint the store compares with its own pin.
 pub(crate) struct Declared {
     schema: VaultSchema,
     fields: DeclaredFields,
 }
 
 impl Declared {
-    /// The declaration `schema` makes.
-    pub(crate) fn new(schema: VaultSchema) -> Self {
-        let fields = declared_fields(&schema);
+    /// The declaration `schema` makes, pinned under `fingerprint`.
+    pub(crate) fn pinned(schema: VaultSchema, fingerprint: impl Into<String>) -> Self {
+        let fields = declared_fields(&schema, fingerprint.into());
         Declared { schema, fields }
+    }
+
+    /// The declaration of a vault with no schema pinned, which declares
+    /// nothing.
+    pub(crate) fn unpinned() -> Self {
+        Declared {
+            schema: VaultSchema::default(),
+            fields: DeclaredFields::none(),
+        }
     }
 
     /// The content model.
@@ -834,17 +845,17 @@ impl Declared {
     }
 }
 
-/// The declared fields of `schema` as the store reads them: every declared key,
-/// and for each whose type does not order as text, the typed order that type
-/// reads a raw value into.
+/// The declared fields of `schema`, pinned under `fingerprint`, as the store
+/// reads them: every declared key, and for each whose type does not order as
+/// text, the typed order that type reads a raw value into.
 ///
 /// A raw value that does not read as its declared type has no sort key, which
 /// is the store's `NULL`: the document still carries the value, and a typed
 /// order has nothing to place it by.
-fn declared_fields(schema: &VaultSchema) -> DeclaredFields {
-    schema
-        .fields()
-        .fold(DeclaredFields::none(), |declared, (key, field)| {
+fn declared_fields(schema: &VaultSchema, fingerprint: String) -> DeclaredFields {
+    schema.fields().fold(
+        DeclaredFields::under(fingerprint),
+        |declared, (key, field)| {
             let kind = field.kind();
             if kind.orders_as_text() {
                 declared.declare(key)
@@ -854,7 +865,8 @@ fn declared_fields(schema: &VaultSchema) -> DeclaredFields {
                     TypedOrder::new(move |raw| kind.read(raw).ok().map(|value| value.sort_key())),
                 )
             }
-        })
+        },
+    )
 }
 
 /// Judge a document's tags against the vault's declared tag facet.
@@ -965,17 +977,18 @@ mod tests {
     /// A vault that has declared nothing, which is what most cases here plan
     /// under: the observation alone decides the plan.
     fn undeclaring() -> Declared {
-        Declared::new(VaultSchema::default())
+        Declared::unpinned()
     }
 
     /// A vault whose declared tag vocabulary is `front` and everything under
     /// `area/`, and which reports anything else.
     fn reporting() -> Declared {
-        Declared::new(
+        Declared::pinned(
             VaultSchema::parse(
                 b"version: 1\ntags:\n  declared: [front]\n  patterns: [\"area/**\"]\n  undeclared: report\n",
             )
             .expect("a schema declaring a tag facet"),
+            "reporting",
         )
     }
 
@@ -1655,11 +1668,18 @@ mod tests {
 
     impl DerivedVault {
         fn new(label: &str, schema: &[u8], documents: &[(&str, String)]) -> Self {
-            let declared =
-                Declared::new(VaultSchema::parse(schema).expect("a schema declaring typed fields"));
+            const FINGERPRINT: &str = "compared";
+            let declared = Declared::pinned(
+                VaultSchema::parse(schema).expect("a schema declaring typed fields"),
+                FINGERPRINT,
+            );
             let scratch = norn_testkit::scratch::Scratch::new(label);
             let mut store =
                 norn_store::Store::open(scratch.join("store.sqlite3")).expect("a store");
+            store
+                .begin_request()
+                .pin_vault_schema(schema, FINGERPRINT)
+                .expect("pinning the compared schema");
             let changes: Vec<Change> = documents
                 .iter()
                 .map(|(path, bytes)| {

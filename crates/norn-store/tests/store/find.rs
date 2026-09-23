@@ -46,11 +46,23 @@ pub(crate) fn integer_order() -> TypedOrder {
     })
 }
 
-/// `status` declared as text, and `count` declared with a typed order.
+/// The fingerprint of the schema the fixture pins, which its declarations are
+/// read from.
+pub(crate) const SEED_SCHEMA: &str = "seed-schema";
+
+/// `status` declared as text, and `count` declared with a typed order, under
+/// the fixture's schema.
 pub(crate) fn declared() -> DeclaredFields {
-    DeclaredFields::none()
+    DeclaredFields::under(SEED_SCHEMA)
         .declare("status")
         .declare_typed("count", integer_order())
+}
+
+/// `status` and `count` both declared as text, under the fixture's schema.
+pub(crate) fn declared_raw() -> DeclaredFields {
+    DeclaredFields::under(SEED_SCHEMA)
+        .declare("status")
+        .declare("count")
 }
 
 pub(crate) fn map(entries: Vec<(&str, FrontmatterValue)>) -> FrontmatterValue {
@@ -71,7 +83,8 @@ pub(crate) fn integers(values: &[i64]) -> FrontmatterValue {
 }
 
 /// Five documents whose fields part the two orders, whose paths part the two
-/// path orders, and one of each fact a filter reads:
+/// path orders, and one of each fact a filter reads, written under the
+/// fixture's schema, which the store pins first:
 ///
 /// | path | status | count | also |
 /// |---|---|---|---|
@@ -81,6 +94,10 @@ pub(crate) fn integers(values: &[i64]) -> FrontmatterValue {
 /// | `other/glossary.md` | | | a finding |
 /// | `other/v1.2.md` | `done` | `[]` | |
 pub(crate) fn seed(store: &mut Store) {
+    store
+        .begin_request()
+        .pin_vault_schema(SEED_SCHEMA.as_bytes(), SEED_SCHEMA)
+        .expect("pinning the fixture's schema");
     let declared = declared();
     let mut tagged = document("notes/a.md", "hash-a", "the interloper walked in\n")
         .with_frontmatter(
@@ -178,8 +195,17 @@ impl Seeded {
     }
 
     pub(crate) fn plans(&self, params: &FindParams, resume: Option<&Resume>) -> Vec<FindPlan> {
+        self.plans_under(params, &declared(), resume)
+    }
+
+    fn plans_under(
+        &self,
+        params: &FindParams,
+        declared: &DeclaredFields,
+        resume: Option<&Resume>,
+    ) -> Vec<FindPlan> {
         self.snapshot()
-            .find_plans(params, &declared(), resume)
+            .find_plans(params, declared, resume)
             .expect("the plans of a request")
     }
 
@@ -447,7 +473,6 @@ const PAGE_BARS: &[(FindStatement, Direction, &str)] = &[
 fn a_path_page_seeks_the_case_insensitive_index_in_either_direction() {
     let mut seeded = Seeded::new("find-path-page");
     let continuation = Resume {
-        order: FieldOrder::Raw,
         at: FindPosition {
             sort: None,
             path: "notes/B.md".to_string(),
@@ -603,19 +628,13 @@ fn a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path() {
     let mut seeded = Seeded::new("find-field-sort");
     for bar in FIELD_BARS {
         let params = sorted(SortKey::field(bar.key), bar.direction);
-        let order = match bar.valued {
-            FindStatement::FieldValuePage(order, _) => order,
-            _ => unreachable!("a field bar names a valued section"),
-        };
         let in_valued = Resume {
-            order,
             at: FindPosition {
                 sort: Some("m".to_string()),
                 path: "notes/a.md".to_string(),
             },
         };
         let in_missing = Resume {
-            order,
             at: FindPosition {
                 sort: None,
                 path: "notes/a.md".to_string(),
@@ -1249,7 +1268,7 @@ fn a_set_valued_sort_field_orders_a_document_once_at_its_least_value() {
         row("notes/a.md", Some("3".to_string())),
         row("notes/c.md", Some("nine".to_string())),
     ];
-    let raw = DeclaredFields::none();
+    let raw = declared_raw();
     assert_eq!(
         read(Direction::Ascending, &raw, FieldOrder::Raw),
         then(missing_raw.clone(), valued_raw.clone())
@@ -1259,22 +1278,25 @@ fn a_set_valued_sort_field_orders_a_document_once_at_its_least_value() {
         then(reversed(&valued_raw), reversed(&missing_raw))
     );
 
-    for (order, index) in [
-        (FieldOrder::Raw, "document_fields_least_raw"),
-        (FieldOrder::Typed, "document_fields_least_typed"),
+    for (order, index, declared) in [
+        (FieldOrder::Raw, "document_fields_least_raw", &raw),
+        (FieldOrder::Typed, "document_fields_least_typed", &typed),
     ] {
         for (direction, page_direction) in [
             (Direction::Ascending, PageDirection::Ascending),
             (Direction::Descending, PageDirection::Descending),
         ] {
             let resume = Resume {
-                order,
                 at: FindPosition {
                     sort: Some("0".to_string()),
                     path: "notes/a.md".to_string(),
                 },
             };
-            let plans = seeded.plans(&sorted(SortKey::field("count"), direction), Some(&resume));
+            let plans = seeded.plans_under(
+                &sorted(SortKey::field("count"), direction),
+                declared,
+                Some(&resume),
+            );
             let valued = plan_of(&plans, FindStatement::FieldValuePage(order, page_direction));
             let touched = valued.searches_of("document_fields");
             assert!(
@@ -1306,10 +1328,7 @@ fn drained(seeded: &Seeded, params: &FindParams, limit: u32) -> Vec<(String, Opt
         let Some(next) = page.next else {
             return rows;
         };
-        resume = Some(Resume {
-            order: page.order.unwrap_or(FieldOrder::Raw),
-            at: next,
-        });
+        resume = Some(Resume { at: next });
     }
     panic!("the pages did not end: {rows:?}");
 }
@@ -1539,8 +1558,9 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
 
 /// **A page holds the bound it names, the default where it names none, and at
 /// most [`MAX_PAGE`]; each statement it runs is counted on its snapshot.** A
-/// path page is one statement. A field sort whose first section does not fill
-/// the page reads the second, and one that fills it stops there.
+/// path page is one statement beside the fingerprint read. A field sort whose
+/// first section does not fill the page reads the second, and one that fills
+/// it stops there.
 #[test]
 fn a_page_holds_its_bound_and_counts_each_statement_it_runs() {
     let seeded = Seeded::new("find-bound");
@@ -1557,21 +1577,23 @@ fn a_page_holds_its_bound_and_counts_each_statement_it_runs() {
             snapshot.counters().statements_executed() - before,
         )
     };
-    assert_eq!(count(&request()), (5, false, 1));
-    assert_eq!(count(&request().with_limit(2)), (2, true, 1));
-    assert_eq!(count(&request().with_limit(0)), (1, true, 1));
-    assert_eq!(count(&request().with_limit(u32::MAX)), (5, false, 1));
+    // Every page reads the active fingerprint once, which its declaration is
+    // judged against, and then its sections.
+    assert_eq!(count(&request()), (5, false, 2));
+    assert_eq!(count(&request().with_limit(2)), (2, true, 2));
+    assert_eq!(count(&request().with_limit(0)), (1, true, 2));
+    assert_eq!(count(&request().with_limit(u32::MAX)), (5, false, 2));
     let by_status = sorted(SortKey::field("status"), Direction::Ascending);
-    assert_eq!(count(&by_status), (5, false, 2));
+    assert_eq!(count(&by_status), (5, false, 3));
     // Ascending, the missing section's one row does not fill a page of one and
     // the row after it: the valued section is read for that row.
-    assert_eq!(count(&by_status.with_limit(1)), (1, true, 2));
+    assert_eq!(count(&by_status.with_limit(1)), (1, true, 3));
     // Descending, the valued section fills it.
     assert_eq!(
         count(&sorted(SortKey::field("status"), Direction::Descending).with_limit(1)),
-        (1, true, 1)
+        (1, true, 2)
     );
-    // The fingerprint a finding part is judged under is one more statement.
+    // A finding part binds that same reading, and costs no further statement.
     assert_eq!(
         count(&request().with_predicates([Predicate::has_finding(FindingKind::BodyBytesNotUtf8)])),
         (1, false, 2)

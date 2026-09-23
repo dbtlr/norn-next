@@ -1613,6 +1613,10 @@ re-pin discards**: the pin's own transaction clears every typed value and its le
 marker beside the findings it discards, and the walk that follows refills them. That is safe
 because a schema reload closes the entry's reader and publishes `Warming` in its `Healing`
 phase until the heal converges, so no read observes a column the walk has half refilled.
+**The pin is the key at both ends**: the declaration the host hands the store names the
+fingerprint it was read from, an increment refuses typed values derived under any other
+than the one pinned in its own transaction, and a find refuses a declaration its snapshot
+does not pin.
 
 **Exclusion is a membership boundary**: an excluded place holds no rows, and any row
 standing under an excluded root is pruned by the next leg that ranges over that root —

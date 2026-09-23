@@ -241,34 +241,76 @@ fn least(values: &[Option<String>]) -> Option<usize> {
         .map(|(_, index)| index)
 }
 
-/// The fields a vault schema declares, and the typed order each typed one
-/// carries.
+/// The fields a vault schema declares, the typed order each typed one
+/// carries, and the fingerprint of the schema they were read from.
 ///
 /// The store reads no schema: the host derives this value from the schema it
 /// pinned and hands it over, and [`FieldRows::derive`] reads it to fill the
 /// typed column. A key declared without a typed order is ordered by its raw
 /// text, which is what a field declared as text is.
+///
+/// **The declaration names the schema it came from.** [`DeclaredFields::none`]
+/// is the declaration of a store with no schema pinned, which declares nothing;
+/// every declared key is declared [`DeclaredFields::under`] a schema
+/// fingerprint. A typed value is therefore always derived under a named
+/// schema, and the store compares that name with the one it pins: an
+/// increment refuses typed rows derived under another, and a find refuses a
+/// declaration that is not the snapshot's.
 #[derive(Clone, Debug, Default)]
 pub struct DeclaredFields {
+    schema: Option<String>,
     keys: BTreeMap<String, Option<TypedOrder>>,
 }
 
 impl DeclaredFields {
-    /// A vault that declares no field.
+    /// The declaration of a store with no schema pinned: no schema, and no
+    /// declared field.
     pub fn none() -> Self {
         Self::default()
     }
 
+    /// A declaration read from the schema pinned under `fingerprint`, declaring
+    /// no field yet.
+    pub fn under(fingerprint: impl Into<String>) -> Self {
+        DeclaredFields {
+            schema: Some(fingerprint.into()),
+            keys: BTreeMap::new(),
+        }
+    }
+
     /// The same declaration with `key` declared and ordered by its raw text.
-    pub fn declare(mut self, key: impl Into<String>) -> Self {
-        self.keys.insert(key.into(), None);
-        self
+    ///
+    /// # Panics
+    ///
+    /// On a declaration with no schema: [`DeclaredFields::none`] declares
+    /// nothing, and a key is declared [`DeclaredFields::under`] the schema that
+    /// declares it.
+    pub fn declare(self, key: impl Into<String>) -> Self {
+        self.with(key.into(), None)
     }
 
     /// The same declaration with `key` declared and ordered by `order`.
-    pub fn declare_typed(mut self, key: impl Into<String>, order: TypedOrder) -> Self {
-        self.keys.insert(key.into(), Some(order));
+    ///
+    /// # Panics
+    ///
+    /// On a declaration with no schema, as [`DeclaredFields::declare`] does.
+    pub fn declare_typed(self, key: impl Into<String>, order: TypedOrder) -> Self {
+        self.with(key.into(), Some(order))
+    }
+
+    fn with(mut self, key: String, order: Option<TypedOrder>) -> Self {
+        assert!(
+            self.schema.is_some(),
+            "`{key}` is declared on a declaration no schema makes"
+        );
+        self.keys.insert(key, order);
         self
+    }
+
+    /// The fingerprint of the schema this declaration was read from, or `None`
+    /// for the declaration of a store with no schema pinned.
+    pub fn schema(&self) -> Option<&str> {
+        self.schema.as_deref()
     }
 
     /// Whether the schema declares `key`.

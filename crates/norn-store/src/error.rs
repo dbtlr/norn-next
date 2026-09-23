@@ -62,11 +62,17 @@ pub enum StoreError {
         limit: usize,
         given: usize,
     },
-    /// Two parts of what a caller handed over disagree, so together they
-    /// describe nothing: `what` names the pair. Refused rather than written,
-    /// because a store holding both would answer from whichever part a read
-    /// happened to consult.
-    Disagreement { what: &'static str },
+    /// A document's typed field values were derived under a schema other than
+    /// the one the store pins. Refused rather than written, because the typed
+    /// column holds only values the pinned schema derives: a value derived
+    /// under another would stand in an order no read can name.
+    UnpinnedDeclaration {
+        /// The fingerprint of the schema the values were derived under, or
+        /// `None` for none.
+        derived_under: Option<String>,
+        /// The fingerprint the store pins, or `None` where it pins none.
+        pinned: Option<String>,
+    },
     /// One entry of a changeset was refused, named by where it sits and what it
     /// is about. A streaming heal hands over tens of thousands of entries and
     /// fails on whichever one is pathological, so the refusal that reaches the
@@ -96,7 +102,15 @@ impl fmt::Display for StoreError {
             StoreError::Bound { what, limit, given } => {
                 write!(f, "{what} holds at most {limit}, and {given} were given")
             }
-            StoreError::Disagreement { what } => write!(f, "{what} disagree"),
+            StoreError::UnpinnedDeclaration {
+                derived_under,
+                pinned,
+            } => write!(
+                f,
+                "typed field values were derived under {}, and the store pins {}",
+                schema_named(derived_under.as_deref()),
+                schema_named(pinned.as_deref())
+            ),
             StoreError::Entry {
                 index,
                 path,
@@ -129,12 +143,20 @@ impl StoreError {
             | StoreError::Sql { .. }
             | StoreError::Lifecycle { .. }
             | StoreError::Bound { .. }
-            | StoreError::Disagreement { .. } => None,
+            | StoreError::UnpinnedDeclaration { .. } => None,
         }
     }
 }
 
 impl std::error::Error for StoreError {}
+
+/// A schema fingerprint as a refusal names it: quoted, or "no schema".
+fn schema_named(fingerprint: Option<&str>) -> String {
+    fingerprint.map_or_else(
+        || "no schema".to_string(),
+        |named| format!("the schema `{named}`"),
+    )
+}
 
 /// The substrate's three refusal shapes are three of this crate's own, and the
 /// conversion is the whole of the mapping: the driver-seam judgment about
