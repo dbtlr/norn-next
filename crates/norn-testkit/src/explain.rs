@@ -365,7 +365,7 @@ impl QueryPlan {
     ///
     /// A search is not a point read on its own. `path>?` opens a cursor on the
     /// same index as `path=?` and reports the same `SEARCH … USING INDEX` row,
-    /// so [`QueryPlan::assert_uses_index`] and [`QueryPlan::assert_searches`]
+    /// so [`QueryPlan::assert_searches_through`] and [`QueryPlan::assert_searches`]
     /// both green a reader that seeks to a key and then walks the rest of the
     /// table. The constraint text is where the two come apart.
     ///
@@ -390,8 +390,13 @@ impl QueryPlan {
         );
     }
 
-    /// **The index bar.** A step that searches `table` reads it through
-    /// `access`.
+    /// **The access bar.** Some step that searches `table` reads it through
+    /// `access`: a declared index, the primary key of a `WITHOUT ROWID` table,
+    /// the row id, or an automatic index.
+    ///
+    /// It binds which b-tree a search runs through and nothing about the range
+    /// it opens there, so it is paired with [`QueryPlan::assert_search_constraint`]
+    /// wherever the constraint is what makes a search the one a bar means.
     ///
     /// The judgment is taken on the rows that search `table` and nowhere
     /// else. A plan names indexes on several rows, and an index named on some
@@ -405,7 +410,7 @@ impl QueryPlan {
     /// index, and the cascade it fires reaches the same table's rows by primary
     /// key. Each of those is a fact the plan states, so each is one assertion,
     /// and a search this bar is not asked about is left to the bar that is.
-    pub fn assert_uses_index(&self, table: &str, access: Access<'_>) {
+    pub fn assert_searches_through(&self, table: &str, access: Access<'_>) {
         let table = bare_name(table);
         self.assert_searches(table);
         let searches = self.searches_of(table);
@@ -990,11 +995,11 @@ mod tests {
             "SELECT finding, class_key FROM finding_classes WHERE finding IN (?1, ?2)",
             rows(&["SEARCH finding_classes USING PRIMARY KEY (finding=?)"]),
         );
-        by_key.assert_uses_index("finding_classes", Access::PrimaryKey);
+        by_key.assert_searches_through("finding_classes", Access::PrimaryKey);
         let failure = std::panic::catch_unwind({
             let by_key = by_key.clone();
             move || {
-                by_key.assert_uses_index(
+                by_key.assert_searches_through(
                     "finding_classes",
                     Access::Index("finding_classes_class_key"),
                 )
@@ -1015,12 +1020,12 @@ mod tests {
                 "SEARCH finding_classes USING COVERING INDEX finding_classes_class_key (class_key>?)",
             ]),
         );
-        by_index.assert_uses_index(
+        by_index.assert_searches_through(
             "finding_classes",
             Access::Index("finding_classes_class_key"),
         );
         let failure = std::panic::catch_unwind(move || {
-            by_index.assert_uses_index("finding_classes", Access::PrimaryKey)
+            by_index.assert_searches_through("finding_classes", Access::PrimaryKey)
         })
         .expect_err("a secondary-index seek is not a primary-key seek");
         let message = failure
@@ -1045,6 +1050,23 @@ mod tests {
         assert!(row.uses_automatic_index());
     }
 
+    /// SQLite spells an automatic index over part of a table with `PARTIAL`
+    /// between `AUTOMATIC` and `COVERING`, and it is the same unnamed,
+    /// per-statement index as the plain form.
+    #[test]
+    fn a_partial_automatic_index_is_reported_as_automatic() {
+        let row = PlanRow::new(
+            3,
+            0,
+            "SEARCH b USING AUTOMATIC PARTIAL COVERING INDEX (x=?)",
+        );
+        assert_eq!(row.searches(), Some("b"));
+        assert_eq!(row.access(), Some(Access::AutomaticIndex));
+        assert_eq!(row.index(), None);
+        assert_eq!(row.constraint(), Some("(x=?)"));
+        assert!(row.uses_automatic_index());
+    }
+
     #[test]
     fn an_indexed_plan_passes_the_bars() {
         let plan = plan(&[
@@ -1055,8 +1077,8 @@ mod tests {
         plan.assert_no_table_scan();
         plan.assert_no_full_scan_of("documents");
         plan.assert_searches("documents");
-        plan.assert_uses_index("documents", Access::Index("documents_stem"));
-        plan.assert_uses_index("links", Access::Index("links_source"));
+        plan.assert_searches_through("documents", Access::Index("documents_stem"));
+        plan.assert_searches_through("links", Access::Index("links_source"));
         plan.assert_no_temp_btree();
     }
 
@@ -1080,9 +1102,9 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "reads it through index `documents_stem`")]
-    fn a_plan_reading_another_index_fails_the_index_bar() {
+    fn a_plan_reading_another_index_fails_the_access_bar() {
         plan(&["SEARCH documents USING INDEX documents_path (path=?)"])
-            .assert_uses_index("documents", Access::Index("documents_stem"));
+            .assert_searches_through("documents", Access::Index("documents_stem"));
     }
 
     /// The index is judged on the row that searches the named table. Here the
@@ -1092,7 +1114,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "no step searching `findings` reads it through index \
                                `finding_classes_class_key`")]
-    fn an_index_named_on_another_tables_row_does_not_answer_the_index_bar() {
+    fn an_index_named_on_another_tables_row_does_not_answer_the_access_bar() {
         QueryPlan::new(
             "SELECT id FROM findings WHERE id IN (SELECT finding FROM finding_classes \
              WHERE class_key >= ?1)",
@@ -1103,25 +1125,25 @@ mod tests {
                  (class_key>?)",
             ]),
         )
-        .assert_uses_index("findings", Access::Index("finding_classes_class_key"));
+        .assert_searches_through("findings", Access::Index("finding_classes_class_key"));
     }
 
     /// A table the plan scans is not searched through anything, however many
     /// other rows name the index the bar asks about.
     #[test]
     #[should_panic(expected = "does not search `documents`")]
-    fn a_scanned_table_fails_the_index_bar_whatever_another_row_names() {
+    fn a_scanned_table_fails_the_access_bar_whatever_another_row_names() {
         QueryPlan::new(
             "SELECT d.path FROM documents d JOIN links l ON l.target = d.stem",
             rows(&["SCAN d", "SEARCH l USING INDEX links_target (target=?)"]),
         )
-        .assert_uses_index("documents", Access::Index("links_target"));
+        .assert_searches_through("documents", Access::Index("links_target"));
     }
 
     /// A table searched twice for two reasons answers for each access it is
     /// searched through, and for no other.
     #[test]
-    fn a_table_searched_two_ways_answers_the_index_bar_for_each_and_no_other() {
+    fn a_table_searched_two_ways_answers_the_access_bar_for_each_and_no_other() {
         let discard = QueryPlan::new(
             "DELETE FROM findings WHERE id IN (SELECT finding FROM finding_classes \
              WHERE class_key >= ?1)",
@@ -1133,14 +1155,14 @@ mod tests {
                 "SEARCH finding_classes USING PRIMARY KEY (finding=?)",
             ]),
         );
-        discard.assert_uses_index(
+        discard.assert_searches_through(
             "finding_classes",
             Access::Index("finding_classes_class_key"),
         );
-        discard.assert_uses_index("finding_classes", Access::PrimaryKey);
-        discard.assert_uses_index("findings", Access::RowId);
+        discard.assert_searches_through("finding_classes", Access::PrimaryKey);
+        discard.assert_searches_through("findings", Access::RowId);
         let failure = std::panic::catch_unwind(move || {
-            discard.assert_uses_index("finding_classes", Access::AutomaticIndex)
+            discard.assert_searches_through("finding_classes", Access::AutomaticIndex)
         })
         .expect_err("no search of the table reads it through an automatic index");
         let message = failure
@@ -1152,17 +1174,17 @@ mod tests {
         );
     }
 
-    /// The index bar cannot tell a point read from a range: both report
+    /// The access bar cannot tell a point read from a range: both report
     /// `SEARCH … USING INDEX documents_stem`, and only the constraint says
     /// which one ran.
     #[test]
     fn the_constraint_bar_separates_an_equality_seek_from_a_range_over_the_same_index() {
         let equality = plan(&["SEARCH documents USING INDEX documents_stem (stem=?)"]);
-        equality.assert_uses_index("documents", Access::Index("documents_stem"));
+        equality.assert_searches_through("documents", Access::Index("documents_stem"));
         equality.assert_search_constraint("documents", "(stem=?)");
 
         let range = plan(&["SEARCH documents USING INDEX documents_stem (stem>?)"]);
-        range.assert_uses_index("documents", Access::Index("documents_stem"));
+        range.assert_searches_through("documents", Access::Index("documents_stem"));
         let failure = std::panic::catch_unwind(move || {
             range.assert_search_constraint("documents", "(stem=?)")
         })
@@ -1181,7 +1203,7 @@ mod tests {
     #[test]
     fn a_primary_key_seek_is_judged_by_its_constraint() {
         let seek = plan(&["SEARCH meta USING PRIMARY KEY (key=?)"]);
-        seek.assert_uses_index("meta", Access::PrimaryKey);
+        seek.assert_searches_through("meta", Access::PrimaryKey);
         seek.assert_search_constraint("meta", "(key=?)");
     }
 

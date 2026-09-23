@@ -17,6 +17,8 @@
 //! bar is read through — the two are certified separately and change for
 //! different reasons.
 
+use std::num::NonZeroUsize;
+
 use norn_db::EmittedPlan;
 use norn_db::rusqlite::{params, params_from_iter};
 use norn_wire::FindingKind;
@@ -87,12 +89,12 @@ impl<'a> Request<'a> {
     ) -> Result<EmittedPlan, StoreError> {
         if let ExplainedStatement::FindingCandidates(ids) | ExplainedStatement::FindingClasses(ids) =
             statement
-            && !(1..=FINDING_ID_CHUNK).contains(&ids)
+            && ids.get() > FINDING_ID_CHUNK
         {
             return Err(StoreError::Bound {
                 what: "a finding-id chunk",
                 limit: FINDING_ID_CHUNK,
-                given: ids,
+                given: ids.get(),
             });
         }
         let sql = match statement {
@@ -123,8 +125,8 @@ impl<'a> Request<'a> {
             ExplainedStatement::StoredTombstone(_) => STORED_TOMBSTONE_SQL.to_string(),
             ExplainedStatement::StoredFindings(_) => stored_findings_sql(),
             ExplainedStatement::VaultSchemaPin => norn_db::meta::META_READ_SQL.to_string(),
-            ExplainedStatement::FindingCandidates(ids) => finding_candidates_sql(ids),
-            ExplainedStatement::FindingClasses(ids) => finding_classes_sql(ids),
+            ExplainedStatement::FindingCandidates(ids) => finding_candidates_sql(ids.get()),
+            ExplainedStatement::FindingClasses(ids) => finding_classes_sql(ids.get()),
         };
         let connection = self.store.connection();
         Ok(match statement {
@@ -227,7 +229,7 @@ impl<'a> Request<'a> {
             }
             ExplainedStatement::FindingCandidates(ids)
             | ExplainedStatement::FindingClasses(ids) => {
-                let chunk: Vec<i64> = (EXPLAINED_FIRST_FINDING_ID..).take(ids).collect();
+                let chunk: Vec<i64> = (EXPLAINED_FIRST_FINDING_ID..).take(ids.get()).collect();
                 norn_db::emitted_plan(connection, &sql, finding_id_parameters(&chunk))
             }
         }?)
@@ -267,7 +269,18 @@ impl<'a> Request<'a> {
     /// the paged readers are. Taking an [`Request::emitted_plan`] contributes
     /// nothing either.
     pub fn read_steps(&self) -> u64 {
-        self.read_steps.get()
+        self.read_work.steps.get()
+    }
+
+    /// How many statements this request's multi-row reads have run, counted
+    /// over the same statements [`Request::read_steps`] counts the steps of.
+    ///
+    /// It is the reading a bar over how a reader splits its work into
+    /// statements is taken through, and nothing outside this crate's own tests
+    /// reads it.
+    #[cfg(test)]
+    pub(crate) fn read_statements(&self) -> u64 {
+        self.read_work.statements.get()
     }
 }
 
@@ -350,11 +363,20 @@ pub enum ExplainedStatement<'a> {
     /// [`Request::stored_findings`], [`Request::findings_in_class`] and
     /// [`Request::stored_findings_after`] read once per chunk of the findings
     /// their first statement found. A chunk holds from one id to
-    /// [`FINDING_ID_CHUNK`], and a count outside that is refused.
-    FindingCandidates(usize),
+    /// [`FINDING_ID_CHUNK`]: the width is nonzero by its type, and a width
+    /// above the chunk bound is refused as [`StoreError::Bound`].
+    ///
+    /// An empty chunk is not a statement any reader runs, so it has no
+    /// spelling here at all:
+    ///
+    /// ```compile_fail,E0308
+    /// norn_store::ExplainedStatement::FindingCandidates(0);
+    /// ```
+    FindingCandidates(NonZeroUsize),
     /// The class memberships of a chunk of this many findings, read beside
-    /// [`ExplainedStatement::FindingCandidates`] by the same three readers.
-    FindingClasses(usize),
+    /// [`ExplainedStatement::FindingCandidates`] by the same three readers,
+    /// and spelled by a nonzero width for the same reason.
+    FindingClasses(NonZeroUsize),
 }
 
 /// How many keyed point reads this seam names.
@@ -382,7 +404,7 @@ impl<'a> ExplainedStatement<'a> {
     /// its place in it.
     ///
     /// The parameters are the ones a statement cannot be spelled without, and
-    /// `ids` is the size of a finding-id chunk. The scope, the order and the
+    /// `ids` is the width of a finding-id chunk. The scope, the order and the
     /// discard scope are not parameters: a statement's place in this
     /// enumeration does not depend on which of them it carries, and the bars
     /// that care about those axes range over them themselves.
@@ -390,7 +412,7 @@ impl<'a> ExplainedStatement<'a> {
         subject: &'a DocumentPath,
         probe: &'a SuffixProbe,
         kinds: &'a [FindingKind],
-        ids: usize,
+        ids: NonZeroUsize,
     ) -> [Self; STATEMENTS] {
         [
             Self::SuffixCandidates(probe),
