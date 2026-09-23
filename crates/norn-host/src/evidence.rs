@@ -326,6 +326,7 @@ mod tests {
             affected_classes: Default::default(),
             invalidated: norn_store::Invalidation {
                 findings_discarded: 3,
+                typed_values_discarded: 0,
             },
         }
     }

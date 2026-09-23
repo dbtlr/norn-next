@@ -22,9 +22,10 @@
 //!   holds the read's own cost shape, in two carriers. A work bar drains the
 //!   heal page, the four pillar enumerations and the two change feeds a row at
 //!   a time through `Request::read_steps`, and states each cost as a line in
-//!   the rows drained. Plan bars over the nine keyed point reads assert an
+//!   the rows drained. Plan bars over the ten keyed point reads assert an
 //!   equality seek on the key each was given — through a named index for eight
-//!   of them, and through `meta`'s primary key for the pinned-schema read.
+//!   of them, and through a primary key for the field rows and the
+//!   pinned-schema read.
 //! - **Size independence.** One bounded write costs the same at 300 documents
 //!   and at 2000. A ceiling passes anything under it; a pair fails the moment
 //!   the two scales stop moving together.

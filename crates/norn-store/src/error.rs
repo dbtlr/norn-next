@@ -62,6 +62,11 @@ pub enum StoreError {
         limit: usize,
         given: usize,
     },
+    /// Two parts of what a caller handed over disagree, so together they
+    /// describe nothing: `what` names the pair. Refused rather than written,
+    /// because a store holding both would answer from whichever part a read
+    /// happened to consult.
+    Disagreement { what: &'static str },
     /// One entry of a changeset was refused, named by where it sits and what it
     /// is about. A streaming heal hands over tens of thousands of entries and
     /// fails on whichever one is pathological, so the refusal that reaches the
@@ -91,6 +96,7 @@ impl fmt::Display for StoreError {
             StoreError::Bound { what, limit, given } => {
                 write!(f, "{what} holds at most {limit}, and {given} were given")
             }
+            StoreError::Disagreement { what } => write!(f, "{what} disagree"),
             StoreError::Entry {
                 index,
                 path,
@@ -122,7 +128,8 @@ impl StoreError {
             StoreError::Path { .. }
             | StoreError::Sql { .. }
             | StoreError::Lifecycle { .. }
-            | StoreError::Bound { .. } => None,
+            | StoreError::Bound { .. }
+            | StoreError::Disagreement { .. } => None,
         }
     }
 }

@@ -2,10 +2,12 @@
 //!
 //! `documents.frontmatter` holds a JSON1 projection of the frontmatter block:
 //! one column, queryable through SQLite's JSON functions, schema-independent
-//! and carrying no invalidation key. There is deliberately **no field-per-row
-//! table** beside it. Field rows are an entity-attribute-value shape, and every
-//! query over one pays a join per field it reads while giving up the ability to
-//! ask about a field's *structure* at all.
+//! and carrying no invalidation key. **It is what a field's value is read off.**
+//! The field pillar beside it ([`crate::FieldRows`]) is derived from this same
+//! value and answers the other two questions — which documents carry a key and
+//! a value, and in what order they stand — so a predicate or an order is
+//! answered off the pillar's rows, while a projected value is read whole,
+//! structure included, from here.
 //!
 //! # Projected, never authoritative
 //!
@@ -228,17 +230,25 @@ fn write_value(value: &FrontmatterValue, out: &mut String) {
 /// two equal values disagree about is the thing canonicalization exists to
 /// prevent.
 fn write_float(number: f64, out: &mut String) {
+    out.push_str(float_text(number).as_deref().unwrap_or("null"));
+}
+
+/// A finite float's canonical spelling, or nothing where JSON has none.
+///
+/// The one spelling of a float in the store: the projection writes it, and the
+/// field pillar's raw text is it, so a value read off either says the same
+/// digits.
+pub(crate) fn float_text(number: f64) -> Option<String> {
     if !number.is_finite() {
-        out.push_str("null");
-        return;
+        return None;
     }
-    let written = number.to_string();
-    out.push_str(&written);
+    let mut written = number.to_string();
     // `1.0` writes as `1`, which every JSON reader calls an integer. The
     // fractional marker is what keeps a float's shape in the projection.
     if !written.contains('.') {
-        out.push_str(".0");
+        written.push_str(".0");
     }
+    Some(written)
 }
 
 fn write_string(text: &str, out: &mut String) {

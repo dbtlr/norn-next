@@ -17,6 +17,7 @@ mod common;
 mod counters;
 mod equivalence;
 mod facts;
+mod fields;
 mod increments;
 mod lifecycle;
 mod pillars;

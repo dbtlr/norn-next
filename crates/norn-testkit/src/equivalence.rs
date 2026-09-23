@@ -12,7 +12,8 @@
 //! It carries every **derived fact**: the document rows and their bodies, the
 //! content hashes and the sub-fingerprints beside them, byte lengths, body
 //! offsets and frontmatter diagnostic counts, the frontmatter projection, the
-//! links, headings, block ids and tags, the terms the full-text index holds, the
+//! links, headings, block ids and tags, the field rows with their typed sort
+//! keys, the terms the full-text index holds, the
 //! pinned vault schema, and every finding — findings at paths no document row
 //! stands at included, because those are exactly the ones a keyed read cannot be
 //! asked for.
@@ -75,8 +76,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use norn_store::{
-    BlockFact, DocumentPath, FindingCursor, HeadingFact, IndexedTerm, LinkFact, PillarReport,
-    Store, StoreError, StoredFinding, StoredPathOrder, StoredTombstone, TagFact, ddl,
+    BlockFact, DocumentPath, FieldRows, FindingCursor, HeadingFact, IndexedTerm, LinkFact,
+    PillarReport, Store, StoreError, StoredFinding, StoredPathOrder, StoredTombstone, TagFact, ddl,
 };
 use norn_wire::{FindingKind, FindingScope};
 
@@ -126,6 +127,10 @@ pub struct ProjectedDocument {
     pub headings: Vec<HeadingFact>,
     pub blocks: Vec<BlockFact>,
     pub tags: Vec<TagFact>,
+    /// The field rows, typed half included: a store that healed under a
+    /// re-pinned schema and one built from zero under it agree about every
+    /// typed value only if the heal refilled what the pin cleared.
+    pub fields: FieldRows,
 }
 
 /// One finding, with the write generation it was recorded at left out.
@@ -352,6 +357,7 @@ impl StoreProjection {
                     headings: facts.headings,
                     blocks: facts.blocks,
                     tags: facts.tags,
+                    fields: facts.fields,
                 });
             }
         }
@@ -547,6 +553,7 @@ impl StoreProjection {
             push_indexed(&mut entries, &at, "heading", &document.headings);
             push_indexed(&mut entries, &at, "block", &document.blocks);
             push_indexed(&mut entries, &at, "tag", &document.tags);
+            push_indexed(&mut entries, &at, "field", document.fields.rows());
         }
         // A finding has no key of its own that survives being written to a
         // second store, so its field is its subject and its position among the
@@ -926,6 +933,7 @@ mod tests {
                 headings: Vec::new(),
                 blocks: Vec::new(),
                 tags: Vec::new(),
+                fields: FieldRows::default(),
             }],
             findings: Vec::new(),
             terms: vec![IndexedTerm {

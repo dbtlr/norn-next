@@ -13,6 +13,7 @@ use norn_db::rusqlite::{CachedStatement, OptionalExtension, Transaction, params}
 use crate::counters::{Counter, DerivationCounters};
 use crate::error::{self, StoreError};
 use crate::facts::{DocumentFacts, FindingFacts, Invalidation, Provenance};
+use crate::fields::{DeclaredFields, FieldRow, FieldRows};
 use crate::hash;
 use crate::json;
 use crate::path::{ClassKey, DocumentPath};
@@ -24,6 +25,7 @@ use crate::store::Store;
 /// The two shapes are the two things that happen to a path: it is derived, or
 /// it is gone.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)] // An upsert is the common entry: boxing it would allocate once per document to shrink the rarer death.
 pub enum Change {
     /// A document as it now stands.
     ///
@@ -273,6 +275,7 @@ pub(crate) fn apply(
     counters.add(Counter::HeadingRowsWritten, tally.heading_rows);
     counters.add(Counter::BlockRowsWritten, tally.block_rows);
     counters.add(Counter::TagRowsWritten, tally.tag_rows);
+    counters.add(Counter::FieldRowsWritten, tally.field_rows);
     counters.add(Counter::FrontmatterProjections, tally.projections);
     counters.add(Counter::FindingsDiscarded, tally.findings_discarded);
     counters.add(Counter::FindingsWritten, findings.len() as u64);
@@ -285,6 +288,7 @@ pub(crate) fn apply(
         affected_classes: tally.affected_classes,
         invalidated: Invalidation {
             findings_discarded: tally.findings_discarded,
+            typed_values_discarded: 0,
         },
     })
 }
@@ -303,6 +307,7 @@ struct Tally {
     heading_rows: u64,
     block_rows: u64,
     tag_rows: u64,
+    field_rows: u64,
     projections: u64,
     findings_discarded: u64,
     affected_classes: BTreeSet<ClassKey>,
@@ -322,6 +327,7 @@ struct Statements<'t> {
     insert_heading: CachedStatement<'t>,
     insert_block: CachedStatement<'t>,
     insert_tag: CachedStatement<'t>,
+    insert_field: CachedStatement<'t>,
     delete_document: CachedStatement<'t>,
     record_tombstone: CachedStatement<'t>,
     /// The subject-scoped findings discard, over one changed path at a time.
@@ -340,6 +346,7 @@ const FACT_DISCARDS: &[&str] = &[
     "DELETE FROM headings WHERE document = ?1",
     "DELETE FROM blocks WHERE document = ?1",
     "DELETE FROM document_tags WHERE document = ?1",
+    "DELETE FROM document_fields WHERE document = ?1",
 ];
 
 impl<'t> Statements<'t> {
@@ -404,6 +411,13 @@ impl<'t> Statements<'t> {
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 "preparing a tag write",
             )?,
+            insert_field: prepared(
+                "INSERT INTO document_fields (
+                     document, key, ordinal, path, container, raw, typed, least_raw,
+                     least_typed
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "preparing a field write",
+            )?,
             // The hash the tombstone carries comes back from the row this
             // removes, so the delete and the record read one value between them.
             delete_document: prepared(
@@ -453,6 +467,7 @@ fn upsert(
     tally: &mut Tally,
 ) -> Result<(), StoreError> {
     refuse_a_document_that_does_not_add_up(facts)?;
+    refuse_field_rows_another_value_derives(facts)?;
     let projection = facts
         .frontmatter
         .as_ref()
@@ -555,11 +570,47 @@ fn upsert(
             .map_err(|error| error::sql("writing a tag row", error))?;
     }
 
+    for row in facts.fields.rows() {
+        let (container, raw, typed, least_raw, least_typed) = match row {
+            FieldRow::Presence { container, .. } => {
+                (Some(container.as_str()), None, None, false, false)
+            }
+            FieldRow::Value {
+                raw,
+                typed,
+                least_raw,
+                least_typed,
+                ..
+            } => (
+                None,
+                raw.as_deref(),
+                typed.as_deref(),
+                *least_raw,
+                *least_typed,
+            ),
+        };
+        statements
+            .insert_field
+            .execute(params![
+                document,
+                row.key(),
+                row.ordinal(),
+                facts.path.as_str(),
+                container,
+                raw,
+                typed,
+                least_raw,
+                least_typed,
+            ])
+            .map_err(|error| error::sql("writing a field row", error))?;
+    }
+
     tally.documents_upserted += 1;
     tally.link_rows += facts.links.len() as u64;
     tally.heading_rows += facts.headings.len() as u64;
     tally.block_rows += facts.blocks.len() as u64;
     tally.tag_rows += facts.tags.len() as u64;
+    tally.field_rows += facts.fields.rows().len() as u64;
     if projection.is_some() {
         tally.projections += 1;
     }
@@ -630,6 +681,27 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
         what: "the byte length a document's body offset and body account for",
         limit: widest(accounted),
         given: widest(facts.byte_length),
+    })
+}
+
+/// Refuse a document whose field rows are not the rows its own frontmatter
+/// derives.
+///
+/// The rows ride beside the value they are derived from, so the two can be
+/// handed over apart; a pair that disagrees describes no document, and the
+/// rows it would leave answer a predicate about a value the document does not
+/// carry. The store derives the rows again with no declaration and compares
+/// everything but the typed half, which is the one half it cannot derive
+/// without the schema the caller holds. The comparison is a check rather than a
+/// derivation — what is written is the rows the caller handed over — so it
+/// moves no counter, and a `Composed` changeset reads what a `Derived` one does.
+fn refuse_field_rows_another_value_derives(facts: &DocumentFacts) -> Result<(), StoreError> {
+    let derived = FieldRows::derive(facts.frontmatter.as_ref(), &DeclaredFields::none());
+    if facts.fields.agree_untyped(&derived) {
+        return Ok(());
+    }
+    Err(StoreError::Disagreement {
+        what: "a document's field rows and the frontmatter they were handed beside",
     })
 }
 

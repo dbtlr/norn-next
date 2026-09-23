@@ -26,16 +26,16 @@ use norn_wire::FindingKind;
 use crate::ddl;
 
 use super::{
-    DOCUMENT_BLOCKS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINKS_SQL, DOCUMENT_TAGS_SQL,
-    DiscardScope, DocumentPath, FINDING_ID_CHUNK, FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL,
-    MAX_PAGE, Request, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder,
-    SubjectScope, SuffixProbe, TOMBSTONE_PAGE_SQL, class_discard_sql, document_feed_sql,
-    document_page_parameters, document_page_sql, feed_page_parameters, finding_candidates_sql,
-    finding_classes_sql, finding_id_parameters, finding_page_parameters, finding_page_sql,
-    finding_subject_parameters, finding_subjects_sql, findings_in_class_sql, probe_parameters,
-    stored_document_sql, stored_facts_document_sql, stored_findings_sql,
-    subject_discard_parameters, subject_discard_sql, suffix_candidates_sql, text_page_parameters,
-    tombstone_feed_sql,
+    DOCUMENT_BLOCKS_SQL, DOCUMENT_FIELDS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINKS_SQL,
+    DOCUMENT_TAGS_SQL, DiscardScope, DocumentPath, FINDING_ID_CHUNK, FeedCursor, FindingCursor,
+    INDEXED_TERM_PAGE_SQL, MAX_PAGE, Request, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL,
+    StoreError, StoredPathOrder, SubjectScope, SuffixProbe, TOMBSTONE_PAGE_SQL,
+    TYPED_VALUE_DISCARD_SQL, class_discard_sql, document_feed_sql, document_page_parameters,
+    document_page_sql, feed_page_parameters, finding_candidates_sql, finding_classes_sql,
+    finding_id_parameters, finding_page_parameters, finding_page_sql, finding_subject_parameters,
+    finding_subjects_sql, findings_in_class_sql, probe_parameters, stored_document_sql,
+    stored_facts_document_sql, stored_findings_sql, subject_discard_parameters,
+    subject_discard_sql, suffix_candidates_sql, text_page_parameters, tombstone_feed_sql,
 };
 
 /// The leaf a page's explained cursor is spelled with, under whatever floor the
@@ -106,6 +106,7 @@ impl<'a> Request<'a> {
             }
             ExplainedStatement::ClassDiscard(probe) => class_discard_sql(probe.range_count()),
             ExplainedStatement::SubjectDiscard(_, scope) => subject_discard_sql(scope),
+            ExplainedStatement::TypedValueDiscard => TYPED_VALUE_DISCARD_SQL.to_string(),
             ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, order) => {
                 finding_subjects_sql(scope, kinds.len(), order)
             }
@@ -122,6 +123,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::DocumentHeadings => DOCUMENT_HEADINGS_SQL.to_string(),
             ExplainedStatement::DocumentBlocks => DOCUMENT_BLOCKS_SQL.to_string(),
             ExplainedStatement::DocumentTags => DOCUMENT_TAGS_SQL.to_string(),
+            ExplainedStatement::DocumentFields => DOCUMENT_FIELDS_SQL.to_string(),
             ExplainedStatement::StoredTombstone(_) => STORED_TOMBSTONE_SQL.to_string(),
             ExplainedStatement::StoredFindings(_) => stored_findings_sql(),
             ExplainedStatement::VaultSchemaPin => norn_db::meta::META_READ_SQL.to_string(),
@@ -140,6 +142,9 @@ impl<'a> Request<'a> {
                 &sql,
                 params_from_iter(subject_discard_parameters(path, scope)),
             ),
+            // The pin binds nothing: every typed value is derived under the
+            // schema being replaced.
+            ExplainedStatement::TypedValueDiscard => norn_db::emitted_plan(connection, &sql, []),
             ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, _) => {
                 let cursor = explained_page_cursor(scope);
                 norn_db::emitted_plan(
@@ -213,13 +218,14 @@ impl<'a> Request<'a> {
             | ExplainedStatement::StoredFindings(path) => {
                 norn_db::emitted_plan(connection, &sql, params![path.as_str()])
             }
-            // The four fact statements are keyed by a row id rather than a
+            // The five fact statements are keyed by a row id rather than a
             // path, and the id is bound for the reason a page's cursor is —
             // see [`EXPLAINED_DOCUMENT_ROW`].
             ExplainedStatement::DocumentLinks
             | ExplainedStatement::DocumentHeadings
             | ExplainedStatement::DocumentBlocks
-            | ExplainedStatement::DocumentTags => {
+            | ExplainedStatement::DocumentTags
+            | ExplainedStatement::DocumentFields => {
                 norn_db::emitted_plan(connection, &sql, params![EXPLAINED_DOCUMENT_ROW])
             }
             // The pin reads three keys through one statement, so the plan is
@@ -305,6 +311,9 @@ pub enum ExplainedStatement<'a> {
     /// once per changed path, and [`Request::discard_findings_about`] runs it
     /// over the kinds a caller is re-deriving.
     SubjectDiscard(&'a DocumentPath, DiscardScope<'a>),
+    /// The clear [`Request::pin_vault_schema`] runs over the field pillar's
+    /// typed values, in the pin's transaction.
+    TypedValueDiscard,
     /// [`Request::finding_subjects_without_rows_after`], which a walk pages its
     /// scope's unaccounted places through.
     FindingSubjectsWithoutRows(SubjectScope<'a>, &'a [FindingKind], StoredPathOrder),
@@ -341,7 +350,7 @@ pub enum ExplainedStatement<'a> {
     /// document's row, its body and its row id, keyed by the caller's path.
     StoredFactsDocument(&'a DocumentPath),
     /// The link rows [`Request::stored_facts`] reads for the document its first
-    /// statement found. The three below are the same read over the other fact
+    /// statement found. The four below are the same read over the other fact
     /// tables, and each is keyed by that document's row id rather than by a
     /// path.
     DocumentLinks,
@@ -351,6 +360,8 @@ pub enum ExplainedStatement<'a> {
     DocumentBlocks,
     /// The tag rows [`Request::stored_facts`] reads.
     DocumentTags,
+    /// The field rows [`Request::stored_facts`] reads.
+    DocumentFields,
     /// [`Request::stored_tombstone`], the death recorded for one path.
     StoredTombstone(&'a DocumentPath),
     /// [`Request::stored_findings`], every finding recorded about one path.
@@ -384,13 +395,13 @@ pub enum ExplainedStatement<'a> {
 /// It is the length of [`ExplainedStatement::point_reads`], and that is the
 /// whole of the guarantee: a point read dropped from the census does not
 /// compile, rather than quietly narrowing the bar that iterates it.
-pub const POINT_READS: usize = 9;
+pub const POINT_READS: usize = 10;
 
 /// How many statements this seam names in total.
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 23;
+pub const STATEMENTS: usize = 25;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -419,6 +430,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::FindingsInClass(probe),
             Self::ClassDiscard(probe),
             Self::SubjectDiscard(subject, DiscardScope::EveryKind),
+            Self::TypedValueDiscard,
             Self::FindingSubjectsWithoutRows(
                 SubjectScope::Vault,
                 kinds,
@@ -437,6 +449,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::DocumentHeadings,
             Self::DocumentBlocks,
             Self::DocumentTags,
+            Self::DocumentFields,
             Self::StoredTombstone(subject),
             Self::StoredFindings(subject),
             Self::VaultSchemaPin,
@@ -458,25 +471,27 @@ impl<'a> ExplainedStatement<'a> {
             Self::FindingsInClass(_) => 1,
             Self::ClassDiscard(_) => 2,
             Self::SubjectDiscard(..) => 3,
-            Self::FindingSubjectsWithoutRows(..) => 4,
-            Self::StoredDocumentPage(..) => 5,
-            Self::StoredFindingPage => 6,
-            Self::StoredTombstonePage => 7,
-            Self::StoredSuffixKeyPage => 8,
-            Self::IndexedTermPage => 9,
-            Self::DocumentFeedPage => 10,
-            Self::TombstoneFeedPage => 11,
-            Self::StoredDocument(_) => 12,
-            Self::StoredFactsDocument(_) => 13,
-            Self::DocumentLinks => 14,
-            Self::DocumentHeadings => 15,
-            Self::DocumentBlocks => 16,
-            Self::DocumentTags => 17,
-            Self::StoredTombstone(_) => 18,
-            Self::StoredFindings(_) => 19,
-            Self::VaultSchemaPin => 20,
-            Self::FindingCandidates(_) => 21,
-            Self::FindingClasses(_) => 22,
+            Self::TypedValueDiscard => 4,
+            Self::FindingSubjectsWithoutRows(..) => 5,
+            Self::StoredDocumentPage(..) => 6,
+            Self::StoredFindingPage => 7,
+            Self::StoredTombstonePage => 8,
+            Self::StoredSuffixKeyPage => 9,
+            Self::IndexedTermPage => 10,
+            Self::DocumentFeedPage => 11,
+            Self::TombstoneFeedPage => 12,
+            Self::StoredDocument(_) => 13,
+            Self::StoredFactsDocument(_) => 14,
+            Self::DocumentLinks => 15,
+            Self::DocumentHeadings => 16,
+            Self::DocumentBlocks => 17,
+            Self::DocumentTags => 18,
+            Self::DocumentFields => 19,
+            Self::StoredTombstone(_) => 20,
+            Self::StoredFindings(_) => 21,
+            Self::VaultSchemaPin => 22,
+            Self::FindingCandidates(_) => 23,
+            Self::FindingClasses(_) => 24,
         };
         assert!(
             slot < STATEMENTS,
@@ -499,6 +514,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::DocumentHeadings,
             Self::DocumentBlocks,
             Self::DocumentTags,
+            Self::DocumentFields,
             Self::StoredTombstone(subject),
             Self::StoredFindings(subject),
             Self::VaultSchemaPin,
@@ -522,6 +538,7 @@ impl<'a> ExplainedStatement<'a> {
             | Self::DocumentHeadings
             | Self::DocumentBlocks
             | Self::DocumentTags
+            | Self::DocumentFields
             | Self::StoredTombstone(_)
             | Self::StoredFindings(_)
             | Self::VaultSchemaPin => true,
@@ -529,6 +546,7 @@ impl<'a> ExplainedStatement<'a> {
             | Self::FindingsInClass(_)
             | Self::ClassDiscard(_)
             | Self::SubjectDiscard(..)
+            | Self::TypedValueDiscard
             | Self::FindingSubjectsWithoutRows(..)
             | Self::StoredDocumentPage(..)
             | Self::StoredFindingPage

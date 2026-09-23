@@ -10,8 +10,8 @@ use crate::common::{
     Scratch, document, document_with_every_fact, path, record_death, span, write_document,
 };
 use norn_store::{
-    BlockFact, Change, DocumentFacts, FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact,
-    LinkFamily, Provenance, StoreError, TagFact, TagSource, ddl,
+    BlockFact, Change, DeclaredFields, DocumentFacts, FrontmatterValue, HeadingFact,
+    IncrementProvenance, LinkFact, LinkFamily, Provenance, StoreError, TagFact, TagSource, ddl,
 };
 
 /// One of every fact shape, written and read back unchanged — including the
@@ -81,7 +81,10 @@ fn an_absent_frontmatter_block_and_an_empty_one_are_different_values() {
     let mut store = scratch.open();
     let absent = document("absent.md", "hash-1", "a body\n");
     let mut empty = document("empty.md", "hash-2", "a body\n");
-    empty.frontmatter = Some(FrontmatterValue::Map(Vec::new()));
+    empty = empty.with_frontmatter(
+        Some(FrontmatterValue::Map(Vec::new())),
+        &DeclaredFields::none(),
+    );
 
     let mut request = store.begin_request();
     write_document(&mut request, &absent);
@@ -123,7 +126,7 @@ fn a_frontmatter_value_past_the_bound_is_refused_and_its_facts_freed() {
     for _ in 0..100_000 {
         value = FrontmatterValue::Sequence(vec![value]);
     }
-    facts.frontmatter = Some(value);
+    facts = facts.with_frontmatter(Some(value), &DeclaredFields::none());
     let subject = facts.path.clone();
 
     let error = store
@@ -195,10 +198,15 @@ fn a_re_derivation_replaces_fact_rows_wholesale() {
         after.document.frontmatter, None,
         "the old projection outlived the block it projected"
     );
+    assert!(
+        after.fields.is_empty(),
+        "the old field rows outlived the frontmatter they were derived from"
+    );
 
-    // Eight fact rows went in and were discarded; the generation moved and the
-    // document is still one document.
-    assert_eq!(request.counters().get("fact_rows_discarded"), Some(8));
+    // Twelve fact rows went in and were discarded — eight token rows and the
+    // four field rows two keys derive; the generation moved and the document is
+    // still one document.
+    assert_eq!(request.counters().get("fact_rows_discarded"), Some(12));
     assert!(after.document.generation > before.generation);
     assert_eq!(request.pillars().expect("a pillar report").documents, 1);
 

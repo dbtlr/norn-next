@@ -77,8 +77,10 @@
 //!
 //! # Where the model is consumed
 //!
-//! Derivation reads the tag facet and files the facet's findings. The read
-//! surface reads the declared fields to answer the field universe, and reads
+//! Derivation reads the tag facet and files the facet's findings, and reads
+//! each declared field's [`FieldType`] to fill the typed column the field
+//! pillar sorts by. The read surface reads the declared fields to answer the
+//! field universe, and reads
 //! [`FieldType`] to give one comparison rule to sorts, ranges and comparison
 //! operators alike — see [`typed`]. The ambiguity-ignore patterns name the
 //! paths the resolution ladder does not count as candidates, which is the
@@ -158,11 +160,11 @@ impl VaultSchema {
 
     /// The declared fields, in key order.
     ///
-    /// **Read by `describe`, which is not built.** `describe` reports the
-    /// vault's declared and observed field universe, and this iterator is the
-    /// declared half of that answer. The current call graph does not reach
-    /// it: the read surface and its builders do not exist yet, and the tag
-    /// facet is the only schema-keyed derivation that does.
+    /// Read by derivation, which hands the store the typed order each declared
+    /// type carries so the field pillar's typed column is filled under this
+    /// schema. `describe` reads it too once it is built, as the declared half
+    /// of the field universe it reports; the current call graph does not reach
+    /// that consumer because the read surface's handlers do not exist yet.
     pub fn fields(&self) -> impl Iterator<Item = (&str, &DeclaredField)> {
         self.fields.iter().map(|(key, field)| (key.as_str(), field))
     }
@@ -181,10 +183,8 @@ impl VaultSchema {
     ///
     /// **Read by `describe`, which is not built.** `describe` reports the
     /// vault's declared and observed field universe, and the declared folders
-    /// stand beside it. The current call graph does not reach it, for the
-    /// same reason [`VaultSchema::fields`] is not reached: the read surface
-    /// and its builders do not exist yet, and the tag facet is the only
-    /// schema-keyed derivation that does.
+    /// stand beside it. The current call graph does not reach it: the read
+    /// surface's handlers do not exist yet, and no derivation reads a folder.
     pub fn folders(&self) -> &[DeclaredFolder] {
         &self.folders
     }
@@ -194,8 +194,7 @@ impl VaultSchema {
     /// **Read by the resolution ladder, and backlinks and findings apply the
     /// same exclusion.** The current call graph does not reach it: the read
     /// surface and its builders — the resolution ladder among them — do not
-    /// exist yet, and the tag facet is the only schema-keyed derivation that
-    /// does.
+    /// exist yet, and no derivation reads a path rule.
     pub fn ambiguity_ignore(&self) -> &[Pattern] {
         &self.ambiguity_ignore
     }
@@ -205,19 +204,27 @@ impl VaultSchema {
     ///
     /// The re-derivation a schema change implies costs the vault, so the
     /// question is asked before it is paid. The answer is the disjunction over
-    /// the declarations some derived state reads, and **today that set holds
-    /// the tag facet alone**: it is the one declaration a derivation consults,
-    /// so a schema whose facet reports nothing leaves every row with the same
-    /// derived state under the new pin as under the old.
+    /// the declarations some derived state reads, and that set holds two:
     ///
-    /// **A declaration gaining a consumer joins this disjunction in the same
-    /// change.** The typed column the field projection pillar stores under the
-    /// active schema fingerprint is the next one: once it exists, a re-pin that
-    /// moves only a field's declared type changes what that column holds, and a
-    /// schema answering `false` here would leave the column derived under a
-    /// type the vault no longer declares.
+    /// - **A tag facet that reports**, whose findings are derived per document.
+    /// - **A field declared with a type that does not order as text**, whose
+    ///   values the field pillar's typed column holds. A pin clears that
+    ///   column, so a schema declaring one owes every document standing under
+    ///   it the re-derivation that refills it, whether or not its bytes moved.
+    ///   A field declared as text or tags orders as its raw text and fills
+    ///   nothing.
+    ///
+    /// A schema declaring neither leaves every row with the same derived state
+    /// under the new pin as under the old. **A declaration gaining a consumer
+    /// joins this disjunction in the same change**: a schema answering `false`
+    /// here while some derived state reads its declaration would leave that
+    /// state derived under a schema the vault no longer declares.
     pub fn rederives_documents(&self) -> bool {
         self.tags.reports_undeclared()
+            || self
+                .fields
+                .values()
+                .any(|field| !field.kind().orders_as_text())
     }
 
     /// The type a field's declaration gives it, or text where nothing declares

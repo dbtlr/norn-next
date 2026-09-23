@@ -18,13 +18,13 @@
 //! drifting apart as variants are added.
 //!
 //! [`TypedValue::sort_key`] is a text encoding whose bytewise order is that
-//! same order. **Nothing writes it beside a raw value yet**: it is the key the
-//! field projection pillar's typed column stores so that a typed sort is a
-//! seek along an index rather than a per-row re-parse, and that column lands
-//! with the read surface's typed comparison. Until then the only reader is one
-//! that already holds the value, and it compares directly; the suite holds the
-//! key and the comparison equal over a mixed sample so the two cannot part
-//! before the column arrives.
+//! same order. **It is what the field pillar's typed column stores** beside a
+//! value's raw text, for every value whose key the pinned schema declares with
+//! a type that does not order as text, so a typed order is an order over
+//! stored text rather than a per-row re-parse. The store compares those keys
+//! as bytes and never reads a [`TypedValue`]; the suite holds the key and the
+//! comparison equal over a mixed sample, which is what makes the two one
+//! order.
 //!
 //! # The mixed-offset signal
 //!
@@ -85,6 +85,18 @@ impl FieldType {
             FieldType::Boolean => "boolean",
             FieldType::Date => "date",
             FieldType::Tags => "tags",
+        }
+    }
+
+    /// Whether this type orders its values as the text they are written as.
+    ///
+    /// Text does by definition, and so does a tag set, whose elements are read
+    /// as text. A type that orders as text needs no typed sort key: its order
+    /// is the raw order, so a declaration of one changes no stored order.
+    pub const fn orders_as_text(self) -> bool {
+        match self {
+            FieldType::Text | FieldType::Tags => true,
+            FieldType::Number | FieldType::Boolean | FieldType::Date => false,
         }
     }
 

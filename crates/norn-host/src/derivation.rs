@@ -17,9 +17,10 @@
 //! takes.
 //!
 //! **A plan is a function of the observation and the vault's declaration.**
-//! [`plan_document`] takes the content model of the pinned vault schema beside
-//! the document, because a finding keyed by the schema fingerprint is derived
-//! under the declaration that fingerprint names. The declaration is read off
+//! [`plan_document`] takes the pinned vault schema's [`Declared`] beside the
+//! document, because a finding keyed by the schema fingerprint — and a typed
+//! value a pin of another fingerprint clears — is derived under the
+//! declaration that fingerprint names. The declaration is read off
 //! the store's own pin, so the model a plan derives under and the fingerprint
 //! its findings are stamped with come from one set of bytes.
 //!
@@ -42,8 +43,8 @@ use std::path::Path;
 
 use norn_config::schema::VaultSchema;
 use norn_store::{
-    BlockFact, Change, DiscardScope, DocumentFacts, DocumentPath, FrontmatterValue, HeadingFact,
-    LinkFact, LinkFamily, Provenance, Span, TagFact, TagSource,
+    BlockFact, Change, DeclaredFields, DiscardScope, DocumentFacts, DocumentPath, FrontmatterValue,
+    HeadingFact, LinkFact, LinkFamily, Provenance, Span, TagFact, TagSource, TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, FindingScope, Severity};
@@ -619,7 +620,14 @@ pub(crate) struct Derived {
     pub(crate) unread_frontmatter: Option<UnreadFrontmatter>,
 }
 
-pub(crate) fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<Derived, Quarantine> {
+/// Derive one document's facts from its bytes, the field rows' typed half
+/// under `fields`.
+pub(crate) fn map_document(
+    path: &str,
+    bytes: &[u8],
+    hash: String,
+    fields: &DeclaredFields,
+) -> Result<Derived, Quarantine> {
     // Identity before content: a path that names no document has nothing to
     // say about its own bytes.
     let document_path = document_path(Path::new(path))?;
@@ -641,9 +649,9 @@ pub(crate) fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<Der
             problem: refusal.problem(),
         });
     let scan = document.scan_body();
-    let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64);
+    let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64)
+        .with_frontmatter(document.frontmatter().map(map_value), fields);
     facts.body_offset = document.body_start() as u64;
-    facts.frontmatter = document.frontmatter().map(map_value);
     facts.frontmatter_diagnostic_count = document
         .diagnostics()
         .iter()
@@ -753,19 +761,19 @@ pub(crate) struct Plan {
 /// `path` is the spelling as the vault holds it, which is what a quarantine's
 /// subject is rendered from where the grammar admits no document path.
 ///
-/// `declared` is the content model of the pinned vault schema. It decides the
-/// facet findings alone: a document that does not decode is judged against
-/// nothing, because a vault declaration says what a document's facts must be
-/// and there are no facts.
+/// `declared` is the pinned vault schema's declaration. It decides the facet
+/// findings and the typed half of the field rows: a document that does not
+/// decode is judged against nothing, because a vault declaration says what a
+/// document's facts must be and there are no facts.
 pub(crate) fn plan_document(
     path: &Path,
     spelling: &str,
     bytes: &[u8],
     hash: String,
     stored: Option<&DocumentPath>,
-    declared: &VaultSchema,
+    declared: &Declared,
 ) -> Plan {
-    match map_document(spelling, bytes, hash) {
+    match map_document(spelling, bytes, hash, declared.fields()) {
         Ok(derived) => {
             let subject = derived.facts.path.clone();
             let mut findings = Vec::new();
@@ -781,7 +789,7 @@ pub(crate) fn plan_document(
                     target: None,
                 });
             }
-            findings.extend(plan_tag_facet(&subject, &derived.facts, declared));
+            findings.extend(plan_tag_facet(&subject, &derived.facts, declared.schema()));
             Plan {
                 change: Some(Change::Upsert(derived.facts)),
                 findings,
@@ -795,6 +803,58 @@ pub(crate) fn plan_document(
             findings: vec![plan_quarantine(path, quarantine)],
         },
     }
+}
+
+/// The declaration a plan derives under: the pinned schema's content model,
+/// and the typed orders its declared fields hand the store.
+///
+/// Built once per schema rather than per document, and only through
+/// [`Declared::new`], so the typed orders a plan fills the field pillar with
+/// are always the ones the schema beside them declares.
+pub(crate) struct Declared {
+    schema: VaultSchema,
+    fields: DeclaredFields,
+}
+
+impl Declared {
+    /// The declaration `schema` makes.
+    pub(crate) fn new(schema: VaultSchema) -> Self {
+        let fields = declared_fields(&schema);
+        Declared { schema, fields }
+    }
+
+    /// The content model.
+    pub(crate) fn schema(&self) -> &VaultSchema {
+        &self.schema
+    }
+
+    /// The declared fields as the store reads them.
+    pub(crate) fn fields(&self) -> &DeclaredFields {
+        &self.fields
+    }
+}
+
+/// The declared fields of `schema` as the store reads them: every declared key,
+/// and for each whose type does not order as text, the typed order that type
+/// reads a raw value into.
+///
+/// A raw value that does not read as its declared type has no sort key, which
+/// is the store's `NULL`: the document still carries the value, and a typed
+/// order has nothing to place it by.
+fn declared_fields(schema: &VaultSchema) -> DeclaredFields {
+    schema
+        .fields()
+        .fold(DeclaredFields::none(), |declared, (key, field)| {
+            let kind = field.kind();
+            if kind.orders_as_text() {
+                declared.declare(key)
+            } else {
+                declared.declare_typed(
+                    key,
+                    TypedOrder::new(move |raw| kind.read(raw).ok().map(|value| value.sort_key())),
+                )
+            }
+        })
 }
 
 /// Judge a document's tags against the vault's declared tag facet.
@@ -904,17 +964,19 @@ mod tests {
 
     /// A vault that has declared nothing, which is what most cases here plan
     /// under: the observation alone decides the plan.
-    fn undeclaring() -> VaultSchema {
-        VaultSchema::default()
+    fn undeclaring() -> Declared {
+        Declared::new(VaultSchema::default())
     }
 
     /// A vault whose declared tag vocabulary is `front` and everything under
     /// `area/`, and which reports anything else.
-    fn reporting() -> VaultSchema {
-        VaultSchema::parse(
-            b"version: 1\ntags:\n  declared: [front]\n  patterns: [\"area/**\"]\n  undeclared: report\n",
+    fn reporting() -> Declared {
+        Declared::new(
+            VaultSchema::parse(
+                b"version: 1\ntags:\n  declared: [front]\n  patterns: [\"area/**\"]\n  undeclared: report\n",
+            )
+            .expect("a schema declaring a tag facet"),
         )
-        .expect("a schema declaring a tag facet")
     }
 
     /// **The two discard sides partition the causes.** The sides are read off
@@ -1073,7 +1135,7 @@ mod tests {
         ] {
             let bytes = source.as_bytes();
             let hash = || norn_fs::ContentHash::of(bytes).to_string();
-            let problem = map_document("note.md", bytes, hash())
+            let problem = map_document("note.md", bytes, hash(), &DeclaredFields::none())
                 .expect("a document whose block went unread still derives")
                 .unread_frontmatter
                 .expect("the block was read by nothing")
@@ -1122,7 +1184,8 @@ mod tests {
 
         let whole = b"---\ntags: [front]\n---\n# Heading\n[[target]] #body\n".as_slice();
         let hash = norn_fs::ContentHash::of(whole).to_string();
-        let derived = map_document("note.md", whole, hash.clone()).expect("a document derives");
+        let derived = map_document("note.md", whole, hash.clone(), &DeclaredFields::none())
+            .expect("a document derives");
         let plan = plan_document(
             Path::new("note.md"),
             "note.md",
@@ -1155,7 +1218,8 @@ mod tests {
 
         let unread = b"---\ntitle: note\n# Heading\n".as_slice();
         let hash = norn_fs::ContentHash::of(unread).to_string();
-        let derived = map_document("note.md", unread, hash.clone()).expect("a document derives");
+        let derived = map_document("note.md", unread, hash.clone(), &DeclaredFields::none())
+            .expect("a document derives");
         let plan = plan_document(
             Path::new("note.md"),
             "note.md",
@@ -1271,6 +1335,7 @@ mod tests {
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
+                &DeclaredFields::none(),
             )
             .expect("a document whose block went unread still derives")
         };
@@ -1336,6 +1401,7 @@ mod tests {
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
+                &DeclaredFields::none(),
             )
             .expect("a document whose block went unread still derives")
         };
@@ -1375,6 +1441,7 @@ mod tests {
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
+                &DeclaredFields::none(),
             )
             .expect("a document whose block went unread still derives")
             .facts
@@ -1418,6 +1485,7 @@ mod tests {
             "note.md",
             source,
             norn_fs::ContentHash::of(source).to_string(),
+            &DeclaredFields::none(),
         )
         .unwrap();
         let facts = derived.facts;
@@ -1450,6 +1518,7 @@ mod tests {
                 "note.md",
                 &source,
                 norn_fs::ContentHash::of(&source).to_string(),
+                &DeclaredFields::none(),
             )
             .unwrap()
             .facts;

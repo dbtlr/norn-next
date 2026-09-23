@@ -21,7 +21,9 @@
 //! Order is the position in the slice. A fact carries no ordinal of its own
 //! because the store assigns one from the slice index, which is exactly the
 //! emission order the text layer contracts — and because two spellings of a
-//! row's position could disagree.
+//! row's position could disagree. Field rows are the one exception: a field
+//! row's ordinal is its place under its key rather than in a slice, and
+//! [`crate::FieldRows::derive`] — the only thing that makes one — assigns it.
 //!
 //! # In and out are the same types, except where the projection is one-way
 //!
@@ -35,6 +37,7 @@ use std::collections::BTreeSet;
 
 use norn_wire::{FindingKind, Severity};
 
+use crate::fields::{DeclaredFields, FieldRows};
 use crate::json::FrontmatterValue;
 use crate::path::{ClassKey, DocumentPath};
 
@@ -209,6 +212,11 @@ pub struct DocumentFacts {
     pub blocks: Vec<BlockFact>,
     /// Tags in the order they were read, both homes.
     pub tags: Vec<TagFact>,
+    /// The field rows `frontmatter` derives. The two are set together through
+    /// [`DocumentFacts::with_frontmatter`], and a pair that disagrees is
+    /// refused where the document is written: rows another value derives
+    /// describe no document.
+    pub fields: FieldRows,
 }
 
 impl DocumentFacts {
@@ -239,7 +247,23 @@ impl DocumentFacts {
             headings: Vec::new(),
             blocks: Vec::new(),
             tags: Vec::new(),
+            fields: FieldRows::default(),
         }
+    }
+
+    /// The same document with `frontmatter` as its value and the field rows it
+    /// derives under `declared`.
+    ///
+    /// The one way the pair is set, so the rows are always the ones the value
+    /// derives; the declaration decides only their typed half.
+    pub fn with_frontmatter(
+        mut self,
+        frontmatter: Option<FrontmatterValue>,
+        declared: &DeclaredFields,
+    ) -> Self {
+        self.fields = FieldRows::derive(frontmatter.as_ref(), declared);
+        self.frontmatter = frontmatter;
+        self
     }
 }
 
@@ -299,6 +323,9 @@ pub struct StoredFacts {
     pub headings: Vec<HeadingFact>,
     pub blocks: Vec<BlockFact>,
     pub tags: Vec<TagFact>,
+    /// The field rows, typed half included, in key order and then ordinal
+    /// order.
+    pub fields: FieldRows,
 }
 
 /// How a document's death was learned.
@@ -535,6 +562,10 @@ pub struct Invalidation {
     /// belonging to a class being re-derived. Parse-fact rows carry no schema key
     /// and no class, so none of them is ever counted here.
     pub findings_discarded: u64,
+    /// Field values whose typed sort key the act cleared, because it was derived
+    /// under a different vault schema. Only a schema pin clears one; the row
+    /// and its raw text stay.
+    pub typed_values_discarded: u64,
 }
 
 /// What pinning a vault schema did.

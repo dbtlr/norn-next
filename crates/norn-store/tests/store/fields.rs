@@ -1,0 +1,403 @@
+//! The field pillar: what a document's frontmatter derives, how it is written
+//! and replaced, and what a schema pin does to its typed half.
+//!
+//! Each case writes through the store's own increment and reads back through
+//! [`norn_store::Request::stored_facts`], so what is asserted is the rows at
+//! rest rather than the value the derivation handed over.
+
+use crate::common::{Scratch, document, path, record_death, write_document};
+use norn_store::{
+    Change, DeclaredFields, DocumentFacts, FieldContainer, FieldRow, FieldRows, FrontmatterValue,
+    IncrementProvenance, Provenance, StoreError, TypedOrder,
+};
+
+/// A presence row, as the rows are compared.
+fn presence(key: &str, container: FieldContainer) -> FieldRow {
+    FieldRow::Presence {
+        key: key.to_string(),
+        container,
+    }
+}
+
+/// A value row carrying no typed value, marked least under the raw order where
+/// `least` says so.
+fn raw(key: &str, ordinal: u32, text: Option<&str>, least: bool) -> FieldRow {
+    FieldRow::Value {
+        key: key.to_string(),
+        ordinal,
+        raw: text.map(str::to_string),
+        typed: None,
+        least_raw: least,
+        least_typed: false,
+    }
+}
+
+fn string(text: &str) -> FrontmatterValue {
+    FrontmatterValue::String(text.to_string())
+}
+
+fn map(entries: Vec<(&str, FrontmatterValue)>) -> FrontmatterValue {
+    FrontmatterValue::Map(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect(),
+    )
+}
+
+/// An order that reads a raw value as an integer and sorts by it, which is
+/// enough of a typed order to part from the raw one: `"10"` stands before
+/// `"9"` as text and after it as a number.
+fn integer_order() -> TypedOrder {
+    TypedOrder::new(|raw| {
+        raw.parse::<i64>()
+            .ok()
+            .map(|number| format!("{:020}", i128::from(number) - i128::from(i64::MIN)))
+    })
+}
+
+/// One document at `at` whose frontmatter is `value`, its rows derived under
+/// `declared`.
+fn fielded(
+    at: &str,
+    hash: &str,
+    value: FrontmatterValue,
+    declared: &DeclaredFields,
+) -> DocumentFacts {
+    document(at, hash, "a body\n").with_frontmatter(Some(value), declared)
+}
+
+fn stored_fields(request: &mut norn_store::Request<'_>, at: &str) -> FieldRows {
+    request
+        .stored_facts(&path(at))
+        .expect("reading a document")
+        .expect("a document")
+        .fields
+}
+
+/// **Every key carries a presence row, and every scalar a value row.** The
+/// container a key's value sits in is recorded on its presence row, so an empty
+/// sequence and an empty map are present and told apart; a scalar, and each
+/// scalar element of a sequence in element order, is one value row carrying its
+/// canonical text unquoted. A map yields no value rows, and neither does a
+/// sequence or a map nested inside a sequence. A null and a float JSON cannot
+/// spell are scalars with no raw text — present, and matched by no value. A
+/// repeated key keeps its last value.
+#[test]
+fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
+    let value = map(vec![
+        ("title", string("first")),
+        ("count", FrontmatterValue::Int(42)),
+        ("ratio", FrontmatterValue::Float(1.0)),
+        ("draft", FrontmatterValue::Bool(false)),
+        ("empty", FrontmatterValue::Null),
+        ("infinite", FrontmatterValue::Float(f64::INFINITY)),
+        (
+            "tags",
+            FrontmatterValue::Sequence(vec![
+                string("b"),
+                FrontmatterValue::Sequence(vec![string("nested")]),
+                string("a"),
+                map(vec![("inner", string("x"))]),
+                FrontmatterValue::Null,
+            ]),
+        ),
+        ("none", FrontmatterValue::Sequence(Vec::new())),
+        ("nothing", FrontmatterValue::Map(Vec::new())),
+        ("author", map(vec![("name", string("Ada"))])),
+        ("title", string("second")),
+    ]);
+    let expected = vec![
+        presence("author", FieldContainer::Map),
+        presence("count", FieldContainer::Scalar),
+        raw("count", 1, Some("42"), true),
+        presence("draft", FieldContainer::Scalar),
+        raw("draft", 1, Some("false"), true),
+        presence("empty", FieldContainer::Scalar),
+        raw("empty", 1, None, false),
+        presence("infinite", FieldContainer::Scalar),
+        raw("infinite", 1, None, false),
+        presence("none", FieldContainer::Sequence),
+        presence("nothing", FieldContainer::Map),
+        presence("ratio", FieldContainer::Scalar),
+        raw("ratio", 1, Some("1.0"), true),
+        presence("tags", FieldContainer::Sequence),
+        raw("tags", 1, Some("b"), false),
+        raw("tags", 2, Some("a"), true),
+        raw("tags", 3, None, false),
+        presence("title", FieldContainer::Scalar),
+        raw("title", 1, Some("second"), true),
+    ];
+    let derived = FieldRows::derive(Some(&value), &DeclaredFields::none());
+    assert_eq!(derived.rows(), expected.as_slice());
+
+    let scratch = Scratch::new("field-rows");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_document(
+        &mut request,
+        &fielded("docs/shape.md", "hash-1", value, &DeclaredFields::none()),
+    );
+    assert_eq!(
+        stored_fields(&mut request, "docs/shape.md"),
+        derived,
+        "the rows at rest are not the rows the frontmatter derives"
+    );
+    assert_eq!(request.counters().get("field_rows_written"), Some(19));
+
+    // Only a map derives rows: a scalar or a sequence at the top has no keys.
+    for top in [
+        string("a scalar"),
+        FrontmatterValue::Sequence(vec![string("x")]),
+    ] {
+        assert!(FieldRows::derive(Some(&top), &DeclaredFields::none()).is_empty());
+    }
+    assert!(FieldRows::derive(None, &DeclaredFields::none()).is_empty());
+}
+
+/// **The raw and the typed order each mark their own least value.** A key
+/// ordered by a type carries that type's sort key beside the raw text, and the
+/// two orders can disagree about which value is least: `"10"` is the least text
+/// of `["9", "10", "x"]` and nine the least integer. A value that does not read
+/// as the type carries no typed key and is never the typed least. A key the
+/// declaration does not order by a type carries no typed value at all.
+#[test]
+fn the_raw_and_the_typed_order_mark_their_own_least_value() {
+    let declared = DeclaredFields::none()
+        .declare_typed("rank", integer_order())
+        .declare("title");
+    let value = map(vec![
+        (
+            "rank",
+            FrontmatterValue::Sequence(vec![string("9"), string("10"), string("x")]),
+        ),
+        ("title", string("10")),
+    ]);
+    let rows = FieldRows::derive(Some(&value), &declared);
+    let values: Vec<(&str, u32, Option<&str>, bool, bool)> = rows
+        .rows()
+        .iter()
+        .filter_map(|row| match row {
+            FieldRow::Value {
+                key,
+                ordinal,
+                typed,
+                least_raw,
+                least_typed,
+                ..
+            } => Some((
+                key.as_str(),
+                *ordinal,
+                typed.as_deref(),
+                *least_raw,
+                *least_typed,
+            )),
+            FieldRow::Presence { .. } => None,
+        })
+        .collect();
+    let nine = integer_order().sort_key("9");
+    let ten = integer_order().sort_key("10");
+    assert_eq!(
+        values,
+        vec![
+            ("rank", 1, nine.as_deref(), false, true),
+            ("rank", 2, ten.as_deref(), true, false),
+            ("rank", 3, None, false, false),
+            ("title", 1, None, true, false),
+        ]
+    );
+
+    let scratch = Scratch::new("field-markers");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_document(
+        &mut request,
+        &fielded("docs/ranked.md", "hash-1", value, &declared),
+    );
+    assert_eq!(stored_fields(&mut request, "docs/ranked.md"), rows);
+}
+
+/// **A re-derivation replaces a document's field rows wholesale.** The rows the
+/// first frontmatter derived are gone, and the rows at rest are exactly the ones
+/// the second derives — a key the second value dropped leaves nothing behind.
+#[test]
+fn a_re_derivation_replaces_the_field_rows_wholesale() {
+    let scratch = Scratch::new("field-replace");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let none = DeclaredFields::none();
+    let first = map(vec![
+        ("status", string("draft")),
+        (
+            "tags",
+            FrontmatterValue::Sequence(vec![string("a"), string("b")]),
+        ),
+    ]);
+    write_document(
+        &mut request,
+        &fielded("docs/moving.md", "hash-1", first, &none),
+    );
+
+    let second = map(vec![("owner", string("ada"))]);
+    write_document(
+        &mut request,
+        &fielded("docs/moving.md", "hash-2", second.clone(), &none),
+    );
+    assert_eq!(
+        stored_fields(&mut request, "docs/moving.md"),
+        FieldRows::derive(Some(&second), &none)
+    );
+}
+
+/// **A document's field rows die with it.** A death takes the rows through the
+/// cascade: the delete succeeds with foreign keys enforced, the store holds no
+/// row referencing a document that is not there, and the typed values the dead
+/// document carried are gone, which a later pin that clears every typed value
+/// counts as none.
+#[test]
+fn a_documents_field_rows_die_with_it() {
+    let scratch = Scratch::new("field-cascade");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let declared = DeclaredFields::none().declare_typed("rank", integer_order());
+    write_document(
+        &mut request,
+        &fielded(
+            "docs/doomed.md",
+            "hash-1",
+            map(vec![("rank", string("3"))]),
+            &declared,
+        ),
+    );
+    record_death(
+        &mut request,
+        &path("docs/doomed.md"),
+        Provenance::PlanDelete,
+    );
+    request.finish();
+    store
+        .verify_integrity()
+        .expect("a store whose document died");
+
+    let pin = store
+        .begin_request()
+        .pin_vault_schema(b"version: 1\n", "schema-1")
+        .expect("pinning a schema");
+    assert!(pin.repinned);
+    assert_eq!(
+        pin.invalidated.typed_values_discarded, 0,
+        "a dead document's typed value outlived it"
+    );
+}
+
+/// **A pin that moves the schema fingerprint clears every typed value, and
+/// nothing else of the pillar.** The typed values were derived under the schema
+/// the pin replaces, so the pin clears them and their markers in its own
+/// transaction and reports how many it cleared; the rows and their raw text and
+/// raw markers stand, because they are a function of the document alone. A pin
+/// of the schema already pinned is not a schema change and clears nothing.
+#[test]
+fn a_moved_pin_clears_every_typed_value_and_nothing_else() {
+    let scratch = Scratch::new("field-pin");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let declared = DeclaredFields::none().declare_typed("rank", integer_order());
+    request
+        .pin_vault_schema(b"version: 1\n", "schema-1")
+        .expect("pinning a schema");
+    let value = map(vec![
+        (
+            "rank",
+            FrontmatterValue::Sequence(vec![string("9"), string("10")]),
+        ),
+        ("title", string("ranked")),
+    ]);
+    write_document(
+        &mut request,
+        &fielded("docs/ranked.md", "hash-1", value.clone(), &declared),
+    );
+
+    let again = request
+        .pin_vault_schema(b"version: 1\n", "schema-1")
+        .expect("pinning the same schema");
+    assert!(!again.repinned);
+    assert_eq!(again.invalidated.typed_values_discarded, 0);
+    assert_eq!(
+        stored_fields(&mut request, "docs/ranked.md"),
+        FieldRows::derive(Some(&value), &declared),
+        "a pin of the schema already pinned cleared a typed value"
+    );
+
+    let moved = request
+        .pin_vault_schema(b"version: 1\nfields: {}\n", "schema-2")
+        .expect("re-pinning a schema");
+    assert!(moved.repinned);
+    assert_eq!(moved.invalidated.typed_values_discarded, 2);
+    assert_eq!(request.counters().get("typed_values_discarded"), Some(2));
+    assert_eq!(
+        stored_fields(&mut request, "docs/ranked.md"),
+        FieldRows::derive(Some(&value), &DeclaredFields::none()),
+        "the pin left a typed value standing, or took more than the typed half"
+    );
+    request.finish();
+    store
+        .verify_integrity()
+        .expect("a store whose typed values a pin cleared");
+}
+
+/// **Field rows another value derives are refused.** The rows ride beside the
+/// frontmatter they were derived from, and a pair that disagrees describes no
+/// document: a value set without its rows, or rows derived from another value,
+/// is refused as a disagreement and nothing is written. Rows that differ from
+/// the value's own only in their typed half are the document's, whatever typed
+/// order produced them.
+#[test]
+fn field_rows_another_value_derives_are_refused() {
+    let scratch = Scratch::new("field-refusal");
+    let mut store = scratch.open();
+    let none = DeclaredFields::none();
+
+    let mut unrowed = document("docs/unrowed.md", "hash-1", "a body\n");
+    unrowed.frontmatter = Some(map(vec![("title", string("bare"))]));
+    let mut swapped = fielded(
+        "docs/swapped.md",
+        "hash-1",
+        map(vec![("title", string("one"))]),
+        &none,
+    );
+    swapped.frontmatter = Some(map(vec![("title", string("another"))]));
+
+    for facts in [unrowed, swapped] {
+        let subject = facts.path.clone();
+        let error = store
+            .begin_request()
+            .apply_increment(IncrementProvenance::Derived, [Change::Upsert(facts)], &[])
+            .expect_err("a document whose field rows another value derives");
+        let StoreError::Entry { problem, .. } = &error else {
+            panic!("the refusal does not say which entry it came from: {error:?}");
+        };
+        assert!(
+            matches!(**problem, StoreError::Disagreement { .. }),
+            "{problem:?}"
+        );
+        assert_eq!(
+            store
+                .begin_request()
+                .stored_document(&subject)
+                .expect("reading a document"),
+            None,
+            "a refused document was written"
+        );
+    }
+
+    let typed = DeclaredFields::none().declare_typed("rank", integer_order());
+    write_document(
+        &mut store.begin_request(),
+        &fielded(
+            "docs/typed.md",
+            "hash-1",
+            map(vec![("rank", string("4"))]),
+            &typed,
+        ),
+    );
+}

@@ -1,9 +1,10 @@
 #![forbid(unsafe_code)]
 //! An SDK for talking to SQL.
 //!
-//! This crate is the first effect seam: it owns the store schema, the three
-//! pillars, what the database-side heal rung means for derived state, and the
-//! derivation counters. **No other crate reaches the derived database**,
+//! This crate is the first effect seam: it owns the store schema, the four
+//! pillars — full text, findings, migrations and the field pillar — what the
+//! database-side heal rung means for derived state, and the derivation
+//! counters. **No other crate reaches the derived database**,
 //! harness included — what a test or a gate needs from the substrate, it gets
 //! through this API.
 //!
@@ -74,6 +75,7 @@ mod facts;
 #[cfg(feature = "induced-failure")]
 mod faults;
 mod feed;
+mod fields;
 mod hash;
 mod increment;
 mod json;
@@ -92,6 +94,7 @@ pub use facts::{
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
 pub use feed::FeedRead;
+pub use fields::{DeclaredFields, FieldContainer, FieldRow, FieldRows, TypedOrder};
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 // The open ceremony's own vocabulary, which is this crate's too: a store is

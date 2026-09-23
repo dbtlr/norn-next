@@ -78,6 +78,7 @@ use crate::facts::{
     SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone,
     TagFact, TagSource, VaultSchemaPin,
 };
+use crate::fields::{FieldContainer, FieldRow, FieldRows};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
 use crate::store::Store;
@@ -385,6 +386,7 @@ impl<'a> Request<'a> {
         self.counters.add(Counter::FindingsDiscarded, discarded);
         Ok(Invalidation {
             findings_discarded: discarded,
+            typed_values_discarded: 0,
         })
     }
 
@@ -429,6 +431,7 @@ impl<'a> Request<'a> {
         self.counters.add(Counter::FindingsDiscarded, discarded);
         Ok(Invalidation {
             findings_discarded: discarded,
+            typed_values_discarded: 0,
         })
     }
 
@@ -442,8 +445,11 @@ impl<'a> Request<'a> {
     /// **The pin and the discard are one transaction.** Splitting them leaves a
     /// generation in which the pinned key says a set of findings is dead and a
     /// request can still read them, and nothing outside the store can close that
-    /// window. Parse-fact rows carry no schema key and are not touched: a schema
-    /// edit re-derives exactly the tables it keys.
+    /// window. The discard takes the findings keyed by another fingerprint and
+    /// clears the field pillar's typed values, which were derived under the
+    /// schema this pin replaces; the field rows themselves and every other
+    /// parse-fact row carry no schema key and stay. A schema edit re-derives
+    /// exactly the state it keys.
     ///
     /// Pinning a schema whose bytes and fingerprint already match the standing
     /// pin is **not a schema change**. It takes no generation, writes nothing and
@@ -496,17 +502,24 @@ impl<'a> Request<'a> {
             )
             .map_err(|error| error::sql("discarding schema-dependent state", error))?
             as u64;
+        let typed_discarded = transaction
+            .execute(TYPED_VALUE_DISCARD_SQL, [])
+            .map_err(|error| error::sql("clearing the typed field values", error))?
+            as u64;
 
         transaction
             .commit()
             .map_err(|error| error::sql("committing a schema pin", error))?;
         self.counters.add(Counter::VaultSchemaPins, 1);
         self.counters.add(Counter::FindingsDiscarded, discarded);
+        self.counters
+            .add(Counter::TypedValuesDiscarded, typed_discarded);
         Ok(SchemaPin {
             generation,
             repinned: true,
             invalidated: Invalidation {
                 findings_discarded: discarded,
+                typed_values_discarded: typed_discarded,
             },
         })
     }
@@ -633,10 +646,10 @@ impl<'a> Request<'a> {
     /// ordinal order.
     ///
     /// The row, the body and the document's id come back in one statement, and
-    /// the four fact reads are keyed by that id — so the path is looked up once
+    /// the five fact reads are keyed by that id — so the path is looked up once
     /// rather than once per fact table.
     ///
-    /// **All five reads run inside one `DEFERRED` transaction, so they all see
+    /// **All six reads run inside one `DEFERRED` transaction, so they all see
     /// one WAL snapshot.** Without it, a second `Store` on the same path — the
     /// maintainer file lock that would rule that out is a later crate's, not
     /// this one's (NORN-33) — could commit a re-derivation between the document
@@ -697,6 +710,14 @@ impl<'a> Request<'a> {
                 stored_tag,
                 "reading a document's tags",
             )?,
+            fields: FieldRows::stored(Self::read_all_on(
+                &transaction,
+                &self.read_work,
+                DOCUMENT_FIELDS_SQL,
+                params![id],
+                stored_field,
+                "reading a document's field rows",
+            )?),
         }))
         // The transaction is never committed. A read takes no write lock worth
         // keeping and discards nothing on rollback, so letting it drop here
@@ -1550,7 +1571,7 @@ fn stored_document_sql() -> String {
 /// The statement [`Request::stored_facts`] opens its snapshot with.
 ///
 /// The row, the body and the document's id come back through one seek of
-/// `documents_path`, which is what lets the four fact reads below key off an id
+/// `documents_path`, which is what lets the five fact reads below key off an id
 /// this statement already found rather than look the path up once per table.
 fn stored_facts_document_sql() -> String {
     format!("SELECT id, body, {STORED_DOCUMENT_COLUMNS} FROM documents WHERE path = ?1")
@@ -1560,7 +1581,7 @@ fn stored_facts_document_sql() -> String {
 ///
 /// Keyed by the document row id, and ordered by the ordinal that key's index
 /// already orders by — so the rows come off `links_document_ordinal` in the
-/// order the reader states and nothing sorts. The three fact statements below
+/// order the reader states and nothing sorts. The four fact statements below
 /// carry the same shape over their own tables.
 const DOCUMENT_LINKS_SQL: &str = "SELECT family, embed, protocol, target, title, anchor, block_ref,
                         span_line, span_column, span_offset
@@ -1579,6 +1600,24 @@ const DOCUMENT_BLOCKS_SQL: &str = "SELECT block_id, span_line, span_column, span
 /// The statement [`Request::stored_facts`] reads a document's tags with.
 const DOCUMENT_TAGS_SQL: &str = "SELECT name, source, span_line, span_column, span_offset
                  FROM document_tags WHERE document = ?1 ORDER BY ordinal";
+
+/// The statement [`Request::stored_facts`] reads a document's field rows with.
+///
+/// The same shape as the four above, over the field pillar's primary key: the
+/// document leads it, so the key and the ordinal the rows are stated in are the
+/// order the seek reaches them in.
+const DOCUMENT_FIELDS_SQL: &str =
+    "SELECT key, ordinal, container, raw, typed, least_raw, least_typed
+                 FROM document_fields WHERE document = ?1 ORDER BY key, ordinal";
+
+/// The statement [`Request::pin_vault_schema`] clears the typed field values
+/// with, in the pin's transaction.
+///
+/// Its predicate is the typed index's own, so it reads that index — the rows
+/// holding a typed value — and never the rows that hold none. A pin that moves
+/// nothing typed reads an empty index.
+pub(crate) const TYPED_VALUE_DISCARD_SQL: &str =
+    "UPDATE document_fields SET typed = NULL, least_typed = 0 WHERE typed IS NOT NULL";
 
 /// The statement [`Request::stored_tombstone`] emits.
 ///
@@ -2311,6 +2350,27 @@ fn stored_block(row: &Row<'_>) -> Reading<BlockFact> {
     Ok(Ok(BlockFact {
         block_id: row.get(0)?,
         span: optional_span(row, 1)?,
+    }))
+}
+
+fn stored_field(row: &Row<'_>) -> Reading<FieldRow> {
+    let key: String = row.get(0)?;
+    let ordinal: u32 = row.get(1)?;
+    let container: Option<String> = row.get(2)?;
+    if ordinal == 0 {
+        let written = container.unwrap_or_default();
+        let Some(container) = FieldContainer::parse(&written) else {
+            return Ok(Err(unreadable("document_fields.container", &written)));
+        };
+        return Ok(Ok(FieldRow::Presence { key, container }));
+    }
+    Ok(Ok(FieldRow::Value {
+        key,
+        ordinal,
+        raw: row.get(3)?,
+        typed: row.get(4)?,
+        least_raw: row.get(5)?,
+        least_typed: row.get(6)?,
     }))
 }
 
