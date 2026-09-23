@@ -727,9 +727,10 @@ cursor report the same plan text — so every paged statement carries one furthe
 over the emitted SQL rather than its plan: the cursor is the coalesced floor's first
 argument. A composite cursor is the same rule over a pair — the floor is a row value and
 each half of it coalesces, so the cursor's generation is the first `COALESCE`'s first
-argument and its path is the second's. It pins a spelling rather than a cost, and it is the
-strongest bar available until a per-statement work count is, which is a store-side
-reporting surface no task has opened.
+argument and its path is the second's. It pins a spelling rather than a cost. A find page
+reports a per-statement work count — `FindWork`'s full-scan, sort and VM-step readings,
+summed over the page statements it ran — but the change-feed drains report none, so for a
+drain this bar is the strongest one available.
 
 None of those is a query shape's bar. **The predicate + sort + page shape has a builder**:
 the find builder compiles a request's conjunction, order and page bound into statements a
