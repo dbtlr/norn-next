@@ -1642,4 +1642,199 @@ mod tests {
             assert_eq!(cause.severity(), expected, "`{}`", cause.kind());
         }
     }
+
+    /// The documents the comparison case derives, and what each writes under
+    /// `when` (a date), `weight` (a number) and `code` (text). The raw text is
+    /// what the in-process rule reads; the store reads the same bytes through
+    /// [`plan_document`].
+    ///
+    /// The dates part the raw order from the typed one, and mix a stated
+    /// offset with an unstated one: `a.md` names 09:00 UTC and `b.md` 10:00 at
+    /// no stated offset. The numbers part them too — `10` sorts before `9` as
+    /// text — and `b.md` and `f.md` write nine once as a number and once as a
+    /// string. `code` writes one as a number and once as a string.
+    const COMPARED: [(&str, &str, &str, &str); 6] = [
+        ("a.md", "2026-03-04T09:00:00Z", "10", "1"),
+        ("b.md", "2026-03-04T10:00:00", "9", "\"1\""),
+        ("c.md", "2026-03-04T09:30:00+01:00", "9.5", "2"),
+        ("d.md", "2026-03-04", "-1", "10"),
+        ("e.md", "2026-03-03T23:00:00-05:00", "100", "x"),
+        ("f.md", "2026-03-05", "\"9\"", "y"),
+    ];
+
+    /// **One comparison rule governs the store's typed order and the
+    /// in-process comparison.** Documents are derived through the host's own
+    /// declaration and plan, written through a changeset, and found through
+    /// the builder: a typed sort, both ways, and a typed bound, both ways,
+    /// answer exactly what [`TypedValue::compare`] answers over the same raw
+    /// text — across a mixed-offset pair, which the rule signals and orders by
+    /// reading the unstated side at offset zero, and across a number whose
+    /// text order is not its numeric one. Equality is over the raw text, so
+    /// `1` written as a number and `"1"` written as a string are one value to
+    /// an equality part, as they are to the rule.
+    #[test]
+    fn the_stores_typed_order_and_the_in_process_comparison_are_one_rule() {
+        use std::cmp::Ordering;
+        use std::sync::Arc;
+
+        use norn_config::schema::{ComparisonSignal, FieldType, TypedValue};
+        use norn_store::{IncrementProvenance, Store};
+        use norn_wire::{Direction, FindParams, Predicate, Sort, SortKey, VaultAddress, VaultName};
+
+        let declared = Declared::new(
+            VaultSchema::parse(
+                b"version: 1\nfields:\n  when:\n    type: date\n  weight:\n    type: number\n  code:\n    type: text\n",
+            )
+            .expect("a schema declaring typed fields"),
+        );
+        let scratch = norn_testkit::scratch::Scratch::new("norn-host-comparison");
+        let mut store = Store::open(scratch.join("store.sqlite3")).expect("a store");
+        let changes: Vec<Change> = COMPARED
+            .iter()
+            .map(|(path, when, weight, code)| {
+                let bytes =
+                    format!("---\nwhen: {when}\nweight: {weight}\ncode: {code}\n---\nbody\n");
+                let hash = norn_fs::ContentHash::of(bytes.as_bytes()).to_string();
+                plan_document(
+                    Path::new(path),
+                    path,
+                    bytes.as_bytes(),
+                    hash,
+                    None,
+                    &declared,
+                )
+                .change
+                .expect("a document that derives")
+            })
+            .collect();
+        store
+            .begin_request()
+            .apply_increment(IncrementProvenance::Derived, changes, &[])
+            .expect("writing the derived documents");
+        let reader = Arc::new(store.open_reader().reader.expect("a reader"));
+        let find = |params: FindParams| -> Vec<String> {
+            reader
+                .try_take()
+                .expect("an idle reader")
+                .establish()
+                .snapshot
+                .expect("a snapshot")
+                .find(&params, declared.fields())
+                .expect("a find")
+                .rows
+                .into_iter()
+                .map(|row| row.path.as_str().to_string())
+                .collect()
+        };
+        let request = || {
+            FindParams::new(VaultAddress::name(
+                VaultName::new("compared").expect("a vault name"),
+            ))
+        };
+        let unquoted = |raw: &str| raw.trim_matches('"').to_string();
+        let typed = |kind: FieldType, raw: &str| {
+            kind.read(&unquoted(raw))
+                .unwrap_or_else(|_| panic!("`{raw}` reads as {kind}"))
+        };
+
+        for (key, kind, column) in [
+            ("when", FieldType::Date, 1),
+            ("weight", FieldType::Number, 2),
+        ] {
+            let value = |path: &str| {
+                let (_, when, weight, _) = COMPARED
+                    .iter()
+                    .find(|row| row.0 == path)
+                    .expect("a compared document");
+                typed(kind, if column == 1 { when } else { weight })
+            };
+            // The rule's order: the typed comparison, the path breaking a tie.
+            let mut expected: Vec<String> = COMPARED.iter().map(|row| row.0.to_string()).collect();
+            expected.sort_by(|left, right| {
+                value(left)
+                    .compare(&value(right))
+                    .ordering
+                    .then_with(|| left.cmp(right))
+            });
+            let ascending =
+                find(request().with_sort(Sort::new(SortKey::field(key), Direction::Ascending)));
+            assert_eq!(
+                ascending, expected,
+                "`{key}` ascending is not the rule's order"
+            );
+            let descending =
+                find(request().with_sort(Sort::new(SortKey::field(key), Direction::Descending)));
+            expected.reverse();
+            assert_eq!(
+                descending, expected,
+                "`{key}` descending is not the rule's order"
+            );
+
+            // A bound compares under the same rule, at every value as the
+            // bound: `after` is what the rule calls greater, `before` less.
+            for (_, when, weight, _) in COMPARED {
+                let raw = unquoted(if column == 1 { when } else { weight });
+                let bound = typed(kind, &raw);
+                for (predicate, wanted) in [
+                    (Predicate::after(key, raw.clone()), Ordering::Greater),
+                    (Predicate::before(key, raw.clone()), Ordering::Less),
+                ] {
+                    let mut matching: Vec<String> = COMPARED
+                        .iter()
+                        .map(|row| row.0.to_string())
+                        .filter(|path| value(path).compare(&bound).ordering == wanted)
+                        .collect();
+                    matching.sort_by_key(|path| path.to_ascii_lowercase());
+                    assert_eq!(
+                        find(request().with_predicates([predicate.clone()])),
+                        matching,
+                        "{predicate:?} does not answer what the rule does"
+                    );
+                }
+            }
+        }
+
+        // The mixed-offset pair: the rule signals it, orders the stated 09:00Z
+        // before the unstated 10:00, and the store's order agrees.
+        let comparison = typed(FieldType::Date, "2026-03-04T09:00:00Z")
+            .compare(&typed(FieldType::Date, "2026-03-04T10:00:00"));
+        assert_eq!(comparison.signal, Some(ComparisonSignal::MixedOffset));
+        assert_eq!(comparison.ordering, Ordering::Less);
+        let by_when =
+            find(request().with_sort(Sort::new(SortKey::field("when"), Direction::Ascending)));
+        let at = |path: &str| by_when.iter().position(|found| found == path);
+        assert!(at("a.md") < at("b.md"), "{by_when:?}");
+        // `10` before `9` as text; after it as a number.
+        let by_weight =
+            find(request().with_sort(Sort::new(SortKey::field("weight"), Direction::Ascending)));
+        assert!(
+            by_weight.iter().position(|found| found == "b.md")
+                < by_weight.iter().position(|found| found == "a.md"),
+            "{by_weight:?}"
+        );
+
+        // Numeric-versus-text equality: one written as a number and one as a
+        // string are the one raw text, to the builder's equality and to the
+        // rule alike.
+        assert_eq!(
+            find(request().with_predicates([Predicate::equal_to("code", "1")])),
+            ["a.md", "b.md"]
+        );
+        assert_eq!(
+            TypedValue::Text("1".to_string())
+                .compare(&typed(FieldType::Text, "\"1\""))
+                .ordering,
+            Ordering::Equal
+        );
+        assert_eq!(
+            find(request().with_predicates([Predicate::equal_to("weight", "9")])),
+            ["b.md", "f.md"]
+        );
+        assert_eq!(
+            typed(FieldType::Number, "9")
+                .compare(&typed(FieldType::Number, "\"9\""))
+                .ordering,
+            Ordering::Equal
+        );
+    }
 }

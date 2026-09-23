@@ -94,7 +94,7 @@ use std::fmt;
 use serde_yaml::Value;
 
 pub use norn_wire::{Pattern, PatternError};
-pub use typed::{FieldType, TypedValue};
+pub use typed::{Comparison, ComparisonSignal, FieldType, TypedValue};
 
 /// The schema version this build reads.
 ///
