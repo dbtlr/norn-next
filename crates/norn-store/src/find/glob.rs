@@ -14,6 +14,7 @@ use norn_db::rusqlite::{self, Connection};
 use norn_wire::Pattern;
 
 use crate::error::{self, StoreError};
+use crate::path::prefix_successor;
 
 /// The name a statement calls the glob match by: `norn_glob(pattern, path)`.
 pub(crate) const GLOB_FUNCTION: &str = "norn_glob";
@@ -58,11 +59,10 @@ pub(crate) fn register_functions(connection: &Connection) -> Result<(), StoreErr
 /// because `**` matches the run of no segments: `notes/**` matches `notes`
 /// itself, which does not start with `notes/`.
 ///
-/// The upper bound is the prefix with its last character stepped to the next
-/// one, which in UTF-8 is also the next text bytewise. A prefix with no next
-/// text — empty, or ending in the last character there is — is bounded above by
-/// an empty blob, which SQLite orders after every text: the range is then every
-/// path from the lower bound on.
+/// The upper bound is the prefix's [`prefix_successor`]. A prefix with no
+/// successor — empty, or made only of the last character there is — is bounded
+/// above by an empty blob, which SQLite orders after every text: the range is
+/// then every path from the lower bound on.
 pub(crate) fn path_range(pattern: &Pattern) -> (String, Value) {
     let source = pattern.as_str();
     let first_wildcard = source.find(['*', '?']).unwrap_or(source.len());
@@ -76,22 +76,8 @@ pub(crate) fn path_range(pattern: &Pattern) -> (String, Value) {
     if opens_any_depth {
         prefix = prefix.strip_suffix('/').unwrap_or(prefix);
     }
-    let upper = successor(prefix).map_or(Value::Blob(Vec::new()), Value::Text);
+    let upper = prefix_successor(prefix).map_or(Value::Blob(Vec::new()), Value::Text);
     (prefix.to_string(), upper)
-}
-
-/// The least text that sorts after every text starting with `prefix`, or
-/// nothing where no text does.
-fn successor(prefix: &str) -> Option<String> {
-    let mut characters: Vec<char> = prefix.chars().collect();
-    while let Some(last) = characters.pop() {
-        let stepped = (u32::from(last) + 1..=u32::from(char::MAX)).find_map(char::from_u32);
-        if let Some(stepped) = stepped {
-            characters.push(stepped);
-            return Some(characters.into_iter().collect());
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -139,12 +125,5 @@ mod tests {
             ("notes/a".to_string(), Value::Text("notes/b".to_string()))
         );
         assert_eq!(range("**/a.md"), (String::new(), Value::Blob(Vec::new())));
-    }
-
-    #[test]
-    fn a_prefix_ending_in_the_last_character_steps_the_one_before_it() {
-        assert_eq!(successor("a\u{10FFFF}"), Some("b".to_string()));
-        assert_eq!(successor("\u{10FFFF}"), None);
-        assert_eq!(successor("\u{D7FF}"), Some("\u{E000}".to_string()));
     }
 }
