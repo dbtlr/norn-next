@@ -1711,25 +1711,41 @@ mod tests {
         }
     }
 
+    /// One compared document: its path, then the raw text it writes under
+    /// `when`, `weight`, `code` and `flag`.
+    type Compared = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    );
+
+    /// The raw text one compared document writes under one key.
+    type Written = fn(&Compared) -> &'static str;
+
     /// The documents the comparison case derives, and what each writes under
-    /// `when` (a date), `weight` (a number) and `code` (text). The raw text is
-    /// what the in-process rule reads; the store reads the same bytes through
-    /// [`plan_document`].
+    /// `when` (a date), `weight` (a number), `code` (text) and `flag` (a
+    /// boolean). The raw text is what the in-process rule reads; the store
+    /// reads the same bytes through [`plan_document`].
     ///
     /// The dates part the raw order from the typed one, and mix a stated
     /// offset with an unstated one: `a.md` names 09:00 UTC and `b.md` 10:00 at
     /// no stated offset. The numbers part them too — `10` sorts before `9` as
     /// text — and `b.md`, `f.md` and `g.md` write nine as an integer, as a
     /// string and as a float, three raw texts the declared number reads as one
-    /// value. `code` writes one as a number and once as a string.
-    const COMPARED: [(&str, &str, &str, &str); 7] = [
-        ("a.md", "2026-03-04T09:00:00Z", "10", "1"),
-        ("b.md", "2026-03-04T10:00:00", "9", "\"1\""),
-        ("c.md", "2026-03-04T09:30:00+01:00", "9.5", "2"),
-        ("d.md", "2026-03-04", "-1", "10"),
-        ("e.md", "2026-03-03T23:00:00-05:00", "100", "x"),
-        ("f.md", "2026-03-05", "\"9\"", "y"),
-        ("g.md", "2026-03-06", "9.0", "z"),
+    /// value. `code` writes one as a number and once as a string. `flag`
+    /// writes booleans bare and as strings padded with a space, which the
+    /// declared boolean reads as the same values and whose raw text sorts
+    /// apart from them: `" true"` before `false` and `"false "` after it.
+    const COMPARED: [Compared; 7] = [
+        ("a.md", "2026-03-04T09:00:00Z", "10", "1", "true"),
+        ("b.md", "2026-03-04T10:00:00", "9", "\"1\"", "false"),
+        ("c.md", "2026-03-04T09:30:00+01:00", "9.5", "2", "\" true\""),
+        ("d.md", "2026-03-04", "-1", "10", "false"),
+        ("e.md", "2026-03-03T23:00:00-05:00", "100", "x", "true"),
+        ("f.md", "2026-03-05", "\"9\"", "y", "\"false \""),
+        ("g.md", "2026-03-06", "9.0", "z", "true"),
     ];
 
     /// **One comparison rule governs the store's typed order and the
@@ -1740,7 +1756,8 @@ mod tests {
     /// [`TypedValue::compare`] answers over the same raw text — across a
     /// mixed-offset pair, which the rule signals and orders by reading the
     /// unstated side at offset zero, across a number whose text order is not
-    /// its numeric one, and across `9` and `9.0`, two texts one number. On a
+    /// its numeric one, across `9` and `9.0`, two texts one number, and across
+    /// booleans whose raw text is not their boolean order. On a
     /// key declared as text equality is over the raw text, so `1` written as a
     /// number and `"1"` written as a string are one value to an equality part,
     /// as they are to the rule.
@@ -1753,16 +1770,18 @@ mod tests {
 
         let documents: Vec<(&str, String)> = COMPARED
             .iter()
-            .map(|(path, when, weight, code)| {
+            .map(|(path, when, weight, code, flag)| {
                 (
                     *path,
-                    format!("---\nwhen: {when}\nweight: {weight}\ncode: {code}\n---\nbody\n"),
+                    format!(
+                        "---\nwhen: {when}\nweight: {weight}\ncode: {code}\nflag: {flag}\n---\nbody\n"
+                    ),
                 )
             })
             .collect();
         let vault = DerivedVault::new(
             "norn-host-comparison",
-            b"version: 1\nfields:\n  when:\n    type: date\n  weight:\n    type: number\n  code:\n    type: text\n",
+            b"version: 1\nfields:\n  when:\n    type: date\n  weight:\n    type: number\n  code:\n    type: text\n  flag:\n    type: boolean\n",
             &documents,
         );
         let find = |params| vault.find(params);
@@ -1773,16 +1792,19 @@ mod tests {
                 .unwrap_or_else(|_| panic!("`{raw}` reads as {kind}"))
         };
 
-        for (key, kind, column) in [
-            ("when", FieldType::Date, 1),
-            ("weight", FieldType::Number, 2),
-        ] {
+        // Each typed key, with the raw text a compared row writes under it.
+        let typed_keys: [(&str, FieldType, Written); 3] = [
+            ("when", FieldType::Date, |row| row.1),
+            ("weight", FieldType::Number, |row| row.2),
+            ("flag", FieldType::Boolean, |row| row.4),
+        ];
+        for (key, kind, written) in typed_keys {
             let value = |path: &str| {
-                let (_, when, weight, _) = COMPARED
+                let row = COMPARED
                     .iter()
                     .find(|row| row.0 == path)
                     .expect("a compared document");
-                typed(kind, if column == 1 { when } else { weight })
+                typed(kind, written(row))
             };
             // The rule's order: the typed comparison, the path breaking a tie.
             let mut expected: Vec<String> = COMPARED.iter().map(|row| row.0.to_string()).collect();
@@ -1819,8 +1841,8 @@ mod tests {
                 matching.sort_by_key(|path| path.to_ascii_lowercase());
                 matching
             };
-            for (_, when, weight, _) in COMPARED {
-                let raw = unquoted(if column == 1 { when } else { weight });
+            for row in &COMPARED {
+                let raw = unquoted(written(row));
                 let bound = typed(kind, &raw);
                 let ordering = |found: &TypedValue| found.compare(&bound).ordering;
                 for (predicate, matching) in [
