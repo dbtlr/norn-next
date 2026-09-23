@@ -100,7 +100,11 @@ pub enum Predicate {
     /// The document's path matches `glob`.
     #[non_exhaustive]
     Path {
-        /// The glob the path must match.
+        /// The glob the path must match, anchored at both ends: `?` matches
+        /// one character that is not `/`, `*` any run of characters holding
+        /// no `/`, and a whole `**` segment any run of segments, none
+        /// included. Every other character matches itself; there is no
+        /// escape.
         glob: String,
     },
     /// The document carries a link whose target is `target`.

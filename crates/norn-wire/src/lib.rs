@@ -28,7 +28,9 @@
 //! a [`VaultRoot`] — the [`AttachMode`] a demand asks for its derived state
 //! under, the [`Verb`] a request asks for with the [`Addressing`] it carries a
 //! vault by and the [`RequestScope`] that addressing is answered from, the
-//! [`Predicate`] list a read filters by, and the [`ResolutionTarget`] one
+//! [`Predicate`] list a read filters by, whose path part is a glob read by the
+//! [`Pattern`] grammar a schema's path and tag sets are written in too, and
+//! the [`ResolutionTarget`] one
 //! document is addressed by. What a read answers with is spelled here as
 //! well: the [`AnswerReading`] every answer carries — its [`TrustState`], its
 //! establishment, and the [`LadderDeclaration`] of [`RungReport`]s a search
@@ -93,9 +95,11 @@
 //!
 //! # Derive discipline
 //!
-//! Every public type carries the same derives, and the reason is that a wire
-//! type is read by serde and described by schemars at once — a type that
-//! serializes but has no schema is a payload no surface can advertise:
+//! Every public type that crosses the seam carries the same derives, and the
+//! reason is that a wire type is read by serde and described by schemars at
+//! once — a type that serializes but has no schema is a payload no surface can
+//! advertise. [`Pattern`] and the refusals a grammar's constructor returns are
+//! readings of a value rather than values that cross, and carry none of them:
 //!
 //! - [`serde::Serialize`] and [`serde::Deserialize`], with `snake_case` field
 //!   and variant names on the wire — except the code registries, whose members
@@ -341,6 +345,7 @@ mod document;
 mod error;
 mod finding;
 mod finding_row;
+mod glob;
 mod name;
 mod predicate;
 mod product;
@@ -372,6 +377,7 @@ pub use document::{
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReasonCode, TooFewNames};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
+pub use glob::{Pattern, PatternError};
 pub use name::{IllegalVaultName, VaultName};
 pub use predicate::Predicate;
 pub use product::{Unsatisfied, VaultAnswer};

@@ -84,7 +84,6 @@
 //! paths the resolution ladder does not count as candidates, which is the
 //! read surface's to apply.
 
-mod glob;
 pub mod typed;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -92,7 +91,7 @@ use std::fmt;
 
 use serde_yaml::Value;
 
-pub use glob::{Pattern, PatternError};
+pub use norn_wire::{Pattern, PatternError};
 pub use typed::{FieldType, TypedValue};
 
 /// The schema version this build reads.
