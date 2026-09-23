@@ -35,8 +35,9 @@
 //!
 //! **Four bands here can spell a calibration state, and none of them is in
 //! one.** [`SOAK_PEAK_RSS_CEILING_BYTES`], [`SOAK_HIGH_WATER_RSS_CEILING_BYTES`],
-//! [`SOAK_SETTLE_CEILING`] and [`SOAK_QUIESCENT_FD_RETENTION`] are `Option`s: `Some` bars the run, and `None`
-//! records the reading, bars nothing, and stamps its own runs non-qualifying
+//! [`SOAK_SETTLE_CEILING`] and [`SOAK_QUIESCENT_FD_RETENTION`] are `Option`s:
+//! `Some` bars the run, and `None` records the reading, bars nothing, and
+//! stamps its own runs non-qualifying
 //! through the ledger's exit-bar registry
 //! (`norn_testkit::certification::ledger::NAMED_EXIT_BARS`, held to these
 //! constants by a test in `settle.rs`) — so a calibration window never counts
@@ -94,29 +95,34 @@ use std::time::Duration;
 /// ready, and detaches — so the reading is the attach's cost plus the test
 /// binary that carried it, and generation is charged to nobody.
 ///
-/// Observed on 2026-09-23: **22.40–23.40 MiB on macos-arm64**, this host's
-/// current readings across repeated runs of the lane — an indicative band, not
-/// a fixed measurement, so a rerun lands near an edge rather than the middle.
-/// On `ubuntu-latest` x86_64-glibc the hosted band across this lane's two
-/// attaches at this profile is **16.73–18.82 MiB** over ten readings: 17.69 and
-/// 18.26 at the first hosted run, 16.73 and 17.00 in the Layer 1 acceptance
-/// pass, and 17.73/18.30, 17.96/18.18, 18.82/18.37 and 17.95/17.91 across four
-/// consecutive `memory invariant` runs. The later `memory invariant` run
-/// 35858094556 read **21.40 MiB** from this case and 21.53 from the attach-only
-/// child of [`READ_OVER_ATTACH_PEAK_RSS_PER_MILLE`], above that band. Every
-/// hosted reading sits below the local band, as 4 KiB pages against 16 KiB
-/// predict. **The hosted spread is about two MiB wide and is not a trend to
-/// read**: one run's two attaches differ by as much as 0.57 MiB, which is the
-/// same order as the spread across runs, so no ordering of these readings
-/// carries a direction and the number that bounds them is the top one.
+/// Observed on macos-arm64: **22.40–23.39 MiB**, this host's readings of this
+/// lane's attaches at this profile across eight runs on 2026-09-23 — 22.40 to
+/// 22.96 over the first three runs and 22.93 to 23.39 over the five after
+/// them. An indicative band, not a fixed measurement, so a rerun lands near an
+/// edge rather than the middle. On `ubuntu-latest` x86_64-glibc the hosted
+/// readings of this lane's attaches at this profile span **16.73–21.53 MiB**
+/// over twelve readings: 17.69 and 18.26 at the first hosted run, 16.73 and
+/// 17.00 in the Layer 1 acceptance pass, 17.73/18.30, 17.96/18.18, 18.82/18.37
+/// and 17.95/17.91 across four consecutive `memory invariant` runs, and then
+/// 21.40 from this case and 21.53 from the attach-only child of
+/// [`READ_OVER_ATTACH_PEAK_RSS_PER_MILLE`] in `memory invariant` run
+/// 35858094556. Every hosted reading sits below the local band, as 4 KiB pages
+/// against 16 KiB predict.
+///
+/// **The hosted spread is 4.8 MiB wide.** The first ten readings sit inside
+/// 16.73–18.82, where one run's two attaches differ by as much as 0.57 MiB, the
+/// same order as the spread across those runs; the run after them reads 2.58
+/// and 2.71 MiB above that band's top. One run is not a direction, so the rise
+/// is recorded for the trend this file keeps rather than read as one, and the
+/// number that bounds the readings is the top one.
 ///
 /// The ceiling stays at 40 MiB, which is 1.71x the local band's top and 1.86x
-/// the highest hosted reading, 21.53 MiB. The readings it holds are whole-process peaks,
-/// so each carries the child binary and its runtime as a fixed addend that a
-/// page-size or allocator change moves without the attachment costing more —
-/// and a bar that flakes teaches people to rerun rather than to look. What a
-/// vault-shaped cost would read here is multiples of the band, not the 2 MiB of
-/// spread between platforms.
+/// the highest hosted reading, 21.53 MiB. The readings it holds are
+/// whole-process peaks, so each carries the child binary and its runtime as a
+/// fixed addend that a page-size or allocator change moves without the
+/// attachment costing more — and a bar that flakes teaches people to rerun
+/// rather than to look. What a vault-shaped cost would read here is multiples
+/// of the band, not the 2 MiB of spread between platforms.
 ///
 /// **Platform scope: the Linux measurement lane.** The per-PR `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; the
@@ -143,11 +149,11 @@ pub const ATTACH_PEAK_RSS_CEILING_BYTES: u64 = 40 * 1024 * 1024;
 /// below either profile, and what is left growing with the vault is how many
 /// of those changesets are committed. The observed ratios on 2026-09-23 are
 /// **1.09–1.15 on macos-arm64**, this host's current readings, against attach
-/// peaks of 20.31–20.64 MiB at `ambiguous` and 22.40–23.40 MiB at `realistic`;
-/// the hosted band on
-/// `ubuntu-latest` x86_64-glibc is **1.13–1.26** over five runs — 1.21 (14.60
-/// against 17.69 MiB) at the first, then 1.19, 1.17, 1.26 and 1.13 across four
-/// consecutive `memory invariant` runs, against bases of 14.83–15.82 MiB. A
+/// peaks of 20.31–20.64 MiB at `ambiguous` and 22.40–23.39 MiB at `realistic`;
+/// the hosted band on `ubuntu-latest` x86_64-glibc is **1.13–1.26** over five
+/// runs — 1.21 (14.60 against 17.69 MiB) at the first, then 1.19, 1.17, 1.26
+/// and 1.13 across four consecutive `memory invariant` runs, against bases of
+/// 14.83–15.82 MiB. A
 /// lower base and a wider ratio band, the shape a smaller page size predicts:
 /// the fixed addend both readings carry shrinks, so the same difference between
 /// the two scales is a larger multiple of it.
@@ -174,7 +180,7 @@ pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 /// readings, six from this bar's own case and six from the reading child of
 /// the ratio beside it, across six runs of the lane — an indicative band from
 /// repeated local runs, not a fixed measurement. The attach-only child at the
-/// same profile read inside the 22.40–23.40 MiB band
+/// same profile read inside the 22.40–23.39 MiB band
 /// [`ATTACH_PEAK_RSS_CEILING_BYTES`] states. On `ubuntu-latest` x86_64-glibc
 /// the `memory invariant` run 35858094556 read **21.83 MiB** from this case
 /// and 21.67 from the ratio's reading child, against 21.53 from its attach-only
@@ -185,7 +191,7 @@ pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 /// reading and 1.62x the local band's top. It is authored from the hosted
 /// reading at the proportion [`ATTACH_PEAK_RSS_CEILING_BYTES`] keeps over its
 /// own highest hosted reading, 1.86x, which puts it at 40.6 MiB; 42 MiB holds
-/// that proportion with one more MiB, and stays below the 2.13x the attach
+/// that proportion with 1.4 MiB more, and stays below the 2.13x the attach
 /// ceiling was authored at. The readings are whole-process peaks carrying the
 /// child binary and its runtime as a fixed addend, and a bar that flakes
 /// teaches people to rerun rather than to look.
@@ -456,15 +462,15 @@ pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
 ///
 /// The ceiling is 40 MiB, read against the feature-on series above: 2.02x its
 /// highest hosted reading and 1.72x the highest local one, the stance
-/// [`ATTACH_PEAK_RSS_CEILING_BYTES`] takes and for the same reason. The readings are whole-process peaks, so each carries
-/// the binary and its runtime as a fixed addend that a runner image, a page
-/// size or an allocator moves without the load costing more — the sixteen-run
-/// series has already stepped 0.72 MiB overnight once, with the slope flat
-/// through it — and a bar that flakes on the next such step
-/// teaches people to rerun rather than to look. What a vault-shaped cost would
-/// read here is multiples of the band: a load that held the ≥5k profile's
-/// documents resident would clear this many times over, not by the 4 MiB
-/// between platforms.
+/// [`ATTACH_PEAK_RSS_CEILING_BYTES`] takes and for the same reason. The
+/// readings are whole-process peaks, so each carries the binary and its
+/// runtime as a fixed addend that a runner image, a page size or an allocator
+/// moves without the load costing more — the sixteen-run series has already
+/// stepped 0.72 MiB overnight once, with the slope flat through it — and a bar
+/// that flakes on the next such step teaches people to rerun rather than to
+/// look. What a vault-shaped cost would read here is multiples of the band: a
+/// load that held the ≥5k profile's documents resident would clear this many
+/// times over, not by the 4 MiB between platforms.
 ///
 /// **Platform scope: the Linux measurement lane.** The sixteen-run series is
 /// the scheduled lane's on `ubuntu-latest` x86_64-glibc; the macos-arm64
