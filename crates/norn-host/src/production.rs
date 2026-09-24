@@ -8058,6 +8058,78 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **A store an earlier derivation wrote is rebuilt from zero at the
+    /// attach that opens it, and the reason names both versions.** The stale
+    /// row stands under the content hash of the bytes the vault holds, which is
+    /// the state an earlier build leaves: a heal derives a file again only when
+    /// its hash moves, so without the rebuild the row the earlier derivation
+    /// wrote would be served until the file was edited. An attach under the
+    /// same version afterwards reuses the store.
+    #[test]
+    fn a_store_an_earlier_derivation_wrote_is_rebuilt_at_attach() {
+        const NOTE: &str = "# Title\n\nA body.\n";
+        let f = Fixture::new("attach-derivation-moved");
+        fs::write(f.vault().join("note.md"), NOTE).unwrap();
+        let (ops, name) = f.ops(64);
+        let policy = ProductionPolicy::new(64, 2).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let earlier = norn_store::DerivationVersion::new(crate::DERIVATION_VERSION.get() - 1);
+
+        let mut stale = Store::open(dirs_store(&f, &name), proven_order(&f), earlier).unwrap();
+        // What the earlier derivation wrote for these bytes: the row, and no
+        // heading.
+        stale
+            .begin_request()
+            .apply_increment(
+                norn_store::IncrementProvenance::Derived,
+                [norn_store::Change::Upsert(norn_store::DocumentFacts::new(
+                    DocumentPath::new("note.md").unwrap(),
+                    norn_fs::ContentHash::of(NOTE.as_bytes()).to_string(),
+                    NOTE,
+                    NOTE.len() as u64,
+                ))],
+                &[],
+            )
+            .unwrap();
+        let stale_epoch = stale.epoch().to_string();
+        drop(stale);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let OpenOutcome::RebuiltFromZero(RebuildReason::Client { detail }) =
+            attachment.store.open_outcome()
+        else {
+            panic!(
+                "a store derivation version {earlier} wrote opened under {} as {:?}",
+                crate::DERIVATION_VERSION,
+                attachment.store.open_outcome()
+            );
+        };
+        assert!(
+            detail.contains(&format!("`{earlier}`"))
+                && detail.contains(&format!("`{}`", crate::DERIVATION_VERSION)),
+            "the reason does not name both derivation versions: {detail}"
+        );
+        assert_ne!(attachment.store.epoch(), stale_epoch);
+        assert_eq!(
+            attachment.store.derivation_version(),
+            crate::DERIVATION_VERSION
+        );
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "attach-derivation-moved-oracle", policy),
+            "the rebuild derived something a from-scratch build does not"
+        );
+        ops.detach(&name, attachment);
+
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            *attachment.store.open_outcome(),
+            OpenOutcome::Reused,
+            "an attach under the derivation version the store was written by rebuilt it"
+        );
+        ops.detach(&name, attachment);
+    }
+
     /// **A recovery whose coverage proves another order than its store was
     /// derived under derives nothing into that store, and owes rung 3**, which
     /// discards it and derives the vault again under the order the coverage
