@@ -15,7 +15,9 @@ use norn_store::{
     Counted, DeclaredFields, Found, FrontmatterValue, Snapshot, SnapshotReader, Store, TagFact,
     TagSource, TypedOrder,
 };
-use norn_wire::{CountParams, FindParams, GroupKey, Predicate, Tally, VaultAddress, VaultName};
+use norn_wire::{
+    CountParams, Cursor, CursorKey, FindParams, GroupKey, Predicate, Tally, VaultAddress, VaultName,
+};
 
 // ---- fixtures ----
 
@@ -424,4 +426,66 @@ fn every_tally_agrees_with_a_find_of_its_members() {
             }
         }
     }
+}
+
+// ---- the page ----
+
+/// Every tally of `params`, drained a page of `limit` at a time.
+fn drained(counting_store: &Counting, params: &CountParams, limit: u32) -> Vec<Tally> {
+    let mut tallies = Vec::new();
+    let mut after: Option<Cursor> = None;
+    loop {
+        let mut page = params.clone().with_limit(limit);
+        if let Some(cursor) = after.take() {
+            page = page.with_after(cursor);
+        }
+        let counted = counting_store.count(&page);
+        assert!(
+            counted.tallies.len() <= limit as usize,
+            "a page held more than its bound"
+        );
+        tallies.extend(counted.tallies);
+        match counted.next {
+            Some(next) => after = Some(next),
+            None => return tallies,
+        }
+        assert!(tallies.len() < 100, "the drain does not end");
+    }
+}
+
+/// **A drain a page at a time answers the tallies one page does**, in the same
+/// order, whatever the bound: a continuation resumes after the last tally's
+/// tuple, inside the `null`-lead section and out of it, under a typed member
+/// and a raw one, filtered and not.
+#[test]
+fn a_drain_a_page_at_a_time_answers_the_tallies_one_page_does() {
+    let counting_store = Counting::new("count-drain");
+    let groupings = [
+        vec![field("aliases")],
+        vec![field("n")],
+        vec![GroupKey::tag()],
+        vec![field("aliases"), GroupKey::tag()],
+        vec![field("n"), GroupKey::tag(), field("aliases")],
+    ];
+    for predicates in [Vec::new(), vec![Predicate::tag("draft")]] {
+        for by in &groupings {
+            let params = counting(by.clone()).with_predicates(predicates.clone());
+            let whole = counting_store
+                .count(&params.clone().with_limit(1000))
+                .tallies;
+            for limit in [1, 2, 3] {
+                assert_eq!(
+                    drained(&counting_store, &params, limit),
+                    whole,
+                    "{by:?} under {predicates:?} drained {limit} at a time"
+                );
+            }
+        }
+    }
+    let first = counting_store.count(&counting(vec![field("n")]).with_limit(2));
+    assert_eq!(
+        first.next.as_ref().map(Cursor::key),
+        Some(&CursorKey::tally([Some("3".to_string())])),
+        "a page stops at its last tally's labels"
+    );
 }
