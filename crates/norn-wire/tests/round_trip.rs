@@ -661,7 +661,7 @@ fn finding_row() -> FindingRow {
     )
 }
 
-/// Every nested collection a request pages by ordinal.
+/// Every nested collection a request pages.
 fn collection_selectors() -> Vec<CollectionSelector> {
     vec![
         CollectionSelector::Links,
