@@ -873,8 +873,11 @@ body column, which the counters cannot see.
 
 **The full-text match shape has a builder** of its own beside that filter: the search
 builder answers the lexical floor of `search` — BM25 over the full-text pillar, so it is
-transactional with derivation and runs no model — and reads no rung set; the rungs above
-the floor are an engine's, and fusing them is the host's. A query is plain text: it is
+transactional with derivation and runs no model. It reads a lexical request of its own,
+never the wire's `search` params: that request names no rung set, and its floor, its bound
+and its cursor are the lexical rung's own, so the host builds it explicitly; the rungs
+above the floor are an engine's, and fusing them, with the fused answer's floor, bound and
+cursor, is the host's. A query is plain text: it is
 split into terms at whitespace, each term quoted so that no character of it is match
 syntax, and a hit is a document holding every term. A query naming no term answers no hit
 and reports nothing. A hit's score is FTS5's BM25 negated, so it is higher for the more

@@ -13,13 +13,14 @@ use std::sync::Arc;
 use crate::common::{DOCUMENT_PAYLOAD, Scratch, document, reads_of, violation, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    ContentModel, FindStatement, PageRefusal, ReadFilter, ReadStatement, SEARCH_STATEMENTS,
-    SearchPlan, SearchStatement, Searched, Snapshot, SnapshotReader, Store, TagFact, TagSource,
+    ContentModel, FindStatement, LexicalQuery, PageRefusal, ReadFilter, ReadStatement,
+    SEARCH_STATEMENTS, SearchPlan, SearchStatement, Searched, Snapshot, SnapshotReader, Store,
+    TagFact, TagSource,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan, ScanTarget};
 use norn_wire::{
     Column, Cursor, CursorKey, FieldValue, FindingKind, Moved, Predicate, ResolutionTarget, Score,
-    SearchParams, Unsatisfied, VaultAddress, VaultName,
+    Unsatisfied,
 };
 
 // ---- fixtures ----
@@ -142,31 +143,27 @@ impl Searching {
             .expect("a snapshot")
     }
 
-    fn search(&self, params: &SearchParams) -> Searched {
+    fn search(&self, params: &LexicalQuery) -> Searched {
         self.snapshot()
             .search(params, &declared())
             .unwrap_or_else(|refusal| panic!("a search of {params:?}: {refusal}"))
     }
 
-    fn refusal(&self, params: &SearchParams) -> PageRefusal {
+    fn refusal(&self, params: &LexicalQuery) -> PageRefusal {
         self.snapshot()
             .search(params, &declared())
             .expect_err("a refused search")
     }
 
-    fn plans(&self, params: &SearchParams) -> Vec<SearchPlan> {
+    fn plans(&self, params: &LexicalQuery) -> Vec<SearchPlan> {
         self.snapshot()
             .search_plans(params, &declared())
             .expect("the plans of a search")
     }
 }
 
-fn vault() -> VaultAddress {
-    VaultAddress::name(VaultName::new("notes").expect("a vault name"))
-}
-
-fn searching(query: &str) -> SearchParams {
-    SearchParams::new(vault(), query)
+fn searching(query: &str) -> LexicalQuery {
+    LexicalQuery::new(query)
 }
 
 /// The paths a page's hits stand at, in its order.
@@ -333,7 +330,7 @@ fn a_query_naming_no_term_answers_no_hit() {
 /// continuing the cursor the one before it minted, on one snapshot. A drain
 /// that has not ended after more pages than the fixture has documents is a
 /// cursor that does not advance.
-fn drained(snapshot: &Snapshot, params: &SearchParams, limit: u32) -> Vec<(String, u64)> {
+fn drained(snapshot: &Snapshot, params: &LexicalQuery, limit: u32) -> Vec<(String, u64)> {
     let mut hits = Vec::new();
     let mut after: Option<Cursor> = None;
     for _ in 0..=fixture().len() {
@@ -1027,7 +1024,7 @@ fn page_work(searched: &Searched) -> (u64, u64, u64, u64) {
 /// tag, a path, a field and a `matches` part, a floored page, and a
 /// continuation of a one-term query, whose ranking the vault's size does not
 /// reorder.
-fn vault_size_requests(store: &Searching) -> Vec<SearchParams> {
+fn vault_size_requests(store: &Searching) -> Vec<LexicalQuery> {
     let lantern = searching("lantern").with_limit(2);
     let next = store.search(&lantern).next.expect("a next page of lantern");
     vec![
@@ -1114,7 +1111,7 @@ fn ranking_costs_every_match_and_a_narrowing_part_narrows_what_is_scored() {
     let large = Searching::with_documents("search-ranking-large", bulk(500, matches));
     let added = 450;
     let first = searching("lantern harbor").with_limit(3);
-    let growth = |params: &dyn Fn(&Searching) -> SearchParams| {
+    let growth = |params: &dyn Fn(&Searching) -> LexicalQuery| {
         let (on_small, on_large) = (small.search(&params(&small)), large.search(&params(&large)));
         let (small_read, small_scans, small_sorts, small_steps) = page_work(&on_small);
         let (large_read, large_scans, large_sorts, large_steps) = page_work(&on_large);

@@ -154,7 +154,9 @@ pub use request::{
     POINT_READS, Request, STATEMENTS, SubjectScope,
 };
 pub use resolve::{AmbiguityIgnore, TargetClass};
-pub use search::{SEARCH_STATEMENTS, SearchPlan, SearchStatement, SearchWork, Searched};
+pub use search::{
+    LexicalQuery, SEARCH_STATEMENTS, SearchPlan, SearchStatement, SearchWork, Searched,
+};
 pub use store::{
     ConnectionTurn, ReaderMint, RecordedStoreSchema, Snapshot, SnapshotAttempt, SnapshotReader,
     Store, StoreMode, StoreReading,

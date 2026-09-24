@@ -8,8 +8,9 @@
 //! write that derives a document, so a lexical answer is transactional with
 //! derivation and runs no model. The rungs above it are answered by engines
 //! over their own state, and whatever else a request's rung set names is the
-//! host's to run and fuse; this builder reads the query, the conjunction, the
-//! floor, the columns, the bound and the cursor, and never the rung set.
+//! host's to run and fuse. So the builder reads a [`LexicalQuery`], which names
+//! no rung set: the host builds one for the lexical rung, and the floor, the
+//! bound and the cursor it carries are that rung's own.
 //!
 //! # A query is plain text
 //!
@@ -69,7 +70,7 @@ mod statement;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    Column, Cursor, CursorKey, Hit, Moved, Page, Score, SearchParams, SearchReport, Unsatisfied,
+    Column, Cursor, CursorKey, Hit, Moved, Page, Predicate, Score, SearchReport, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -82,6 +83,85 @@ use crate::store::Snapshot;
 
 use statement::{HitPosition, LexicalPage, compose_lexical_page, lexical_expression};
 pub use statement::{SEARCH_STATEMENTS, SearchStatement};
+
+/// A request for one page of the lexical rung's hits: what [`Snapshot::search`]
+/// reads.
+///
+/// **It names the lexical rung and no other.** A `search` on the wire,
+/// [`norn_wire::SearchParams`], names a rung set, and its floor, its bound and
+/// its cursor are over the answer that set makes: where the set is the lexical
+/// floor alone that answer is this rung's page, and where it names a rung above
+/// the floor it is the host's fusion of every rung's hits. So the host builds
+/// this request for the lexical rung itself, and **its floor, its cursor and its
+/// bound are the lexical rung's own**: a floor on the BM25 scale this rung
+/// scores on, a cursor this rung minted, and a bound on this rung's page — never
+/// the fused answer's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LexicalQuery {
+    /// The plain-text query to rank against, as written.
+    pub query: String,
+    /// The conjunction a hit must also satisfy. Empty filters nothing.
+    pub predicates: Vec<Predicate>,
+    /// The least lexical score a hit may carry, and `None` for every hit.
+    pub min_score: Option<Score>,
+    /// The columns each hit's document row carries. Empty hydrates no row.
+    pub columns: Vec<Column>,
+    /// How many hits the page holds at most, and `None` for
+    /// [`crate::DEFAULT_PAGE`].
+    pub limit: Option<u32>,
+    /// The lexical page this one continues, and `None` for the first page.
+    pub after: Option<Cursor>,
+}
+
+impl LexicalQuery {
+    /// A first page of the lexical hits for `query`, unfloored and unfiltered,
+    /// hydrating no document row.
+    pub fn new(query: impl Into<String>) -> Self {
+        LexicalQuery {
+            query: query.into(),
+            predicates: Vec::new(),
+            min_score: None,
+            columns: Vec::new(),
+            limit: None,
+            after: None,
+        }
+    }
+
+    /// The request filtered by `predicates`.
+    #[must_use]
+    pub fn with_predicates(mut self, predicates: impl IntoIterator<Item = Predicate>) -> Self {
+        self.predicates = predicates.into_iter().collect();
+        self
+    }
+
+    /// The request floored at `min_score`.
+    #[must_use]
+    pub const fn with_min_score(mut self, min_score: Score) -> Self {
+        self.min_score = Some(min_score);
+        self
+    }
+
+    /// The request projecting `columns` onto each hit's document row.
+    #[must_use]
+    pub fn with_columns(mut self, columns: impl IntoIterator<Item = Column>) -> Self {
+        self.columns = columns.into_iter().collect();
+        self
+    }
+
+    /// The request bounded at `limit` hits.
+    #[must_use]
+    pub const fn with_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// The request continuing the lexical page `after` names.
+    #[must_use]
+    pub fn with_after(mut self, after: Cursor) -> Self {
+        self.after = Some(after);
+        self
+    }
+}
 
 /// What [`Snapshot::search`] answers: a page of ranked hits, where the next
 /// begins, and what the request could not apply.
@@ -170,13 +250,13 @@ struct RankedKey {
 }
 
 impl Snapshot {
-    /// One page of the lexical rung's hits for `params`, most relevant first,
+    /// One page of the lexical rung's hits for `request`, most relevant first,
     /// continuing its cursor.
     ///
     /// `declared` is the vault's declaration, read from the schema the
     /// snapshot pins: it decides how a conjunction's part compares and —
     /// beside the keys documents carry — which predicate and projected keys
-    /// are known. The page holds `params.limit` hits,
+    /// are known. The page holds `request.limit` hits,
     /// [`crate::DEFAULT_PAGE`] where it names none.
     ///
     /// Refused as a find is refused, through the same compilation: a page
@@ -189,13 +269,13 @@ impl Snapshot {
     /// fingerprint, which no ranking is ([`PageRefusal::OrderChanged`]).
     pub fn search(
         &self,
-        params: &SearchParams,
+        request: &LexicalQuery,
         declared: &ContentModel,
     ) -> Result<Searched, PageRefusal> {
-        self.run_search(params, declared, &mut Lookups::default())
+        self.run_search(request, declared, &mut Lookups::default())
     }
 
-    /// Every statement [`Snapshot::search`] runs for `params`, in the order it
+    /// Every statement [`Snapshot::search`] runs for `request`, in the order it
     /// runs them, each with the plan SQLite reported for it.
     ///
     /// This is the search itself, run on this snapshot, and each plan is taken
@@ -204,11 +284,11 @@ impl Snapshot {
     /// run is not listed.
     pub fn search_plans(
         &self,
-        params: &SearchParams,
+        request: &LexicalQuery,
         declared: &ContentModel,
     ) -> Result<Vec<SearchPlan>, PageRefusal> {
         let mut lookups = Lookups::default();
-        self.run_search(params, declared, &mut lookups)?;
+        self.run_search(request, declared, &mut lookups)?;
         Ok(
             self.explained(lookups.ran, |statement, filters, plan| SearchPlan {
                 statement,
@@ -222,21 +302,21 @@ impl Snapshot {
     /// explains, recording every statement it runs in `lookups`.
     fn run_search(
         &self,
-        params: &SearchParams,
+        request: &LexicalQuery,
         declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<Searched, PageRefusal> {
         let started = self.counters().statements_executed();
-        let limit = page_limit(params.limit)?;
-        let projection = Projection::of(&params.columns)?;
+        let limit = page_limit(request.limit)?;
+        let projection = Projection::of(&request.columns)?;
         self.declaration_pinned(declared, lookups)?;
         let mut conjunction = self.compile_conjunction(
-            &params.predicates,
+            &request.predicates,
             ResolvesPart::NotApplicable,
             declared,
             lookups,
         )?;
-        let (resume, moved) = match &params.after {
+        let (resume, moved) = match &request.after {
             None => (None, Vec::new()),
             Some(cursor) => {
                 let (at, moved) = self.judge_hit(cursor, lookups)?;
@@ -252,7 +332,7 @@ impl Snapshot {
             path: path.as_str(),
         });
         let (ranked, next) =
-            self.page_hits(params, &conjunction, limit, after, lookups, &mut work)?;
+            self.page_hits(request, &conjunction, limit, after, lookups, &mut work)?;
         let snapshot = self.reading_facts(None, lookups)?;
         let next = next
             .map(|last| Ok::<_, StoreError>(CursorKey::hit(score_of(last.score)?, last.path)))
@@ -261,7 +341,7 @@ impl Snapshot {
         let unsatisfied = self.resolve(conjunction.reports, declared, lookups)?;
         let hits = self.hits(
             &ranked,
-            &params.columns,
+            &request.columns,
             &projection,
             &fields,
             lookups,
@@ -303,20 +383,20 @@ impl Snapshot {
     /// statement cost.
     fn page_hits(
         &self,
-        params: &SearchParams,
+        request: &LexicalQuery,
         conjunction: &Conjunction,
         limit: usize,
         after: Option<HitPosition<'_>>,
         lookups: &mut Lookups,
         work: &mut SearchWork,
     ) -> Result<(Vec<RankedKey>, Option<RankedKey>), StoreError> {
-        let Some(expression) = lexical_expression(&params.query) else {
+        let Some(expression) = lexical_expression(&request.query) else {
             return Ok((Vec::new(), None));
         };
         if conjunction.matches_nothing {
             return Ok((Vec::new(), None));
         }
-        let floor = params.min_score.map(Score::get);
+        let floor = request.min_score.map(Score::get);
         let shapes: Vec<ReadFilter> = conjunction
             .filters
             .iter()
