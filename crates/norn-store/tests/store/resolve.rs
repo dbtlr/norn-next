@@ -234,6 +234,28 @@ fn an_ignored_leaf_resolves_to_any_target_longer_than_its_name() {
     );
 }
 
+/// **A document at the root that the schema ignores is reached by a target
+/// naming it.** With `glossary.md` ignored, the place is the document itself,
+/// and `glossary` and `glossary.md` each name that place whole, so each
+/// resolves to it beside the documents no glob ignores.
+#[test]
+fn an_ignored_root_level_document_resolves_to_a_target_naming_it() {
+    for order in [Sensitive, Folding] {
+        let vault = Vault::holding(
+            &format!("resolve-ignored-root-{order:?}"),
+            order,
+            &["docs/glossary.md", "glossary.md"],
+        );
+        for target in ["glossary", "glossary.md"] {
+            assert_eq!(
+                vault.resolves(target, &["glossary.md"]),
+                strings(&["docs/glossary.md", "glossary.md"]),
+                "`{target}` under {order:?}"
+            );
+        }
+    }
+}
+
 /// **A finding's class is the class a find's `resolves` part reads on the same
 /// root.** A producer compiles the target once, reads its class through the
 /// class read, and files the finding under the resolution's class keys; the

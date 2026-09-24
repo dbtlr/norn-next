@@ -1604,8 +1604,9 @@ each under its own index; a root that tells spellings apart probes the raw key a
 folded one, and a root that folds ASCII case probes the folded key, where every spelling of a
 target is one class and an exact-case match takes no precedence. The vault schema's
 ambiguity-ignore globs keep the places under them out of a class unless the target names the
-ignored place: a one-segment target never does, and a longer target does where its segments
-reach that place. Class-scoped findings maintenance names a changed path's class in the key
+ignored place: a target does where its segments reach that place's last segment, and a
+one-segment target does only where the ignored document stands at the root, whose name is
+the whole place. Class-scoped findings maintenance names a changed path's class in the key
 space the store's order selects, the space every finding in the store is filed in, so a
 finding is re-decided when a document joins or leaves its class.
 

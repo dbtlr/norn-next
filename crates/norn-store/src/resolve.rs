@@ -32,11 +32,13 @@
 //! ([`AmbiguityIgnore`]). A place is **under** an ignore glob when the glob
 //! matches the place or one of its segment-aligned ancestors; the shallowest
 //! such spelling is the **ignored place**. A candidate under one is excluded
-//! from a target's class unless the target names the ignored place: a
-//! one-segment target never does, and a longer one does when the segments it
-//! spells reach the ignored place's last segment. So with `archive/**`
-//! ignored, `glossary` and `norn/glossary` both pass over
-//! `archive/norn/glossary.md`, and `archive/norn/glossary` resolves to it.
+//! from a target's class unless the target names the ignored place: the
+//! segments it spells reach the ignored place's last segment. A one-segment
+//! target spells a stem alone and names no place below the root, while a
+//! document at the root is its whole place and its own name names it. So with
+//! `archive/**` ignored, `glossary` and `norn/glossary` both pass over
+//! `archive/norn/glossary.md`, and `archive/norn/glossary` resolves to it; with
+//! `glossary.md` ignored, `glossary` still resolves to `glossary.md`.
 //!
 //! The globs are matched as [`Pattern`] matches, bytewise, which is how a
 //! find's path part matches the same grammar.
@@ -92,15 +94,19 @@ impl AmbiguityIgnore {
     /// segments.
     ///
     /// A path under no glob always stays. A path under one stays only where the
-    /// target names its ignored place: the target is longer than one segment,
-    /// and the segments it spells — the last `target_segments` of the path —
-    /// reach the ignored place's last segment.
+    /// target names its ignored place: the segments the target spells — the
+    /// last `target_segments` of the path — run from the ignored place's last
+    /// segment down to the leaf, so the target spells at least as many
+    /// segments as there are from that place to the leaf. A one-segment target
+    /// spells the stem alone, which names no place below the root; a document
+    /// at the root is its whole place, so its own name names it.
     pub fn admits(&self, path: &str, target_segments: usize) -> bool {
         let Some(ignored) = self.ignored_place(path) else {
             return true;
         };
         let depth = path.split(SEPARATOR).count();
-        target_segments > 1 && ignored + target_segments > depth
+        let from_the_place_to_the_leaf = depth - ignored + 1;
+        target_segments >= from_the_place_to_the_leaf && (target_segments > 1 || depth == 1)
     }
 
     /// How many segments the shallowest spelling of `path` or one of its
@@ -288,6 +294,33 @@ mod tests {
             Ok(AmbiguityIgnore::none()),
             "the empty set encodes as nothing"
         );
+    }
+
+    /// A target reaches an ignored place when the segments it spells run up to
+    /// the place's last segment, and not one segment short of it; a
+    /// one-segment target spells the stem alone and reaches no ignored place
+    /// below the root.
+    #[test]
+    fn a_target_reaches_an_ignored_place_from_its_last_segment_down() {
+        let nested = ignoring(&["**/drafts/**"]);
+        assert!(nested.admits("notes/drafts/x.md", 2));
+        assert!(!nested.admits("notes/drafts/x.md", 1));
+        let deeper = ignoring(&["archive/**"]);
+        assert!(deeper.admits("archive/norn/glossary.md", 3));
+        assert!(!deeper.admits("archive/norn/glossary.md", 2));
+        let leaf = ignoring(&["attachments/*"]);
+        assert!(leaf.admits("attachments/image.md", 2));
+        assert!(!leaf.admits("attachments/image.md", 1));
+    }
+
+    /// **A document at the root that a glob ignores is reached by its own
+    /// name.** The place is the document, and a one-segment target naming it
+    /// names the whole place, so it resolves.
+    #[test]
+    fn a_root_level_ignored_document_is_reached_by_its_own_name() {
+        let root = ignoring(&["glossary.md"]);
+        assert!(root.admits("glossary.md", 1));
+        assert!(root.admits("docs/glossary.md", 1), "a path no glob matches");
     }
 
     #[test]
