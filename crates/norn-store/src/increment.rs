@@ -365,12 +365,13 @@ impl<'t> Statements<'t> {
             // the cascade fires only for one.
             upsert_document: prepared(
                 "INSERT INTO documents (
-                     path, suffix_key, content_hash, byte_length, body, body_hash, body_offset,
-                     frontmatter, frontmatter_projection_hash, frontmatter_diagnostic_count,
-                     generation, derived_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     path, suffix_key, folded_suffix_key, content_hash, byte_length, body,
+                     body_hash, body_offset, frontmatter, frontmatter_projection_hash,
+                     frontmatter_diagnostic_count, generation, derived_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(path) DO UPDATE SET
                      suffix_key                   = excluded.suffix_key,
+                     folded_suffix_key            = excluded.folded_suffix_key,
                      content_hash                 = excluded.content_hash,
                      byte_length                  = excluded.byte_length,
                      body                         = excluded.body,
@@ -479,6 +480,7 @@ fn upsert(
             params![
                 facts.path.as_str(),
                 facts.path.suffix_key(),
+                facts.path.folded_suffix_key(),
                 facts.content_hash,
                 facts.byte_length,
                 facts.body,

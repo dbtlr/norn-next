@@ -77,8 +77,8 @@ use crate::error::{self, StoreError};
 use crate::facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, FeedDocument, FeedTombstone, FindingFacts,
     HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport, Provenance,
-    SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone,
-    TagFact, TagSource, VaultSchemaPin,
+    SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredSuffixKeys,
+    StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 use crate::fields::{FieldContainer, FieldRow, FieldRows};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
@@ -988,12 +988,13 @@ impl<'a> Request<'a> {
         )
     }
 
-    /// The next bounded page of stored suffix keys, each beside the path whose
-    /// row holds it, in path order.
+    /// The next bounded page of stored suffix keys, raw and folded, each beside
+    /// the path whose row holds them, in path order.
     ///
-    /// `documents.suffix_key` is a derived column: the path type writes it and
-    /// the resolution ladder ranges over it, and every read that would notice a
-    /// key drifting from its path goes through the drifted range. So the check
+    /// `documents.suffix_key` and `documents.folded_suffix_key` are derived
+    /// columns: the path type writes them and the resolution ladder ranges over
+    /// one or the other, and every read that would notice a key drifting from
+    /// its path goes through the drifted range. So the check
     /// is a recompute at rest over every row, and this is the page that reaches
     /// every row to make it — no keyed read asks the question, and carrying the
     /// column on the document row instead would put a string on every reader of
@@ -1007,7 +1008,7 @@ impl<'a> Request<'a> {
         &self,
         after: Option<&DocumentPath>,
         limit: usize,
-    ) -> Result<Vec<(DocumentPath, String)>, StoreError> {
+    ) -> Result<Vec<StoredSuffixKeys>, StoreError> {
         if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "a suffix-key page",
@@ -2045,7 +2046,7 @@ const TOMBSTONE_PAGE_SQL: &str = "SELECT path, last_content_hash, provenance, ge
 /// column is read off the row the seek reached rather than off an index of its
 /// own, because `documents_suffix_key` orders by the key and this page orders
 /// by the path.
-const SUFFIX_KEY_PAGE_SQL: &str = "SELECT path, suffix_key
+const SUFFIX_KEY_PAGE_SQL: &str = "SELECT path, suffix_key, folded_suffix_key
              FROM documents
              WHERE path > COALESCE(?1, '')
              ORDER BY path
@@ -2236,11 +2237,12 @@ fn stored_document(row: &Row<'_>, first: usize) -> Reading<StoredDocument> {
     }))
 }
 
-/// One row's path and the suffix key stored beside it.
-fn stored_suffix_key(row: &Row<'_>) -> Reading<(DocumentPath, String)> {
+/// One row's path and the two suffix keys stored beside it.
+fn stored_suffix_key(row: &Row<'_>) -> Reading<StoredSuffixKeys> {
     let path: String = row.get(0)?;
-    let suffix_key: String = row.get(1)?;
-    Ok(DocumentPath::new(&path).map(|path| (path, suffix_key)))
+    let raw: String = row.get(1)?;
+    let folded: String = row.get(2)?;
+    Ok(DocumentPath::new(&path).map(|path| StoredSuffixKeys { path, raw, folded }))
 }
 
 fn stored_tombstone(row: &Row<'_>) -> Reading<StoredTombstone> {

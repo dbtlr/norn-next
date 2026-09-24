@@ -1459,23 +1459,24 @@ fn an_enumeration_drained_a_page_at_a_time_reaches_every_row() {
         terms.push(term.term);
         assert!(terms.len() < 32, "the indexed-term cursor did not advance");
     }
-    let mut keyed: Vec<(String, String)> = Vec::new();
+    let mut keyed: Vec<(String, String, String)> = Vec::new();
     let mut keyed_after: Option<norn_store::DocumentPath> = None;
-    while let Some((path, suffix_key)) = request
+    while let Some(stored) = request
         .suffix_keys_after(keyed_after.as_ref(), 1)
         .expect("a page of stored suffix keys")
         .into_iter()
         .next()
     {
-        keyed.push((path.as_str().to_string(), suffix_key));
-        keyed_after = Some(path);
+        keyed.push((stored.path.as_str().to_string(), stored.raw, stored.folded));
+        keyed_after = Some(stored.path);
         assert!(keyed.len() < 32, "the suffix-key cursor did not advance");
     }
+    let key = |path: &str, key: &str| (path.to_string(), key.to_string(), key.to_string());
     assert_eq!(
         keyed,
         vec![
-            ("one/glossary.md".to_string(), "glossary/one/".to_string()),
-            ("two/glossary.md".to_string(), "glossary/two/".to_string()),
+            key("one/glossary.md", "glossary/one/"),
+            key("two/glossary.md", "glossary/two/"),
         ],
         "the enumeration reaches every row's stored key beside the path that has to produce it, \
          which is the pair no keyed read hands back"
@@ -2265,12 +2266,12 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
         |request| {
             let mut cursor: Option<norn_store::DocumentPath> = None;
             let mut reached = 0;
-            while let Some((at, _)) = request
+            while let Some(stored) = request
                 .suffix_keys_after(cursor.as_ref(), 1)
                 .expect("a page of stored suffix keys")
                 .pop()
             {
-                cursor = Some(at);
+                cursor = Some(stored.path);
                 reached += 1;
                 assert!(
                     reached <= DRAINED_ROWS,

@@ -343,6 +343,18 @@ pub struct StoredDocument {
     pub derived_at: i64,
 }
 
+/// The suffix keys one document row holds, beside the path that has to
+/// produce them: what [`crate::Request::suffix_keys_after`] pages.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredSuffixKeys {
+    pub path: DocumentPath,
+    /// `documents.suffix_key`, which [`DocumentPath::suffix_key`] recomputes.
+    pub raw: String,
+    /// `documents.folded_suffix_key`, which
+    /// [`DocumentPath::folded_suffix_key`] recomputes.
+    pub folded: String,
+}
+
 /// Ordering used by a bounded stored-document scan.
 ///
 /// The variant is the case behavior the vault's root was **proven** to have at

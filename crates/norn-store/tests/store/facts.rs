@@ -476,8 +476,8 @@ fn a_derived_path_form_has_one_home() {
             "`{absent}` is declared, and no statement in this build reads it"
         );
     }
-    // The seven that stay, because a statement in this build reads each: the
-    // resolution ladder's range, the order a heal's page seeks on a vault that
+    // The eight that stay, because a statement in this build reads each: the
+    // resolution ladder's range under either key, the order a heal's page seeks on a vault that
     // folds ASCII case, the class direction of findings maintenance, the
     // schema-key discard's two ranges, the two change feeds, each of which is
     // answered out of its own index without the row being read at all, and the
@@ -485,6 +485,7 @@ fn a_derived_path_form_has_one_home() {
     for present in [
         "document_tags_name",
         "documents_suffix_key",
+        "documents_folded_suffix_key",
         "documents_path_nocase",
         "documents_change_feed",
         "tombstones_change_feed",

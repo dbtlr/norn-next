@@ -525,3 +525,28 @@ fn a_class_probe_refuses_what_no_class_opens() {
         );
     }
 }
+
+/// **The folded suffix key folds ASCII case and nothing else.** `A`-`Z` become
+/// `a`-`z`; every other byte is itself, so a non-ASCII letter keeps its case
+/// and a folded key never claims two spellings the filesystem seam keeps apart.
+#[test]
+fn the_folded_suffix_key_folds_ascii_case_alone() {
+    for (path, raw, folded) in [
+        (
+            "Docs/Norn/Glossary.MD",
+            "Glossary/Norn/Docs/",
+            "glossary/norn/docs/",
+        ),
+        ("notes/v1.2.md", "v1.2/notes/", "v1.2/notes/"),
+        ("Écoles/Été.md", "Été/Écoles/", "Été/Écoles/"),
+        ("ÄRGER/Straße.md", "Straße/ÄRGER/", "straße/Ärger/"),
+    ] {
+        let read = DocumentPath::new(path).expect("a document path");
+        assert_eq!(read.suffix_key(), raw, "the raw key of `{path}`");
+        assert_eq!(
+            read.folded_suffix_key(),
+            folded,
+            "the folded key of `{path}`"
+        );
+    }
+}

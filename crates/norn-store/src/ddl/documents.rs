@@ -26,10 +26,25 @@
 //!   probes, described in [`crate::path`]. It exists so that
 //!   right-to-left, segment-aligned suffix resolution is a range scan over an
 //!   index rather than a scan over every path in the vault.
+//! - `folded_suffix_key` — the same key with ASCII case folded, which is the
+//!   key a probe ranges over on a root that proves it folds case.
 //!
-//! Both are computed in one place, from one input, by
-//! [`crate::path::DocumentPath`] — two columns that must agree, produced
-//! together so they cannot disagree.
+//! All three are computed in one place, from one input, by
+//! [`crate::path::DocumentPath`] — columns that must agree, produced together
+//! so they cannot disagree.
+//!
+//! # Two suffix keys, and the root decides which one a probe reads
+//!
+//! **The folded key is declared for every store**, with its own index,
+//! `documents_folded_suffix_key`, for the reason the folded path index below
+//! is: the schema is one statement list, and which key applies is a filesystem
+//! behaviour proven at the vault root and carried to the read as a parameter.
+//! A root that tells spellings apart probes `suffix_key` and never consults the
+//! folded one; a root that folds ASCII case probes `folded_suffix_key`, so
+//! `Foo` and `foo` open one class there. The fold is the seam's — `A`-`Z` onto
+//! `a`-`z`, every other byte as itself — and a column rather than a `NOCASE`
+//! index, because a probe's upper bound is a successor computed over bytes and
+//! is exact only under `BINARY`.
 //!
 //! **One fact, one home.** The stem and the segment count are functions of
 //! `path`, and [`crate::path::DocumentPath`] computes both from it on the way
@@ -150,6 +165,7 @@ const STATEMENTS: &[&str] = &[
     id                           INTEGER PRIMARY KEY,
     path                         TEXT    NOT NULL CHECK (path <> ''),
     suffix_key                   TEXT    NOT NULL,
+    folded_suffix_key            TEXT    NOT NULL,
     content_hash                 TEXT    NOT NULL,
     byte_length                  INTEGER NOT NULL,
     body                         TEXT    NOT NULL,
@@ -165,6 +181,7 @@ const STATEMENTS: &[&str] = &[
     "CREATE UNIQUE INDEX documents_path ON documents(path)",
     "CREATE INDEX documents_path_nocase ON documents(path COLLATE NOCASE, path)",
     "CREATE INDEX documents_suffix_key ON documents(suffix_key)",
+    "CREATE INDEX documents_folded_suffix_key ON documents(folded_suffix_key)",
     "CREATE INDEX documents_change_feed ON documents(
     generation, path, content_hash, body_hash, frontmatter_projection_hash
 )",

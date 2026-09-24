@@ -104,6 +104,7 @@ pub const RENDERED_MARKER: char = '\u{FFFD}';
 pub struct DocumentPath {
     path: String,
     suffix_key: String,
+    folded_suffix_key: String,
     stem: String,
     depth: usize,
 }
@@ -148,6 +149,7 @@ impl DocumentPath {
 
         Ok(DocumentPath {
             path: path.to_string(),
+            folded_suffix_key: fold_ascii_case(&suffix_key),
             suffix_key,
             stem,
             depth: segments.len(),
@@ -267,6 +269,12 @@ impl DocumentPath {
     /// The segment-reversed key a suffix probe ranges over.
     pub fn suffix_key(&self) -> &str {
         &self.suffix_key
+    }
+
+    /// The suffix key with ASCII case folded: the key a probe ranges over on a
+    /// root that proves it folds case. See [`fold_ascii_case`].
+    pub fn folded_suffix_key(&self) -> &str {
+        &self.folded_suffix_key
     }
 
     /// The leaf segment with its final extension removed.
@@ -705,6 +713,17 @@ fn rendered_segment(segment: &str) -> String {
         rendered.insert(0, RENDERED_MARKER);
     }
     rendered
+}
+
+/// `text` with ASCII case folded: `A`-`Z` onto `a`-`z`, and every other
+/// character as itself.
+///
+/// This is the filesystem seam's fold and SQLite's `NOCASE`, term for term, so
+/// a folded key names exactly the spellings a folding root resolves to one
+/// entry. A non-ASCII letter keeps its case: a wider fold would claim two
+/// spellings the seam keeps apart as one document.
+pub(crate) fn fold_ascii_case(text: &str) -> String {
+    text.to_ascii_lowercase()
 }
 
 /// The refusal for a NUL or other control byte, which no printable key holds and
