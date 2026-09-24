@@ -66,7 +66,7 @@ use norn_wire::{
 };
 
 use crate::error::{self, StoreError};
-use crate::fields::DeclaredFields;
+use crate::fields::ContentModel;
 use crate::read::{
     Conjunction, FindingBase, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, ResolvesPart,
     Stepped, finding_base, page_limit,
@@ -204,7 +204,7 @@ impl Snapshot {
     pub fn validate(
         &self,
         params: &ValidateParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
     ) -> Result<Validated, PageRefusal> {
         self.run_validate(params, declared, &mut Lookups::default())
     }
@@ -219,7 +219,7 @@ impl Snapshot {
     pub fn validate_plans(
         &self,
         params: &ValidateParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
     ) -> Result<Vec<ValidatePlan>, PageRefusal> {
         let mut lookups = Lookups::default();
         self.run_validate(params, declared, &mut lookups)?;
@@ -238,7 +238,7 @@ impl Snapshot {
     fn run_validate(
         &self,
         params: &ValidateParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<Validated, PageRefusal> {
         let started = self.counters().statements_executed();

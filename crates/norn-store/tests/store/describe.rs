@@ -19,7 +19,7 @@ use std::sync::Arc;
 use crate::common::{Scratch, document, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    DESCRIBE_STATEMENTS, DeclaredFields, DescribePlan, DescribeStatement, Described,
+    ContentModel, DESCRIBE_STATEMENTS, DescribePlan, DescribeStatement, Described,
     FieldDeclaration, FrontmatterValue, PageRefusal, ReadStatement, Snapshot, SnapshotReader,
     Store, induced_failure,
 };
@@ -35,8 +35,8 @@ use norn_wire::{
 const DESCRIBE_SCHEMA: &str = "describe-schema";
 
 /// One declaration of every declared shape, under the fixture's schema.
-fn declared() -> DeclaredFields {
-    DeclaredFields::under(DESCRIBE_SCHEMA)
+fn declared() -> ContentModel {
+    ContentModel::under(DESCRIBE_SCHEMA)
         .declare_field(
             "status",
             FieldDeclaration::new(FieldType::Text)
@@ -60,7 +60,7 @@ fn sequence(items: &[&str]) -> FrontmatterValue {
 }
 
 /// The fixture's four documents, under `declared`.
-fn documents(declared: &DeclaredFields) -> Vec<norn_store::DocumentFacts> {
+fn documents(declared: &ContentModel) -> Vec<norn_store::DocumentFacts> {
     let with = |at: &str, entries: Vec<(&str, FrontmatterValue)>| {
         document(at, &format!("hash-{at}"), "a body\n")
             .with_frontmatter(Some(map(entries)), declared)
@@ -106,7 +106,7 @@ struct Describing {
     _scratch: Scratch,
     store: Store,
     reader: Arc<SnapshotReader>,
-    declared: DeclaredFields,
+    declared: ContentModel,
 }
 
 impl Describing {
@@ -154,12 +154,12 @@ impl Describing {
     fn unpinned(label: &str) -> Self {
         let scratch = Scratch::new(label);
         let mut store = scratch.open();
-        let declared = DeclaredFields::none();
+        let declared = ContentModel::none();
         write_documents(&mut store.begin_request(), &documents(&declared));
         Self::reading(scratch, store, declared)
     }
 
-    fn reading(scratch: Scratch, store: Store, declared: DeclaredFields) -> Self {
+    fn reading(scratch: Scratch, store: Store, declared: ContentModel) -> Self {
         let reader = Arc::new(
             store
                 .open_reader()
@@ -463,7 +463,7 @@ fn a_declaration_not_pinned_and_a_bound_outside_its_range_are_refused() {
             .snapshot()
             .describe(
                 &describing(),
-                &DeclaredFields::under("another-schema").declare("status")
+                &ContentModel::under("another-schema").declare("status")
             )
             .expect_err("the declaration is not the pinned one"),
         PageRefusal::DeclarationNotPinned {

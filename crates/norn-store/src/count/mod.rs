@@ -84,7 +84,7 @@ use norn_wire::{
 };
 
 use crate::error::{self, StoreError};
-use crate::fields::DeclaredFields;
+use crate::fields::ContentModel;
 use crate::read::{
     Conjunction, FieldOrder, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement,
     Report, ResolvesPart, Stepped, page_limit,
@@ -198,7 +198,7 @@ impl Snapshot {
     pub fn count(
         &self,
         params: &CountParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
     ) -> Result<Counted, PageRefusal> {
         self.run_count(params, declared, &mut Lookups::default())
     }
@@ -213,7 +213,7 @@ impl Snapshot {
     pub fn count_plans(
         &self,
         params: &CountParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
     ) -> Result<Vec<CountPlan>, PageRefusal> {
         let mut lookups = Lookups::default();
         self.run_count(params, declared, &mut lookups)?;
@@ -231,7 +231,7 @@ impl Snapshot {
     fn run_count(
         &self,
         params: &CountParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<Counted, PageRefusal> {
         let started = self.counters().statements_executed();
@@ -293,7 +293,7 @@ impl Snapshot {
         cursor: &Cursor,
         members: &[Member<'_>],
         order: Option<FieldOrder>,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<(Vec<Option<String>>, Vec<Moved>), PageRefusal> {
         let CursorKey::Tally { group, .. } = cursor.key() else {
@@ -408,7 +408,7 @@ impl Snapshot {
     fn members<'a>(
         &self,
         by: &'a [GroupKey],
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<(Vec<Member<'a>>, Vec<Report>), PageRefusal> {
         let mut reports = Vec::new();
@@ -443,7 +443,7 @@ impl Snapshot {
 /// The sort key a group labelled `label` stands at under `member`'s order: the
 /// label's typed sort key under a typed order, which is `None` where the label
 /// does not read as the type, and the label itself otherwise.
-fn sort_key(member: &Member<'_>, label: &str, declared: &DeclaredFields) -> Option<String> {
+fn sort_key(member: &Member<'_>, label: &str, declared: &ContentModel) -> Option<String> {
     match (member.shape, member.key) {
         (GroupMember::Field(FieldOrder::Typed), Some(key)) => declared
             .typed_order(key)

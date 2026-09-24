@@ -34,7 +34,7 @@
 //! # The typed value, and the least-value markers
 //!
 //! Beside the raw text a value row carries a **typed** sort key where the
-//! declaration hands [`DeclaredFields::typed_order`] one for the key and the raw
+//! declaration hands [`ContentModel::typed_order`] one for the key and the raw
 //! text reads as that type; everything else carries none. The key's bytewise
 //! order is the declared type's order, so a typed sort is an order over text.
 //!
@@ -154,7 +154,7 @@ pub struct FieldRows {
 impl FieldRows {
     /// The rows `frontmatter` derives, with the typed values `declared` gives
     /// them.
-    pub fn derive(frontmatter: Option<&FrontmatterValue>, declared: &DeclaredFields) -> Self {
+    pub fn derive(frontmatter: Option<&FrontmatterValue>, declared: &ContentModel) -> Self {
         let Some(FrontmatterValue::Map(entries)) = frontmatter else {
             return FieldRows::default();
         };
@@ -270,9 +270,9 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 /// rule states are the enums a facet reports, so the store carries them rather
 /// than defining a third spelling of each.
 ///
-/// **The declaration names the schema it came from.** [`DeclaredFields::none`]
+/// **The declaration names the schema it came from.** [`ContentModel::none`]
 /// is the declaration of a store with no schema pinned, which declares nothing;
-/// everything declared is declared [`DeclaredFields::under`] a schema
+/// everything declared is declared [`ContentModel::under`] a schema
 /// fingerprint. A typed value is therefore always derived under a named
 /// schema, and the store compares that name with the one it pins: an
 /// increment refuses typed rows derived under another, and a read refuses a
@@ -283,7 +283,7 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 /// folder by its path. A name declared twice is one declaration, and the last
 /// one stands, as a repeated frontmatter key's last value does.
 #[derive(Clone, Debug, Default)]
-pub struct DeclaredFields {
+pub struct ContentModel {
     schema: Option<String>,
     keys: BTreeMap<String, DeclaredKey>,
     tags: BTreeSet<String>,
@@ -301,7 +301,7 @@ struct DeclaredKey {
     order: Option<TypedOrder>,
 }
 
-impl DeclaredFields {
+impl ContentModel {
     /// The declaration of a store with no schema pinned: no schema, and no
     /// declaration.
     pub fn none() -> Self {
@@ -311,7 +311,7 @@ impl DeclaredFields {
     /// A declaration read from the schema pinned under `fingerprint`, declaring
     /// nothing yet.
     pub fn under(fingerprint: impl Into<String>) -> Self {
-        DeclaredFields {
+        ContentModel {
             schema: Some(fingerprint.into()),
             ..Self::default()
         }
@@ -322,8 +322,8 @@ impl DeclaredFields {
     ///
     /// # Panics
     ///
-    /// On a declaration with no schema: [`DeclaredFields::none`] declares
-    /// nothing, and everything is declared [`DeclaredFields::under`] the
+    /// On a declaration with no schema: [`ContentModel::none`] declares
+    /// nothing, and everything is declared [`ContentModel::under`] the
     /// schema that declares it. Every method that declares something panics
     /// alike.
     pub fn declare(self, key: impl Into<String>) -> Self {

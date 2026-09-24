@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::common::{Scratch, document, number, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    COUNT_STATEMENTS, CountPlan, CountStatement, Counted, DeclaredFields, FieldOrder, Found,
+    COUNT_STATEMENTS, ContentModel, CountPlan, CountStatement, Counted, FieldOrder, Found,
     FrontmatterValue, GroupMember, PageRefusal, ReadStatement, Snapshot, SnapshotReader, Store,
     TagFact, TagSource, TypedOrder, induced_failure,
 };
@@ -47,8 +47,8 @@ fn decimal_order() -> TypedOrder {
 }
 
 /// `status` and `aliases` declared as text, `n` declared as a decimal.
-fn declared() -> DeclaredFields {
-    DeclaredFields::under(COUNT_SCHEMA)
+fn declared() -> ContentModel {
+    ContentModel::under(COUNT_SCHEMA)
         .declare("status")
         .declare("aliases")
         .declare_field("n", number(), Some(decimal_order()))
@@ -817,7 +817,7 @@ fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
         .snapshot()
         .count(
             &typed.clone().with_after(cursor),
-            &DeclaredFields::under("another-schema").declare_field(
+            &ContentModel::under("another-schema").declare_field(
                 "n",
                 number(),
                 Some(decimal_order()),

@@ -75,7 +75,7 @@ const SEPARATOR: char = '/';
 /// The globs a vault's schema keeps out of ambiguity classes.
 ///
 /// The store reads no schema: the host declares each glob on the
-/// [`crate::DeclaredFields`] it derives from the schema it pinned, which holds
+/// [`crate::ContentModel`] it derives from the schema it pinned, which holds
 /// the set once, so the set a read applies is the set of the schema the
 /// snapshot pins, and the set `describe` reports as path rules is that same
 /// set.

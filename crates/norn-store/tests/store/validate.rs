@@ -22,7 +22,7 @@ use crate::common::{
 };
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    DeclaredFields, FindingFacts, PageRefusal, ReadStatement, Snapshot, SnapshotReader, Store,
+    ContentModel, FindingFacts, PageRefusal, ReadStatement, Snapshot, SnapshotReader, Store,
     TagFact, TagSource, VALIDATE_STATEMENTS, ValidatePlan, ValidateStatement, Validated,
     Validation, induced_failure,
 };
@@ -37,8 +37,8 @@ use norn_wire::{
 /// The fingerprint of the schema the fixture pins.
 const VALIDATE_SCHEMA: &str = "validate-schema";
 
-fn declared() -> DeclaredFields {
-    DeclaredFields::under(VALIDATE_SCHEMA).declare("status")
+fn declared() -> ContentModel {
+    ContentModel::under(VALIDATE_SCHEMA).declare("status")
 }
 
 /// A tag the vault's declared tag facet does not admit, on the document at

@@ -164,7 +164,7 @@ use norn_wire::{
 };
 
 use crate::error::{self, StoreError};
-use crate::fields::DeclaredFields;
+use crate::fields::ContentModel;
 use crate::read::{
     FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, Report,
     ResolvesPart, page_limit,
@@ -387,11 +387,7 @@ impl Snapshot {
     /// order, as the module states; a projected column or a part the store
     /// keeps no index of; and a bound that does not read as its key's declared
     /// type.
-    pub fn find(
-        &self,
-        params: &FindParams,
-        declared: &DeclaredFields,
-    ) -> Result<Found, PageRefusal> {
+    pub fn find(&self, params: &FindParams, declared: &ContentModel) -> Result<Found, PageRefusal> {
         self.run_find(params, declared, &mut Lookups::default())
     }
 
@@ -411,7 +407,7 @@ impl Snapshot {
     pub fn find_plans(
         &self,
         params: &FindParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
     ) -> Result<Vec<FindPlan>, PageRefusal> {
         let mut lookups = Lookups::default();
         self.run_find(params, declared, &mut lookups)?;
@@ -432,7 +428,7 @@ impl Snapshot {
     fn run_find(
         &self,
         params: &FindParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<Found, PageRefusal> {
         let started = self.counters().statements_executed();
@@ -529,7 +525,7 @@ impl Snapshot {
     fn projected_keys<'p>(
         &self,
         projection: &Projection<'p>,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
         compiled: &mut Compiled<'_>,
     ) -> Result<Vec<&'p str>, StoreError> {
@@ -555,7 +551,7 @@ impl Snapshot {
     fn compile<'a>(
         &self,
         params: &'a FindParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<Compiled<'a>, PageRefusal> {
         self.declaration_pinned(declared, lookups)?;

@@ -12,7 +12,7 @@
 //! **The declared facets are the pinned declaration's**: the declared fields
 //! with their type, whether they are required and their closed set, the
 //! declared tags, the tag patterns, the declared folders, the path rules and
-//! the stance on an undeclared tag are read off the [`DeclaredFields`] the
+//! the stance on an undeclared tag are read off the [`ContentModel`] the
 //! host hands over, which is refused unless it was read from the schema the
 //! snapshot pins. They are a read of memory and run no statement, drawn from
 //! the page's position on, so a page builds no declared facet past the one
@@ -53,7 +53,7 @@ use norn_wire::{
 };
 
 use crate::error::{self, StoreError};
-use crate::fields::{DeclaredFields, FieldContainer};
+use crate::fields::{ContentModel, FieldContainer};
 use crate::read::{Lookups, PageRefusal, Ran, ReadStatement, Stepped, page_limit};
 use crate::store::Snapshot;
 
@@ -142,7 +142,7 @@ impl Snapshot {
     pub fn describe(
         &self,
         params: &DescribeParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
     ) -> Result<Described, PageRefusal> {
         self.run_describe(params, declared, &mut Lookups::default())
     }
@@ -158,7 +158,7 @@ impl Snapshot {
     pub fn describe_plans(
         &self,
         params: &DescribeParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
     ) -> Result<Vec<DescribePlan>, PageRefusal> {
         let mut lookups = Lookups::default();
         self.run_describe(params, declared, &mut lookups)?;
@@ -176,7 +176,7 @@ impl Snapshot {
     fn run_describe(
         &self,
         params: &DescribeParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<Described, PageRefusal> {
         let started = self.counters().statements_executed();

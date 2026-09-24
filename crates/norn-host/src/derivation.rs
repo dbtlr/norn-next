@@ -43,7 +43,7 @@ use std::path::Path;
 
 use norn_config::schema::{FieldType, UndeclaredTags, VaultSchema};
 use norn_store::{
-    BlockFact, Change, DeclaredFields, DiscardScope, DocumentFacts, DocumentPath, FieldDeclaration,
+    BlockFact, Change, ContentModel, DiscardScope, DocumentFacts, DocumentPath, FieldDeclaration,
     FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Provenance, Span, TagFact, TagSource,
     TypedOrder,
 };
@@ -622,12 +622,12 @@ pub(crate) struct Derived {
 }
 
 /// Derive one document's facts from its bytes, the field rows' typed half
-/// under `fields`.
+/// under `model`.
 pub(crate) fn map_document(
     path: &str,
     bytes: &[u8],
     hash: String,
-    fields: &DeclaredFields,
+    model: &ContentModel,
 ) -> Result<Derived, Quarantine> {
     // Identity before content: a path that names no document has nothing to
     // say about its own bytes.
@@ -651,7 +651,7 @@ pub(crate) fn map_document(
         });
     let scan = document.scan_body();
     let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64)
-        .with_frontmatter(document.frontmatter().map(map_value), fields);
+        .with_frontmatter(document.frontmatter().map(map_value), model);
     facts.body_offset = document.body_start() as u64;
     facts.frontmatter_diagnostic_count = document
         .diagnostics()
@@ -774,7 +774,7 @@ pub(crate) fn plan_document(
     stored: Option<&DocumentPath>,
     declared: &Declared,
 ) -> Plan {
-    match map_document(spelling, bytes, hash, declared.fields()) {
+    match map_document(spelling, bytes, hash, declared.content_model()) {
         Ok(derived) => {
             let subject = derived.facts.path.clone();
             let mut findings = Vec::new();
@@ -816,14 +816,17 @@ pub(crate) fn plan_document(
 /// declares, and carry the fingerprint the store compares with its own pin.
 pub(crate) struct Declared {
     schema: VaultSchema,
-    fields: DeclaredFields,
+    content_model: ContentModel,
 }
 
 impl Declared {
     /// The declaration `schema` makes, pinned under `fingerprint`.
     pub(crate) fn pinned(schema: VaultSchema, fingerprint: impl Into<String>) -> Self {
-        let fields = declared_fields(&schema, fingerprint.into());
-        Declared { schema, fields }
+        let content_model = content_model(&schema, fingerprint.into());
+        Declared {
+            schema,
+            content_model,
+        }
     }
 
     /// The declaration of a vault with no schema pinned, which declares
@@ -831,18 +834,18 @@ impl Declared {
     pub(crate) fn unpinned() -> Self {
         Declared {
             schema: VaultSchema::default(),
-            fields: DeclaredFields::none(),
+            content_model: ContentModel::none(),
         }
     }
 
-    /// The content model.
+    /// The schema, as `norn-config` reads it.
     pub(crate) fn schema(&self) -> &VaultSchema {
         &self.schema
     }
 
-    /// The declared fields as the store reads them.
-    pub(crate) fn fields(&self) -> &DeclaredFields {
-        &self.fields
+    /// The content model as the store reads it.
+    pub(crate) fn content_model(&self) -> &ContentModel {
+        &self.content_model
     }
 }
 
@@ -857,9 +860,9 @@ impl Declared {
 /// A raw value that does not read as its declared type has no sort key, which
 /// is the store's `NULL`: the document still carries the value, and a typed
 /// order has nothing to place it by.
-fn declared_fields(schema: &VaultSchema, fingerprint: String) -> DeclaredFields {
+fn content_model(schema: &VaultSchema, fingerprint: String) -> ContentModel {
     let declared = schema.fields().fold(
-        DeclaredFields::under(fingerprint),
+        ContentModel::under(fingerprint),
         |declared, (key, field)| {
             let kind = field.kind();
             let mut declaration = FieldDeclaration::new(wire_field_type(kind));
@@ -876,7 +879,7 @@ fn declared_fields(schema: &VaultSchema, fingerprint: String) -> DeclaredFields 
         },
     );
     let tags = schema.tags();
-    let declared = tags.declared().fold(declared, DeclaredFields::declare_tag);
+    let declared = tags.declared().fold(declared, ContentModel::declare_tag);
     let declared = tags
         .patterns()
         .iter()
@@ -1045,7 +1048,7 @@ mod tests {
             "ignoring",
         );
         let globs: Vec<&str> = declared
-            .fields()
+            .content_model()
             .ambiguity_ignore()
             .patterns()
             .iter()
@@ -1054,7 +1057,7 @@ mod tests {
         assert_eq!(globs, ["archive/**"]);
         assert!(
             Declared::unpinned()
-                .fields()
+                .content_model()
                 .ambiguity_ignore()
                 .patterns()
                 .is_empty()
@@ -1095,7 +1098,7 @@ paths:
         );
         let facets = |kind| {
             declared
-                .fields()
+                .content_model()
                 .facets_of(kind, None)
                 .collect::<Vec<Facet>>()
         };
@@ -1112,8 +1115,8 @@ paths:
                 Facet::declared_field("title", Wire::Text, true, None),
             ]
         );
-        assert!(declared.fields().typed_order("due").is_some());
-        assert!(declared.fields().typed_order("title").is_none());
+        assert!(declared.content_model().typed_order("due").is_some());
+        assert!(declared.content_model().typed_order("title").is_none());
         assert_eq!(
             facets(FacetKind::DeclaredTag),
             vec![Facet::declared_tag("area"), Facet::declared_tag("project")]
@@ -1151,7 +1154,7 @@ paths:
         );
         assert_eq!(
             silent
-                .fields()
+                .content_model()
                 .facets_of(FacetKind::UndeclaredTags, None)
                 .collect::<Vec<Facet>>(),
             vec![Facet::undeclared_tags(TagStance::Allow)]
@@ -1159,7 +1162,7 @@ paths:
         let unpinned = undeclaring();
         for kind in FacetKind::ALL {
             assert_eq!(
-                unpinned.fields().facets_of(kind, None).count(),
+                unpinned.content_model().facets_of(kind, None).count(),
                 0,
                 "{kind:?}"
             );
@@ -1322,7 +1325,7 @@ paths:
         ] {
             let bytes = source.as_bytes();
             let hash = || norn_fs::ContentHash::of(bytes).to_string();
-            let problem = map_document("note.md", bytes, hash(), &DeclaredFields::none())
+            let problem = map_document("note.md", bytes, hash(), &ContentModel::none())
                 .expect("a document whose block went unread still derives")
                 .unread_frontmatter
                 .expect("the block was read by nothing")
@@ -1371,7 +1374,7 @@ paths:
 
         let whole = b"---\ntags: [front]\n---\n# Heading\n[[target]] #body\n".as_slice();
         let hash = norn_fs::ContentHash::of(whole).to_string();
-        let derived = map_document("note.md", whole, hash.clone(), &DeclaredFields::none())
+        let derived = map_document("note.md", whole, hash.clone(), &ContentModel::none())
             .expect("a document derives");
         let plan = plan_document(
             Path::new("note.md"),
@@ -1405,7 +1408,7 @@ paths:
 
         let unread = b"---\ntitle: note\n# Heading\n".as_slice();
         let hash = norn_fs::ContentHash::of(unread).to_string();
-        let derived = map_document("note.md", unread, hash.clone(), &DeclaredFields::none())
+        let derived = map_document("note.md", unread, hash.clone(), &ContentModel::none())
             .expect("a document derives");
         let plan = plan_document(
             Path::new("note.md"),
@@ -1522,7 +1525,7 @@ paths:
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
-                &DeclaredFields::none(),
+                &ContentModel::none(),
             )
             .expect("a document whose block went unread still derives")
         };
@@ -1588,7 +1591,7 @@ paths:
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
-                &DeclaredFields::none(),
+                &ContentModel::none(),
             )
             .expect("a document whose block went unread still derives")
         };
@@ -1627,7 +1630,7 @@ paths:
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
-                &DeclaredFields::none(),
+                &ContentModel::none(),
             )
             .expect("a document whose block went unread still derives")
             .facts
@@ -1671,7 +1674,7 @@ paths:
             "note.md",
             source,
             norn_fs::ContentHash::of(source).to_string(),
-            &DeclaredFields::none(),
+            &ContentModel::none(),
         )
         .unwrap();
         let facts = derived.facts;
@@ -1704,7 +1707,7 @@ paths:
                 "note.md",
                 &source,
                 norn_fs::ContentHash::of(&source).to_string(),
-                &DeclaredFields::none(),
+                &ContentModel::none(),
             )
             .unwrap()
             .facts;
@@ -1899,7 +1902,7 @@ paths:
                 .establish()
                 .snapshot
                 .expect("a snapshot")
-                .find(&params, self.declared.fields())
+                .find(&params, self.declared.content_model())
                 .expect("a find")
                 .rows
                 .into_iter()

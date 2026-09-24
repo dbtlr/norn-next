@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use norn_store::{
-    BlockFact, CandidateFact, Change, ClassKey, DeclaredFields, DerivationCounters, DocumentFacts,
+    BlockFact, CandidateFact, Change, ClassKey, ContentModel, DerivationCounters, DocumentFacts,
     DocumentPath, FieldDeclaration, FindingFacts, FrontmatterValue, HeadingFact, IncrementOutcome,
     IncrementProvenance, LinkFact, LinkFamily, Provenance, Request, Span, Store, TagFact,
     TagSource, suffix_probe,
@@ -190,7 +190,7 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
             ),
             ("draft".to_string(), FrontmatterValue::Bool(false)),
         ])),
-        &DeclaredFields::none(),
+        &ContentModel::none(),
     );
     facts.links = vec![
         LinkFact {

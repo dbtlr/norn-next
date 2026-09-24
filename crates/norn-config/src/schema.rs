@@ -84,8 +84,9 @@
 //! [`FieldType`] to give one comparison rule to sorts, ranges and comparison
 //! operators alike — see [`typed`]. The ambiguity-ignore patterns name the
 //! paths the resolution ladder does not count as candidates: derivation hands
-//! them to the store with the declared fields, and the store's resolver applies
-//! them wherever a target's class is read.
+//! them to the store with the rest of the content model, the store's resolver
+//! applies them wherever a target's class is read, and `describe` reports the
+//! same set as path rules.
 
 pub mod typed;
 

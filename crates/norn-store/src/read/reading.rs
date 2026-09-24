@@ -7,7 +7,7 @@ use norn_wire::{Cursor, CursorOrderChanged, Moved};
 use super::{FieldOrder, Lookups, PageRefusal, Ran};
 use crate::ddl;
 use crate::error::{self, StoreError};
-use crate::fields::DeclaredFields;
+use crate::fields::ContentModel;
 use crate::find::FindStatement;
 use crate::store::Snapshot;
 
@@ -89,7 +89,7 @@ impl Snapshot {
     /// one the typed column holds.
     pub(crate) fn declaration_pinned(
         &self,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<(), PageRefusal> {
         let pinned = self.fingerprint(lookups)?;

@@ -37,7 +37,7 @@ use std::collections::BTreeSet;
 
 use norn_wire::{FindingKind, Severity};
 
-use crate::fields::{DeclaredFields, FieldRows};
+use crate::fields::{ContentModel, FieldRows};
 use crate::json::FrontmatterValue;
 use crate::path::{ClassKey, DocumentPath};
 
@@ -294,7 +294,7 @@ impl DocumentFacts {
     pub fn with_frontmatter(
         mut self,
         frontmatter: Option<FrontmatterValue>,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
     ) -> Self {
         self.fields = FieldRows::derive(frontmatter.as_ref(), declared);
         self.fields_schema = declared.schema().map(str::to_string);

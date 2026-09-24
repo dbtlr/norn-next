@@ -3184,7 +3184,7 @@ mod tests {
     use norn_config::registry::{SchemaSource, VaultRoot};
     use norn_config::schema::FieldType;
     use norn_store::{
-        BlockFact, DeclaredFields, FieldRow, FieldRows, HeadingFact, LinkFact, OpenOutcome,
+        BlockFact, ContentModel, FieldRow, FieldRows, HeadingFact, LinkFact, OpenOutcome,
         RebuildReason, TagFact,
     };
     use norn_testkit::scratch::Scratch;
@@ -7904,7 +7904,7 @@ mod tests {
             "a read answers under another order than the store's rows were derived under"
         );
         let found: Vec<String> = snapshot
-            .find(&params, declared.fields())
+            .find(&params, declared.content_model())
             .expect("a find resolving `Foo`")
             .rows
             .iter()
@@ -7912,7 +7912,7 @@ mod tests {
             .collect();
         let request = attachment.store.begin_request();
         let resolution = request
-            .target_class("Foo", declared.fields().ambiguity_ignore())
+            .target_class("Foo", declared.content_model().ambiguity_ignore())
             .unwrap();
         let mut class: Vec<String> = request
             .suffix_candidates(&resolution)
@@ -9077,7 +9077,7 @@ mod tests {
             "note.md",
             &source,
             norn_fs::ContentHash::of(&source).to_string(),
-            &DeclaredFields::none(),
+            &ContentModel::none(),
         )
         .expect("a document derives");
         assert!(derived.facts.frontmatter().is_none());
@@ -9125,7 +9125,7 @@ mod tests {
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
-                &DeclaredFields::none(),
+                &ContentModel::none(),
             )
             .expect("a document whose block went unread still derives");
             assert!(
