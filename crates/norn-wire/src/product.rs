@@ -114,8 +114,8 @@ pub enum Unsatisfied {
         id: String,
     },
     /// The request carried a resolution part on a verb that answers no
-    /// resolution. It is meaningful on `find` alone; `count` and `validate`
-    /// report it here.
+    /// resolution. It is meaningful on `find` alone; `count`, `validate` and
+    /// `search` report it here.
     #[non_exhaustive]
     ResolvesNotApplicable {
         /// The target the request asked to resolve.

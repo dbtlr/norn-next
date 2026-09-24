@@ -55,6 +55,11 @@
 //!   the pinned declaration and the observed field keys off the field
 //!   pillar's presence index. [`Snapshot::describe_plans`] explains what it
 //!   ran.
+//! - [`Snapshot::search`] — the search builder's lexical floor: a plain-text
+//!   query ranked by BM25 over the full-text pillar, narrowed by a
+//!   conjunction compiled as a find compiles it, answering a page of hits in
+//!   score order with the path breaking a tie, each carrying the row its
+//!   columns name. [`Snapshot::search_plans`] explains what it ran.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
