@@ -10,11 +10,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::common::{Scratch, document, write_documents};
-use crate::find::{map, string};
+use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    Counted, DeclaredFields, FindRefusal, Found, FrontmatterValue, Snapshot, SnapshotReader, Store,
-    TagFact, TagSource, TypedOrder,
+    COUNT_STATEMENTS, CountPlan, CountStatement, Counted, DeclaredFields, FieldOrder, FindRefusal,
+    Found, FrontmatterValue, GroupMember, ReadStatement, Snapshot, SnapshotReader, Store, TagFact,
+    TagSource, TypedOrder, induced_failure,
 };
+use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
     CountParams, Cursor, CursorKey, FindParams, GroupKey, Predicate, ResolutionTarget, Tally,
     Unsatisfied, VaultAddress, VaultName,
@@ -613,4 +615,500 @@ fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
         matches!(refusal, FindRefusal::OrderChanged(_)),
         "{refusal:?}"
     );
+}
+
+// ---- the plan bars ----
+
+impl Counting {
+    fn plans(&self, params: &CountParams) -> Vec<CountPlan> {
+        self.snapshot()
+            .count_plans(params, &declared())
+            .expect("the plans of a count")
+    }
+
+    /// `params` continuing after the tally `group`, with a cursor minted in
+    /// the reading a first page of it answers from.
+    fn resumed(&self, params: &CountParams, group: &[Option<&str>]) -> CountParams {
+        let reading = self.count(params).snapshot;
+        params.clone().with_after(Cursor::new(
+            reading,
+            CursorKey::tally(group.iter().map(|member| member.map(str::to_string))),
+        ))
+    }
+
+    /// Drop `index` on the writer, which is what a negative control judges the
+    /// same bar against.
+    fn drop_index(&mut self, index: &str) {
+        induced_failure::execute_out_of_band(&mut self.store, &format!("DROP INDEX {index}"))
+            .unwrap_or_else(|problem| panic!("dropping {index}: {problem}"));
+    }
+}
+
+/// The plan the store reported for one statement, in the harness's shape.
+fn plan(emitted: &CountPlan) -> QueryPlan {
+    QueryPlan::new(
+        emitted.plan.sql.clone(),
+        emitted
+            .plan
+            .steps
+            .iter()
+            .map(|step| PlanRow::new(step.id, step.parent, step.detail.clone()))
+            .collect(),
+    )
+}
+
+/// The one plan `plans` holds for `statement`.
+fn plan_of(plans: &[CountPlan], statement: CountStatement) -> QueryPlan {
+    let matching: Vec<&CountPlan> = plans
+        .iter()
+        .filter(|plan| plan.statement == ReadStatement::Count(statement))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "the count runs {statement:?} {} times: {plans:?}",
+        matching.len()
+    );
+    plan(matching[0])
+}
+
+/// `plan` with every row's detail rewritten by `edit`: a plan a control
+/// judges in place of the one SQLite reported.
+fn rewritten(plan: &QueryPlan, edit: impl Fn(&str) -> String) -> QueryPlan {
+    QueryPlan::new(
+        plan.sql(),
+        plan.rows()
+            .iter()
+            .map(|row| PlanRow::new(row.id, row.parent, edit(&row.detail)))
+            .collect(),
+    )
+}
+
+/// Which test bars each statement the builder names. Exhaustive, so a
+/// statement added to [`CountStatement`] does not compile until its author
+/// names the bar.
+fn statement_barred_by(statement: CountStatement) -> &'static str {
+    match statement {
+        CountStatement::Total => {
+            "an_ungrouped_count_counts_the_documents_or_reaches_them_by_its_filters_seek"
+        }
+        CountStatement::NullLead(_) => {
+            "a_null_lead_section_probes_each_document_for_its_leading_key_by_the_document"
+        }
+        CountStatement::ValuedLead(_) => {
+            "a_valued_section_seeks_its_leading_index_from_the_pages_position"
+        }
+    }
+}
+
+/// **Every statement the count builder names carries a bar, and one bar
+/// judges each**: across the bars, the statements each judges cover the
+/// enumeration's slots exactly once, and the two section bars each probe every
+/// member a leading key is read from.
+#[test]
+fn the_count_bars_cover_every_statement_once() {
+    let per_bar: [Vec<CountStatement>; 3] = [
+        vec![CountStatement::Total],
+        LEAD_BARS
+            .iter()
+            .map(|bar| CountStatement::NullLead(bar.member))
+            .collect(),
+        LEAD_BARS
+            .iter()
+            .map(|bar| CountStatement::ValuedLead(bar.member))
+            .collect(),
+    ];
+    let mut slots: Vec<usize> = Vec::new();
+    for statements in &per_bar {
+        let mut reached: Vec<usize> = statements
+            .iter()
+            .map(|statement| statement.slot())
+            .collect();
+        reached.sort_unstable();
+        reached.dedup();
+        slots.extend(reached);
+    }
+    slots.sort_unstable();
+    assert_eq!(slots, (0..COUNT_STATEMENTS).collect::<Vec<usize>>());
+    for (slot, statement) in CountStatement::all().into_iter().enumerate() {
+        assert_eq!(statement.slot(), slot, "{statement:?} claims another slot");
+    }
+    let probed: Vec<GroupMember> = LEAD_BARS.iter().map(|bar| bar.member).collect();
+    assert_eq!(probed, GroupMember::ALL.to_vec());
+    let bars: BTreeSet<&str> = per_bar
+        .into_iter()
+        .flatten()
+        .map(statement_barred_by)
+        .collect();
+    assert_eq!(
+        bars,
+        [
+            "a_null_lead_section_probes_each_document_for_its_leading_key_by_the_document",
+            "a_valued_section_seeks_its_leading_index_from_the_pages_position",
+            "an_ungrouped_count_counts_the_documents_or_reaches_them_by_its_filters_seek",
+        ]
+        .into_iter()
+        .collect()
+    );
+}
+
+/// **An ungrouped count with no filter is the documents table's own count**,
+/// which SQLite answers from the b-tree through its narrowest index and never
+/// the table's rows, and **one with a filter reaches the documents the
+/// filter's seek hands it by row id**.
+///
+/// Controls: the unfiltered plan rebuilt as a read of the table's own rows,
+/// and the filtered plan rebuilt with its row-id seek as a scan, each fail.
+#[test]
+fn an_ungrouped_count_counts_the_documents_or_reaches_them_by_its_filters_seek() {
+    let counting_store = Counting::new("count-total-plan");
+    let judge_whole = |plan: &QueryPlan| {
+        plan.assert_no_table_scan();
+        assert!(
+            plan.rows().len() == 1
+                && plan.rows()[0].scans().map(|name| plan.table_of(name)) == Some("documents")
+                && plan.rows()[0].index().is_some(),
+            "an unfiltered total is not one count of `documents` through an index: {:?}\n\
+             emitted SQL: {}",
+            plan.rows(),
+            plan.sql()
+        );
+    };
+    let judge_filtered = |plan: &QueryPlan| {
+        plan.assert_no_full_scan();
+        rows_of(plan, "d").assert_searches_through("documents", Access::RowId);
+        rows_of(plan, "d").assert_search_constraint("documents", "(rowid=?)");
+    };
+    let whole = plan_of(
+        &counting_store.plans(&counting(Vec::new())),
+        CountStatement::Total,
+    );
+    judge_whole(&whole);
+    let filtered = plan_of(
+        &counting_store.plans(&counting(Vec::new()).with_predicates([Predicate::tag("draft")])),
+        CountStatement::Total,
+    );
+    judge_filtered(&filtered);
+
+    let unindexed = rewritten(&whole, |detail| {
+        detail.split(" USING ").next().unwrap_or(detail).to_string()
+    });
+    failure_of("an unfiltered total that reads the table's rows", || {
+        judge_whole(&unindexed)
+    });
+    let scanned = rewritten(&filtered, |detail| {
+        detail.replace("SEARCH d USING INTEGER PRIMARY KEY (rowid=?)", "SCAN d")
+    });
+    failure_of("a filtered total that scans the documents", || {
+        judge_filtered(&scanned)
+    });
+}
+
+/// One member a grouping's leading key is read from, and the index its valued
+/// section seeks.
+struct LeadBar {
+    member: GroupMember,
+    key: fn() -> GroupKey,
+    /// A label of the member's first valued group, which a continuation
+    /// resumes after.
+    label: &'static str,
+    index: &'static str,
+    constraint: &'static str,
+}
+
+/// Each member a leading key is read from: raw over `status`, which is
+/// declared as text; typed over `n`, which is declared a decimal; and the tag.
+const LEAD_BARS: &[LeadBar] = &[
+    LeadBar {
+        member: GroupMember::Field(FieldOrder::Raw),
+        key: || GroupKey::field("status"),
+        label: "closed",
+        index: "document_fields_raw",
+        constraint: "(key=? AND raw>?)",
+    },
+    LeadBar {
+        member: GroupMember::Field(FieldOrder::Typed),
+        key: || GroupKey::field("n"),
+        label: "3",
+        index: "document_fields_typed",
+        constraint: "(key=? AND typed>?)",
+    },
+    LeadBar {
+        member: GroupMember::Tag,
+        key: GroupKey::tag,
+        label: "draft",
+        index: "document_tags_name",
+        constraint: "(name>?)",
+    },
+];
+
+/// Judge the rows a member reached by its document reads under `alias`: a
+/// field's rows by the primary key's `(document, key)` prefix, a tag's by its
+/// `(document, ordinal)` index.
+fn judge_by_document(plan: &QueryPlan, alias: &str, member: GroupMember) {
+    let rows = rows_of(plan, alias);
+    match member {
+        GroupMember::Field(_) => {
+            rows.assert_searches_through("document_fields", Access::PrimaryKey);
+            rows.assert_search_constraint("document_fields", "(document=? AND key=?)");
+        }
+        GroupMember::Tag => {
+            rows.assert_searches_through(
+                "document_tags",
+                Access::Index("document_tags_document_ordinal"),
+            );
+            rows.assert_search_constraint("document_tags", "(document=?)");
+        }
+    }
+}
+
+/// Whether `plan` sorts to group or order: a temporary B-tree for the
+/// `GROUP BY` or the `ORDER BY`. A count's distinct-document tally keeps a
+/// temporary B-tree per group of its own, which is not a sort of the page.
+fn sorts_the_page(plan: &QueryPlan) -> bool {
+    plan.rows().iter().any(|row| {
+        row.detail.contains("TEMP B-TREE FOR GROUP BY")
+            || row.detail.contains("TEMP B-TREE FOR ORDER BY")
+    })
+}
+
+/// Judge a valued section no filter drives: a seek of the leading member's
+/// value index from the page's position, and — grouped by one key — the
+/// groups streamed off it in order, with no sort.
+fn judge_valued(plan: &QueryPlan, bar: &LeadBar, single: bool) {
+    plan.assert_no_full_scan();
+    let lead = rows_of(plan, "g1");
+    lead.assert_searches_through(bar.member.table(), Access::Index(bar.index));
+    lead.assert_search_constraint(bar.member.table(), bar.constraint);
+    assert!(
+        !single || !sorts_the_page(plan),
+        "a count grouped by one key sorted its groups: {:?}\nemitted SQL: {}",
+        plan.rows(),
+        plan.sql()
+    );
+}
+
+/// Judge a valued section a filter drives: the matched documents by row id,
+/// each reaching its leading values by the document, never through the
+/// leading member's value index.
+fn judge_valued_driven(plan: &QueryPlan, bar: &LeadBar) {
+    plan.assert_no_full_scan();
+    rows_of(plan, "d").assert_searches_through("documents", Access::RowId);
+    judge_by_document(plan, "g1", bar.member);
+    assert!(
+        rows_of(plan, "g1")
+            .rows()
+            .iter()
+            .all(|row| row.index() != Some(bar.index)),
+        "a driven section reads its leading value index: {:?}\nemitted SQL: {}",
+        plan.rows(),
+        plan.sql()
+    );
+}
+
+/// **A valued section seeks its leading member's index from the page's
+/// position.** With no filter, the leading member's rows are one seek of its
+/// value index — `(key, raw)`, `(key, typed)`, or the tag's `(name)` — bound
+/// below by the page's position, on a first page and a continuation alike;
+/// grouped by one key the groups stream off that index in order and nothing
+/// sorts. Every trailing member is reached by the document. With a filter
+/// that keeps what it seeks, the matched documents drive the section and reach
+/// their leading values by the document.
+///
+/// Controls: a continuation's plan rebuilt without its position bound fails;
+/// each value index dropped, the section reads something else; the tag's
+/// document index dropped, a trailing tag is reached some other way; a driven
+/// plan rebuilt to read its leading value index fails.
+#[test]
+fn a_valued_section_seeks_its_leading_index_from_the_pages_position() {
+    let mut counting_store = Counting::new("count-valued-plan");
+    for bar in LEAD_BARS {
+        let statement = CountStatement::ValuedLead(bar.member);
+        let alone = counting(vec![(bar.key)()]);
+        let resumed = counting_store.resumed(&alone, &[Some(bar.label)]);
+        judge_valued(
+            &plan_of(&counting_store.plans(&alone), statement),
+            bar,
+            true,
+        );
+        let continued = plan_of(&counting_store.plans(&resumed), statement);
+        judge_valued(&continued, bar, true);
+
+        let crossed = counting(vec![(bar.key)(), GroupKey::tag(), field("aliases")]);
+        for params in [
+            crossed.clone(),
+            counting_store.resumed(&crossed, &[Some(bar.label), None, None]),
+        ] {
+            let plan = plan_of(&counting_store.plans(&params), statement);
+            judge_valued(&plan, bar, false);
+            judge_by_document(&plan, "g2", GroupMember::Tag);
+            judge_by_document(&plan, "g3", GroupMember::Field(FieldOrder::Raw));
+        }
+
+        let driven = plan_of(
+            &counting_store.plans(&alone.clone().with_predicates([Predicate::tag("draft")])),
+            statement,
+        );
+        judge_valued_driven(&driven, bar);
+
+        // Control: the continuation's position taken out of the seek.
+        let bound = bar
+            .constraint
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .rsplit(" AND ")
+            .next()
+            .expect("a constraint names its bound");
+        let unbounded = rewritten(&continued, |detail| {
+            detail
+                .replace(&format!(" AND {bound}"), "")
+                .replace(&format!(" ({bound})"), "")
+        });
+        failure_of("a continuation that seeks from no position", || {
+            judge_valued(&unbounded, bar, true)
+        });
+        // Control: a driven section that reads its leading value index.
+        let undriven = rewritten(&driven, |detail| {
+            if detail.starts_with("SEARCH g1 ") {
+                format!("SEARCH g1 USING INDEX {} {}", bar.index, bar.constraint)
+            } else {
+                detail.to_string()
+            }
+        });
+        failure_of("a driven section that reads its value index", || {
+            judge_valued_driven(&undriven, bar)
+        });
+    }
+
+    for bar in LEAD_BARS {
+        counting_store.drop_index(bar.index);
+        let plans = counting_store.plans(&counting(vec![(bar.key)()]));
+        failure_of(&format!("{} dropped", bar.index), || {
+            judge_valued(
+                &plan_of(&plans, CountStatement::ValuedLead(bar.member)),
+                bar,
+                true,
+            )
+        });
+    }
+    counting_store.drop_index("document_tags_document_ordinal");
+    let plans = counting_store.plans(&counting(vec![field("status"), GroupKey::tag()]));
+    failure_of("document_tags_document_ordinal dropped", || {
+        judge_by_document(
+            &plan_of(
+                &plans,
+                CountStatement::ValuedLead(GroupMember::Field(FieldOrder::Raw)),
+            ),
+            "g2",
+            GroupMember::Tag,
+        )
+    });
+}
+
+/// Judge a `null`-lead section: each document probed for a value under the
+/// leading key by the document, and no read of the leading key's rows end to
+/// end. With no filter the section walks the documents — the one read of a
+/// relation end to end it makes — and with one it reaches the matched
+/// documents by row id and reads nothing end to end.
+fn judge_null(plan: &QueryPlan, member: GroupMember, driven: bool) {
+    plan.assert_no_full_scan_of("document_fields");
+    plan.assert_no_full_scan_of("document_tags");
+    judge_by_document(plan, "m", member);
+    if driven {
+        plan.assert_no_full_scan();
+        rows_of(plan, "d").assert_searches_through("documents", Access::RowId);
+    } else {
+        assert!(
+            plan.unbounded_steps()
+                .iter()
+                .all(|row| row.scans() == Some("d") && row.index().is_some()),
+            "an unfiltered null section reads more than the documents end to end: {:?}\n\
+             emitted SQL: {}",
+            plan.rows(),
+            plan.sql()
+        );
+    }
+}
+
+/// **A `null`-lead section probes each document for its leading key by the
+/// document.** Whether a document holds a value under the leading key is one
+/// seek of that document's rows — the primary key's `(document, key)` prefix
+/// for a field, the `(document, ordinal)` index for a tag — so no document
+/// reads the leading key's rows, and nothing reads them end to end. Unfiltered,
+/// the section walks the documents through an index, which is the price of
+/// finding the documents holding no value; a filter that keeps what it seeks
+/// drives it, and then nothing is read end to end. Trailing members are
+/// reached by the document.
+///
+/// Controls: a field probe rebuilt to read the leading key's value index —
+/// every row under the key, for every document — fails; the tag's document
+/// index dropped, the tag probe reads something else; a driven plan rebuilt
+/// to walk the documents fails.
+#[test]
+fn a_null_lead_section_probes_each_document_for_its_leading_key_by_the_document() {
+    let mut counting_store = Counting::new("count-null-plan");
+    for bar in LEAD_BARS {
+        let statement = CountStatement::NullLead(bar.member);
+        let alone = counting(vec![(bar.key)()]);
+        judge_null(
+            &plan_of(&counting_store.plans(&alone), statement),
+            bar.member,
+            false,
+        );
+        let crossed = counting(vec![(bar.key)(), GroupKey::tag(), field("aliases")]);
+        for params in [
+            crossed.clone(),
+            counting_store.resumed(&crossed, &[None, None, Some("x")]),
+        ] {
+            let plan = plan_of(&counting_store.plans(&params), statement);
+            judge_null(&plan, bar.member, false);
+            judge_by_document(&plan, "g2", GroupMember::Tag);
+            judge_by_document(&plan, "g3", GroupMember::Field(FieldOrder::Raw));
+        }
+        let driven = plan_of(
+            &counting_store.plans(&alone.clone().with_predicates([Predicate::tag("draft")])),
+            statement,
+        );
+        judge_null(&driven, bar.member, true);
+
+        // Control: a driven section that walks the documents.
+        let walked = rewritten(&driven, |detail| {
+            detail.replace(
+                "SEARCH d USING INTEGER PRIMARY KEY (rowid=?)",
+                "SCAN d USING COVERING INDEX documents_suffix_key",
+            )
+        });
+        failure_of("a driven null section that walks the documents", || {
+            judge_null(&walked, bar.member, true)
+        });
+        if let GroupMember::Field(_) = bar.member {
+            // Control: the probe through the leading key's value index.
+            let unkeyed = rewritten(
+                &plan_of(&counting_store.plans(&alone), statement),
+                |detail| {
+                    if detail.starts_with("SEARCH m ") {
+                        format!(
+                            "SEARCH m USING COVERING INDEX {} {}",
+                            bar.index, bar.constraint
+                        )
+                    } else {
+                        detail.to_string()
+                    }
+                },
+            );
+            failure_of("a probe that reads the key's value index", || {
+                judge_null(&unkeyed, bar.member, false)
+            });
+        }
+    }
+
+    counting_store.drop_index("document_tags_document_ordinal");
+    let plans = counting_store.plans(&counting(vec![GroupKey::tag()]));
+    failure_of("document_tags_document_ordinal dropped", || {
+        judge_null(
+            &plan_of(&plans, CountStatement::NullLead(GroupMember::Tag)),
+            GroupMember::Tag,
+            false,
+        )
+    });
 }

@@ -316,7 +316,7 @@ fn plan_of(plans: &[FindPlan], statement: FindStatement) -> QueryPlan {
 /// subquery and the page itself both search `documents`. A bar about the
 /// filter is judged on the filter's rows alone, and the alias is what binds
 /// them.
-fn rows_of(plan: &QueryPlan, alias: &str) -> QueryPlan {
+pub(crate) fn rows_of(plan: &QueryPlan, alias: &str) -> QueryPlan {
     QueryPlan::new(
         plan.sql(),
         plan.rows()
@@ -329,7 +329,7 @@ fn rows_of(plan: &QueryPlan, alias: &str) -> QueryPlan {
 
 /// The panic `bar` raises, which a negative control requires it to raise. The
 /// message is printed, so a run shows what the bar says when it fails.
-fn failure_of(control: &str, bar: impl FnOnce()) -> String {
+pub(crate) fn failure_of(control: &str, bar: impl FnOnce()) -> String {
     let failure = catch_unwind(AssertUnwindSafe(bar)).expect_err(&format!(
         "the bar held under its negative control: {control}"
     ));
