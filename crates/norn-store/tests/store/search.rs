@@ -326,11 +326,13 @@ fn a_query_naming_no_term_answers_no_hit() {
 // ---- paging ----
 
 /// Every hit a drain of `params` answers, `limit` hits a page, each page
-/// continuing the cursor the one before it minted, on one snapshot.
+/// continuing the cursor the one before it minted, on one snapshot. A drain
+/// that has not ended after more pages than the fixture has documents is a
+/// cursor that does not advance.
 fn drained(snapshot: &Snapshot, params: &SearchParams, limit: u32) -> Vec<(String, u64)> {
     let mut hits = Vec::new();
     let mut after: Option<Cursor> = None;
-    loop {
+    for _ in 0..=fixture().len() {
         let mut page = params.clone().with_limit(limit);
         if let Some(cursor) = after.take() {
             page = page.with_after(cursor);
@@ -354,6 +356,7 @@ fn drained(snapshot: &Snapshot, params: &SearchParams, limit: u32) -> Vec<(Strin
             None => return hits,
         }
     }
+    panic!("a drain of {params:?} at {limit} a page did not end: {hits:?}");
 }
 
 /// **A drain a page at a time answers the ranking one page does.** At a bound
