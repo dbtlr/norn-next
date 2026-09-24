@@ -89,7 +89,7 @@ const CASE_TOTAL: usize = 109;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "c8e72d9bd64634001d08de08bcdcd3e2a0f98c77e4c4316a005fafa28867bcfa";
+const CONTRACT_DIGEST: &str = "79dbde67eac0129410fa75879e0423495d07dabb28bf18248b59d81fcc705bbd";
 
 /// The cases carried by tests today, by name.
 ///
@@ -126,7 +126,7 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// A reason waiting on a name inside a file the tree already holds states that
 /// name as a `symbol-absent` ground and leaves this list. What is left is the
-/// residue no subject reaches, and it is six classes rather than a bag:
+/// residue no subject reaches, and it is seven classes rather than a bag:
 ///
 /// - **A shell step.** The carrier is a line of `lane-suite.sh`, which no
 ///   `<file>::<fn>` reference and no Rust declaration names.
@@ -142,6 +142,9 @@ const BOUND_CASES: &[&str] = &[
 ///   set, so no name can be pre-committed as the carrier's.
 /// - **A guard with no settled home.** The scan or lint the case waits on has
 ///   no file decided on to hold it, and a symbol ground names a file.
+/// - **A read builder with no settled home.** The answers the case waits on
+///   have no builder, and no decision has placed one, so no path can be
+///   claimed absent on its behalf.
 /// - **An unwired surface.** The binary is empty and the corpus activation list
 ///   is data; what is absent is an invocation, which is a state of that data
 ///   rather than a name any declaration carries.
@@ -165,6 +168,7 @@ const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "maintenance-touches-the-affected-set-only",
     "output-parity-cannot-certify-structure",
     "present-but-unusable-config-refuses-loudly",
+    "set-valued-answers-are-pushed-down",
     "steps-report-their-own-outcome",
     "substrate-capabilities-are-probed-before-they-are-relied-on",
     "unsatisfiable-config-is-rejected-at-load",
