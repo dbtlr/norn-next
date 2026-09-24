@@ -13,8 +13,8 @@ use crate::common::{Scratch, document, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
     COUNT_STATEMENTS, ContentModel, CountPlan, CountStatement, Counted, FieldDeclaration,
-    FieldOrder, Found, FrontmatterValue, GroupMember, PageRefusal, ReadStatement, Snapshot,
-    SnapshotReader, Store, TagFact, TagSource, TypedOrder, induced_failure,
+    FieldOrder, FindStatement, Found, FrontmatterValue, GroupMember, PageRefusal, ReadStatement,
+    Snapshot, SnapshotReader, Store, TagFact, TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -204,13 +204,18 @@ impl Counting {
     /// rows that a count whose work grows with the vault reads many times
     /// more of them.
     fn with_bulk(label: &str, bulk: usize) -> Self {
+        Self::with_bulk_bodies(label, bulk, "a body\n")
+    }
+
+    /// [`Counting::with_bulk`], each bulk document's body `body`.
+    fn with_bulk_bodies(label: &str, bulk: usize, body: &str) -> Self {
         let documents: Vec<_> = (0..bulk)
             .map(|at| {
                 tagged(
                     document(
                         &format!("bulk/{at:04}.md"),
                         &format!("hash-bulk-{at}"),
-                        "a body\n",
+                        body,
                     )
                     .with_frontmatter(
                         Some(map(vec![
@@ -1449,5 +1454,63 @@ fn a_narrowing_part_narrows_a_counts_work_to_the_documents_it_matches() {
         failure_of("document_tags_name dropped", || {
             judge_narrow(&small, &large, &tagged)
         });
+    }
+}
+
+/// Whether `statement` is one a count runs: a tally statement, or a probe the
+/// conjunction's compilation runs, or the fingerprint read. A page of document
+/// rows and a hydration are neither.
+fn a_count_runs(statement: ReadStatement) -> bool {
+    matches!(
+        statement,
+        ReadStatement::Count(_)
+            | ReadStatement::Find(
+                FindStatement::ActiveFingerprint
+                    | FindStatement::KnownKey
+                    | FindStatement::FieldUniverse
+                    | FindStatement::BareDirectory
+                    | FindStatement::MatchProbe
+            )
+    )
+}
+
+/// **A count's work does not follow the body bytes of the documents it
+/// counts.** Over the fixture beside 200 more documents of 64-byte bodies, and
+/// beside the same 200 of 16 KiB bodies — the same documents, fields and tags,
+/// so the same groups — every grouping the work bar reads, unfiltered and
+/// narrowed by a tag and by a field's value, runs the same statements, reads
+/// the same tallies and takes the same steps at both. **No count hydrates a
+/// document**: every statement it runs is a tally statement, a probe its
+/// conjunction's compilation runs, or the fingerprint read, never a page of
+/// document rows nor a hydration.
+///
+/// What a tally costs follows the index entries it reads — the documents it
+/// counts, and the leading key's rows a valued section pages — rather than the
+/// groups alone, which the narrowing bar reads; this pair holds those fixed
+/// and varies the bodies alone.
+#[test]
+fn a_counts_work_does_not_follow_the_body_bytes_it_counts() {
+    let short = Counting::with_bulk_bodies("count-bodies-short", 200, &"b".repeat(64));
+    let long = Counting::with_bulk_bodies("count-bodies-long", 200, &"b".repeat(16 * 1024));
+    let narrowing = [
+        Vec::new(),
+        vec![Predicate::tag("bulk")],
+        vec![Predicate::equal_to("status", "filed")],
+    ];
+    for by in work_groupings() {
+        for predicates in &narrowing {
+            let params = counting(by.clone()).with_predicates(predicates.clone());
+            let (at_short, at_long) = (short.count(&params), long.count(&params));
+            assert_eq!(at_short.tallies, at_long.tallies, "{params:?}");
+            assert_eq!(
+                at_short.work, at_long.work,
+                "a count's work followed the bodies: {params:?}"
+            );
+            let plans = long.plans(&params);
+            assert!(
+                plans.iter().all(|plan| a_count_runs(plan.statement)),
+                "a count ran a statement that reads document rows: {plans:?}"
+            );
+        }
     }
 }
