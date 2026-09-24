@@ -565,6 +565,31 @@ fn a_part_a_count_cannot_apply_is_reported_as_a_find_reports_it() {
         malformed.unsatisfied
     );
 
+    // An ungrouped count is one tally over the whole match however the match
+    // emptied — a part that cannot be applied, or a filter matching nothing —
+    // and a grouped count over an empty match answers no tallies either way.
+    let nowhere = Predicate::equal_to("status", "nowhere");
+    let ungrouped_unapplied =
+        counting_store.count(&counting(Vec::new()).with_predicates([Predicate::path("")]));
+    assert_eq!(ungrouped_unapplied.tallies, vec![tally(&[], 0)]);
+    assert_eq!(ungrouped_unapplied.next, None);
+    assert!(
+        matches!(
+            ungrouped_unapplied.unsatisfied.as_slice(),
+            [Unsatisfied::MalformedGlob { .. }]
+        ),
+        "{:?}",
+        ungrouped_unapplied.unsatisfied
+    );
+    let ungrouped_unmatched =
+        counting_store.count(&counting(Vec::new()).with_predicates([nowhere.clone()]));
+    assert_eq!(ungrouped_unmatched.tallies, vec![tally(&[], 0)]);
+    assert!(ungrouped_unmatched.unsatisfied.is_empty());
+    let grouped_unmatched =
+        counting_store.count(&counting(vec![field("aliases")]).with_predicates([nowhere]));
+    assert_eq!(grouped_unmatched.tallies, Vec::new());
+    assert!(grouped_unmatched.unsatisfied.is_empty());
+
     let unknown = counting_store
         .count(&counting(vec![field("aliases")]).with_predicates([Predicate::has("stauts"), open]));
     assert_eq!(unknown.tallies, earned);

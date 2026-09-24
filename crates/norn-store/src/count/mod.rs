@@ -62,8 +62,9 @@
 //! The conjunction is compiled by the find builder's own compilation, so a
 //! part narrows a count exactly as it narrows a find, and the parts that cannot
 //! be applied are reported the same way: a part with no meaning empties the
-//! page, and a predicate key outside the field universe is reported and
-//! filters nothing. **A `resolves` part is not applicable**: it answers which
+//! match — a grouped count answers no tally, and one grouped by nothing its
+//! one tally, of zero, exactly as a filter matching no document does — and a
+//! predicate key outside the field universe is reported and filters nothing. **A `resolves` part is not applicable**: it answers which
 //! documents a target names, which is a find, so a count reports it
 //! ([`Unsatisfied::ResolvesNotApplicable`]) and filters nothing by it.
 
@@ -321,7 +322,13 @@ impl Snapshot {
         work: &mut CountWork,
     ) -> Result<(Vec<Tally>, Option<Tally>), StoreError> {
         let mut tallies: Vec<Tally> = Vec::new();
-        if !conjunction.matches_nothing {
+        if conjunction.matches_nothing {
+            // A match a part emptied is still one tally where the count groups
+            // by nothing: no document is in it. A grouped count has no group.
+            if sections(members, at).contains(&(CountStatement::Total, None)) {
+                tallies.push(Tally::new(Vec::new(), 0));
+            }
+        } else {
             let shapes: Vec<FindFilter> = conjunction
                 .filters
                 .iter()
