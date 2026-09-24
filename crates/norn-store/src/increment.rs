@@ -140,9 +140,10 @@ pub struct IncrementOutcome {
     /// derives the same path counts the death here and leaves no tombstone,
     /// because the document insert's trigger clears it.
     pub tombstones_recorded: u64,
-    /// Every ambiguity class the changed paths are in, each spelled in both key
-    /// spaces — raw, and folded by ASCII case — because a finding's classes are
-    /// spelled in the space its root probes. This is the resolution axis of the
+    /// Every ambiguity class the changed paths are in, spelled in the key space
+    /// the store's path order selects — raw where its root tells spellings
+    /// apart, folded by ASCII case where it folds — which is the space every
+    /// finding in the store is filed in. This is the resolution axis of the
     /// findings maintenance this changeset implies, and what a caller re-records
     /// against.
     ///
@@ -200,6 +201,9 @@ pub(crate) fn apply(
     // One clock reading for the changeset, as there is one generation. Nothing
     // orders by it; it is what a person reads in a report.
     let recorded_at = request::unix_seconds();
+    // Every finding in this store is filed in the key space its order
+    // selects, so that is the space a changed path names its class in.
+    let class_space = SuffixKey::under(store.path_order());
     let transaction = store
         .database
         .immediate_transaction("opening the increment transaction")?;
@@ -236,6 +240,10 @@ pub(crate) fn apply(
             .and_then(|()| discard_the_subject(&mut statements.discard_subject, subject));
             tally.findings_discarded +=
                 applied.map_err(|problem| error::in_entry(index, subject, problem))?;
+            // A document joining a class and one leaving it both name it.
+            tally
+                .affected_classes
+                .insert(subject.class_key_in(class_space));
 
             // The point a changeset can be torn at, and the only one: between
             // two entries, with the transaction open and nothing committed. A
@@ -243,8 +251,11 @@ pub(crate) fn apply(
             #[cfg(feature = "induced-failure")]
             crate::faults::abort_if_the_changeset_is_torn(index as u64 + 1);
         }
-        let discarded =
-            discard_affected_classes(&mut statements.discard_class, &tally.affected_classes)?;
+        let discarded = discard_affected_classes(
+            &mut statements.discard_class,
+            &tally.affected_classes,
+            class_space,
+        )?;
         tally.findings_discarded += discarded;
     }
 
@@ -616,7 +627,6 @@ fn upsert(
     if projection.is_some() {
         tally.projections += 1;
     }
-    tally.affected_classes.extend(class_keys_of(&facts.path));
     Ok(())
 }
 
@@ -655,7 +665,6 @@ fn record_death(
         .map_err(|error| error::sql("recording a tombstone", error))?;
 
     tally.tombstones_recorded += 1;
-    tally.affected_classes.extend(class_keys_of(path));
     Ok(())
 }
 
@@ -752,21 +761,6 @@ fn discard_the_subject(
         .map_err(|error| error::sql("discarding a path's findings", error))? as u64)
 }
 
-/// The class keys a change to `path` affects: its class in both key spaces.
-///
-/// A finding's classes are spelled in the key space its root probes, raw on a
-/// root that tells spellings apart and folded on one that folds ASCII case, and
-/// the increment does not ask which root this is. Naming both reaches a finding
-/// recorded in either — on a stem with no ASCII capital the two are one key —
-/// and a finding the other space names is re-decided rather than missed, which
-/// is the direction class maintenance errs in.
-fn class_keys_of(path: &DocumentPath) -> [ClassKey; 2] {
-    [
-        path.class_key_in(SuffixKey::Raw),
-        path.class_key_in(SuffixKey::Folded),
-    ]
-}
-
 /// Discard the findings in every class the changeset's paths affect, and report
 /// how many went.
 ///
@@ -778,10 +772,11 @@ fn class_keys_of(path: &DocumentPath) -> [ClassKey; 2] {
 fn discard_affected_classes(
     statement: &mut CachedStatement<'_>,
     classes: &BTreeSet<ClassKey>,
+    space: SuffixKey,
 ) -> Result<u64, StoreError> {
     let mut discarded = 0_u64;
     for class in classes {
-        let probe = class.probe();
+        let probe = class.probe(space);
         // The statement was compiled for one range and binds two parameters. A
         // class key is its own probe's single lower bound, so this holds by
         // construction — and a probe that ever opened two would bind half its

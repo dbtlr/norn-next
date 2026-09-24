@@ -79,10 +79,10 @@
 //! as it stood. The scan is the one resolver's ([`crate::Resolution`]), so a
 //! finding's class is the class a find's `resolves` part reads on that root.
 //!
-//! A finding's class keys are spelled in the key space its root probes, and a
-//! changed path names its class in both — see
-//! [`crate::IncrementOutcome::affected_classes`] — so maintenance reaches a
-//! finding whichever space it was filed in.
+//! A finding's class keys are spelled in the key space its root probes, which
+//! the store's path order selects, and a changed path names its class in that
+//! same space — see [`crate::IncrementOutcome::affected_classes`] — so
+//! maintenance reaches every finding filed in the store.
 //!
 //! # Ambiguity classes, and why maintenance is scoped by class
 //!

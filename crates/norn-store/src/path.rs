@@ -320,9 +320,8 @@ impl DocumentPath {
     /// `key`: its stem as stored, or folded by ASCII case.
     ///
     /// Class-scoped maintenance reaches a finding through the class key its
-    /// producer recorded, which is spelled in the key space the root probes. A
-    /// change to this document names both, so a finding is reached whichever
-    /// space it was recorded in.
+    /// producer recorded, which is spelled in the key space the root probes,
+    /// so a change to this document names its class in that space.
     pub fn class_key_in(&self, key: SuffixKey) -> ClassKey {
         let stem = match key {
             SuffixKey::Raw => self.stem.clone(),
@@ -453,9 +452,13 @@ impl ClassKey {
     /// the class it affects, and building the range here rather than from the
     /// stem again is what keeps the key that is reported and the key that is
     /// discarded the same bytes.
-    pub(crate) fn probe(&self) -> SuffixProbe {
+    ///
+    /// The key does not say which key space it was minted in, so the caller
+    /// names it: `key` is the space the class key is spelled in, and the probe
+    /// reports it as the key its range bounds.
+    pub(crate) fn probe(&self, key: SuffixKey) -> SuffixProbe {
         SuffixProbe {
-            key: SuffixKey::Raw,
+            key,
             ranges: vec![bounded(self.0.clone())],
         }
     }
@@ -821,6 +824,18 @@ fn control_byte_problem(text: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A class key's probe reports the key space the caller says the class key
+    /// is spelled in, and ranges over exactly that key.
+    #[test]
+    fn a_class_keys_probe_reports_the_key_space_it_ranges_over() {
+        let class = ClassKey::new("foo/").expect("a class key");
+        for key in [SuffixKey::Raw, SuffixKey::Folded] {
+            let probe = class.probe(key);
+            assert_eq!(probe.key(), key);
+            assert_eq!(probe.ranges().collect::<Vec<_>>(), [("foo/", "foo0")]);
+        }
+    }
 
     /// A separator steps to the character after it, which is what bounds a
     /// segment-aligned prefix: `a/` opens up to `a0`.

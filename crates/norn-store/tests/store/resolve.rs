@@ -5,13 +5,15 @@
 
 use std::sync::Arc;
 
+use std::collections::BTreeSet;
+
 use norn_store::{
-    AmbiguityIgnore, CandidateFact, DeclaredFields, FindingFacts, Resolution, SnapshotReader,
-    Store, StoredPathOrder,
+    AmbiguityIgnore, CandidateFact, DeclaredFields, FindingFacts, Provenance, Resolution,
+    SnapshotReader, Store, StoredPathOrder, SuffixKey,
 };
 use norn_wire::{FindParams, FindingKind, Pattern, Predicate, ResolutionTarget, Severity};
 
-use crate::common::{Scratch, document, path, write_document, write_documents};
+use crate::common::{Scratch, document, path, record_death, write_document, write_documents};
 
 /// The fingerprint the suite's schema is pinned under.
 const SCHEMA: &str = "resolve-schema";
@@ -252,24 +254,7 @@ fn a_findings_class_is_the_class_resolves_reads_on_that_root() {
 
         let mut request = vault.store.begin_request();
         request
-            .record_finding(&FindingFacts {
-                kind: FindingKind::PathNamesNoDocument,
-                severity: Severity::Warning,
-                path: path("note.md"),
-                class_keys: resolution.class_keys(),
-                target: Some("Foo".to_string()),
-                span: None,
-                candidates: class
-                    .iter()
-                    .map(|at| CandidateFact {
-                        path: path(at),
-                        suffix: at.clone(),
-                    })
-                    .collect(),
-                candidates_total: class.len() as u64,
-                message: "`Foo` names more than one document".to_string(),
-                detail: None,
-            })
+            .record_finding(&finding_about_foo(&resolution, &class))
             .expect("recording the finding");
         let recorded = request
             .findings_in_class(resolution.probe())
@@ -294,6 +279,72 @@ fn a_findings_class_is_the_class_resolves_reads_on_that_root() {
                 .findings_in_class(resolution.probe())
                 .expect("reading the class's findings")
                 .is_empty()
+        );
+    }
+}
+
+/// The finding a producer files about the target `Foo`, whose class on the
+/// root is `class`: under the resolution's class keys, with the class as its
+/// candidates.
+fn finding_about_foo(resolution: &Resolution, class: &[String]) -> FindingFacts {
+    FindingFacts {
+        kind: FindingKind::PathNamesNoDocument,
+        severity: Severity::Warning,
+        path: path("note.md"),
+        class_keys: resolution.class_keys(),
+        target: Some("Foo".to_string()),
+        span: None,
+        candidates: class
+            .iter()
+            .map(|at| CandidateFact {
+                path: path(at),
+                suffix: at.clone(),
+            })
+            .collect(),
+        candidates_total: class.len() as u64,
+        message: "`Foo` names more than one document".to_string(),
+        detail: None,
+    }
+}
+
+/// **A document leaving a class takes the findings filed under it, and a
+/// change names its class in the key space the store's root probes alone.**
+/// On a root that folds ASCII case, `b/FOO.md` is in the class of `Foo`, and
+/// a finding about `Foo` is filed under the folded key: the death of
+/// `b/FOO.md` reaches it there. The raw key `FOO/` is one no finding in this
+/// store is filed under, so the change does not name it.
+#[test]
+fn a_document_leaving_a_class_takes_the_findings_filed_under_it() {
+    for (order, leaving) in [(Sensitive, "b/Foo.md"), (Folding, "b/FOO.md")] {
+        let mut vault = Vault::holding(
+            &format!("resolve-leaving-{order:?}"),
+            order,
+            &["a/Foo.md", leaving],
+        );
+        let resolution =
+            Resolution::new("Foo", order, &AmbiguityIgnore::none()).expect("a suffix target");
+        let class = vault.class(&resolution);
+        assert_eq!(class, strings(&["a/Foo.md", leaving]), "under {order:?}");
+
+        let mut request = vault.store.begin_request();
+        request
+            .record_finding(&finding_about_foo(&resolution, &class))
+            .expect("recording the finding");
+        let left = record_death(&mut request, &path(leaving), Provenance::WatcherRemoval);
+        assert_eq!(
+            left.invalidated.findings_discarded, 1,
+            "`{leaving}` left the class of `Foo` under {order:?} and its finding stood"
+        );
+        assert!(
+            request
+                .findings_in_class(resolution.probe())
+                .expect("reading the class's findings")
+                .is_empty()
+        );
+        assert_eq!(
+            left.affected_classes,
+            BTreeSet::from([path(leaving).class_key_in(SuffixKey::under(order))]),
+            "the classes a change names under {order:?}"
         );
     }
 }

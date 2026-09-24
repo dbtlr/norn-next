@@ -1605,8 +1605,9 @@ folded one, and a root that folds ASCII case probes the folded key, where every 
 target is one class and an exact-case match takes no precedence. The vault schema's
 ambiguity-ignore globs keep the places under them out of a class unless the target names the
 ignored place: a one-segment target never does, and a longer target does where its segments
-reach that place. Class-scoped findings maintenance names a changed path's class in both key
-spaces, so a finding filed under either is re-decided when a document joins or leaves it.
+reach that place. Class-scoped findings maintenance names a changed path's class in the key
+space the store's order selects, the space every finding in the store is filed in, so a
+finding is re-decided when a document joins or leaves its class.
 
 The links table stores **syntactic facts only** — raw target, family, protocol, title, span —
 and resolution runs at query time through this one grammar; resolved edges are never stored,
