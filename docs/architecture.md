@@ -885,13 +885,13 @@ every such term, a term holding several words matching them adjacent and in orde
 Matching folds case and diacritics as the tokenizer does (`remove_diacritics 2`), and
 FTS5 compares a word by its first 32768 bytes, in the index and in a query alike, so two
 words sharing those bytes match each other through a search's query and a `matches` part
-alike. The word
-rule is one function over a table of the code points the tokenizer begins a word at — the
-bundled FTS5's Unicode tables, which class letters, numbers, private use and every code
-point they hold no category for as word characters — and a contract test reads that
-table back from the store's own full-text index for every code point. A query holding no
-word answers no hit, runs no lexical page, and is reported. A hit's score is FTS5's BM25 negated, so it is higher for the more
-relevant hit, and hits are ordered by score descending, then by path in byte order; a
+alike. The word rule is one function over a table of the code points the tokenizer
+begins a word at — the bundled FTS5's Unicode tables, which class letters, numbers,
+private use and every code point they hold no category for as word characters, so an
+emoji newer than those tables (`🙂`) is a word where an older one (`😀`) is not — and a
+contract test reads that table back from the store's own full-text index for every code
+point. A query holding no word answers no hit, runs no lexical page, and is reported. A
+hit's score is FTS5's BM25 negated, so it is higher for the more relevant hit, and hits are ordered by score descending, then by path in byte order; a
 floor admits the hits scored at or above it. A page resumes after the `(score, path)` its
 cursor carries, compared with each match's score as the page computes it, so a drain on
 one snapshot is the whole ranking. Its conjunction is compiled by the same compilation,
