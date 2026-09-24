@@ -19,12 +19,7 @@ publish.workspace = true
 # signature — nothing crossing this seam is an untyped JSON value — and its one
 # runtime use is inside that wrapping. It is a registry dependency and not a
 # workspace one, so the zero-workspace-dependency invariant stands.
-#
-# `float_roundtrip` parses a number back to the double that was written. A hit
-# cursor carries a relevance score a continuation compares exactly, and the
-# cursor is read back only where its re-encoding is the bytes it arrived as, so
-# a score parsed one unit in the last place away is a cursor refused.
 [dependencies]
 schemars = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true, features = ["float_roundtrip"] }
+serde_json = { workspace = true }
