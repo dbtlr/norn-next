@@ -119,7 +119,7 @@ pub enum Predicate {
         target: ResolutionTarget,
     },
     /// The document is what `target` resolves to. Meaningful on `find` alone;
-    /// `count` and `validate` report it as an unsatisfied part.
+    /// `count`, `validate` and `search` report it as an unsatisfied part.
     #[non_exhaustive]
     Resolves {
         /// The target being resolved.
