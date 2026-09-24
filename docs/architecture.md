@@ -1608,8 +1608,8 @@ ignored place: a target does where its segments reach that place's last segment,
 one-segment target does only where the ignored document stands at the root, whose name is
 the whole place. The globs match under the store's order — with ASCII case folded where it
 folds, bytewise where it does not — so `archive/**` ignores `Archive/notes.md` on a root
-that does not tell the two apart; a find's path part matches the same grammar bytewise on
-every root. Class-scoped findings maintenance names a changed path's class in the key
+that does not tell the two apart; a path part of a find, a count or a validate matches the
+same grammar bytewise on every root. Class-scoped findings maintenance names a changed path's class in the key
 space the store's order selects, the space every finding in the store is filed in, so a
 finding is re-decided when a document joins or leaves its class.
 
