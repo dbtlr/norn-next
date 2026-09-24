@@ -66,6 +66,9 @@ impl DescribeStatement {
 /// same as a key held once.
 pub(crate) fn compose_observed(after: Option<&str>, rows: usize) -> (String, Vec<Value>) {
     let mut binder = Binder::default();
+    // A first page is bounded at the empty text inclusive: the empty text is
+    // a key a document carries where its frontmatter writes `"": x`, and it
+    // sorts before every other key.
     let (comparison, bound) = match after {
         None => (">=", String::new()),
         Some(key) => (">", key.to_string()),

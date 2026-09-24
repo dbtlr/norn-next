@@ -331,6 +331,36 @@ fn naming_kinds_answers_those_kinds_alone_in_the_order_of_their_codes() {
     }
 }
 
+/// **The empty key is a key.** A frontmatter key spelled as the empty text —
+/// `"": x` parses as one — is observed like any other, and first, since it
+/// sorts before every other key: a first page begins at it, and a drain a
+/// page at a time answers it once.
+#[test]
+fn the_empty_key_is_observed_first() {
+    let scratch = Scratch::new("describe-empty-key");
+    let mut store = scratch.open();
+    store
+        .begin_request()
+        .pin_vault_schema(DESCRIBE_SCHEMA.as_bytes(), DESCRIBE_SCHEMA)
+        .expect("pinning the fixture's schema");
+    let declared = declared();
+    let mut written = documents(&declared);
+    written.push(
+        document("e.md", "hash-e.md", "a body\n")
+            .with_frontmatter(Some(map(vec![("", string("x"))])), &declared),
+    );
+    write_documents(&mut store.begin_request(), &written);
+    let describing_store = Describing::reading(scratch, store, declared);
+    let observed = describing_store.facets(&observed_only());
+    assert_eq!(
+        observed.first(),
+        Some(&Facet::observed_field("", [ContainerKind::Scalar]))
+    );
+    assert_eq!(observed.len(), 4);
+    assert_eq!(drained(&describing_store, &observed_only(), 1), observed);
+    assert_eq!(drained(&describing_store, &describing(), 2).len(), 14);
+}
+
 /// The key a facet's cursor names.
 fn key_of(facet: &Facet) -> String {
     match facet.cursor_key() {
