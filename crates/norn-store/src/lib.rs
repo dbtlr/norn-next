@@ -93,6 +93,7 @@ mod hash;
 mod increment;
 mod json;
 mod path;
+mod read;
 mod request;
 mod store;
 
@@ -110,12 +111,15 @@ pub use faults::induced_failure;
 pub use feed::FeedRead;
 pub use fields::{DeclaredFields, FieldContainer, FieldRow, FieldRows, TypedOrder};
 pub use find::{
-    BODY_ROW_CEILING, DEFAULT_PAGE, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindBound,
-    FindFilter, FindPlan, FindStatement, FindWork, Found, IN_VALUES_CEILING, NESTED_ROW_CEILING,
-    Nested, NestedRows, PageDirection, ReadRefusal, ReadStatement,
+    BODY_ROW_CEILING, FIND_STATEMENTS, FindPlan, FindStatement, FindWork, Found,
+    NESTED_ROW_CEILING, Nested, NestedRows, PageDirection,
 };
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
+pub use read::{
+    DEFAULT_PAGE, FIND_FILTERS, FieldOrder, FindBound, FindFilter, IN_VALUES_CEILING, ReadRefusal,
+    ReadStatement,
+};
 // The open ceremony's own vocabulary, which is this crate's too: a store is
 // one client of that ceremony, and the rung a disagreement names is the same
 // rung whichever database met it.

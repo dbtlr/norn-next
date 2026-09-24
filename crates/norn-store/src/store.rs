@@ -676,7 +676,7 @@ impl Store {
             .adopted
             .map_err(StoreError::from)
             .and_then(|database| {
-                crate::find::register_functions(database.connection())?;
+                crate::read::register_functions(database.connection())?;
                 Ok(database)
             })
             .map(|database| SnapshotReader {

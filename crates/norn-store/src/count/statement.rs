@@ -3,21 +3,21 @@
 //!
 //! **One function writes a statement's text and binds its parameters.**
 //! [`compose_tallies`] numbers each parameter as it writes the placeholder for
-//! it, through the same binder the find builder's composer numbers with, and
-//! spells a conjunction's filters through the find builder's own filter
-//! fragments, so a part narrows a count exactly as it narrows a find.
+//! it, through the binder every read builder's composer numbers with, and
+//! spells a conjunction's filters through the filter fragments every read
+//! builder shares, so a part narrows a count exactly as it narrows a find.
 
 use norn_db::rusqlite::types::Value;
 
-use crate::find::{Binder, FieldOrder, Filter};
+use crate::read::{Binder, FieldOrder, Filter};
 
 /// Every statement shape the count builder runs, named.
 ///
 /// The same discipline as [`crate::FindStatement`]: [`CountStatement::all`]
 /// holds each shape once, [`CountStatement::slot`] is exhaustive over the
 /// enum, and [`COUNT_STATEMENTS`] is the count a census is checked against. A
-/// count compiles its conjunction through the find builder, so the probes that
-/// compilation runs are [`crate::FindStatement`]s and are named there.
+/// count compiles its conjunction through the compilation every read builder
+/// shares, whose probes are [`crate::FindStatement`]s and are named there.
 ///
 /// A grouped count reads its tallies in two sections, split on the grouping's
 /// leading member: the tallies whose leading member is `null` first, then the

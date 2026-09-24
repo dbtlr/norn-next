@@ -88,9 +88,9 @@
 //! Every other entry below empties the page.
 //!
 //! - **A key outside the field universe** — the keys the declaration names
-//!   and the keys some document carries — is reported with the keys near it
-//!   ([`suggest`] states the one rule). An unknown sort key orders the page by
-//!   path, ascending; an unknown projected key carries nothing under it; an
+//!   and the keys some document carries — is reported with the keys near it,
+//!   by the one did-you-mean rule every read builder shares. An unknown sort
+//!   key orders the page by path, ascending; an unknown projected key carries nothing under it; an
 //!   unknown predicate key's part filters nothing. Whether a key is known is a
 //!   declaration lookup or one existence seek of the presence rows, and the
 //!   universe itself is walked only where some key is unknown.
@@ -149,102 +149,31 @@
 //! reads as a position in the reversed order, so an ascending cursor replayed
 //! descending is answered rather than refused.
 
-mod glob;
 mod hydrate;
 mod statement;
-mod suggest;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use norn_db::EmittedPlan;
-use norn_db::rusqlite::types::Value;
-use norn_db::rusqlite::{self, Row, StatementStatus, params_from_iter};
 use norn_wire::{
-    Column, Cursor, CursorKey, CursorOrderChanged, Direction, DocumentRow, FindParams, FindReport,
-    Moved, Page, Pattern, Predicate, SortKey, Unsatisfied,
+    Column, Cursor, CursorKey, Direction, DocumentRow, FindParams, FindReport, Moved, Page,
+    SortKey, Unsatisfied,
 };
 
-use crate::count::CountStatement;
-use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
-use crate::json::{FrontmatterValue, canonical_json};
-use crate::path::{DirectoryPrefix, DocumentPath, suffix_probe};
-use crate::request::MAX_PAGE;
+use crate::read::{
+    FieldOrder, Filter, FindFilter, KeyPlace, Lookups, Ran, ReadRefusal, ReadStatement, Report,
+    Resolution, page_limit,
+};
 use crate::store::Snapshot;
 
-pub(crate) use glob::register_functions;
 pub use hydrate::{BODY_ROW_CEILING, FindWork, NESTED_ROW_CEILING, NestedRows};
-pub(crate) use statement::{Binder, Filter};
-pub use statement::{
-    FIND_FILTERS, FIND_STATEMENTS, FindFilter, FindStatement, Nested, PageDirection,
+pub use statement::{FIND_STATEMENTS, FindStatement, Nested, PageDirection};
+use statement::{Section, SectionStart, compose_page};
+pub(crate) use statement::{
+    compose_bare_directory, compose_known_key, compose_match_probe, compose_universe,
 };
-use statement::{
-    Section, SectionStart, compose_bare_directory, compose_known_key, compose_match_probe,
-    compose_page, compose_universe,
-};
-
-/// How many rows a page holds when a request names no bound.
-///
-/// The store's default. A handler may narrow it by naming a bound of its own;
-/// a bound outside `1..=`[`MAX_PAGE`] is refused
-/// ([`ReadRefusal::OutOfBound`]), never clamped.
-pub const DEFAULT_PAGE: usize = 100;
-
-/// The most values one membership part may name.
-///
-/// Every value is bound into the part's one statement, so the ceiling is what
-/// bounds that statement's text and its parameters. A part naming more is
-/// refused ([`ReadRefusal::OutOfBound`]), and one naming none
-/// ([`ReadRefusal::EmptyMembership`]).
-pub const IN_VALUES_CEILING: usize = 256;
-
-/// A count a request names that the store holds to a range.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FindBound {
-    /// The rows a page holds: `1..=`[`MAX_PAGE`].
-    PageRows,
-    /// The values one membership part names: at most [`IN_VALUES_CEILING`].
-    /// A part naming none is refused as [`ReadRefusal::EmptyMembership`].
-    MembershipValues,
-}
-
-impl FindBound {
-    /// The most the count may be.
-    pub const fn ceiling(self) -> usize {
-        match self {
-            FindBound::PageRows => MAX_PAGE,
-            FindBound::MembershipValues => IN_VALUES_CEILING,
-        }
-    }
-}
-
-/// Which of a field's two orders a sort or a bound compares under.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FieldOrder {
-    /// The canonical text's bytewise order.
-    Raw,
-    /// The declared type's order, over the typed sort key the schema pinned.
-    Typed,
-}
-
-impl FieldOrder {
-    /// The column this order compares.
-    fn column(self) -> &'static str {
-        match self {
-            FieldOrder::Raw => "raw",
-            FieldOrder::Typed => "typed",
-        }
-    }
-
-    /// The column marking a document's least value under this order.
-    fn marker(self) -> &'static str {
-        match self {
-            FieldOrder::Raw => "least_raw",
-            FieldOrder::Typed => "least_typed",
-        }
-    }
-}
 
 /// Where a page stopped, or where a continuation resumes: the value the row
 /// was ordered by, and its path. The order it stands in is the request's.
@@ -320,31 +249,6 @@ impl Found {
     }
 }
 
-/// A statement a read builder ran, named by the builder that names it.
-///
-/// A read compiles its conjunction through the find builder's probes, so a
-/// count runs find's statements beside its own; the record of what a read ran
-/// holds either, and each builder's enumeration stays its own.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReadStatement {
-    /// A statement [`FindStatement`] names.
-    Find(FindStatement),
-    /// A statement [`CountStatement`] names.
-    Count(CountStatement),
-}
-
-impl From<FindStatement> for ReadStatement {
-    fn from(statement: FindStatement) -> Self {
-        ReadStatement::Find(statement)
-    }
-}
-
-impl From<CountStatement> for ReadStatement {
-    fn from(statement: CountStatement) -> Self {
-        ReadStatement::Count(statement)
-    }
-}
-
 /// A statement a find ran, with the plan SQLite reported for the text and the
 /// values it ran with.
 #[derive(Clone, Debug)]
@@ -353,132 +257,6 @@ pub struct FindPlan {
     /// The filters the statement narrows by, in the request's order.
     pub filters: Vec<FindFilter>,
     pub plan: EmittedPlan,
-}
-
-/// Why a read builder answered no page.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum ReadRefusal {
-    /// The request filters by a fact the store keeps no index of.
-    ///
-    /// A **dormant carrier** for the link index NORN-229 builds: `links` stores
-    /// a link's target raw and unindexed, so no seek answers a `links_to` part,
-    /// and nothing reaches the part's filter until that index stands. Until
-    /// then no request naming one can be answered, and saying so is the answer.
-    NotIndexed { fact: &'static str },
-    /// The request names a row column a find does not project yet.
-    ///
-    /// A **dormant carrier** for the resolved link and finding columns NORN-229
-    /// builds: the store holds a document's link and finding rows, but a find's
-    /// row carries neither column until the link index resolves what a link
-    /// names, so no row composition reads them yet.
-    NotProjected { column: &'static str },
-    /// A value a comparing part names — an equality, an inequality, a
-    /// membership or a `before`/`after` bound — on a key declared with a typed
-    /// order does not read as that type, so it names no place in the key's
-    /// order.
-    UnreadableBound { key: String, value: String },
-    /// The declaration the request was compiled under was read from a schema
-    /// other than the one the snapshot pins, so its typed orders are not the
-    /// ones the typed column holds. Each fingerprint is `None` for no schema.
-    DeclarationNotPinned {
-        declared_under: Option<String>,
-        pinned: Option<String>,
-    },
-    /// The cursor is not a position in the order the request reads: it was
-    /// minted under a schema fingerprint the snapshot no longer reads, or in
-    /// another order than the request's.
-    OrderChanged(CursorOrderChanged),
-    /// The cursor names a position among rows that are not documents.
-    NotADocumentCursor,
-    /// The cursor names no position among a count's tallies: it is not a
-    /// tally's, its grouping tuple is another width than the request's, or a
-    /// member names no place in its key's order.
-    NotATallyCursor,
-    /// A membership part on `key` names no value, so no document can satisfy
-    /// it. The wire refuses one on read; this is the refusal of one built
-    /// in-process.
-    EmptyMembership { key: String },
-    /// A count the request names is outside the range `bound` holds it to:
-    /// `given` rows for a page, or `given` values for one membership part.
-    OutOfBound { bound: FindBound, given: usize },
-    /// The request carries a part this build of the store does not know.
-    UnknownPart { part: &'static str },
-    /// The store refused a statement.
-    Store(StoreError),
-}
-
-impl std::fmt::Display for ReadRefusal {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ReadRefusal::NotIndexed { fact } => {
-                write!(formatter, "the store keeps no index of {fact}")
-            }
-            ReadRefusal::NotProjected { column } => {
-                write!(formatter, "{column} is not yet projected onto a find's row")
-            }
-            ReadRefusal::UnreadableBound { key, value } => write!(
-                formatter,
-                "`{value}` does not read as the type `{key}` is declared with"
-            ),
-            ReadRefusal::DeclarationNotPinned {
-                declared_under,
-                pinned,
-            } => write!(
-                formatter,
-                "the declaration was read from {}, and the snapshot pins {}",
-                schema_named(declared_under.as_deref()),
-                schema_named(pinned.as_deref())
-            ),
-            ReadRefusal::OrderChanged(changed) => write!(
-                formatter,
-                "the cursor was minted in an order under {}, and the request reads one under {}",
-                schema_named(changed.minted_under.as_deref()),
-                schema_named(changed.current.as_deref())
-            ),
-            ReadRefusal::NotADocumentCursor => {
-                formatter.write_str("the cursor names a position among rows that are not documents")
-            }
-            ReadRefusal::NotATallyCursor => {
-                formatter.write_str("the cursor names no position among this count's tallies")
-            }
-            ReadRefusal::EmptyMembership { key } => {
-                write!(formatter, "the membership part on `{key}` names no value")
-            }
-            ReadRefusal::OutOfBound { bound, given } => match bound {
-                FindBound::PageRows => write!(
-                    formatter,
-                    "a page holds 1 to {} rows, and {given} were asked for",
-                    bound.ceiling()
-                ),
-                FindBound::MembershipValues => write!(
-                    formatter,
-                    "a membership part names at most {} values, and {given} were named",
-                    bound.ceiling()
-                ),
-            },
-            ReadRefusal::UnknownPart { part } => {
-                write!(formatter, "this store does not know {part}")
-            }
-            ReadRefusal::Store(problem) => problem.fmt(formatter),
-        }
-    }
-}
-
-impl std::error::Error for ReadRefusal {}
-
-/// A schema fingerprint as a refusal names it: quoted, or "no schema".
-fn schema_named(fingerprint: Option<&str>) -> String {
-    fingerprint.map_or_else(
-        || "no schema".to_string(),
-        |named| format!("the schema `{named}`"),
-    )
-}
-
-impl From<StoreError> for ReadRefusal {
-    fn from(problem: StoreError) -> Self {
-        ReadRefusal::Store(problem)
-    }
 }
 
 /// The order a page runs in.
@@ -502,24 +280,6 @@ impl PageOrder<'_> {
     }
 }
 
-/// Where a request named a key.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum KeyPlace {
-    Sort,
-    Projection,
-    Predicate,
-    Group,
-}
-
-/// One part of a request that could not be applied as asked, before the
-/// field universe an unknown key's suggestions are drawn from is read.
-pub(crate) enum Report {
-    /// A part reported as it stands.
-    Part(Unsatisfied),
-    /// A key outside the field universe, named at `KeyPlace`.
-    Unknown(KeyPlace, String),
-}
-
 /// A request compiled: its order, its filters, and the parts it could not
 /// apply as asked.
 struct Compiled<'a> {
@@ -540,32 +300,6 @@ impl Compiled<'_> {
     fn field_order(&self) -> Option<FieldOrder> {
         self.order.field_order()
     }
-}
-
-/// A conjunction compiled: the filters its parts spell, the parts it could
-/// not apply as asked, and whether one of those matches nothing.
-pub(crate) struct Conjunction {
-    pub(crate) filters: Vec<Filter>,
-    pub(crate) reports: Vec<Report>,
-    /// Whether some part matches no document, which empties the answer.
-    pub(crate) matches_nothing: bool,
-}
-
-/// Whether the verb compiling a conjunction answers a `resolves` part.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Resolution {
-    /// The part filters by the class its target opens.
-    Answered,
-    /// The part is reported as not applicable and filters nothing.
-    NotApplicable,
-}
-
-/// A compiled part of the conjunction.
-enum Part {
-    Filter(Filter),
-    /// A part that cannot be applied as asked, so no document satisfies it:
-    /// reported, and every section is empty.
-    MatchesNothing(Unsatisfied),
 }
 
 /// The columns a request projects, read once.
@@ -633,84 +367,6 @@ impl<'a> Projection<'a> {
     }
 }
 
-/// One statement a find ran on its snapshot, as it ran: its shape, the
-/// filters it narrows by, its text and the values bound to it.
-///
-/// [`Snapshot::run_statement`] records one before it prepares the text the
-/// record holds, which is how [`Snapshot::find_plans`] explains the statement
-/// that ran rather than a second spelling of it.
-pub(crate) struct Ran {
-    pub(crate) statement: ReadStatement,
-    pub(crate) filters: Vec<FindFilter>,
-    sql: String,
-    values: Vec<Value>,
-    /// What SQLite counted while the statement was stepped, read once every
-    /// row it answers has been read.
-    pub(crate) stepped: Stepped,
-}
-
-/// What SQLite counts while one statement is stepped, read off the
-/// statement's own status before it is dropped.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct Stepped {
-    /// Steps forward through a loop no constraint bounds: a table read end to
-    /// end, or an index read end to end.
-    pub(crate) full_scan_steps: u64,
-    /// Sorts the statement ran: a temporary B-tree an `ORDER BY` filled
-    /// because no index hands its rows back in order.
-    pub(crate) sorts: u64,
-    /// Virtual-machine operations the statement ran, whatever they did.
-    pub(crate) vm_steps: u64,
-}
-
-impl Stepped {
-    /// The counts `statement` holds, having been stepped to its end.
-    fn of(statement: &rusqlite::Statement<'_>) -> Self {
-        // SQLite keeps each count unsigned and hands it back as a C `int`, so
-        // the bits read back as the unsigned count they are.
-        let count = |status| u64::from(statement.get_status(status) as u32);
-        Stepped {
-            full_scan_steps: count(StatementStatus::FullscanStep),
-            sorts: count(StatementStatus::Sort),
-            vm_steps: count(StatementStatus::VmStep),
-        }
-    }
-}
-
-impl Ran {
-    /// `statement`, composed as `(sql, values)`, narrowing by no filter.
-    pub(crate) fn new(
-        statement: impl Into<ReadStatement>,
-        (sql, values): (String, Vec<Value>),
-    ) -> Self {
-        Ran {
-            statement: statement.into(),
-            filters: Vec::new(),
-            sql,
-            values,
-            stepped: Stepped::default(),
-        }
-    }
-
-    /// The same statement, narrowing by `filters`.
-    pub(crate) fn narrowed_by(mut self, filters: Vec<FindFilter>) -> Self {
-        self.filters = filters;
-        self
-    }
-}
-
-/// What one request asked its snapshot, each question asked once — the active
-/// fingerprint and which keys are known — and every statement the find ran,
-/// in the order it ran them.
-#[derive(Default)]
-pub(crate) struct Lookups {
-    /// The active fingerprint once read, `None` inside where no schema is
-    /// pinned.
-    fingerprint: Option<Option<String>>,
-    known: BTreeMap<String, bool>,
-    pub(crate) ran: Vec<Ran>,
-}
-
 impl Snapshot {
     /// One page of the documents `params` asks for, as rows carrying the
     /// columns it projects, in its order, continuing its cursor.
@@ -718,11 +374,11 @@ impl Snapshot {
     /// `declared` is the vault's declaration, read from the schema the
     /// snapshot pins: it decides a field sort's order, how a bound is
     /// compared, and — beside the keys documents carry — which keys are known.
-    /// The page holds `params.limit` rows, [`DEFAULT_PAGE`] where it names
+    /// The page holds `params.limit` rows, [`crate::DEFAULT_PAGE`] where it names
     /// none, and only those rows are hydrated.
     ///
-    /// Refused: a page bound outside `1..=`[`MAX_PAGE`]; a membership part
-    /// naming no value or more than [`IN_VALUES_CEILING`]; a declaration read
+    /// Refused: a page bound outside `1..=`[`crate::MAX_PAGE`]; a membership part
+    /// naming no value or more than [`crate::IN_VALUES_CEILING`]; a declaration read
     /// from another schema than the snapshot pins; a cursor among rows that
     /// are not documents; a cursor that is not a position in the request's
     /// order, as the module states; a projected column or a part the store
@@ -756,28 +412,16 @@ impl Snapshot {
     ) -> Result<Vec<FindPlan>, ReadRefusal> {
         let mut lookups = Lookups::default();
         self.run_find(params, declared, &mut lookups)?;
-        let mut plans = Vec::with_capacity(lookups.ran.len());
-        for ran in lookups.ran {
-            let ReadStatement::Find(statement) = ran.statement else {
+        Ok(self.explained(lookups.ran, |statement, filters, plan| {
+            let ReadStatement::Find(statement) = statement else {
                 unreachable!("a find runs only the statements find names")
             };
-            let filters = ran.filters.clone();
-            plans.push(FindPlan {
+            FindPlan {
                 statement,
                 filters,
-                plan: self.explain(ran)?,
-            });
-        }
-        Ok(plans)
-    }
-
-    /// The plan SQLite reports for `ran`: the text it ran, bound to the values
-    /// it ran with, explained on this snapshot's read-only connection. An
-    /// explain is a report about a statement rather than a run of it, so it is
-    /// not counted.
-    pub(crate) fn explain(&self, ran: Ran) -> Result<EmittedPlan, StoreError> {
-        norn_db::emitted_plan(self.connection(), &ran.sql, params_from_iter(ran.values))
-            .map_err(StoreError::from)
+                plan,
+            }
+        })?)
     }
 
     /// The find [`Snapshot::find`] answers and [`Snapshot::find_plans`]
@@ -815,49 +459,6 @@ impl Snapshot {
             snapshot,
             work,
         })
-    }
-
-    /// Run `ran`, counted on this snapshot and recorded at the end of `record`
-    /// before it is prepared, and read each row it answers through `read`.
-    ///
-    /// Every statement a find runs is run here, and what is prepared is the
-    /// text the record holds, bound to the values it holds:
-    /// [`Snapshot::find_plans`] explains the record, so the plan of a
-    /// statement is the plan of what ran. Once every row is read, the record
-    /// takes what SQLite counted stepping it ([`Stepped`]).
-    pub(crate) fn run_statement<T>(
-        &self,
-        record: &mut Vec<Ran>,
-        ran: Ran,
-        read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
-    ) -> rusqlite::Result<Vec<T>> {
-        self.run_statement_staged(record, ran, read)
-            .map_err(StatementFailure::into_inner)
-    }
-
-    /// [`Snapshot::run_statement`], its failure saying whether the statement
-    /// failed before it was stepped — preparing its text or binding its
-    /// values — or while it was stepped.
-    fn run_statement_staged<T>(
-        &self,
-        record: &mut Vec<Ran>,
-        ran: Ran,
-        read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
-    ) -> Result<Vec<T>, StatementFailure> {
-        self.count_statement();
-        record.push(ran);
-        let ran = record.last_mut().expect("the statement was just recorded");
-        let mut statement = self
-            .connection()
-            .prepare(&ran.sql)
-            .map_err(StatementFailure::Preparing)?;
-        let rows = statement
-            .query_map(params_from_iter(ran.values.iter()), read)
-            .map_err(StatementFailure::Preparing)?
-            .collect::<rusqlite::Result<Vec<T>>>()
-            .map_err(StatementFailure::Stepping)?;
-        ran.stepped = Stepped::of(&statement);
-        Ok(rows)
     }
 
     /// Judge the cursor a request continues against the request's `order` on
@@ -904,174 +505,6 @@ impl Snapshot {
             }),
             moved,
         ))
-    }
-
-    /// Judge the reading `cursor` was minted under against the reading a page
-    /// in `order` answers from on this snapshot, and say what moved since.
-    ///
-    /// The cursor is refused where its fingerprint is not the order's — the
-    /// active fingerprint for a typed order, none for any other — and where
-    /// `misplaced` says its position is detectably in another order. The
-    /// refusal names the order the cursor was minted in either way.
-    pub(crate) fn judge_reading(
-        &self,
-        cursor: &Cursor,
-        order: Option<FieldOrder>,
-        misplaced: bool,
-        lookups: &mut Lookups,
-    ) -> Result<Vec<Moved>, ReadRefusal> {
-        let now = self.reading_facts(order, lookups)?;
-        let minted_under = cursor.snapshot().schema_fingerprint.as_deref();
-        if minted_under != now.schema_fingerprint.as_deref() || misplaced {
-            let current = now.schema_fingerprint.clone();
-            return Err(ReadRefusal::OrderChanged(match minted_under {
-                Some(minted_under) => CursorOrderChanged::new(minted_under, current),
-                None => CursorOrderChanged::minted_raw(current),
-            }));
-        }
-        cursor.continuation(&now).map_err(ReadRefusal::OrderChanged)
-    }
-
-    /// This snapshot's reading as a cursor carries it for a page in `order`:
-    /// the epoch and the write generation, and the active fingerprint where
-    /// the order is typed.
-    pub(crate) fn reading_facts(
-        &self,
-        order: Option<FieldOrder>,
-        lookups: &mut Lookups,
-    ) -> Result<norn_wire::Snapshot, StoreError> {
-        let fingerprint = match order {
-            Some(FieldOrder::Typed) => self.fingerprint(lookups)?,
-            Some(FieldOrder::Raw) | None => None,
-        };
-        let generation =
-            u64::try_from(self.reading().write_generation()).map_err(|_| StoreError::Damaged {
-                what: "the store's write generation is below zero".to_string(),
-            })?;
-        Ok(norn_wire::Snapshot::new(
-            self.epoch(),
-            generation,
-            fingerprint,
-            None,
-        ))
-    }
-
-    /// The active fingerprint, read once per request; `None` where no schema
-    /// is pinned.
-    fn fingerprint(&self, lookups: &mut Lookups) -> Result<Option<String>, StoreError> {
-        if let Some(fingerprint) = &lookups.fingerprint {
-            return Ok(fingerprint.clone());
-        }
-        let read = Ran::new(
-            FindStatement::ActiveFingerprint,
-            (
-                norn_db::meta::META_READ_SQL.to_string(),
-                vec![Value::Text(ddl::meta::VAULT_SCHEMA_FINGERPRINT.to_string())],
-            ),
-        );
-        let fingerprint = self
-            .run_statement(&mut lookups.ran, read, |row| row.get::<_, String>(0))
-            .map_err(|problem| error::sql("reading the pinned schema fingerprint", problem))?
-            .into_iter()
-            .next();
-        lookups.fingerprint = Some(fingerprint.clone());
-        Ok(fingerprint)
-    }
-
-    /// Whether `key` is in the field universe: declared, or carried by some
-    /// document. A declared key asks the snapshot nothing; any other is one
-    /// existence seek, asked once per request.
-    pub(crate) fn is_known(
-        &self,
-        key: &str,
-        declared: &DeclaredFields,
-        lookups: &mut Lookups,
-    ) -> Result<bool, StoreError> {
-        if declared.is_declared(key) {
-            return Ok(true);
-        }
-        if let Some(known) = lookups.known.get(key) {
-            return Ok(*known);
-        }
-        let known = self.ask(
-            &mut lookups.ran,
-            Ran::new(FindStatement::KnownKey, compose_known_key(key)),
-            "asking whether a document carries a key",
-        )?;
-        lookups.known.insert(key.to_string(), known);
-        Ok(known)
-    }
-
-    /// Run one yes-or-no probe, which answers exactly one row.
-    fn ask(
-        &self,
-        record: &mut Vec<Ran>,
-        probe: Ran,
-        operation: &'static str,
-    ) -> Result<bool, StoreError> {
-        self.run_statement(record, probe, |row| row.get::<_, bool>(0))
-            .and_then(|answers| {
-                answers
-                    .into_iter()
-                    .next()
-                    .ok_or(rusqlite::Error::QueryReturnedNoRows)
-            })
-            .map_err(|problem| error::sql(operation, problem))
-    }
-
-    /// The field universe: every declared key, and every key a document
-    /// carries.
-    fn field_universe(
-        &self,
-        declared: &DeclaredFields,
-        lookups: &mut Lookups,
-    ) -> Result<BTreeSet<String>, StoreError> {
-        const OPERATION: &str = "reading the keys the vault's documents carry";
-        let carried: Vec<String> = self
-            .run_statement(
-                &mut lookups.ran,
-                Ran::new(FindStatement::FieldUniverse, compose_universe()),
-                |row| row.get(0),
-            )
-            .map_err(|problem| error::sql(OPERATION, problem))?;
-        Ok(carried
-            .into_iter()
-            .chain(declared.keys().map(str::to_string))
-            .collect())
-    }
-
-    /// The reports a request's compile made, with an unknown key's
-    /// suggestions drawn from the field universe — which is read once, and
-    /// only where some key is unknown.
-    pub(crate) fn resolve(
-        &self,
-        reports: Vec<Report>,
-        declared: &DeclaredFields,
-        lookups: &mut Lookups,
-    ) -> Result<Vec<Unsatisfied>, StoreError> {
-        let universe = if reports
-            .iter()
-            .any(|report| matches!(report, Report::Unknown(..)))
-        {
-            self.field_universe(declared, lookups)?
-        } else {
-            BTreeSet::new()
-        };
-        Ok(reports
-            .into_iter()
-            .map(|report| match report {
-                Report::Part(part) => part,
-                Report::Unknown(place, key) => {
-                    let near = suggest::did_you_mean(&key, universe.iter().map(String::as_str));
-                    match place {
-                        KeyPlace::Sort => Unsatisfied::unknown_sort_key(key, near),
-                        KeyPlace::Projection => Unsatisfied::unknown_projection_key(key, near),
-                        KeyPlace::Predicate => Unsatisfied::unknown_predicate_key(key, near),
-                        KeyPlace::Group => Unsatisfied::unknown_group_key(key, near),
-                    }
-                }
-            })
-            .collect())
     }
 
     /// The keys `projection` names that are known, in its order; each unknown
@@ -1151,77 +584,6 @@ impl Snapshot {
         })
     }
 
-    /// Refuse `declared` where it was read from another schema than the
-    /// snapshot pins, so every typed order a request compiles under is the
-    /// one the typed column holds.
-    pub(crate) fn declaration_pinned(
-        &self,
-        declared: &DeclaredFields,
-        lookups: &mut Lookups,
-    ) -> Result<(), ReadRefusal> {
-        let pinned = self.fingerprint(lookups)?;
-        if declared.schema() != pinned.as_deref() {
-            return Err(ReadRefusal::DeclarationNotPinned {
-                declared_under: declared.schema().map(str::to_string),
-                pinned,
-            });
-        }
-        Ok(())
-    }
-
-    /// A request's conjunction compiled under `declared`: the filters its
-    /// parts spell, and the parts it could not apply as asked, in the order
-    /// the request names them.
-    ///
-    /// Every read that filters by a conjunction compiles it here, so a part
-    /// means one thing on every verb. A part whose key is outside the field
-    /// universe is reported and filters nothing; a part that cannot be applied
-    /// is reported and matches nothing. A `resolves` part is compiled into a
-    /// filter where `resolution` answers it, and reported as not applicable,
-    /// filtering nothing, where it does not.
-    pub(crate) fn compile_conjunction(
-        &self,
-        predicates: &[Predicate],
-        resolution: Resolution,
-        declared: &DeclaredFields,
-        lookups: &mut Lookups,
-    ) -> Result<Conjunction, ReadRefusal> {
-        let mut conjunction = Conjunction {
-            filters: Vec::new(),
-            reports: Vec::new(),
-            matches_nothing: false,
-        };
-        for predicate in predicates {
-            membership_bound(predicate)?;
-            if let Predicate::Resolves { target, .. } = predicate
-                && resolution == Resolution::NotApplicable
-            {
-                conjunction
-                    .reports
-                    .push(Report::Part(Unsatisfied::resolves_not_applicable(
-                        target.clone(),
-                    )));
-                continue;
-            }
-            if let Some(key) = predicate_key(predicate)
-                && !self.is_known(key, declared, lookups)?
-            {
-                conjunction
-                    .reports
-                    .push(Report::Unknown(KeyPlace::Predicate, key.to_string()));
-                continue;
-            }
-            match self.compile_predicate(predicate, declared, lookups)? {
-                Part::Filter(filter) => conjunction.filters.push(filter),
-                Part::MatchesNothing(part) => {
-                    conjunction.matches_nothing = true;
-                    conjunction.reports.push(Report::Part(part));
-                }
-            }
-        }
-        Ok(conjunction)
-    }
-
     /// One page of keys: at most `limit`, and where the next page starts.
     ///
     /// `work` takes what the section statements cost: the keys they handed
@@ -1235,35 +597,30 @@ impl Snapshot {
         lookups: &mut Lookups,
         work: &mut FindWork,
     ) -> Result<(Vec<FoundKey>, Option<FindPosition>), StoreError> {
-        let mut keys: Vec<FoundKey> = Vec::new();
-        if !compiled.matches_nothing {
-            for (statement, start) in sections(compiled.order, at) {
-                let rows = limit + 1 - keys.len();
-                if rows == 0 {
-                    break;
-                }
-                let (sql, values) = compose_page(&Section {
+        let sections = if compiled.matches_nothing {
+            Vec::new()
+        } else {
+            sections(compiled.order, at)
+        };
+        let page = self.read_page(
+            sections,
+            limit,
+            &mut lookups.ran,
+            |(statement, start), rows| {
+                let composed = compose_page(&Section {
                     statement,
                     key: field_key(compiled.order),
                     start,
                     filters: &compiled.filters,
                     rows,
                 });
-                let section =
-                    Ran::new(statement, (sql, values)).narrowed_by(compiled.filter_shapes());
-                keys.extend(self.read_keys(&mut lookups.ran, section)?);
-                let ran = lookups.ran.last().expect("the section was just recorded");
-                work.page_stepped(ran.stepped);
-            }
-        }
-        work.keys_read = keys.len() as u64;
-        let next = if keys.len() > limit {
-            keys.truncate(limit);
-            keys.last().map(FoundKey::position)
-        } else {
-            None
-        };
-        Ok((keys, next))
+                Ran::new(statement, composed).narrowed_by(compiled.filter_shapes())
+            },
+            |record, section| self.read_keys(record, section),
+        )?;
+        work.keys_read = page.read;
+        work.page_stepped(page.stepped);
+        Ok((page.rows, page.next.as_ref().map(FoundKey::position)))
     }
 
     /// Run one page section.
@@ -1277,277 +634,6 @@ impl Snapshot {
         })
         .map_err(|problem| error::sql("reading a page of found documents", problem))
     }
-
-    /// One part of the conjunction as the filter a statement spells, or the
-    /// report that it matches nothing.
-    ///
-    /// Only a finding part reads the fingerprint, only a path part with no
-    /// wildcard probes whether it names a bare directory, and only a match
-    /// part probes whether the full-text engine parses its query: the other
-    /// parts bind nothing the snapshot has to be asked for.
-    fn compile_predicate(
-        &self,
-        predicate: &Predicate,
-        declared: &DeclaredFields,
-        lookups: &mut Lookups,
-    ) -> Result<Part, ReadRefusal> {
-        let text = |value: &str| Value::Text(value.to_string());
-        let filter =
-            |shape: FindFilter, values: Vec<Value>| Ok(Part::Filter(Filter { shape, values }));
-        // The order a key's values compare under, and a request's value as a
-        // place in it: its typed sort key where the key carries a typed order,
-        // its text where it does not.
-        let order = |key: &str| match declared.typed_order(key) {
-            None => FieldOrder::Raw,
-            Some(_) => FieldOrder::Typed,
-        };
-        let compared = |key: &String, value: &String| match declared.typed_order(key) {
-            None => Ok(value.clone()),
-            Some(typed) => typed
-                .sort_key(value)
-                .ok_or_else(|| ReadRefusal::UnreadableBound {
-                    key: key.clone(),
-                    value: value.clone(),
-                }),
-        };
-        match predicate {
-            Predicate::Eq { key, value, .. } => filter(
-                FindFilter::Equal(order(key)),
-                vec![text(key), Value::Text(compared(key, value)?)],
-            ),
-            Predicate::NotEq { key, value, .. } => filter(
-                FindFilter::NotEqual(order(key)),
-                vec![text(key), Value::Text(compared(key, value)?)],
-            ),
-            Predicate::In { key, values, .. } => {
-                let listed = canonical_json(&FrontmatterValue::Sequence(
-                    values
-                        .iter()
-                        .map(|value| compared(key, value).map(FrontmatterValue::String))
-                        .collect::<Result<Vec<FrontmatterValue>, ReadRefusal>>()?,
-                ))?;
-                filter(
-                    FindFilter::Member(order(key)),
-                    vec![text(key), Value::Text(listed)],
-                )
-            }
-            Predicate::Has { key, .. } => filter(FindFilter::Present, vec![text(key)]),
-            Predicate::Missing { key, .. } => filter(FindFilter::Absent, vec![text(key)]),
-            Predicate::Before { key, value, .. } | Predicate::After { key, value, .. } => {
-                let (order, bound) = (order(key), compared(key, value)?);
-                let shape = if matches!(predicate, Predicate::Before { .. }) {
-                    FindFilter::Before(order)
-                } else {
-                    FindFilter::After(order)
-                };
-                filter(shape, vec![text(key), Value::Text(bound)])
-            }
-            Predicate::Matches { query, .. } => match self.match_problem(query, lookups)? {
-                Some(problem) => Ok(Part::MatchesNothing(Unsatisfied::malformed_query(
-                    query.clone(),
-                    problem,
-                ))),
-                None => filter(FindFilter::FullText, vec![text(query)]),
-            },
-            Predicate::Path { glob, .. } => match Pattern::parse(glob) {
-                Err(problem) => Ok(Part::MatchesNothing(Unsatisfied::malformed_glob(
-                    glob.clone(),
-                    problem.to_string(),
-                ))),
-                Ok(pattern) => {
-                    if let Some(part) = self.unmatchable_path(&pattern, lookups)? {
-                        return Ok(Part::MatchesNothing(part));
-                    }
-                    let (lower, upper) = glob::path_range(&pattern);
-                    filter(
-                        FindFilter::PathGlob,
-                        vec![Value::Text(lower), upper, text(glob)],
-                    )
-                }
-            },
-            Predicate::LinksTo { .. } => Err(ReadRefusal::NotIndexed {
-                fact: "a link's target",
-            }),
-            Predicate::Resolves { target, .. } => match suffix_probe(target.address()) {
-                Err(_) => Ok(Part::MatchesNothing(Unsatisfied::impossible_path(
-                    target.address(),
-                ))),
-                Ok(probe) => filter(
-                    FindFilter::Resolves,
-                    probe
-                        .ranges()
-                        .flat_map(|(lower, upper)| [text(lower), text(upper)])
-                        .collect(),
-                ),
-            },
-            Predicate::Tag { name, .. } => filter(FindFilter::Tag, vec![text(name)]),
-            Predicate::HasFinding { kind, .. } => filter(
-                FindFilter::Finding,
-                // A finding recorded under no schema is stamped with the
-                // empty fingerprint.
-                vec![
-                    Value::Text(self.fingerprint(lookups)?.unwrap_or_default()),
-                    text(kind.as_str()),
-                ],
-            ),
-            _ => Err(ReadRefusal::UnknownPart {
-                part: "a predicate",
-            }),
-        }
-    }
-
-    /// What the full-text engine says is wrong with `query`, or `None` where it
-    /// parses. One [`FindStatement::MatchProbe`].
-    ///
-    /// A probe that does not prepare or bind is the store's problem and
-    /// refused as one, whatever code it failed with: the query is bound as a
-    /// value, so nothing before the probe is stepped reads it. Only a failure
-    /// met stepping the prepared probe can be the request's, and it is read as
-    /// that exactly where [`query_problem`] says so.
-    fn match_problem(
-        &self,
-        query: &str,
-        lookups: &mut Lookups,
-    ) -> Result<Option<String>, StoreError> {
-        const OPERATION: &str = "asking whether a full-text query parses";
-        let answered = self.run_statement_staged(
-            &mut lookups.ran,
-            Ran::new(FindStatement::MatchProbe, compose_match_probe(query)),
-            |row| row.get::<_, bool>(0),
-        );
-        match answered {
-            Ok(_) => Ok(None),
-            Err(StatementFailure::Stepping(problem)) => match query_problem(&problem) {
-                Some(said) => Ok(Some(said)),
-                None => Err(error::sql(OPERATION, problem)),
-            },
-            Err(StatementFailure::Preparing(problem)) => Err(error::sql(OPERATION, problem)),
-        }
-    }
-
-    /// The report a parsed glob is answered with where it can match nothing by
-    /// construction, or `None` where it can be applied.
-    ///
-    /// A glob with no wildcard is asked first whether it is a bare directory —
-    /// no document at the path, and some beneath it — because that is the
-    /// report that says what the request meant. Then any glob is impossible
-    /// where, read with each wildcard as a letter, it is no document path the
-    /// store accepts: every path the glob could match is spelled that way with
-    /// other characters in the holes, and the refusals the grammar makes are
-    /// about the separators and segments a hole does not change.
-    fn unmatchable_path(
-        &self,
-        pattern: &Pattern,
-        lookups: &mut Lookups,
-    ) -> Result<Option<Unsatisfied>, StoreError> {
-        let source = pattern.as_str();
-        let literal = !source.contains(['*', '?']);
-        if literal && let Ok(directory) = DirectoryPrefix::new(source) {
-            let (lower, upper) = directory.descendant_bounds();
-            let bare = self.ask(
-                &mut lookups.ran,
-                Ran::new(
-                    FindStatement::BareDirectory,
-                    compose_bare_directory(source, &lower, &upper),
-                ),
-                "asking whether a path names a bare directory",
-            )?;
-            if bare {
-                return Ok(Some(Unsatisfied::bare_directory(source)));
-            }
-        }
-        if DocumentPath::new(&source.replace(['*', '?'], "a")).is_err() {
-            return Ok(Some(Unsatisfied::impossible_path(source)));
-        }
-        Ok(None)
-    }
-}
-
-/// Where a statement a find ran failed.
-enum StatementFailure {
-    /// Before it was stepped: its text did not prepare, or its values did not
-    /// bind.
-    Preparing(rusqlite::Error),
-    /// While it was stepped, or while a row it answered was read.
-    Stepping(rusqlite::Error),
-}
-
-impl StatementFailure {
-    /// The driver's error, wherever it was met.
-    fn into_inner(self) -> rusqlite::Error {
-        match self {
-            StatementFailure::Preparing(problem) | StatementFailure::Stepping(problem) => problem,
-        }
-    }
-}
-
-/// What `problem`, met stepping a prepared [`FindStatement::MatchProbe`], says
-/// is wrong with the query it bound, or `None` where it is a problem of the
-/// store's.
-///
-/// The full-text engine parses a query when the probe is stepped, and reports
-/// every query it cannot read — `fts5: syntax error near …`, an unterminated
-/// string, a column filter naming no column — as the plain `SQLITE_ERROR`, with
-/// its words as the message. A damaged index, a failed read, a busy or an
-/// interrupted connection each report a code of their own, and stay the
-/// store's.
-fn query_problem(problem: &norn_db::rusqlite::Error) -> Option<String> {
-    match problem {
-        norn_db::rusqlite::Error::SqliteFailure(failure, message)
-            if failure.extended_code == norn_db::rusqlite::ffi::SQLITE_ERROR =>
-        {
-            Some(message.clone().unwrap_or_else(|| failure.to_string()))
-        }
-        _ => None,
-    }
-}
-
-/// The key a predicate names, where it names one.
-fn predicate_key(predicate: &Predicate) -> Option<&str> {
-    match predicate {
-        Predicate::Eq { key, .. }
-        | Predicate::NotEq { key, .. }
-        | Predicate::In { key, .. }
-        | Predicate::Has { key, .. }
-        | Predicate::Missing { key, .. }
-        | Predicate::Before { key, .. }
-        | Predicate::After { key, .. } => Some(key),
-        _ => None,
-    }
-}
-
-/// The page bound a request names, or [`DEFAULT_PAGE`] where it names none;
-/// a bound outside `1..=`[`MAX_PAGE`] is refused.
-pub(crate) fn page_limit(limit: Option<u32>) -> Result<usize, ReadRefusal> {
-    let Some(limit) = limit else {
-        return Ok(DEFAULT_PAGE);
-    };
-    let given = usize::try_from(limit).unwrap_or(usize::MAX);
-    if given == 0 || given > FindBound::PageRows.ceiling() {
-        return Err(ReadRefusal::OutOfBound {
-            bound: FindBound::PageRows,
-            given,
-        });
-    }
-    Ok(given)
-}
-
-/// A membership part's values held to `1..=`[`IN_VALUES_CEILING`]; every other
-/// part passes.
-fn membership_bound(predicate: &Predicate) -> Result<(), ReadRefusal> {
-    let Predicate::In { key, values, .. } = predicate else {
-        return Ok(());
-    };
-    if values.is_empty() {
-        return Err(ReadRefusal::EmptyMembership { key: key.clone() });
-    }
-    if values.len() > FindBound::MembershipValues.ceiling() {
-        return Err(ReadRefusal::OutOfBound {
-            bound: FindBound::MembershipValues,
-            given: values.len(),
-        });
-    }
-    Ok(())
 }
 
 /// The key a field order sorts by.
@@ -1598,48 +684,5 @@ fn sections<'a>(
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use norn_db::rusqlite::{Error, ffi};
-
-    use super::query_problem;
-
-    fn failure(extended_code: i32, message: &str) -> Error {
-        Error::SqliteFailure(ffi::Error::new(extended_code), Some(message.to_string()))
-    }
-
-    /// The engine's words for a query it cannot read are the request's
-    /// problem; a damaged index, a failed read, a busy or an interrupted
-    /// connection is the store's, whatever its message says.
-    #[test]
-    fn only_a_query_the_engine_cannot_read_is_the_requests_problem() {
-        for said in [
-            "fts5: syntax error near \"\"",
-            "unterminated string",
-            "no such column: title",
-        ] {
-            assert_eq!(
-                query_problem(&failure(ffi::SQLITE_ERROR, said)).as_deref(),
-                Some(said)
-            );
-        }
-        for code in [
-            ffi::SQLITE_CORRUPT_VTAB,
-            ffi::SQLITE_CORRUPT,
-            ffi::SQLITE_IOERR_READ,
-            ffi::SQLITE_BUSY,
-            ffi::SQLITE_INTERRUPT,
-            ffi::SQLITE_NOMEM,
-        ] {
-            assert_eq!(
-                query_problem(&failure(code, "fts5: syntax error near \"\"")),
-                None,
-                "code {code} was read as the request's"
-            );
-        }
-        assert_eq!(query_problem(&Error::QueryReturnedNoRows), None);
     }
 }

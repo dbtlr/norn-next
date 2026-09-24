@@ -774,8 +774,8 @@ kind under the active fingerprint. The full-text match shape is barred as that f
 suffix/stem resolve and findings-for-path are read through statements the seam above bars.
 
 **The count-by-field shape has a builder** beside it: the count builder compiles a
-request's conjunction through the find builder's own compilation — so a part narrows a
-count exactly as it narrows a find, and is reported the same way where it cannot be
+request's conjunction through the one compilation every read builder shares — so a part
+narrows a count exactly as it narrows a find, and is reported the same way where it cannot be
 applied, except that a `resolves` part is reported as not applicable and filters
 nothing — and groups the matched documents into tallies. A key holding a set groups a
 document once per element, a tag grouping once per tag, and several keys by their cross

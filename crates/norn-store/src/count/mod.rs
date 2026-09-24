@@ -57,22 +57,23 @@
 //! and what each reads.
 //!
 //! **What an unfiltered grouped count costs is linear in the vault's
-//! documents.** Its valued section reads the leading key's rows from the page's position on —
-//! and, grouped by one key, stops at the page's bound — and its `null` section
-//! walks every document, since a document holding no value is found by no seek
+//! documents.** Its valued section reads the leading key's rows from the
+//! page's position on — and, grouped by one key, stops at the page's bound —
+//! and its `null` section walks every document, since a document holding no value is found by no seek
 //! of the rows that hold one. **A filter that keeps what it seeks drives
 //! both**, so a narrowing part narrows the count's cost to the documents it
 //! matches.
 //!
 //! # A conjunction means what it means to a find
 //!
-//! The conjunction is compiled by the find builder's own compilation, so a
-//! part narrows a count exactly as it narrows a find, and the parts that cannot
-//! be applied are reported the same way: a part with no meaning empties the
-//! match — a grouped count answers no tally, and one grouped by nothing its
-//! one tally, of zero, exactly as a filter matching no document does — and a
-//! predicate key outside the field universe is reported and filters nothing. **A `resolves` part is not applicable**: it answers which
-//! documents a target names, which is a find, so a count reports it
+//! The conjunction is compiled by the one compilation every read builder
+//! shares, so a part narrows a count exactly as it narrows a find, and the
+//! parts that cannot be applied are reported the same way: a part with no
+//! meaning empties the match — a grouped count answers no tally, and one
+//! grouped by nothing its one tally, of zero, exactly as a filter matching no
+//! document does — and a predicate key outside the field universe is reported
+//! and filters nothing. **A `resolves` part is not applicable**: it answers
+//! which documents a target names, which is a find, so a count reports it
 //! ([`Unsatisfied::ResolvesNotApplicable`]) and filters nothing by it.
 
 mod statement;
@@ -84,7 +85,7 @@ use norn_wire::{
 
 use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
-use crate::find::{
+use crate::read::{
     Conjunction, FieldOrder, FindFilter, KeyPlace, Lookups, Ran, ReadRefusal, ReadStatement,
     Report, Resolution, Stepped, page_limit,
 };
@@ -154,7 +155,7 @@ pub struct CountWork {
 }
 
 impl CountWork {
-    /// Add what SQLite counted stepping one tally statement.
+    /// Add what SQLite counted stepping the tally statements.
     fn stepped(&mut self, stepped: Stepped) {
         self.full_scan_steps += stepped.full_scan_steps;
         self.sorts += stepped.sorts;
@@ -216,16 +217,13 @@ impl Snapshot {
     ) -> Result<Vec<CountPlan>, ReadRefusal> {
         let mut lookups = Lookups::default();
         self.run_count(params, declared, &mut lookups)?;
-        let mut plans = Vec::with_capacity(lookups.ran.len());
-        for ran in lookups.ran {
-            let (statement, filters) = (ran.statement, ran.filters.clone());
-            plans.push(CountPlan {
+        Ok(
+            self.explained(lookups.ran, |statement, filters, plan| CountPlan {
                 statement,
                 filters,
-                plan: self.explain(ran)?,
-            });
-        }
-        Ok(plans)
+                plan,
+            })?,
+        )
     }
 
     /// The count [`Snapshot::count`] answers and [`Snapshot::count_plans`]
@@ -320,6 +318,10 @@ impl Snapshot {
 
     /// One page of tallies: at most `limit`, and the tally the next page
     /// continues after.
+    ///
+    /// `work` takes what the tally statements cost: the tallies they handed
+    /// back — one past the bound where a next page exists — and what SQLite
+    /// counted stepping them.
     fn page_tallies(
         &self,
         members: &[Member<'_>],
@@ -329,27 +331,28 @@ impl Snapshot {
         lookups: &mut Lookups,
         work: &mut CountWork,
     ) -> Result<(Vec<Tally>, Option<Tally>), StoreError> {
-        let mut tallies: Vec<Tally> = Vec::new();
+        let sections = sections(members, at);
         if conjunction.matches_nothing {
             // A match a part emptied is still one tally where the count groups
             // by nothing: no document is in it, and no statement is run to say
             // so. A grouped count has no group.
-            work.tallies_read = 0;
-            if sections(members, at).contains(&(CountStatement::Total, None)) {
-                tallies.push(Tally::new(Vec::new(), 0));
-            }
+            let tallies = if sections.contains(&(CountStatement::Total, None)) {
+                vec![Tally::new(Vec::new(), 0)]
+            } else {
+                Vec::new()
+            };
             return Ok((tallies, None));
-        } else {
-            let shapes: Vec<FindFilter> = conjunction
-                .filters
-                .iter()
-                .map(|filter| filter.shape)
-                .collect();
-            for (statement, after) in sections(members, at) {
-                let rows = limit + 1 - tallies.len();
-                if rows == 0 {
-                    break;
-                }
+        }
+        let shapes: Vec<FindFilter> = conjunction
+            .filters
+            .iter()
+            .map(|filter| filter.shape)
+            .collect();
+        let page = self.read_page(
+            sections,
+            limit,
+            &mut lookups.ran,
+            |(statement, after), rows| {
                 let composed = compose_tallies(&Tallies {
                     statement,
                     members,
@@ -357,20 +360,13 @@ impl Snapshot {
                     filters: &conjunction.filters,
                     rows,
                 });
-                let section = Ran::new(statement, composed).narrowed_by(shapes.clone());
-                tallies.extend(self.read_tallies(&mut lookups.ran, section, members.len())?);
-                let ran = lookups.ran.last().expect("the section was just recorded");
-                work.stepped(ran.stepped);
-            }
-        }
-        work.tallies_read = tallies.len() as u64;
-        let next = if tallies.len() > limit {
-            tallies.truncate(limit);
-            tallies.last().cloned()
-        } else {
-            None
-        };
-        Ok((tallies, next))
+                Ran::new(statement, composed).narrowed_by(shapes.clone())
+            },
+            |record, section| self.read_tallies(record, section, members.len()),
+        )?;
+        work.tallies_read = page.read;
+        work.stepped(page.stepped);
+        Ok((page.rows, page.next))
     }
 
     /// Run one tally statement over a grouping `width` members wide.

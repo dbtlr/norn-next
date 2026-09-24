@@ -27,10 +27,11 @@ use super::statement::{
     DocumentColumns, FindStatement, Nested, compose_documents, compose_nested_head,
     compose_nested_total,
 };
-use super::{FoundKey, Projection, Ran, Stepped};
+use super::{FoundKey, Projection};
 use crate::error::{self, StoreError};
 use crate::facts::{Span, TagSource};
 use crate::json::projected_fields;
+use crate::read::{Ran, Stepped};
 use crate::request::{Reading, stored_block, stored_heading, stored_tag};
 use crate::store::Snapshot;
 
