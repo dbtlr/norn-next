@@ -606,7 +606,7 @@ fn upsert(
                 document,
                 row.key(),
                 row.ordinal(),
-                facts.path.as_str(),
+                row.path(),
                 container,
                 raw,
                 typed,

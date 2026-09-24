@@ -1041,15 +1041,18 @@ const NULL: &str = "(none)";
 ///   `blocks`, `document_tags` and `document_fields`; `finding` on
 ///   `finding_classes` and `finding_candidates`. [`StoreProjection::entries`]
 ///   already names the row this one stands under in its `at`.
-/// - **`ordinal`** on `links`, `headings`, `blocks` and `document_tags`. These
-///   are read in ordinal order and rendered at their position in the vec
-///   ([`push_indexed`]), so the value is carried by where a row stands rather
-///   than repeated as a named column. `document_fields` and
-///   `finding_candidates` render their position explicitly instead — `ordinal`
-///   and a candidate's `rank` — because their rows interleave more than one
-///   key or subject, where position alone would not say which.
-/// - **`generation`** on `findings` — the write generation, dropped for
-///   [`ProjectedFinding`]'s own reason.
+/// - **`ordinal`** on `links`, `headings`, `blocks` and `document_tags`, and
+///   **`rank`** on `finding_candidates`. These are read in that order and
+///   rendered at their position within their owning row ([`push_indexed`] and
+///   the candidates' own enumeration), so the value is carried by where a row
+///   stands rather than repeated as a named column. `document_fields` renders
+///   its `ordinal` from the stored column instead, because its rows interleave
+///   more than one key under one document, where position alone would not say
+///   which.
+/// - **`generation`** on `findings` and on `documents`, and on the vault-schema
+///   pin — write generations, dropped for [`ProjectedFinding`]'s own reason.
+/// - **`derived_at`** on `documents` and every other timestamp — when a row was
+///   written, never a fact about the vault.
 ///
 /// Every other column is rendered, `document_fields.path` included: the
 /// document's own path, copied onto every field row so a field sort can page
