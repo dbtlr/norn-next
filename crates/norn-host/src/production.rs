@@ -159,6 +159,9 @@ pub struct ProductionAttachment {
     /// They stand beside `controls` rather than in place of them, so the
     /// fingerprints the attachment reports as active stay the ones it serves
     /// under until rung 3 reopens the store and takes these into `controls`.
+    /// No recovery or reload runs while they stand, which
+    /// [`ProductionAttachment::debug_assert_nothing_held_for_rung_three`]
+    /// asserts.
     held_for_rung_three: Option<ReloadCandidate>,
     /// Whether the engines are owed the config `controls` carries.
     ///
@@ -226,6 +229,24 @@ impl ProductionAttachment {
     fn hold_for_rung_three(&mut self, candidate: ReloadCandidate) {
         self.config_delivery_owed = candidate.undeclarable().is_none();
         self.held_for_rung_three = Some(candidate);
+    }
+
+    /// Assert that no controls stand held for rung 3, at the start of a
+    /// recovery or a reload.
+    ///
+    /// Both legs put the controls they read into service, and neither meets
+    /// held ones: a leg that holds controls returns the damage verdict, the
+    /// lifecycle parks the coverage and hands straight on to the rebuild, a
+    /// demand ranks the rebuild ahead of a recovery, a reload is refused
+    /// while the entry publishes that verdict, and every other route gives
+    /// the attachment to a release. A recovery or reload reached over held
+    /// controls would put its own read beside them, and the rung after it
+    /// would pin and deliver the held controls over that read.
+    fn debug_assert_nothing_held_for_rung_three(&self) {
+        debug_assert!(
+            self.held_for_rung_three.is_none(),
+            "a recovery or reload ran over controls held for rung 3"
+        );
     }
 }
 
@@ -850,6 +871,7 @@ impl EntryOps for ProductionEntryOps {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
+        attachment.debug_assert_nothing_held_for_rung_three();
         let _job = self.evidence.attributing();
         self.evidence.count_recovery();
         if !attachment.maintainership.still_current().map_err(effect)? {
@@ -912,6 +934,7 @@ impl EntryOps for ProductionEntryOps {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<ReloadOutcome, crate::EntryReloadFailure> {
+        attachment.debug_assert_nothing_held_for_rung_three();
         let _job = self.evidence.attributing();
         if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership.into());
@@ -8413,6 +8436,50 @@ mod tests {
             "the rebuild delivered config held under a declaration this build cannot read"
         );
         ops.detach(&name, attachment);
+    }
+
+    /// **A recovery never runs over controls held for rung 3.** A leg that
+    /// holds controls returns the damage verdict, and the lifecycle answers it
+    /// with the rung that takes them, ranked ahead of any recovery. A
+    /// recovery reached anyway would put its own read into service beside
+    /// the held controls, and the rung after it would pin and deliver the
+    /// held ones over what the recovery read.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "controls held for rung 3")]
+    fn a_recovery_over_controls_held_for_rung_three_trips_its_debug_assertion() {
+        let f = Fixture::new("recover-over-held-controls");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name, _receiver) = ops_recording_sample_config(&f);
+        let progress = ProgressReporter::disconnected();
+
+        let mut attachment =
+            derive_under_the_other_order(&f, ops.attach(&f.registration(), &progress).unwrap());
+        write_sample_config(&f, 2);
+        ops.recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over a store derived under the other order");
+
+        let _ = ops.recover(&name, &mut attachment, &progress);
+    }
+
+    /// **A reload never runs over controls held for rung 3**, for the reason
+    /// a recovery never does.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "controls held for rung 3")]
+    fn a_reload_over_controls_held_for_rung_three_trips_its_debug_assertion() {
+        let f = Fixture::new("reload-over-held-controls");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name, _receiver) = ops_recording_sample_config(&f);
+        let progress = ProgressReporter::disconnected();
+
+        let mut attachment =
+            derive_under_the_other_order(&f, ops.attach(&f.registration(), &progress).unwrap());
+        write_sample_config(&f, 2);
+        ops.recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over a store derived under the other order");
+
+        let _ = ops.reload(&name, &mut attachment, &progress);
     }
 
     /// **Owed config is delivered once.** The rebuild that pins the order a
