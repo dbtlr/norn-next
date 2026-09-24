@@ -57,8 +57,9 @@
 //! file outlives the handle and is the one reading an open may refuse over, and
 //! the path order, the case behaviour the vault root was proven to have, which
 //! every row was derived under. An open under another order than the one the
-//! store records is a rebuild from zero, reported as the store's own
-//! [`RebuildReason::Client`] detail naming both orders: see
+//! store records, or over a store that records none, is a rebuild from zero,
+//! reported as the store's own [`RebuildReason::Client`] detail naming what the
+//! store records and the order its root proves: see
 //! [`Store::path_order`]. What it takes back is [`OpenOutcome`]: the rung the
 //! state was at, with a typed [`RebuildReason`] where the answer was a rebuild.
 //!
@@ -663,7 +664,7 @@ impl Store {
     /// and an open under another one rebuilds from zero: rows that root could
     /// not have produced are never served under it. A heal's merge is not among
     /// them; it pages rows under its own walk's order. A store that records no
-    /// order takes the one it is opened under and keeps its rows.
+    /// order is rebuilt the same way, since nothing vouches for its rows.
     pub fn path_order(&self) -> StoredPathOrder {
         self.order
     }
@@ -676,10 +677,8 @@ impl Store {
     /// already open when its root's case behaviour is proven again, which is
     /// what a recovery that installs coverage anew does.
     pub fn path_order_moved(&self, proven: StoredPathOrder) -> Option<RebuildReason> {
-        match judge_path_order(Some(self.order.as_str()), proven) {
-            OrderVerdict::Moved { detail } => Some(RebuildReason::Client { detail }),
-            OrderVerdict::Derived | OrderVerdict::Unrecorded => None,
-        }
+        path_order_rebuild(Some(self.order.as_str()), proven)
+            .map(|detail| RebuildReason::Client { detail })
     }
 
     /// The identity this database carries from creation to discard.
@@ -1115,36 +1114,30 @@ struct StoreClient {
     order: StoredPathOrder,
 }
 
-/// What an open under one order makes of the order a store records.
-enum OrderVerdict {
-    /// The store records no order, so nothing says its rows were derived
-    /// under another one.
-    Unrecorded,
-    /// The rows were derived under the order the open is under.
-    Derived,
-    /// The rows were derived under another order, or under a spelling no
-    /// build records, and the detail says which and what the root proves.
-    Moved { detail: String },
-}
-
-/// Judge the order a store records against the one its root proves.
+/// Judge the order a store records against the one its root proves: the
+/// reason the store owes a rebuild from zero, naming what it records and what
+/// the root proves, or `None` where its rows were derived under that order.
+///
+/// A store that records no order owes the rebuild too: nothing says which
+/// order its rows were derived under, so nothing says they are rows the root
+/// could have produced. So does a recorded spelling no build writes.
 ///
 /// One judgment for both occasions it is taken on: an open over a database
 /// the mechanics call usable, and a store already open whose root's case
 /// behaviour is proven again.
-fn judge_path_order(recorded: Option<&str>, proven: StoredPathOrder) -> OrderVerdict {
+fn path_order_rebuild(recorded: Option<&str>, proven: StoredPathOrder) -> Option<String> {
     match recorded {
-        None => OrderVerdict::Unrecorded,
-        Some(recorded) if StoredPathOrder::from_recorded(recorded) == Some(proven) => {
-            OrderVerdict::Derived
-        }
-        Some(recorded) => OrderVerdict::Moved {
-            detail: format!(
-                "the store's rows were derived under the `{recorded}` path order and its root \
-                 proves `{}`",
-                proven.as_str()
-            ),
-        },
+        Some(recorded) if StoredPathOrder::from_recorded(recorded) == Some(proven) => None,
+        Some(recorded) => Some(format!(
+            "the store's rows were derived under the `{recorded}` path order and its root proves \
+             `{}`",
+            proven.as_str()
+        )),
+        None => Some(format!(
+            "the store records no path order its rows were derived under, and its root proves \
+             `{}`",
+            proven.as_str()
+        )),
     }
 }
 
@@ -1243,20 +1236,15 @@ impl StoreClient {
     /// projection of the vault, so rows derived under an order the root no
     /// longer proves cost a derivation to replace — and serving them would
     /// answer with spellings merged or split the way this root does not merge
-    /// or split them. A recorded spelling no build writes is the same rebuild.
-    ///
-    /// A database that records no order records the one it is opened under
-    /// and keeps its rows: nothing says they were derived under another.
+    /// or split them. A recorded spelling no build writes, and a database that
+    /// records no order at all, are the same rebuild: nothing vouches for the
+    /// order their rows were derived under.
     fn adopt_path_order(&self, connection: &Connection) -> Result<Adoption, StoreError> {
         let recorded = norn_db::meta::get_meta::<String>(connection, ddl::meta::PATH_ORDER)?;
-        match judge_path_order(recorded.as_deref(), self.order) {
-            OrderVerdict::Unrecorded => {
-                norn_db::meta::put_meta(connection, ddl::meta::PATH_ORDER, self.order.as_str())?;
-                Ok(Adoption::Keep)
-            }
-            OrderVerdict::Derived => Ok(Adoption::Keep),
-            OrderVerdict::Moved { detail } => Ok(Adoption::Rebuild { detail }),
-        }
+        Ok(match path_order_rebuild(recorded.as_deref(), self.order) {
+            None => Adoption::Keep,
+            Some(detail) => Adoption::Rebuild { detail },
+        })
     }
 }
 

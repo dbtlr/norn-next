@@ -840,40 +840,58 @@ fn a_store_opened_under_the_order_it_was_derived_under_is_reused() {
     }
 }
 
-/// **A store that records no order takes the one it is opened under**, and
-/// keeps what it holds: nothing says its rows were derived under another. The
-/// order it takes is recorded, so an open under the other one afterwards is
-/// the rebuild.
+/// **A store that records no order is rebuilt from zero, whichever order it is
+/// opened under.** Nothing says which order its rows were derived under, so
+/// nothing says they are rows the root could have produced: the rebuild's
+/// reason says the store records none and names the order the root proves,
+/// and the rebuilt store records that order, so the next open under it reuses
+/// the store.
 #[test]
-fn a_store_recording_no_path_order_records_the_one_it_is_opened_under() {
-    let scratch = Scratch::new("order-unrecorded");
-    let database = scratch.database();
+fn a_store_recording_no_path_order_is_rebuilt_from_zero() {
+    for (_, proven) in ORDER_PAIRS {
+        let scratch = Scratch::new(&format!("order-unrecorded-{}", proven.as_str()));
+        let database = scratch.database();
 
-    let mut store = Store::open(&database, StoredPathOrder::Sensitive).expect("creating a store");
-    write_document(
-        &mut store.begin_request(),
-        &document("a/Foo.md", "hash-1", "a body\n"),
-    );
-    induced_failure::execute_out_of_band(&mut store, "DELETE FROM meta WHERE key = 'path_order'")
+        let mut store = Store::open(&database, proven).expect("creating a store");
+        write_document(
+            &mut store.begin_request(),
+            &document("a/Foo.md", "hash-1", "a body\n"),
+        );
+        induced_failure::execute_out_of_band(
+            &mut store,
+            "DELETE FROM meta WHERE key = 'path_order'",
+        )
         .expect("deleting the path_order row");
-    drop(store);
+        let epoch = store.epoch().to_string();
+        drop(store);
 
-    let mut adopted =
-        Store::open(&database, StoredPathOrder::AsciiCaseInsensitive).expect("reopening a store");
-    assert_eq!(*adopted.open_outcome(), OpenOutcome::Reused);
-    assert_eq!(adopted.path_order(), StoredPathOrder::AsciiCaseInsensitive);
-    assert_eq!(stored_paths(&mut adopted), ["a/Foo.md"]);
-    drop(adopted);
+        let mut rebuilt = Store::open(&database, proven).expect("reopening a store");
+        let OpenOutcome::RebuiltFromZero(RebuildReason::Client { detail }) = rebuilt.open_outcome()
+        else {
+            panic!(
+                "a store recording no order opened under {proven:?} as {:?}",
+                rebuilt.open_outcome()
+            );
+        };
+        assert!(
+            detail.contains("records no path order")
+                && detail.contains(&format!("`{}`", proven.as_str())),
+            "the reason does not say the store records none and name the proven order: {detail}"
+        );
+        assert_ne!(rebuilt.epoch(), epoch, "a rebuild from zero kept its epoch");
+        assert!(
+            stored_paths(&mut rebuilt).is_empty(),
+            "the rebuild kept rows no recorded order vouches for"
+        );
+        drop(rebuilt);
 
-    let rebuilt = Store::open(&database, StoredPathOrder::Sensitive).expect("reopening a store");
-    assert!(
-        matches!(
-            rebuilt.open_outcome(),
-            OpenOutcome::RebuiltFromZero(RebuildReason::Client { .. })
-        ),
-        "the adopting open recorded no order: {:?}",
-        rebuilt.open_outcome()
-    );
+        let reopened = Store::open(&database, proven).expect("reopening a store");
+        assert_eq!(
+            *reopened.open_outcome(),
+            OpenOutcome::Reused,
+            "the rebuild did not record the order it was opened under"
+        );
+    }
 }
 
 /// **A recorded order no build writes is rebuilt from zero.** The rows are a

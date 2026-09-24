@@ -61,6 +61,6 @@ pub(crate) const STORE_MODE: &str = "store_mode";
 /// which spellings are one row — and the key space a finding's classes are
 /// filed in both follow it, so an open under another order rebuilds from zero
 /// rather than serving rows that root could not have produced.
-/// [`crate::Store`] records it at create, records it on an open over a store
-/// that records none, and judges it at every other open.
+/// [`crate::Store`] records it at create and judges it at every other open; a
+/// store that records none is rebuilt as one that records another.
 pub(crate) const PATH_ORDER: &str = "path_order";

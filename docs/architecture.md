@@ -123,8 +123,9 @@ may not be added.
   key space a finding's classes are filed in both follow it, and no later derivation converges
   either. An attach
   proves the order through its new coverage before it opens the store and opens it under that
-  order, and the open rebuilds from zero where the recorded order differs, reported as the
-  store's own rebuild reason naming both orders. A recovery and a reload hold a store opened
+  order, and the open rebuilds from zero where the recorded order differs or none is
+  recorded, reported as the store's own rebuild reason naming what the store records and the
+  order the root proves. A recovery and a reload hold a store opened
   before the standing coverage proved its order, so each judges the store against that proof
   before it pins or derives anything — a recovery whatever its declaration reads as — and a
   moved order is routed to the host's rung-3 leg, which rebuilds the store under the proven
