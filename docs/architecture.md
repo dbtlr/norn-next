@@ -121,15 +121,17 @@ may not be added.
   store records the path order its rows were derived under in `meta`, beside the store
   fingerprint, as a rebuild input: document identity — which spellings are one row — and the
   key space a finding's classes are filed in both follow it, and no later derivation converges
-  either. An attach
-  proves the order through its new coverage before it opens the store and opens it under that
-  order, and the open rebuilds from zero where the recorded order differs or none is
-  recorded, reported as the store's own rebuild reason naming what the store records and the
-  order the root proves. A recovery and a reload hold a store opened
-  before the standing coverage proved its order, so each judges the store against that proof
-  before it pins or derives anything — a recovery whatever its declaration reads as — and a
-  moved order is routed to the host's rung-3 leg, which rebuilds the store under the proven
-  order and derives the vault again where the declaration is one this build reads.
+  either. An attach proves the order through its new coverage before it opens the store and
+  opens it under that order, and the open rebuilds from zero where the recorded order differs,
+  none is recorded, or the recorded value is one no build writes, reported as the store's own
+  rebuild reason naming what the store records and the order the root proves. A recovery
+  installs new coverage over a store opened under the old coverage's proof, so it judges the
+  store against the new proof before it pins or derives anything, whatever its declaration
+  reads as, and a moved order is routed to the host's rung-3 leg, which rebuilds the store
+  under the proven order and derives the vault again where the declaration is one this build
+  reads. A reload installs no coverage, so the store it holds was opened, judged or rebuilt
+  under the standing proof; after it refuses a declaration this build cannot read, it judges
+  the order again as a guard ahead of its pin.
 - **Corruption, or any state the lower rungs cannot resolve** — at any time, before or after
   release.
 
@@ -1596,11 +1598,12 @@ it through that one: a find's `resolves` part and a class read today, and the li
 findings the link index lands in Layer 3, which file under the class keys it compiles. Case
 is the root's: the coverage proves the root's case behaviour when it is installed, and the
 store records the order its rows were derived under. A read answers under the store's order,
-which its snapshot takes from the handle the store minted, so no read detects one; an attach,
-a recovery and a reload judge the store's order against the coverage's proof, and a store
+which its snapshot takes from the handle the store minted, so no read detects one. An attach
+opens the store under the coverage's proof, a recovery judges the store against the proof
+its new coverage makes, and a reload judges it again as a guard ahead of its pin; a store
 derived under the other order is rebuilt from zero under the proven one before anything
-derives into it. Every store holds each document's suffix key twice — as written, and with ASCII case folded —
-each under its own index; a root that tells spellings apart probes the raw key and never the
+derives into it. Every store holds each document's suffix key twice — as written, and with
+ASCII case folded — each under its own index; a root that tells spellings apart probes the raw key and never the
 folded one, and a root that folds ASCII case probes the folded key, where every spelling of a
 target is one class and an exact-case match takes no precedence. The vault schema's
 ambiguity-ignore globs keep the places under them out of a class unless the target names the
