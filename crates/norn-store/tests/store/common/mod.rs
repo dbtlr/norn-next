@@ -26,7 +26,10 @@ use norn_wire::{FindingKind, Severity};
 /// table's external content. Reading any of them costs the bytes of the
 /// documents read, and no index a set-valued answer reads is keyed by one.
 /// The table's other columns are keys, hashes and lengths, whose width does
-/// not follow the document's.
+/// not follow the document's. The column FTS5 names after its table,
+/// `documents_fts.documents_fts`, is not payload: it is the handle a `MATCH`
+/// and a ranking function read the index through — its postings and each
+/// document's token counts — and never the text the index is over.
 pub const DOCUMENT_PAYLOAD: &[(&str, &str)] = &[
     ("documents", "body"),
     ("documents", "frontmatter"),

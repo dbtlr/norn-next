@@ -15,7 +15,6 @@ use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
     ContentModel, FindStatement, PageRefusal, ReadFilter, ReadStatement, SEARCH_STATEMENTS,
     SearchPlan, SearchStatement, Searched, Snapshot, SnapshotReader, Store, TagFact, TagSource,
-    induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan, ScanTarget};
 use norn_wire::{
@@ -1148,4 +1147,100 @@ fn ranking_costs_every_match_and_a_narrowing_part_narrows_what_is_scored() {
         "a narrowed page grew by {narrowed} and an unfiltered one by {unfiltered}: a match the \
          tag rejects was scored"
     );
+}
+
+// ---- the payload bar ----
+
+/// **No statement a search runs reads a document's payload, and its page
+/// reads the full-text index rather than the text it indexes.** Every
+/// statement a search emits — the lexical page, and each probe its
+/// conjunction's compilation runs — for every request the vault-size bar reads,
+/// under every filter a search applies, reads none of
+/// [`crate::common::DOCUMENT_PAYLOAD`] as SQLite's authorizer reports the
+/// columns it reads. A `MATCH` and `bm25()` take the column FTS5 names after
+/// its table, `documents_fts.documents_fts`, which is the handle to the index —
+/// its postings and each document's token counts — and the page reads it;
+/// `documents_fts.body` is the text the index is over, read through
+/// `documents.body` by row id, and it stays payload, so no search statement
+/// reads it. What a search costs never includes the bytes of the documents it
+/// ranks.
+///
+/// Controls: a search projecting the body and the fields hydrates rows reading
+/// the body and the frontmatter; and the page's own reads with the full-text
+/// body column beside them — the read a snippet or a highlight makes. Each
+/// fails the bar.
+#[test]
+fn no_statement_a_search_runs_reads_a_documents_payload() {
+    let searching_store = Searching::new("search-payload");
+    let mut shapes = vault_size_requests(&searching_store);
+    shapes.extend(
+        filtered()
+            .into_iter()
+            .map(|(predicate, _)| searching("lantern").with_predicates([predicate])),
+    );
+    shapes.push(searching("lantern").with_predicates([Predicate::equal_to("statis", "x")]));
+    shapes.push(searching("lantern").with_predicates([Predicate::path("notes")]));
+    let mut reached: Vec<ReadStatement> = Vec::new();
+    for params in &shapes {
+        for emitted in searching_store.plans(params) {
+            reached.push(emitted.statement);
+            let reads = reads_of(&emitted.plan);
+            reads.assert_reads_none_of(DOCUMENT_PAYLOAD);
+            if emitted.statement == ReadStatement::Search(SearchStatement::LexicalPage) {
+                assert!(
+                    reads.reads("documents_fts", "documents_fts"),
+                    "a lexical page did not read the full-text index: {reads:?}"
+                );
+            }
+        }
+    }
+    for statement in SearchStatement::all() {
+        assert!(
+            reached.contains(&ReadStatement::Search(statement)),
+            "the payload bar never reached {statement:?}: {reached:?}"
+        );
+    }
+    for probe in [
+        FindStatement::ActiveFingerprint,
+        FindStatement::KnownKey,
+        FindStatement::FieldUniverse,
+        FindStatement::BareDirectory,
+        FindStatement::MatchProbe,
+    ] {
+        assert!(
+            reached.contains(&ReadStatement::Find(probe)),
+            "the payload bar never reached {probe:?}: {reached:?}"
+        );
+    }
+
+    let hydrated = searching_store.plans(
+        &searching("lantern").with_columns([Column::fields(), Column::body()]),
+    );
+    let rows = hydrated
+        .iter()
+        .find(|emitted| emitted.statement == ReadStatement::Find(FindStatement::HydrateDocuments))
+        .expect("a search naming columns hydrates its hits' rows");
+    let rows = reads_of(&rows.plan);
+    assert!(
+        rows.reads("documents", "body") && rows.reads("documents", "frontmatter"),
+        "a hydration projecting the body and the fields read neither: {rows:?}"
+    );
+    failure_of("a hydration of the body and the fields", || {
+        rows.assert_reads_none_of(DOCUMENT_PAYLOAD)
+    });
+    let page = hydrated
+        .iter()
+        .find(|emitted| emitted.statement == ReadStatement::Search(SearchStatement::LexicalPage))
+        .expect("a lexical page");
+    let snippeted = norn_testkit::explain::StatementReads::new(
+        page.plan.sql.clone(),
+        page.plan
+            .reads
+            .iter()
+            .map(|read| (read.table.clone(), read.column.clone()))
+            .chain([("documents_fts".to_string(), "body".to_string())]),
+    );
+    failure_of("a page reading the full-text body column", || {
+        snippeted.assert_reads_none_of(DOCUMENT_PAYLOAD)
+    });
 }
