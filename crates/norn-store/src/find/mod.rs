@@ -200,6 +200,17 @@ pub(crate) struct FoundKey {
 }
 
 impl FoundKey {
+    /// The document at row id `document` and `path`, standing in no sorted
+    /// order: a key a read hydrates the rows of, whatever order it paged them
+    /// in.
+    pub(crate) fn unsorted(document: i64, path: String) -> Self {
+        FoundKey {
+            document,
+            path,
+            sort: None,
+        }
+    }
+
     /// The document's path.
     pub(crate) fn path(&self) -> &str {
         &self.path
@@ -323,7 +334,7 @@ pub(crate) struct Projection<'a> {
 impl<'a> Projection<'a> {
     /// What `columns` projects, or the refusal of a column the store keeps no
     /// index of.
-    fn of(columns: &'a [Column]) -> Result<Self, PageRefusal> {
+    pub(crate) fn of(columns: &'a [Column]) -> Result<Self, PageRefusal> {
         let mut projection = Projection {
             all_fields: false,
             keys: Vec::new(),
@@ -439,7 +450,7 @@ impl Snapshot {
             None => (None, Vec::new()),
             Some(cursor) => self.judge(cursor, compiled.order, lookups)?,
         };
-        let fields = self.projected_keys(&projection, declared, lookups, &mut compiled)?;
+        let fields = self.projected_keys(&projection, declared, lookups, &mut compiled.reports)?;
 
         let mut work = FindWork::default();
         let (keys, next) = self.page_keys(&compiled, limit, resume.as_ref(), lookups, &mut work)?;
@@ -448,21 +459,7 @@ impl Snapshot {
         let next =
             next.map(|at| Cursor::new(snapshot.clone(), CursorKey::document(at.sort, at.path)));
         let unsatisfied = self.resolve(compiled.reports, declared, lookups)?;
-        // A finding recorded under no schema is stamped with the empty
-        // fingerprint.
-        let findings_under = if projection.findings {
-            Some(self.fingerprint(lookups)?.unwrap_or_default())
-        } else {
-            None
-        };
-        let rows = self.hydrate(
-            &keys,
-            &projection,
-            &fields,
-            findings_under.as_deref(),
-            &mut work,
-            &mut lookups.ran,
-        )?;
+        let rows = self.hydrate_rows(&keys, &projection, &fields, lookups, &mut work)?;
         work.statements = self.counters().statements_executed() - started;
         Ok(Found {
             rows,
@@ -521,25 +518,56 @@ impl Snapshot {
     }
 
     /// The keys `projection` names that are known, in its order; each unknown
-    /// one is reported on `compiled`.
-    fn projected_keys<'p>(
+    /// one is reported at the end of `reports`.
+    pub(crate) fn projected_keys<'p>(
         &self,
         projection: &Projection<'p>,
         declared: &ContentModel,
         lookups: &mut Lookups,
-        compiled: &mut Compiled<'_>,
+        reports: &mut Vec<Report>,
     ) -> Result<Vec<&'p str>, StoreError> {
         let mut known = Vec::new();
         for key in projection.keys.iter().copied() {
             if self.is_known(key, declared, lookups)? {
                 known.push(key);
             } else {
-                compiled
-                    .reports
-                    .push(Report::Unknown(KeyPlace::Projection, key.to_string()));
+                reports.push(Report::Unknown(KeyPlace::Projection, key.to_string()));
             }
         }
         Ok(known)
+    }
+
+    /// The rows of the documents `keys` name, in their order, carrying the
+    /// columns `projection` names, `fields` being the keys of it that are
+    /// known.
+    ///
+    /// Every read that answers document rows hydrates them here, so a row
+    /// carries the same columns at the same cost whichever verb paged it. The
+    /// findings column reads under the active fingerprint, which is read only
+    /// where the projection names that column.
+    pub(crate) fn hydrate_rows(
+        &self,
+        keys: &[FoundKey],
+        projection: &Projection<'_>,
+        fields: &[&str],
+        lookups: &mut Lookups,
+        work: &mut FindWork,
+    ) -> Result<Vec<DocumentRow>, StoreError> {
+        // A finding recorded under no schema is stamped with the empty
+        // fingerprint.
+        let findings_under = if projection.findings {
+            Some(self.fingerprint(lookups)?.unwrap_or_default())
+        } else {
+            None
+        };
+        self.hydrate(
+            keys,
+            projection,
+            fields,
+            findings_under.as_deref(),
+            work,
+            &mut lookups.ran,
+        )
     }
 
     /// The request's order and its conjunction, compiled under `declared`,

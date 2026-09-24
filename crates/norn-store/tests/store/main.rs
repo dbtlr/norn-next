@@ -27,4 +27,5 @@ mod lifecycle;
 mod pillars;
 mod readers;
 mod resolve;
+mod search;
 mod validate;
