@@ -466,6 +466,29 @@ fn a_cursor_continues_from_its_position_whichever_kinds_minted_it() {
     );
 }
 
+/// **A cursor at the last facet continues to an empty page.** A page ending
+/// at the last facet mints no cursor, so one is minted by hand at the stance on
+/// an undeclared tag — the last kind's one facet — and a page continuing it,
+/// under every kind and under that kind alone, answers nothing and says no
+/// next page exists.
+#[test]
+fn a_cursor_at_the_last_facet_continues_to_an_empty_page() {
+    let describing_store = Describing::new("describe-cursor-last");
+    let reading = describing_store.describe(&describing()).snapshot;
+    let last = Cursor::new(
+        reading,
+        CursorKey::facet(FacetKind::UndeclaredTags, TagStance::Report.as_str()),
+    );
+    for params in [
+        describing(),
+        describing().with_facets([FacetKind::UndeclaredTags]),
+    ] {
+        let page = describing_store.describe(&params.with_after(last.clone()));
+        assert_eq!(page.facets, Vec::new());
+        assert_eq!(page.next, None);
+    }
+}
+
 /// **A cursor that names no position among facets is refused**: a
 /// document's, and a finding's.
 #[test]
