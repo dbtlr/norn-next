@@ -12,11 +12,12 @@ use std::sync::Arc;
 use crate::common::{Scratch, document, write_documents};
 use crate::find::{map, string};
 use norn_store::{
-    Counted, DeclaredFields, Found, FrontmatterValue, Snapshot, SnapshotReader, Store, TagFact,
-    TagSource, TypedOrder,
+    Counted, DeclaredFields, FindRefusal, Found, FrontmatterValue, Snapshot, SnapshotReader, Store,
+    TagFact, TagSource, TypedOrder,
 };
 use norn_wire::{
-    CountParams, Cursor, CursorKey, FindParams, GroupKey, Predicate, Tally, VaultAddress, VaultName,
+    CountParams, Cursor, CursorKey, FindParams, GroupKey, Predicate, ResolutionTarget, Tally,
+    Unsatisfied, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -487,5 +488,129 @@ fn a_drain_a_page_at_a_time_answers_the_tallies_one_page_does() {
         first.next.as_ref().map(Cursor::key),
         Some(&CursorKey::tally([Some("3".to_string())])),
         "a page stops at its last tally's labels"
+    );
+}
+
+// ---- the parts a count cannot apply ----
+
+/// **A `resolves` part is answered in-band**: the tallies are the ones the
+/// rest of the conjunction earned, and the part is reported as not applicable
+/// rather than refused. **The other parts a count cannot apply are reported
+/// as a find reports them**, through the same compilation: a malformed glob
+/// empties the page, and a predicate key outside the field universe is
+/// reported with its near keys and filters nothing.
+#[test]
+fn a_part_a_count_cannot_apply_is_reported_as_a_find_reports_it() {
+    let counting_store = Counting::new("count-unsatisfied");
+    let target = ResolutionTarget::new("a").expect("a target");
+    let open = Predicate::equal_to("status", "open");
+    let earned = counting_store
+        .count(&counting(vec![field("aliases")]).with_predicates([open.clone()]))
+        .tallies;
+    assert!(!earned.is_empty());
+
+    let resolved = counting_store.count(
+        &counting(vec![field("aliases")])
+            .with_predicates([Predicate::resolves(target.clone()), open.clone()]),
+    );
+    assert_eq!(resolved.tallies, earned);
+    assert_eq!(
+        resolved.unsatisfied,
+        vec![Unsatisfied::resolves_not_applicable(target)]
+    );
+
+    let malformed = counting_store.count(
+        &counting(vec![field("aliases")]).with_predicates([Predicate::path(""), open.clone()]),
+    );
+    assert_eq!(malformed.tallies, Vec::new());
+    assert!(
+        matches!(
+            malformed.unsatisfied.as_slice(),
+            [Unsatisfied::MalformedGlob { .. }]
+        ),
+        "{:?}",
+        malformed.unsatisfied
+    );
+
+    let unknown = counting_store
+        .count(&counting(vec![field("aliases")]).with_predicates([Predicate::has("stauts"), open]));
+    assert_eq!(unknown.tallies, earned);
+    assert_eq!(
+        unknown.unsatisfied,
+        vec![Unsatisfied::unknown_predicate_key(
+            "stauts",
+            vec!["status".to_string()]
+        )]
+    );
+}
+
+// ---- the cursor ----
+
+/// **A cursor that names no position among the request's tallies is
+/// refused**: a document's, a tally of another width, and one whose typed
+/// member does not read as its key's type. **A cursor minted in a typed
+/// grouping is refused under another schema**, and a raw grouping's cursor
+/// continued in a typed grouping is refused as minted in another order.
+#[test]
+fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
+    let mut counting_store = Counting::new("count-cursor");
+    let typed = counting(vec![field("n")]);
+    let reading = counting_store.count(&typed).snapshot;
+    let refused = |counting_store: &Counting, params: &CountParams| {
+        counting_store
+            .snapshot()
+            .count(params, &declared())
+            .expect_err("the cursor is refused")
+    };
+    for key in [
+        CursorKey::document(None, "a.md"),
+        CursorKey::tally([None, None]),
+        CursorKey::tally([Some("nine".to_string())]),
+    ] {
+        assert_eq!(
+            refused(
+                &counting_store,
+                &typed
+                    .clone()
+                    .with_after(Cursor::new(reading.clone(), key.clone()))
+            ),
+            FindRefusal::NotATallyCursor,
+            "{key:?}"
+        );
+    }
+
+    let raw_reading = counting_store
+        .count(&counting(vec![field("aliases")]))
+        .snapshot;
+    assert!(
+        matches!(
+            refused(
+                &counting_store,
+                &typed.clone().with_after(Cursor::new(
+                    raw_reading,
+                    CursorKey::tally([Some("3".to_string())])
+                ))
+            ),
+            FindRefusal::OrderChanged(_)
+        ),
+        "a raw grouping's cursor continued in a typed grouping"
+    );
+
+    let cursor = Cursor::new(reading, CursorKey::tally([Some("3".to_string())]));
+    counting_store
+        .store
+        .begin_request()
+        .pin_vault_schema(b"another-schema", "another-schema")
+        .expect("pinning another schema");
+    let refusal = counting_store
+        .snapshot()
+        .count(
+            &typed.clone().with_after(cursor),
+            &DeclaredFields::under("another-schema").declare_typed("n", decimal_order()),
+        )
+        .expect_err("a typed cursor under another schema");
+    assert!(
+        matches!(refusal, FindRefusal::OrderChanged(_)),
+        "{refusal:?}"
     );
 }
