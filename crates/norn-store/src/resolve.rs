@@ -40,8 +40,13 @@
 //! `archive/norn/glossary.md`, and `archive/norn/glossary` resolves to it; with
 //! `glossary.md` ignored, `glossary` still resolves to `glossary.md`.
 //!
-//! The globs are matched as [`Pattern`] matches, bytewise, which is how a
-//! find's path part matches the same grammar.
+//! The globs match under the order the class is read under, the store's
+//! recorded path order: where it folds ASCII case a glob matches with ASCII
+//! case folded, so `archive/**` ignores `Archive/notes.md` there as the root
+//! itself does not tell the two apart; where it tells spellings apart a glob
+//! matches bytes. The fold is [`CaseFold::Ascii`], so a letter outside ASCII
+//! keeps its case in a glob as it does in a key. A find's path part matches
+//! the same grammar bytewise on every root.
 
 use std::collections::BTreeSet;
 
@@ -56,8 +61,12 @@ use crate::path::{ClassKey, SuffixKey, SuffixProbe, suffix_probe};
 use crate::request::range_predicate_from;
 
 /// The name a statement calls the exclusion by:
-/// `norn_ambiguity_admits(ignored, target_segments, path)`.
+/// `norn_ambiguity_admits(ignored, target_segments, path_order, path)`.
 pub(crate) const ADMITS_FUNCTION: &str = "norn_ambiguity_admits";
+
+/// How many values [`TargetClass::parameters`] numbers after the ranges'
+/// bounds: the ignore set, the target's segment count, and the path order.
+pub(crate) const EXCLUSION_PARAMETERS: usize = 3;
 
 /// The separator between segments, in a target and in a path alike.
 const SEPARATOR: char = '/';
@@ -91,7 +100,7 @@ impl AmbiguityIgnore {
     }
 
     /// Whether `path` stays in the class of a target of `target_segments`
-    /// segments.
+    /// segments, on a root whose path order is `order`.
     ///
     /// A path under no glob always stays. A path under one stays only where the
     /// target names its ignored place: the segments the target spells — the
@@ -100,8 +109,11 @@ impl AmbiguityIgnore {
     /// segments as there are from that place to the leaf. A one-segment target
     /// spells the stem alone, which names no place below the root; a document
     /// at the root is its whole place, so its own name names it.
-    pub fn admits(&self, path: &str, target_segments: usize) -> bool {
-        let Some(ignored) = self.ignored_place(path) else {
+    ///
+    /// The globs match with ASCII case folded where `order` folds it, and
+    /// bytewise where it does not.
+    pub fn admits(&self, path: &str, target_segments: usize, order: StoredPathOrder) -> bool {
+        let Some(ignored) = self.ignored_place(path, glob_case(order)) else {
             return true;
         };
         let depth = path.split(SEPARATOR).count();
@@ -111,8 +123,8 @@ impl AmbiguityIgnore {
 
     /// How many segments the shallowest spelling of `path` or one of its
     /// ancestors an ignore glob matches has, or `None` where no glob matches
-    /// any of them.
-    fn ignored_place(&self, path: &str) -> Option<usize> {
+    /// any of them, the globs matching under `case`.
+    fn ignored_place(&self, path: &str, case: CaseFold) -> Option<usize> {
         if self.patterns.is_empty() {
             return None;
         }
@@ -125,7 +137,7 @@ impl AmbiguityIgnore {
                 let place = &path[..*end];
                 self.patterns
                     .iter()
-                    .any(|pattern| pattern.matches(place, CaseFold::Exact))
+                    .any(|pattern| pattern.matches(place, case))
             })
             .map(|(index, _)| index + 1)
     }
@@ -160,13 +172,23 @@ impl AmbiguityIgnore {
     }
 }
 
+/// The case an ignore glob matches under on a root whose path order is `order`.
+fn glob_case(order: StoredPathOrder) -> CaseFold {
+    match order {
+        StoredPathOrder::Sensitive => CaseFold::Exact,
+        StoredPathOrder::AsciiCaseInsensitive => CaseFold::Ascii,
+    }
+}
+
 /// A target compiled for one root: the probe over the key the root probes, how
-/// many segments the target spells, and the places the root's schema ignores.
+/// many segments the target spells, the places the root's schema ignores, and
+/// the path order those places are matched under.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetClass {
     probe: SuffixProbe,
     target_segments: usize,
     ignore: AmbiguityIgnore,
+    order: StoredPathOrder,
 }
 
 impl TargetClass {
@@ -190,6 +212,7 @@ impl TargetClass {
             probe,
             target_segments: target.split(SEPARATOR).count(),
             ignore: ignore.clone(),
+            order,
         })
     }
 
@@ -207,11 +230,12 @@ impl TargetClass {
     /// Whether a document at `path` whose key this probe's ranges hold is in
     /// the class: the ignore set is the one test the ranges do not make.
     pub fn admits(&self, path: &str) -> bool {
-        self.ignore.admits(path, self.target_segments)
+        self.ignore.admits(path, self.target_segments, self.order)
     }
 
     /// The values [`predicate`] numbers, in its order: each range's bounds,
-    /// then the ignore set and the target's segment count.
+    /// then the ignore set, the target's segment count, and the recorded
+    /// spelling of the path order the ignore set is matched under.
     pub(crate) fn parameters(&self) -> Vec<Value> {
         self.probe
             .ranges()
@@ -224,6 +248,7 @@ impl TargetClass {
             .chain([
                 Value::Text(self.ignore.encoded()),
                 Value::Integer(self.target_segments as i64),
+                Value::Text(self.order.as_str().to_string()),
             ])
             .collect()
     }
@@ -241,20 +266,23 @@ pub(crate) fn predicate(alias: &str, key: SuffixKey, ranges: usize, first: usize
     let seeks = range_predicate_from(&column, ranges, first);
     let ignored = first + ranges * 2;
     let segments = ignored + 1;
-    format!("({seeks}) AND {ADMITS_FUNCTION}(?{ignored}, ?{segments}, {alias}.path)")
+    let order = segments + 1;
+    format!("({seeks}) AND {ADMITS_FUNCTION}(?{ignored}, ?{segments}, ?{order}, {alias}.path)")
 }
 
 /// Register the exclusion on `connection`, so every statement a resolution
 /// spells can call it: the writer's and every read snapshot's alike.
 ///
 /// **Deterministic**, and registered as such: its answer is a function of its
-/// three arguments. The ignore set is decoded once per statement and kept as
-/// the call's auxiliary data for the rows after the first.
+/// four arguments, the path order among them, so the case the globs match
+/// under is the statement's input rather than the connection's state. The
+/// ignore set is decoded once per statement and kept as the call's auxiliary
+/// data for the rows after the first.
 pub(crate) fn register_functions(connection: &Connection) -> Result<(), StoreError> {
     connection
         .create_scalar_function(
             ADMITS_FUNCTION,
-            3,
+            4,
             FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
             |context| {
                 let ignore = context.get_or_create_aux(0, |encoded: ValueRef<'_>| {
@@ -265,11 +293,20 @@ pub(crate) fn register_functions(connection: &Connection) -> Result<(), StoreErr
                         .map_err(|problem| rusqlite::Error::UserFunctionError(problem.into()))
                 })?;
                 let segments: i64 = context.get(1)?;
-                let path = context
+                let recorded = context
                     .get_raw(2)
                     .as_str()
                     .map_err(|problem| rusqlite::Error::UserFunctionError(Box::new(problem)))?;
-                Ok(ignore.admits(path, usize::try_from(segments).unwrap_or(0)))
+                let order = StoredPathOrder::from_recorded(recorded).ok_or_else(|| {
+                    rusqlite::Error::UserFunctionError(
+                        format!("`{recorded}` is no path order").into(),
+                    )
+                })?;
+                let path = context
+                    .get_raw(3)
+                    .as_str()
+                    .map_err(|problem| rusqlite::Error::UserFunctionError(Box::new(problem)))?;
+                Ok(ignore.admits(path, usize::try_from(segments).unwrap_or(0), order))
             },
         )
         .map_err(|problem| error::sql("registering the ambiguity-ignore function", problem))
@@ -278,6 +315,7 @@ pub(crate) fn register_functions(connection: &Connection) -> Result<(), StoreErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use StoredPathOrder::Sensitive;
 
     fn ignoring(globs: &[&str]) -> AmbiguityIgnore {
         AmbiguityIgnore::new(
@@ -309,14 +347,14 @@ mod tests {
     #[test]
     fn a_target_reaches_an_ignored_place_from_its_last_segment_down() {
         let nested = ignoring(&["**/drafts/**"]);
-        assert!(nested.admits("notes/drafts/x.md", 2));
-        assert!(!nested.admits("notes/drafts/x.md", 1));
+        assert!(nested.admits("notes/drafts/x.md", 2, Sensitive));
+        assert!(!nested.admits("notes/drafts/x.md", 1, Sensitive));
         let deeper = ignoring(&["archive/**"]);
-        assert!(deeper.admits("archive/norn/glossary.md", 3));
-        assert!(!deeper.admits("archive/norn/glossary.md", 2));
+        assert!(deeper.admits("archive/norn/glossary.md", 3, Sensitive));
+        assert!(!deeper.admits("archive/norn/glossary.md", 2, Sensitive));
         let leaf = ignoring(&["attachments/*"]);
-        assert!(leaf.admits("attachments/image.md", 2));
-        assert!(!leaf.admits("attachments/image.md", 1));
+        assert!(leaf.admits("attachments/image.md", 2, Sensitive));
+        assert!(!leaf.admits("attachments/image.md", 1, Sensitive));
     }
 
     /// **A document at the root that a glob ignores is reached by its own
@@ -325,17 +363,33 @@ mod tests {
     #[test]
     fn a_root_level_ignored_document_is_reached_by_its_own_name() {
         let root = ignoring(&["glossary.md"]);
-        assert!(root.admits("glossary.md", 1));
-        assert!(root.admits("docs/glossary.md", 1), "a path no glob matches");
+        assert!(root.admits("glossary.md", 1, Sensitive));
+        assert!(
+            root.admits("docs/glossary.md", 1, Sensitive),
+            "a path no glob matches"
+        );
     }
 
     #[test]
     fn a_place_is_under_the_shallowest_spelling_a_glob_matches() {
         let set = ignoring(&["archive/**", "attachments/*", "**/drafts/**"]);
-        assert_eq!(set.ignored_place("archive/deep/glossary.md"), Some(1));
-        assert_eq!(set.ignored_place("attachments/image.md"), Some(2));
-        assert_eq!(set.ignored_place("notes/drafts/x.md"), Some(2));
-        assert_eq!(set.ignored_place("notes/glossary.md"), None);
-        assert_eq!(set.ignored_place("Archive/glossary.md"), None);
+        for case in [CaseFold::Exact, CaseFold::Ascii] {
+            assert_eq!(set.ignored_place("archive/deep/glossary.md", case), Some(1));
+            assert_eq!(set.ignored_place("attachments/image.md", case), Some(2));
+            assert_eq!(set.ignored_place("notes/drafts/x.md", case), Some(2));
+            assert_eq!(set.ignored_place("notes/glossary.md", case), None);
+        }
+        assert_eq!(
+            set.ignored_place("Archive/glossary.md", CaseFold::Exact),
+            None
+        );
+        assert_eq!(
+            set.ignored_place("Archive/glossary.md", CaseFold::Ascii),
+            Some(1)
+        );
+        assert_eq!(
+            set.ignored_place("notes/Drafts/x.md", CaseFold::Ascii),
+            Some(2)
+        );
     }
 }

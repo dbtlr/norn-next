@@ -197,6 +197,8 @@ impl VaultSchema {
     /// **Read by the resolution ladder.** Derivation hands the set to the store
     /// beside the declared fields, and the store's one resolver applies it to
     /// every class a target opens, which a find's `resolves` part reads today.
+    /// The globs match under the store's recorded path order: with ASCII case
+    /// folded on a root that folds it, bytewise on a root that does not.
     ///
     /// Backlinks and link-health findings are the dormant consumers of the
     /// same exclusion: the link index lands them in Layer 3, and they read a

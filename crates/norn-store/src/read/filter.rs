@@ -210,11 +210,11 @@ impl Filter {
                 // Each value takes its number in turn, and the resolution's
                 // predicate spells its ranges and its exclusion over those
                 // numbers from `first`: two bounds per range, then the ignore
-                // set and the target's segment count.
+                // set, the target's segment count and the path order.
                 for _ in &self.values {
                     next();
                 }
-                let ranges = (self.values.len() - 2) / 2;
+                let ranges = (self.values.len() - crate::resolve::EXCLUSION_PARAMETERS) / 2;
                 format!(
                     "{id} IN (SELECT dr.id FROM documents AS dr WHERE {})",
                     crate::resolve::predicate("dr", key, ranges, first)

@@ -213,6 +213,131 @@ fn an_ignored_place_resolves_only_where_the_target_names_it() {
     }
 }
 
+/// **On a root that folds ASCII case, an ignore glob matches with ASCII case
+/// folded.** The root does not tell `archive` from `Archive`, so `archive/**`
+/// keeps `Archive/norn/glossary.md` out of `glossary`'s class and `Archive/**`
+/// keeps `archive/deep/term.md` out of `term`'s, in a find's `resolves` part
+/// and in the class read alike; a target reaching the ignored place in any
+/// case still resolves to it.
+#[test]
+fn a_folding_root_matches_an_ignore_glob_with_ascii_case_folded() {
+    let mut vault = Vault::holding(
+        "resolve-ignored-folded",
+        Folding,
+        &[
+            "Archive/norn/glossary.md",
+            "archive/deep/term.md",
+            "docs/norn/glossary.md",
+            "notes/term.md",
+        ],
+    );
+    assert_eq!(
+        vault.resolves("glossary", &["archive/**"]),
+        strings(&["docs/norn/glossary.md"])
+    );
+    assert_eq!(
+        vault.resolves("norn/glossary", &["archive/**"]),
+        strings(&["docs/norn/glossary.md"])
+    );
+    assert_eq!(
+        vault.resolves("term", &["Archive/**"]),
+        strings(&["notes/term.md"])
+    );
+    for target in [
+        "ARCHIVE/deep/term",
+        "archive/deep/term",
+        "Archive/Deep/Term",
+    ] {
+        assert_eq!(
+            vault.resolves(target, &["Archive/**"]),
+            strings(&["archive/deep/term.md"]),
+            "`{target}`"
+        );
+    }
+    assert_eq!(
+        vault.resolves("archive/norn/glossary", &["archive/**"]),
+        strings(&["Archive/norn/glossary.md"])
+    );
+
+    let ignore = ignoring(&["archive/**"]);
+    let class = TargetClass::new("glossary", Folding, &ignore).expect("a suffix target");
+    assert!(!class.admits("Archive/norn/glossary.md"));
+    assert_eq!(vault.class(&class), strings(&["docs/norn/glossary.md"]));
+    let ignore = ignoring(&["Archive/**"]);
+    let class = TargetClass::new("term", Folding, &ignore).expect("a suffix target");
+    assert!(!class.admits("archive/deep/term.md"));
+    assert_eq!(vault.class(&class), strings(&["notes/term.md"]));
+}
+
+/// **On a root that tells spellings apart, an ignore glob matches bytes.**
+/// `archive/**` does not name `Archive/norn/glossary.md` there, nor
+/// `Archive/**` `archive/deep/term.md`, so each stays in its class.
+#[test]
+fn a_sensitive_root_matches_an_ignore_glob_bytewise() {
+    let mut vault = Vault::holding(
+        "resolve-ignored-raw",
+        Sensitive,
+        &[
+            "Archive/norn/glossary.md",
+            "archive/deep/term.md",
+            "docs/norn/glossary.md",
+            "notes/term.md",
+        ],
+    );
+    assert_eq!(
+        vault.resolves("glossary", &["archive/**"]),
+        strings(&["Archive/norn/glossary.md", "docs/norn/glossary.md"])
+    );
+    assert_eq!(
+        vault.resolves("term", &["Archive/**"]),
+        strings(&["archive/deep/term.md", "notes/term.md"])
+    );
+    // The spelling the glob does name is still ignored.
+    assert_eq!(
+        vault.resolves("term", &["archive/**"]),
+        strings(&["notes/term.md"])
+    );
+
+    let ignore = ignoring(&["archive/**"]);
+    let class = TargetClass::new("glossary", Sensitive, &ignore).expect("a suffix target");
+    assert!(class.admits("Archive/norn/glossary.md"));
+    assert_eq!(
+        vault.class(&class),
+        strings(&["Archive/norn/glossary.md", "docs/norn/glossary.md"])
+    );
+    let ignore = ignoring(&["Archive/**"]);
+    let class = TargetClass::new("term", Sensitive, &ignore).expect("a suffix target");
+    assert!(class.admits("archive/deep/term.md"));
+    assert_eq!(
+        vault.class(&class),
+        strings(&["archive/deep/term.md", "notes/term.md"])
+    );
+}
+
+/// **An ignore glob folds no letter outside ASCII.** On a folding root
+/// `Été/**` does not name `été/x/term.md`, while `ÉTé/**` names
+/// `Été/x/term.md`, because only the ASCII `T` differs.
+#[test]
+fn an_ignore_glob_never_folds_a_letter_outside_ascii() {
+    let vault = Vault::holding(
+        "resolve-ignored-non-ascii",
+        Folding,
+        &["Été/x/term.md", "été/x/term.md"],
+    );
+    assert_eq!(
+        vault.resolves("term", &["Été/**"]),
+        strings(&["été/x/term.md"])
+    );
+    assert_eq!(
+        vault.resolves("term", &["ÉTé/**"]),
+        strings(&["été/x/term.md"])
+    );
+    assert_eq!(
+        vault.resolves("term", &["ÉTÉ/**"]),
+        strings(&["Été/x/term.md", "été/x/term.md"])
+    );
+}
+
 /// **A glob naming a leaf keeps a document out of a one-segment target's class
 /// alone.** `attachments/*` ignores the document itself rather than a
 /// directory, so a longer target naming it resolves, and a bare name does not.
