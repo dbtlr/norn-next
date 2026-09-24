@@ -170,9 +170,40 @@ pub(crate) struct Counting {
 
 impl Counting {
     fn new(label: &str) -> Self {
+        Self::with_bulk(label, 0)
+    }
+
+    /// The fixture and `bulk` more documents under `bulk/`, each with the
+    /// `status` `filed`, its own `n` and alias, and the tag `bulk`: enough
+    /// rows that a count whose work grows with the vault reads many times
+    /// more of them.
+    fn with_bulk(label: &str, bulk: usize) -> Self {
         let scratch = Scratch::new(label);
         let mut store = scratch.open();
         seed(&mut store);
+        let documents: Vec<_> = (0..bulk)
+            .map(|at| {
+                tagged(
+                    document(
+                        &format!("bulk/{at:04}.md"),
+                        &format!("hash-bulk-{at}"),
+                        "a body\n",
+                    )
+                    .with_frontmatter(
+                        Some(map(vec![
+                            ("status", string("filed")),
+                            ("n", string(&at.to_string())),
+                            ("aliases", texts(&[&format!("b{at}")])),
+                        ])),
+                        &declared(),
+                    ),
+                    &["bulk"],
+                )
+            })
+            .collect();
+        if !documents.is_empty() {
+            write_documents(&mut store.begin_request(), &documents);
+        }
         let reader = Arc::new(
             store
                 .open_reader()
@@ -1111,4 +1142,98 @@ fn a_null_lead_section_probes_each_document_for_its_leading_key_by_the_document(
             false,
         )
     });
+}
+
+// ---- the work bar ----
+
+/// The groupings the work bar reads: a raw key, a typed key, the tag, three
+/// keys crossed, and none.
+fn work_groupings() -> [Vec<GroupKey>; 5] {
+    [
+        vec![field("status")],
+        vec![field("n")],
+        vec![GroupKey::tag()],
+        vec![field("n"), GroupKey::tag(), field("aliases")],
+        Vec::new(),
+    ]
+}
+
+/// Judge a narrowed count by what SQLite counted running it over two vault
+/// sizes: the same work at both, and no step through a loop no constraint
+/// bounds.
+fn judge_narrow(small: &Counting, large: &Counting, params: &CountParams) {
+    let (small, large) = (small.count(params).work, large.count(params).work);
+    assert_eq!(
+        small, large,
+        "a narrowed count's work grew with the vault: {params:?}"
+    );
+    assert_eq!(
+        large.full_scan_steps, 0,
+        "a narrowed count stepped through a full scan: {large:?} for {params:?}"
+    );
+}
+
+/// **A narrowing part narrows a count's work to the documents it matches.**
+/// Over the fixture and 50, then 500, more documents, a count narrowed to
+/// the fixture's own documents — by a tag, and by a field's value — runs the
+/// same statements and the same VM steps at both sizes, under every grouping,
+/// and steps through no full scan: every statement is driven from the part's
+/// seek.
+///
+/// **An unfiltered grouped count is linear in the vault, and says so.** Its
+/// `null`-lead section walks every document once, so its full-scan steps grow
+/// by exactly one per document added; its valued section reads the leading
+/// key's rows from the page's position, so its VM steps grow with them too.
+/// An unfiltered ungrouped count is the b-tree's own count of `documents`,
+/// which steps no row, so its readings stand still while the pages it counts
+/// grow.
+///
+/// Control: `document_tags_name` dropped on the larger vault, the tag part
+/// reads its table end to end, and the narrowed bar fails.
+#[test]
+fn a_narrowing_part_narrows_a_counts_work_to_the_documents_it_matches() {
+    let small = Counting::with_bulk("count-work-small", 50);
+    let mut large = Counting::with_bulk("count-work-large", 500);
+    let narrowing = [
+        Predicate::tag("draft"),
+        Predicate::equal_to("status", "open"),
+    ];
+    for by in work_groupings() {
+        for part in &narrowing {
+            judge_narrow(
+                &small,
+                &large,
+                &counting(by.clone()).with_predicates([part.clone()]),
+            );
+        }
+        let whole = counting(by.clone());
+        let (at_small, at_large) = (small.count(&whole).work, large.count(&whole).work);
+        if by.is_empty() {
+            assert_eq!(
+                (at_small.full_scan_steps, at_small.vm_steps),
+                (at_large.full_scan_steps, at_large.vm_steps),
+                "an unfiltered ungrouped count stepped rows"
+            );
+        } else {
+            assert_eq!(
+                at_large.full_scan_steps - at_small.full_scan_steps,
+                450,
+                "an unfiltered count's null section did not walk each added document once: \
+                 {at_small:?} then {at_large:?} for {by:?}"
+            );
+            assert!(
+                at_large.vm_steps > at_small.vm_steps * 4,
+                "an unfiltered count's VM steps did not grow with the vault: {at_small:?} then \
+                 {at_large:?} for {by:?}"
+            );
+        }
+    }
+
+    large.drop_index("document_tags_name");
+    for by in work_groupings() {
+        let tagged = counting(by).with_predicates([Predicate::tag("draft")]);
+        failure_of("document_tags_name dropped", || {
+            judge_narrow(&small, &large, &tagged)
+        });
+    }
 }
