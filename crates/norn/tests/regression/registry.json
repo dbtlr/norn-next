@@ -906,12 +906,13 @@
       "property": "Full-text search executes against a text index, and its cost scales with match count rather than with corpus bytes. A case-folded substring scan over every body is not a search implementation.",
       "sources": ["NRN-a60"],
       "binding": {
-        "status": "dormant",
-        "reason": "the text index exists and is maintained across every write: crates/norn-store/src/ddl/fts.rs declares it and crates/norn-store/src/request/mod.rs matches against it, so no path case-folds a substring over every body. The cost claim has no subject: a search surface is what turns a match count into a request's cost, and crates/norn-serve is not in the workspace — so nothing scales with match count rather than corpus bytes, and no bar reads either quantity.",
-        "grounds": [
-          { "present": "crates/norn-store/src/ddl/fts.rs" },
-          { "present": "crates/norn-store/src/request/mod.rs" },
-          { "absent": "crates/norn-serve" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/search.rs::a_lexical_page_is_driven_by_the_full_text_index_and_sorts_what_it_matched",
+          "crates/norn-store/tests/store/search.rs::a_search_costs_the_documents_its_query_matches_and_never_the_vault",
+          "crates/norn-store/tests/store/search.rs::ranking_costs_every_match_and_a_narrowing_part_narrows_what_is_scored",
+          "crates/norn-store/tests/store/search.rs::no_statement_a_search_runs_reads_a_documents_payload",
+          "crates/norn-store/tests/store/find.rs::every_filter_seeks_the_index_its_values_are_bounds_for"
         ]
       }
     },
@@ -1291,12 +1292,13 @@
       "sources": ["NRN-a59", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the landed read builders, find, count, validate and describe, answer in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others; crates/norn-store/src/count/mod.rs answers a count's tallies as aggregate SQL and hydrates no document row; crates/norn-store/src/validate/mod.rs pages the findings standing under the active fingerprint in SQL, one kind's seek at a time, reading one finding past the bound and the candidate heads of the findings it returns and no others, and answers its summary as one aggregate statement; and crates/norn-store/src/describe/mod.rs pages the keys documents carry in SQL, reading one key past the bound, and draws the declared facets from the page's position off the declaration the host holds in memory, building none past the one that says a next page exists, so that draw is no post-pass over rows SQL answered. The property is stated over each read verb, and no read verb exists: search and get have no builder, and nothing dispatches a verb, because crates/norn-serve is not in the workspace.",
+        "reason": "the landed read builders, find, count, validate, describe and search, answer in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others; crates/norn-store/src/count/mod.rs answers a count's tallies as aggregate SQL and hydrates no document row; crates/norn-store/src/validate/mod.rs pages the findings standing under the active fingerprint in SQL, one kind's seek at a time, reading one finding past the bound and the candidate heads of the findings it returns and no others, and answers its summary as one aggregate statement; and crates/norn-store/src/describe/mod.rs pages the keys documents carry in SQL, reading one key past the bound, and draws the declared facets from the page's position off the declaration the host holds in memory, building none past the one that says a next page exists, so that draw is no post-pass over rows SQL answered; and crates/norn-store/src/search/mod.rs scores, sorts and pages a search's lexical hits in SQL, reading one hit past the bound, and hydrates the rows of the hits it returns and no others. The property is stated over each read verb, and no read verb exists: get has no builder, and nothing dispatches a verb, because crates/norn-serve is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-store/src/find/mod.rs" },
           { "present": "crates/norn-store/src/count/mod.rs" },
           { "present": "crates/norn-store/src/validate/mod.rs" },
           { "present": "crates/norn-store/src/describe/mod.rs" },
+          { "present": "crates/norn-store/src/search/mod.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }
