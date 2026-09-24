@@ -31,7 +31,6 @@
 //!
 //! The conjunction is compiled by the one compilation every read builder
 //! shares, so a part that cannot be applied is reported as a find reports it,
-//! a predicate key outside the field universe is reported and filters nothing,
 //! and **a `resolves` part is not applicable**: it answers which documents a
 //! target names, which is a find, so a validate reports it
 //! ([`Unsatisfied::ResolvesNotApplicable`]) and filters nothing by it.
@@ -41,7 +40,10 @@
 //! path part naming it. **Every other part judges the document row at the
 //! finding's path**: a field, a tag, a full-text match, a finding, each is a
 //! fact of a document, and a finding with no document row beside it satisfies
-//! none of them, an inequality and an absence included.
+//! none of them, an inequality and an absence included. A part on a predicate
+//! key outside the field universe is one of them: it is reported with the keys
+//! near it and filters nothing among documents, so it admits every finding
+//! standing on a document row and none standing where no row does.
 //!
 //! # A summary is an aggregate, and is not paged
 //!
@@ -345,6 +347,7 @@ impl Snapshot {
                     severities: narrowing.severities.as_deref(),
                     after,
                     filters: &narrowing.conjunction.filters,
+                    on_a_document: narrowing.conjunction.names_unknown_key,
                     rows,
                 });
                 Ran::new(ValidateStatement::KindPage, composed).narrowed_by(shapes.clone())
@@ -376,6 +379,7 @@ impl Snapshot {
             severities: narrowing.severities.as_deref(),
             after: None,
             filters: &narrowing.conjunction.filters,
+            on_a_document: narrowing.conjunction.names_unknown_key,
             rows: 0,
         });
         let summary = Ran::new(ValidateStatement::Summary, composed).narrowed_by(

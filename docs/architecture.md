@@ -806,7 +806,8 @@ severity, which is one aggregate and is not paged. Its conjunction is compiled b
 compilation, with a `resolves` part reported as not applicable, and one rule decides what a
 part judges: a path part judges the path a finding stands at, so a finding where no document
 row stands is found by the path naming it, and every other part judges the document row at
-that path, which a finding with no row beside it never satisfies. A finding row carries the
+that path, which a finding with no row beside it never satisfies — a part on a key outside
+the field universe included, which filters nothing among documents. A finding row carries the
 candidate head and total the pillar stores and a hint naming the `find` that enumerates its
 class, read through the one accessor a find's findings column reads through, so a finding
 is the same row on either verb. It names two statements under the same discipline, each

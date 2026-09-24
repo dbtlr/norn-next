@@ -43,6 +43,12 @@ pub(crate) struct Conjunction {
     pub(crate) reports: Vec<Report>,
     /// Whether some part matches no document, which empties the answer.
     pub(crate) matches_nothing: bool,
+    /// Whether some part names a predicate key outside the field universe.
+    /// Such a part filters nothing among documents, and is still a fact of a
+    /// document: a read whose rows can stand where no document does admits
+    /// only the rows standing on one. Every row a find or a count reads is a
+    /// document, so neither reads it.
+    pub(crate) names_unknown_key: bool,
 }
 
 /// Whether the verb compiling a conjunction answers a `resolves` part.
@@ -148,7 +154,8 @@ impl Snapshot {
     ///
     /// Every read that filters by a conjunction compiles it here, so a part
     /// means one thing on every verb. A part whose key is outside the field
-    /// universe is reported and filters nothing; a part that cannot be applied
+    /// universe is reported and filters nothing among documents
+    /// ([`Conjunction::names_unknown_key`]); a part that cannot be applied
     /// is reported and matches nothing. A `resolves` part is compiled into a
     /// filter where `resolution` answers it, and reported as not applicable,
     /// filtering nothing, where it does not.
@@ -163,6 +170,7 @@ impl Snapshot {
             filters: Vec::new(),
             reports: Vec::new(),
             matches_nothing: false,
+            names_unknown_key: false,
         };
         for predicate in predicates {
             membership_bound(predicate)?;
@@ -182,6 +190,7 @@ impl Snapshot {
                 conjunction
                     .reports
                     .push(Report::Unknown(KeyPlace::Predicate, key.to_string()));
+                conjunction.names_unknown_key = true;
                 continue;
             }
             match self.compile_predicate(predicate, declared, lookups)? {

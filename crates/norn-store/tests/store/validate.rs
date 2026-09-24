@@ -189,6 +189,14 @@ impl Validating {
         }
     }
 
+    /// Record `finding` over the seeded vault.
+    fn stand(&mut self, finding: &FindingFacts) {
+        self.store
+            .begin_request()
+            .record_finding(finding)
+            .expect("recording a finding");
+    }
+
     fn plans(&self, params: &ValidateParams) -> Vec<ValidatePlan> {
         self.snapshot()
             .validate_plans(params, &declared())
@@ -531,7 +539,7 @@ fn a_summary_tallies_what_a_drain_answers() {
 /// validate cannot apply are reported as a find reports them**, through the
 /// same compilation: a malformed glob empties the answer, and a predicate key
 /// outside the field universe is reported with its near keys and filters
-/// nothing.
+/// nothing among documents.
 #[test]
 fn a_part_a_validate_cannot_apply_is_reported_as_a_find_reports_it() {
     let validating_store = Validating::new("validate-unsatisfied");
@@ -594,6 +602,78 @@ fn a_part_a_validate_cannot_apply_is_reported_as_a_find_reports_it() {
         },
         earned
     );
+}
+
+/// Each finding's kind and severity, tallied in that order.
+fn tallies_of(rows: &[FindingRow]) -> Vec<(FindingKind, Severity, u64)> {
+    let mut counted: BTreeMap<(&str, &str), (FindingKind, Severity, u64)> = BTreeMap::new();
+    for row in rows {
+        counted
+            .entry((row.kind.as_str(), row.severity.as_str()))
+            .or_insert((row.kind, row.severity, 0))
+            .2 += 1;
+    }
+    counted.into_values().collect()
+}
+
+fn tallied(tallies: &[KindTally]) -> Vec<(FindingKind, Severity, u64)> {
+    tallies
+        .iter()
+        .map(|tally| (tally.kind, tally.severity, tally.count))
+        .collect()
+}
+
+/// **A part on a key outside the field universe is reported and filters
+/// nothing among documents, and it is still a part that judges a document**,
+/// so it admits no finding standing where no document row does: on a page
+/// and on a summary, an equality, an inequality, a presence, an absence and a
+/// bound alike answer every finding standing on a document and none at
+/// `broken.md` or `notes/gone.md`.
+#[test]
+fn a_part_on_an_unknown_key_admits_no_finding_without_a_document() {
+    let mut validating_store = Validating::new("validate-unknown-key");
+    validating_store.stand(&violation("notes/gone.md"));
+    let documentless = ["broken.md", "notes/gone.md"];
+    let every = validating_store.rows(&validating());
+    assert!(
+        documentless
+            .iter()
+            .all(|path| every.iter().any(|row| row.path.as_str() == *path)),
+        "both documentless findings stand"
+    );
+    let documented: Vec<FindingRow> = every
+        .into_iter()
+        .filter(|row| !documentless.contains(&row.path.as_str()))
+        .collect();
+    assert_eq!(names(&documented), every_finding()[1..].to_vec());
+    let reported = vec![Unsatisfied::unknown_predicate_key(
+        "stauts",
+        vec!["status".to_string()],
+    )];
+
+    for part in [
+        Predicate::equal_to("stauts", "open"),
+        Predicate::not_equal_to("stauts", "open"),
+        Predicate::has("stauts"),
+        Predicate::missing("stauts"),
+        Predicate::before("stauts", "open"),
+    ] {
+        let params = validating().with_predicates([part.clone()]);
+        let answered = validating_store.validate(&params);
+        assert_eq!(answered.unsatisfied, reported, "{part:?}");
+        assert_eq!(
+            validating_store.rows(&params),
+            documented,
+            "a page of {part:?}"
+        );
+        let summarized = validating_store.validate(&params.clone().summarized());
+        assert_eq!(summarized.unsatisfied, reported, "{part:?}");
+        assert_eq!(
+            tallied(&validating_store.summary(&params)),
+            tallies_of(&documented),
+            "a summary of {part:?}"
+        );
+    }
 }
 
 /// **A cursor that names no position among a validate's findings is
