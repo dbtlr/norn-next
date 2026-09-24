@@ -709,6 +709,22 @@ fn a_lone_cr_document_answers_its_section_bytes_as_written() {
     assert_eq!(section(&vault, "cr#b").3, "b body\r");
 }
 
+/// **A section ended by a heading inside a container ends at that heading's
+/// line**: the container's prefix on it is the next section's, never a byte of
+/// the section answered.
+#[test]
+fn a_section_ended_inside_a_container_answers_no_byte_of_its_prefix() {
+    let body = "## A\ntext\n> ## Q\nquoted\n\nafter\n## B\nb\n";
+    let listed = "## A\ntext\n- # L\n  item\n## B\nb\n";
+    let vault = Vault::holding(
+        "get-section-container",
+        Sensitive,
+        &[parsed("c.md", body), parsed("l.md", listed)],
+    );
+    assert_eq!(section(&vault, "c#A").3, "text\n");
+    assert_eq!(section(&vault, "l#A").3, "text\n");
+}
+
 /// **A block anchor answers the block its identifier defines**: the leaf
 /// block its marker trails, or the fenced block above a marker on the line
 /// after its closing fence. **A block the document does not define is

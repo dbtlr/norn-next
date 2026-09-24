@@ -1,7 +1,8 @@
 //! Heading-delimited sections — the byte ranges a heading owns.
 //!
 //! A section is addressed by a heading anchor and runs from its heading line to
-//! the next same-or-higher-level heading, or to the end of the body. This is
+//! the start of the line holding the next same-or-higher-level heading, or to
+//! the end of the body. This is
 //! the single section resolver: a read and a write consume the same span, the
 //! same matching rule and the same failure modes, so they cannot disagree
 //! about where a section is. What a caller chooses is only what several
@@ -32,8 +33,9 @@
 //!
 //! [`SectionSpan`] carries four boundaries rather than two, because the blank
 //! lines around a heading are separators rather than content. `body_start`
-//! begins just past the whole heading construct and `end` stops at the next
-//! heading, so `body_start..end` is everything the section owns; the narrower
+//! begins just past the whole heading construct and `end` stops at the start
+//! of the next heading's line, so `body_start..end` is everything the section
+//! owns and never a container's prefix on that line; the narrower
 //! `content_start..content_end` excludes the blank lines at each end. A
 //! replace addressed at the content leaves the separators standing, which is
 //! what keeps an edit from collapsing `## Alpha\n\nbody\n\n## Beta` into
@@ -109,7 +111,9 @@ pub struct SectionSpan {
     /// End of the last non-blank line below the heading, its newline
     /// included. Equal to `content_start` when the section has no content.
     pub content_end: usize,
-    /// Start of the next same-or-higher-level heading, or the end of the body.
+    /// Start of the line holding the next same-or-higher-level heading, or
+    /// the end of the body. Where that heading sits inside a container, the
+    /// container's prefix on its line is the next section's.
     pub end: usize,
 }
 
@@ -201,7 +205,7 @@ pub fn resolve_section(
     let end = headings[index + 1..]
         .iter()
         .find(|heading| heading.level <= level)
-        .map(|heading| heading.span.byte_offset)
+        .map(|heading| line_start(body, heading.span.byte_offset))
         .unwrap_or(body.len())
         .max(body_start);
     let (content_start, content_end) = content_bounds(body, body_start, end);
@@ -213,6 +217,20 @@ pub fn resolve_section(
         content_end,
         end,
     })
+}
+
+/// Where the line holding `at` starts: just past the break before it, on
+/// [`crate::span`]'s break rule, or the start of the body.
+///
+/// A heading inside a container starts past the container's prefix on its
+/// line — `> ## Q`, `- # L` — and that prefix is the container's, which the
+/// next section holds, so the section the heading ends stops at the line.
+fn line_start(body: &str, at: usize) -> usize {
+    let at = at.min(body.len());
+    body.as_bytes()[..at]
+        .iter()
+        .rposition(|byte| matches!(byte, b'\n' | b'\r'))
+        .map_or(0, |found| found + 1)
 }
 
 /// The section body with its leading and trailing blank lines excluded.

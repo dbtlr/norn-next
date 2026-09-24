@@ -116,7 +116,8 @@ pub trait DocumentText {
 
 /// The section a heading anchor names: which heading opens it, by its index
 /// in document order, and the bytes of the body below the heading that it
-/// owns — to the next heading at its level or above, or the end of the body.
+/// owns — to the start of the line holding the next heading at its level or
+/// above, or the end of the body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SectionAt {
     pub heading: usize,

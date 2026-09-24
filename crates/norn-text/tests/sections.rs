@@ -89,6 +89,50 @@ fn a_deeper_subsection_belongs_to_its_parent() {
     assert_eq!(&body[span.body_start..span.end], "p\n### Child\nc\n");
 }
 
+/// **A section ends at the start of the line holding the heading that ends
+/// it**, so where that heading sits inside a container the container's prefix
+/// on its line — a `>`, a list marker — belongs to the next section, and a
+/// read answers no byte of it.
+#[test]
+fn a_section_ended_by_a_heading_inside_a_container_ends_at_its_line() {
+    for (body, owned) in [
+        ("## A\ntext\n> ## Q\nquoted\n\nafter\n## B\nb\n", "text\n"),
+        ("## A\ntext\n- # L\n  item\n## B\nb\n", "text\n"),
+        ("## A\ntext\n1. > ## N\n## B\nb\n", "text\n"),
+        ("## A\r\rtext\r> ## Q\rquoted\r", "\rtext\r"),
+    ] {
+        let span = resolve_section(body, "A").expect("A");
+        assert_eq!(&body[span.body_start..span.end], owned, "for {body:?}");
+    }
+}
+
+/// **A write over a section ended by a heading inside a container leaves the
+/// container standing**: its prefix on the heading's line is the next
+/// section's, so the splice writes over none of it.
+#[test]
+fn a_write_over_a_section_ended_inside_a_container_keeps_the_container() {
+    for (source, edited) in [
+        (
+            "## A\ntext\n> ## Q\nquoted\n",
+            "## A\nnew\n> ## Q\nquoted\n",
+        ),
+        ("## A\ntext\n- # L\n  item\n", "## A\nnew\n- # L\n  item\n"),
+    ] {
+        let written = Document::parse(source)
+            .replace_section("A", "new\n")
+            .expect("a replacement");
+        assert_eq!(written, edited, "for {source:?}");
+        let reread = BodyScan::new(&written);
+        assert!(
+            reread
+                .headings()
+                .iter()
+                .all(|heading| heading.text == "A" || heading.inside_container),
+            "the container around the next heading survives: {written:?}"
+        );
+    }
+}
+
 #[test]
 fn a_missing_heading_refuses_by_name() {
     assert_eq!(
