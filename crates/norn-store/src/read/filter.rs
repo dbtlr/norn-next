@@ -117,7 +117,9 @@ pub(crate) struct Filter {
     pub(crate) shape: ReadFilter,
     /// The values the fragment binds, in the order [`Filter::spell`] writes
     /// their placeholders. A resolution filter binds two per suffix range and
-    /// two more, so the count also says how many ranges it opens.
+    /// [`crate::resolve::EXCLUSION_PARAMETERS`] more — the ignore set, the
+    /// target's segment count and the path order — so the count also says how
+    /// many ranges it opens.
     pub(crate) values: Vec<Value>,
 }
 
