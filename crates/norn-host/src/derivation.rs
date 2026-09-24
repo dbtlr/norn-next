@@ -1169,6 +1169,51 @@ paths:
         }
     }
 
+    /// **Every field type is declared as the wire type spelled as it is, and
+    /// carries a typed order exactly where it does not order as text.** One
+    /// field of each of the five types, each reported with its own type:
+    /// `number`, `boolean` and `date` read a raw value into a typed sort key,
+    /// and `text` and `tags` are ordered by their raw text.
+    #[test]
+    fn every_field_type_is_declared_as_its_own_wire_type() {
+        use norn_wire::{Facet, FacetKind};
+
+        let mut schema = String::from("version: 1\nfields:\n");
+        for kind in FieldType::ALL {
+            schema.push_str(&format!("  {0}: {{type: {0}}}\n", kind.as_str()));
+        }
+        let declared = Declared::pinned(
+            VaultSchema::parse(schema.as_bytes()).expect("a schema declaring every type"),
+            "every-type",
+        );
+        let reported: Vec<(String, &str)> = declared
+            .content_model()
+            .facets_of(FacetKind::DeclaredField, None)
+            .map(|facet| match facet {
+                Facet::DeclaredField {
+                    key, field_type, ..
+                } => (key, field_type.as_str()),
+                other => panic!("a declared field's facet: {other:?}"),
+            })
+            .collect();
+        let mut expected: Vec<(String, &str)> = FieldType::ALL
+            .into_iter()
+            .map(|kind| (kind.as_str().to_string(), kind.as_str()))
+            .collect();
+        expected.sort();
+        assert_eq!(reported, expected);
+        for kind in FieldType::ALL {
+            assert_eq!(
+                declared
+                    .content_model()
+                    .typed_order(kind.as_str())
+                    .is_some(),
+                !kind.orders_as_text(),
+                "{kind:?}"
+            );
+        }
+    }
+
     /// **The two discard sides partition the causes.** The sides are read off
     /// [`CAUSES`] through [`Cause::decided`], so a cause whose kind falls out of
     /// both is a cause no act re-derives — which is a copy of that finding per
