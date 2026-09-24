@@ -83,7 +83,7 @@ use crate::facts::{
 use crate::fields::{FieldContainer, FieldRow, FieldRows};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
-use crate::resolve::{self, Resolution};
+use crate::resolve::{self, TargetClass};
 use crate::store::Store;
 
 mod instrument;
@@ -1122,7 +1122,7 @@ impl<'a> Request<'a> {
     /// when a document is re-derived.
     pub fn suffix_candidates(
         &self,
-        resolution: &Resolution,
+        resolution: &TargetClass,
     ) -> Result<Vec<DocumentPath>, StoreError> {
         self.read_all(
             &suffix_candidates_sql(resolution),
@@ -1689,7 +1689,7 @@ fn finding_id_parameters(chunk: &[i64]) -> impl Params + '_ {
 
 /// The statement [`Request::suffix_candidates`] emits for `resolution`: its
 /// ranges over the key it probes, its exclusion, and the ladder's order.
-fn suffix_candidates_sql(resolution: &Resolution) -> String {
+fn suffix_candidates_sql(resolution: &TargetClass) -> String {
     let key = resolution.probe().key();
     format!(
         "SELECT dr.path FROM documents AS dr WHERE {} ORDER BY dr.{}, dr.path",

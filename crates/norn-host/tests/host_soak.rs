@@ -1578,7 +1578,7 @@ fn assert_the_churn_reached_the_store(store: &mut Store, written: &Written) {
 /// however long the load beside it has been running.
 fn assert_warm_reads_derive_nothing(store: &mut Store, subject: &DocumentPath) {
     let probe = class_probe(subject.stem()).expect("a class stem off a derived path");
-    let class = norn_store::Resolution::new(
+    let class = norn_store::TargetClass::new(
         subject.stem(),
         store.path_order(),
         &norn_store::AmbiguityIgnore::none(),

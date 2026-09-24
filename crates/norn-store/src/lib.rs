@@ -53,7 +53,7 @@
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
-//! - [`Resolution`] — the one resolver: a target compiled for its root, over
+//! - [`TargetClass`] — the one resolver: a target compiled for its root, over
 //!   the suffix key the root's proven case behaviour selects and less the
 //!   places its schema's ambiguity-ignore set names.
 //!
@@ -141,7 +141,7 @@ pub use request::{
     DiscardScope, ExplainedStatement, FINDING_ID_CHUNK, FeedCursor, FindingCursor, MAX_PAGE,
     POINT_READS, Request, STATEMENTS, SubjectScope,
 };
-pub use resolve::{AmbiguityIgnore, Resolution};
+pub use resolve::{AmbiguityIgnore, TargetClass};
 pub use store::{
     ConnectionTurn, ReaderMint, RecordedStoreSchema, Snapshot, SnapshotAttempt, SnapshotReader,
     Store, StoreMode, StoreReading,

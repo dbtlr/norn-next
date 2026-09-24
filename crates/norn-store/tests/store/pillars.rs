@@ -739,7 +739,7 @@ fn assert_cascade_seeks_the_primary_key(plan: &QueryPlan, table: &str) {
 /// resolution that probes it.
 #[test]
 fn a_class_read_seeks_the_suffix_key_its_root_probes() {
-    use norn_store::{AmbiguityIgnore, Resolution, StoredPathOrder};
+    use norn_store::{AmbiguityIgnore, StoredPathOrder, TargetClass};
 
     let scratch = Scratch::new("class-read-plans");
     let mut store = scratch.open();
@@ -752,7 +752,7 @@ fn a_class_read_seeks_the_suffix_key_its_root_probes() {
         ],
     );
     let archive = AmbiguityIgnore::new([norn_wire::Pattern::parse("archive/**").expect("a glob")]);
-    let resolutions: Vec<(Resolution, &'static str, &'static str)> = [
+    let resolutions: Vec<(TargetClass, &'static str, &'static str)> = [
         (
             StoredPathOrder::Sensitive,
             "documents_suffix_key",
@@ -774,7 +774,7 @@ fn a_class_read_seeks_the_suffix_key_its_root_probes() {
                     .into_iter()
                     .map(move |ignore| {
                         (
-                            Resolution::new(target, order, &ignore).expect("a suffix target"),
+                            TargetClass::new(target, order, &ignore).expect("a suffix target"),
                             index,
                             column,
                         )
@@ -783,7 +783,7 @@ fn a_class_read_seeks_the_suffix_key_its_root_probes() {
     })
     .collect();
     let judge =
-        |store: &mut norn_store::Store, resolution: &Resolution, index: &str, column: &str| {
+        |store: &mut norn_store::Store, resolution: &TargetClass, index: &str, column: &str| {
             let read = plan(
                 store
                     .begin_request()
@@ -996,7 +996,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     // dropped from a list its bar iterates leaves a slot empty here rather
     // than leaving the bar one statement narrower without a word.
     let probe = class_probe("glossary").expect("a class stem");
-    let resolution = norn_store::Resolution::new(
+    let resolution = norn_store::TargetClass::new(
         "glossary",
         norn_store::StoredPathOrder::Sensitive,
         &norn_store::AmbiguityIgnore::none(),
@@ -1146,7 +1146,7 @@ fn the_point_read_census_holds_every_statement_that_says_it_is_one() {
     let probe = class_probe("glossary").expect("a class stem");
     let kinds = [FindingKind::PathNamesNoDocument];
 
-    let resolution = norn_store::Resolution::new(
+    let resolution = norn_store::TargetClass::new(
         "glossary",
         norn_store::StoredPathOrder::Sensitive,
         &norn_store::AmbiguityIgnore::none(),

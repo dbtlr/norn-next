@@ -4,7 +4,7 @@
 //!
 //! Every surface that asks which documents a target names asks here: a find's
 //! `resolves` part, a read of a class's candidates, and a finding's producer
-//! reading the class it files a finding about. What a [`Resolution`] carries is
+//! reading the class it files a finding about. What a [`TargetClass`] carries is
 //! what each of them needs and nothing more — the probe, over the key the root
 //! selects, and the exclusion — and one spelling of both in SQL, so no two
 //! surfaces can disagree about a class.
@@ -148,13 +148,13 @@ impl AmbiguityIgnore {
 /// A target compiled for one root: the probe over the key the root probes, how
 /// many segments the target spells, and the places the root's schema ignores.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Resolution {
+pub struct TargetClass {
     probe: SuffixProbe,
     target_segments: usize,
     ignore: AmbiguityIgnore,
 }
 
-impl Resolution {
+impl TargetClass {
     /// Compile `target` — a suffix address, with any `#` anchor already split
     /// off — for a root whose proven case behaviour is `order`, excluding the
     /// places `ignore` names.
@@ -171,7 +171,7 @@ impl Resolution {
             SuffixKey::Raw => raw,
             SuffixKey::Folded => raw.folded(),
         };
-        Ok(Resolution {
+        Ok(TargetClass {
             probe,
             target_segments: target.split(SEPARATOR).count(),
             ignore: ignore.clone(),
@@ -216,7 +216,7 @@ impl Resolution {
 
 /// The predicate a resolution of `ranges` ranges over `key` spells against the
 /// `documents` rows a statement calls `alias`, its values numbered from
-/// `first` in [`Resolution::parameters`]'s order.
+/// `first` in [`TargetClass::parameters`]'s order.
 ///
 /// Each range is a seek of the key's own index; the ignore set is a test of
 /// the rows those seeks reached, so it narrows a class without widening what

@@ -87,7 +87,7 @@ use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
 use crate::read::{
     Conjunction, FieldOrder, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement,
-    Report, Resolution, Stepped, page_limit,
+    Report, ResolvesPart, Stepped, page_limit,
 };
 use crate::store::Snapshot;
 
@@ -240,7 +240,7 @@ impl Snapshot {
         let (members, mut reports) = self.members(&params.by, declared, lookups)?;
         let conjunction = self.compile_conjunction(
             &params.predicates,
-            Resolution::NotApplicable,
+            ResolvesPart::NotApplicable,
             declared,
             lookups,
         )?;

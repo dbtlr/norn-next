@@ -38,7 +38,7 @@ use crate::request::MAX_PAGE;
 use crate::store::Snapshot;
 use crate::validate::ValidateStatement;
 
-pub(crate) use conjunction::{Conjunction, KeyPlace, Report, Resolution};
+pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
 pub(crate) use filter::glob_test;
 pub(crate) use filter::{Binder, Filter};
 pub use filter::{READ_FILTERS, ReadFilter};

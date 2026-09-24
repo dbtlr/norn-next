@@ -28,9 +28,9 @@ use crate::ddl;
 use super::{
     DOCUMENT_BLOCKS_SQL, DOCUMENT_FIELDS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINKS_SQL,
     DOCUMENT_TAGS_SQL, DiscardScope, DocumentPath, FINDING_ID_CHUNK, FeedCursor, FindingCursor,
-    INDEXED_TERM_PAGE_SQL, MAX_PAGE, Request, Resolution, STORED_TOMBSTONE_SQL,
-    SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope, SuffixProbe,
-    TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, class_discard_sql, document_feed_sql,
+    INDEXED_TERM_PAGE_SQL, MAX_PAGE, Request, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL,
+    StoreError, StoredPathOrder, SubjectScope, SuffixProbe, TOMBSTONE_PAGE_SQL,
+    TYPED_VALUE_DISCARD_SQL, TargetClass, class_discard_sql, document_feed_sql,
     document_page_parameters, document_page_sql, feed_page_parameters, finding_candidates_sql,
     finding_classes_sql, finding_id_parameters, finding_page_parameters, finding_page_sql,
     finding_subject_parameters, finding_subjects_sql, findings_in_class_sql, probe_parameters,
@@ -302,7 +302,7 @@ impl<'a> Request<'a> {
 pub enum ExplainedStatement<'a> {
     /// [`Request::suffix_candidates`], over the key the resolution's root
     /// probes.
-    SuffixCandidates(&'a Resolution),
+    SuffixCandidates(&'a TargetClass),
     /// [`Request::findings_in_class`].
     FindingsInClass(&'a SuffixProbe),
     /// The class-scoped discard: [`Request::discard_findings_in_class`] runs it
@@ -423,7 +423,7 @@ impl<'a> ExplainedStatement<'a> {
     /// that care about those axes range over them themselves.
     pub fn all(
         subject: &'a DocumentPath,
-        resolution: &'a Resolution,
+        resolution: &'a TargetClass,
         probe: &'a SuffixProbe,
         kinds: &'a [FindingKind],
         ids: NonZeroUsize,

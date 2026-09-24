@@ -7838,7 +7838,7 @@ mod tests {
             .map(|row| row.path.as_str().to_string())
             .collect();
         let resolution =
-            norn_store::Resolution::new("Foo", order, declared.fields().ambiguity_ignore())
+            norn_store::TargetClass::new("Foo", order, declared.fields().ambiguity_ignore())
                 .unwrap();
         let mut class: Vec<String> = attachment
             .store

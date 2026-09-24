@@ -450,7 +450,7 @@ fn the_hosts_account_is_readable() {
 fn a_warm_pass(store: &mut Store, subject: &StoredDocument) -> CounterSnapshot {
     let stem = subject.path.stem().to_string();
     let probe = class_probe(&stem).expect("a class stem off a derived path");
-    let class = norn_store::Resolution::new(
+    let class = norn_store::TargetClass::new(
         &stem,
         store.path_order(),
         &norn_store::AmbiguityIgnore::none(),

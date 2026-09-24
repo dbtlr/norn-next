@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::collections::BTreeSet;
 
 use norn_store::{
-    AmbiguityIgnore, CandidateFact, DeclaredFields, FindingFacts, Provenance, Resolution,
-    SnapshotReader, Store, StoredPathOrder, SuffixKey,
+    AmbiguityIgnore, CandidateFact, DeclaredFields, FindingFacts, Provenance, SnapshotReader,
+    Store, StoredPathOrder, SuffixKey, TargetClass,
 };
 use norn_wire::{FindParams, FindingKind, Pattern, Predicate, ResolutionTarget, Severity};
 
@@ -78,7 +78,7 @@ impl Vault {
 
     /// The class the same resolution reads through the store's class read, in
     /// path order.
-    fn class(&mut self, resolution: &Resolution) -> Vec<String> {
+    fn class(&mut self, resolution: &TargetClass) -> Vec<String> {
         let mut paths: Vec<String> = self
             .store
             .begin_request()
@@ -248,7 +248,7 @@ fn a_findings_class_is_the_class_resolves_reads_on_that_root() {
             &["a/Foo.md", "b/foo.md", "archive/foo.md"],
         );
         let ignore = ignoring(&["archive/**"]);
-        let resolution = Resolution::new("Foo", order, &ignore).expect("a suffix target");
+        let resolution = TargetClass::new("Foo", order, &ignore).expect("a suffix target");
         let class = vault.class(&resolution);
         assert_eq!(class, vault.resolves("Foo", &["archive/**"]));
 
@@ -286,7 +286,7 @@ fn a_findings_class_is_the_class_resolves_reads_on_that_root() {
 /// The finding a producer files about the target `Foo`, whose class on the
 /// root is `class`: under the resolution's class keys, with the class as its
 /// candidates.
-fn finding_about_foo(resolution: &Resolution, class: &[String]) -> FindingFacts {
+fn finding_about_foo(resolution: &TargetClass, class: &[String]) -> FindingFacts {
     FindingFacts {
         kind: FindingKind::PathNamesNoDocument,
         severity: Severity::Warning,
@@ -322,7 +322,7 @@ fn a_document_leaving_a_class_takes_the_findings_filed_under_it() {
             &["a/Foo.md", leaving],
         );
         let resolution =
-            Resolution::new("Foo", order, &AmbiguityIgnore::none()).expect("a suffix target");
+            TargetClass::new("Foo", order, &AmbiguityIgnore::none()).expect("a suffix target");
         let class = vault.class(&resolution);
         assert_eq!(class, strings(&["a/Foo.md", leaving]), "under {order:?}");
 

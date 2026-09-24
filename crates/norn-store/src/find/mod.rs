@@ -111,7 +111,7 @@
 //!   engine's words, and the page is empty, as a malformed glob's is.
 //!
 //! A `resolves` part enumerates the target's ambiguity class through the one
-//! resolver, [`crate::resolve::Resolution`]: both reductions of a dotted leaf, over the raw
+//! resolver, [`crate::resolve::TargetClass`]: both reductions of a dotted leaf, over the raw
 //! suffix key where the snapshot's root tells spellings apart and over the
 //! folded key where it folds ASCII case, less the places the declaration's
 //! ambiguity-ignore set keeps out of the class. The case behaviour is the
@@ -167,7 +167,7 @@ use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
 use crate::read::{
     FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, Report,
-    Resolution, page_limit,
+    ResolvesPart, page_limit,
 };
 use crate::store::Snapshot;
 
@@ -590,8 +590,12 @@ impl Snapshot {
                 }
             }
         };
-        let conjunction =
-            self.compile_conjunction(&params.predicates, Resolution::Answered, declared, lookups)?;
+        let conjunction = self.compile_conjunction(
+            &params.predicates,
+            ResolvesPart::Answered,
+            declared,
+            lookups,
+        )?;
         reports.extend(conjunction.reports);
         Ok(Compiled {
             order,
