@@ -435,7 +435,9 @@ impl<'a> BodyScan<'a> {
         let Some(leaf) = holding else {
             return line_around(self.body, marker);
         };
-        let opens_its_block = self.body[leaf.range.start..marker].trim().is_empty();
+        let opens_its_block = self.body[leaf.range.start..marker]
+            .chars()
+            .all(crate::section::is_ascii_space);
         let after_a_fence = self.fenced.iter().find(|fence| {
             fence.container == leaf.container
                 && fence.range.end <= leaf.range.start

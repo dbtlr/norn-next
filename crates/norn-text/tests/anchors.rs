@@ -320,6 +320,9 @@ fn a_marker_after_a_closing_fence_names_the_fenced_block() {
     assert_eq!(block_of(apart, "loose"), "^loose");
     let trailing = "```\nx\n```\ntext ^pa\n";
     assert_eq!(block_of(trailing, "pa"), "text ^pa");
+    // A no-break space is text, not the whitespace a marker-only line holds.
+    let nbsp = "```\nx\n```\n\u{a0}^nb\n";
+    assert_eq!(block_of(nbsp, "nb"), "\u{a0}^nb");
 }
 
 /// A heading carrying a marker is its own block.
