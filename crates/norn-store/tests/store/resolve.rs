@@ -370,3 +370,49 @@ fn a_document_leaving_a_class_takes_the_findings_filed_under_it() {
         );
     }
 }
+
+/// **A class read hands its candidates back in the probed key's order, then
+/// by path.** On a root that folds ASCII case the probed key is the folded
+/// one, and its order is neither the raw key's nor the paths' own, so a read
+/// ordered by either hands the class back in another order. Two spellings of
+/// one folded key fall back on their paths.
+#[test]
+fn a_class_read_orders_its_candidates_by_the_probed_key_then_path() {
+    let paths = [
+        "b/x/Foo.md",
+        "a/y/foo.md",
+        "c/x/FOO.md",
+        "a/x/foo.md",
+        "a/x/Foo.md",
+    ];
+    let mut vault = Vault::holding("resolve-class-order", Folding, &paths);
+    let class =
+        TargetClass::new("foo", Folding, &AmbiguityIgnore::none()).expect("a suffix target");
+    let read: Vec<String> = vault
+        .store
+        .begin_request()
+        .suffix_candidates(&class)
+        .expect("reading a class")
+        .iter()
+        .map(|at| at.as_str().to_string())
+        .collect();
+
+    let ordered_by = |key: fn(&norn_store::DocumentPath) -> String| {
+        let mut ordered = strings(&paths);
+        ordered.sort_by_key(|at| (key(&path(at)), at.clone()));
+        ordered
+    };
+    let expected = ordered_by(|at| at.folded_suffix_key().to_string());
+    let by_raw_key = ordered_by(|at| at.suffix_key().to_string());
+    let mut by_path = strings(&paths);
+    by_path.sort();
+    assert_ne!(
+        expected, by_raw_key,
+        "the fixture does not tell the keys apart"
+    );
+    assert_ne!(
+        expected, by_path,
+        "the fixture does not tell the key from the path"
+    );
+    assert_eq!(read, expected);
+}

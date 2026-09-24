@@ -1108,13 +1108,12 @@ impl<'a> Request<'a> {
 
     // ---- probe reads ----
 
-    /// Every document in the class a resolution names, in suffix-key order.
+    /// Every document in the class a target names, in suffix-key order.
     ///
     /// The full candidate enumeration behind a finding's bounded head, and the
     /// membership of an ambiguity class: ranges over the suffix key the
-    /// resolution's root probes, costing the class rather than the vault, with
-    /// the places its schema ignores left out. A probe converts into the
-    /// resolution that ignores nothing, which is the whole class it opens.
+    /// target's root probes, costing the class rather than the vault, with the
+    /// places its schema ignores left out.
     ///
     /// The order is total — the probed key, then `path` — because equal suffix
     /// keys are exactly what an ambiguity class is made of, and a ladder whose

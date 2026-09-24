@@ -289,6 +289,10 @@ mod tests {
     fn an_encoded_set_reads_back_whole() {
         let set = ignoring(&["archive/**", "a:b/*", "7:x"]);
         assert_eq!(AmbiguityIgnore::decoded(&set.encoded()), Ok(set));
+        // A glob whose bytes outnumber its characters: the prefix counts
+        // bytes, which is what the decoder slices by.
+        let wide = ignoring(&["archivé/**", "日記/*", "x"]);
+        assert_eq!(AmbiguityIgnore::decoded(&wide.encoded()), Ok(wide));
         assert_eq!(
             AmbiguityIgnore::decoded(""),
             Ok(AmbiguityIgnore::none()),
