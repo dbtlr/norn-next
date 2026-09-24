@@ -119,8 +119,9 @@ may not be added.
   churn they would absorb.
 - **A root proving a case behaviour the store was not derived under** — at any time. The
   store records the path order its rows were derived under in `meta`, beside the store
-  fingerprint, as a rebuild input: which spellings are one document, the order a heal pages
-  rows in, and the key space a finding's classes are spelled in all follow it. An attach
+  fingerprint, as a rebuild input: document identity — which spellings are one row — and the
+  key space a finding's classes are filed in both follow it, and no later derivation converges
+  either. An attach
   proves the order through its new coverage before it opens the store and opens it under that
   order, and the open rebuilds from zero where the recorded order differs, reported as the
   store's own rebuild reason naming both orders. A recovery and a reload hold a store opened

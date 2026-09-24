@@ -57,10 +57,10 @@ pub(crate) const STORE_MODE: &str = "store_mode";
 /// The case behaviour the vault root was proven to have when this store's rows
 /// were derived, spelled by [`crate::StoredPathOrder::as_str`].
 ///
-/// It is a rebuild input beside the store fingerprint: which spellings are one
-/// document, the order a heal pages rows in, and the key space a finding's
-/// classes are spelled in all follow it, so an open under another order
-/// rebuilds from zero rather than serving rows that root could not have
-/// produced. [`crate::Store`] records it at create, records it on an open over
-/// a store that records none, and judges it at every other open.
+/// It is a rebuild input beside the store fingerprint: document identity —
+/// which spellings are one row — and the key space a finding's classes are
+/// filed in both follow it, so an open under another order rebuilds from zero
+/// rather than serving rows that root could not have produced.
+/// [`crate::Store`] records it at create, records it on an open over a store
+/// that records none, and judges it at every other open.
 pub(crate) const PATH_ORDER: &str = "path_order";

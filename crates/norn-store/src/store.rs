@@ -655,12 +655,15 @@ impl Store {
     /// The case behaviour every row this store holds was derived under: the
     /// order the vault root was proven to have when the store was opened.
     ///
-    /// **It is a rebuild input.** Which spellings are one document, the order a
-    /// heal pages rows in, and the key space a finding's classes are spelled in
-    /// all follow it, so the store records it and an open under another order
-    /// rebuilds from zero — rows that root could not have produced are never
-    /// served under it. A store that records no order takes the one it is
-    /// opened under and keeps its rows.
+    /// **It is a rebuild input.** Two things the rows hold follow it: document
+    /// identity — which spellings are one row, so `Foo.md` and `foo.md` are one
+    /// document where the root folds ASCII case and two where it tells them
+    /// apart — and the key space a finding's classes are filed in. Neither is
+    /// something a later derivation converges, so the store records the order
+    /// and an open under another one rebuilds from zero: rows that root could
+    /// not have produced are never served under it. A heal's merge is not among
+    /// them; it pages rows under its own walk's order. A store that records no
+    /// order takes the one it is opened under and keeps its rows.
     pub fn path_order(&self) -> StoredPathOrder {
         self.order
     }
