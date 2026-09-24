@@ -827,6 +827,36 @@ fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
     );
 }
 
+/// **A declaration read from another schema than the snapshot pins is
+/// refused**, as every read refuses it, grouped or not: one read from another
+/// schema, and the declaration of a store with none, each named against the
+/// schema the snapshot pins.
+#[test]
+fn a_declaration_the_snapshot_does_not_pin_is_refused() {
+    let counting_store = Counting::new("count-declaration");
+    for (declared, declared_under) in [
+        (
+            ContentModel::under("another-schema").declare("status"),
+            Some("another-schema".to_string()),
+        ),
+        (ContentModel::none(), None),
+    ] {
+        for params in [counting(vec![field("status")]), counting(Vec::new())] {
+            assert_eq!(
+                counting_store
+                    .snapshot()
+                    .count(&params, &declared)
+                    .expect_err("the declaration is not the pinned one"),
+                PageRefusal::DeclarationNotPinned {
+                    declared_under: declared_under.clone(),
+                    pinned: Some(COUNT_SCHEMA.to_string()),
+                },
+                "{params:?}"
+            );
+        }
+    }
+}
+
 // ---- the plan bars ----
 
 impl Counting {

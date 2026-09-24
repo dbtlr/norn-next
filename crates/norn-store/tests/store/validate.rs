@@ -707,6 +707,36 @@ fn a_cursor_that_is_no_position_among_the_findings_is_refused() {
     );
 }
 
+/// **A declaration read from another schema than the snapshot pins is
+/// refused**, as every read refuses it, by a page and a summary alike: one
+/// read from another schema, and the declaration of a store with none, each
+/// named against the schema the snapshot pins.
+#[test]
+fn a_declaration_the_snapshot_does_not_pin_is_refused() {
+    let validating_store = Validating::new("validate-declaration");
+    for (declared, declared_under) in [
+        (
+            ContentModel::under("another-schema").declare("status"),
+            Some("another-schema".to_string()),
+        ),
+        (ContentModel::none(), None),
+    ] {
+        for params in [validating(), validating().summarized()] {
+            assert_eq!(
+                validating_store
+                    .snapshot()
+                    .validate(&params, &declared)
+                    .expect_err("the declaration is not the pinned one"),
+                PageRefusal::DeclarationNotPinned {
+                    declared_under: declared_under.clone(),
+                    pinned: Some(VALIDATE_SCHEMA.to_string()),
+                },
+                "{params:?}"
+            );
+        }
+    }
+}
+
 /// **A summary is not paged**: it refuses a cursor — even one a page of the
 /// same request minted, which a page continues — and it answers the same
 /// tallies whatever page bound the request names, one a page refuses
