@@ -22,16 +22,17 @@ version is the deriver's, because derivation is what it describes; the store rec
 judges it and knows nothing of what changed. The version is norn-host's and covers every
 crate's contribution to the written rows — norn-text's parse, norn-host's plan, and
 norn-store's write-time computation such as suffix keys, projection hashes, sub-fingerprints
-and the full-text index — and the digest is taken through a real attach, so the store's
-write-time computation is inside it. A recorded value no build writes, or one that is not
+and the full-text index. A recorded value no build writes, or one that is not
 text, rebuilds like a moved version, as a recorded path order does.
 
-**A digest of derived rows holds the version honest.** A test derives a pinned corpus from
-zero and digests every derived row; the digest is pinned beside the version it was taken
-under. A change to derivation output moves the digest, and the test fails until the
-version moves with it, so no change to what derivation writes can land without forcing the
-rebuild it needs. This is the pattern the regression registry's contract digest uses: a
-reviewed number that a change must move on purpose.
+**A digest of derived rows holds the version honest**, taken through a real attach so the
+store's write-time computation is inside it. A test derives a pinned corpus from zero and
+digests every derived column of every lane-1 table, the full-text index digested as its
+vocabulary; the digest is pinned beside the version it was taken under. A change to
+derivation output moves the digest, and the test fails until the version moves with it, so
+no change to what derivation writes can land without forcing the rebuild it needs. This is
+the pattern the regression registry's contract digest uses: a reviewed number that a
+change must move on purpose.
 
 Three alternatives were weighed. Moving the DDL fingerprint by hand whenever derivation
 changes forces the rebuild once, but relies on someone noticing, and nothing catches the

@@ -142,8 +142,9 @@ may not be added.
   the store records and the version the build derives under; where the order moved too, the one
   reason names both. A running build's version does not move, so a store already open is not
   judged against it again. A digest holds the version honest: a pinned corpus is derived from
-  zero, every derived row is digested, and the digest is pinned beside the version it was taken
-  under, so a digest that moves while the version does not fails. See
+  zero, every derived column of every lane-1 table is digested, the full-text index digested as
+  its vocabulary, and the digest is pinned beside the version it was taken under, so a digest
+  that moves while the version does not fails. See
   [ADR 0026](decisions/0026-a-derived-store-records-the-derivation-that-wrote-it.md).
 - **Corruption, or any state the lower rungs cannot resolve** — at any time, before or after
   release.
