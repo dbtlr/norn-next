@@ -40,6 +40,11 @@
 //!   find and hands out the plan of every statement it ran, taken of the text
 //!   and values it ran with, which is what its `EXPLAIN` bars are asserted
 //!   through.
+//! - [`Snapshot::count`] — the count builder: a request's conjunction,
+//!   compiled as a find compiles it, and its grouping, answering a page of
+//!   tallies, the cursor the next page continues, and the parts it could not
+//!   apply. [`Snapshot::count_plans`] explains what it ran, as
+//!   [`Snapshot::find_plans`] does for a find.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -67,8 +72,7 @@
 //!   recorded to survive is a policy over generations, and nothing here decides
 //!   it: a tombstone is kept until something says otherwise.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
-//! - **The read shapes no builder emits.** The find builder is the one read
-//!   builder: nothing here counts by field. Nothing indexes a link's target,
+//! - **The read shape no builder emits.** Nothing indexes a link's target,
 //!   so a find refuses a `links_to` part by name, and a find's row projects no
 //!   link or finding column, so it refuses those columns by name. Both
 //!   refusals are dormant carriers whose consumer is NORN-229, the task that

@@ -1,9 +1,14 @@
 //! `count`: how many documents match, grouped by the keys a request names.
 //!
-//! **The grouping tuple has one spelling.** A group member the document does
-//! not carry is `null`, on the row and in the cursor key alike, and
-//! [`Tally::cursor_key`] is the one function that turns the row into the key,
-//! so the two cannot drift into two orders sharing a name.
+//! **The grouping tuple has one spelling.** A group member for which the
+//! document carries no scalar value is `null`, on the row and in the cursor key
+//! alike, and [`Tally::cursor_key`] is the one function that turns the row into
+//! the key, so the two cannot drift into two orders sharing a name.
+//!
+//! **A tally counts documents, and one document may stand in several
+//! groups.** A key holding a set groups the document once per element, and a
+//! tag grouping once per tag, so the tallies of one answer can sum past the
+//! documents the request matched.
 //!
 //! **`count` hydrates no document row**, so [`CountParams`] carries no
 //! projection: the answer is how many, and a request that wants the documents
@@ -60,7 +65,7 @@ impl GroupKey {
 #[non_exhaustive]
 pub struct Tally {
     /// One value per group key the request named, in the request's own order,
-    /// and `null` where the document does not carry that key.
+    /// and `null` where the document carries no scalar value for that key.
     pub group: Vec<Option<String>>,
     /// How many documents are in the group.
     pub count: u64,
@@ -79,9 +84,9 @@ impl Tally {
     ///
     /// The destructuring carries no wildcard, so a field added to a tally does
     /// not compile until this says what the order stops at. The grouping tuple
-    /// is spelled one way on the row and in the key alike — a member the
-    /// document does not carry is `null` in both — so a continuation names the
-    /// position the page actually reached.
+    /// is spelled one way on the row and in the key alike — a member for which
+    /// the document carries no scalar value is `null` in both — so a
+    /// continuation names the position the page actually reached.
     pub fn cursor_key(&self) -> CursorKey {
         let Tally { group, count: _ } = self;
         CursorKey::tally(group.clone())
@@ -89,6 +94,10 @@ impl Tally {
 }
 
 /// What `count` answers with: one page of tallies.
+///
+/// Each tally counts the documents in its group, and a document holding
+/// several values under a grouped key stands in the group of each, so the
+/// counts can sum past the documents the request matched.
 pub type CountReport = Page<Tally>;
 
 /// What a `count` request carries.

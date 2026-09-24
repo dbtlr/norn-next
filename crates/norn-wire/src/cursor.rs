@@ -196,7 +196,7 @@ pub enum CursorKey {
     #[non_exhaustive]
     Tally {
         /// The values the row is grouped by, in the grouping's own order, and
-        /// `null` where the document does not carry that key.
+        /// `null` where the document carries no scalar value for that key.
         group: Vec<Option<String>>,
     },
     /// A finding row: the kind, then the path, then the finding's identifier.

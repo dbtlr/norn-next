@@ -3838,8 +3838,9 @@ fn a_block_anchor_is_answered_with_the_block_it_named() {
 }
 
 /// A tally carries one value per group key the request named, and `null`
-/// where the document does not carry that key — so a reader lines the tuple up
-/// with the request rather than guessing which key a short tuple skipped.
+/// where the document carries no scalar value for that key — so a reader lines
+/// the tuple up with the request rather than guessing which key a short tuple
+/// skipped.
 #[test]
 fn a_tally_carries_one_value_per_group_key() {
     assert_eq!(
@@ -3850,8 +3851,9 @@ fn a_tally_carries_one_value_per_group_key() {
 
 /// The row and the key it stops at spell the grouping tuple one way, and
 /// `Tally::cursor_key` is the one function that turns one into the other: a
-/// group member the document does not carry is `null` in the key as it is on
-/// the row, so a continuation names the position the page reached.
+/// group member for which the document carries no scalar value is `null` in
+/// the key as it is on the row, so a continuation names the position the page
+/// reached.
 #[test]
 fn a_tally_cursor_key_spells_the_null_group_the_way_the_row_does() {
     let tally = Tally::new([Some("note".to_string()), None], 7);
