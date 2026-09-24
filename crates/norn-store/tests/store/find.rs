@@ -15,11 +15,11 @@ use std::sync::Arc;
 
 use crate::common::{Scratch, ambiguity, document, violation, write_documents};
 use norn_store::{
-    BlockFact, DEFAULT_PAGE, DeclaredFields, FIND_STATEMENTS, FieldOrder, FindPlan, FindStatement,
-    Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, MAX_PAGE, NESTED_ROW_CEILING, Nested,
-    PageDirection, PageRefusal, READ_FILTERS, ReadBound, ReadFilter, Snapshot, SnapshotReader,
-    Span, Store, StoreError, StoredPathOrder, SuffixKey, TagFact, TagSource, TypedOrder,
-    induced_failure,
+    BlockFact, ContentModel, DEFAULT_PAGE, FIND_STATEMENTS, FieldDeclaration, FieldOrder, FindPlan,
+    FindStatement, Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, MAX_PAGE,
+    NESTED_ROW_CEILING, Nested, PageDirection, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
+    Snapshot, SnapshotReader, Span, Store, StoreError, StoredPathOrder, SuffixKey, TagFact,
+    TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -55,15 +55,15 @@ pub(crate) const SEED_SCHEMA: &str = "seed-schema";
 
 /// `status` declared as text, and `count` declared with a typed order, under
 /// the fixture's schema.
-pub(crate) fn declared() -> DeclaredFields {
-    DeclaredFields::under(SEED_SCHEMA)
+pub(crate) fn declared() -> ContentModel {
+    ContentModel::under(SEED_SCHEMA)
         .declare("status")
-        .declare_typed("count", integer_order())
+        .declare_field("count", FieldDeclaration::number(integer_order()))
 }
 
 /// `status` and `count` both declared as text, under the fixture's schema.
-pub(crate) fn declared_raw() -> DeclaredFields {
-    DeclaredFields::under(SEED_SCHEMA)
+pub(crate) fn declared_raw() -> ContentModel {
+    ContentModel::under(SEED_SCHEMA)
         .declare("status")
         .declare("count")
 }
@@ -242,7 +242,7 @@ impl Seeded {
         self.plans_under(params, &declared())
     }
 
-    fn plans_under(&self, params: &FindParams, declared: &DeclaredFields) -> Vec<FindPlan> {
+    fn plans_under(&self, params: &FindParams, declared: &ContentModel) -> Vec<FindPlan> {
         self.snapshot()
             .find_plans(params, declared)
             .expect("the plans of a request")
@@ -260,7 +260,7 @@ impl Seeded {
     fn resumed_under(
         &self,
         params: &FindParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         sort: Option<&str>,
         path: &str,
     ) -> FindParams {
@@ -1738,7 +1738,7 @@ fn a_set_valued_sort_field_orders_a_document_once_at_its_least_value() {
     let integer = |number: i64| integer_order().sort_key(&number.to_string());
     // A first page runs in the typed order where the declaration gives the key
     // one, and in the raw order where it does not.
-    let read = |direction: Direction, declared: &DeclaredFields, order: FieldOrder| {
+    let read = |direction: Direction, declared: &ContentModel, order: FieldOrder| {
         let page = seeded
             .snapshot()
             .find(&sorted(SortKey::field("count"), direction), declared)
@@ -1838,7 +1838,7 @@ fn keyed(
     seeded: &Seeded,
     key: &SortKey,
     direction: Direction,
-    declared: &DeclaredFields,
+    declared: &ContentModel,
 ) -> Vec<(String, Option<String>)> {
     let page = |direction: Direction, limit: usize| {
         let limit = u32::try_from(limit).expect("a page bound");
@@ -2374,7 +2374,7 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
                 &request()
                     .with_predicates([Predicate::path(source.clone())])
                     .with_limit(MAX_PAGE as u32),
-                &DeclaredFields::none(),
+                &ContentModel::none(),
             )
             .expect("a page");
         let mut answered = row_paths(&page);

@@ -41,14 +41,14 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use norn_config::schema::VaultSchema;
+use norn_config::schema::{FieldType, UndeclaredTags, VaultSchema};
 use norn_store::{
-    AmbiguityIgnore, BlockFact, Change, DeclaredFields, DiscardScope, DocumentFacts, DocumentPath,
+    BlockFact, Change, ContentModel, DiscardScope, DocumentFacts, DocumentPath, FieldDeclaration,
     FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Provenance, Span, TagFact, TagSource,
     TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
-use norn_wire::{FindingKind, FindingScope, Severity};
+use norn_wire::{FindingKind, FindingScope, Severity, TagStance};
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -622,12 +622,12 @@ pub(crate) struct Derived {
 }
 
 /// Derive one document's facts from its bytes, the field rows' typed half
-/// under `fields`.
+/// under `model`.
 pub(crate) fn map_document(
     path: &str,
     bytes: &[u8],
     hash: String,
-    fields: &DeclaredFields,
+    model: &ContentModel,
 ) -> Result<Derived, Quarantine> {
     // Identity before content: a path that names no document has nothing to
     // say about its own bytes.
@@ -651,7 +651,7 @@ pub(crate) fn map_document(
         });
     let scan = document.scan_body();
     let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64)
-        .with_frontmatter(document.frontmatter().map(map_value), fields);
+        .with_frontmatter(document.frontmatter().map(map_value), model);
     facts.body_offset = document.body_start() as u64;
     facts.frontmatter_diagnostic_count = document
         .diagnostics()
@@ -774,7 +774,7 @@ pub(crate) fn plan_document(
     stored: Option<&DocumentPath>,
     declared: &Declared,
 ) -> Plan {
-    match map_document(spelling, bytes, hash, declared.fields()) {
+    match map_document(spelling, bytes, hash, declared.content_model()) {
         Ok(derived) => {
             let subject = derived.facts.path.clone();
             let mut findings = Vec::new();
@@ -816,14 +816,17 @@ pub(crate) fn plan_document(
 /// declares, and carry the fingerprint the store compares with its own pin.
 pub(crate) struct Declared {
     schema: VaultSchema,
-    fields: DeclaredFields,
+    content_model: ContentModel,
 }
 
 impl Declared {
     /// The declaration `schema` makes, pinned under `fingerprint`.
     pub(crate) fn pinned(schema: VaultSchema, fingerprint: impl Into<String>) -> Self {
-        let fields = declared_fields(&schema, fingerprint.into());
-        Declared { schema, fields }
+        let content_model = content_model(&schema, fingerprint.into());
+        Declared {
+            schema,
+            content_model,
+        }
     }
 
     /// The declaration of a vault with no schema pinned, which declares
@@ -831,45 +834,83 @@ impl Declared {
     pub(crate) fn unpinned() -> Self {
         Declared {
             schema: VaultSchema::default(),
-            fields: DeclaredFields::none(),
+            content_model: ContentModel::none(),
         }
     }
 
-    /// The content model.
+    /// The schema, as `norn-config` reads it.
     pub(crate) fn schema(&self) -> &VaultSchema {
         &self.schema
     }
 
-    /// The declared fields as the store reads them.
-    pub(crate) fn fields(&self) -> &DeclaredFields {
-        &self.fields
+    /// The content model as the store reads it.
+    pub(crate) fn content_model(&self) -> &ContentModel {
+        &self.content_model
     }
 }
 
-/// The declared fields of `schema`, pinned under `fingerprint`, as the store
-/// reads them: every declared key, for each whose type does not order as text
-/// the typed order that type reads a raw value into, and the places the schema
-/// keeps out of ambiguity classes.
+/// What `schema` declares, pinned under `fingerprint`, as the store reads it:
+/// every declared field with its type, whether it is required and its closed
+/// set, and for each whose type does not order as text, the typed order that
+/// type reads a raw value into; the declared tags, the tag patterns and the
+/// stance on an undeclared tag; the declared folders; and the ambiguity-ignore
+/// patterns, the places the schema keeps out of ambiguity classes, which
+/// the resolver applies and `describe` reports as path rules.
 ///
 /// A raw value that does not read as its declared type has no sort key, which
 /// is the store's `NULL`: the document still carries the value, and a typed
 /// order has nothing to place it by.
-fn declared_fields(schema: &VaultSchema, fingerprint: String) -> DeclaredFields {
-    let ignore = AmbiguityIgnore::new(schema.ambiguity_ignore().iter().cloned());
-    schema.fields().fold(
-        DeclaredFields::under(fingerprint).ignoring_ambiguity(ignore),
+fn content_model(schema: &VaultSchema, fingerprint: String) -> ContentModel {
+    let declared = schema.fields().fold(
+        ContentModel::under(fingerprint),
         |declared, (key, field)| {
-            let kind = field.kind();
-            if kind.orders_as_text() {
-                declared.declare(key)
-            } else {
-                declared.declare_typed(
-                    key,
-                    TypedOrder::new(move |raw| kind.read(raw).ok().map(|value| value.sort_key())),
-                )
+            let mut declaration = field_declaration(field.kind());
+            if field.required() {
+                declaration = declaration.required();
             }
+            if let Some(values) = field.one_of() {
+                declaration = declaration.one_of(values);
+            }
+            declared.declare_field(key, declaration)
         },
-    )
+    );
+    let tags = schema.tags();
+    let declared = tags.declared().fold(declared, ContentModel::declare_tag);
+    let declared = tags
+        .patterns()
+        .iter()
+        .fold(declared, |declared, pattern| {
+            declared.declare_tag_pattern(pattern.as_str())
+        })
+        .declare_undeclared_tags(match tags.undeclared() {
+            UndeclaredTags::Allow => TagStance::Allow,
+            UndeclaredTags::Report => TagStance::Report,
+        });
+    let declared = schema.folders().iter().fold(declared, |declared, folder| {
+        declared.declare_folder(folder.path(), folder.description().map(str::to_string))
+    });
+    schema
+        .ambiguity_ignore()
+        .iter()
+        .fold(declared, |declared, pattern| {
+            declared.declare_ambiguity_ignore(pattern.clone())
+        })
+}
+
+/// A field declared as `kind`, as the store reads it: under the wire type a
+/// `describe` facet reports, which is spelled as `kind` is — the two enums are
+/// one vocabulary, held equal by spelling in `norn-config`'s suite — and, for a
+/// type that does not order as text, with the typed order `kind` reads a raw
+/// value into.
+fn field_declaration(kind: FieldType) -> FieldDeclaration {
+    let order = || TypedOrder::new(move |raw| kind.read(raw).ok().map(|value| value.sort_key()));
+    match kind {
+        FieldType::Text => FieldDeclaration::text(),
+        FieldType::Number => FieldDeclaration::number(order()),
+        FieldType::Boolean => FieldDeclaration::boolean(order()),
+        FieldType::Date => FieldDeclaration::date(order()),
+        FieldType::Tags => FieldDeclaration::tags(),
+    }
 }
 
 /// Judge a document's tags against the vault's declared tag facet.
@@ -1006,7 +1047,7 @@ mod tests {
             "ignoring",
         );
         let globs: Vec<&str> = declared
-            .fields()
+            .content_model()
             .ambiguity_ignore()
             .patterns()
             .iter()
@@ -1015,11 +1056,161 @@ mod tests {
         assert_eq!(globs, ["archive/**"]);
         assert!(
             Declared::unpinned()
-                .fields()
+                .content_model()
                 .ambiguity_ignore()
                 .patterns()
                 .is_empty()
         );
+    }
+
+    /// **A pinned schema's declaration reports every declaration the schema
+    /// makes**, each as the facet `describe` answers with, in the order of the
+    /// text that keys it: each field with its type, whether it is required and
+    /// its closed set, the tags, the patterns, the stance, the folders and the
+    /// ambiguity-ignore patterns. A vault with no schema pinned declares
+    /// nothing, and a schema silent on tags states the default stance.
+    #[test]
+    fn a_pinned_declaration_reports_every_declaration_its_schema_makes() {
+        use norn_wire::{Facet, FacetKind, FieldType as Wire, PathRuleKind};
+
+        let declared = Declared::pinned(
+            VaultSchema::parse(
+                b"version: 1
+fields:
+  title: {type: text, required: true}
+  due: {type: date}
+  status: {type: text, one_of: [live, draft]}
+tags:
+  declared: [project, area]
+  patterns: [\"person/**\", \"area/**\"]
+  undeclared: report
+folders:
+  - path: journal
+    description: One document per day
+  - path: archive
+paths:
+  ambiguity_ignore: [\"archive/**\"]
+",
+            )
+            .expect("a schema declaring every shape"),
+            "every-shape",
+        );
+        let facets = |kind| {
+            declared
+                .content_model()
+                .facets_of(kind, None)
+                .collect::<Vec<Facet>>()
+        };
+        assert_eq!(
+            facets(FacetKind::DeclaredField),
+            vec![
+                Facet::declared_field("due", Wire::Date, false, None),
+                Facet::declared_field(
+                    "status",
+                    Wire::Text,
+                    false,
+                    Some(vec!["draft".to_string(), "live".to_string()])
+                ),
+                Facet::declared_field("title", Wire::Text, true, None),
+            ]
+        );
+        assert!(declared.content_model().typed_order("due").is_some());
+        assert!(declared.content_model().typed_order("title").is_none());
+        assert_eq!(
+            facets(FacetKind::DeclaredTag),
+            vec![Facet::declared_tag("area"), Facet::declared_tag("project")]
+        );
+        assert_eq!(
+            facets(FacetKind::TagPattern),
+            vec![
+                Facet::tag_pattern("area/**"),
+                Facet::tag_pattern("person/**")
+            ]
+        );
+        assert_eq!(
+            facets(FacetKind::UndeclaredTags),
+            vec![Facet::undeclared_tags(TagStance::Report)]
+        );
+        assert_eq!(
+            facets(FacetKind::Folder),
+            vec![
+                Facet::folder("archive", None),
+                Facet::folder("journal", Some("One document per day".to_string())),
+            ]
+        );
+        assert_eq!(
+            facets(FacetKind::PathRule),
+            vec![Facet::path_rule(
+                PathRuleKind::AmbiguityIgnore,
+                "archive/**"
+            )]
+        );
+        assert_eq!(facets(FacetKind::ObservedField), Vec::new());
+
+        let silent = Declared::pinned(
+            VaultSchema::parse(b"version: 1\n").expect("a schema declaring nothing"),
+            "silent",
+        );
+        assert_eq!(
+            silent
+                .content_model()
+                .facets_of(FacetKind::UndeclaredTags, None)
+                .collect::<Vec<Facet>>(),
+            vec![Facet::undeclared_tags(TagStance::Allow)]
+        );
+        let unpinned = undeclaring();
+        for kind in FacetKind::ALL {
+            assert_eq!(
+                unpinned.content_model().facets_of(kind, None).count(),
+                0,
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// **Every field type is declared as the wire type spelled as it is, and
+    /// carries a typed order exactly where it does not order as text.** One
+    /// field of each of the five types, each reported with its own type:
+    /// `number`, `boolean` and `date` read a raw value into a typed sort key,
+    /// and `text` and `tags` are ordered by their raw text.
+    #[test]
+    fn every_field_type_is_declared_as_its_own_wire_type() {
+        use norn_wire::{Facet, FacetKind};
+
+        let mut schema = String::from("version: 1\nfields:\n");
+        for kind in FieldType::ALL {
+            schema.push_str(&format!("  {0}: {{type: {0}}}\n", kind.as_str()));
+        }
+        let declared = Declared::pinned(
+            VaultSchema::parse(schema.as_bytes()).expect("a schema declaring every type"),
+            "every-type",
+        );
+        let reported: Vec<(String, &str)> = declared
+            .content_model()
+            .facets_of(FacetKind::DeclaredField, None)
+            .map(|facet| match facet {
+                Facet::DeclaredField {
+                    key, field_type, ..
+                } => (key, field_type.as_str()),
+                other => panic!("a declared field's facet: {other:?}"),
+            })
+            .collect();
+        let mut expected: Vec<(String, &str)> = FieldType::ALL
+            .into_iter()
+            .map(|kind| (kind.as_str().to_string(), kind.as_str()))
+            .collect();
+        expected.sort();
+        assert_eq!(reported, expected);
+        for kind in FieldType::ALL {
+            assert_eq!(
+                declared
+                    .content_model()
+                    .typed_order(kind.as_str())
+                    .is_some(),
+                !kind.orders_as_text(),
+                "{kind:?}"
+            );
+        }
     }
 
     /// **The two discard sides partition the causes.** The sides are read off
@@ -1178,7 +1369,7 @@ mod tests {
         ] {
             let bytes = source.as_bytes();
             let hash = || norn_fs::ContentHash::of(bytes).to_string();
-            let problem = map_document("note.md", bytes, hash(), &DeclaredFields::none())
+            let problem = map_document("note.md", bytes, hash(), &ContentModel::none())
                 .expect("a document whose block went unread still derives")
                 .unread_frontmatter
                 .expect("the block was read by nothing")
@@ -1227,7 +1418,7 @@ mod tests {
 
         let whole = b"---\ntags: [front]\n---\n# Heading\n[[target]] #body\n".as_slice();
         let hash = norn_fs::ContentHash::of(whole).to_string();
-        let derived = map_document("note.md", whole, hash.clone(), &DeclaredFields::none())
+        let derived = map_document("note.md", whole, hash.clone(), &ContentModel::none())
             .expect("a document derives");
         let plan = plan_document(
             Path::new("note.md"),
@@ -1261,7 +1452,7 @@ mod tests {
 
         let unread = b"---\ntitle: note\n# Heading\n".as_slice();
         let hash = norn_fs::ContentHash::of(unread).to_string();
-        let derived = map_document("note.md", unread, hash.clone(), &DeclaredFields::none())
+        let derived = map_document("note.md", unread, hash.clone(), &ContentModel::none())
             .expect("a document derives");
         let plan = plan_document(
             Path::new("note.md"),
@@ -1378,7 +1569,7 @@ mod tests {
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
-                &DeclaredFields::none(),
+                &ContentModel::none(),
             )
             .expect("a document whose block went unread still derives")
         };
@@ -1444,7 +1635,7 @@ mod tests {
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
-                &DeclaredFields::none(),
+                &ContentModel::none(),
             )
             .expect("a document whose block went unread still derives")
         };
@@ -1483,7 +1674,7 @@ mod tests {
                 "note.md",
                 bytes,
                 norn_fs::ContentHash::of(bytes).to_string(),
-                &DeclaredFields::none(),
+                &ContentModel::none(),
             )
             .expect("a document whose block went unread still derives")
             .facts
@@ -1527,7 +1718,7 @@ mod tests {
             "note.md",
             source,
             norn_fs::ContentHash::of(source).to_string(),
-            &DeclaredFields::none(),
+            &ContentModel::none(),
         )
         .unwrap();
         let facts = derived.facts;
@@ -1560,7 +1751,7 @@ mod tests {
                 "note.md",
                 &source,
                 norn_fs::ContentHash::of(&source).to_string(),
-                &DeclaredFields::none(),
+                &ContentModel::none(),
             )
             .unwrap()
             .facts;
@@ -1755,7 +1946,7 @@ mod tests {
                 .establish()
                 .snapshot
                 .expect("a snapshot")
-                .find(&params, self.declared.fields())
+                .find(&params, self.declared.content_model())
                 .expect("a find")
                 .rows
                 .into_iter()

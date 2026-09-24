@@ -18,11 +18,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::common::{
-    Scratch, ambiguity, ambiguity_for_target, document, unread_block, violation, write_documents,
+    DOCUMENT_PAYLOAD, Scratch, ambiguity, ambiguity_for_target, document, reads_of, unread_block,
+    violation, write_documents,
 };
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    DeclaredFields, FindingFacts, PageRefusal, ReadStatement, Snapshot, SnapshotReader, Store,
+    ContentModel, FindingFacts, PageRefusal, ReadStatement, Snapshot, SnapshotReader, Store,
     TagFact, TagSource, VALIDATE_STATEMENTS, ValidatePlan, ValidateStatement, Validated,
     Validation, induced_failure,
 };
@@ -37,8 +38,8 @@ use norn_wire::{
 /// The fingerprint of the schema the fixture pins.
 const VALIDATE_SCHEMA: &str = "validate-schema";
 
-fn declared() -> DeclaredFields {
-    DeclaredFields::under(VALIDATE_SCHEMA).declare("status")
+fn declared() -> ContentModel {
+    ContentModel::under(VALIDATE_SCHEMA).declare("status")
 }
 
 /// A tag the vault's declared tag facet does not admit, on the document at
@@ -707,6 +708,36 @@ fn a_cursor_that_is_no_position_among_the_findings_is_refused() {
     );
 }
 
+/// **A declaration read from another schema than the snapshot pins is
+/// refused**, as every read refuses it, by a page and a summary alike: one
+/// read from another schema, and the declaration of a store with none, each
+/// named against the schema the snapshot pins.
+#[test]
+fn a_declaration_the_snapshot_does_not_pin_is_refused() {
+    let validating_store = Validating::new("validate-declaration");
+    for (declared, declared_under) in [
+        (
+            ContentModel::under("another-schema").declare("status"),
+            Some("another-schema".to_string()),
+        ),
+        (ContentModel::none(), None),
+    ] {
+        for params in [validating(), validating().summarized()] {
+            assert_eq!(
+                validating_store
+                    .snapshot()
+                    .validate(&params, &declared)
+                    .expect_err("the declaration is not the pinned one"),
+                PageRefusal::DeclarationNotPinned {
+                    declared_under: declared_under.clone(),
+                    pinned: Some(VALIDATE_SCHEMA.to_string()),
+                },
+                "{params:?}"
+            );
+        }
+    }
+}
+
 /// **A summary is not paged**: it refuses a cursor — even one a page of the
 /// same request minted, which a page continues — and it answers the same
 /// tallies whatever page bound the request names, one a page refuses
@@ -1130,4 +1161,45 @@ fn a_narrowing_part_narrows_a_validates_work_to_the_findings_it_matches() {
     failure_of("findings_fingerprint_kind_severity dropped", || {
         judge_narrow(&small, &large, &validating().with_severity(Severity::Error))
     });
+}
+
+// ---- the payload bar ----
+
+/// **No statement a validate runs reads a document's payload.** Every
+/// statement a page of findings and a summary emit — the kind page, the
+/// summary, the probes the conjunction's compilation runs and the reads of
+/// each finding row's head and classes — under every narrowing the drain
+/// reads, a continuation, and a document part driving each, reads none of
+/// [`crate::common::DOCUMENT_PAYLOAD`] as SQLite's authorizer reports the
+/// columns it reads: so what a page or a summary costs never includes the
+/// body bytes of the documents its findings stand over.
+#[test]
+fn no_statement_a_validate_runs_reads_a_documents_payload() {
+    let validating_store = Validating::new("validate-payload");
+    let mut narrowings = requests();
+    narrowings.push(validating().with_predicates([Predicate::tag("draft")]));
+    narrowings.push(
+        validating()
+            .with_severity(Severity::Error)
+            .with_predicates([Predicate::tag("draft"), Predicate::path("*.md")]),
+    );
+    let (_, next) = validating_store.page(&validating().with_limit(3));
+    let mut shapes = vec![validating().with_after(next.expect("a next page"))];
+    for params in narrowings {
+        shapes.push(params.clone().summarized());
+        shapes.push(params);
+    }
+    let mut reached: Vec<ReadStatement> = Vec::new();
+    for params in &shapes {
+        for emitted in validating_store.plans(params) {
+            reached.push(emitted.statement);
+            reads_of(&emitted.plan).assert_reads_none_of(DOCUMENT_PAYLOAD);
+        }
+    }
+    for statement in ValidateStatement::all() {
+        assert!(
+            reached.contains(&ReadStatement::Validate(statement)),
+            "the payload bar never reached {statement:?}: {reached:?}"
+        );
+    }
 }

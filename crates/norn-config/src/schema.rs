@@ -84,8 +84,9 @@
 //! [`FieldType`] to give one comparison rule to sorts, ranges and comparison
 //! operators alike — see [`typed`]. The ambiguity-ignore patterns name the
 //! paths the resolution ladder does not count as candidates: derivation hands
-//! them to the store with the declared fields, and the store's resolver applies
-//! them wherever a target's class is read.
+//! them to the store with the rest of the content model, the store's resolver
+//! applies them wherever a target's class is read, and `describe` reports the
+//! same set as path rules.
 
 pub mod typed;
 
@@ -161,13 +162,11 @@ impl VaultSchema {
 
     /// The declared fields, in key order.
     ///
-    /// Read by derivation, which hands the store the declared keys and the
-    /// typed order each typed one carries: the field pillar's typed column is
-    /// filled under this schema, and a find reads the declared keys as the
-    /// declared half of the field universe it judges a key against. `describe`
-    /// reports that universe once it is built; the current call graph does not
-    /// reach that consumer because the read surface's handlers do not exist
-    /// yet.
+    /// Read by derivation, which hands the store every declaration and the
+    /// typed order each typed field carries: the field pillar's typed column is
+    /// filled under this schema, a find reads the declared keys as the declared
+    /// half of the field universe it judges a key against, and `describe`
+    /// reports each declaration as a facet.
     pub fn fields(&self) -> impl Iterator<Item = (&str, &DeclaredField)> {
         self.fields.iter().map(|(key, field)| (key.as_str(), field))
     }
@@ -182,23 +181,25 @@ impl VaultSchema {
         &self.tags
     }
 
-    /// The declared folders, in the order they were written.
+    /// The declared folders, in the order they were written, each path once
+    /// and without its trailing `/`.
     ///
-    /// **Read by `describe`, which is not built.** `describe` reports the
-    /// vault's declared and observed field universe, and the declared folders
-    /// stand beside it. The current call graph does not reach it: the read
-    /// surface's handlers do not exist yet, and no derivation reads a folder.
+    /// Read by derivation, which hands them to the store with the rest of the
+    /// declaration, and `describe` reports each as a facet. No derivation
+    /// judges a document by the folder it stands in.
     pub fn folders(&self) -> &[DeclaredFolder] {
         &self.folders
     }
 
     /// The paths the resolution ladder does not count as candidates.
     ///
-    /// **Read by the resolution ladder.** Derivation hands the set to the store
-    /// beside the declared fields, and the store's one resolver applies it to
-    /// every class a target opens, which a find's `resolves` part reads today.
-    /// The globs match under the store's recorded path order: with ASCII case
-    /// folded on a root that folds it, bytewise on a root that does not.
+    /// **Read by the resolution ladder, and reported by `describe`.**
+    /// Derivation declares the set on the declaration it hands the store,
+    /// which holds it once: the store's one resolver applies it to every class
+    /// a target opens, which a find's `resolves` part reads today, and
+    /// `describe` reports each glob of it as a path rule. The globs match under
+    /// the store's recorded path order: with ASCII case folded on a root that
+    /// folds it, bytewise on a root that does not.
     ///
     /// Backlinks and link-health findings are the dormant consumers of the
     /// same exclusion: the link index lands them in Layer 3, and they read a
@@ -272,14 +273,12 @@ impl DeclaredField {
 
     /// Whether every document is declared to carry this field.
     ///
-    /// **Read by `describe` and by the field-rule finding kinds, neither of
-    /// which is built.** `describe` answers the declared field universe,
-    /// declarations and all, and a missing required field is a finding a
-    /// derivation mints under the schema fingerprint the way the tag facet's
-    /// is. The current call graph reaches neither, because the only finding
-    /// kind a schema keys today is the tag facet's: the declaration is parsed
-    /// and exposed here so the verb and the kind land against a model that
-    /// already holds them, rather than widening the grammar at the same time.
+    /// Read by `describe`, which reports it with the field's declaration, and
+    /// by the field-rule finding kinds, which are not built: a missing required
+    /// field is a finding a derivation mints under the schema fingerprint the
+    /// way the tag facet's is. The current call graph does not reach that
+    /// consumer, because the only finding kind a schema keys today is the tag
+    /// facet's.
     pub fn required(&self) -> bool {
         self.required
     }
@@ -287,10 +286,9 @@ impl DeclaredField {
     /// The closed set of values the field is declared to hold, where it is
     /// declared closed.
     ///
-    /// **Read by the same two unbuilt consumers as [`DeclaredField::required`]**
-    /// — `describe`, which reports the closed set as part of the declaration,
-    /// and the finding a value outside it mints. Nothing in the current call
-    /// graph reads it for the same reason.
+    /// Read by the same two consumers as [`DeclaredField::required`]:
+    /// `describe`, which reports the closed set as part of the declaration,
+    /// and the finding a value outside it mints, which is not built.
     pub fn one_of(&self) -> Option<impl Iterator<Item = &str>> {
         self.one_of
             .as_ref()
@@ -428,6 +426,12 @@ pub enum VaultSchemaError {
         /// The keys the section does hold, in grammar order.
         known: &'static [&'static str],
     },
+    /// `folders` declares one folder path twice. A trailing `/` does not make
+    /// a second folder, so `journal` and `journal/` are one path.
+    RepeatedFolder {
+        /// The path declared twice, without its trailing `/`.
+        path: String,
+    },
 }
 
 impl fmt::Display for VaultSchemaError {
@@ -464,6 +468,9 @@ impl fmt::Display for VaultSchemaError {
                 },
                 known.join(", ")
             ),
+            VaultSchemaError::RepeatedFolder { path } => {
+                write!(formatter, "`folders` declares the folder `{path}` twice")
+            }
         }
     }
 }
@@ -657,6 +664,7 @@ fn read_folders(document: &serde_yaml::Mapping) -> Result<Vec<DeclaredFolder>, V
     let Value::Sequence(folders) = value else {
         return Err(section_error("folders", "a sequence", value));
     };
+    let mut declared = BTreeSet::new();
     folders
         .iter()
         .map(|folder| {
@@ -675,9 +683,20 @@ fn read_folders(document: &serde_yaml::Mapping) -> Result<Vec<DeclaredFolder>, V
                     found: "absent".to_string(),
                 });
             };
+            // A folder path is read without its trailing `/`: `journal/` is
+            // the folder `journal`.
             let path = path
                 .as_str()
-                .ok_or_else(|| section_error("folders.path", "a path", path))?;
+                .ok_or_else(|| section_error("folders.path", "a path", path))?
+                .trim_end_matches('/');
+            // A path declared twice is refused as a repeated key is, rather
+            // than leaving which declaration stands to the order they were
+            // written in.
+            if !declared.insert(path) {
+                return Err(VaultSchemaError::RepeatedFolder {
+                    path: path.to_string(),
+                });
+            }
             let description = match at(folder, "description") {
                 None => None,
                 Some(value) => Some(

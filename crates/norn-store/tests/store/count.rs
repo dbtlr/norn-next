@@ -9,17 +9,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::common::{Scratch, document, write_documents};
+use crate::common::{DOCUMENT_PAYLOAD, Scratch, document, reads_of, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    COUNT_STATEMENTS, CountPlan, CountStatement, Counted, DeclaredFields, FieldOrder, Found,
-    FrontmatterValue, GroupMember, PageRefusal, ReadStatement, Snapshot, SnapshotReader, Store,
-    TagFact, TagSource, TypedOrder, induced_failure,
+    COUNT_STATEMENTS, ContentModel, CountPlan, CountStatement, Counted, FieldDeclaration,
+    FieldOrder, FindStatement, Found, FrontmatterValue, GroupMember, PageRefusal, ReadStatement,
+    Snapshot, SnapshotReader, Store, TagFact, TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    CountParams, Cursor, CursorKey, FindParams, GroupKey, Predicate, ResolutionTarget, Tally,
-    Unsatisfied, VaultAddress, VaultName,
+    Column, CountParams, Cursor, CursorKey, FindParams, GroupKey, Predicate, ResolutionTarget,
+    Tally, Unsatisfied, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -47,11 +47,11 @@ fn decimal_order() -> TypedOrder {
 }
 
 /// `status` and `aliases` declared as text, `n` declared as a decimal.
-fn declared() -> DeclaredFields {
-    DeclaredFields::under(COUNT_SCHEMA)
+fn declared() -> ContentModel {
+    ContentModel::under(COUNT_SCHEMA)
         .declare("status")
         .declare("aliases")
-        .declare_typed("n", decimal_order())
+        .declare_field("n", FieldDeclaration::number(decimal_order()))
 }
 
 fn texts(values: &[&str]) -> FrontmatterValue {
@@ -204,13 +204,18 @@ impl Counting {
     /// rows that a count whose work grows with the vault reads many times
     /// more of them.
     fn with_bulk(label: &str, bulk: usize) -> Self {
+        Self::with_bulk_bodies(label, bulk, "a body\n")
+    }
+
+    /// [`Counting::with_bulk`], each bulk document's body `body`.
+    fn with_bulk_bodies(label: &str, bulk: usize, body: &str) -> Self {
         let documents: Vec<_> = (0..bulk)
             .map(|at| {
                 tagged(
                     document(
                         &format!("bulk/{at:04}.md"),
                         &format!("hash-bulk-{at}"),
-                        "a body\n",
+                        body,
                     )
                     .with_frontmatter(
                         Some(map(vec![
@@ -817,13 +822,44 @@ fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
         .snapshot()
         .count(
             &typed.clone().with_after(cursor),
-            &DeclaredFields::under("another-schema").declare_typed("n", decimal_order()),
+            &ContentModel::under("another-schema")
+                .declare_field("n", FieldDeclaration::number(decimal_order())),
         )
         .expect_err("a typed cursor under another schema");
     assert!(
         matches!(refusal, PageRefusal::OrderChanged(_)),
         "{refusal:?}"
     );
+}
+
+/// **A declaration read from another schema than the snapshot pins is
+/// refused**, as every read refuses it, grouped or not: one read from another
+/// schema, and the declaration of a store with none, each named against the
+/// schema the snapshot pins.
+#[test]
+fn a_declaration_the_snapshot_does_not_pin_is_refused() {
+    let counting_store = Counting::new("count-declaration");
+    for (declared, declared_under) in [
+        (
+            ContentModel::under("another-schema").declare("status"),
+            Some("another-schema".to_string()),
+        ),
+        (ContentModel::none(), None),
+    ] {
+        for params in [counting(vec![field("status")]), counting(Vec::new())] {
+            assert_eq!(
+                counting_store
+                    .snapshot()
+                    .count(&params, &declared)
+                    .expect_err("the declaration is not the pinned one"),
+                PageRefusal::DeclarationNotPinned {
+                    declared_under: declared_under.clone(),
+                    pinned: Some(COUNT_SCHEMA.to_string()),
+                },
+                "{params:?}"
+            );
+        }
+    }
 }
 
 // ---- the plan bars ----
@@ -1419,4 +1455,163 @@ fn a_narrowing_part_narrows_a_counts_work_to_the_documents_it_matches() {
             judge_narrow(&small, &large, &tagged)
         });
     }
+}
+
+/// Whether `statement` is one a count runs: a tally statement, or a probe the
+/// conjunction's compilation runs, or the fingerprint read. A page of document
+/// rows and a hydration are neither.
+fn a_count_runs(statement: ReadStatement) -> bool {
+    matches!(
+        statement,
+        ReadStatement::Count(_)
+            | ReadStatement::Find(
+                FindStatement::ActiveFingerprint
+                    | FindStatement::KnownKey
+                    | FindStatement::FieldUniverse
+                    | FindStatement::BareDirectory
+                    | FindStatement::MatchProbe
+            )
+    )
+}
+
+/// **A count's work does not follow the body bytes of the documents it
+/// counts.** Over the fixture beside 200 more documents of 64-byte bodies, and
+/// beside the same 200 of 16 KiB bodies — the same documents, fields and tags,
+/// so the same groups — every grouping the work bar reads, unfiltered and
+/// narrowed by a tag and by a field's value, runs the same statements, reads
+/// the same tallies and takes the same steps at both. **No count hydrates a
+/// document**: every statement it runs is a tally statement, a probe its
+/// conjunction's compilation runs, or the fingerprint read, never a page of
+/// document rows nor a hydration.
+///
+/// What a tally costs follows the index entries it reads — the documents it
+/// counts, and the leading key's rows a valued section pages — rather than the
+/// groups alone, which the narrowing bar reads; this pair holds those fixed
+/// and varies the bodies alone. The counters count a statement's steps and
+/// not the bytes a step reads, so a statement reading a body by its row id
+/// steps the same over both: that no statement reads one is
+/// [`no_statement_a_count_runs_reads_a_documents_payload`]'s to hold.
+#[test]
+fn a_counts_work_does_not_follow_the_body_bytes_it_counts() {
+    let short = Counting::with_bulk_bodies("count-bodies-short", 200, &"b".repeat(64));
+    let long = Counting::with_bulk_bodies("count-bodies-long", 200, &"b".repeat(16 * 1024));
+    let narrowing = [
+        Vec::new(),
+        vec![Predicate::tag("bulk")],
+        vec![Predicate::equal_to("status", "filed")],
+    ];
+    for by in work_groupings() {
+        for predicates in &narrowing {
+            let params = counting(by.clone()).with_predicates(predicates.clone());
+            let (at_short, at_long) = (short.count(&params), long.count(&params));
+            assert_eq!(at_short.tallies, at_long.tallies, "{params:?}");
+            assert_eq!(
+                at_short.work, at_long.work,
+                "a count's work followed the bodies: {params:?}"
+            );
+            let plans = long.plans(&params);
+            assert!(
+                plans.iter().all(|plan| a_count_runs(plan.statement)),
+                "a count ran a statement that reads document rows: {plans:?}"
+            );
+        }
+    }
+}
+
+// ---- the payload bar ----
+
+/// The conjunctions the payload bar compiles: none, and one of each part a
+/// count applies — the probes a compilation runs among them: a key the
+/// declaration names, a key it does not, a path naming no wildcard, and a
+/// full-text query.
+fn payload_narrowing() -> Vec<Vec<Predicate>> {
+    vec![
+        Vec::new(),
+        vec![Predicate::tag("draft")],
+        vec![Predicate::equal_to("status", "open")],
+        vec![
+            Predicate::tag("draft"),
+            Predicate::not_equal_to("status", "closed"),
+        ],
+        vec![Predicate::has("status")],
+        vec![Predicate::missing("status")],
+        vec![Predicate::before("n", "10")],
+        vec![Predicate::equal_to("unnamed", "x")],
+        vec![Predicate::path("notes")],
+        vec![Predicate::path("*.md")],
+        vec![Predicate::matches("body")],
+    ]
+}
+
+/// **No statement a count runs reads a document's payload.** Every statement
+/// a count emits — each tally statement, and each probe its conjunction's
+/// compilation runs — over every grouping the work bar reads under every part
+/// a count applies, and every continuation the plan bars resume, reads none
+/// of [`crate::common::DOCUMENT_PAYLOAD`] as SQLite's authorizer reports the
+/// columns it reads: so what a count costs never includes the body bytes of
+/// the documents it counts, whatever its plan and its step counts say.
+///
+/// Control: a find projecting the body and the fields, on the same snapshot,
+/// hydrates rows reading the body and the frontmatter, and the bar fails over
+/// it.
+#[test]
+fn no_statement_a_count_runs_reads_a_documents_payload() {
+    let counting_store = Counting::new("count-payload");
+    let mut shapes: Vec<CountParams> = Vec::new();
+    for by in work_groupings() {
+        for predicates in payload_narrowing() {
+            shapes.push(counting(by.clone()).with_predicates(predicates));
+        }
+    }
+    for bar in LEAD_BARS {
+        let alone = counting(vec![(bar.key)()]);
+        shapes.push(counting_store.resumed(&alone, &[Some(bar.label)]));
+        let crossed = counting(vec![(bar.key)(), GroupKey::tag(), field("aliases")]);
+        shapes.push(counting_store.resumed(&crossed, &[Some(bar.label), None, None]));
+        shapes.push(counting_store.resumed(&crossed, &[None, None, Some("x")]));
+    }
+    let mut reached: Vec<ReadStatement> = Vec::new();
+    for params in &shapes {
+        for emitted in counting_store.plans(params) {
+            reached.push(emitted.statement);
+            reads_of(&emitted.plan).assert_reads_none_of(DOCUMENT_PAYLOAD);
+        }
+    }
+    for statement in CountStatement::all() {
+        assert!(
+            reached.contains(&ReadStatement::Count(statement)),
+            "the payload bar never reached {statement:?}: {reached:?}"
+        );
+    }
+    for probe in [
+        FindStatement::KnownKey,
+        FindStatement::FieldUniverse,
+        FindStatement::BareDirectory,
+        FindStatement::MatchProbe,
+    ] {
+        assert!(
+            reached.contains(&ReadStatement::Find(probe)),
+            "the payload bar never reached {probe:?}: {reached:?}"
+        );
+    }
+
+    let hydrated = counting_store
+        .snapshot()
+        .find_plans(
+            &FindParams::new(vault()).with_columns([Column::fields(), Column::body()]),
+            &declared(),
+        )
+        .expect("the plans of a find");
+    let rows = hydrated
+        .iter()
+        .find(|emitted| emitted.statement == FindStatement::HydrateDocuments)
+        .expect("a find hydrates its rows");
+    let rows = reads_of(&rows.plan);
+    assert!(
+        rows.reads("documents", "body") && rows.reads("documents", "frontmatter"),
+        "a hydration projecting the body and the fields read neither: {rows:?}"
+    );
+    failure_of("a hydration of the body and the fields", || {
+        rows.assert_reads_none_of(DOCUMENT_PAYLOAD)
+    });
 }

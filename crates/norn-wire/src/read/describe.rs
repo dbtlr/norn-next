@@ -113,6 +113,25 @@ pub enum ContainerKind {
     Map,
 }
 
+impl ContainerKind {
+    /// Every container the vocabulary holds, in declaration order, which is
+    /// the order an observed field lists the containers it is held in.
+    pub const ALL: [ContainerKind; 3] = [
+        ContainerKind::Scalar,
+        ContainerKind::Sequence,
+        ContainerKind::Map,
+    ];
+
+    /// Where this container stands in [`ContainerKind::ALL`].
+    const fn position(self) -> usize {
+        match self {
+            ContainerKind::Scalar => 0,
+            ContainerKind::Sequence => 1,
+            ContainerKind::Map => 2,
+        }
+    }
+}
+
 /// Which rule a path rule states.
 ///
 /// On the wire a rule is the flat string itself: `"ambiguity_ignore"`.
@@ -146,12 +165,17 @@ pub enum Facet {
         one_of: Option<Vec<String>>,
     },
     /// A field the vault's documents carry, declared or not.
+    ///
+    /// One facet per key: a key one document holds as a scalar and another as
+    /// a sequence is one observed field held in both.
     #[non_exhaustive]
     ObservedField {
         /// The frontmatter key.
         key: String,
-        /// What container its values sit in.
-        container: ContainerKind,
+        /// Every container some document holds the key's value in, each once,
+        /// in the order the container vocabulary declares: scalar, sequence,
+        /// map.
+        containers: Vec<ContainerKind>,
     },
     /// A tag name the vault's schema declares.
     #[non_exhaustive]
@@ -205,11 +229,23 @@ impl Facet {
         }
     }
 
-    /// The field `key`, observed in `container`.
-    pub fn observed_field(key: impl Into<String>, container: ContainerKind) -> Self {
+    /// The field `key`, observed held in each of `containers`: listed each
+    /// once, in [`ContainerKind::ALL`]'s order, whatever order they are named
+    /// in.
+    pub fn observed_field(
+        key: impl Into<String>,
+        containers: impl IntoIterator<Item = ContainerKind>,
+    ) -> Self {
+        let mut held = [false; ContainerKind::ALL.len()];
+        for container in containers {
+            held[container.position()] = true;
+        }
         Facet::ObservedField {
             key: key.into(),
-            container,
+            containers: ContainerKind::ALL
+                .into_iter()
+                .filter(|container| held[container.position()])
+                .collect(),
         }
     }
 
@@ -285,7 +321,7 @@ impl Facet {
                 required: _,
                 one_of: _,
             } => key.clone(),
-            Facet::ObservedField { key, container: _ } => key.clone(),
+            Facet::ObservedField { key, containers: _ } => key.clone(),
             Facet::DeclaredTag { name } => name.clone(),
             Facet::TagPattern { pattern } => pattern.clone(),
             Facet::Folder {
@@ -299,16 +335,23 @@ impl Facet {
     }
 }
 
-/// What `describe` answers with: one page of facets.
+/// What `describe` answers with: one page of facets, in `(kind, key)` order —
+/// the kinds in the byte order of their codes ([`FacetKind::in_code_order`]),
+/// and within a kind the facets in the byte order of their keys.
 pub type DescribeReport = Page<Facet>;
 
 /// What a `describe` request carries.
+///
+/// The facets it answers stand in `(kind, key)` order: the kind, in the byte
+/// order of its code, then the key in byte order, which is the order a facet
+/// cursor names a position in.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct DescribeParams {
     /// The vault to answer about.
     pub vault: VaultAddress,
-    /// The kinds of facet to report. Empty reports every kind.
+    /// The kinds of facet to report. Empty reports every kind. Whatever order
+    /// it names them in, they are answered in the byte order of their codes.
     pub facets: Vec<FacetKind>,
     /// How many facets at most. `null` leaves the ceiling to the host.
     pub limit: Option<u32>,

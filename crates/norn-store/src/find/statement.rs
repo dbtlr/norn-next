@@ -11,7 +11,7 @@ use norn_db::rusqlite::types::Value;
 
 use crate::error::StoreError;
 use crate::json::{FrontmatterValue, canonical_json};
-use crate::read::{Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter};
+use crate::read::{Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter, key_walk};
 
 /// Every statement shape the find builder runs, named.
 ///
@@ -42,7 +42,8 @@ pub enum FindStatement {
     /// Whether any document carries a key the declaration does not name: one
     /// existence seek of `document_fields_presence`.
     KnownKey,
-    /// Every key a document carries, each once, in key order: a walk of
+    /// Every key a document carries, each once, in key order: the key walk
+    /// every enumeration of the keys shares, a walk of
     /// `document_fields_presence` that seeks past each key to the next, so it
     /// costs the distinct keys rather than the rows that carry them. Run only
     /// where some key a request named is unknown.
@@ -368,24 +369,16 @@ pub(crate) fn compose_known_key(key: &str) -> (String, Vec<Value>) {
 }
 
 /// [`FindStatement::FieldUniverse`]: every key a document carries, once each,
-/// in key order.
+/// in key order: the whole [`key_walk`](crate::read::key_walk), from the first key.
 ///
-/// Each step seeks the presence index for the least key after the one before
-/// it, so the walk reads one index entry per distinct key rather than one per
-/// document that carries it. Every key is text, and every text sorts at or
-/// after the empty one, so the first step's bound excludes none.
+/// Every key is text, and every text sorts at or after the empty one, so the
+/// first step's bound excludes none.
 pub(crate) fn compose_universe() -> (String, Vec<Value>) {
     (
-        "WITH RECURSIVE universe(key) AS (
-             SELECT (SELECT MIN(fu.key) FROM document_fields AS fu
-                      WHERE fu.ordinal = 0 AND fu.key >= '')
-             UNION ALL
-             SELECT (SELECT MIN(fx.key) FROM document_fields AS fx
-                      WHERE fx.ordinal = 0 AND fx.key > universe.key)
-               FROM universe WHERE universe.key IS NOT NULL
-         )
-         SELECT key FROM universe WHERE key IS NOT NULL"
-            .to_string(),
+        format!(
+            "{} SELECT key FROM walked WHERE key IS NOT NULL",
+            key_walk(">= ''", None)
+        ),
         Vec::new(),
     )
 }

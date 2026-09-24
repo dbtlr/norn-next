@@ -137,27 +137,25 @@ impl<'a> Request<'a> {
             ExplainedStatement::FindingCandidates(ids) => finding_candidates_sql(ids.get()),
             ExplainedStatement::FindingClasses(ids) => finding_classes_sql(ids.get()),
         };
-        let connection = self.store.connection();
+        let database = &self.store.database;
         Ok(match statement {
             ExplainedStatement::SuffixCandidates(resolution) => {
-                norn_db::emitted_plan(connection, &sql, params_from_iter(resolution.parameters()))
+                database.emitted_plan(&sql, params_from_iter(resolution.parameters()))
             }
             ExplainedStatement::FindingsInClass(probe)
             | ExplainedStatement::ClassDiscard(probe) => {
-                norn_db::emitted_plan(connection, &sql, probe_parameters(probe))
+                database.emitted_plan(&sql, probe_parameters(probe))
             }
-            ExplainedStatement::SubjectDiscard(path, scope) => norn_db::emitted_plan(
-                connection,
+            ExplainedStatement::SubjectDiscard(path, scope) => database.emitted_plan(
                 &sql,
                 params_from_iter(subject_discard_parameters(path, scope)),
             ),
             // The pin binds nothing: every typed value is derived under the
             // schema being replaced.
-            ExplainedStatement::TypedValueDiscard => norn_db::emitted_plan(connection, &sql, []),
+            ExplainedStatement::TypedValueDiscard => database.emitted_plan(&sql, []),
             ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, _) => {
                 let cursor = explained_page_cursor(scope);
-                norn_db::emitted_plan(
-                    connection,
+                database.emitted_plan(
                     &sql,
                     params_from_iter(finding_subject_parameters(
                         scope,
@@ -169,8 +167,7 @@ impl<'a> Request<'a> {
             }
             ExplainedStatement::StoredDocumentPage(scope, _) => {
                 let cursor = explained_page_cursor(scope);
-                norn_db::emitted_plan(
-                    connection,
+                database.emitted_plan(
                     &sql,
                     params_from_iter(document_page_parameters(scope, Some(&cursor), MAX_PAGE)),
                 )
@@ -180,8 +177,7 @@ impl<'a> Request<'a> {
             // statement text does not branch on the cursor, so the plan is the
             // same either way today, and an edit that ever gave the cursor its
             // own text would otherwise be explained on the first page alone.
-            ExplainedStatement::StoredFindingPage => norn_db::emitted_plan(
-                connection,
+            ExplainedStatement::StoredFindingPage => database.emitted_plan(
                 &sql,
                 params_from_iter(finding_page_parameters(
                     Some(FindingCursor(EXPLAINED_FINDING_CURSOR)),
@@ -189,8 +185,7 @@ impl<'a> Request<'a> {
                 )),
             ),
             ExplainedStatement::StoredTombstonePage | ExplainedStatement::StoredSuffixKeyPage => {
-                norn_db::emitted_plan(
-                    connection,
+                database.emitted_plan(
                     &sql,
                     params_from_iter(text_page_parameters(
                         Some(EXPLAINED_PAGE_CURSOR_LEAF),
@@ -198,8 +193,7 @@ impl<'a> Request<'a> {
                     )),
                 )
             }
-            ExplainedStatement::IndexedTermPage => norn_db::emitted_plan(
-                connection,
+            ExplainedStatement::IndexedTermPage => database.emitted_plan(
                 &sql,
                 params_from_iter(text_page_parameters(Some(EXPLAINED_TERM_CURSOR), MAX_PAGE)),
             ),
@@ -209,8 +203,7 @@ impl<'a> Request<'a> {
             // today, and a cursor left null would explain the first page
             // alone if an edit ever gave the two states their own text.
             ExplainedStatement::DocumentFeedPage | ExplainedStatement::TombstoneFeedPage => {
-                norn_db::emitted_plan(
-                    connection,
+                database.emitted_plan(
                     &sql,
                     params_from_iter(feed_page_parameters(
                         Some(&explained_feed_cursor()),
@@ -225,7 +218,7 @@ impl<'a> Request<'a> {
             | ExplainedStatement::StoredFactsDocument(path)
             | ExplainedStatement::StoredTombstone(path)
             | ExplainedStatement::StoredFindings(path) => {
-                norn_db::emitted_plan(connection, &sql, params![path.as_str()])
+                database.emitted_plan(&sql, params![path.as_str()])
             }
             // The five fact statements are keyed by a row id rather than a
             // path, and the id is bound for the reason a page's cursor is —
@@ -235,17 +228,17 @@ impl<'a> Request<'a> {
             | ExplainedStatement::DocumentBlocks
             | ExplainedStatement::DocumentTags
             | ExplainedStatement::DocumentFields => {
-                norn_db::emitted_plan(connection, &sql, params![EXPLAINED_DOCUMENT_ROW])
+                database.emitted_plan(&sql, params![EXPLAINED_DOCUMENT_ROW])
             }
             // The pin reads three keys through one statement, so the plan is
             // taken under the first of the three.
             ExplainedStatement::VaultSchemaPin => {
-                norn_db::emitted_plan(connection, &sql, params![ddl::meta::VAULT_SCHEMA_BYTES])
+                database.emitted_plan(&sql, params![ddl::meta::VAULT_SCHEMA_BYTES])
             }
             ExplainedStatement::FindingCandidates(ids)
             | ExplainedStatement::FindingClasses(ids) => {
                 let chunk: Vec<i64> = (EXPLAINED_FIRST_FINDING_ID..).take(ids.get()).collect();
-                norn_db::emitted_plan(connection, &sql, finding_id_parameters(&chunk))
+                database.emitted_plan(&sql, finding_id_parameters(&chunk))
             }
         }?)
     }

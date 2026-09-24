@@ -660,6 +660,79 @@ fn a_read_only_connection_refuses_to_relax_its_own_settings() {
     );
 }
 
+/// **A plan carries every column its statement reads, and taking it leaves the
+/// connection as it was.** The reads are SQLite's own report at preparation,
+/// so they name what the statement reads wherever in it the read is — a
+/// subquery's included. On a sealed connection the seal judges the statement
+/// while its plan is taken, so a statement the seal refuses has no plan, and
+/// afterwards the seal and the handle's own transaction control stand as they
+/// were; a writable connection writes afterwards as it did before.
+#[test]
+fn an_emitted_plan_carries_the_columns_its_statement_reads() {
+    let scratch = Scratch::new("emitted-reads");
+    let database = scratch.database();
+    let (writer, _) = open(&database, Answer::Keep).expect("a first open");
+    meta::put_meta(&writer, meta::WRITE_GENERATION, 1_i64).expect("a writer writes");
+    let read = |table: &str, column: &str| norn_db::ColumnRead {
+        table: table.to_string(),
+        column: column.to_string(),
+    };
+
+    let mut reader = norn_db::Database::adopt(
+        norn_db::connect_read_only(&database).expect("a read-only handle"),
+        &database,
+    )
+    .expect("a read-only handle binds to its file");
+    let plan = reader
+        .emitted_plan(meta::META_READ_SQL, [meta::WRITE_GENERATION])
+        .expect("the plan of a pinned-scalar read");
+    assert_eq!(
+        plan.reads,
+        [read("meta", "key"), read("meta", "value")]
+            .into_iter()
+            .collect(),
+        "{plan:?}"
+    );
+    let nested = reader
+        .emitted_plan(
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM meta AS m WHERE length(m.value) >= 0)",
+            [],
+        )
+        .expect("the plan of a probe");
+    assert_eq!(
+        nested.reads,
+        [read("meta", "value")].into_iter().collect(),
+        "a read inside a subquery went unreported: {nested:?}"
+    );
+    reader
+        .emitted_plan("CREATE TEMP TABLE probe (value INTEGER)", [])
+        .expect_err("a statement the seal refuses was explained");
+
+    for statement in ["PRAGMA query_only = 0", "ROLLBACK"] {
+        assert!(
+            reader.connection().execute_batch(statement).is_err(),
+            "taking a plan unsealed the connection: it ran `{statement}`"
+        );
+    }
+    reader
+        .open_snapshot()
+        .expect("taking a plan disarmed the handle's own transaction control");
+    reader.close_snapshot().expect("a snapshot ends");
+
+    let writing = norn_db::Database::adopt(writer, &database).expect("a writer binds to its file");
+    let plan = writing
+        .emitted_plan(meta::META_READ_SQL, [meta::WRITE_GENERATION])
+        .expect("the plan of a pinned-scalar read on a writer");
+    assert_eq!(
+        plan.reads,
+        [read("meta", "key"), read("meta", "value")]
+            .into_iter()
+            .collect()
+    );
+    meta::put_meta(writing.connection(), meta::WRITE_GENERATION, 2_i64)
+        .expect("taking a plan left the writer unable to write");
+}
+
 /// A database that is not in write-ahead logging is refused as an environment
 /// fact rather than as damage. The journal mode says how the file is being
 /// used, not what its pages hold, and discarding a sound database over it

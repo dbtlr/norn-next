@@ -24,19 +24,20 @@ impl Snapshot {
     /// One page of at most `limit` rows, read from `sections` in order.
     ///
     /// Each section is asked for one row more than the page still has room
-    /// for, and a section after the page is full is never run, so a page reads
+    /// for, and a section after the page is full is never read, so a page reads
     /// at most one row past its bound. **That row is what says a next page
     /// exists**: it is dropped, and the last row kept is where the next page
-    /// continues. The builder states the rest: `compose` spells a section's
-    /// statement to read at most the rows it is handed, and `read` runs it,
-    /// recording it at the end of `record`.
+    /// continues. The builder states the rest: `read` answers a section with
+    /// at most the rows it is handed, running each statement it reads through
+    /// at the end of `record` — or none, where what the section reads is held
+    /// in memory — and what SQLite counted stepping the statements a section
+    /// ran is summed into the page's.
     pub(crate) fn read_page<S, T: Clone>(
         &self,
         sections: impl IntoIterator<Item = S>,
         limit: usize,
         record: &mut Vec<Ran>,
-        mut compose: impl FnMut(S, usize) -> Ran,
-        mut read: impl FnMut(&mut Vec<Ran>, Ran) -> Result<Vec<T>, StoreError>,
+        mut read: impl FnMut(&mut Vec<Ran>, S, usize) -> Result<Vec<T>, StoreError>,
     ) -> Result<KeysetPage<T>, StoreError> {
         let mut rows: Vec<T> = Vec::new();
         let mut stepped = Stepped::default();
@@ -45,13 +46,11 @@ impl Snapshot {
             if room == 0 {
                 break;
             }
-            rows.extend(read(record, compose(section, room))?);
-            stepped.add(
-                record
-                    .last()
-                    .expect("the section was just recorded")
-                    .stepped,
-            );
+            let ran_before = record.len();
+            rows.extend(read(record, section, room)?);
+            for ran in &record[ran_before..] {
+                stepped.add(ran.stepped);
+            }
         }
         let read = rows.len() as u64;
         let next = if rows.len() > limit {

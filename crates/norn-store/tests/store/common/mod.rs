@@ -9,14 +9,40 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use norn_store::{
-    BlockFact, CandidateFact, Change, ClassKey, DeclaredFields, DerivationCounters, DocumentFacts,
-    DocumentPath, FindingFacts, FrontmatterValue, HeadingFact, IncrementOutcome,
+    BlockFact, CandidateFact, Change, ClassKey, ContentModel, DerivationCounters, DocumentFacts,
+    DocumentPath, EmittedPlan, FindingFacts, FrontmatterValue, HeadingFact, IncrementOutcome,
     IncrementProvenance, LinkFact, LinkFamily, Provenance, Request, Span, Store, TagFact,
     TagSource, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
+use norn_testkit::explain::StatementReads;
 use norn_testkit::scratch::Scratch as TestkitScratch;
 use norn_wire::{FindingKind, Severity};
+
+/// The columns that hold a document's payload: what a document says, rather
+/// than an index entry about it. `documents.body` is the body text and
+/// `documents.frontmatter` the frontmatter as stored; `documents_fts.body` is
+/// the full-text table's one column, which reads `documents.body` through the
+/// table's external content. Reading any of them costs the bytes of the
+/// documents read, and no index a set-valued answer reads is keyed by one.
+/// The table's other columns are keys, hashes and lengths, whose width does
+/// not follow the document's.
+pub const DOCUMENT_PAYLOAD: &[(&str, &str)] = &[
+    ("documents", "body"),
+    ("documents", "frontmatter"),
+    ("documents_fts", "body"),
+];
+
+/// The columns `emitted` reads, in the harness's shape.
+pub fn reads_of(emitted: &EmittedPlan) -> StatementReads {
+    StatementReads::new(
+        emitted.sql.clone(),
+        emitted
+            .reads
+            .iter()
+            .map(|read| (read.table.clone(), read.column.clone())),
+    )
+}
 
 /// A snapshot of a request's reading, in the shape the harness compares.
 pub fn snapshot(counters: &DerivationCounters) -> CounterSnapshot {
@@ -184,7 +210,7 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
             ),
             ("draft".to_string(), FrontmatterValue::Bool(false)),
         ])),
-        &DeclaredFields::none(),
+        &ContentModel::none(),
     );
     facts.links = vec![
         LinkFact {

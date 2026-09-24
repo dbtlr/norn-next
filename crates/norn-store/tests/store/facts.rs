@@ -10,7 +10,7 @@ use crate::common::{
     Scratch, document, document_with_every_fact, path, record_death, span, write_document,
 };
 use norn_store::{
-    BlockFact, Change, DeclaredFields, DocumentFacts, FrontmatterValue, HeadingFact,
+    BlockFact, Change, ContentModel, DocumentFacts, FrontmatterValue, HeadingFact,
     IncrementProvenance, LinkFact, LinkFamily, Provenance, StoreError, TagFact, TagSource, ddl,
 };
 
@@ -83,7 +83,7 @@ fn an_absent_frontmatter_block_and_an_empty_one_are_different_values() {
     let mut empty = document("empty.md", "hash-2", "a body\n");
     empty = empty.with_frontmatter(
         Some(FrontmatterValue::Map(Vec::new())),
-        &DeclaredFields::none(),
+        &ContentModel::none(),
     );
 
     let mut request = store.begin_request();
@@ -126,7 +126,7 @@ fn a_frontmatter_value_past_the_bound_is_refused_and_its_facts_freed() {
     for _ in 0..100_000 {
         value = FrontmatterValue::Sequence(vec![value]);
     }
-    facts = facts.with_frontmatter(Some(value), &DeclaredFields::none());
+    facts = facts.with_frontmatter(Some(value), &ContentModel::none());
     let subject = facts.path.clone();
 
     let error = store
@@ -415,7 +415,7 @@ fn a_field_index_holds_only_the_rows_its_reads_match() {
             "key, typed, path",
             "least_typed = 1",
         ),
-        ("document_fields_presence", "key", "ordinal = 0"),
+        ("document_fields_presence", "key, container", "ordinal = 0"),
     ] {
         assert_eq!(
             index_shape(&declared, index),

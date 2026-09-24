@@ -308,7 +308,7 @@ fn a_sub_fingerprint_that_does_not_describe_its_column_is_damage() {
         let mut store = scratch.open();
         let subject = path("docs/norn/glossary.md");
         let mut facts = document(subject.as_str(), "hash-1", "a body\n");
-        facts = facts.with_frontmatter(titled_frontmatter(), &norn_store::DeclaredFields::none());
+        facts = facts.with_frontmatter(titled_frontmatter(), &norn_store::ContentModel::none());
         write_document(&mut store.begin_request(), &facts);
         store.verify_integrity().expect("a store just written to");
 
@@ -1861,7 +1861,7 @@ fn the_feed_projects_a_fingerprint_per_part_a_consumer_derives_from() {
 
     let plain = document("plain.md", "hash-plain", "one body\n");
     let mut titled = document("titled.md", "hash-titled", "one body\n");
-    titled = titled.with_frontmatter(titled_frontmatter(), &norn_store::DeclaredFields::none());
+    titled = titled.with_frontmatter(titled_frontmatter(), &norn_store::ContentModel::none());
     write_documents(&mut request, &[plain, titled]);
 
     let fed: std::collections::BTreeMap<String, norn_store::FeedDocument> = request
@@ -1894,8 +1894,7 @@ fn the_feed_projects_a_fingerprint_per_part_a_consumer_derives_from() {
     // Re-deriving the body alone moves the body hash and leaves the projection
     // hash where it was, which is the discrimination the two columns exist for.
     let mut rewritten = document("titled.md", "hash-titled-2", "another body\n");
-    rewritten =
-        rewritten.with_frontmatter(titled_frontmatter(), &norn_store::DeclaredFields::none());
+    rewritten = rewritten.with_frontmatter(titled_frontmatter(), &norn_store::ContentModel::none());
     write_document(&mut request, &rewritten);
     let after = request
         .changed_documents_after(None, norn_store::MAX_PAGE)

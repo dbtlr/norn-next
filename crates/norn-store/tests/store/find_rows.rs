@@ -6,9 +6,9 @@
 //! and typed orders.
 
 use norn_store::{
-    BODY_ROW_CEILING, BlockFact, DeclaredFields, FindStatement, FindWork, Found, HeadingFact,
-    NESTED_ROW_CEILING, Nested, NestedRows, PageRefusal, SnapshotReader, Span, Store, TagFact,
-    TagSource, Validation,
+    BODY_ROW_CEILING, BlockFact, ContentModel, FieldDeclaration, FindStatement, FindWork, Found,
+    HeadingFact, NESTED_ROW_CEILING, Nested, NestedRows, PageRefusal, SnapshotReader, Span, Store,
+    TagFact, TagSource, Validation,
 };
 use norn_wire::{
     BlockRow, Column, Cursor, CursorKey, CursorOrderChanged, Direction, FieldValue, FindParams,
@@ -20,15 +20,15 @@ use crate::common::{Scratch, ambiguity, document, unread_block, violation, write
 use crate::find::{SEED_SCHEMA, Seeded, declared, integer_order, map, request, sorted, string};
 
 /// The fixture's declaration, read from the schema pinned under `schema`.
-fn declared_under(schema: &str) -> DeclaredFields {
-    DeclaredFields::under(schema)
+fn declared_under(schema: &str) -> ContentModel {
+    ContentModel::under(schema)
         .declare("status")
-        .declare_typed("count", integer_order())
+        .declare_field("count", FieldDeclaration::number(integer_order()))
 }
 
 /// The fixture's keys, both ordered by their text, under `schema`.
-fn declared_raw_under(schema: &str) -> DeclaredFields {
-    DeclaredFields::under(schema)
+fn declared_raw_under(schema: &str) -> ContentModel {
+    ContentModel::under(schema)
         .declare("status")
         .declare("count")
 }
@@ -49,7 +49,7 @@ impl Unpinned {
         let counted = |at: &str, hash: &str, count: &str| {
             document(at, hash, "a body\n").with_frontmatter(
                 Some(map(vec![("count", string(count))])),
-                &DeclaredFields::none(),
+                &ContentModel::none(),
             )
         };
         write_documents(
@@ -93,7 +93,7 @@ impl Seeded {
     }
 
     /// One find on a fresh snapshot, under `declared`.
-    fn found_under(&self, params: &FindParams, declared: &DeclaredFields) -> Found {
+    fn found_under(&self, params: &FindParams, declared: &ContentModel) -> Found {
         self.snapshot()
             .find(params, declared)
             .unwrap_or_else(|refusal| panic!("a find of {params:?}: {refusal}"))
@@ -231,7 +231,7 @@ fn a_typed_cursor_refuses_after_a_re_pin_and_a_raw_one_survives_it() {
     let raw_cursor = raw.next.expect("a next page");
 
     seeded.pin("schema-2");
-    let refused = |cursor: &Cursor, declared: &DeclaredFields| {
+    let refused = |cursor: &Cursor, declared: &ContentModel| {
         seeded
             .snapshot()
             .find(&by_count.clone().with_after(cursor.clone()), declared)
@@ -345,14 +345,14 @@ fn a_cursor_minted_in_another_order_than_the_requests_is_refused() {
 #[test]
 fn a_declaration_read_from_another_schema_than_the_pinned_one_is_refused() {
     let mut seeded = Seeded::new("find-declaration-not-pinned");
-    let refusal = |seeded: &Seeded, declared: &DeclaredFields| {
+    let refusal = |seeded: &Seeded, declared: &ContentModel| {
         seeded
             .snapshot()
             .find(&request(), declared)
             .expect_err("a declaration the snapshot does not pin")
     };
     assert_eq!(
-        refusal(&seeded, &DeclaredFields::none()),
+        refusal(&seeded, &ContentModel::none()),
         PageRefusal::DeclarationNotPinned {
             declared_under: None,
             pinned: Some(SEED_SCHEMA.to_string()),
@@ -393,14 +393,14 @@ fn a_store_with_no_schema_pinned_mints_cursors_under_no_fingerprint() {
             let params = sorted(key.clone(), direction).with_limit(1);
             let found = unpinned
                 .snapshot()
-                .find(&params, &DeclaredFields::none())
+                .find(&params, &ContentModel::none())
                 .expect("a page");
             assert_eq!(found.snapshot.schema_fingerprint, None, "{params:?}");
             let next = found.next.expect("a next page");
             assert_eq!(next.snapshot().schema_fingerprint, None, "{params:?}");
             unpinned
                 .snapshot()
-                .find(&params.with_after(next), &DeclaredFields::none())
+                .find(&params.with_after(next), &ContentModel::none())
                 .expect("a continuation under no schema");
         }
     }
@@ -408,7 +408,7 @@ fn a_store_with_no_schema_pinned_mints_cursors_under_no_fingerprint() {
         .snapshot()
         .find(
             &request().with_predicates([Predicate::has_finding(FindingKind::BodyBytesNotUtf8)]),
-            &DeclaredFields::none(),
+            &ContentModel::none(),
         )
         .expect("a page");
     assert_eq!(paths(&with_finding), ["notes/a.md"]);
@@ -821,7 +821,7 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
                 VaultName::new("notes").expect("a vault name"),
             ))
             .with_columns([Column::findings()]),
-            &DeclaredFields::none(),
+            &ContentModel::none(),
         )
         .expect("a find under no schema");
     let carried: Vec<(String, u64)> = bare
@@ -941,7 +941,7 @@ fn a_row_cut_by_a_ceiling_says_how_much_the_whole_held() {
 
 /// The fixture's declaration with `due` declared too, which no document
 /// carries.
-fn declaring_due() -> DeclaredFields {
+fn declaring_due() -> ContentModel {
     declared().declare("due")
 }
 

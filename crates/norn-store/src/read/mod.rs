@@ -1,7 +1,8 @@
 //! What every read builder shares: the refusal a builder answers with instead
 //! of a page, the statements a read runs and records, the reading a cursor is
 //! judged against, the one compilation of a conjunction, the filters it
-//! spells, and the one keyset page a builder reads section after section.
+//! spells, the one walk of the keys documents carry, and the one keyset page a
+//! builder reads section after section.
 //!
 //! A read builder is inherent methods on [`Snapshot`], so every statement it
 //! runs reads the one instant the snapshot was established at and is counted
@@ -23,6 +24,7 @@ mod conjunction;
 mod filter;
 mod finding;
 mod glob;
+mod keys;
 mod page;
 mod reading;
 mod run;
@@ -31,6 +33,7 @@ mod suggest;
 use norn_wire::CursorOrderChanged;
 
 use crate::count::CountStatement;
+use crate::describe::DescribeStatement;
 use crate::error::StoreError;
 use crate::find::FindStatement;
 use crate::request::MAX_PAGE;
@@ -44,6 +47,7 @@ pub(crate) use filter::{Binder, Filter};
 pub use filter::{READ_FILTERS, ReadFilter};
 pub(crate) use finding::{FINDING_ROW_COLUMNS, FindingBase, finding_base};
 pub(crate) use glob::register_functions;
+pub(crate) use keys::key_walk;
 pub(crate) use run::{Lookups, Ran, Stepped};
 
 /// How many rows a page holds when a request names no bound.
@@ -111,8 +115,9 @@ impl FieldOrder {
 /// A statement a read builder ran, named by the builder that names it.
 ///
 /// A read compiles its conjunction through probes the find builder names, and
-/// reads finding rows through statements the find builder names, so a count
-/// and a validate run find's statements beside their own; the record of what
+/// reads finding rows and the active fingerprint through statements the find
+/// builder names, so a count, a validate and a describe run find's statements
+/// beside their own; the record of what
 /// a read ran holds any of them, and each builder's enumeration stays its own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadStatement {
@@ -122,6 +127,14 @@ pub enum ReadStatement {
     Count(CountStatement),
     /// A statement [`ValidateStatement`] names.
     Validate(ValidateStatement),
+    /// A statement [`DescribeStatement`] names.
+    Describe(DescribeStatement),
+}
+
+impl From<DescribeStatement> for ReadStatement {
+    fn from(statement: DescribeStatement) -> Self {
+        ReadStatement::Describe(statement)
+    }
 }
 
 impl From<ValidateStatement> for ReadStatement {
@@ -167,7 +180,8 @@ pub enum PageRefusal {
     UnreadableBound { key: String, value: String },
     /// The declaration the request was compiled under was read from a schema
     /// other than the one the snapshot pins, so its typed orders are not the
-    /// ones the typed column holds. Each fingerprint is `None` for no schema.
+    /// ones the typed column holds, and the facets it declares are not the
+    /// pinned schema's. Each fingerprint is `None` for no schema.
     DeclarationNotPinned {
         declared_under: Option<String>,
         pinned: Option<String>,
@@ -185,6 +199,9 @@ pub enum PageRefusal {
     /// The cursor names no position among a validate's findings: it is not a
     /// finding's.
     NotAFindingCursor,
+    /// The cursor names no position among a describe's facets: it is not a
+    /// facet's.
+    NotAFacetCursor,
     /// The request answers a summary and carries a cursor. A summary answers
     /// every tally at once and is not paged, so no cursor names a position it
     /// continues from.
@@ -238,6 +255,9 @@ impl std::fmt::Display for PageRefusal {
             }
             PageRefusal::NotAFindingCursor => {
                 formatter.write_str("the cursor names no position among this validate's findings")
+            }
+            PageRefusal::NotAFacetCursor => {
+                formatter.write_str("the cursor names no position among a describe's facets")
             }
             PageRefusal::SummaryNotPaged => {
                 formatter.write_str("a summary is not paged, so it continues no cursor")

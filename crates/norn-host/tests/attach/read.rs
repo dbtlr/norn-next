@@ -5,7 +5,7 @@
 //! process that ran it to a ceiling, so both read the same request, spelled
 //! here once.
 
-use norn_store::{DeclaredFields, Found, Snapshot, Store};
+use norn_store::{ContentModel, Found, Snapshot, Store};
 use norn_testkit::counters::CounterSnapshot;
 use norn_wire::{Direction, FindParams, Sort, SortKey, VaultAddress, VaultName};
 
@@ -17,13 +17,13 @@ pub const FIND_LIMIT: u32 = 25;
 /// The suites' vault schema declares no field, so the declaration names the
 /// pinned fingerprint and nothing else, and every field orders by its raw
 /// text.
-pub fn the_pinned_declaration(store: &mut Store) -> DeclaredFields {
+pub fn the_pinned_declaration(store: &mut Store) -> ContentModel {
     let pin = store
         .begin_request()
         .vault_schema_pin()
         .expect("reading the pin")
         .expect("an attachment pins the vault schema");
-    DeclaredFields::under(pin.fingerprint)
+    ContentModel::under(pin.fingerprint)
 }
 
 /// A find over `vault`, newest `created` first, bounded at [`FIND_LIMIT`].
@@ -61,7 +61,7 @@ impl Pages {
 pub fn pages(
     snapshot: &Snapshot,
     params: &FindParams,
-    declared: &DeclaredFields,
+    declared: &ContentModel,
     count: u64,
 ) -> Pages {
     let mut pages = Vec::new();
@@ -83,7 +83,7 @@ pub fn pages(
 pub fn each_page(
     snapshot: &Snapshot,
     params: &FindParams,
-    declared: &DeclaredFields,
+    declared: &ContentModel,
     count: u64,
     mut visit: impl FnMut(Found),
 ) {

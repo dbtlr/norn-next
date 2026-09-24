@@ -7,8 +7,8 @@
 
 use crate::common::{Scratch, document, path, record_death, write_document};
 use norn_store::{
-    Change, DeclaredFields, DocumentFacts, FieldContainer, FieldRow, FieldRows, FrontmatterValue,
-    IncrementProvenance, Provenance, StoreError, TypedOrder, induced_failure,
+    Change, ContentModel, DocumentFacts, FieldContainer, FieldDeclaration, FieldRow, FieldRows,
+    FrontmatterValue, IncrementProvenance, Provenance, StoreError, TypedOrder, induced_failure,
 };
 
 /// A presence row, as the rows are compared.
@@ -62,7 +62,7 @@ fn fielded(
     at: &str,
     hash: &str,
     value: FrontmatterValue,
-    declared: &DeclaredFields,
+    declared: &ContentModel,
 ) -> DocumentFacts {
     document(at, hash, "a body\n").with_frontmatter(Some(value), declared)
 }
@@ -128,7 +128,7 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
         presence("title", FieldContainer::Scalar),
         raw("title", 1, Some("second"), true),
     ];
-    let derived = FieldRows::derive(Some(&value), &DeclaredFields::none());
+    let derived = FieldRows::derive(Some(&value), &ContentModel::none());
     assert_eq!(derived.rows(), expected.as_slice());
 
     let scratch = Scratch::new("field-rows");
@@ -136,7 +136,7 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
     let mut request = store.begin_request();
     write_document(
         &mut request,
-        &fielded("docs/shape.md", "hash-1", value, &DeclaredFields::none()),
+        &fielded("docs/shape.md", "hash-1", value, &ContentModel::none()),
     );
     assert_eq!(
         stored_fields(&mut request, "docs/shape.md"),
@@ -150,9 +150,9 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
         string("a scalar"),
         FrontmatterValue::Sequence(vec![string("x")]),
     ] {
-        assert!(FieldRows::derive(Some(&top), &DeclaredFields::none()).is_empty());
+        assert!(FieldRows::derive(Some(&top), &ContentModel::none()).is_empty());
     }
-    assert!(FieldRows::derive(None, &DeclaredFields::none()).is_empty());
+    assert!(FieldRows::derive(None, &ContentModel::none()).is_empty());
 }
 
 /// **The raw and the typed order each mark their own least value.** A key
@@ -163,8 +163,8 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
 /// declaration does not order by a type carries no typed value at all.
 #[test]
 fn the_raw_and_the_typed_order_mark_their_own_least_value() {
-    let declared = DeclaredFields::under("schema-1")
-        .declare_typed("rank", integer_order())
+    let declared = ContentModel::under("schema-1")
+        .declare_field("rank", FieldDeclaration::number(integer_order()))
         .declare("title");
     let value = map(vec![
         (
@@ -226,7 +226,8 @@ fn the_raw_and_the_typed_order_mark_their_own_least_value() {
 /// order and the typed order alike.
 #[test]
 fn a_tie_for_the_least_value_marks_the_earliest_element() {
-    let declared = DeclaredFields::under("schema-1").declare_typed("rank", integer_order());
+    let declared = ContentModel::under("schema-1")
+        .declare_field("rank", FieldDeclaration::number(integer_order()));
     let value = map(vec![(
         "rank",
         FrontmatterValue::Sequence(vec![string("3"), string("5"), string("3")]),
@@ -258,7 +259,7 @@ fn a_re_derivation_replaces_the_field_rows_wholesale() {
     let scratch = Scratch::new("field-replace");
     let mut store = scratch.open();
     let mut request = store.begin_request();
-    let none = DeclaredFields::none();
+    let none = ContentModel::none();
     let first = map(vec![
         ("status", string("draft")),
         (
@@ -309,7 +310,7 @@ fn a_refused_field_row_leaves_no_document_row() {
         "docs/fielded.md",
         "hash-2",
         map(vec![("status", string("draft"))]),
-        &DeclaredFields::none(),
+        &ContentModel::none(),
     );
     let refused =
         request.apply_increment(IncrementProvenance::Derived, [Change::Upsert(fielded)], &[]);
@@ -345,7 +346,7 @@ fn typed_values_derived_under_a_schema_the_store_does_not_pin_are_refused() {
     let scratch = Scratch::new("field-unpinned-declaration");
     let mut store = scratch.open();
     let mut request = store.begin_request();
-    let ranked = |declared: &DeclaredFields| {
+    let ranked = |declared: &ContentModel| {
         fielded(
             "docs/ranked.md",
             "hash-1",
@@ -353,9 +354,10 @@ fn typed_values_derived_under_a_schema_the_store_does_not_pin_are_refused() {
             declared,
         )
     };
-    let typed_under =
-        |schema: &str| DeclaredFields::under(schema).declare_typed("rank", integer_order());
-    let refusal = |request: &mut norn_store::Request<'_>, declared: &DeclaredFields| {
+    let typed_under = |schema: &str| {
+        ContentModel::under(schema).declare_field("rank", FieldDeclaration::number(integer_order()))
+    };
+    let refusal = |request: &mut norn_store::Request<'_>, declared: &ContentModel| {
         let refused = request
             .apply_increment(
                 IncrementProvenance::Derived,
@@ -396,8 +398,8 @@ fn typed_values_derived_under_a_schema_the_store_does_not_pin_are_refused() {
     );
 
     for untyped in [
-        DeclaredFields::none(),
-        DeclaredFields::under("schema-1").declare("rank"),
+        ContentModel::none(),
+        ContentModel::under("schema-1").declare("rank"),
     ] {
         write_document(&mut request, &ranked(&untyped));
     }
@@ -424,7 +426,8 @@ fn a_documents_field_rows_die_with_it() {
     request
         .pin_vault_schema(b"version: 1\n", "schema-1")
         .expect("pinning a schema");
-    let declared = DeclaredFields::under("schema-1").declare_typed("rank", integer_order());
+    let declared = ContentModel::under("schema-1")
+        .declare_field("rank", FieldDeclaration::number(integer_order()));
     write_document(
         &mut request,
         &fielded(
@@ -466,7 +469,8 @@ fn a_moved_pin_clears_every_typed_value_and_nothing_else() {
     let scratch = Scratch::new("field-pin");
     let mut store = scratch.open();
     let mut request = store.begin_request();
-    let declared = DeclaredFields::under("schema-1").declare_typed("rank", integer_order());
+    let declared = ContentModel::under("schema-1")
+        .declare_field("rank", FieldDeclaration::number(integer_order()));
     request
         .pin_vault_schema(b"version: 1\n", "schema-1")
         .expect("pinning a schema");
@@ -501,7 +505,7 @@ fn a_moved_pin_clears_every_typed_value_and_nothing_else() {
     assert_eq!(request.counters().get("typed_values_discarded"), Some(2));
     assert_eq!(
         stored_fields(&mut request, "docs/ranked.md"),
-        FieldRows::derive(Some(&value), &DeclaredFields::none()),
+        FieldRows::derive(Some(&value), &ContentModel::none()),
         "the pin left a typed value standing, or took more than the typed half"
     );
     request.finish();
@@ -516,7 +520,8 @@ fn a_moved_pin_clears_every_typed_value_and_nothing_else() {
 /// taking the value away takes the rows with it.
 #[test]
 fn a_documents_rows_are_the_rows_its_frontmatter_derives() {
-    let typed = DeclaredFields::under("schema-1").declare_typed("rank", integer_order());
+    let typed = ContentModel::under("schema-1")
+        .declare_field("rank", FieldDeclaration::number(integer_order()));
     let one = map(vec![("title", string("one")), ("rank", string("4"))]);
     let another = map(vec![("title", string("another"))]);
 

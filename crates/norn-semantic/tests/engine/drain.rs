@@ -5,7 +5,7 @@ use crate::common::{
     CountingEmbedder, InterferingEmbedder, Scratch, document, path, recompute, record_death,
     write_document,
 };
-use norn_store::{DeclaredFields, FrontmatterValue};
+use norn_store::{ContentModel, FrontmatterValue};
 
 /// An empty store drains to an empty sidecar; the drain after it is the
 /// settled all-zero reading.
@@ -63,7 +63,7 @@ fn a_frontmatter_only_edit_does_not_reembed() {
             "title".to_string(),
             FrontmatterValue::String("Alpha".to_string()),
         )])),
-        &DeclaredFields::none(),
+        &ContentModel::none(),
     );
     write_document(&mut store, &edited);
 

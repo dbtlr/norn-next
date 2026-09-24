@@ -10,7 +10,7 @@ use super::filter::{Filter, ReadFilter};
 use super::run::StatementFailure;
 use super::{FieldOrder, Lookups, PageRefusal, Ran, ReadBound, glob, suggest};
 use crate::error::{self, StoreError};
-use crate::fields::DeclaredFields;
+use crate::fields::ContentModel;
 use crate::find::{
     FindStatement, compose_bare_directory, compose_known_key, compose_match_probe, compose_universe,
 };
@@ -76,7 +76,7 @@ impl Snapshot {
     pub(crate) fn is_known(
         &self,
         key: &str,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<bool, StoreError> {
         if declared.is_declared(key) {
@@ -98,7 +98,7 @@ impl Snapshot {
     /// carries.
     fn field_universe(
         &self,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<BTreeSet<String>, StoreError> {
         const OPERATION: &str = "reading the keys the vault's documents carry";
@@ -121,7 +121,7 @@ impl Snapshot {
     pub(crate) fn resolve(
         &self,
         reports: Vec<Report>,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<Vec<Unsatisfied>, StoreError> {
         let universe = if reports
@@ -164,7 +164,7 @@ impl Snapshot {
         &self,
         predicates: &[Predicate],
         resolves: ResolvesPart,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<Conjunction, PageRefusal> {
         let mut conjunction = Conjunction {
@@ -215,7 +215,7 @@ impl Snapshot {
     fn compile_predicate(
         &self,
         predicate: &Predicate,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<Part, PageRefusal> {
         let text = |value: &str| Value::Text(value.to_string());

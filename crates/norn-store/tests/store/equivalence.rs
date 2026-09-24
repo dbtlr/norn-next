@@ -240,9 +240,11 @@ fn a_changed_typed_field_value_is_a_divergence() {
     let mut pair = Pair::new("pin-typed-field");
     let divergence = pair.diverged(|store| {
         let facts = document_with_every_fact("one/glossary.md", "hash-1");
-        let typed = norn_store::DeclaredFields::under("schema-fingerprint").declare_typed(
+        let typed = norn_store::ContentModel::under("schema-fingerprint").declare_field(
             "draft",
-            norn_store::TypedOrder::new(|raw| Some(format!("typed {raw}"))),
+            norn_store::FieldDeclaration::number(norn_store::TypedOrder::new(|raw| {
+                Some(format!("typed {raw}"))
+            })),
         );
         let frontmatter = facts.frontmatter().cloned();
         let facts = facts.with_frontmatter(frontmatter, &typed);

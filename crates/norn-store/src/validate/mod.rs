@@ -66,7 +66,7 @@ use norn_wire::{
 };
 
 use crate::error::{self, StoreError};
-use crate::fields::DeclaredFields;
+use crate::fields::ContentModel;
 use crate::read::{
     Conjunction, FindingBase, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, ResolvesPart,
     Stepped, finding_base, page_limit,
@@ -204,7 +204,7 @@ impl Snapshot {
     pub fn validate(
         &self,
         params: &ValidateParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
     ) -> Result<Validated, PageRefusal> {
         self.run_validate(params, declared, &mut Lookups::default())
     }
@@ -219,7 +219,7 @@ impl Snapshot {
     pub fn validate_plans(
         &self,
         params: &ValidateParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
     ) -> Result<Vec<ValidatePlan>, PageRefusal> {
         let mut lookups = Lookups::default();
         self.run_validate(params, declared, &mut lookups)?;
@@ -238,7 +238,7 @@ impl Snapshot {
     fn run_validate(
         &self,
         params: &ValidateParams,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<Validated, PageRefusal> {
         let started = self.counters().statements_executed();
@@ -344,7 +344,7 @@ impl Snapshot {
             sections,
             limit,
             &mut lookups.ran,
-            |(kind, after), rows| {
+            |record, (kind, after), rows| {
                 let composed = compose_findings(&Findings {
                     statement: ValidateStatement::KindPage,
                     fingerprint: &narrowing.fingerprint,
@@ -355,9 +355,8 @@ impl Snapshot {
                     on_a_document: narrowing.conjunction.names_unknown_key,
                     rows,
                 });
-                Ran::new(ValidateStatement::KindPage, composed).narrowed_by(shapes.clone())
-            },
-            |record, section| {
+                let section =
+                    Ran::new(ValidateStatement::KindPage, composed).narrowed_by(shapes.clone());
                 self.run_statement(record, section, finding_base)
                     .map_err(|problem| error::sql("reading a page of findings", problem))
             },

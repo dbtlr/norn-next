@@ -1166,6 +1166,47 @@ fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
         ])
     );
     assert_eq!(
+        sorted(
+            members(&schema_of::<FacetKind>())
+                .iter()
+                .map(String::as_str)
+        ),
+        sorted(FacetKind::ALL.map(|kind| kind.as_str())),
+        "the walkable list of facet kinds drifted from the enum"
+    );
+    assert_eq!(
+        FacetKind::in_code_order().map(|kind| kind.as_str()),
+        [
+            "declared_field",
+            "declared_tag",
+            "folder",
+            "observed_field",
+            "path_rule",
+            "tag_pattern",
+            "undeclared_tags",
+        ],
+        "a page reads the facet kinds in the byte order of their codes"
+    );
+    let containers: Vec<String> = ContainerKind::ALL
+        .iter()
+        .map(|container| {
+            serde_json::to_value(container)
+                .expect("a container as JSON")
+                .as_str()
+                .expect("a container is a bare string")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        sorted(
+            branches(&schema_of::<ContainerKind>())
+                .iter()
+                .filter_map(string_constant)
+        ),
+        sorted(containers.iter().map(String::as_str)),
+        "the walkable list of containers drifted from the enum"
+    );
+    assert_eq!(
         sorted(members(&schema_of::<Moved>()).iter().map(String::as_str)),
         sorted(["epoch", "generation", "sidecar_revision"])
     );
@@ -2034,6 +2075,19 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
                 .unwrap_or_else(|| panic!("a rule branch is not a pinned string: {branch}"))
         })),
         ["ambiguity_ignore"]
+    );
+    let observed = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "facet") == Some("observed_field"))
+        .expect("the observed_field branch");
+    assert_eq!(
+        property_names(observed),
+        ["facet", "key", "containers"].into_iter().collect()
+    );
+    assert_eq!(
+        observed["properties"]["containers"]["items"]["$ref"].as_str(),
+        Some("#/$defs/ContainerKind"),
+        "an observed field carries the set of containers it is held in: {observed}"
     );
     let undeclared = branches(&schema)
         .iter()

@@ -90,7 +90,7 @@ pub enum FacetKind {
     ObservedField,
     /// A tag the vault's schema declares.
     DeclaredTag,
-    /// A folder in the vault.
+    /// A folder the vault's schema declares.
     Folder,
     /// A path rule the vault's schema states.
     PathRule,
@@ -98,6 +98,42 @@ pub enum FacetKind {
     TagPattern,
     /// What the vault says about a tag its facet does not admit.
     UndeclaredTags,
+}
+
+impl FacetKind {
+    /// Every kind the vocabulary holds, in declaration order.
+    pub const ALL: [FacetKind; 7] = [
+        FacetKind::DeclaredField,
+        FacetKind::ObservedField,
+        FacetKind::DeclaredTag,
+        FacetKind::Folder,
+        FacetKind::PathRule,
+        FacetKind::TagPattern,
+        FacetKind::UndeclaredTags,
+    ];
+
+    /// Every kind, in the byte order of its code, which is the order a page
+    /// of facets reads the kinds in: every facet of one kind before any of the
+    /// next. It is the order a finding cursor reads its kinds in too, so every
+    /// cursor that names a kind orders kinds one way.
+    pub fn in_code_order() -> [FacetKind; 7] {
+        let mut kinds = Self::ALL;
+        kinds.sort_unstable_by_key(|kind| kind.as_str());
+        kinds
+    }
+
+    /// The kind as the string it is on the wire.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            FacetKind::DeclaredField => "declared_field",
+            FacetKind::ObservedField => "observed_field",
+            FacetKind::DeclaredTag => "declared_tag",
+            FacetKind::Folder => "folder",
+            FacetKind::PathRule => "path_rule",
+            FacetKind::TagPattern => "tag_pattern",
+            FacetKind::UndeclaredTags => "undeclared_tags",
+        }
+    }
 }
 
 /// A number that is no relevance score.
@@ -212,7 +248,8 @@ pub enum CursorKey {
         /// The finding's identifier within that path.
         id: u64,
     },
-    /// A facet row: the kind, then the key.
+    /// A facet row: the kind, in the byte order of its code, then the key in
+    /// byte order.
     #[non_exhaustive]
     Facet {
         /// What the row is a facet of.

@@ -36,9 +36,10 @@
 //! disagreement means, are the client's. This module opens, mints, hands back
 //! and removes; the verdicts are read one layer up.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -46,6 +47,7 @@ use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 
 use crate::error::{self, DbError};
 use crate::meta;
+use crate::plan::ColumnRead;
 
 /// How long a connection waits on a lock before reporting the database busy.
 ///
@@ -107,6 +109,27 @@ pub struct Database {
     /// authorizer; a writable one has no authorizer and is unaffected by it.
     /// See [`arm_the_snapshot_control`].
     snapshot_control: Arc<AtomicBool>,
+    /// Whether the connection is read-only, and so sealed by the authorizer
+    /// [`arm_the_snapshot_control`] installs. A writable connection has none.
+    sealed: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times the current thread's recorder authorizer has recorded a
+    /// read, since a test on that thread last reset it.
+    ///
+    /// The recorder's verdicts are provably identical to the connection's own
+    /// — both answer through [`sealed_verdict`] — so a suite cannot tell the
+    /// two apart by what a statement is allowed to do. This is the one place
+    /// they differ: the recorder counts here and the connection's own
+    /// authorizer never touches this counter, so a read prepared while the
+    /// recorder has outlived [`Database::recording_reads`] is the one thing
+    /// this counter can catch that an authorization verdict cannot.
+    /// Thread-local rather than a shared static so that `cargo test`'s
+    /// default one-thread-per-test does not let one suite's recording
+    /// pollute another's count.
+    static RECORDER_INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl Database {
@@ -139,10 +162,10 @@ impl Database {
             }
         })?;
         let snapshot_control = Arc::new(AtomicBool::new(false));
-        if connection
+        let sealed = connection
             .is_readonly(rusqlite::MAIN_DB)
-            .map_err(|error| error::sql("reading the mode the database is open in", error))?
-        {
+            .map_err(|error| error::sql("reading the mode the database is open in", error))?;
+        if sealed {
             arm_the_snapshot_control(&connection, Arc::clone(&snapshot_control))?;
         }
         Ok(Database {
@@ -150,6 +173,7 @@ impl Database {
             path: path.to_path_buf(),
             epoch,
             snapshot_control,
+            sealed,
         })
     }
 
@@ -157,6 +181,73 @@ impl Database {
     /// and runs it here; opening is the act it may not perform for itself.
     pub fn connection(&self) -> &Connection {
         &self.connection
+    }
+
+    /// Run `prepare`, reporting every column a statement it prepares reads.
+    ///
+    /// **SQLite's authorizer is what reports a read**, once per column a
+    /// statement reads, while the statement is prepared, wherever in the
+    /// statement the read stands. A connection has one authorizer, so the one
+    /// installed for the length of `prepare` records each read and hands the
+    /// verdict to the connection's own: a sealed connection's seal, the
+    /// handle's transaction control included, judges every statement exactly
+    /// as it does outside, and a writable connection, which has no
+    /// authorizer, is refused nothing. The connection's own authorizer is
+    /// reinstated whichever way `prepare` ended, a panic out of `prepare`
+    /// included — [`ReinstateOwnAuthorizer`] is the guard that makes the panic
+    /// case true.
+    ///
+    /// Installing an authorizer expires the connection's prepared statements,
+    /// so each is prepared again the next time it runs.
+    pub(crate) fn recording_reads<'a, T>(
+        &'a self,
+        prepare: impl FnOnce(&'a Connection) -> Result<T, DbError>,
+    ) -> Result<(T, BTreeSet<ColumnRead>), DbError> {
+        let recorded = Arc::new(Mutex::new(BTreeSet::new()));
+        let sink = Arc::clone(&recorded);
+        let seal = self.sealed.then(|| Arc::clone(&self.snapshot_control));
+        self.connection
+            .authorizer(Some(move |context: AuthContext<'_>| {
+                if let AuthAction::Read {
+                    table_name,
+                    column_name,
+                } = context.action
+                {
+                    #[cfg(test)]
+                    RECORDER_INVOCATIONS.with(|count| count.set(count.get() + 1));
+                    sink.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(ColumnRead {
+                            table: table_name.to_string(),
+                            column: column_name.to_string(),
+                        });
+                }
+                match &seal {
+                    Some(control) => sealed_verdict(control, context),
+                    None => Authorization::Allow,
+                }
+            }))
+            .map_err(|error| error::sql("recording the columns a statement reads", error))?;
+        let reinstate_on_unwind = ReinstateOwnAuthorizer::arm(self);
+        let prepared = prepare(&self.connection);
+        let reinstated = reinstate_on_unwind.run();
+        let value = prepared?;
+        reinstated?;
+        let reads = std::mem::take(&mut *recorded.lock().unwrap_or_else(PoisonError::into_inner));
+        Ok((value, reads))
+    }
+
+    /// Put the connection back in the state [`Database::recording_reads`]
+    /// found it in: a sealed connection gets [`arm_the_snapshot_control`]'s
+    /// authorizer back, a writable one gets none.
+    fn reinstate_own_authorizer(&self) -> Result<(), DbError> {
+        if self.sealed {
+            arm_the_snapshot_control(&self.connection, Arc::clone(&self.snapshot_control))
+        } else {
+            self.connection
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                .map_err(|error| error::sql("removing the read recorder", error))
+        }
     }
 
     /// The database file this handle is holding.
@@ -507,14 +598,62 @@ fn arm_the_snapshot_control(
 ) -> Result<(), DbError> {
     connection
         .authorizer(Some(move |context: AuthContext<'_>| {
-            if matches!(context.action, AuthAction::Transaction { .. })
-                && control.load(Ordering::SeqCst)
-            {
-                return Authorization::Allow;
-            }
-            refuse_everything_but_reading(context)
+            sealed_verdict(&control, context)
         }))
         .map_err(|error| error::sql("binding the snapshot control to its handle", error))
+}
+
+/// Reinstates a connection's own authorizer when dropped, so the temporary
+/// recorder [`Database::recording_reads`] installs never outlives the
+/// `prepare` call it wraps — a panic unwinding through `prepare` included.
+///
+/// [`ReinstateOwnAuthorizer::run`] is the ordinary exit's path: it reinstates
+/// and disarms the guard, so a `prepare` that returns — a value or a
+/// [`DbError`] alike — reinstates exactly once, there. A `prepare` that
+/// panics never reaches `run`; the guard is still armed when the unwind drops
+/// it, and `Drop::drop` is what reinstates instead. Either way the recorder
+/// installed for `prepare`'s length is gone once this guard is, so nothing
+/// past it still pays to record.
+struct ReinstateOwnAuthorizer<'a> {
+    database: &'a Database,
+    armed: bool,
+}
+
+impl<'a> ReinstateOwnAuthorizer<'a> {
+    /// Arm the guard around `database`, which already carries the recorder
+    /// [`Database::recording_reads`] installed for the `prepare` about to run.
+    fn arm(database: &'a Database) -> Self {
+        ReinstateOwnAuthorizer {
+            database,
+            armed: true,
+        }
+    }
+
+    /// Reinstate the connection's own authorizer and disarm the guard, for
+    /// `prepare`'s ordinary — non-panicking — exit.
+    fn run(mut self) -> Result<(), DbError> {
+        self.armed = false;
+        self.database.reinstate_own_authorizer()
+    }
+}
+
+impl Drop for ReinstateOwnAuthorizer<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // A panic already owns the unwind here, so this is a best effort:
+            // an error it hits has nowhere left to report to.
+            let _ = self.database.reinstate_own_authorizer();
+        }
+    }
+}
+
+/// What a sealed connection's authorizer answers: transaction control while
+/// `control` is raised, and otherwise [`refuse_everything_but_reading`].
+fn sealed_verdict(control: &AtomicBool, context: AuthContext<'_>) -> Authorization {
+    if matches!(context.action, AuthAction::Transaction { .. }) && control.load(Ordering::SeqCst) {
+        return Authorization::Allow;
+    }
+    refuse_everything_but_reading(context)
 }
 
 /// The one thing a read-only connection may do: read rows.
@@ -646,4 +785,100 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
     PathBuf::from(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{self, AssertUnwindSafe};
+
+    use norn_testkit::scratch::Scratch;
+
+    use super::*;
+
+    /// A sealed, single-table database a case can hand to
+    /// [`Database::recording_reads`] directly. `table` and `column` are the
+    /// case's own choice, so a read of them is unmistakably its own.
+    fn sealed_database(label: &str, table: &str, column: &str) -> (Scratch, Database) {
+        let scratch = Scratch::new(label);
+        let path = scratch.join("trial.sqlite3");
+        let connection = match connect(&path).expect("opening the database for setup") {
+            Attempt::Connected(connection) => connection,
+            Attempt::Unreadable { detail } => {
+                panic!("a freshly created database read as unreadable: {detail}")
+            }
+        };
+        for statement in meta::statements() {
+            connection
+                .execute_batch(&statement)
+                .expect("creating the meta table");
+        }
+        meta::put_meta(&connection, meta::STORE_EPOCH, "recording-reads-trial")
+            .expect("writing the store epoch");
+        connection
+            .execute_batch(&format!("CREATE TABLE {table} ({column} TEXT)"))
+            .expect("creating the trial table");
+        connection
+            .execute(&format!("INSERT INTO {table} ({column}) VALUES ('x')"), [])
+            .expect("seeding the trial table");
+        drop(connection);
+
+        let read_only = connect_read_only(&path).expect("opening the trial database read-only");
+        let database =
+            Database::adopt(read_only, &path).expect("adopting the read-only trial database");
+        assert!(
+            database.sealed,
+            "a read-only open is what recording_reads records against a seal"
+        );
+        (scratch, database)
+    }
+
+    /// A `prepare` that panics before touching the connection, standing in for
+    /// whatever real preparation panicked partway through: the recorder
+    /// [`Database::recording_reads`] installed for this call is what a caller
+    /// is left with either way.
+    fn panicking_prepare(_connection: &Connection) -> Result<(), DbError> {
+        panic!("a plan whose preparation panics")
+    }
+
+    /// A panic out of `prepare` still leaves the connection with its own
+    /// authorizer, not the recorder installed for the call that panicked.
+    ///
+    /// The recorder's verdicts are provably identical to the connection's
+    /// own — both answer through [`sealed_verdict`] against the same seal —
+    /// so a write is refused whichever one answers it, fixed or not; that
+    /// assertion alone cannot fail on the pre-fix code. [`RECORDER_INVOCATIONS`]
+    /// is the one thing that can: the connection's own authorizer never
+    /// touches it, so a read that increments it after the panic is a read the
+    /// leaked recorder — not the reinstated seal — answered.
+    #[test]
+    fn a_panic_out_of_prepare_still_reinstates_the_connections_own_authorizer() {
+        let (_scratch, database) =
+            sealed_database("norn-db-recording-reads-panic", "trial", "label");
+
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            database.recording_reads(panicking_prepare)
+        }));
+        assert!(
+            outcome.is_err(),
+            "the prepare closure's panic should propagate out of recording_reads"
+        );
+
+        RECORDER_INVOCATIONS.with(|count| count.set(0));
+        database
+            .connection()
+            .prepare("SELECT label FROM trial")
+            .expect("a read is still allowed on a sealed connection after the panic");
+        assert_eq!(
+            RECORDER_INVOCATIONS.with(|count| count.get()),
+            0,
+            "the connection's own authorizer answered this prepare, not the recorder \
+             the panicked call installed"
+        );
+
+        let write = database.connection().execute("DELETE FROM trial", []);
+        assert!(
+            write.is_err(),
+            "a write is still refused on a sealed connection after the panic"
+        );
+    }
 }

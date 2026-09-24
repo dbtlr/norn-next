@@ -7,7 +7,7 @@ use norn_wire::{Cursor, CursorOrderChanged, Moved};
 use super::{FieldOrder, Lookups, PageRefusal, Ran};
 use crate::ddl;
 use crate::error::{self, StoreError};
-use crate::fields::DeclaredFields;
+use crate::fields::ContentModel;
 use crate::find::FindStatement;
 use crate::store::Snapshot;
 
@@ -86,10 +86,11 @@ impl Snapshot {
 
     /// Refuse `declared` where it was read from another schema than the
     /// snapshot pins, so every typed order a request compiles under is the
-    /// one the typed column holds.
+    /// one the typed column holds, and every declared facet a describe answers
+    /// is the pinned schema's.
     pub(crate) fn declaration_pinned(
         &self,
-        declared: &DeclaredFields,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<(), PageRefusal> {
         let pinned = self.fingerprint(lookups)?;
