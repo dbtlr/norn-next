@@ -123,11 +123,11 @@ may not be added.
   rows in, and the key space a finding's classes are spelled in all follow it. An attach
   proves the order through its new coverage before it opens the store and opens it under that
   order, and the open rebuilds from zero where the recorded order differs, reported as the
-  store's own rebuild reason naming both orders. A recovery holds a store opened before its
-  coverage proved the order again, so it judges the store against the new proof before it
-  pins or derives anything, and a moved order is routed to the host's rung-3 leg, which
-  derives the vault again under the proven order. A store that records no order takes the
-  one it is opened under.
+  store's own rebuild reason naming both orders. A recovery and a reload hold a store opened
+  before the standing coverage proved its order, so each judges the store against that proof
+  before it pins or derives anything — a recovery whatever its declaration reads as — and a
+  moved order is routed to the host's rung-3 leg, which rebuilds the store under the proven
+  order and derives the vault again where the declaration is one this build reads.
 - **Corruption, or any state the lower rungs cannot resolve** — at any time, before or after
   release.
 
@@ -1592,7 +1592,11 @@ wire's bounded head stays a head rather than becoming the query surface.
 **One resolver compiles a target for its root**, and every surface that reads a class reads
 it through that one: a find's `resolves` part, a class read, and the class a finding is filed
 under. Case is the root's: the coverage proves the root's case behaviour when it is installed,
-the entry retains the proof, and a read's hold hands it to the snapshot, so no read detects it.
+and the store records the order its rows were derived under. A read answers under the store's
+order, which its snapshot takes from the handle the store minted, so no read detects one; an
+attach, a recovery and a reload judge the store's order against the coverage's proof, and a
+store derived under the other order is rebuilt from zero under the proven one before anything
+derives into it.
 Every store holds each document's suffix key twice — as written, and with ASCII case folded —
 each under its own index; a root that tells spellings apart probes the raw key and never the
 folded one, and a root that folds ASCII case probes the folded key, where every spelling of a

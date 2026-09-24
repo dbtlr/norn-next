@@ -115,8 +115,8 @@
 //! suffix key where the snapshot's root tells spellings apart and over the
 //! folded key where it folds ASCII case, less the places the declaration's
 //! ambiguity-ignore set keeps out of the class. The case behaviour is the
-//! snapshot's ([`Snapshot::path_order`]), handed to it by the read that
-//! established it, so no find detects it.
+//! snapshot's ([`Snapshot::path_order`]): the order the rows it reads were
+//! derived under, so no find detects it.
 //!
 //! # A find is keys, then rows
 //!

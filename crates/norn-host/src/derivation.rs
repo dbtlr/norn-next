@@ -1752,7 +1752,7 @@ mod tests {
             self.reader
                 .try_take()
                 .expect("an idle reader")
-                .establish(norn_store::StoredPathOrder::Sensitive)
+                .establish()
                 .snapshot
                 .expect("a snapshot")
                 .find(&params, self.declared.fields())

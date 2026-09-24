@@ -14,7 +14,8 @@ use norn_fs::{
 };
 use norn_store::{
     Change, DerivedFinding, DirectoryPrefix, DocumentPath, FindingFacts, IncrementProvenance,
-    Provenance, SchemaPin, Store, StoreError, StoredDocument, StoredPathOrder, SubjectScope,
+    Provenance, RebuildReason, SchemaPin, Store, StoreError, StoredDocument, StoredPathOrder,
+    SubjectScope,
 };
 use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, UntrustedReason, VaultName};
 
@@ -140,12 +141,6 @@ pub struct ProductionAttachment {
     /// The canonical directory shared by this attachment's watcher, walks,
     /// control reads, write normalization, and shadow placement.
     covered_root: PathBuf,
-    /// The case behaviour the coverage proved for `covered_root` when it was
-    /// installed. It moves with the coverage: a recovery that installs
-    /// coverage again takes the proof that coverage made. The store is opened
-    /// under it, and rebuilt under it wherever the two disagree, so a read
-    /// resolving under the store's order resolves under this proof.
-    path_order: StoredPathOrder,
     controls: ReloadCandidate,
     subscription: Option<Subscription>,
     store: Store,
@@ -187,6 +182,29 @@ pub struct ProductionAttachment {
 
 type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
 
+impl ProductionAttachment {
+    /// The case behaviour the installed coverage proved for `covered_root`,
+    /// or `None` where no coverage stands.
+    ///
+    /// The store records the order its own rows were derived under, and a
+    /// read answers under that one. This proof is what the store is judged
+    /// against wherever a leg is about to derive into it, and what rung 3
+    /// derives the vault again under.
+    fn proven_order(&self) -> Option<StoredPathOrder> {
+        self.subscription
+            .as_ref()
+            .map(|subscription| stored_path_order(subscription.case_sensitivity()))
+    }
+
+    /// The rebuild the store owes where its rows were derived under another
+    /// order than the installed coverage proved: the reason, naming both, or
+    /// `None` where they agree or no coverage stands to prove one.
+    fn path_order_moved(&self) -> Option<RebuildReason> {
+        self.proven_order()
+            .and_then(|proven| self.store.path_order_moved(proven))
+    }
+}
+
 impl SnapshotSource for ProductionAttachment {
     /// The store's own read-only handle. `norn-store` is where a connection is
     /// opened, so the handle a vault's reads run on is the store's type and
@@ -211,14 +229,6 @@ impl SnapshotSource for ProductionAttachment {
             statements: minted.statements,
         }
     }
-
-    /// The order the store's rows were derived under. It is the coverage's
-    /// proof wherever the attachment derives, and where a recovery proved
-    /// another order and derived nothing, it is still the order of the rows a
-    /// read would answer from.
-    fn path_order(&self) -> StoredPathOrder {
-        self.store.path_order()
-    }
 }
 
 impl ReadSource for norn_store::SnapshotReader {
@@ -240,8 +250,8 @@ impl ReadSource for norn_store::SnapshotReader {
     /// The statements come from the attempt's own counters rather than the
     /// snapshot's, because an attempt that refused has no snapshot to read
     /// them off and ran the statement all the same.
-    fn establish(turn: Self::Turn, order: StoredPathOrder) -> Establishment<Self::Snapshot> {
-        let attempt = turn.establish(order);
+    fn establish(turn: Self::Turn) -> Establishment<Self::Snapshot> {
+        let attempt = turn.establish();
         Establishment {
             established: attempt
                 .snapshot
@@ -527,12 +537,20 @@ impl ProductionEntryOps {
         // Opening the derived state a read answers from is prologue work that
         // counts no document, which is the phase an attach installs it under.
         progress.installing_coverage();
+        // The store is reopened under the order the standing coverage proved,
+        // which is the order a store rebuilt because that order moved needs
+        // and the one a store rebuilt for damage already had. No coverage
+        // standing is a heal that cannot run.
+        let Some(order) = attachment.proven_order() else {
+            release(attachment);
+            return Err(environmental("watcher coverage is not installed"));
+        };
         // The store is consumed here, so the attachment is not whole again
         // until the reopen lands. A failure between the two gives back what is
         // left in the order a detach gives it back: coverage first and the
         // maintainer lock last, so no second maintainer takes this vault while
         // a watch over it still stands.
-        match attachment.store.discard_and_reopen(attachment.path_order) {
+        match attachment.store.discard_and_reopen(order) {
             Ok(store) => attachment.store = store,
             Err(error) => {
                 drop(attachment.subscription);
@@ -541,6 +559,13 @@ impl ProductionEntryOps {
             }
         }
         attachment.store_verification_due = Instant::now() + STORE_VERIFICATION_INTERVAL;
+        if attachment.controls.undeclarable().is_some() {
+            // The stance the attach takes over a declaration this build cannot
+            // read: the rebuilt store holds nothing, nothing is pinned and
+            // nothing derived, and a reload that pins a readable declaration
+            // derives into it.
+            return Ok(attachment);
+        }
         Self::pin_candidate(&mut attachment.store, &attachment.controls)?;
         let derived = self
             .heal_under_coverage(&mut attachment, progress)
@@ -710,7 +735,6 @@ impl EntryOps for ProductionEntryOps {
         let mut attachment = ProductionAttachment {
             registration: registration.clone(),
             covered_root,
-            path_order,
             controls: candidate.clone(),
             maintainership,
             store,
@@ -803,7 +827,6 @@ impl EntryOps for ProductionEntryOps {
             .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
             .map_err(watcher)?;
         let covered_root = subscription.covered_root().to_owned();
-        let path_order = stored_path_order(subscription.case_sensitivity());
         let candidate = ReloadCandidate::read_at(&attachment.registration, &covered_root)
             .map_err(JobFailure::Reload)?;
         let derived = self.derived(&attachment.registration.name);
@@ -815,7 +838,19 @@ impl EntryOps for ProductionEntryOps {
         attachment._own_writes = own_writes;
         attachment._shadows = shadows;
         attachment.covered_root = covered_root;
-        attachment.path_order = path_order;
+        // The first point a recovery holds both the order its new coverage
+        // proved and the store it will derive into, and the judgment is taken
+        // whatever the declaration says. A store derived under the other order
+        // holds rows under another document identity — which spellings are
+        // one row — with its finding classes filed in another key space, so
+        // nothing is pinned or derived into it and no read is served from it:
+        // it owes rung 3, which discards it and derives the vault again under
+        // the order this coverage proved, where the declaration read here
+        // lets it derive at all.
+        if let Some(reason) = attachment.path_order_moved() {
+            attachment.controls = candidate;
+            return Err(JobFailure::StoreDamaged(reason.to_string()));
+        }
         if candidate.undeclarable().is_some() {
             // The same stance the attach takes: coverage is re-installed, the
             // schema is re-read, and a declaration this build still cannot read
@@ -823,17 +858,6 @@ impl EntryOps for ProductionEntryOps {
             // is corrected is what returns the vault to service.
             attachment.controls = candidate;
             return Ok(());
-        }
-        // The first point a recovery holds both the order its new coverage
-        // proved and the store it will derive into. A store derived under the
-        // other order is not one a heal may converge — the merge would compare
-        // rows paged in one order against a walk in the other — so nothing is
-        // pinned or derived into it: it owes rung 3, which discards it, pins
-        // the declaration read here, and derives the vault again under the
-        // order this coverage proved.
-        if let Some(reason) = attachment.store.path_order_moved(path_order) {
-            attachment.controls = candidate;
-            return Err(JobFailure::StoreDamaged(reason.to_string()));
         }
         Self::pin_candidate(&mut attachment.store, &candidate)?;
         attachment.controls = candidate;
@@ -862,6 +886,14 @@ impl EntryOps for ProductionEntryOps {
         // pin stands.
         if let Some(detail) = candidate.undeclarable() {
             return Err(JobFailure::Reload(ReloadError::SchemaParse(detail.to_string())).into());
+        }
+        // A store whose rows were derived under another order than the
+        // coverage proved is neither pinned nor derived into here: it owes
+        // rung 3, which derives the vault again under the proven order and
+        // under the declaration this reload read.
+        if let Some(reason) = attachment.path_order_moved() {
+            attachment.controls = candidate;
+            return Err(JobFailure::StoreDamaged(reason.to_string()).into());
         }
         let schema_changed =
             candidate.fingerprints().schema != attachment.controls.fingerprints().schema;
@@ -7771,11 +7803,11 @@ mod tests {
     }
 
     /// The paths `Foo` resolves to through the read an attachment serves —
-    /// its read handle, established under the order the attachment hands
-    /// reads — and through the class read a finding about `Foo` is filed
-    /// under, which has to be the same set.
+    /// its read handle, whose snapshot reads under the order the store's rows
+    /// were derived under — and through the class read a finding about `Foo`
+    /// is filed under, which has to be the same set.
     fn foo_resolves_through(attachment: &mut ProductionAttachment) -> Vec<String> {
-        let order = SnapshotSource::path_order(attachment);
+        let order = attachment.store.path_order();
         let declared = crate::derivation::Declared::pinned(
             VaultSchema::parse(attachment.controls.schema_bytes()).unwrap(),
             attachment.controls.fingerprints().schema.to_string(),
@@ -7787,12 +7819,18 @@ mod tests {
         .with_predicates([norn_wire::Predicate::resolves(
             norn_wire::ResolutionTarget::new("Foo").unwrap(),
         )]);
-        let found: Vec<String> = reader
+        let snapshot = reader
             .try_take()
             .expect("an idle reader")
-            .establish(order)
+            .establish()
             .snapshot
-            .expect("a snapshot")
+            .expect("a snapshot");
+        assert_eq!(
+            snapshot.path_order(),
+            order,
+            "a read answers under another order than the store's rows were derived under"
+        );
+        let found: Vec<String> = snapshot
             .find(&params, declared.fields())
             .expect("a find resolving `Foo`")
             .rows
@@ -7861,7 +7899,6 @@ mod tests {
         );
         assert_ne!(attachment.store.epoch(), stale_epoch);
         assert_eq!(attachment.store.path_order(), proven);
-        assert_eq!(SnapshotSource::path_order(&attachment), proven);
         assert_eq!(
             derived_vault(&mut attachment.store, f.vault().as_path()),
             from_scratch(&f, "attach-order-moved-oracle", policy),
@@ -7934,6 +7971,142 @@ mod tests {
         assert_eq!(
             derived_vault(&mut attachment.store, f.vault().as_path()),
             from_scratch(&f, "recover-order-moved-oracle", policy),
+            "the rebuild derived something a from-scratch build does not"
+        );
+        assert_eq!(
+            foo_resolves_through(&mut attachment),
+            foo_resolves_under(proven)
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A recovery judges its store's path order whatever the declaration
+    /// reads as, so no later leg derives into a store derived under the other
+    /// order.** The recovery meets a schema this build cannot read and a store
+    /// derived under the order the coverage does not prove: it owes rung 3,
+    /// which rebuilds the store under the proven order and derives nothing
+    /// under the unreadable declaration, and the reload that pins a readable
+    /// one derives into the rebuilt store — so `Foo` resolves under the order
+    /// the root proves, to both spellings where it folds ASCII case.
+    #[test]
+    fn a_recovery_over_an_unreadable_schema_still_judges_the_path_order() {
+        let f = Fixture::new("recover-order-moved-unreadable");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name) = f.ops(64);
+        let policy = ProductionPolicy::new(64, 2).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let proven = proven_order(&f);
+        let schema = f.vault().join(".norn/schema.yaml");
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        attachment.store = attachment
+            .store
+            .discard_and_reopen(other_order(proven))
+            .unwrap();
+        derive_stale_rows(&mut attachment.store);
+        fs::write(&schema, "version: 9\n").unwrap();
+
+        let failure = ops
+            .recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over a store derived under the other order");
+        assert!(
+            matches!(failure, JobFailure::StoreDamaged(_)),
+            "the moved order was reported as {failure:?} rather than owing rung 3"
+        );
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["a/Foo.md", "stale.md"],
+            "the recovery derived into a store derived under the other order"
+        );
+
+        let mut attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 under the order the coverage proved");
+        assert_eq!(attachment.store.path_order(), proven);
+        assert!(
+            stored_paths(&mut attachment.store).is_empty(),
+            "rung 3 derived under a declaration this build cannot read"
+        );
+        assert!(
+            matches!(
+                ops.withheld_trust(&attachment),
+                Some(UntrustedReason::SchemaUnreadable { .. })
+            ),
+            "the rebuilt attachment stopped withholding trust for the unreadable declaration"
+        );
+
+        fs::write(&schema, "version: 1\n").unwrap();
+        assert_eq!(
+            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ReloadOutcome::SchemaChanged
+        );
+        assert_eq!(attachment.store.path_order(), proven);
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "recover-order-moved-unreadable-oracle", policy),
+            "the reload derived something a from-scratch build does not"
+        );
+        assert_eq!(
+            foo_resolves_through(&mut attachment),
+            foo_resolves_under(proven)
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A reload judges its store's path order before it pins or derives.**
+    /// An attachment standing over an unreadable declaration derived nothing,
+    /// and its store is one derived under the order the coverage does not
+    /// prove: the reload that reads a corrected declaration pins nothing into
+    /// that store and owes rung 3, which derives the vault under the
+    /// declaration the reload read and the order the coverage proved.
+    #[test]
+    fn a_reload_over_a_store_derived_under_the_other_path_order_owes_rung_three() {
+        let f = Fixture::new("reload-order-moved");
+        write_two_spellings_of_one_stem(&f);
+        let schema = f.vault().join(".norn/schema.yaml");
+        fs::write(&schema, "version: 9\n").unwrap();
+        let (ops, name) = f.ops(64);
+        let policy = ProductionPolicy::new(64, 2).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let proven = proven_order(&f);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        attachment.store = attachment
+            .store
+            .discard_and_reopen(other_order(proven))
+            .unwrap();
+        derive_stale_rows(&mut attachment.store);
+        fs::write(&schema, "version: 1\n").unwrap();
+
+        let failure = ops
+            .reload(&name, &mut attachment, &progress)
+            .expect_err("a reload over a store derived under the other order");
+        assert!(
+            matches!(
+                failure,
+                crate::EntryReloadFailure::Runtime(JobFailure::StoreDamaged(_))
+            ),
+            "the moved order was reported as {failure:?} rather than owing rung 3"
+        );
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["a/Foo.md", "stale.md"],
+            "the reload derived into a store derived under the other order"
+        );
+        assert_eq!(
+            attachment.store.begin_request().vault_schema_pin().unwrap(),
+            None,
+            "the reload pinned a declaration into a store derived under the other order"
+        );
+
+        let mut attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 under the order the coverage proved");
+        assert_eq!(attachment.store.path_order(), proven);
+        assert_eq!(ops.withheld_trust(&attachment), None);
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "reload-order-moved-oracle", policy),
             "the rebuild derived something a from-scratch build does not"
         );
         assert_eq!(

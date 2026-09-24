@@ -32,7 +32,7 @@ fn a_snapshot(reader: &Arc<norn_store::SnapshotReader>) -> norn_store::Snapshot 
     reader
         .try_take()
         .expect("a handle nothing is reading holds its connection")
-        .establish(norn_store::StoredPathOrder::Sensitive)
+        .establish()
         .snapshot
         .expect("a snapshot")
 }
@@ -106,7 +106,7 @@ fn an_establishment_that_refuses_reports_what_it_ran_and_gives_the_connection_ba
     let refused = reader
         .try_take()
         .expect("a handle nothing is reading holds its connection")
-        .establish(norn_store::StoredPathOrder::Sensitive);
+        .establish();
     refused
         .snapshot
         .expect_err("a busy write-generation read established a snapshot");
@@ -255,7 +255,7 @@ fn a_second_read_waits_for_the_one_connection_and_takes_it_when_it_comes_back() 
     let second = thread::spawn(move || {
         waiting
             .wait_for_the_connection()
-            .establish(norn_store::StoredPathOrder::Sensitive)
+            .establish()
             .snapshot
             .expect("a second snapshot")
     });

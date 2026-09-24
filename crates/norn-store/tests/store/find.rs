@@ -166,8 +166,18 @@ impl Seeded {
     /// in every table a page reads that a step through any of them end to end
     /// is counted many times over.
     fn with_bulk(label: &str, bulk: usize) -> Self {
+        Self::with_bulk_under(label, bulk, StoredPathOrder::Sensitive)
+    }
+
+    /// The fixture in a store over a root proven to have `order`'s case
+    /// behaviour, which every snapshot of it reads under.
+    fn under(label: &str, order: StoredPathOrder) -> Self {
+        Self::with_bulk_under(label, 0, order)
+    }
+
+    fn with_bulk_under(label: &str, bulk: usize, order: StoredPathOrder) -> Self {
         let scratch = Scratch::new(label);
-        let mut store = scratch.open();
+        let mut store = Store::open(scratch.database(), order).expect("opening a store");
         seed(&mut store);
         let declared = declared();
         let documents: Vec<_> = (0..bulk)
@@ -206,17 +216,12 @@ impl Seeded {
         }
     }
 
-    /// A snapshot of a root that tells spellings apart.
+    /// A snapshot of the store, under the order its rows were derived under.
     pub(crate) fn snapshot(&self) -> Snapshot {
-        self.snapshot_under(StoredPathOrder::Sensitive)
-    }
-
-    /// A snapshot of a root proven to have `order`'s case behaviour.
-    pub(crate) fn snapshot_under(&self, order: StoredPathOrder) -> Snapshot {
         self.reader
             .try_take()
             .expect("a handle nothing is reading holds its connection")
-            .establish(order)
+            .establish()
             .snapshot
             .expect("a snapshot")
     }
@@ -235,14 +240,6 @@ impl Seeded {
 
     pub(crate) fn plans(&self, params: &FindParams) -> Vec<FindPlan> {
         self.plans_under(params, &declared())
-    }
-
-    /// The plans of `params` on a snapshot of a root with `order`'s case
-    /// behaviour, under the fixture's declaration.
-    fn plans_on(&self, order: StoredPathOrder, params: &FindParams) -> Vec<FindPlan> {
-        self.snapshot_under(order)
-            .find_plans(params, &declared())
-            .expect("the plans of a request")
     }
 
     fn plans_under(&self, params: &FindParams, declared: &DeclaredFields) -> Vec<FindPlan> {
@@ -1403,7 +1400,16 @@ fn judge_filter(page: &QueryPlan, seek: &Seek) {
 /// rebuilt with its `MATCH` selection taken out.
 #[test]
 fn every_filter_seeks_the_index_its_values_are_bounds_for() {
-    let mut seeded = Seeded::new("find-filters");
+    // One fixture per root: a filter form is compiled on the root its case
+    // behaviour belongs to, and a snapshot reads under its store's order.
+    let mut roots = [
+        Seeded::under("find-filters", StoredPathOrder::Sensitive),
+        Seeded::under("find-filters-folded", StoredPathOrder::AsciiCaseInsensitive),
+    ];
+    let on = |shape: ReadFilter| match root_of(shape) {
+        StoredPathOrder::Sensitive => 0,
+        StoredPathOrder::AsciiCaseInsensitive => 1,
+    };
     let bars = filter_bars();
     for bar in &bars {
         for (part, shape, seek) in &bar.probes {
@@ -1414,8 +1420,7 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
                     FindStatement::FieldValuePage(FieldOrder::Raw, PageDirection::Ascending),
                 ),
             ] {
-                let plans =
-                    seeded.plans_on(root_of(*shape), &params.with_predicates([part.clone()]));
+                let plans = roots[on(*shape)].plans(&params.with_predicates([part.clone()]));
                 let page = plans
                     .iter()
                     .find(|plan| plan.statement == statement)
@@ -1431,7 +1436,7 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
     }
 
     // Control: the full-text selection taken out of the plan.
-    let plans = seeded.plans(&request().with_predicates([Predicate::matches("interloper")]));
+    let plans = roots[0].plans(&request().with_predicates([Predicate::matches("interloper")]));
     let page = plan_of(&plans, FindStatement::PathPage(PageDirection::Ascending));
     let unselected = QueryPlan::new(
         page.sql(),
@@ -1453,11 +1458,12 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
                 continue;
             };
             if !dropped.contains(index) {
-                seeded.drop_index(index);
+                for root in &mut roots {
+                    root.drop_index(index);
+                }
                 dropped.push(index);
             }
-            let plans =
-                seeded.plans_on(root_of(*shape), &request().with_predicates([part.clone()]));
+            let plans = roots[on(*shape)].plans(&request().with_predicates([part.clone()]));
             let page = plan_of(&plans, FindStatement::PathPage(PageDirection::Ascending));
             failure_of(&format!("{index} dropped under {part:?}"), || {
                 judge_filter(&page, seek)
@@ -2349,7 +2355,7 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
     let snapshot = reader
         .try_take()
         .expect("a free handle")
-        .establish(norn_store::StoredPathOrder::Sensitive)
+        .establish()
         .snapshot
         .expect("a snapshot");
 

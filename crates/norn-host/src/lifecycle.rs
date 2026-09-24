@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use norn_config::registry::Entry as Registration;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
-use norn_store::{StoreReading, StoredPathOrder};
+use norn_store::StoreReading;
 use norn_wire::{
     AttachMode, ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, VaultName,
     WarmingPhase, WatcherLossCause,
@@ -95,15 +95,6 @@ pub trait SnapshotSource: Send + 'static {
     /// mint that refused reports what it ran before it refused, because the
     /// gate was held for those statements too.
     fn open_reader(&self) -> MintedReader<Self::Reader>;
-
-    /// The case behaviour this coverage's vault root was proven to have when
-    /// the coverage was installed.
-    ///
-    /// The entry retains it wherever it installs or parks the coverage, and
-    /// hands it to every snapshot a read establishes, so a read answers under
-    /// the proof the coverage made and detects nothing itself. The entry keeps
-    /// its own copy because a read runs while a leg holds the coverage.
-    fn path_order(&self) -> StoredPathOrder;
 }
 
 /// A minted read handle, and what minting it ran against the database.
@@ -175,9 +166,11 @@ pub trait ReadSource: Send + Sync + 'static {
     /// statement that refused it under the caller's gate hold, and the gate
     /// was held for it exactly as for one that answered.
     ///
-    /// `order` is the case behaviour the entry retained from its coverage, and
-    /// the snapshot carries it to every read builder that runs on it.
-    fn establish(turn: Self::Turn, order: StoredPathOrder) -> Establishment<Self::Snapshot>;
+    /// The entry hands the snapshot no case behaviour. What a read's paths and
+    /// targets are compared under is the order the rows it reads were derived
+    /// under, which is the store's own record and travels with the handle the
+    /// store minted.
+    fn establish(turn: Self::Turn) -> Establishment<Self::Snapshot>;
 }
 
 /// One read's attempt to establish its snapshot, and what that attempt ran
@@ -619,7 +612,6 @@ impl<A: SnapshotSource> Entry<A> {
                 coverage: Coverage::none(),
                 reader: None,
                 reader_unavailable: None,
-                path_order: StoredPathOrder::Sensitive,
                 pending: Batch::default(),
                 active_fingerprints: None,
                 control_root: None,
@@ -684,15 +676,6 @@ struct EntryState<A: SnapshotSource> {
     /// meets it: a reason kept past the mint that replaced it would name an
     /// open nothing ran.
     reader_unavailable: Option<ReaderUnavailable>,
-    /// The case behaviour the coverage installed or parked last proved for the
-    /// vault root, which every read's snapshot is established under.
-    ///
-    /// It is retained here rather than read off the coverage at each read,
-    /// because a read proceeds while a leg holds the coverage; it moves where
-    /// the coverage is installed or parked, under the lock that publishes the
-    /// handle a read pairs it with. An entry that never installed coverage
-    /// serves no read, so the value it starts with is never read.
-    path_order: StoredPathOrder,
     pending: Batch,
     /// The core fingerprints active in the attached runtime.
     active_fingerprints: Option<ActiveFingerprints>,
@@ -925,7 +908,6 @@ impl<A: SnapshotSource> EntryState<A> {
             "a reader stands over coverage the entry never installed"
         );
         self.mint_reader(&attachment);
-        self.path_order = attachment.path_order();
         self.coverage.install(attachment);
     }
 
@@ -1020,7 +1002,6 @@ impl<A: SnapshotSource> EntryState<A> {
     fn remint_coverage(&mut self, leg: u64, attachment: A) {
         self.close_reader();
         self.mint_reader(&attachment);
-        self.path_order = attachment.path_order();
         self.coverage.park_by(leg, attachment);
     }
 
@@ -1036,7 +1017,6 @@ impl<A: SnapshotSource> EntryState<A> {
         if self.reader.is_none() {
             self.mint_reader(&attachment);
         }
-        self.path_order = attachment.path_order();
         self.coverage.park_by(leg, attachment);
     }
 
@@ -3301,8 +3281,7 @@ impl<O: EntryOps> Host<O> {
         // The establishment is accounted where it returns, for the reason the
         // mint above is: it ran under this hold either way, and the refusal
         // below is a path that paid for it.
-        let establishment =
-            <O::Attachment as SnapshotSource>::Reader::establish(turn, state.path_order);
+        let establishment = <O::Attachment as SnapshotSource>::Reader::establish(turn);
         self.shared
             .reads
             .count_establishment_under_the_gate(&establishment, minted.statements);
@@ -5283,12 +5262,6 @@ mod tests {
                 statements,
             }
         }
-
-        /// The fake reads no root, and the case behaviour it hands over is the
-        /// one a root that tells spellings apart proves.
-        fn path_order(&self) -> StoredPathOrder {
-            StoredPathOrder::Sensitive
-        }
     }
 
     impl ReadSource for FakeReader {
@@ -5323,7 +5296,7 @@ mod tests {
             }
         }
 
-        fn establish(mut turn: FakeTurn, _: StoredPathOrder) -> Establishment<Self::Snapshot> {
+        fn establish(mut turn: FakeTurn) -> Establishment<Self::Snapshot> {
             let ledger = Arc::clone(&turn.reader.ledger);
             park_here_if_the_case_asked(&ledger);
             // Reported on both answers, the way a real establishment reports
