@@ -470,7 +470,7 @@ impl PageOrder<'_> {
 
 /// Where a request named a key.
 #[derive(Clone, Copy, Debug)]
-enum KeyPlace {
+pub(crate) enum KeyPlace {
     Sort,
     Projection,
     Predicate,
@@ -478,7 +478,7 @@ enum KeyPlace {
 
 /// One part of a request that could not be applied as asked, before the
 /// field universe an unknown key's suggestions are drawn from is read.
-enum Report {
+pub(crate) enum Report {
     /// A part reported as it stands.
     Part(Unsatisfied),
     /// A key outside the field universe, named at `KeyPlace`.
@@ -505,6 +505,24 @@ impl Compiled<'_> {
     fn field_order(&self) -> Option<FieldOrder> {
         self.order.field_order()
     }
+}
+
+/// A conjunction compiled: the filters its parts spell, the parts it could
+/// not apply as asked, and whether one of those matches nothing.
+pub(crate) struct Conjunction {
+    pub(crate) filters: Vec<Filter>,
+    pub(crate) reports: Vec<Report>,
+    /// Whether some part matches no document, which empties the answer.
+    pub(crate) matches_nothing: bool,
+}
+
+/// Whether the verb compiling a conjunction answers a `resolves` part.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Resolution {
+    /// The part filters by the class its target opens.
+    Answered,
+    /// The part is reported as not applicable and filters nothing.
+    NotApplicable,
 }
 
 /// A compiled part of the conjunction.
@@ -586,7 +604,7 @@ impl<'a> Projection<'a> {
 /// [`Snapshot::run_statement`] records one before it prepares the text the
 /// record holds, which is how [`Snapshot::find_plans`] explains the statement
 /// that ran rather than a second spelling of it.
-pub(super) struct Ran {
+pub(crate) struct Ran {
     statement: FindStatement,
     filters: Vec<FindFilter>,
     sql: String,
@@ -599,7 +617,7 @@ pub(super) struct Ran {
 /// What SQLite counts while one statement is stepped, read off the
 /// statement's own status before it is dropped.
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct Stepped {
+pub(crate) struct Stepped {
     /// Steps forward through a loop no constraint bounds: a table read end to
     /// end, or an index read end to end.
     full_scan_steps: u64,
@@ -647,12 +665,12 @@ impl Ran {
 /// fingerprint and which keys are known — and every statement the find ran,
 /// in the order it ran them.
 #[derive(Default)]
-struct Lookups {
+pub(crate) struct Lookups {
     /// The active fingerprint once read, `None` inside where no schema is
     /// pinned.
     fingerprint: Option<Option<String>>,
     known: BTreeMap<String, bool>,
-    ran: Vec<Ran>,
+    pub(crate) ran: Vec<Ran>,
 }
 
 impl Snapshot {
@@ -759,7 +777,7 @@ impl Snapshot {
     /// [`Snapshot::find_plans`] explains the record, so the plan of a
     /// statement is the plan of what ran. Once every row is read, the record
     /// takes what SQLite counted stepping it ([`Stepped`]).
-    pub(super) fn run_statement<T>(
+    pub(crate) fn run_statement<T>(
         &self,
         record: &mut Vec<Ran>,
         ran: Ran,
@@ -824,19 +842,13 @@ impl Snapshot {
         let CursorKey::Document { sort, path, .. } = cursor.key() else {
             return Err(FindRefusal::NotADocumentCursor);
         };
-        let now = self.reading_facts(order.field_order(), lookups)?;
-        let minted_under = cursor.snapshot().schema_fingerprint.as_deref();
         let path_ordered = matches!(order, PageOrder::Path(_));
-        if minted_under != now.schema_fingerprint.as_deref() || (path_ordered && sort.is_some()) {
-            let current = now.schema_fingerprint.clone();
-            return Err(FindRefusal::OrderChanged(match minted_under {
-                Some(minted_under) => CursorOrderChanged::new(minted_under, current),
-                None => CursorOrderChanged::minted_raw(current),
-            }));
-        }
-        let moved = cursor
-            .continuation(&now)
-            .map_err(FindRefusal::OrderChanged)?;
+        let moved = self.judge_reading(
+            cursor,
+            order.field_order(),
+            path_ordered && sort.is_some(),
+            lookups,
+        )?;
         Ok((
             Some(FindPosition {
                 sort: sort.clone(),
@@ -846,10 +858,38 @@ impl Snapshot {
         ))
     }
 
+    /// Judge the reading `cursor` was minted under against the reading a page
+    /// in `order` answers from on this snapshot, and say what moved since.
+    ///
+    /// The cursor is refused where its fingerprint is not the order's — the
+    /// active fingerprint for a typed order, none for any other — and where
+    /// `misplaced` says its position is detectably in another order. The
+    /// refusal names the order the cursor was minted in either way.
+    pub(crate) fn judge_reading(
+        &self,
+        cursor: &Cursor,
+        order: Option<FieldOrder>,
+        misplaced: bool,
+        lookups: &mut Lookups,
+    ) -> Result<Vec<Moved>, FindRefusal> {
+        let now = self.reading_facts(order, lookups)?;
+        let minted_under = cursor.snapshot().schema_fingerprint.as_deref();
+        if minted_under != now.schema_fingerprint.as_deref() || misplaced {
+            let current = now.schema_fingerprint.clone();
+            return Err(FindRefusal::OrderChanged(match minted_under {
+                Some(minted_under) => CursorOrderChanged::new(minted_under, current),
+                None => CursorOrderChanged::minted_raw(current),
+            }));
+        }
+        cursor
+            .continuation(&now)
+            .map_err(FindRefusal::OrderChanged)
+    }
+
     /// This snapshot's reading as a cursor carries it for a page in `order`:
     /// the epoch and the write generation, and the active fingerprint where
     /// the order is typed.
-    fn reading_facts(
+    pub(crate) fn reading_facts(
         &self,
         order: Option<FieldOrder>,
         lookups: &mut Lookups,
@@ -957,7 +997,7 @@ impl Snapshot {
     /// The reports a request's compile made, with an unknown key's
     /// suggestions drawn from the field universe — which is read once, and
     /// only where some key is unknown.
-    fn resolve(
+    pub(crate) fn resolve(
         &self,
         reports: Vec<Report>,
         declared: &DeclaredFields,
@@ -1021,13 +1061,7 @@ impl Snapshot {
         declared: &DeclaredFields,
         lookups: &mut Lookups,
     ) -> Result<Compiled<'a>, FindRefusal> {
-        let pinned = self.fingerprint(lookups)?;
-        if declared.schema() != pinned.as_deref() {
-            return Err(FindRefusal::DeclarationNotPinned {
-                declared_under: declared.schema().map(str::to_string),
-                pinned,
-            });
-        }
+        self.declaration_pinned(declared, lookups)?;
         let mut reports = Vec::new();
         let order = match &params.sort {
             None => PageOrder::Path(PageDirection::Ascending),
@@ -1059,31 +1093,90 @@ impl Snapshot {
                 }
             }
         };
+        let conjunction = self.compile_conjunction(
+            &params.predicates,
+            Resolution::Answered,
+            declared,
+            lookups,
+        )?;
+        reports.extend(conjunction.reports);
+        Ok(Compiled {
+            order,
+            filters: conjunction.filters,
+            reports,
+            matches_nothing: conjunction.matches_nothing,
+        })
+    }
 
-        let mut filters = Vec::new();
-        let mut matches_nothing = false;
-        for predicate in &params.predicates {
+    /// Refuse `declared` where it was read from another schema than the
+    /// snapshot pins, so every typed order a request compiles under is the
+    /// one the typed column holds.
+    pub(crate) fn declaration_pinned(
+        &self,
+        declared: &DeclaredFields,
+        lookups: &mut Lookups,
+    ) -> Result<(), FindRefusal> {
+        let pinned = self.fingerprint(lookups)?;
+        if declared.schema() != pinned.as_deref() {
+            return Err(FindRefusal::DeclarationNotPinned {
+                declared_under: declared.schema().map(str::to_string),
+                pinned,
+            });
+        }
+        Ok(())
+    }
+
+    /// A request's conjunction compiled under `declared`: the filters its
+    /// parts spell, and the parts it could not apply as asked, in the order
+    /// the request names them.
+    ///
+    /// Every read that filters by a conjunction compiles it here, so a part
+    /// means one thing on every verb. A part whose key is outside the field
+    /// universe is reported and filters nothing; a part that cannot be applied
+    /// is reported and matches nothing. A `resolves` part is compiled into a
+    /// filter where `resolution` answers it, and reported as not applicable,
+    /// filtering nothing, where it does not.
+    pub(crate) fn compile_conjunction(
+        &self,
+        predicates: &[Predicate],
+        resolution: Resolution,
+        declared: &DeclaredFields,
+        lookups: &mut Lookups,
+    ) -> Result<Conjunction, FindRefusal> {
+        let mut conjunction = Conjunction {
+            filters: Vec::new(),
+            reports: Vec::new(),
+            matches_nothing: false,
+        };
+        for predicate in predicates {
             membership_bound(predicate)?;
+            if let Predicate::Resolves { target, .. } = predicate
+                && resolution == Resolution::NotApplicable
+            {
+                conjunction
+                    .reports
+                    .push(Report::Part(Unsatisfied::resolves_not_applicable(
+                        target.clone(),
+                    )));
+                continue;
+            }
             if let Some(key) = predicate_key(predicate)
                 && !self.is_known(key, declared, lookups)?
             {
-                reports.push(Report::Unknown(KeyPlace::Predicate, key.to_string()));
+                conjunction
+                    .reports
+                    .push(Report::Unknown(KeyPlace::Predicate, key.to_string()));
                 continue;
             }
             match self.compile_predicate(predicate, declared, lookups)? {
-                Part::Filter(filter) => filters.push(filter),
+                Part::Filter(filter) => conjunction.filters.push(filter),
                 Part::MatchesNothing(part) => {
-                    matches_nothing = true;
-                    reports.push(Report::Part(part));
+                    conjunction.matches_nothing = true;
+                    conjunction.reports.push(Report::Part(part));
                 }
             }
         }
-        Ok(Compiled {
-            order,
-            filters,
-            reports,
-            matches_nothing,
-        })
+        Ok(conjunction)
     }
 
     /// One page of keys: at most `limit`, and where the next page starts.
@@ -1382,7 +1475,7 @@ fn predicate_key(predicate: &Predicate) -> Option<&str> {
 
 /// The page bound a request names, or [`DEFAULT_PAGE`] where it names none;
 /// a bound outside `1..=`[`MAX_PAGE`] is refused.
-fn page_limit(limit: Option<u32>) -> Result<usize, FindRefusal> {
+pub(crate) fn page_limit(limit: Option<u32>) -> Result<usize, FindRefusal> {
     let Some(limit) = limit else {
         return Ok(DEFAULT_PAGE);
     };
