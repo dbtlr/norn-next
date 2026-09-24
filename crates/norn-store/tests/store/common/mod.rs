@@ -17,7 +17,7 @@ use norn_store::{
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::explain::StatementReads;
 use norn_testkit::scratch::Scratch as TestkitScratch;
-use norn_wire::{FindingKind, Severity};
+use norn_wire::{FindParams, FindingKind, Predicate, Severity, VaultAddress, VaultName};
 
 /// The columns that hold a document's payload: what a document says, rather
 /// than an index entry about it. `documents.body` is the body text and
@@ -26,7 +26,10 @@ use norn_wire::{FindingKind, Severity};
 /// table's external content. Reading any of them costs the bytes of the
 /// documents read, and no index a set-valued answer reads is keyed by one.
 /// The table's other columns are keys, hashes and lengths, whose width does
-/// not follow the document's.
+/// not follow the document's. The column FTS5 names after its table,
+/// `documents_fts.documents_fts`, is not payload: it is the handle a `MATCH`
+/// and a ranking function read the index through — its postings and each
+/// document's token counts — and never the text the index is over.
 pub const DOCUMENT_PAYLOAD: &[(&str, &str)] = &[
     ("documents", "body"),
     ("documents", "frontmatter"),
@@ -75,6 +78,48 @@ impl Scratch {
         Store::open(self.database(), norn_store::StoredPathOrder::Sensitive)
             .expect("opening a store")
     }
+}
+
+/// The paths of the documents whose body the full-text index matches the FTS5
+/// match `expression`, in the order a find pages them: a find narrowed by a
+/// `matches` part alone, on a snapshot established now, under a declaration of
+/// no schema — so `store` pins none.
+///
+/// This is how a case about the full-text pillar asks what the index answers:
+/// through the read path every full-text match is answered by, rather than a
+/// second spelling of it.
+pub fn full_text_matches(store: &Store, expression: &str) -> Vec<String> {
+    let reader = std::sync::Arc::new(
+        store
+            .open_reader()
+            .reader
+            .expect("a live store mints a reader"),
+    );
+    let snapshot = reader
+        .try_take()
+        .expect("a handle nothing is reading holds its connection")
+        .establish()
+        .snapshot
+        .expect("a snapshot");
+    let found = snapshot
+        .find(
+            &FindParams::new(VaultAddress::name(
+                VaultName::new("notes").expect("a vault name"),
+            ))
+            .with_predicates([Predicate::matches(expression)]),
+            &ContentModel::none(),
+        )
+        .unwrap_or_else(|refusal| panic!("a find matching `{expression}`: {refusal}"));
+    assert!(
+        found.unsatisfied.is_empty(),
+        "`{expression}` is no match the index reads: {:?}",
+        found.unsatisfied
+    );
+    found
+        .rows
+        .iter()
+        .map(|row| row.path.as_str().to_string())
+        .collect()
 }
 
 /// Write one document as a changeset of its own.

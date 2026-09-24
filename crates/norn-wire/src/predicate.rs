@@ -94,7 +94,9 @@ pub enum Predicate {
         value: String,
     },
     /// The document matches `query` in full text. This filters; it does not
-    /// order.
+    /// order. The full-text index compares a word by its first 32768 bytes,
+    /// in the index and in the query alike, so two words that share those
+    /// bytes match each other.
     #[non_exhaustive]
     Matches {
         /// The full-text query, carried as written.
@@ -117,7 +119,7 @@ pub enum Predicate {
         target: ResolutionTarget,
     },
     /// The document is what `target` resolves to. Meaningful on `find` alone;
-    /// `count` and `validate` report it as an unsatisfied part.
+    /// `count`, `validate` and `search` report it as an unsatisfied part.
     #[non_exhaustive]
     Resolves {
         /// The target being resolved.

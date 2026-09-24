@@ -1040,12 +1040,13 @@ impl<'a> Request<'a> {
     /// order.
     ///
     /// This reads the index rather than the column it indexes, and it does so
-    /// without a match expression: [`Request::full_text_matches`] answers about
-    /// terms a caller already named, so a term the index holds that no caller
-    /// thinks to ask for is invisible to it. What comes back is the index's own
-    /// vocabulary — the term, how many documents hold it, how many times it
-    /// occurs — which is what makes a disagreement between the index and
-    /// `documents.body` readable rather than only detectable.
+    /// without a match expression: a match answers about terms a caller already
+    /// named — a find's `matches` part, a search's query — so a term the index
+    /// holds that no caller thinks to ask for is invisible to it. What comes
+    /// back is the index's own vocabulary — the term, how many documents hold
+    /// it, how many times it occurs — which is what makes a disagreement
+    /// between the index and `documents.body` readable rather than only
+    /// detectable.
     ///
     /// `after` is exclusive.
     pub fn indexed_terms_after(
@@ -1242,28 +1243,6 @@ impl<'a> Request<'a> {
                 order,
             })
         }
-    }
-
-    /// The full-text matches for one FTS5 match expression, in path order.
-    ///
-    /// The range primitive the full-text read builder composes: it takes a match
-    /// expression and returns the documents whose body the index says holds those
-    /// terms. Snippets, ranking and paging are the builder's.
-    ///
-    /// It reads the index rather than the column, which is what makes it the
-    /// pillar's observable behaviour: a `MATCH` that answers about text
-    /// `documents.body` no longer carries is an index that has drifted, and
-    /// [`crate::Store::verify_integrity`] is what states that as damage.
-    pub fn full_text_matches(&self, expression: &str) -> Result<Vec<DocumentPath>, StoreError> {
-        self.read_all(
-            "SELECT documents.path FROM documents_fts
-             JOIN documents ON documents.id = documents_fts.rowid
-             WHERE documents_fts MATCH ?1
-             ORDER BY documents.path",
-            params![expression],
-            |row| Ok(DocumentPath::new(&row.get::<_, String>(0)?)),
-            "reading full-text matches",
-        )
     }
 
     // ---- readers ----

@@ -10,8 +10,8 @@
 
 use crate::common::{
     Scratch, ambiguity, ambiguity_for_target, class, class_named, classes, document,
-    document_with_every_fact, drained, path, record_death, violation, write_document,
-    write_documents,
+    document_with_every_fact, drained, full_text_matches, path, record_death, violation,
+    write_document, write_documents,
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, StoreError,
@@ -47,37 +47,23 @@ fn the_full_text_index_stays_consistent_across_every_write() {
     let scratch = Scratch::new("full-text");
     let mut store = scratch.open();
     let subject = path("docs/norn/glossary.md");
+    let only_the_subject = vec![subject.as_str().to_string()];
 
-    let mut request = store.begin_request();
     write_document(
-        &mut request,
+        &mut store.begin_request(),
         &document(subject.as_str(), "hash-1", "the first body\n"),
     );
-    assert_eq!(
-        request.full_text_matches("first").expect("matches"),
-        vec![subject.clone()]
-    );
-    request.finish();
+    assert_eq!(full_text_matches(&store, "first"), only_the_subject);
     store.verify_integrity().expect("after an insert");
 
-    let mut request = store.begin_request();
     write_document(
-        &mut request,
+        &mut store.begin_request(),
         &document(subject.as_str(), "hash-2", "an entirely new body\n"),
     );
     // The old terms are gone from the index and the new ones are in it, which is
     // what the delete-then-insert pair in the update trigger is for.
-    assert!(
-        request
-            .full_text_matches("first")
-            .expect("matches")
-            .is_empty()
-    );
-    assert_eq!(
-        request.full_text_matches("entirely").expect("matches"),
-        vec![subject.clone()]
-    );
-    request.finish();
+    assert!(full_text_matches(&store, "first").is_empty());
+    assert_eq!(full_text_matches(&store, "entirely"), only_the_subject);
     store.verify_integrity().expect("after an update");
 
     // A re-derivation that did not change the body leaves the index agreeing
@@ -85,28 +71,18 @@ fn the_full_text_index_stays_consistent_across_every_write() {
     // guard is what makes that free rather than a delete and an insert of the
     // same terms — a cost difference rather than a behavioural one, since no
     // read distinguishes the two. What is asserted here is the agreement.
-    let mut request = store.begin_request();
     write_document(
-        &mut request,
+        &mut store.begin_request(),
         &document(subject.as_str(), "hash-3", "an entirely new body\n"),
     );
-    assert_eq!(
-        request.full_text_matches("entirely").expect("matches"),
-        vec![subject.clone()]
-    );
-    request.finish();
+    assert_eq!(full_text_matches(&store, "entirely"), only_the_subject);
     store.verify_integrity().expect("after an unchanged body");
 
-    let mut request = store.begin_request();
-    record_death(&mut request, &subject, Provenance::PlanDelete);
+    record_death(&mut store.begin_request(), &subject, Provenance::PlanDelete);
     assert!(
-        request
-            .full_text_matches("entirely")
-            .expect("matches")
-            .is_empty(),
+        full_text_matches(&store, "entirely").is_empty(),
         "the index still answers about a document that is gone"
     );
-    request.finish();
     store.verify_integrity().expect("after a delete");
 }
 
@@ -141,11 +117,8 @@ fn a_full_text_index_that_drifted_from_its_column_is_damage() {
 
     // The drift is observable: the index answers about text that is not there.
     assert_eq!(
-        store
-            .begin_request()
-            .full_text_matches("first")
-            .expect("matches"),
-        vec![subject.clone()],
+        full_text_matches(&store, "first"),
+        vec![subject.as_str().to_string()],
         "the index no longer holds the terms the desync left in it"
     );
 

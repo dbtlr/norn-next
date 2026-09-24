@@ -138,7 +138,9 @@ impl<'de> Deserialize<'de> for RungSet {
 pub struct Hit {
     /// The document the hit is for.
     pub path: DocumentPath,
-    /// How relevant the ladder judged it, which is what the order sorts by.
+    /// How relevant the ladder judged it: higher is more relevant. Hits are
+    /// ordered by score descending, then by path in byte order, and a
+    /// request's `min_score` floors this same scale.
     pub score: Score,
     /// The document's row, projected onto the columns the request asked for,
     /// and `null` where the request projected no column.
@@ -176,13 +178,32 @@ pub type SearchReport = Page<Hit>;
 pub struct SearchParams {
     /// The vault to answer from.
     pub vault: VaultAddress,
-    /// The query to rank against, carried as written.
+    /// The query to rank against, carried as written. It is plain text, and
+    /// no character of it is query syntax.
+    ///
+    /// Terms are split at whitespace — every character Unicode reads as
+    /// whitespace — and at NUL. A word is what the full-text index's tokenizer
+    /// reads as one: a run of the characters its Unicode tables class as
+    /// letters, digits or private use, or class not at all. Those tables
+    /// predate recent Unicode versions, so a character assigned since, such as
+    /// a newer emoji, reads as a word. A term holding no word, such as
+    /// punctuation alone, is dropped. A hit is a
+    /// document holding every other term, and a term holding several words,
+    /// such as `foo-bar`, matches them adjacent and in order. Matching folds
+    /// case and diacritics as the tokenizer does, and compares a word by its
+    /// first 32768 bytes, in the index and in the query alike, so two words
+    /// that share those bytes match each other. A query holding no word
+    /// answers no hit and is reported as the unsatisfied part
+    /// `query_names_no_word`.
     pub query: String,
-    /// The conjunction a hit must also satisfy. Empty filters nothing.
+    /// The conjunction a hit must also satisfy. Empty filters nothing. A
+    /// `resolves` part answers which documents a target names, which is a
+    /// `find`, so a search reports it as not applicable.
     pub predicates: Vec<Predicate>,
     /// The rungs to run. The lexical floor alone unless more are asked for.
     pub rungs: RungSet,
-    /// The relevance a hit must reach. `null` returns every hit the ladder
+    /// The relevance a hit must reach, on the scale a hit's `score` is: a hit
+    /// scored at or above it is answered. `null` returns every hit the ladder
     /// ranked.
     pub min_score: Option<Score>,
     /// The columns each hit's document row carries. Empty hydrates no row.

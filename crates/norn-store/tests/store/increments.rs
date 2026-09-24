@@ -13,8 +13,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::common::{
-    Scratch, ambiguity, classes, document, document_with_every_fact, drained, path, snapshot,
-    unread_block, violation, write_document, write_documents,
+    Scratch, ambiguity, classes, document, document_with_every_fact, drained, full_text_matches,
+    path, snapshot, unread_block, violation, write_document, write_documents,
 };
 use norn_wire::{CaseFold, Pattern};
 
@@ -1516,13 +1516,6 @@ fn a_refused_changeset_rolls_back_the_entries_that_ran_before_it() {
         );
     }
     assert_eq!(request.pillars().expect("a pillar report").documents, 3);
-    assert!(
-        request
-            .full_text_matches("replaced")
-            .expect("reading matches")
-            .is_empty(),
-        "the full-text index holds terms only the refused changeset wrote"
-    );
     // The discards the entries ahead of the refusal ran are rolled back too.
     assert_eq!(
         request
@@ -1553,6 +1546,10 @@ fn a_refused_changeset_rolls_back_the_entries_that_ran_before_it() {
     );
 
     request.finish();
+    assert!(
+        full_text_matches(&store, "replaced").is_empty(),
+        "the full-text index holds terms only the refused changeset wrote"
+    );
     store
         .verify_integrity()
         .expect("a store a changeset was refused in");
@@ -1690,13 +1687,6 @@ fn a_torn_changeset_leaves_the_previous_generation_whole() {
         );
     }
     assert_eq!(request.pillars().expect("a pillar report").documents, 2);
-    assert!(
-        request
-            .full_text_matches("torn")
-            .expect("reading matches")
-            .is_empty(),
-        "the full-text index holds terms only the torn changeset wrote"
-    );
     // The discard the torn changeset would have folded in did not happen either.
     assert_eq!(
         request
@@ -1708,6 +1698,10 @@ fn a_torn_changeset_leaves_the_previous_generation_whole() {
     );
 
     request.finish();
+    assert!(
+        full_text_matches(&reopened, "torn").is_empty(),
+        "the full-text index holds terms only the torn changeset wrote"
+    );
     reopened
         .verify_integrity()
         .expect("a store a changeset was torn in");

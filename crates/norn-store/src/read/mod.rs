@@ -37,6 +37,7 @@ use crate::describe::DescribeStatement;
 use crate::error::StoreError;
 use crate::find::FindStatement;
 use crate::request::MAX_PAGE;
+use crate::search::SearchStatement;
 #[cfg(doc)]
 use crate::store::Snapshot;
 use crate::validate::ValidateStatement;
@@ -115,9 +116,9 @@ impl FieldOrder {
 /// A statement a read builder ran, named by the builder that names it.
 ///
 /// A read compiles its conjunction through probes the find builder names, and
-/// reads finding rows and the active fingerprint through statements the find
-/// builder names, so a count, a validate and a describe run find's statements
-/// beside their own; the record of what
+/// reads finding rows, document rows and the active fingerprint through
+/// statements the find builder names, so a count, a validate, a describe and a
+/// search run find's statements beside their own; the record of what
 /// a read ran holds any of them, and each builder's enumeration stays its own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadStatement {
@@ -129,6 +130,14 @@ pub enum ReadStatement {
     Validate(ValidateStatement),
     /// A statement [`DescribeStatement`] names.
     Describe(DescribeStatement),
+    /// A statement [`SearchStatement`] names.
+    Search(SearchStatement),
+}
+
+impl From<SearchStatement> for ReadStatement {
+    fn from(statement: SearchStatement) -> Self {
+        ReadStatement::Search(statement)
+    }
 }
 
 impl From<DescribeStatement> for ReadStatement {
@@ -202,6 +211,8 @@ pub enum PageRefusal {
     /// The cursor names no position among a describe's facets: it is not a
     /// facet's.
     NotAFacetCursor,
+    /// The cursor names no position among a search's hits: it is not a hit's.
+    NotAHitCursor,
     /// The request answers a summary and carries a cursor. A summary answers
     /// every tally at once and is not paged, so no cursor names a position it
     /// continues from.
@@ -258,6 +269,9 @@ impl std::fmt::Display for PageRefusal {
             }
             PageRefusal::NotAFacetCursor => {
                 formatter.write_str("the cursor names no position among a describe's facets")
+            }
+            PageRefusal::NotAHitCursor => {
+                formatter.write_str("the cursor names no position among a search's hits")
             }
             PageRefusal::SummaryNotPaged => {
                 formatter.write_str("a summary is not paged, so it continues no cursor")
