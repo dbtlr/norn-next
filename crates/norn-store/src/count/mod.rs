@@ -59,10 +59,10 @@
 //! **What an unfiltered grouped count costs is linear in the vault's
 //! documents.** Its valued section reads the leading key's rows from the
 //! page's position on — and, grouped by one key, stops at the page's bound —
-//! and its `null` section walks every document, since a document holding no value is found by no seek
-//! of the rows that hold one. **A filter that keeps what it seeks drives
-//! both**, so a narrowing part narrows the count's cost to the documents it
-//! matches.
+//! and its `null` section walks every document, since a document holding no
+//! value is found by no seek of the rows that hold one. **A filter that keeps
+//! what it seeks drives both**, so a narrowing part narrows the count's cost
+//! to the documents it matches.
 //!
 //! # A conjunction means what it means to a find
 //!

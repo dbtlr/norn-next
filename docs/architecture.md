@@ -654,11 +654,11 @@ The contract is stated whole and filled shape by shape, as each builder lands. T
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
 a statement it emitted, because a plan cannot be taken by a crate that may not reach the
 database — and, beside the statements the read builders below name, twenty-five named
-statements carry a plan bar through it: suffix
-candidates, findings in a class, the class- and subject-scoped findings discards — the
-subject discard in both the whole form and the form narrowed to the kinds a producer
-re-derives — the clear a schema pin runs over the field projection's typed values, the page a walk reads its scope's unaccounted finding subjects through, the
-ordered document page a heal merges its walk against, the four enumerations a caller drains
+statements carry a plan bar through it: suffix candidates, findings in a class, the class-
+and subject-scoped findings discards — the subject discard in both the whole form and the
+form narrowed to the kinds a producer re-derives — the clear a schema pin runs over the
+field projection's typed values, the page a walk reads its scope's unaccounted finding
+subjects through, the ordered document page a heal merges its walk against, the four enumerations a caller drains
 a whole pillar through — the findings table, the tombstones, every row's stored suffix key
 beside the path that has to produce it, and the vocabulary the full-text index holds — and
 the two drains a lane-2 consumer ([ADR

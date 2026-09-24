@@ -3,8 +3,9 @@
 //! **The grouping tuple has one spelling.** A group member for which the
 //! document carries no scalar value — and, under a key the vault declares with
 //! a typed order, no scalar that reads as that type — is `null`, on the row and
-//! in the cursor key alike, and [`Tally::cursor_key`] is the one function that turns the row into
-//! the key, so the two cannot drift into two orders sharing a name.
+//! in the cursor key alike, and [`Tally::cursor_key`] is the one function that
+//! turns the row into the key, so the two cannot drift into two orders sharing
+//! a name.
 //!
 //! **A tally counts documents, and one document may stand in several
 //! groups.** A key holding a set groups the document once per element, and a
