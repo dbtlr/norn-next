@@ -1592,8 +1592,8 @@ disambiguating suffixes, and the findings pillar indexes full candidate enumerat
 wire's bounded head stays a head rather than becoming the query surface.
 
 **One resolver compiles a target for its root**, and every surface that reads a class reads
-it through that one: a find's `resolves` part, a class read, and the class a finding is filed
-under. Case is the root's: the coverage proves the root's case behaviour when it is installed,
+it through that one: a find's `resolves` part and a class read today, and the link-health
+findings the link index lands in Layer 3, which file under the class keys it compiles. Case is the root's: the coverage proves the root's case behaviour when it is installed,
 and the store records the order its rows were derived under. A read answers under the store's
 order, which its snapshot takes from the handle the store minted, so no read detects one; an
 attach, a recovery and a reload judge the store's order against the coverage's proof, and a

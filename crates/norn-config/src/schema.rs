@@ -194,11 +194,14 @@ impl VaultSchema {
 
     /// The paths the resolution ladder does not count as candidates.
     ///
-    /// **Read by the resolution ladder, and backlinks and findings apply the
-    /// same exclusion.** Derivation hands the set to the store beside the
-    /// declared fields, and the store's one resolver applies it to every class
-    /// a target opens: a find's `resolves` part, and the class a finding's
-    /// producer reads.
+    /// **Read by the resolution ladder.** Derivation hands the set to the store
+    /// beside the declared fields, and the store's one resolver applies it to
+    /// every class a target opens, which a find's `resolves` part reads today.
+    ///
+    /// Backlinks and link-health findings are the dormant consumers of the
+    /// same exclusion: the link index lands them in Layer 3, and they read a
+    /// link target's class through that one resolver. The current call graph
+    /// does not reach them, because no link index exists yet.
     pub fn ambiguity_ignore(&self) -> &[Pattern] {
         &self.ambiguity_ignore
     }

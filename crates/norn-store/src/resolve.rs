@@ -3,11 +3,18 @@
 //! compiled into the class of documents the target names.
 //!
 //! Every surface that asks which documents a target names asks here: a find's
-//! `resolves` part, a read of a class's candidates, and a finding's producer
-//! reading the class it files a finding about. What a [`TargetClass`] carries is
-//! what each of them needs and nothing more — the probe, over the key the root
-//! selects, and the exclusion — and one spelling of both in SQL, so no two
-//! surfaces can disagree about a class.
+//! `resolves` part, and a read of a class's candidates. What a [`TargetClass`]
+//! carries is what each of them needs and nothing more — the probe, over the key
+//! the root selects, and the exclusion — and one spelling of both in SQL, so no
+//! two surfaces can disagree about a class.
+//!
+//! **The class keys are a dormant carrier.** [`TargetClass::class_keys`] is the
+//! set a finding about a target is filed under, and its consumer is the
+//! link-health findings and backlinks the link index lands in Layer 3: a
+//! producer that reads a link's target, reads its class here, and files what
+//! it found under these keys. The current call graph does not reach it,
+//! because no link index exists yet — every finding the host files is about
+//! its own subject and belongs to no class.
 //!
 //! # Case is the root's
 //!
