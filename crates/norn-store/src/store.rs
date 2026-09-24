@@ -293,10 +293,10 @@ impl ConnectionTurn {
     /// The connection goes back to the handle when the [`Snapshot`] is
     /// dropped, or here where the establishment refuses.
     ///
-    /// The snapshot reads under the case behaviour the handle's store rows
-    /// were derived under, which the handle carries from its mint: every read
-    /// builder that runs on it takes the order from there, so no read detects
-    /// one and no caller hands one over. It costs no statement.
+    /// The snapshot carries the case behaviour the handle's store rows were
+    /// derived under, which the handle carries from its mint, and a find's
+    /// `resolves` part compiles its class under it, so no read detects one and
+    /// no caller hands one over. It costs no statement.
     ///
     /// **It reports what it ran whichever way it ended.** An establishment
     /// that refused ran the statement that refused it, rolled the transaction
@@ -441,8 +441,13 @@ impl Snapshot {
         &self.reading
     }
 
-    /// The case behaviour the rows this snapshot reads were derived under:
-    /// which suffix key a resolution probes, and how paths compare.
+    /// The case behaviour the rows this snapshot reads were derived under.
+    ///
+    /// A find's `resolves` part is the one reader of it: the order selects the
+    /// suffix key the resolution probes and the case its ignore globs match
+    /// under. No other read builder consults it: a find's, a count's and a
+    /// validate's path parts match bytes and their pages order paths the same
+    /// way on every root.
     pub fn path_order(&self) -> StoredPathOrder {
         self.order
     }
