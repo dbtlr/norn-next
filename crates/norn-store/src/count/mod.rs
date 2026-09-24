@@ -77,8 +77,8 @@ use norn_wire::{
 use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
 use crate::find::{
-    Conjunction, FieldOrder, FindFilter, FindRefusal, Lookups, Ran, ReadStatement, Resolution,
-    Stepped, page_limit,
+    Conjunction, FieldOrder, FindFilter, FindRefusal, KeyPlace, Lookups, Ran, ReadStatement,
+    Report, Resolution, Stepped, page_limit,
 };
 use crate::store::Snapshot;
 
@@ -230,7 +230,7 @@ impl Snapshot {
         let started = self.counters().statements_executed();
         let limit = page_limit(params.limit)?;
         self.declaration_pinned(declared, lookups)?;
-        let members = members(&params.by, declared)?;
+        let (members, mut reports) = self.members(&params.by, declared, lookups)?;
         let conjunction = self.compile_conjunction(
             &params.predicates,
             Resolution::NotApplicable,
@@ -260,7 +260,8 @@ impl Snapshot {
         )?;
         let snapshot = self.reading_facts(order, lookups)?;
         let next = next.map(|last| Cursor::new(snapshot.clone(), last.cursor_key()));
-        let unsatisfied = self.resolve(conjunction.reports, declared, lookups)?;
+        reports.extend(conjunction.reports);
+        let unsatisfied = self.resolve(reports, declared, lookups)?;
         work.statements = self.counters().statements_executed() - started;
         Ok(Counted {
             tallies,
@@ -381,32 +382,45 @@ impl Snapshot {
         })
         .map_err(|problem| error::sql("reading a page of tallies", problem))
     }
-}
 
-/// The members `by` groups by, each read under the order the declaration gives
-/// its key.
-fn members<'a>(
-    by: &'a [GroupKey],
-    declared: &DeclaredFields,
-) -> Result<Vec<Member<'a>>, FindRefusal> {
-    by.iter()
-        .map(|key| match key {
-            GroupKey::Field { key, .. } => Ok(Member {
-                shape: GroupMember::Field(match declared.typed_order(key) {
-                    Some(_) => FieldOrder::Typed,
-                    None => FieldOrder::Raw,
+    /// The members `by` groups by, each read under the order the declaration
+    /// gives its key, with a field key outside the field universe reported —
+    /// its member still groups, and every document's member for it is `null`,
+    /// exactly as an unknown predicate key filters nothing and is reported. A
+    /// tag member is never unknown.
+    fn members<'a>(
+        &self,
+        by: &'a [GroupKey],
+        declared: &DeclaredFields,
+        lookups: &mut Lookups,
+    ) -> Result<(Vec<Member<'a>>, Vec<Report>), FindRefusal> {
+        let mut reports = Vec::new();
+        let members = by
+            .iter()
+            .map(|key| match key {
+                GroupKey::Field { key, .. } => {
+                    if !self.is_known(key, declared, lookups)? {
+                        reports.push(Report::Unknown(KeyPlace::Group, key.clone()));
+                    }
+                    Ok(Member {
+                        shape: GroupMember::Field(match declared.typed_order(key) {
+                            Some(_) => FieldOrder::Typed,
+                            None => FieldOrder::Raw,
+                        }),
+                        key: Some(key),
+                    })
+                }
+                GroupKey::Tag { .. } => Ok(Member {
+                    shape: GroupMember::Tag,
+                    key: None,
                 }),
-                key: Some(key),
-            }),
-            GroupKey::Tag { .. } => Ok(Member {
-                shape: GroupMember::Tag,
-                key: None,
-            }),
-            _ => Err(FindRefusal::UnknownPart {
-                part: "a group key",
-            }),
-        })
-        .collect()
+                _ => Err(FindRefusal::UnknownPart {
+                    part: "a group key",
+                }),
+            })
+            .collect::<Result<Vec<Member<'a>>, FindRefusal>>()?;
+        Ok((members, reports))
+    }
 }
 
 /// The sort key a group labelled `label` stands at under `member`'s order: the

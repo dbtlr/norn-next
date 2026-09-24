@@ -508,6 +508,7 @@ pub(crate) enum KeyPlace {
     Sort,
     Projection,
     Predicate,
+    Group,
 }
 
 /// One part of a request that could not be applied as asked, before the
@@ -980,7 +981,7 @@ impl Snapshot {
     /// Whether `key` is in the field universe: declared, or carried by some
     /// document. A declared key asks the snapshot nothing; any other is one
     /// existence seek, asked once per request.
-    fn is_known(
+    pub(crate) fn is_known(
         &self,
         key: &str,
         declared: &DeclaredFields,
@@ -1066,6 +1067,7 @@ impl Snapshot {
                         KeyPlace::Sort => Unsatisfied::unknown_sort_key(key, near),
                         KeyPlace::Projection => Unsatisfied::unknown_projection_key(key, near),
                         KeyPlace::Predicate => Unsatisfied::unknown_predicate_key(key, near),
+                        KeyPlace::Group => Unsatisfied::unknown_group_key(key, near),
                     }
                 }
             })

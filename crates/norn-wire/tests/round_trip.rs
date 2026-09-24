@@ -479,6 +479,7 @@ fn unsatisfied_parts() -> Vec<Unsatisfied> {
         Unsatisfied::unknown_sort_key("due", vec!["date".to_string()]),
         Unsatisfied::unknown_projection_key("due", vec![]),
         Unsatisfied::unknown_predicate_key("due", vec!["date".to_string()]),
+        Unsatisfied::unknown_group_key("due", vec!["date".to_string()]),
         Unsatisfied::bare_directory("docs"),
         Unsatisfied::malformed_glob("docs/[", "the character class does not close"),
         Unsatisfied::malformed_query("design AND", "fts5: syntax error near \"\""),

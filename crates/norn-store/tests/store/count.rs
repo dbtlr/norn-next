@@ -577,6 +577,28 @@ fn a_part_a_count_cannot_apply_is_reported_as_a_find_reports_it() {
     );
 }
 
+/// **A `by` key outside the field universe still answers**: no document
+/// carries it, so every one of the fixture's seven documents groups under
+/// `null`, and the key is reported with its near key. **A known key carries
+/// no such report.**
+#[test]
+fn a_by_key_outside_the_field_universe_answers_null_and_is_reported() {
+    let counting_store = Counting::new("count-unknown-group");
+
+    let unknown = counting_store.count(&counting(vec![field("staus")]));
+    assert_eq!(unknown.tallies, vec![tally(&[None], 7)]);
+    assert_eq!(
+        unknown.unsatisfied,
+        vec![Unsatisfied::unknown_group_key(
+            "staus",
+            vec!["status".to_string()]
+        )]
+    );
+
+    let known = counting_store.count(&counting(vec![field("status")]));
+    assert!(known.unsatisfied.is_empty());
+}
+
 // ---- the cursor ----
 
 /// **A cursor that names no position among the request's tallies is
