@@ -14,14 +14,21 @@
 //!
 //! # A query is plain text
 //!
-//! The query is split into terms, each quoted so that no character of it is
-//! full-text syntax, and a hit is a document whose body holds every term —
-//! [`statement`] states the reading whole. So `AND`, `NEAR`, `body:foo`, a
-//! quote, a hyphen or a star in a query are words, and every string is a query
-//! the engine parses. **A query naming no term answers no hit**: one that is
-//! empty or all whitespace runs no statement, and one whose every term is a
-//! run the tokenizer reads no word in — punctuation alone — matches nothing.
-//! Neither is reported: no part of the request was left unapplied.
+//! The query is split into terms at whitespace — every character Unicode reads
+//! as whitespace — and at NUL. A term counts only where it holds a word, as the
+//! index's tokenizer reads words ([`words`] states the rule and pins it to the
+//! tokenizer): **a term holding no word is dropped**, and each other term is
+//! quoted so that no character of it is full-text syntax. A hit is a document
+//! whose body holds every term, and a term holding several words matches them
+//! adjacent and in order — [`statement`] states the reading whole. So `AND`,
+//! `NEAR`, `body:foo`, a quote, a hyphen or a star in a query are words or
+//! separators, never syntax, and every string is a query the engine parses.
+//! Matching folds case and diacritics as the tokenizer does.
+//!
+//! **A query holding no word answers no hit, and is reported**: an empty one,
+//! whitespace, or terms of punctuation alone run no lexical page, and the
+//! query is the request's first unsatisfied part
+//! ([`Unsatisfied::QueryNamesNoWord`]).
 //!
 //! A `matches` part keeps full-text match syntax, and narrows a search through
 //! the conjunction as it narrows a find.
@@ -174,8 +181,8 @@ pub struct Searched {
     /// was answered from. Empty on a first page.
     pub moved: Vec<Moved>,
     /// The parts of the request that could not be applied as asked, in the
-    /// order the request names them: the conjunction's parts, then the
-    /// projection's keys.
+    /// order the request names them: a query holding no word, the
+    /// conjunction's parts, then the projection's keys.
     pub unsatisfied: Vec<Unsatisfied>,
     /// The reading the page was answered from, as a cursor carries it. The
     /// ranking is no schema's order, so it names no fingerprint.

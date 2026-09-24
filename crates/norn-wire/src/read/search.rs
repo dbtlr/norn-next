@@ -178,9 +178,21 @@ pub type SearchReport = Page<Hit>;
 pub struct SearchParams {
     /// The vault to answer from.
     pub vault: VaultAddress,
-    /// The query to rank against, carried as written. It is plain text: a
-    /// hit is a document holding every term of it, and no character of it is
-    /// query syntax.
+    /// The query to rank against, carried as written. It is plain text, and
+    /// no character of it is query syntax.
+    ///
+    /// Terms are split at whitespace — every character Unicode reads as
+    /// whitespace — and at NUL. A word is what the full-text index's tokenizer
+    /// reads as one: a run of the characters its Unicode tables class as
+    /// letters, digits or private use, or class not at all. Those tables
+    /// predate recent Unicode versions, so a character assigned since, such as
+    /// a newer emoji, reads as a word. A term holding no word, such as
+    /// punctuation alone, is dropped. A hit is a
+    /// document holding every other term, and a term holding several words,
+    /// such as `foo-bar`, matches them adjacent and in order. Matching folds
+    /// case and diacritics as the tokenizer does. A query holding no word
+    /// answers no hit and is reported as the unsatisfied part
+    /// `query_names_no_word`.
     pub query: String,
     /// The conjunction a hit must also satisfy. Empty filters nothing. A
     /// `resolves` part answers which documents a target names, which is a

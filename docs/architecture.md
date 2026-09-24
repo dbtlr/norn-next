@@ -878,9 +878,16 @@ never the wire's `search` params: that request names no rung set, and its floor,
 and its cursor are the lexical rung's own, so the host builds it explicitly; the rungs
 above the floor are an engine's, and fusing them, with the fused answer's floor, bound and
 cursor, is the host's. A query is plain text: it is
-split into terms at whitespace, each term quoted so that no character of it is match
-syntax, and a hit is a document holding every term. A query naming no term answers no hit
-and reports nothing. A hit's score is FTS5's BM25 negated, so it is higher for the more
+split into terms at whitespace, every character Unicode reads as whitespace, and at NUL.
+A term holding no word, as the index's tokenizer reads words, is dropped; each other term
+is quoted so that no character of it is match syntax, and a hit is a document holding
+every such term, a term holding several words matching them adjacent and in order.
+Matching folds case and diacritics as the tokenizer does (`remove_diacritics 2`). The word
+rule is one function over a table of the code points the tokenizer begins a word at — the
+bundled FTS5's Unicode tables, which class letters, numbers, private use and every code
+point they hold no category for as word characters — and a contract test reads that
+table back from the store's own full-text index for every code point. A query holding no
+word answers no hit, runs no lexical page, and is reported. A hit's score is FTS5's BM25 negated, so it is higher for the more
 relevant hit, and hits are ordered by score descending, then by path in byte order; a
 floor admits the hits scored at or above it. A page resumes after the `(score, path)` its
 cursor carries, compared with each match's score as the page computes it, so a drain on
