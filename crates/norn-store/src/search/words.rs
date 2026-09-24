@@ -463,27 +463,15 @@ mod tests {
     use super::{WORD_STARTS, holds_word};
     use crate::{Store, StoredPathOrder};
 
-    /// The tokenizer the full-text pillar's DDL declares.
-    fn declared_tokenizer() -> String {
-        let statement = crate::ddl::statements()
-            .into_iter()
-            .find(|statement| statement.starts_with("CREATE VIRTUAL TABLE documents_fts"))
-            .expect("the full-text pillar");
-        let (_, rest) = statement
-            .split_once("tokenize = '")
-            .expect("the pillar declares its tokenizer");
-        let (tokenizer, _) = rest.split_once('\'').expect("a quoted tokenizer");
-        tokenizer.to_string()
-    }
-
-    /// A one-document index under the declared tokenizer, holding the word
-    /// `anchor`, and whether FTS5 reads a word in a string: a query of
-    /// `anchor` and the string as a phrase answers the document exactly where
-    /// FTS5 dropped the phrase, which it does where it reads no token in it.
+    /// The store's own full-text index, holding the word `anchor` and no
+    /// other, and whether FTS5 reads a word in a string: a query of `anchor`
+    /// and the string as a phrase answers the document exactly where FTS5
+    /// dropped the phrase, which it does where it reads no token in it.
     ///
-    /// The index is a temporary table on a throwaway store's own connection,
-    /// so it runs on the SQLite the store runs on and leaves the store's
-    /// schema as it was.
+    /// The index is `documents_fts` itself, on a throwaway store, so the
+    /// tokenizer is the one its DDL declares running on the SQLite the store
+    /// runs on. The word is written to the index directly, beside no document
+    /// row: a count of matches reads the index alone.
     struct Probe {
         _scratch: Scratch,
         store: Store,
@@ -499,12 +487,11 @@ mod tests {
             .expect("a store opens");
             store
                 .connection()
-                .execute_batch(&format!(
-                    "CREATE VIRTUAL TABLE temp.probe USING fts5(body, tokenize = '{}');
-                     INSERT INTO temp.probe(body) VALUES ('anchor');",
-                    declared_tokenizer()
-                ))
-                .expect("a one-document index under the declared tokenizer");
+                .execute(
+                    "INSERT INTO documents_fts(rowid, body) VALUES (1, 'anchor')",
+                    [],
+                )
+                .expect("the word written to the full-text index");
             Probe {
                 _scratch: scratch,
                 store,
@@ -515,7 +502,7 @@ mod tests {
             let mut statement = self
                 .store
                 .connection()
-                .prepare_cached("SELECT count(*) FROM temp.probe WHERE probe MATCH ?1")
+                .prepare_cached("SELECT count(*) FROM documents_fts WHERE documents_fts MATCH ?1")
                 .expect("the probe");
             let expression = format!("\"anchor\" \"{}\"", text.replace('"', "\"\""));
             let matched: i64 = statement
