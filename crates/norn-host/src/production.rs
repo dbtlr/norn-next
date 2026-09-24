@@ -1869,7 +1869,7 @@ fn addressed_scope<'a>(
 /// **A reason that does not stand is asked for, never assumed.** A root that
 /// merely vanished says nothing about what is at it now, so the rows beneath it
 /// converge the way they converge for any name nothing is at while the findings
-/// stay standing: this registers no scope for one. [`Vault::reach`]
+/// stay standing: this registers no scope for one. [`Vault::reach`](norn_fs::Vault::reach)
 /// answers no such reason today, and `stands` is asked here rather than relied
 /// on, so a reason class added later decides at this seam instead of silently
 /// widening it.
