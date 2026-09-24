@@ -118,6 +118,16 @@ impl AmbiguityIgnore {
         &self.patterns
     }
 
+    /// The globs whose text is after `after`, or every glob where it is
+    /// `None`, in the byte order of their text.
+    pub(crate) fn after<'a>(&'a self, after: Option<&str>) -> impl Iterator<Item = &'a Pattern> {
+        let from = after.map_or(0, |after| {
+            self.patterns
+                .partition_point(|pattern| pattern.as_str() <= after)
+        });
+        self.patterns[from..].iter()
+    }
+
     /// Whether `path` stays in the class of a target of `target_segments`
     /// segments, on a root whose path order is `order`.
     ///

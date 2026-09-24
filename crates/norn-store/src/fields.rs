@@ -47,6 +47,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use norn_wire::{Facet, FacetKind, FieldType, PathRuleKind, Pattern, TagStance};
@@ -423,20 +424,24 @@ impl DeclaredFields {
         self.keys.keys().map(String::as_str)
     }
 
-    /// Every facet of `kind` this declaration reports, in the order of the
-    /// text that keys it — the byte order of a field's key, a tag's name, a
-    /// pattern or a folder's path — each once.
+    /// Every facet of `kind` this declaration reports keyed after `after` —
+    /// from the first where it is `None` — in the order of the text that keys
+    /// it: the byte order of a field's key, a tag's name, a pattern, a
+    /// folder's path or the stance's spelling. Each is reported once.
     ///
-    /// A pure read of the declaration: it runs no statement. Observed fields
-    /// are what documents carry rather than what the schema declares, so this
-    /// reports none; and a declaration no schema makes reports nothing of any
-    /// kind.
-    pub fn facets_of(&self, kind: FacetKind) -> Vec<Facet> {
+    /// A pure read of the declaration: it runs no statement, and it builds a
+    /// facet only as the iterator is drawn, so a page drawing the facets it
+    /// returns builds no others. Observed fields are what documents carry
+    /// rather than what the schema declares, so this reports none; and a
+    /// declaration no schema makes reports nothing of any kind.
+    pub fn facets_of<'a>(
+        &'a self,
+        kind: FacetKind,
+        after: Option<&'a str>,
+    ) -> Box<dyn Iterator<Item = Facet> + 'a> {
         match kind {
-            FacetKind::DeclaredField => self
-                .keys
-                .iter()
-                .map(|(key, declared)| {
+            FacetKind::DeclaredField => {
+                Box::new(keyed_after(&self.keys, after).map(|(key, declared)| {
                     let declaration = &declared.declaration;
                     Facet::declared_field(
                         key.clone(),
@@ -444,31 +449,58 @@ impl DeclaredFields {
                         declaration.required,
                         declaration.one_of.clone(),
                     )
-                })
-                .collect(),
-            FacetKind::DeclaredTag => self.tags.iter().map(Facet::declared_tag).collect(),
-            FacetKind::TagPattern => self.tag_patterns.iter().map(Facet::tag_pattern).collect(),
-            FacetKind::Folder => self
-                .folders
-                .iter()
-                .map(|(path, description)| Facet::folder(path.clone(), description.clone()))
-                .collect(),
-            FacetKind::PathRule => self
-                .ambiguity_ignore
-                .patterns()
-                .iter()
-                .map(|pattern| Facet::path_rule(PathRuleKind::AmbiguityIgnore, pattern.as_str()))
-                .collect(),
-            FacetKind::UndeclaredTags => self
-                .undeclared_tags
-                .into_iter()
-                .map(Facet::undeclared_tags)
-                .collect(),
-            FacetKind::ObservedField => Vec::new(),
-            // A kind this build does not know has nothing declared under it.
-            _ => Vec::new(),
+                }))
+            }
+            FacetKind::DeclaredTag => {
+                Box::new(named_after(&self.tags, after).map(Facet::declared_tag))
+            }
+            FacetKind::TagPattern => {
+                Box::new(named_after(&self.tag_patterns, after).map(Facet::tag_pattern))
+            }
+            FacetKind::Folder => Box::new(
+                keyed_after(&self.folders, after)
+                    .map(|(path, description)| Facet::folder(path.clone(), description.clone())),
+            ),
+            FacetKind::PathRule => {
+                Box::new(self.ambiguity_ignore.after(after).map(|pattern| {
+                    Facet::path_rule(PathRuleKind::AmbiguityIgnore, pattern.as_str())
+                }))
+            }
+            FacetKind::UndeclaredTags => Box::new(
+                self.undeclared_tags
+                    .filter(|stance| after.is_none_or(|after| stance.as_str() > after))
+                    .into_iter()
+                    .map(Facet::undeclared_tags),
+            ),
+            // Observed fields, and a kind this build does not know, are
+            // declared nowhere.
+            _ => Box::new(std::iter::empty()),
         }
     }
+}
+
+/// The entries of `map` keyed after `after`, or every entry where it is
+/// `None`, in key order.
+fn keyed_after<'a, V>(
+    map: &'a BTreeMap<String, V>,
+    after: Option<&'a str>,
+) -> impl Iterator<Item = (&'a String, &'a V)> {
+    map.range::<str, _>((
+        after.map_or(Bound::Unbounded, Bound::Excluded),
+        Bound::Unbounded,
+    ))
+}
+
+/// The names in `set` after `after`, or every name where it is `None`, in
+/// name order.
+fn named_after<'a>(
+    set: &'a BTreeSet<String>,
+    after: Option<&'a str>,
+) -> impl Iterator<Item = &'a String> {
+    set.range::<str, _>((
+        after.map_or(Bound::Unbounded, Bound::Excluded),
+        Bound::Unbounded,
+    ))
 }
 
 /// What a schema declares one field as: its type, whether every document is

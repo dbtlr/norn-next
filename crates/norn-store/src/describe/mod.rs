@@ -14,8 +14,10 @@
 //! declared tags, the tag patterns, the declared folders, the path rules and
 //! the stance on an undeclared tag are read off the [`DeclaredFields`] the
 //! host hands over, which is refused unless it was read from the schema the
-//! snapshot pins. They are a read of memory and run no statement. A store
-//! with no schema pinned declares nothing, so it answers no declared facet.
+//! snapshot pins. They are a read of memory and run no statement, drawn from
+//! the page's position on, so a page builds no declared facet past the one
+//! that says a next page exists. A store with no schema pinned declares
+//! nothing, so it answers no declared facet.
 //!
 //! **The observed fields are the keys documents carry**, one facet per key,
 //! each listing every container some document holds it in. They are read from
@@ -200,9 +202,7 @@ impl Snapshot {
             |record, (kind, after), rows| match kind {
                 FacetKind::ObservedField => self.read_observed(record, after, rows),
                 declared_kind => Ok(declared
-                    .facets_of(declared_kind)
-                    .into_iter()
-                    .filter(|facet| after.is_none_or(|after| key_of(facet).as_str() > after))
+                    .facets_of(declared_kind, after)
                     .take(rows)
                     .collect()),
             },
@@ -253,14 +253,6 @@ fn container_kind(container: FieldContainer) -> ContainerKind {
         FieldContainer::Scalar => ContainerKind::Scalar,
         FieldContainer::Sequence => ContainerKind::Sequence,
         FieldContainer::Map => ContainerKind::Map,
-    }
-}
-
-/// The key a facet's cursor names, which its section is ordered by.
-fn key_of(facet: &Facet) -> String {
-    match facet.cursor_key() {
-        CursorKey::Facet { key, .. } => key,
-        _ => unreachable!("a facet's cursor key is a facet's"),
     }
 }
 

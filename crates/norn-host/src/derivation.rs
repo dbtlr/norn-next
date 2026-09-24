@@ -1093,7 +1093,12 @@ paths:
             .expect("a schema declaring every shape"),
             "every-shape",
         );
-        let facets = |kind| declared.fields().facets_of(kind);
+        let facets = |kind| {
+            declared
+                .fields()
+                .facets_of(kind, None)
+                .collect::<Vec<Facet>>()
+        };
         assert_eq!(
             facets(FacetKind::DeclaredField),
             vec![
@@ -1145,12 +1150,19 @@ paths:
             "silent",
         );
         assert_eq!(
-            silent.fields().facets_of(FacetKind::UndeclaredTags),
+            silent
+                .fields()
+                .facets_of(FacetKind::UndeclaredTags, None)
+                .collect::<Vec<Facet>>(),
             vec![Facet::undeclared_tags(TagStance::Allow)]
         );
         let unpinned = undeclaring();
         for kind in FacetKind::ALL {
-            assert_eq!(unpinned.fields().facets_of(kind), Vec::new(), "{kind:?}");
+            assert_eq!(
+                unpinned.fields().facets_of(kind, None).count(),
+                0,
+                "{kind:?}"
+            );
         }
     }
 
