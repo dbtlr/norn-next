@@ -117,10 +117,11 @@ impl FieldOrder {
 /// A statement a read builder ran, named by the builder that names it.
 ///
 /// A read compiles its conjunction through probes the find builder names, and
-/// reads finding rows, document rows and the active fingerprint through
-/// statements the find builder names, so a count, a validate, a describe, a
-/// search and a get run find's statements beside their own; the record of what
-/// a read ran holds any of them, and each builder's enumeration stays its own.
+/// reads finding rows and the active fingerprint, and hydrates document rows,
+/// through statements the find builder names, so a count, a validate, a
+/// describe, a search and a get run find's statements beside their own; the
+/// record of what a read ran holds any of them, and each builder's enumeration
+/// stays its own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadStatement {
     /// A statement [`FindStatement`] names.

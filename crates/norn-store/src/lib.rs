@@ -60,6 +60,12 @@
 //!   conjunction compiled as a find compiles it, answering a page of hits in
 //!   score order with the path breaking a tie, each carrying the row its
 //!   columns name. [`Snapshot::search_plans`] explains what it ran.
+//! - [`Snapshot::get`] — the get builder: one document named by a
+//!   resolution target through the one resolver, answered as a find's row, as
+//!   the section or block its anchor names — read through the document reader
+//!   its caller hands it, since nothing here parses — or as one page of one
+//!   nested collection, and refused where the target names several documents
+//!   or none. [`Snapshot::get_plans`] explains what it ran.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
