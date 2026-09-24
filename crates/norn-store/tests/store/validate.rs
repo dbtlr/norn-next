@@ -417,7 +417,8 @@ fn drained(validating_store: &Validating, params: &ValidateParams, limit: u32) -
 
 /// The requests the drain and the summary are judged over: path parts with
 /// and without a literal prefix among them, since a prefix bounds the seek a
-/// page's position also bounds.
+/// page's position also bounds, and a literal path naming a finding's own
+/// path, with a document row there and without one.
 fn requests() -> Vec<ValidateParams> {
     vec![
         validating(),
@@ -426,6 +427,8 @@ fn requests() -> Vec<ValidateParams> {
         validating().with_predicates([Predicate::path("*.md")]),
         validating().with_predicates([Predicate::path("notes/**")]),
         validating().with_predicates([Predicate::path("notes/*.md")]),
+        validating().with_predicates([Predicate::path("notes/c.md")]),
+        validating().with_predicates([Predicate::path("broken.md")]),
         validating().with_predicates([Predicate::equal_to("status", "open")]),
         validating().with_predicates([Predicate::not_equal_to("status", "open")]),
     ]
