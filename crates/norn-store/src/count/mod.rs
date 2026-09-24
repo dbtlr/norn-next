@@ -85,7 +85,7 @@ use norn_wire::{
 use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
 use crate::find::{
-    Conjunction, FieldOrder, FindFilter, FindRefusal, KeyPlace, Lookups, Ran, ReadStatement,
+    Conjunction, FieldOrder, FindFilter, KeyPlace, Lookups, Ran, ReadRefusal, ReadStatement,
     Report, Resolution, Stepped, page_limit,
 };
 use crate::store::Snapshot;
@@ -191,14 +191,14 @@ impl Snapshot {
     /// from another schema than the snapshot pins, a part the store keeps no
     /// index of, and a bound that does not read as its key's declared type.
     /// And refused as a cursor that names no position among the request's
-    /// tallies ([`FindRefusal::NotATallyCursor`]), or one minted under
+    /// tallies ([`ReadRefusal::NotATallyCursor`]), or one minted under
     /// another schema fingerprint than the grouping reads under
-    /// ([`FindRefusal::OrderChanged`]).
+    /// ([`ReadRefusal::OrderChanged`]).
     pub fn count(
         &self,
         params: &CountParams,
         declared: &DeclaredFields,
-    ) -> Result<Counted, FindRefusal> {
+    ) -> Result<Counted, ReadRefusal> {
         self.run_count(params, declared, &mut Lookups::default())
     }
 
@@ -213,7 +213,7 @@ impl Snapshot {
         &self,
         params: &CountParams,
         declared: &DeclaredFields,
-    ) -> Result<Vec<CountPlan>, FindRefusal> {
+    ) -> Result<Vec<CountPlan>, ReadRefusal> {
         let mut lookups = Lookups::default();
         self.run_count(params, declared, &mut lookups)?;
         let mut plans = Vec::with_capacity(lookups.ran.len());
@@ -235,7 +235,7 @@ impl Snapshot {
         params: &CountParams,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<Counted, FindRefusal> {
+    ) -> Result<Counted, ReadRefusal> {
         let started = self.counters().statements_executed();
         let limit = page_limit(params.limit)?;
         self.declaration_pinned(declared, lookups)?;
@@ -297,12 +297,12 @@ impl Snapshot {
         order: Option<FieldOrder>,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<(Vec<Option<String>>, Vec<Moved>), FindRefusal> {
+    ) -> Result<(Vec<Option<String>>, Vec<Moved>), ReadRefusal> {
         let CursorKey::Tally { group, .. } = cursor.key() else {
-            return Err(FindRefusal::NotATallyCursor);
+            return Err(ReadRefusal::NotATallyCursor);
         };
         if group.len() != members.len() {
-            return Err(FindRefusal::NotATallyCursor);
+            return Err(ReadRefusal::NotATallyCursor);
         }
         let moved = self.judge_reading(cursor, order, false, lookups)?;
         let at = members
@@ -312,9 +312,9 @@ impl Snapshot {
                 None => Ok(None),
                 Some(label) => sort_key(member, label, declared)
                     .map(Some)
-                    .ok_or(FindRefusal::NotATallyCursor),
+                    .ok_or(ReadRefusal::NotATallyCursor),
             })
-            .collect::<Result<Vec<Option<String>>, FindRefusal>>()?;
+            .collect::<Result<Vec<Option<String>>, ReadRefusal>>()?;
         Ok((at, moved))
     }
 
@@ -411,7 +411,7 @@ impl Snapshot {
         by: &'a [GroupKey],
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<(Vec<Member<'a>>, Vec<Report>), FindRefusal> {
+    ) -> Result<(Vec<Member<'a>>, Vec<Report>), ReadRefusal> {
         let mut reports = Vec::new();
         let members = by
             .iter()
@@ -432,11 +432,11 @@ impl Snapshot {
                     shape: GroupMember::Tag,
                     key: None,
                 }),
-                _ => Err(FindRefusal::UnknownPart {
+                _ => Err(ReadRefusal::UnknownPart {
                     part: "a group key",
                 }),
             })
-            .collect::<Result<Vec<Member<'a>>, FindRefusal>>()?;
+            .collect::<Result<Vec<Member<'a>>, ReadRefusal>>()?;
         Ok((members, reports))
     }
 }

@@ -49,7 +49,7 @@
 //! order is the request's, and a continuation's cursor is judged against it.
 //! **The declaration is the snapshot's.** It names the schema it was read from,
 //! and a find whose declaration is not the one the snapshot pins is refused
-//! ([`FindRefusal::DeclarationNotPinned`]), so a typed order is always the one
+//! ([`ReadRefusal::DeclarationNotPinned`]), so a typed order is always the one
 //! the typed column holds.
 //!
 //! **A part that compares values compares under the key's order.** Equality,
@@ -188,15 +188,15 @@ use statement::{
 ///
 /// The store's default. A handler may narrow it by naming a bound of its own;
 /// a bound outside `1..=`[`MAX_PAGE`] is refused
-/// ([`FindRefusal::OutOfBound`]), never clamped.
+/// ([`ReadRefusal::OutOfBound`]), never clamped.
 pub const DEFAULT_PAGE: usize = 100;
 
 /// The most values one membership part may name.
 ///
 /// Every value is bound into the part's one statement, so the ceiling is what
 /// bounds that statement's text and its parameters. A part naming more is
-/// refused ([`FindRefusal::OutOfBound`]), and one naming none
-/// ([`FindRefusal::EmptyMembership`]).
+/// refused ([`ReadRefusal::OutOfBound`]), and one naming none
+/// ([`ReadRefusal::EmptyMembership`]).
 pub const IN_VALUES_CEILING: usize = 256;
 
 /// A count a request names that the store holds to a range.
@@ -205,7 +205,7 @@ pub enum FindBound {
     /// The rows a page holds: `1..=`[`MAX_PAGE`].
     PageRows,
     /// The values one membership part names: at most [`IN_VALUES_CEILING`].
-    /// A part naming none is refused as [`FindRefusal::EmptyMembership`].
+    /// A part naming none is refused as [`ReadRefusal::EmptyMembership`].
     MembershipValues,
 }
 
@@ -355,10 +355,10 @@ pub struct FindPlan {
     pub plan: EmittedPlan,
 }
 
-/// Why the builder answered no page.
+/// Why a read builder answered no page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum FindRefusal {
+pub enum ReadRefusal {
     /// The request filters by a fact the store keeps no index of.
     ///
     /// A **dormant carrier** for the link index NORN-229 builds: `links` stores
@@ -408,20 +408,20 @@ pub enum FindRefusal {
     Store(StoreError),
 }
 
-impl std::fmt::Display for FindRefusal {
+impl std::fmt::Display for ReadRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FindRefusal::NotIndexed { fact } => {
+            ReadRefusal::NotIndexed { fact } => {
                 write!(formatter, "the store keeps no index of {fact}")
             }
-            FindRefusal::NotProjected { column } => {
+            ReadRefusal::NotProjected { column } => {
                 write!(formatter, "{column} is not yet projected onto a find's row")
             }
-            FindRefusal::UnreadableBound { key, value } => write!(
+            ReadRefusal::UnreadableBound { key, value } => write!(
                 formatter,
                 "`{value}` does not read as the type `{key}` is declared with"
             ),
-            FindRefusal::DeclarationNotPinned {
+            ReadRefusal::DeclarationNotPinned {
                 declared_under,
                 pinned,
             } => write!(
@@ -430,22 +430,22 @@ impl std::fmt::Display for FindRefusal {
                 schema_named(declared_under.as_deref()),
                 schema_named(pinned.as_deref())
             ),
-            FindRefusal::OrderChanged(changed) => write!(
+            ReadRefusal::OrderChanged(changed) => write!(
                 formatter,
                 "the cursor was minted in an order under {}, and the request reads one under {}",
                 schema_named(changed.minted_under.as_deref()),
                 schema_named(changed.current.as_deref())
             ),
-            FindRefusal::NotADocumentCursor => {
+            ReadRefusal::NotADocumentCursor => {
                 formatter.write_str("the cursor names a position among rows that are not documents")
             }
-            FindRefusal::NotATallyCursor => {
+            ReadRefusal::NotATallyCursor => {
                 formatter.write_str("the cursor names no position among this count's tallies")
             }
-            FindRefusal::EmptyMembership { key } => {
+            ReadRefusal::EmptyMembership { key } => {
                 write!(formatter, "the membership part on `{key}` names no value")
             }
-            FindRefusal::OutOfBound { bound, given } => match bound {
+            ReadRefusal::OutOfBound { bound, given } => match bound {
                 FindBound::PageRows => write!(
                     formatter,
                     "a page holds 1 to {} rows, and {given} were asked for",
@@ -457,15 +457,15 @@ impl std::fmt::Display for FindRefusal {
                     bound.ceiling()
                 ),
             },
-            FindRefusal::UnknownPart { part } => {
+            ReadRefusal::UnknownPart { part } => {
                 write!(formatter, "this store does not know {part}")
             }
-            FindRefusal::Store(problem) => problem.fmt(formatter),
+            ReadRefusal::Store(problem) => problem.fmt(formatter),
         }
     }
 }
 
-impl std::error::Error for FindRefusal {}
+impl std::error::Error for ReadRefusal {}
 
 /// A schema fingerprint as a refusal names it: quoted, or "no schema".
 fn schema_named(fingerprint: Option<&str>) -> String {
@@ -475,9 +475,9 @@ fn schema_named(fingerprint: Option<&str>) -> String {
     )
 }
 
-impl From<StoreError> for FindRefusal {
+impl From<StoreError> for ReadRefusal {
     fn from(problem: StoreError) -> Self {
-        FindRefusal::Store(problem)
+        ReadRefusal::Store(problem)
     }
 }
 
@@ -583,7 +583,7 @@ pub(crate) struct Projection<'a> {
 impl<'a> Projection<'a> {
     /// What `columns` projects, or the refusal of a column the store keeps no
     /// index of.
-    fn of(columns: &'a [Column]) -> Result<Self, FindRefusal> {
+    fn of(columns: &'a [Column]) -> Result<Self, ReadRefusal> {
         let mut projection = Projection {
             all_fields: false,
             keys: Vec::new(),
@@ -611,16 +611,16 @@ impl<'a> Projection<'a> {
                     nested.insert(2);
                 }
                 Column::Links {} => {
-                    return Err(FindRefusal::NotProjected {
+                    return Err(ReadRefusal::NotProjected {
                         column: "the links column",
                     });
                 }
                 Column::Findings {} => {
-                    return Err(FindRefusal::NotProjected {
+                    return Err(ReadRefusal::NotProjected {
                         column: "the findings column",
                     });
                 }
-                _ => return Err(FindRefusal::UnknownPart { part: "a column" }),
+                _ => return Err(ReadRefusal::UnknownPart { part: "a column" }),
             }
         }
         projection.nested = nested.into_iter().map(|slot| Nested::ALL[slot]).collect();
@@ -732,7 +732,7 @@ impl Snapshot {
         &self,
         params: &FindParams,
         declared: &DeclaredFields,
-    ) -> Result<Found, FindRefusal> {
+    ) -> Result<Found, ReadRefusal> {
         self.run_find(params, declared, &mut Lookups::default())
     }
 
@@ -753,7 +753,7 @@ impl Snapshot {
         &self,
         params: &FindParams,
         declared: &DeclaredFields,
-    ) -> Result<Vec<FindPlan>, FindRefusal> {
+    ) -> Result<Vec<FindPlan>, ReadRefusal> {
         let mut lookups = Lookups::default();
         self.run_find(params, declared, &mut lookups)?;
         let mut plans = Vec::with_capacity(lookups.ran.len());
@@ -787,7 +787,7 @@ impl Snapshot {
         params: &FindParams,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<Found, FindRefusal> {
+    ) -> Result<Found, ReadRefusal> {
         let started = self.counters().statements_executed();
         let limit = page_limit(params.limit)?;
         let projection = Projection::of(&params.columns)?;
@@ -886,9 +886,9 @@ impl Snapshot {
         cursor: &Cursor,
         order: PageOrder<'_>,
         lookups: &mut Lookups,
-    ) -> Result<(Option<FindPosition>, Vec<Moved>), FindRefusal> {
+    ) -> Result<(Option<FindPosition>, Vec<Moved>), ReadRefusal> {
         let CursorKey::Document { sort, path, .. } = cursor.key() else {
-            return Err(FindRefusal::NotADocumentCursor);
+            return Err(ReadRefusal::NotADocumentCursor);
         };
         let path_ordered = matches!(order, PageOrder::Path(_));
         let moved = self.judge_reading(
@@ -919,17 +919,17 @@ impl Snapshot {
         order: Option<FieldOrder>,
         misplaced: bool,
         lookups: &mut Lookups,
-    ) -> Result<Vec<Moved>, FindRefusal> {
+    ) -> Result<Vec<Moved>, ReadRefusal> {
         let now = self.reading_facts(order, lookups)?;
         let minted_under = cursor.snapshot().schema_fingerprint.as_deref();
         if minted_under != now.schema_fingerprint.as_deref() || misplaced {
             let current = now.schema_fingerprint.clone();
-            return Err(FindRefusal::OrderChanged(match minted_under {
+            return Err(ReadRefusal::OrderChanged(match minted_under {
                 Some(minted_under) => CursorOrderChanged::new(minted_under, current),
                 None => CursorOrderChanged::minted_raw(current),
             }));
         }
-        cursor.continuation(&now).map_err(FindRefusal::OrderChanged)
+        cursor.continuation(&now).map_err(ReadRefusal::OrderChanged)
     }
 
     /// This snapshot's reading as a cursor carries it for a page in `order`:
@@ -1107,7 +1107,7 @@ impl Snapshot {
         params: &'a FindParams,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<Compiled<'a>, FindRefusal> {
+    ) -> Result<Compiled<'a>, ReadRefusal> {
         self.declaration_pinned(declared, lookups)?;
         let mut reports = Vec::new();
         let order = match &params.sort {
@@ -1117,7 +1117,7 @@ impl Snapshot {
                     Direction::Ascending => PageDirection::Ascending,
                     Direction::Descending => PageDirection::Descending,
                     _ => {
-                        return Err(FindRefusal::UnknownPart {
+                        return Err(ReadRefusal::UnknownPart {
                             part: "a sort direction",
                         });
                     }
@@ -1136,7 +1136,7 @@ impl Snapshot {
                         },
                         direction,
                     },
-                    _ => return Err(FindRefusal::UnknownPart { part: "a sort key" }),
+                    _ => return Err(ReadRefusal::UnknownPart { part: "a sort key" }),
                 }
             }
         };
@@ -1158,10 +1158,10 @@ impl Snapshot {
         &self,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<(), FindRefusal> {
+    ) -> Result<(), ReadRefusal> {
         let pinned = self.fingerprint(lookups)?;
         if declared.schema() != pinned.as_deref() {
-            return Err(FindRefusal::DeclarationNotPinned {
+            return Err(ReadRefusal::DeclarationNotPinned {
                 declared_under: declared.schema().map(str::to_string),
                 pinned,
             });
@@ -1185,7 +1185,7 @@ impl Snapshot {
         resolution: Resolution,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<Conjunction, FindRefusal> {
+    ) -> Result<Conjunction, ReadRefusal> {
         let mut conjunction = Conjunction {
             filters: Vec::new(),
             reports: Vec::new(),
@@ -1290,7 +1290,7 @@ impl Snapshot {
         predicate: &Predicate,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<Part, FindRefusal> {
+    ) -> Result<Part, ReadRefusal> {
         let text = |value: &str| Value::Text(value.to_string());
         let filter =
             |shape: FindFilter, values: Vec<Value>| Ok(Part::Filter(Filter { shape, values }));
@@ -1305,7 +1305,7 @@ impl Snapshot {
             None => Ok(value.clone()),
             Some(typed) => typed
                 .sort_key(value)
-                .ok_or_else(|| FindRefusal::UnreadableBound {
+                .ok_or_else(|| ReadRefusal::UnreadableBound {
                     key: key.clone(),
                     value: value.clone(),
                 }),
@@ -1324,7 +1324,7 @@ impl Snapshot {
                     values
                         .iter()
                         .map(|value| compared(key, value).map(FrontmatterValue::String))
-                        .collect::<Result<Vec<FrontmatterValue>, FindRefusal>>()?,
+                        .collect::<Result<Vec<FrontmatterValue>, ReadRefusal>>()?,
                 ))?;
                 filter(
                     FindFilter::Member(order(key)),
@@ -1365,7 +1365,7 @@ impl Snapshot {
                     )
                 }
             },
-            Predicate::LinksTo { .. } => Err(FindRefusal::NotIndexed {
+            Predicate::LinksTo { .. } => Err(ReadRefusal::NotIndexed {
                 fact: "a link's target",
             }),
             Predicate::Resolves { target, .. } => match suffix_probe(target.address()) {
@@ -1390,7 +1390,7 @@ impl Snapshot {
                     text(kind.as_str()),
                 ],
             ),
-            _ => Err(FindRefusal::UnknownPart {
+            _ => Err(ReadRefusal::UnknownPart {
                 part: "a predicate",
             }),
         }
@@ -1518,13 +1518,13 @@ fn predicate_key(predicate: &Predicate) -> Option<&str> {
 
 /// The page bound a request names, or [`DEFAULT_PAGE`] where it names none;
 /// a bound outside `1..=`[`MAX_PAGE`] is refused.
-pub(crate) fn page_limit(limit: Option<u32>) -> Result<usize, FindRefusal> {
+pub(crate) fn page_limit(limit: Option<u32>) -> Result<usize, ReadRefusal> {
     let Some(limit) = limit else {
         return Ok(DEFAULT_PAGE);
     };
     let given = usize::try_from(limit).unwrap_or(usize::MAX);
     if given == 0 || given > FindBound::PageRows.ceiling() {
-        return Err(FindRefusal::OutOfBound {
+        return Err(ReadRefusal::OutOfBound {
             bound: FindBound::PageRows,
             given,
         });
@@ -1534,15 +1534,15 @@ pub(crate) fn page_limit(limit: Option<u32>) -> Result<usize, FindRefusal> {
 
 /// A membership part's values held to `1..=`[`IN_VALUES_CEILING`]; every other
 /// part passes.
-fn membership_bound(predicate: &Predicate) -> Result<(), FindRefusal> {
+fn membership_bound(predicate: &Predicate) -> Result<(), ReadRefusal> {
     let Predicate::In { key, values, .. } = predicate else {
         return Ok(());
     };
     if values.is_empty() {
-        return Err(FindRefusal::EmptyMembership { key: key.clone() });
+        return Err(ReadRefusal::EmptyMembership { key: key.clone() });
     }
     if values.len() > FindBound::MembershipValues.ceiling() {
-        return Err(FindRefusal::OutOfBound {
+        return Err(ReadRefusal::OutOfBound {
             bound: FindBound::MembershipValues,
             given: values.len(),
         });

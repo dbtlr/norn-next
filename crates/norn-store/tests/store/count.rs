@@ -12,9 +12,9 @@ use std::sync::Arc;
 use crate::common::{Scratch, document, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    COUNT_STATEMENTS, CountPlan, CountStatement, Counted, DeclaredFields, FieldOrder, FindRefusal,
-    Found, FrontmatterValue, GroupMember, ReadStatement, Snapshot, SnapshotReader, Store, TagFact,
-    TagSource, TypedOrder, induced_failure,
+    COUNT_STATEMENTS, CountPlan, CountStatement, Counted, DeclaredFields, FieldOrder, Found,
+    FrontmatterValue, GroupMember, ReadRefusal, ReadStatement, Snapshot, SnapshotReader, Store,
+    TagFact, TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -785,7 +785,7 @@ fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
                     .clone()
                     .with_after(Cursor::new(reading.clone(), key.clone()))
             ),
-            FindRefusal::NotATallyCursor,
+            ReadRefusal::NotATallyCursor,
             "{key:?}"
         );
     }
@@ -802,7 +802,7 @@ fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
                     CursorKey::tally([Some("3".to_string())])
                 ))
             ),
-            FindRefusal::OrderChanged(_)
+            ReadRefusal::OrderChanged(_)
         ),
         "a raw grouping's cursor continued in a typed grouping"
     );
@@ -821,7 +821,7 @@ fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
         )
         .expect_err("a typed cursor under another schema");
     assert!(
-        matches!(refusal, FindRefusal::OrderChanged(_)),
+        matches!(refusal, ReadRefusal::OrderChanged(_)),
         "{refusal:?}"
     );
 }

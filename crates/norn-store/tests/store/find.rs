@@ -16,9 +16,9 @@ use std::sync::Arc;
 use crate::common::{Scratch, document, violation, write_documents};
 use norn_store::{
     BlockFact, DEFAULT_PAGE, DeclaredFields, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindBound,
-    FindFilter, FindPlan, FindRefusal, FindStatement, Found, FrontmatterValue, HeadingFact,
-    IN_VALUES_CEILING, MAX_PAGE, NESTED_ROW_CEILING, Nested, PageDirection, Snapshot,
-    SnapshotReader, Span, Store, StoreError, TagFact, TagSource, TypedOrder, induced_failure,
+    FindFilter, FindPlan, FindStatement, Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING,
+    MAX_PAGE, NESTED_ROW_CEILING, Nested, PageDirection, ReadRefusal, Snapshot, SnapshotReader,
+    Span, Store, StoreError, TagFact, TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -1960,7 +1960,7 @@ fn a_full_text_index_that_does_not_prepare_refuses_the_find() {
         &request().with_predicates([Predicate::matches("interloper")]),
         &declared(),
     );
-    let Err(FindRefusal::Store(StoreError::Sql { operation, message })) = answered else {
+    let Err(ReadRefusal::Store(StoreError::Sql { operation, message })) = answered else {
         panic!(
             "a find over a missing full-text index was not refused as the store's: {answered:?}"
         );
@@ -1986,7 +1986,7 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
         .expect_err("a links_to part is refused");
     assert_eq!(
         refusal,
-        FindRefusal::NotIndexed {
+        ReadRefusal::NotIndexed {
             fact: "a link's target",
         }
     );
@@ -2003,7 +2003,7 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
         .expect_err("a bound that reads as no number is refused");
     assert_eq!(
         refusal,
-        FindRefusal::UnreadableBound {
+        ReadRefusal::UnreadableBound {
             key: "count".to_string(),
             value: "many".to_string(),
         }
@@ -2019,7 +2019,7 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
             .expect_err("a compared value that reads as no number is refused");
         assert_eq!(
             refusal,
-            FindRefusal::UnreadableBound {
+            ReadRefusal::UnreadableBound {
                 key: "count".to_string(),
                 value: "many".to_string(),
             },
@@ -2054,7 +2054,7 @@ fn a_count_outside_its_bound_is_refused_rather_than_clamped() {
     for limit in [0, MAX_PAGE as u32 + 1, u32::MAX] {
         assert_eq!(
             refused(&request().with_limit(limit)),
-            FindRefusal::OutOfBound {
+            ReadRefusal::OutOfBound {
                 bound: FindBound::PageRows,
                 given: limit as usize,
             },
@@ -2070,7 +2070,7 @@ fn a_count_outside_its_bound_is_refused_rather_than_clamped() {
     for key in ["status", "nothing"] {
         assert_eq!(
             refused(&request().with_predicates([Predicate::in_any(key, Vec::new())])),
-            FindRefusal::EmptyMembership {
+            ReadRefusal::EmptyMembership {
                 key: key.to_string()
             }
         );
@@ -2081,7 +2081,7 @@ fn a_count_outside_its_bound_is_refused_rather_than_clamped() {
             &request()
                 .with_predicates([Predicate::in_any("status", values(IN_VALUES_CEILING + 1))])
         ),
-        FindRefusal::OutOfBound {
+        ReadRefusal::OutOfBound {
             bound: FindBound::MembershipValues,
             given: IN_VALUES_CEILING + 1,
         }

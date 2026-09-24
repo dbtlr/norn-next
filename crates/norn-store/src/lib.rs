@@ -111,8 +111,8 @@ pub use feed::FeedRead;
 pub use fields::{DeclaredFields, FieldContainer, FieldRow, FieldRows, TypedOrder};
 pub use find::{
     BODY_ROW_CEILING, DEFAULT_PAGE, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindBound,
-    FindFilter, FindPlan, FindRefusal, FindStatement, FindWork, Found, IN_VALUES_CEILING,
-    NESTED_ROW_CEILING, Nested, NestedRows, PageDirection, ReadStatement,
+    FindFilter, FindPlan, FindStatement, FindWork, Found, IN_VALUES_CEILING, NESTED_ROW_CEILING,
+    Nested, NestedRows, PageDirection, ReadRefusal, ReadStatement,
 };
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
