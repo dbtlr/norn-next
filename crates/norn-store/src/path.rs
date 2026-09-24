@@ -36,19 +36,20 @@
 //!   lets one index answer both.
 //! - **Bytes are compared as bytes.** Case, dot-prefix and separator
 //!   normalization belong to the filesystem seam, which is the workspace's one
-//!   path-spelling normalization point. Where the root proves it folds ASCII
-//!   case, a probe ranges over the **folded** suffix key instead — the same
-//!   encoding with `A`-`Z` folded onto `a`-`z`, stored beside the raw one — and
-//!   compares those bytes as bytes ([`SuffixKey`], [`SuffixProbe::folded`]). The store therefore requires a
+//!   path-spelling normalization point. The store therefore requires a
 //!   normalized path and refuses one that is obviously not — but it spells no
 //!   path differently from the way it arrived, so nothing here can disagree
-//!   with the seam about what two paths are. Where a read has to compare
-//!   case-insensitively it applies the same ASCII fold the seam is held to,
-//!   spelled here as a collation — see [`crate::StoredPathOrder`] — which
-//!   changes an order and a key range, never a stored byte. **`BINARY` collation is load-bearing**:
-//!   it is what makes the exclusive upper bound below exact, and a
-//!   case-insensitive collation on `suffix_key` would silently change which
-//!   keys a range holds.
+//!   with the seam about what two paths are.
+//!
+//!   Where the root proves it folds ASCII case, a probe ranges over the
+//!   **folded** suffix key instead — the same encoding with `A`-`Z` folded onto
+//!   `a`-`z`, stored beside the raw one — and compares those bytes as bytes
+//!   ([`SuffixKey`]). Where a read has to compare case-insensitively it applies
+//!   the same ASCII fold the seam is held to, spelled here as a collation — see
+//!   [`crate::StoredPathOrder`] — which changes an order and a key range, never
+//!   a stored byte. **`BINARY` collation is load-bearing**: it is what makes the
+//!   exclusive upper bound below exact, and a case-insensitive collation on
+//!   `suffix_key` would silently change which keys a range holds.
 //!
 //! # A target has two reductions, and it probes both
 //!
