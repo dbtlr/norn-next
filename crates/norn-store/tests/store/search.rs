@@ -496,3 +496,201 @@ fn a_document_edited_is_searched_as_it_now_reads() {
     let continued = searching_store.search(&searching("lantern harbor").with_after(cursor));
     assert_eq!(continued.moved, vec![Moved::Generation]);
 }
+
+// ---- the conjunction ----
+
+/// **A part of the conjunction narrows the hits as it narrows a find**, and the
+/// hits it keeps stay in rank order: a tag, a path glob, a field's value, a
+/// finding standing over the document, and a `matches` part — which keeps
+/// full-text syntax, so `harbor NOT walk` excludes the document holding
+/// `walk` — each keep the lantern hits they name, and two parts keep what both
+/// do.
+#[test]
+fn a_part_narrows_the_hits_it_keeps_in_rank_order() {
+    let searching_store = Searching::new("search-narrowed");
+    let whole = searching_store.search(&searching("lantern"));
+    let kept = |predicates: Vec<Predicate>| {
+        let searched =
+            searching_store.search(&searching("lantern").with_predicates(predicates.clone()));
+        assert!(
+            searched.unsatisfied.is_empty(),
+            "{predicates:?}: {:?}",
+            searched.unsatisfied
+        );
+        hit_paths(&searched)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<String>>()
+    };
+    let in_rank_order = |paths: &[&str]| {
+        hit_paths(&whole)
+            .into_iter()
+            .filter(|path| paths.contains(path))
+            .map(str::to_string)
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(
+        kept(vec![Predicate::tag("draft")]),
+        in_rank_order(&["notes/lantern.md"])
+    );
+    assert_eq!(
+        kept(vec![Predicate::path("notes/*")]),
+        in_rank_order(&[
+            "notes/lantern.md",
+            "notes/Twin.md",
+            "notes/twin.md",
+            "notes/walk.md"
+        ])
+    );
+    assert_eq!(
+        kept(vec![Predicate::equal_to("status", "closed")]),
+        in_rank_order(&["notes/walk.md"])
+    );
+    assert_eq!(
+        kept(vec![Predicate::has_finding(FindingKind::BodyBytesNotUtf8)]),
+        in_rank_order(&["other/finding.md"])
+    );
+    assert_eq!(
+        kept(vec![Predicate::matches("harbor NOT walk")]),
+        in_rank_order(&["notes/lantern.md", "notes/Twin.md", "notes/twin.md"])
+    );
+    assert_eq!(
+        kept(vec![
+            Predicate::path("notes/*"),
+            Predicate::not_equal_to("status", "open"),
+        ]),
+        in_rank_order(&["notes/Twin.md", "notes/twin.md", "notes/walk.md"])
+    );
+}
+
+/// **A part a search cannot apply is reported as a find reports it.** A key
+/// outside the field universe is reported with the keys near it and filters
+/// nothing; a `resolves` part is not applicable to a search and filters
+/// nothing; a match part the engine cannot parse and a glob that does not
+/// parse are reported, and empty the page. A `links_to` part is refused, as a
+/// find refuses it.
+#[test]
+fn a_part_a_search_cannot_apply_is_reported_as_a_find_reports_it() {
+    let searching_store = Searching::new("search-unsatisfied");
+    let whole = hit_paths(&searching_store.search(&searching("lantern")))
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<String>>();
+    let target = ResolutionTarget::new("lantern").expect("a target");
+
+    let unknown = searching_store.search(
+        &searching("lantern").with_predicates([Predicate::equal_to("statis", "open")]),
+    );
+    assert_eq!(hit_paths(&unknown), whole);
+    assert_eq!(
+        unknown.unsatisfied,
+        vec![Unsatisfied::unknown_predicate_key(
+            "statis",
+            vec!["status".to_string()]
+        )]
+    );
+
+    let resolves = searching_store
+        .search(&searching("lantern").with_predicates([Predicate::resolves(target.clone())]));
+    assert_eq!(hit_paths(&resolves), whole);
+    assert_eq!(
+        resolves.unsatisfied,
+        vec![Unsatisfied::resolves_not_applicable(target.clone())]
+    );
+
+    let malformed = searching_store
+        .search(&searching("lantern").with_predicates([Predicate::matches("\"unterminated")]));
+    assert_eq!(hit_paths(&malformed), Vec::<&str>::new());
+    assert!(matches!(
+        malformed.unsatisfied.as_slice(),
+        [Unsatisfied::MalformedQuery { .. }]
+    ));
+
+    let glob =
+        searching_store.search(&searching("lantern").with_predicates([Predicate::path("")]));
+    assert_eq!(hit_paths(&glob), Vec::<&str>::new());
+    assert_eq!(
+        glob.unsatisfied,
+        vec![Unsatisfied::malformed_glob("", "a pattern cannot be empty")]
+    );
+
+    assert!(matches!(
+        searching_store
+            .refusal(&searching("lantern").with_predicates([Predicate::links_to(target)])),
+        PageRefusal::NotIndexed { .. }
+    ));
+}
+
+// ---- the columns ----
+
+/// **A hit carries the row its columns name, and a search naming none
+/// hydrates nothing.** With no column, no hit carries a row and the search runs
+/// its page and the fingerprint read its declaration is judged by, and no
+/// hydration; with the fields and the body, each hit carries its own document's, in
+/// rank order, and one hydration reads exactly the hits' rows. A projected key
+/// outside the field universe is reported with the keys near it, after the
+/// conjunction's parts. A links column is refused, as a find refuses it.
+#[test]
+fn a_hit_carries_the_row_its_columns_name() {
+    let searching_store = Searching::new("search-columns");
+    let bare = searching("lantern harbor");
+    let plans = searching_store.plans(&bare);
+    assert_eq!(
+        plans
+            .iter()
+            .map(|plan| plan.statement)
+            .collect::<Vec<ReadStatement>>(),
+        [
+            ReadStatement::Find(FindStatement::ActiveFingerprint),
+            ReadStatement::Search(SearchStatement::LexicalPage),
+        ],
+        "a search naming no column ran {plans:?}"
+    );
+    assert_eq!(searching_store.search(&bare).work.documents_hydrated, 0);
+
+    let projected = searching_store.search(
+        &bare
+            .clone()
+            .with_limit(3)
+            .with_predicates([Predicate::equal_to("statis", "x")])
+            .with_columns([Column::field("status"), Column::field("stat"), Column::body()]),
+    );
+    assert_eq!(
+        hit_paths(&projected),
+        ["notes/lantern.md", "notes/Twin.md", "notes/twin.md"]
+    );
+    assert_eq!(projected.work.documents_hydrated, 3);
+    let row = |at: usize| {
+        projected.hits[at]
+            .document
+            .as_ref()
+            .expect("a hit naming columns carries a row")
+    };
+    for (at, hit) in projected.hits.iter().enumerate() {
+        assert_eq!(row(at).path, hit.path);
+    }
+    assert_eq!(
+        row(0).fields.as_ref().and_then(|fields| fields.get("status")),
+        Some(&FieldValue::scalar("open"))
+    );
+    assert_eq!(
+        row(0).body.as_ref().map(|body| body.text()),
+        Some("lantern lantern lantern harbor\n")
+    );
+    assert_eq!(
+        row(1).body.as_ref().map(|body| body.text()),
+        Some("harbor lantern twin\n")
+    );
+    assert_eq!(
+        projected.unsatisfied,
+        vec![
+            Unsatisfied::unknown_predicate_key("statis", vec!["status".to_string()]),
+            Unsatisfied::unknown_projection_key("stat", vec!["status".to_string()]),
+        ]
+    );
+
+    assert!(matches!(
+        searching_store.refusal(&bare.clone().with_columns([Column::links()])),
+        PageRefusal::NotProjected { .. }
+    ));
+}
