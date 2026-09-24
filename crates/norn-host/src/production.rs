@@ -153,6 +153,13 @@ pub struct ProductionAttachment {
     /// saying why. So the coverage, the store and the maintainer lock are all
     /// held, and the reason is what the entry publishes over them.
     controls: ReloadCandidate,
+    /// Controls a recovery or reload read but could not pin, because the
+    /// store owes rung 3 first.
+    ///
+    /// They stand beside `controls` rather than in place of them, so the
+    /// fingerprints the attachment reports as active stay the ones it serves
+    /// under until rung 3 reopens the store and takes these into `controls`.
+    held_for_rung_three: Option<ReloadCandidate>,
     /// Whether the engines are owed the config `controls` carries.
     ///
     /// It is set only where a leg holds controls it could not pin because
@@ -215,10 +222,10 @@ impl ProductionAttachment {
     /// Hold the controls a leg read but cannot pin, because its store owes
     /// rung 3 first. A readable declaration owes the engines its config at the
     /// rebuild that pins it; an unreadable one pins nothing and delivers
-    /// nothing.
+    /// nothing. The controls the attachment serves under stand until then.
     fn hold_for_rung_three(&mut self, candidate: ReloadCandidate) {
         self.config_delivery_owed = candidate.undeclarable().is_none();
-        self.controls = candidate;
+        self.held_for_rung_three = Some(candidate);
     }
 }
 
@@ -583,11 +590,16 @@ impl ProductionEntryOps {
             }
         }
         attachment.store_verification_due = Instant::now() + STORE_VERIFICATION_INTERVAL;
+        // Controls a leg held for this rung are the ones the rebuilt store is
+        // pinned and derived under.
+        if let Some(held) = attachment.held_for_rung_three.take() {
+            attachment.controls = held;
+        }
         if attachment.controls.undeclarable().is_some() {
             // The stance the attach takes over a declaration this build cannot
             // read: the rebuilt store holds nothing, nothing is pinned and
-            // nothing derived, and a reload that pins a readable declaration
-            // derives into it.
+            // nothing derived, and the entry owes the recovery that reads the
+            // declaration again.
             return Ok(attachment);
         }
         Self::pin_candidate(&mut attachment.store, &attachment.controls)?;
@@ -760,6 +772,7 @@ impl EntryOps for ProductionEntryOps {
             registration: registration.clone(),
             covered_root,
             controls: candidate.clone(),
+            held_for_rung_three: None,
             config_delivery_owed: false,
             maintainership,
             store,
@@ -8238,6 +8251,48 @@ mod tests {
             .rebuild(&name, attachment, &progress)
             .expect("rung 3 under the order the coverage proved");
         assert_eq!(delivered_sample_values(&receiver), [Some(1), Some(2)]);
+        ops.detach(&name, attachment);
+    }
+
+    /// **Controls held for rung 3 are not reported as active until rung 3 pins
+    /// them.** A recovery that owes rung 3 for the path order holds the config
+    /// it read unpinned, so the fingerprints the entry reports stay the ones it
+    /// serves under — and authored drift reads the edit as a reload pending —
+    /// until the rebuild pins the held controls and reports theirs.
+    #[test]
+    fn controls_held_for_rung_three_are_reported_active_only_once_it_pins_them() {
+        let f = Fixture::new("recover-order-moved-fingerprints");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name, _receiver) = ops_recording_sample_config(&f);
+        let progress = ProgressReporter::disconnected();
+
+        let mut attachment =
+            derive_under_the_other_order(&f, ops.attach(&f.registration(), &progress).unwrap());
+        let served = ops.active_fingerprints(&attachment);
+        write_sample_config(&f, 2);
+
+        ops.recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over a store derived under the other order");
+        assert_eq!(
+            ops.active_fingerprints(&attachment),
+            served,
+            "controls held for rung 3 were reported active before any pin"
+        );
+
+        let attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 under the order the coverage proved");
+        let pinned = ops.active_fingerprints(&attachment);
+        assert_ne!(pinned, served, "the rebuild did not take the held controls");
+        assert_eq!(
+            pinned.map(|active| active.config),
+            Some(
+                ReloadCandidate::read_at(&f.registration(), &attachment.covered_root)
+                    .unwrap()
+                    .fingerprints()
+                    .config
+            )
+        );
         ops.detach(&name, attachment);
     }
 
