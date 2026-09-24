@@ -58,7 +58,7 @@ use norn_wire::FindingKind;
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(1),
-    "8cf3ecc2d7b7a66aaf76e768beaf8e6d254816e3e75ae04ae83d481c3d25aae4",
+    "8ad4d8cdceed99c97941d797d048ccf0122b1efc3e643241744616d6eca47ef9",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -160,6 +160,17 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
             b"---\nrating: -3\nweight: -0.5\ncreated: 2026-09-24T10:00:00+02:00\n---\n# Signed\n"
                 .to_vec(),
         ),
+        // A datetime whose zone suffix is `Z` rather than a numeric offset.
+        (
+            "values/zulu.md",
+            b"---\ncreated: 2026-09-24T10:00:00Z\n---\n# Zulu\n".to_vec(),
+        ),
+        // A datetime carrying fractional seconds, which the clock reading
+        // drops before it parses the whole-second field.
+        (
+            "values/fractional.md",
+            b"---\ncreated: 2026-09-24T10:00:00.250+02:00\n---\n# Fractional\n".to_vec(),
+        ),
         ("Markup.md", MARKUP.as_bytes().to_vec()),
         // Lone CR line endings, around a fence whose content reads as a tag
         // wherever the fence is not recognized.
@@ -205,7 +216,9 @@ setext title
 /// undeclared, both setext levels, every ATX level, containers, repeated and
 /// marked-up headings, a heading ending in a non-breaking space, both link
 /// families with and without protocol, title, anchor, block reference and
-/// embed, body and frontmatter tags, declared and not, and block ids.
+/// embed, body and frontmatter tags, declared and not, block ids, a
+/// frontmatter wikilink carrying an alias and an anchor, and a tag whose name
+/// carries a combining mark.
 const GLOSSARY: &str = "---
 title: The glossary
 aliases: [gloss, \"Glossary Term\"]
@@ -217,6 +230,7 @@ empty_list: []
 created: 2026-09-24
 topics: [project, stray]
 tags: [project, \"#area/norn\", undeclared-in-frontmatter]
+related: \"[[Notes#Setext|see here]]\"
 nested:
   depth: 1
   inner:
@@ -248,6 +262,7 @@ Sub setext
 ###### Deepest ######
 
 A paragraph with a #project tag, a (#area/norn) tag, an #undeclared-body tag, not a#tag, and #123.
+A tag whose name carries a combining mark: #cafe\u{301}.
 
 See [[Notes]] and [[notes/Deep Note|shown title]] and [[Glossary#Repeated]] and [[Notes#^para-block]].
 Embed ![[picture.png]] and ![[Notes#Setext|embedded]].
@@ -412,6 +427,17 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         glossary.links.iter().any(|link| link.embed),
         "no embed is exercised"
     );
+    // A frontmatter string value written as a wikilink, alias and anchor
+    // included: what opts a plain property into the link graph.
+    assert!(
+        glossary
+            .links
+            .iter()
+            .any(|link| link.family == LinkFamily::Wikilink
+                && link.title.as_deref() == Some("see here")
+                && link.anchor.as_deref() == Some("Setext")),
+        "no frontmatter wikilink carrying an alias and an anchor is exercised"
+    );
     assert!(
         glossary.blocks.len() >= 2,
         "the glossary's block ids derived {:?}",
@@ -423,6 +449,10 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             "no {source:?} tag is exercised"
         );
     }
+    assert!(
+        glossary.tags.iter().any(|tag| tag.name.contains('\u{301}')),
+        "no tag whose name carries a combining mark is exercised"
+    );
     assert!(
         glossary.frontmatter.is_some() && !glossary.fields.rows().is_empty(),
         "the glossary's frontmatter derived no field rows"
@@ -506,11 +536,14 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         "no least-typed marker is exercised"
     );
     // A typed key a sign or an offset decides: a negative integer, a negative
-    // float and an instant stated at an offset from UTC.
+    // float, an instant stated at an offset from UTC, one stated as `Z`, and
+    // one carrying fractional seconds the clock reading drops.
     for (key, raw) in [
         ("rating", "-3"),
         ("weight", "-0.5"),
         ("created", "2026-09-24T10:00:00+02:00"),
+        ("created", "2026-09-24T10:00:00Z"),
+        ("created", "2026-09-24T10:00:00.250+02:00"),
     ] {
         assert!(
             rows_under(key).iter().any(|row| matches!(

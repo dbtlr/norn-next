@@ -298,7 +298,7 @@ impl DocumentFacts {
         frontmatter: Option<FrontmatterValue>,
         declared: &ContentModel,
     ) -> Self {
-        self.fields = FieldRows::derive(frontmatter.as_ref(), declared);
+        self.fields = FieldRows::derive(&self.path, frontmatter.as_ref(), declared);
         self.fields_schema = declared.schema().map(str::to_string);
         self.frontmatter = frontmatter;
         self

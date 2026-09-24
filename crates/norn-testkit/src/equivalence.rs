@@ -1031,9 +1031,30 @@ const NULL: &str = "(none)";
 /// One stored row, as the names of its columns and the values the database
 /// holds in them.
 ///
-/// Every column the row's table carries a derived value in is here; the row
-/// identifier, the owning document's key and the write generation are not,
-/// for the reasons this module drops them.
+/// **Every column the row's table carries a derived value in is here**,
+/// checked against every derived table's DDL. What is left out, and why:
+///
+/// - **The row identifier** — `id` on every table that has one, and the
+///   `(document, key, ordinal)` primary key `document_fields` uses instead.
+///   Where a row landed, never a fact about the vault.
+/// - **The owning row's foreign key** — `document` on `links`, `headings`,
+///   `blocks`, `document_tags` and `document_fields`; `finding` on
+///   `finding_classes` and `finding_candidates`. [`StoreProjection::entries`]
+///   already names the row this one stands under in its `at`.
+/// - **`ordinal`** on `links`, `headings`, `blocks` and `document_tags`. These
+///   are read in ordinal order and rendered at their position in the vec
+///   ([`push_indexed`]), so the value is carried by where a row stands rather
+///   than repeated as a named column. `document_fields` and
+///   `finding_candidates` render their position explicitly instead — `ordinal`
+///   and a candidate's `rank` — because their rows interleave more than one
+///   key or subject, where position alone would not say which.
+/// - **`generation`** on `findings` — the write generation, dropped for
+///   [`ProjectedFinding`]'s own reason.
+///
+/// Every other column is rendered, `document_fields.path` included: the
+/// document's own path, copied onto every field row so a field sort can page
+/// by it without a join, and [`FieldRow`] renders it so a copy that drifted
+/// from the document it names is caught here rather than nowhere.
 trait StoredColumns {
     fn columns(&self) -> Vec<(&'static str, String)>;
 }
@@ -1089,7 +1110,9 @@ impl StoredColumns for TagFact {
 
 /// A presence row stores its container and no value; a value row stores its
 /// value and no container. Both store both least-value flags, a presence row's
-/// as zero.
+/// as zero. Both carry `path`, the document's own path copied onto the row: a
+/// copy that drifted from the document it names would otherwise be caught
+/// nowhere, since no reader joins it back to `documents` to check.
 impl StoredColumns for FieldRow {
     fn columns(&self) -> Vec<(&'static str, String)> {
         let (container, raw, typed, least_raw, least_typed) = match self {
@@ -1113,6 +1136,7 @@ impl StoredColumns for FieldRow {
         vec![
             ("key", quoted(self.key())),
             ("ordinal", self.ordinal().to_string()),
+            ("path", quoted(self.path())),
             ("container", optional_text(container)),
             ("raw", optional_text(raw)),
             ("typed", optional_text(typed)),

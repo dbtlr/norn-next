@@ -11,17 +11,18 @@ use norn_store::{
     FrontmatterValue, IncrementProvenance, Provenance, StoreError, TypedOrder, induced_failure,
 };
 
-/// A presence row, as the rows are compared.
-fn presence(key: &str, container: FieldContainer) -> FieldRow {
+/// A presence row at `at`, as the rows are compared.
+fn presence(at: &str, key: &str, container: FieldContainer) -> FieldRow {
     FieldRow::Presence {
         key: key.to_string(),
         container,
+        path: at.to_string(),
     }
 }
 
-/// A value row carrying no typed value, marked least under the raw order where
-/// `least` says so.
-fn raw(key: &str, ordinal: u32, text: Option<&str>, least: bool) -> FieldRow {
+/// A value row at `at` carrying no typed value, marked least under the raw
+/// order where `least` says so.
+fn raw(at: &str, key: &str, ordinal: u32, text: Option<&str>, least: bool) -> FieldRow {
     FieldRow::Value {
         key: key.to_string(),
         ordinal,
@@ -29,6 +30,7 @@ fn raw(key: &str, ordinal: u32, text: Option<&str>, least: bool) -> FieldRow {
         typed: None,
         least_raw: least,
         least_typed: false,
+        path: at.to_string(),
     }
 }
 
@@ -107,28 +109,29 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
         ("author", map(vec![("name", string("Ada"))])),
         ("title", string("second")),
     ]);
+    let at = "docs/shape.md";
     let expected = vec![
-        presence("author", FieldContainer::Map),
-        presence("count", FieldContainer::Scalar),
-        raw("count", 1, Some("42"), true),
-        presence("draft", FieldContainer::Scalar),
-        raw("draft", 1, Some("false"), true),
-        presence("empty", FieldContainer::Scalar),
-        raw("empty", 1, None, false),
-        presence("infinite", FieldContainer::Scalar),
-        raw("infinite", 1, None, false),
-        presence("none", FieldContainer::Sequence),
-        presence("nothing", FieldContainer::Map),
-        presence("ratio", FieldContainer::Scalar),
-        raw("ratio", 1, Some("1.0"), true),
-        presence("tags", FieldContainer::Sequence),
-        raw("tags", 1, Some("b"), false),
-        raw("tags", 2, Some("a"), true),
-        raw("tags", 3, None, false),
-        presence("title", FieldContainer::Scalar),
-        raw("title", 1, Some("second"), true),
+        presence(at, "author", FieldContainer::Map),
+        presence(at, "count", FieldContainer::Scalar),
+        raw(at, "count", 1, Some("42"), true),
+        presence(at, "draft", FieldContainer::Scalar),
+        raw(at, "draft", 1, Some("false"), true),
+        presence(at, "empty", FieldContainer::Scalar),
+        raw(at, "empty", 1, None, false),
+        presence(at, "infinite", FieldContainer::Scalar),
+        raw(at, "infinite", 1, None, false),
+        presence(at, "none", FieldContainer::Sequence),
+        presence(at, "nothing", FieldContainer::Map),
+        presence(at, "ratio", FieldContainer::Scalar),
+        raw(at, "ratio", 1, Some("1.0"), true),
+        presence(at, "tags", FieldContainer::Sequence),
+        raw(at, "tags", 1, Some("b"), false),
+        raw(at, "tags", 2, Some("a"), true),
+        raw(at, "tags", 3, None, false),
+        presence(at, "title", FieldContainer::Scalar),
+        raw(at, "title", 1, Some("second"), true),
     ];
-    let derived = FieldRows::derive(Some(&value), &ContentModel::none());
+    let derived = FieldRows::derive(&path(at), Some(&value), &ContentModel::none());
     assert_eq!(derived.rows(), expected.as_slice());
 
     let scratch = Scratch::new("field-rows");
@@ -136,10 +139,10 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
     let mut request = store.begin_request();
     write_document(
         &mut request,
-        &fielded("docs/shape.md", "hash-1", value, &ContentModel::none()),
+        &fielded(at, "hash-1", value, &ContentModel::none()),
     );
     assert_eq!(
-        stored_fields(&mut request, "docs/shape.md"),
+        stored_fields(&mut request, at),
         derived,
         "the rows at rest are not the rows the frontmatter derives"
     );
@@ -150,9 +153,9 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
         string("a scalar"),
         FrontmatterValue::Sequence(vec![string("x")]),
     ] {
-        assert!(FieldRows::derive(Some(&top), &ContentModel::none()).is_empty());
+        assert!(FieldRows::derive(&path(at), Some(&top), &ContentModel::none()).is_empty());
     }
-    assert!(FieldRows::derive(None, &ContentModel::none()).is_empty());
+    assert!(FieldRows::derive(&path(at), None, &ContentModel::none()).is_empty());
 }
 
 /// **The raw and the typed order each mark their own least value.** A key
@@ -173,7 +176,7 @@ fn the_raw_and_the_typed_order_mark_their_own_least_value() {
         ),
         ("title", string("10")),
     ]);
-    let rows = FieldRows::derive(Some(&value), &declared);
+    let rows = FieldRows::derive(&path("docs/ranked.md"), Some(&value), &declared);
     let values: Vec<(&str, u32, Option<&str>, bool, bool)> = rows
         .rows()
         .iter()
@@ -232,7 +235,8 @@ fn a_tie_for_the_least_value_marks_the_earliest_element() {
         "rank",
         FrontmatterValue::Sequence(vec![string("3"), string("5"), string("3")]),
     )]);
-    let markers: Vec<(u32, bool, bool)> = FieldRows::derive(Some(&value), &declared)
+    let derived = FieldRows::derive(&path("docs/rank.md"), Some(&value), &declared);
+    let markers: Vec<(u32, bool, bool)> = derived
         .rows()
         .iter()
         .filter_map(|row| match row {
@@ -279,7 +283,7 @@ fn a_re_derivation_replaces_the_field_rows_wholesale() {
     );
     assert_eq!(
         stored_fields(&mut request, "docs/moving.md"),
-        FieldRows::derive(Some(&second), &none)
+        FieldRows::derive(&path("docs/moving.md"), Some(&second), &none)
     );
 }
 
@@ -407,6 +411,7 @@ fn typed_values_derived_under_a_schema_the_store_does_not_pin_are_refused() {
     assert_eq!(
         stored_fields(&mut request, "docs/ranked.md"),
         FieldRows::derive(
+            &path("docs/ranked.md"),
             Some(&map(vec![("rank", string("3"))])),
             &typed_under("schema-2")
         ),
@@ -493,7 +498,7 @@ fn a_moved_pin_clears_every_typed_value_and_nothing_else() {
     assert_eq!(again.invalidated.typed_values_discarded, 0);
     assert_eq!(
         stored_fields(&mut request, "docs/ranked.md"),
-        FieldRows::derive(Some(&value), &declared),
+        FieldRows::derive(&path("docs/ranked.md"), Some(&value), &declared),
         "a pin of the schema already pinned cleared a typed value"
     );
 
@@ -505,7 +510,7 @@ fn a_moved_pin_clears_every_typed_value_and_nothing_else() {
     assert_eq!(request.counters().get("typed_values_discarded"), Some(2));
     assert_eq!(
         stored_fields(&mut request, "docs/ranked.md"),
-        FieldRows::derive(Some(&value), &ContentModel::none()),
+        FieldRows::derive(&path("docs/ranked.md"), Some(&value), &ContentModel::none()),
         "the pin left a typed value standing, or took more than the typed half"
     );
     request.finish();
@@ -527,11 +532,17 @@ fn a_documents_rows_are_the_rows_its_frontmatter_derives() {
 
     let facts = fielded("docs/a.md", "hash-1", one.clone(), &typed);
     assert_eq!(facts.frontmatter(), Some(&one));
-    assert_eq!(facts.fields(), &FieldRows::derive(Some(&one), &typed));
+    assert_eq!(
+        facts.fields(),
+        &FieldRows::derive(&path("docs/a.md"), Some(&one), &typed)
+    );
 
     let facts = facts.with_frontmatter(Some(another.clone()), &typed);
     assert_eq!(facts.frontmatter(), Some(&another));
-    assert_eq!(facts.fields(), &FieldRows::derive(Some(&another), &typed));
+    assert_eq!(
+        facts.fields(),
+        &FieldRows::derive(&path("docs/a.md"), Some(&another), &typed)
+    );
 
     let facts = facts.with_frontmatter(None, &typed);
     assert_eq!(facts.frontmatter(), None);
