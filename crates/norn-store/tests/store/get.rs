@@ -288,7 +288,12 @@ fn a_target_naming_one_document_answers_it_under_either_order() {
 /// request named it, anchor included; the hint names its address alone.
 #[test]
 fn a_target_naming_several_documents_refuses_with_the_bounded_head_and_the_hint() {
-    let paths: Vec<String> = (1..=7).map(|at| format!("d{at}/glossary.md")).collect();
+    // Written last to first, so the head's order is the ladder's and not the
+    // order the rows were written in.
+    let paths: Vec<String> = (1..=7)
+        .rev()
+        .map(|at| format!("d{at}/glossary.md"))
+        .collect();
     let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
     for order in [Sensitive, Folding] {
         let vault = Vault::at(&format!("get-ambiguous-{order:?}"), order, &paths);
@@ -321,7 +326,7 @@ fn a_target_naming_several_documents_refuses_with_the_bounded_head_and_the_hint(
     let vault = Vault::at(
         "get-ambiguous-dotted",
         Sensitive,
-        &["one/v1.2.md", "two/v1.2.md", "v1.md"],
+        &["v1.md", "two/v1.2.md", "one/v1.2.md"],
     );
     let PageRefusal::AmbiguousTarget(ambiguity) = vault.refusal(&getting("v1.2")) else {
         panic!("a dotted target naming three documents answered");
