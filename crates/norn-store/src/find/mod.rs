@@ -164,6 +164,7 @@ use norn_wire::{
     Moved, Page, Pattern, Predicate, SortKey, Unsatisfied,
 };
 
+use crate::count::CountStatement;
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
@@ -174,11 +175,12 @@ use crate::store::Snapshot;
 
 pub(crate) use glob::register_functions;
 pub use hydrate::{BODY_ROW_CEILING, FindWork, NESTED_ROW_CEILING, NestedRows};
+pub(crate) use statement::{Binder, Filter};
 pub use statement::{
     FIND_FILTERS, FIND_STATEMENTS, FindFilter, FindStatement, Nested, PageDirection,
 };
 use statement::{
-    Filter, Section, SectionStart, compose_bare_directory, compose_known_key, compose_match_probe,
+    Section, SectionStart, compose_bare_directory, compose_known_key, compose_match_probe,
     compose_page, compose_universe,
 };
 
@@ -318,6 +320,31 @@ impl Found {
     }
 }
 
+/// A statement a read builder ran, named by the builder that names it.
+///
+/// A read compiles its conjunction through the find builder's probes, so a
+/// count runs find's statements beside its own; the record of what a read ran
+/// holds either, and each builder's enumeration stays its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadStatement {
+    /// A statement [`FindStatement`] names.
+    Find(FindStatement),
+    /// A statement [`CountStatement`] names.
+    Count(CountStatement),
+}
+
+impl From<FindStatement> for ReadStatement {
+    fn from(statement: FindStatement) -> Self {
+        ReadStatement::Find(statement)
+    }
+}
+
+impl From<CountStatement> for ReadStatement {
+    fn from(statement: CountStatement) -> Self {
+        ReadStatement::Count(statement)
+    }
+}
+
 /// A statement a find ran, with the plan SQLite reported for the text and the
 /// values it ran with.
 #[derive(Clone, Debug)]
@@ -364,6 +391,10 @@ pub enum FindRefusal {
     OrderChanged(CursorOrderChanged),
     /// The cursor names a position among rows that are not documents.
     NotADocumentCursor,
+    /// The cursor names no position among a count's tallies: it is not a
+    /// tally's, its grouping tuple is another width than the request's, or a
+    /// member names no place in its key's order.
+    NotATallyCursor,
     /// A membership part on `key` names no value, so no document can satisfy
     /// it. The wire refuses one on read; this is the refusal of one built
     /// in-process.
@@ -407,6 +438,9 @@ impl std::fmt::Display for FindRefusal {
             ),
             FindRefusal::NotADocumentCursor => {
                 formatter.write_str("the cursor names a position among rows that are not documents")
+            }
+            FindRefusal::NotATallyCursor => {
+                formatter.write_str("the cursor names no position among this count's tallies")
             }
             FindRefusal::EmptyMembership { key } => {
                 write!(formatter, "the membership part on `{key}` names no value")
@@ -605,13 +639,13 @@ impl<'a> Projection<'a> {
 /// record holds, which is how [`Snapshot::find_plans`] explains the statement
 /// that ran rather than a second spelling of it.
 pub(crate) struct Ran {
-    statement: FindStatement,
-    filters: Vec<FindFilter>,
+    pub(crate) statement: ReadStatement,
+    pub(crate) filters: Vec<FindFilter>,
     sql: String,
     values: Vec<Value>,
     /// What SQLite counted while the statement was stepped, read once every
     /// row it answers has been read.
-    stepped: Stepped,
+    pub(crate) stepped: Stepped,
 }
 
 /// What SQLite counts while one statement is stepped, read off the
@@ -620,12 +654,12 @@ pub(crate) struct Ran {
 pub(crate) struct Stepped {
     /// Steps forward through a loop no constraint bounds: a table read end to
     /// end, or an index read end to end.
-    full_scan_steps: u64,
+    pub(crate) full_scan_steps: u64,
     /// Sorts the statement ran: a temporary B-tree an `ORDER BY` filled
     /// because no index hands its rows back in order.
-    sorts: u64,
+    pub(crate) sorts: u64,
     /// Virtual-machine operations the statement ran, whatever they did.
-    vm_steps: u64,
+    pub(crate) vm_steps: u64,
 }
 
 impl Stepped {
@@ -644,9 +678,12 @@ impl Stepped {
 
 impl Ran {
     /// `statement`, composed as `(sql, values)`, narrowing by no filter.
-    pub(super) fn new(statement: FindStatement, (sql, values): (String, Vec<Value>)) -> Self {
+    pub(crate) fn new(
+        statement: impl Into<ReadStatement>,
+        (sql, values): (String, Vec<Value>),
+    ) -> Self {
         Ran {
-            statement,
+            statement: statement.into(),
             filters: Vec::new(),
             sql,
             values,
@@ -655,7 +692,7 @@ impl Ran {
     }
 
     /// The same statement, narrowing by `filters`.
-    fn narrowed_by(mut self, filters: Vec<FindFilter>) -> Self {
+    pub(crate) fn narrowed_by(mut self, filters: Vec<FindFilter>) -> Self {
         self.filters = filters;
         self
     }
@@ -720,16 +757,26 @@ impl Snapshot {
         self.run_find(params, declared, &mut lookups)?;
         let mut plans = Vec::with_capacity(lookups.ran.len());
         for ran in lookups.ran {
-            let plan =
-                norn_db::emitted_plan(self.connection(), &ran.sql, params_from_iter(ran.values))
-                    .map_err(StoreError::from)?;
+            let ReadStatement::Find(statement) = ran.statement else {
+                unreachable!("a find runs only the statements find names")
+            };
+            let filters = ran.filters.clone();
             plans.push(FindPlan {
-                statement: ran.statement,
-                filters: ran.filters,
-                plan,
+                statement,
+                filters,
+                plan: self.explain(ran)?,
             });
         }
         Ok(plans)
+    }
+
+    /// The plan SQLite reports for `ran`: the text it ran, bound to the values
+    /// it ran with, explained on this snapshot's read-only connection. An
+    /// explain is a report about a statement rather than a run of it, so it is
+    /// not counted.
+    pub(crate) fn explain(&self, ran: Ran) -> Result<EmittedPlan, StoreError> {
+        norn_db::emitted_plan(self.connection(), &ran.sql, params_from_iter(ran.values))
+            .map_err(StoreError::from)
     }
 
     /// The find [`Snapshot::find`] answers and [`Snapshot::find_plans`]
@@ -881,9 +928,7 @@ impl Snapshot {
                 None => CursorOrderChanged::minted_raw(current),
             }));
         }
-        cursor
-            .continuation(&now)
-            .map_err(FindRefusal::OrderChanged)
+        cursor.continuation(&now).map_err(FindRefusal::OrderChanged)
     }
 
     /// This snapshot's reading as a cursor carries it for a page in `order`:
@@ -1093,12 +1138,8 @@ impl Snapshot {
                 }
             }
         };
-        let conjunction = self.compile_conjunction(
-            &params.predicates,
-            Resolution::Answered,
-            declared,
-            lookups,
-        )?;
+        let conjunction =
+            self.compile_conjunction(&params.predicates, Resolution::Answered, declared, lookups)?;
         reports.extend(conjunction.reports);
         Ok(Compiled {
             order,

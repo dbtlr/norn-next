@@ -294,7 +294,7 @@ pub(crate) struct Filter {
 impl Filter {
     /// This filter's fragment: a membership test of `id`, the column holding
     /// the page's document id, its placeholders numbered by `binder`.
-    fn spell(&self, id: &str, binder: &mut Binder) -> String {
+    pub(crate) fn spell(&self, id: &str, binder: &mut Binder) -> String {
         // The number this fragment's first value takes: a fragment's values
         // are bound in the order it names them, so they number from here.
         let first = binder.next_number();
@@ -396,20 +396,25 @@ impl Filter {
 
 /// Numbers placeholders as they are written, holding the values in that order.
 #[derive(Default)]
-struct Binder {
+pub(crate) struct Binder {
     values: Vec<Value>,
 }
 
 impl Binder {
     /// The number the next placeholder takes.
-    fn next_number(&self) -> usize {
+    pub(crate) fn next_number(&self) -> usize {
         self.values.len() + 1
     }
 
     /// The placeholder for `value`, which takes the next number.
-    fn bind(&mut self, value: Value) -> String {
+    pub(crate) fn bind(&mut self, value: Value) -> String {
         self.values.push(value);
         format!("?{}", self.values.len())
+    }
+
+    /// The values bound, in their placeholders' numbering.
+    pub(crate) fn into_values(self) -> Vec<Value> {
+        self.values
     }
 }
 
