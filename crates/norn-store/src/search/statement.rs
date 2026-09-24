@@ -146,7 +146,7 @@ pub(crate) fn compose_lexical_page(page: &LexicalPage<'_>) -> (String, Vec<Value
         .map(|filter| {
             format!(
                 "\n               AND {}",
-                filter.spell("d.id", &mut binder)
+                filter.spell("+ft.rowid", &mut binder)
             )
         })
         .collect();
@@ -157,9 +157,9 @@ pub(crate) fn compose_lexical_page(page: &LexicalPage<'_>) -> (String, Vec<Value
         format!(
             "SELECT d.id, d.path, -bm25(ft.documents_fts) AS score
              FROM documents_fts AS ft CROSS JOIN documents AS d ON d.id = ft.rowid
-             WHERE ft.documents_fts MATCH {expression}
+             WHERE ft.documents_fts MATCH {expression}{filters}
                AND (score < {after_score} OR (score = {after_score} AND d.path > {after_path}))
-               AND score >= {floor}{filters}
+               AND score >= {floor}
              ORDER BY score DESC, d.path
              LIMIT {limit}"
         ),

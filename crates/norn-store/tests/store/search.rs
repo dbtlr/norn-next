@@ -975,3 +975,177 @@ fn a_lexical_page_is_driven_by_the_full_text_index_and_sorts_what_it_matched() {
         judge_lexical(&documents_first)
     });
 }
+
+// ---- the work bars ----
+
+/// `count` more documents under `bulk/`, each tagged `bulk`, each with the
+/// body `body` of `at`, its index.
+fn bulk(count: usize, body: impl Fn(usize) -> String) -> Vec<norn_store::DocumentFacts> {
+    (0..count)
+        .map(|at| {
+            let mut facts = document(
+                &format!("bulk/{at:04}.md"),
+                &format!("hash-bulk-{at}"),
+                &body(at),
+            );
+            facts.tags.push(TagFact {
+                name: "bulk".to_string(),
+                source: TagSource::Body,
+                span: None,
+            });
+            facts
+        })
+        .collect()
+}
+
+/// The page counters of a search's work: what SQLite counted running its
+/// lexical page, and the hits the page read.
+fn page_work(searched: &Searched) -> (u64, u64, u64, u64) {
+    let work = searched.work;
+    (
+        work.hits_read,
+        work.page_full_scan_steps,
+        work.page_sorts,
+        work.page_vm_steps,
+    )
+}
+
+/// The requests the vault-size bar reads: a first page, a page narrowed by a
+/// tag, a path, a field and a `matches` part, a floored page, and a
+/// continuation of a one-term query, whose ranking the vault's size does not
+/// reorder.
+fn vault_size_requests(store: &Searching) -> Vec<SearchParams> {
+    let lantern = searching("lantern").with_limit(2);
+    let next = store
+        .search(&lantern)
+        .next
+        .expect("a next page of lantern");
+    vec![
+        searching("lantern harbor").with_limit(3),
+        searching("lantern harbor"),
+        searching("lantern").with_predicates([Predicate::tag("draft")]),
+        searching("lantern").with_predicates([Predicate::path("notes/*")]),
+        searching("lantern").with_predicates([Predicate::equal_to("status", "open")]),
+        searching("lantern").with_predicates([Predicate::matches("harbor")]),
+        searching("lantern").with_min_score(Score::new(0.0).expect("a floor")),
+        lantern.with_after(next),
+    ]
+}
+
+/// **A search costs the documents its query matches, and never the vault.**
+/// Beside 50 documents of 64-byte bodies and beside 500 of 16 KiB bodies, none
+/// holding a term the requests name, every request the bar reads answers the
+/// same hits and counts the same work: the same statements, the same hits
+/// read, the same VM steps, one sort and no step through a full scan. A
+/// document the query does not match is never read, and neither is the body
+/// of one it does: a score is computed off the index.
+///
+/// Control: the larger vault's documents rewritten to hold `lantern`, the
+/// work of a `lantern` page grows with them, and the bar fails.
+#[test]
+fn a_search_costs_the_documents_its_query_matches_and_never_the_vault() {
+    let small = Searching::with_documents(
+        "search-work-small",
+        bulk(50, |at| format!("bulk{at} {}\n", "b".repeat(56))),
+    );
+    let large = Searching::with_documents(
+        "search-work-large",
+        bulk(500, |at| format!("bulk{at} {}\n", "b".repeat(16 * 1024))),
+    );
+    let judge = |small: &Searching, large: &Searching| {
+        for (at_small, at_large) in vault_size_requests(small)
+            .into_iter()
+            .zip(vault_size_requests(large))
+        {
+            let (on_small, on_large) = (small.search(&at_small), large.search(&at_large));
+            assert_eq!(
+                hit_paths(&on_small),
+                hit_paths(&on_large),
+                "{at_small:?}"
+            );
+            assert_eq!(
+                on_small.work.statements, on_large.work.statements,
+                "{at_small:?}"
+            );
+            assert_eq!(
+                page_work(&on_small),
+                page_work(&on_large),
+                "a search's work grew with the vault: {at_small:?}"
+            );
+            let (_, full_scan_steps, sorts, _) = page_work(&on_large);
+            assert_eq!((full_scan_steps, sorts), (0, 1), "{at_small:?}");
+        }
+    };
+    judge(&small, &large);
+
+    let matched = Searching::with_documents(
+        "search-work-matched",
+        bulk(500, |at| format!("bulk{at} lantern\n")),
+    );
+    failure_of("a larger vault whose documents the query matches", || {
+        judge(&small, &matched)
+    });
+}
+
+/// **Ranking costs every match, a continuation included, and a narrowing part
+/// narrows what is scored, not what is matched.** Beside 50 and then 500
+/// documents holding both `lantern` and `harbor`:
+///
+/// - A first page of three hits reads four hits and sorts once at both sizes,
+///   and its VM steps grow with the 450 matches added — every match is scored
+///   and sorted before the page's first hit is known. A continuation of it
+///   grows the same way: a keyset position bounds what is sorted, and every
+///   match is scored again to find what stands past it.
+/// - Narrowed by a tag none of the added documents carries, the page answers
+///   the same hit at both sizes and still grows with the matches — the index
+///   hands every match back, and each is tested against the tag — but by less
+///   than half as much per match as the unfiltered page: a match the tag
+///   rejects is neither scored, nor reached in `documents`, nor sorted.
+#[test]
+fn ranking_costs_every_match_and_a_narrowing_part_narrows_what_is_scored() {
+    let matches = |at: usize| format!("a bulk lantern harbor {at}\n");
+    let small = Searching::with_documents("search-ranking-small", bulk(50, matches));
+    let large = Searching::with_documents("search-ranking-large", bulk(500, matches));
+    let added = 450;
+    let first = searching("lantern harbor").with_limit(3);
+    let growth = |params: &dyn Fn(&Searching) -> SearchParams| {
+        let (on_small, on_large) = (small.search(&params(&small)), large.search(&params(&large)));
+        let (small_read, small_scans, small_sorts, small_steps) = page_work(&on_small);
+        let (large_read, large_scans, large_sorts, large_steps) = page_work(&on_large);
+        assert_eq!(small_read, large_read);
+        assert_eq!((small_scans, small_sorts), (0, 1));
+        assert_eq!((large_scans, large_sorts), (0, 1));
+        (large_steps - small_steps, on_small, on_large)
+    };
+
+    let (unfiltered, ..) = growth(&|_| first.clone());
+    let (continued, ..) = growth(&|store: &Searching| {
+        let next = store.search(&first).next.expect("a next page");
+        first.clone().with_after(next)
+    });
+    for (reading, grown) in [("a first page", unfiltered), ("a continuation", continued)] {
+        assert!(
+            grown >= added * 8,
+            "{reading}'s VM steps grew by {grown} over {added} more matches: ranking did not \
+             score every match"
+        );
+    }
+
+    let (narrowed, on_small, on_large) = growth(&|_| {
+        first
+            .clone()
+            .with_predicates([Predicate::tag("draft")])
+    });
+    assert_eq!(hit_paths(&on_small), ["notes/lantern.md"]);
+    assert_eq!(hit_paths(&on_large), ["notes/lantern.md"]);
+    assert!(
+        narrowed >= added,
+        "a narrowed page's VM steps grew by {narrowed} over {added} more matches: it did not \
+         test each match"
+    );
+    assert!(
+        narrowed * 2 < unfiltered,
+        "a narrowed page grew by {narrowed} and an unfiltered one by {unfiltered}: a match the \
+         tag rejects was scored"
+    );
+}
