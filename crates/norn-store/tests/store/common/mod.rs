@@ -46,7 +46,8 @@ impl Scratch {
     }
 
     pub fn open(&self) -> Store {
-        Store::open(self.database()).expect("opening a store")
+        Store::open(self.database(), norn_store::StoredPathOrder::Sensitive)
+            .expect("opening a store")
     }
 }
 
@@ -325,4 +326,12 @@ pub fn violation(at: &str) -> FindingFacts {
         message: "the `status` field is required".to_string(),
         detail: Some(r#"{"field":"status"}"#.to_string()),
     }
+}
+
+/// The class `target` names on the store `request` runs against, with no
+/// place ignored.
+pub fn class_named(request: &norn_store::Request<'_>, target: &str) -> norn_store::TargetClass {
+    request
+        .target_class(target, &norn_store::AmbiguityIgnore::none())
+        .expect("a suffix target")
 }

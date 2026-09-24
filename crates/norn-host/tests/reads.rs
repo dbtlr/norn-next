@@ -62,6 +62,28 @@ fn a_read_answers_under_the_store_the_attachment_derived() {
     );
 }
 
+/// **A read resolves under the case behaviour the vault root proved, and
+/// detects none of its own.** The attach opened the store under the order its
+/// coverage proved, and the snapshot a read answers from reads under the order
+/// the store's rows were derived under.
+#[test]
+fn a_reads_snapshot_carries_the_case_behaviour_the_root_proved() {
+    let (_sandbox, vault) = a_vault("host-reads-case-behaviour");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let root = std::fs::canonicalize(vault.path()).expect("the vault root");
+    let proven = norn_host::stored_path_order(
+        norn_fs::PathNormalizer::detect(&root)
+            .expect("the root's case behaviour")
+            .case_sensitivity(),
+    );
+    let hold = host
+        .begin_read(vault.name())
+        .expect("an attached vault answers a read");
+    assert_eq!(hold.snapshot().path_order(), proven);
+}
+
 /// **A read is refused before the attach it asks for has finished**, and the
 /// refusal is the entry's own published demand rather than a shape the read
 /// path invented.

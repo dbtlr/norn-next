@@ -110,10 +110,13 @@
 //!   of the full-text index; a malformed query's part is reported with the
 //!   engine's words, and the page is empty, as a malformed glob's is.
 //!
-//! A `resolves` part enumerates the target's ambiguity class through its suffix
-//! probe, both reductions of a dotted leaf included, and compares suffix keys
-//! bytewise. The folded suffix key and per-root case sensitivity land with
-//! NORN-229, which is the task that consumes this filter's case behaviour.
+//! A `resolves` part enumerates the target's ambiguity class through the one
+//! resolver, [`crate::resolve::TargetClass`]: both reductions of a dotted leaf, over the raw
+//! suffix key where the snapshot's root tells spellings apart and over the
+//! folded key where it folds ASCII case, less the places the declaration's
+//! ambiguity-ignore set keeps out of the class. The case behaviour is the
+//! snapshot's ([`Snapshot::path_order`]): the order the rows it reads were
+//! derived under, so no find detects it.
 //!
 //! # A find is keys, then rows
 //!
@@ -164,7 +167,7 @@ use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
 use crate::read::{
     FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, Report,
-    Resolution, page_limit,
+    ResolvesPart, page_limit,
 };
 use crate::store::Snapshot;
 
@@ -587,8 +590,12 @@ impl Snapshot {
                 }
             }
         };
-        let conjunction =
-            self.compile_conjunction(&params.predicates, Resolution::Answered, declared, lookups)?;
+        let conjunction = self.compile_conjunction(
+            &params.predicates,
+            ResolvesPart::Answered,
+            declared,
+            lookups,
+        )?;
         reports.extend(conjunction.reports);
         Ok(Compiled {
             order,

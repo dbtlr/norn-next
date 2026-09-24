@@ -18,7 +18,8 @@ use norn_store::{
     BlockFact, DEFAULT_PAGE, DeclaredFields, FIND_STATEMENTS, FieldOrder, FindPlan, FindStatement,
     Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, MAX_PAGE, NESTED_ROW_CEILING, Nested,
     PageDirection, PageRefusal, READ_FILTERS, ReadBound, ReadFilter, Snapshot, SnapshotReader,
-    Span, Store, StoreError, TagFact, TagSource, TypedOrder, induced_failure,
+    Span, Store, StoreError, StoredPathOrder, SuffixKey, TagFact, TagSource, TypedOrder,
+    induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -165,8 +166,18 @@ impl Seeded {
     /// in every table a page reads that a step through any of them end to end
     /// is counted many times over.
     fn with_bulk(label: &str, bulk: usize) -> Self {
+        Self::with_bulk_under(label, bulk, StoredPathOrder::Sensitive)
+    }
+
+    /// The fixture in a store over a root proven to have `order`'s case
+    /// behaviour, which every snapshot of it reads under.
+    fn under(label: &str, order: StoredPathOrder) -> Self {
+        Self::with_bulk_under(label, 0, order)
+    }
+
+    fn with_bulk_under(label: &str, bulk: usize, order: StoredPathOrder) -> Self {
         let scratch = Scratch::new(label);
-        let mut store = scratch.open();
+        let mut store = Store::open(scratch.database(), order).expect("opening a store");
         seed(&mut store);
         let declared = declared();
         let documents: Vec<_> = (0..bulk)
@@ -205,6 +216,7 @@ impl Seeded {
         }
     }
 
+    /// A snapshot of the store, under the order its rows were derived under.
     pub(crate) fn snapshot(&self) -> Snapshot {
         self.reader
             .try_take()
@@ -386,7 +398,7 @@ fn filter_barred_by(filter: ReadFilter) -> &'static str {
         | ReadFilter::After(_)
         | ReadFilter::FullText
         | ReadFilter::PathGlob
-        | ReadFilter::Resolves
+        | ReadFilter::Resolves(_)
         | ReadFilter::Tag
         | ReadFilter::Finding => "every_filter_seeks_the_index_its_values_are_bounds_for",
     }
@@ -403,11 +415,13 @@ fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
         ReadFilter::Member(_) => orders.map(ReadFilter::Member).to_vec(),
         ReadFilter::Before(_) => orders.map(ReadFilter::Before).to_vec(),
         ReadFilter::After(_) => orders.map(ReadFilter::After).to_vec(),
+        ReadFilter::Resolves(_) => [SuffixKey::Raw, SuffixKey::Folded]
+            .map(ReadFilter::Resolves)
+            .to_vec(),
         ReadFilter::Present
         | ReadFilter::Absent
         | ReadFilter::FullText
         | ReadFilter::PathGlob
-        | ReadFilter::Resolves
         | ReadFilter::Tag
         | ReadFilter::Finding => vec![filter],
     }
@@ -1263,21 +1277,34 @@ fn filter_bars() -> Vec<FilterBar> {
             )],
         },
         FilterBar {
-            shape: ReadFilter::Resolves,
+            shape: ReadFilter::Resolves(SuffixKey::Raw),
             probes: [target("glossary"), target("v1.2#Heading")]
                 .into_iter()
-                .map(|target| {
-                    (
-                        Predicate::resolves(target),
-                        ReadFilter::Resolves,
-                        Seek::Index {
-                            alias: "dr",
-                            table: "documents",
-                            access: Access::Index("documents_suffix_key"),
-                            constraint: "(suffix_key>? AND suffix_key<?)",
-                            dropped: "documents_suffix_key",
-                        },
-                    )
+                .flat_map(|target| {
+                    [
+                        (
+                            Predicate::resolves(target.clone()),
+                            ReadFilter::Resolves(SuffixKey::Raw),
+                            Seek::Index {
+                                alias: "dr",
+                                table: "documents",
+                                access: Access::Index("documents_suffix_key"),
+                                constraint: "(suffix_key>? AND suffix_key<?)",
+                                dropped: "documents_suffix_key",
+                            },
+                        ),
+                        (
+                            Predicate::resolves(target),
+                            ReadFilter::Resolves(SuffixKey::Folded),
+                            Seek::Index {
+                                alias: "dr",
+                                table: "documents",
+                                access: Access::Index("documents_folded_suffix_key"),
+                                constraint: "(folded_suffix_key>? AND folded_suffix_key<?)",
+                                dropped: "documents_folded_suffix_key",
+                            },
+                        ),
+                    ]
                 })
                 .collect(),
         },
@@ -1310,6 +1337,16 @@ fn filter_bars() -> Vec<FilterBar> {
             )],
         },
     ]
+}
+
+/// The case behaviour of the root a filter form is compiled on: the folded
+/// resolution form is what a root that folds ASCII case compiles, and every
+/// other form is the same on either root.
+fn root_of(shape: ReadFilter) -> StoredPathOrder {
+    match shape {
+        ReadFilter::Resolves(SuffixKey::Folded) => StoredPathOrder::AsciiCaseInsensitive,
+        _ => StoredPathOrder::Sensitive,
+    }
 }
 
 /// Judge one filter's rows in a page's plan.
@@ -1363,7 +1400,16 @@ fn judge_filter(page: &QueryPlan, seek: &Seek) {
 /// rebuilt with its `MATCH` selection taken out.
 #[test]
 fn every_filter_seeks_the_index_its_values_are_bounds_for() {
-    let mut seeded = Seeded::new("find-filters");
+    // One fixture per root: a filter form is compiled on the root its case
+    // behaviour belongs to, and a snapshot reads under its store's order.
+    let mut roots = [
+        Seeded::under("find-filters", StoredPathOrder::Sensitive),
+        Seeded::under("find-filters-folded", StoredPathOrder::AsciiCaseInsensitive),
+    ];
+    let on = |shape: ReadFilter| match root_of(shape) {
+        StoredPathOrder::Sensitive => 0,
+        StoredPathOrder::AsciiCaseInsensitive => 1,
+    };
     let bars = filter_bars();
     for bar in &bars {
         for (part, shape, seek) in &bar.probes {
@@ -1374,7 +1420,7 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
                     FindStatement::FieldValuePage(FieldOrder::Raw, PageDirection::Ascending),
                 ),
             ] {
-                let plans = seeded.plans(&params.with_predicates([part.clone()]));
+                let plans = roots[on(*shape)].plans(&params.with_predicates([part.clone()]));
                 let page = plans
                     .iter()
                     .find(|plan| plan.statement == statement)
@@ -1390,7 +1436,7 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
     }
 
     // Control: the full-text selection taken out of the plan.
-    let plans = seeded.plans(&request().with_predicates([Predicate::matches("interloper")]));
+    let plans = roots[0].plans(&request().with_predicates([Predicate::matches("interloper")]));
     let page = plan_of(&plans, FindStatement::PathPage(PageDirection::Ascending));
     let unselected = QueryPlan::new(
         page.sql(),
@@ -1407,15 +1453,17 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
     // were judged with it standing.
     let mut dropped: Vec<&str> = Vec::new();
     for bar in &bars {
-        for (part, _, seek) in &bar.probes {
+        for (part, shape, seek) in &bar.probes {
             let Seek::Index { dropped: index, .. } = seek else {
                 continue;
             };
             if !dropped.contains(index) {
-                seeded.drop_index(index);
+                for root in &mut roots {
+                    root.drop_index(index);
+                }
                 dropped.push(index);
             }
-            let plans = seeded.plans(&request().with_predicates([part.clone()]));
+            let plans = roots[on(*shape)].plans(&request().with_predicates([part.clone()]));
             let page = plan_of(&plans, FindStatement::PathPage(PageDirection::Ascending));
             failure_of(&format!("{index} dropped under {part:?}"), || {
                 judge_filter(&page, seek)
@@ -2318,7 +2366,7 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
         let mut expected: Vec<&str> = paths
             .iter()
             .map(String::as_str)
-            .filter(|path| pattern.matches(path))
+            .filter(|path| pattern.matches(path, norn_wire::CaseFold::Exact))
             .collect();
         expected.sort_unstable();
         let page = snapshot

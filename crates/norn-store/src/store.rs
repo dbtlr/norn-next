@@ -53,10 +53,15 @@
 //! list, which mints a new epoch: see [`Store::epoch`].
 //!
 //! What this crate hands that ceremony is the statement list, the version it
-//! pins, and the store's own pinned key — the mode, which decides whether the
-//! file outlives the handle and is the one reading an open may refuse over.
-//! What it takes back is [`OpenOutcome`]: the rung the state was at, with a
-//! typed [`norn_db::RebuildReason`] where the answer was a rebuild.
+//! pins, and the store's own pinned keys — the mode, which decides whether the
+//! file outlives the handle and is the one reading an open may refuse over, and
+//! the path order, the case behaviour the vault root was proven to have, which
+//! every row was derived under. An open under another order than the one the
+//! store records, or over a store that records none, is a rebuild from zero,
+//! reported as the store's own [`RebuildReason::Client`] detail naming what the
+//! store records and the order its root proves: see
+//! [`Store::path_order`]. What it takes back is [`OpenOutcome`]: the rung the
+//! state was at, with a typed [`RebuildReason`] where the answer was a rebuild.
 //!
 //! **Rung 3 is for damaged state, never for a hostile environment.** A full
 //! disk, a revoked permission, a parent directory that cannot be created, a
@@ -71,14 +76,15 @@ use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 
+use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{self, Connection};
-use norn_db::{Adoption, Database, OpenOutcome, meta};
+use norn_db::{Adoption, Database, OpenOutcome, RebuildReason, meta};
 use norn_wire::{FindingKind, Severity};
 
 use crate::counters::SnapshotCounters;
 use crate::ddl;
 use crate::error::{self, StoreError};
-use crate::facts::{LinkFamily, Provenance, TagSource};
+use crate::facts::{LinkFamily, Provenance, StoredPathOrder, TagSource};
 use crate::hash;
 use crate::request::Request;
 
@@ -145,6 +151,12 @@ pub struct SnapshotReader {
     /// and a second copy here would be one this type had to keep from being
     /// read back out.
     epoch: String,
+    /// The case behaviour the rows of the store this handle was minted from
+    /// were derived under. A store's order is fixed for the life of the
+    /// database it holds — another order is another database — so the handle
+    /// carries it from the mint, and every snapshot it establishes reads under
+    /// it.
+    order: StoredPathOrder,
 }
 
 impl fmt::Debug for SnapshotReader {
@@ -281,6 +293,11 @@ impl ConnectionTurn {
     /// The connection goes back to the handle when the [`Snapshot`] is
     /// dropped, or here where the establishment refuses.
     ///
+    /// The snapshot carries the case behaviour the handle's store rows were
+    /// derived under, which the handle carries from its mint, and a find's
+    /// `resolves` part compiles its class under it, so no read detects one and
+    /// no caller hands one over. It costs no statement.
+    ///
     /// **It reports what it ran whichever way it ended.** An establishment
     /// that refused ran the statement that refused it, rolled the transaction
     /// back and gave the connection up, and a caller holding a lock across all
@@ -294,6 +311,7 @@ impl ConnectionTurn {
         let mut counters = SnapshotCounters::default();
         let snapshot = match establish_on(&mut database, &reader.epoch, &mut counters) {
             Ok(reading) => Ok(Snapshot {
+                order: reader.order,
                 reader,
                 database: Some(database),
                 reading,
@@ -397,6 +415,9 @@ pub struct Snapshot {
     /// the reader at the drop that ends the snapshot.
     database: Option<Database>,
     reading: StoreReading,
+    /// The case behaviour the rows this snapshot reads were derived under, as
+    /// the handle it was established on carries it.
+    order: StoredPathOrder,
     /// What this snapshot cost, counted through `&self`: a read builder runs
     /// on a shared borrow, so nothing that holds the snapshot lends it out
     /// mutably. The connection already makes a snapshot `!Sync`, so a `Cell`
@@ -418,6 +439,17 @@ impl Snapshot {
     /// how far its writes had got.
     pub fn reading(&self) -> &StoreReading {
         &self.reading
+    }
+
+    /// The case behaviour the rows this snapshot reads were derived under.
+    ///
+    /// A find's `resolves` part is the one reader of it: the order selects the
+    /// suffix key the resolution probes and the case its ignore globs match
+    /// under. No other read builder consults it: a find's, a count's and a
+    /// validate's path parts match bytes and their pages order paths the same
+    /// way on every root.
+    pub fn path_order(&self) -> StoredPathOrder {
+        self.order
     }
 
     /// What this read's snapshot cost: the snapshot itself, and the statements
@@ -547,18 +579,21 @@ impl StoreMode {
 pub struct Store {
     pub(crate) database: Database,
     mode: StoreMode,
+    order: StoredPathOrder,
     outcome: OpenOutcome,
     torn_down: bool,
 }
 
 impl Store {
-    /// Open, or create, the durable store at `path`.
+    /// Open, or create, the durable store at `path` for a vault root proven to
+    /// have `order`'s case behaviour.
     ///
     /// The parent directory is prepared if it is missing. A database that is not
-    /// the shape this build writes is rebuilt from zero, and
-    /// [`Store::open_outcome`] says whether that happened and why.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        Self::open_in_mode(path.as_ref(), StoreMode::Durable)
+    /// the shape this build writes, or whose rows were derived under another
+    /// order, is rebuilt from zero, and [`Store::open_outcome`] says whether
+    /// that happened and why.
+    pub fn open(path: impl AsRef<Path>, order: StoredPathOrder) -> Result<Self, StoreError> {
+        Self::open_in_mode(path.as_ref(), StoreMode::Durable, order)
     }
 
     /// Open, or create, a throwaway store at `path`.
@@ -572,15 +607,26 @@ impl Store {
     /// vault's derived state can be told apart from a throwaway open over its own
     /// leftovers — and the alternative is a teardown that deletes a vault's whole
     /// derived state on drop, silently, because a caller passed the wrong path.
-    pub fn open_throwaway(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        Self::open_in_mode(path.as_ref(), StoreMode::Throwaway)
+    pub fn open_throwaway(
+        path: impl AsRef<Path>,
+        order: StoredPathOrder,
+    ) -> Result<Self, StoreError> {
+        Self::open_in_mode(path.as_ref(), StoreMode::Throwaway, order)
     }
 
-    fn open_in_mode(path: &Path, mode: StoreMode) -> Result<Self, StoreError> {
-        let (connection, outcome) = norn_db::open(path, &store_schema(), &StoreClient { mode })?;
+    fn open_in_mode(
+        path: &Path,
+        mode: StoreMode,
+        order: StoredPathOrder,
+    ) -> Result<Self, StoreError> {
+        let (connection, outcome) =
+            norn_db::open(path, &store_schema(), &StoreClient { mode, order })?;
+        let database = Database::adopt(connection, path)?;
+        crate::resolve::register_functions(database.connection())?;
         Ok(Store {
-            database: Database::adopt(connection, path)?,
+            database,
             mode,
+            order,
             outcome,
             torn_down: false,
         })
@@ -611,6 +657,37 @@ impl Store {
     /// How the open ended up with this database.
     pub fn open_outcome(&self) -> &OpenOutcome {
         &self.outcome
+    }
+
+    /// The case behaviour every row this store holds was derived under: the
+    /// order the vault root was proven to have when the store was opened.
+    ///
+    /// **It is a rebuild input.** Two things the rows hold follow it: document
+    /// identity — which spellings are one row, so `Foo.md` and `foo.md` are one
+    /// document where the root folds ASCII case and two where it tells them
+    /// apart — and the key space a finding's classes are filed in. Neither is
+    /// something a later derivation converges, so the store records the order
+    /// and an open under another one rebuilds from zero: rows that root could
+    /// not have produced are never served under it. A heal's merge is not among
+    /// them; it pages rows under its own walk's order. A store that records no
+    /// order is rebuilt the same way, since nothing vouches for its rows.
+    pub fn path_order(&self) -> StoredPathOrder {
+        self.order
+    }
+
+    /// The rebuild a vault root proven to have `proven`'s case behaviour owes
+    /// this store: the reason an open under `proven` rebuilds it for, or `None`
+    /// where its rows were derived under that order.
+    ///
+    /// An open judges this for itself. This is the judgment for a store that is
+    /// already open when its root's case behaviour is proven again, which is
+    /// what a recovery that installs coverage anew does.
+    pub fn path_order_moved(&self, proven: StoredPathOrder) -> Option<RebuildReason> {
+        path_order_rebuild(
+            Some(&Recorded::Text(self.order.as_str().to_string())),
+            proven,
+        )
+        .map(|detail| RebuildReason::Client { detail })
     }
 
     /// The identity this database carries from creation to discard.
@@ -656,8 +733,11 @@ impl Store {
     /// is not using.
     ///
     /// The application-defined functions the find builder's statements call —
-    /// the path-glob match — are registered on the connection here, before any
-    /// statement runs on it, so every snapshot the handle establishes has them.
+    /// the path-glob match and the ambiguity-ignore test — are registered on the
+    /// connection here, before any statement runs on it, so every snapshot the
+    /// handle establishes has them. The writer's connection carries the
+    /// ambiguity-ignore test too, registered where the store opens, because a
+    /// class read runs there as well.
     ///
     /// It is taken from a **live** store, and that is what binds the handle:
     /// the writer holds the file open, so the `-shm` a read-only write-ahead
@@ -677,10 +757,12 @@ impl Store {
             .map_err(StoreError::from)
             .and_then(|database| {
                 crate::read::register_functions(database.connection())?;
+                crate::resolve::register_functions(database.connection())?;
                 Ok(database)
             })
             .map(|database| SnapshotReader {
                 epoch: database.epoch().to_string(),
+                order: self.order,
                 connection: Mutex::new(Some(database)),
                 returned: Condvar::new(),
             });
@@ -979,11 +1061,16 @@ impl Store {
     /// database beside it, holding what a fresh create holds: **nothing**.
     /// Everything the discarded database held is derived state, and the caller's
     /// next act is deriving it again from the vault.
-    pub fn discard_and_reopen(self) -> Result<Self, StoreError> {
+    ///
+    /// The store handed back is opened under `order`, which is the case
+    /// behaviour its root is proven to have now: a store rebuilt because that
+    /// behaviour moved is handed the new one, and one rebuilt for damage is
+    /// handed the order it already had.
+    pub fn discard_and_reopen(self, order: StoredPathOrder) -> Result<Self, StoreError> {
         let path = self.database.path().to_path_buf();
         let mode = self.mode;
         self.discard()?;
-        Self::open_in_mode(&path, mode)
+        Self::open_in_mode(&path, mode, order)
     }
 }
 
@@ -1026,13 +1113,84 @@ fn store_schema() -> norn_db::Schema {
 
 /// What the open ceremony asks this crate, once it has judged the mechanics.
 ///
-/// Two keys are the store's own: the mode, which decides whether the file
-/// outlives the handle, and the write generation every derivation draws its
-/// stamp from. The ceremony writes neither and reads neither — it hands the
-/// create transaction over for them, and hands the database over to be
-/// judged by them.
+/// Three keys are the store's own: the mode, which decides whether the file
+/// outlives the handle, the path order every row was derived under, and the
+/// write generation every derivation draws its stamp from. The ceremony writes
+/// none of them and reads none of them — it hands the create transaction over
+/// for them, and hands the database over to be judged by them.
 struct StoreClient {
     mode: StoreMode,
+    order: StoredPathOrder,
+}
+
+/// A value one of the store's own `meta` keys holds, as an open reads it back:
+/// the text every build writes there, or the SQLite type of a value no build
+/// writes.
+///
+/// A key's reconciliation reads a value of another type the way it reads a
+/// spelling it does not recognize, so a row holding one is judged rather than
+/// failing the open that reads it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Recorded {
+    Text(String),
+    OtherType(&'static str),
+}
+
+impl Recorded {
+    /// The value `key` holds, or `None` where the row is absent.
+    fn read(connection: &Connection, key: &str) -> Result<Option<Recorded>, StoreError> {
+        let value = norn_db::meta::get_meta::<Value>(connection, key)?;
+        Ok(value.map(|value| match value {
+            Value::Text(text) => Recorded::Text(text),
+            Value::Null => Recorded::OtherType("null"),
+            Value::Integer(_) => Recorded::OtherType("integer"),
+            Value::Real(_) => Recorded::OtherType("real"),
+            Value::Blob(_) => Recorded::OtherType("blob"),
+        }))
+    }
+
+    /// The text, where the value is text.
+    fn text(&self) -> Option<&str> {
+        match self {
+            Recorded::Text(text) => Some(text),
+            Recorded::OtherType(_) => None,
+        }
+    }
+}
+
+/// Judge the order a store records against the one its root proves: the
+/// reason the store owes a rebuild from zero, naming what it records and what
+/// the root proves, or `None` where its rows were derived under that order.
+///
+/// A store that records no order owes the rebuild too: nothing says which
+/// order its rows were derived under, so nothing says they are rows the root
+/// could have produced. So does a recorded spelling no build writes, and a
+/// recorded value that is not text.
+///
+/// One judgment for both occasions it is taken on: an open over a database
+/// the mechanics call usable, and a store already open whose root's case
+/// behaviour is proven again.
+fn path_order_rebuild(recorded: Option<&Recorded>, proven: StoredPathOrder) -> Option<String> {
+    let proven_spelling = proven.as_str();
+    match recorded {
+        Some(Recorded::Text(recorded))
+            if StoredPathOrder::from_recorded(recorded) == Some(proven) =>
+        {
+            None
+        }
+        Some(Recorded::Text(recorded)) => Some(format!(
+            "the store's rows were derived under the `{recorded}` path order and its root proves \
+             `{proven_spelling}`"
+        )),
+        Some(Recorded::OtherType(kind)) => Some(format!(
+            "the store records its path order as a value of type `{kind}`, which no build writes, \
+             and its root proves `{proven_spelling}`"
+        )),
+        None => Some(format!(
+            "the store records no path order its rows were derived under, and its root proves \
+             `{proven_spelling}`"
+        )),
+    }
 }
 
 impl norn_db::Client for StoreClient {
@@ -1040,19 +1198,44 @@ impl norn_db::Client for StoreClient {
 
     fn record(&self, transaction: &Connection) -> Result<(), StoreError> {
         norn_db::meta::put_meta(transaction, ddl::meta::STORE_MODE, self.mode.as_str())?;
+        norn_db::meta::put_meta(transaction, ddl::meta::PATH_ORDER, self.order.as_str())?;
         norn_db::meta::put_meta(transaction, meta::WRITE_GENERATION, 0_i64)?;
         Ok(())
     }
 
+    /// Take the verdict over the store's own keys: the mode, then the path
+    /// order.
+    ///
+    /// The mode goes first because it is the one reading an open refuses over,
+    /// and a refusal discards nothing: a throwaway open over a durable store
+    /// derived under another order is refused, not rebuilt.
+    fn adopt(&self, connection: &Connection, path: &Path) -> Result<Adoption, StoreError> {
+        self.adopt_mode(connection, path)?;
+        self.adopt_path_order(connection)
+    }
+
+    /// The condition an arrangement armed for this database's creation, which
+    /// is how the statement list's error path is reached at all: a create
+    /// writes over whatever was on disk, so damage cannot be arranged there.
+    /// The arm and the surface that arms it are this crate's, because no other
+    /// crate reaches a store's database.
+    #[cfg(feature = "induced-failure")]
+    fn armed_failure(&self, connection: &Connection) -> Option<norn_db::rusqlite::Error> {
+        crate::faults::failure_armed_for_the_store_schema(connection)
+    }
+}
+
+impl StoreClient {
     /// Reconcile the mode a database records with the mode it is being opened
     /// in.
     ///
     /// A throwaway open over a durable store is refused: adopting it would arm
     /// a teardown that deletes a registered vault's whole derived state when
     /// the store drops. **A throwaway open over a `store_mode` row that is
-    /// absent or unreadable is refused the same way.** Create always records
-    /// the mode, so a missing or unrecognized row is out-of-band tampering
-    /// rather than a database this crate ever produces, and the conservative
+    /// absent or unreadable is refused the same way**, and a value that is not
+    /// text is unreadable. Create always records the mode as text, so a
+    /// missing or unrecognized row is out-of-band tampering rather than a
+    /// database this crate ever produces, and the conservative
     /// reading is the refusal: the alternative is arming delete-on-drop over a
     /// database whose own record does not say it is disposable.
     ///
@@ -1069,9 +1252,10 @@ impl norn_db::Client for StoreClient {
     /// The arms are written out mode by recorded mode rather than folded
     /// behind a wildcard, so every combination of asked-for and recorded mode
     /// is a decision this code states.
-    fn adopt(&self, connection: &Connection, path: &Path) -> Result<Adoption, StoreError> {
-        let recorded = norn_db::meta::get_meta::<String>(connection, ddl::meta::STORE_MODE)?
-            .as_deref()
+    fn adopt_mode(&self, connection: &Connection, path: &Path) -> Result<(), StoreError> {
+        let recorded = Recorded::read(connection, ddl::meta::STORE_MODE)?
+            .as_ref()
+            .and_then(Recorded::text)
             .and_then(StoreMode::from_str);
         match (self.mode, recorded) {
             (StoreMode::Throwaway, Some(StoreMode::Durable)) => Err(StoreError::Lifecycle {
@@ -1093,20 +1277,29 @@ impl norn_db::Client for StoreClient {
             | (StoreMode::Durable, Some(StoreMode::Throwaway))
             | (StoreMode::Durable, None) => {
                 norn_db::meta::put_meta(connection, ddl::meta::STORE_MODE, self.mode.as_str())?;
-                Ok(Adoption::Keep)
+                Ok(())
             }
-            (StoreMode::Durable, Some(StoreMode::Durable)) => Ok(Adoption::Keep),
+            (StoreMode::Durable, Some(StoreMode::Durable)) => Ok(()),
         }
     }
 
-    /// The condition an arrangement armed for this database's creation, which
-    /// is how the statement list's error path is reached at all: a create
-    /// writes over whatever was on disk, so damage cannot be arranged there.
-    /// The arm and the surface that arms it are this crate's, because no other
-    /// crate reaches a store's database.
-    #[cfg(feature = "induced-failure")]
-    fn armed_failure(&self, connection: &Connection) -> Option<norn_db::rusqlite::Error> {
-        crate::faults::failure_armed_for_the_store_schema(connection)
+    /// Reconcile the order a database's rows were derived under with the order
+    /// its root is proven to have now.
+    ///
+    /// **A moved order is a rebuild, never a refusal.** Every row is a
+    /// projection of the vault, so rows derived under an order the root no
+    /// longer proves cost a derivation to replace — and serving them would
+    /// answer with spellings merged or split the way this root does not merge
+    /// or split them. A recorded spelling no build writes, a recorded value
+    /// that is not text, and a database that records no order at all are the
+    /// same rebuild: nothing vouches for the order their rows were derived
+    /// under.
+    fn adopt_path_order(&self, connection: &Connection) -> Result<Adoption, StoreError> {
+        let recorded = Recorded::read(connection, ddl::meta::PATH_ORDER)?;
+        Ok(match path_order_rebuild(recorded.as_ref(), self.order) {
+            None => Adoption::Keep,
+            Some(detail) => Adoption::Rebuild { detail },
+        })
     }
 }
 
@@ -1131,8 +1324,11 @@ mod tests {
     #[test]
     fn a_snapshot_refuses_a_write_and_reads_beside_the_writer() {
         let scratch = Scratch::new("norn-store-reader-refuses-writes");
-        let mut store =
-            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        let mut store = Store::open(
+            scratch.join("derived").join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+        )
+        .expect("a store opens");
 
         let reader = Arc::new(
             store
@@ -1174,8 +1370,11 @@ mod tests {
     #[test]
     fn a_turn_that_establishes_nothing_gives_the_connection_back() {
         let scratch = Scratch::new("norn-store-reader-turn");
-        let store =
-            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        let store = Store::open(
+            scratch.join("derived").join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+        )
+        .expect("a store opens");
         let reader = Arc::new(
             store
                 .open_reader()
@@ -1213,8 +1412,11 @@ mod tests {
     #[test]
     fn establishing_a_snapshot_runs_one_statement_and_reports_the_reading() {
         let scratch = Scratch::new("norn-store-reader-establish");
-        let store =
-            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        let store = Store::open(
+            scratch.join("derived").join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+        )
+        .expect("a store opens");
         let reader = Arc::new(
             store
                 .open_reader()
@@ -1250,8 +1452,11 @@ mod tests {
     #[test]
     fn a_turn_an_unwind_drops_gives_the_connection_back() {
         let scratch = Scratch::new("norn-store-reader-unwind");
-        let store =
-            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        let store = Store::open(
+            scratch.join("derived").join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+        )
+        .expect("a store opens");
         let reader = Arc::new(
             store
                 .open_reader()
@@ -1315,8 +1520,11 @@ mod tests {
              WHERE documents_fts MATCH ?1";
 
         let scratch = Scratch::new("norn-store-reader-full-text");
-        let mut store =
-            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        let mut store = Store::open(
+            scratch.join("derived").join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+        )
+        .expect("a store opens");
         write_one_document(&mut store, "notes/first.md", "the interloper walked in");
 
         let reader = Arc::new(
@@ -1382,8 +1590,11 @@ mod tests {
     #[test]
     fn a_snapshot_runs_every_shape_a_read_builder_composes() {
         let scratch = Scratch::new("norn-store-reader-shapes");
-        let mut store =
-            Store::open(scratch.join("derived").join("store.sqlite3")).expect("a store opens");
+        let mut store = Store::open(
+            scratch.join("derived").join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+        )
+        .expect("a store opens");
         write_one_document(&mut store, "notes/first.md", "the interloper walked in");
 
         let reader = Arc::new(

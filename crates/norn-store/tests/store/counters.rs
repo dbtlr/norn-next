@@ -11,8 +11,8 @@
 //! `norn-testkit` owns the assertions over them.
 
 use crate::common::{
-    Scratch, document, document_with_every_fact, path, record_death, snapshot, violation,
-    write_document,
+    Scratch, class_named, document, document_with_every_fact, path, record_death, snapshot,
+    violation, write_document,
 };
 use norn_store::Provenance;
 
@@ -142,15 +142,15 @@ fn a_request_that_only_reads_finishes_at_zero() {
         .expect("reading a tombstone");
     let _ = warm.stored_findings(&subject).expect("reading findings");
     let _ = warm
-        .findings_in_class(&norn_store::class_probe("glossary").expect("a class stem"))
+        .findings_in_class(&warm.class_probe("glossary").expect("a class stem"))
         .expect("reading findings");
     let _ = warm
-        .suffix_candidates(&norn_store::class_probe("glossary").expect("a class stem"))
+        .suffix_candidates(&class_named(&warm, "glossary"))
         .expect("reading candidates");
     let _ = warm.full_text_matches("body").expect("reading matches");
     let _ = warm
         .emitted_plan(norn_store::ExplainedStatement::SuffixCandidates(
-            &norn_store::class_probe("glossary").expect("a class stem"),
+            &class_named(&warm, "glossary"),
         ))
         .expect("a query plan");
     let _ = warm.vault_schema_pin().expect("reading the pin");
@@ -302,7 +302,7 @@ fn discarding_a_class_counts_the_findings_it_removed() {
         .expect("recording a finding");
 
     let invalidation = request
-        .discard_findings_in_class(&norn_store::class_probe("glossary").expect("a class stem"))
+        .discard_findings_in_class(&request.class_probe("glossary").expect("a class stem"))
         .expect("discarding a class");
     assert_eq!(invalidation.findings_discarded, 2);
     let reading = request.finish();

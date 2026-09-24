@@ -21,9 +21,10 @@
 //! records them, so one spelling of each belongs to the crate every such
 //! database is opened through. This module names the keys that are the store's
 //! own: `vault_schema_bytes`, `vault_schema_fingerprint` and
-//! `vault_schema_generation` — the pinned vault-schema projection — and
+//! `vault_schema_generation` — the pinned vault-schema projection —
 //! `store_mode`, which is a fact about this crate's own two ways of opening
-//! rather than about running a database.
+//! rather than about running a database, and `path_order`, the case behaviour
+//! every row was derived under.
 //!
 //! # The vault-schema projection is derived state
 //!
@@ -52,3 +53,14 @@ pub(crate) const VAULT_SCHEMA_GENERATION: &str = "vault_schema_generation";
 /// substrate opens a file and never decides whether that file survives the
 /// handle.
 pub(crate) const STORE_MODE: &str = "store_mode";
+
+/// The case behaviour the vault root was proven to have when this store's rows
+/// were derived, spelled by [`crate::StoredPathOrder::as_str`].
+///
+/// It is a rebuild input beside the store fingerprint: document identity —
+/// which spellings are one row — and the key space a finding's classes are
+/// filed in both follow it, so an open under another order rebuilds from zero
+/// rather than serving rows that root could not have produced.
+/// [`crate::Store`] records it at create and judges it at every other open; a
+/// store that records none is rebuilt as one that records another.
+pub(crate) const PATH_ORDER: &str = "path_order";

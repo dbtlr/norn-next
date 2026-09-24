@@ -39,13 +39,17 @@
 //!   path-spelling normalization point. The store therefore requires a
 //!   normalized path and refuses one that is obviously not — but it spells no
 //!   path differently from the way it arrived, so nothing here can disagree
-//!   with the seam about what two paths are. Where a read has to compare
-//!   case-insensitively it applies the same ASCII fold the seam is held to,
-//!   spelled here as a collation — see [`crate::StoredPathOrder`] — which
-//!   changes an order and a key range, never a stored byte. **`BINARY` collation is load-bearing**:
-//!   it is what makes the exclusive upper bound below exact, and a
-//!   case-insensitive collation on `suffix_key` would silently change which
-//!   keys a range holds.
+//!   with the seam about what two paths are.
+//!
+//!   Where the root proves it folds ASCII case, a probe ranges over the
+//!   **folded** suffix key instead — the same encoding with `A`-`Z` folded onto
+//!   `a`-`z`, stored beside the raw one — and compares those bytes as bytes
+//!   ([`SuffixKey`]). Where a read has to compare case-insensitively it applies
+//!   the same ASCII fold the seam is held to, spelled here as a collation — see
+//!   [`crate::StoredPathOrder`] — which changes an order and a key range, never
+//!   a stored byte. **`BINARY` collation is load-bearing**: it is what makes the
+//!   exclusive upper bound below exact, and a case-insensitive collation on
+//!   `suffix_key` would silently change which keys a range holds.
 //!
 //! # A target has two reductions, and it probes both
 //!
@@ -82,6 +86,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::error::StoreError;
+use crate::facts::StoredPathOrder;
 
 /// The separator between segments, in a path and in a reversed key alike.
 const SEPARATOR: char = '/';
@@ -104,6 +109,7 @@ pub const RENDERED_MARKER: char = '\u{FFFD}';
 pub struct DocumentPath {
     path: String,
     suffix_key: String,
+    folded_suffix_key: String,
     stem: String,
     depth: usize,
 }
@@ -148,6 +154,7 @@ impl DocumentPath {
 
         Ok(DocumentPath {
             path: path.to_string(),
+            folded_suffix_key: fold_ascii_case(&suffix_key),
             suffix_key,
             stem,
             depth: segments.len(),
@@ -269,6 +276,13 @@ impl DocumentPath {
         &self.suffix_key
     }
 
+    /// The suffix key with ASCII case folded — `A`-`Z` onto `a`-`z`, every
+    /// other character as itself — which is the key a probe ranges over on a
+    /// root that proves it folds case.
+    pub fn folded_suffix_key(&self) -> &str {
+        &self.folded_suffix_key
+    }
+
     /// The leaf segment with its final extension removed.
     pub fn stem(&self) -> &str {
         &self.stem
@@ -292,19 +306,33 @@ impl DocumentPath {
         descendant_bounds(&self.path)
     }
 
-    /// The key of the ambiguity class this document belongs to: its stem, with
-    /// the separator that makes the match segment-aligned.
+    /// The key of the ambiguity class this document belongs to among probes of
+    /// `key`: its stem as stored, or folded by ASCII case, with the separator
+    /// that makes the match segment-aligned.
     ///
     /// One class, not a set: the store holds the whole path, so which segment is
     /// the leaf and which bytes are its extension are settled facts here. The
     /// ambiguity is the written target's, and it is [`SuffixProbe::class_keys`]
     /// that carries it.
-    pub fn class_key(&self) -> ClassKey {
+    ///
+    /// Class-scoped maintenance reaches a finding through the class key its
+    /// producer recorded, which is spelled in the key space the root probes,
+    /// so a change to this document names its class in that space.
+    ///
+    /// Crate-private: the key space a class key is spelled in is the store's
+    /// to choose, never a caller's, so the only door out of `norn-store` is
+    /// [`crate::Request::class_key_of`], which reads the store's own path
+    /// order rather than taking one.
+    pub(crate) fn class_key_in(&self, key: SuffixKey) -> ClassKey {
+        let stem = match key {
+            SuffixKey::Raw => self.stem.clone(),
+            SuffixKey::Folded => fold_ascii_case(&self.stem),
+        };
         // A document's own stem already passed every refusal `class_probe`
         // applies — it came from a leaf segment `DocumentPath::new` already
         // checked for a `.`/`..` reduction and a control byte, and a leaf
         // segment carries no separator by construction.
-        let probe = class_probe(&self.stem).expect("a document's own stem is a valid class probe");
+        let probe = class_probe(&stem).expect("a document's own stem is a valid class probe");
         ClassKey::of_prefix(&probe.ranges[0].lower)
     }
 }
@@ -363,8 +391,10 @@ impl DirectoryPrefix {
 /// range covers, so a finding stored under one is at rest and permanently
 /// invisible to the maintenance that owns its lifecycle.
 ///
-/// It is produced by [`DocumentPath::class_key`] and [`SuffixProbe::class_keys`],
-/// which is where the two sides of resolution mint the same form.
+/// It is produced by `DocumentPath::class_key_in` (crate-private; a store
+/// mints one through [`crate::Request::class_key_of`]) and
+/// [`SuffixProbe::class_keys`], which is where the two sides of resolution mint
+/// the same form.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ClassKey(String);
 
@@ -417,18 +447,18 @@ impl ClassKey {
         reversed.join(&SEPARATOR.to_string())
     }
 
-    /// The probe over exactly this class: one range, this key as its lower
-    /// bound.
+    /// The bounds of exactly this class: this key as the inclusive lower
+    /// bound, and the key just past everything it opens as the exclusive
+    /// upper one.
     ///
     /// A class key **is** a probe's lower bound, so this is the round trip back.
     /// It is what findings maintenance ranges over once a changed path has named
     /// the class it affects, and building the range here rather than from the
     /// stem again is what keeps the key that is reported and the key that is
     /// discarded the same bytes.
-    pub(crate) fn probe(&self) -> SuffixProbe {
-        SuffixProbe {
-            ranges: vec![bounded(self.0.clone())],
-        }
+    pub(crate) fn bounds(&self) -> (String, String) {
+        let Range { lower, upper } = bounded(self.0.clone());
+        (lower, upper)
     }
 
     /// A probe prefix as the class key it is.
@@ -447,14 +477,57 @@ impl ClassKey {
     }
 }
 
+/// Which of a document's two stored suffix keys a probe ranges over.
+///
+/// The choice is the vault root's, proven at the filesystem seam and carried to
+/// the store as a [`StoredPathOrder`]: a root that tells spellings apart probes
+/// the raw key and never consults the folded one, and a root that folds ASCII
+/// case probes the folded key, so every spelling it resolves to one entry
+/// opens one class there.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum SuffixKey {
+    /// `documents.suffix_key`, compared bytewise.
+    Raw,
+    /// `documents.folded_suffix_key`: the raw key with ASCII case folded.
+    Folded,
+}
+
+impl SuffixKey {
+    /// The key a root with this proven case behaviour probes.
+    pub fn under(order: StoredPathOrder) -> Self {
+        match order {
+            StoredPathOrder::Sensitive => SuffixKey::Raw,
+            StoredPathOrder::AsciiCaseInsensitive => SuffixKey::Folded,
+        }
+    }
+
+    /// Whether `class` is spelled in this key space: every class key is a raw
+    /// one, and a folded class key is one ASCII case folding leaves as it is.
+    pub(crate) fn holds(self, class: &ClassKey) -> bool {
+        match self {
+            SuffixKey::Raw => true,
+            SuffixKey::Folded => fold_ascii_case(class.as_str()) == class.as_str(),
+        }
+    }
+
+    /// The `documents` column this key is stored in.
+    pub(crate) fn column(self) -> &'static str {
+        match self {
+            SuffixKey::Raw => "suffix_key",
+            SuffixKey::Folded => "folded_suffix_key",
+        }
+    }
+}
+
 /// The bounds of the prefix ranges over a segment-reversed key that one probe
-/// opens.
+/// opens, and which of the two stored keys they bound.
 ///
 /// Ranges rather than patterns, because a range over an index is what SQLite
 /// answers without a scan. A probe carries one range or two: a target whose leaf
 /// carries a dot has two reductions and opens both.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SuffixProbe {
+    key: SuffixKey,
     ranges: Vec<Range>,
 }
 
@@ -467,6 +540,31 @@ struct Range {
 }
 
 impl SuffixProbe {
+    /// Which stored suffix key this probe's ranges bound.
+    pub fn key(&self) -> SuffixKey {
+        self.key
+    }
+
+    /// The same probe over `key`: a raw probe as it is, or over the folded key,
+    /// each prefix with ASCII case folded and bounded again.
+    ///
+    /// Probes are built raw, from the spelling a caller wrote, and taken into
+    /// the key space a store's path order selects here and only here.
+    pub(crate) fn in_space(self, key: SuffixKey) -> SuffixProbe {
+        debug_assert_eq!(self.key, SuffixKey::Raw, "a probe is built raw");
+        match key {
+            SuffixKey::Raw => self,
+            SuffixKey::Folded => SuffixProbe {
+                key: SuffixKey::Folded,
+                ranges: self
+                    .ranges
+                    .iter()
+                    .map(|range| bounded(fold_ascii_case(&range.lower)))
+                    .collect(),
+            },
+        }
+    }
+
     /// Every range this probe opens, as `(lower, upper)` pairs: `lower`
     /// inclusive, `upper` exclusive.
     ///
@@ -485,7 +583,8 @@ impl SuffixProbe {
     }
 
     /// Every ambiguity class this probe reads: one per reduction, so one key or
-    /// two.
+    /// two, spelled in the key space the probe ranges over — folded where it
+    /// ranges over the folded key.
     ///
     /// A finding recorded from a probe belongs to **all** of them, because the
     /// reductions are disjoint rather than nested. `notes.tar` opens `notes.tar/`
@@ -560,7 +659,10 @@ pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
     if stem != *leaf {
         ranges.push(bounded(reversed(leaf)));
     }
-    Ok(SuffixProbe { ranges })
+    Ok(SuffixProbe {
+        key: SuffixKey::Raw,
+        ranges,
+    })
 }
 
 /// The probe over the ambiguity class a stem names.
@@ -575,7 +677,7 @@ pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
 /// unrefused stem into a lower bound is what the class key's own debug
 /// assertion trusts, so a caller-supplied stem is checked here rather than
 /// left to trip that assertion later.
-pub fn class_probe(stem: &str) -> Result<SuffixProbe, StoreError> {
+pub(crate) fn class_probe(stem: &str) -> Result<SuffixProbe, StoreError> {
     let refuse = |problem| {
         Err(StoreError::Path {
             path: stem.to_string(),
@@ -595,6 +697,7 @@ pub fn class_probe(stem: &str) -> Result<SuffixProbe, StoreError> {
         return refuse(problem);
     }
     Ok(SuffixProbe {
+        key: SuffixKey::Raw,
         ranges: vec![bounded(format!("{stem}{SEPARATOR}"))],
     })
 }
@@ -707,6 +810,18 @@ fn rendered_segment(segment: &str) -> String {
     rendered
 }
 
+/// `text` with ASCII case folded: `A`-`Z` onto `a`-`z`, and every other
+/// character as itself.
+///
+/// This is the filesystem seam's fold and SQLite's `NOCASE`, term for term, so
+/// a folded key names exactly the spellings a folding root resolves to one
+/// entry, and the folded key is pinned to the fold contract sample those are
+/// (see [`crate::StoredPathOrder`]). A non-ASCII letter keeps its case: a
+/// wider fold would claim two spellings the seam keeps apart as one document.
+pub(crate) fn fold_ascii_case(text: &str) -> String {
+    text.to_ascii_lowercase()
+}
+
 /// The refusal for a NUL or other control byte, which no printable key holds and
 /// which a C string reader would cut short.
 fn control_byte_problem(text: &str) -> Option<&'static str> {
@@ -721,6 +836,60 @@ fn control_byte_problem(text: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A class key's bounds open exactly the class it names.
+    #[test]
+    fn a_class_key_bounds_the_class_it_names() {
+        let class = ClassKey::new("foo/").expect("a class key");
+        assert_eq!(class.bounds(), ("foo/".to_string(), "foo0".to_string()));
+    }
+
+    /// A folded class key is one ASCII case folding leaves as it is, and every
+    /// class key is a raw one.
+    #[test]
+    fn a_folded_key_space_holds_only_folded_class_keys() {
+        for (key, folded) in [
+            ("foo/", true),
+            ("Foo/", false),
+            ("été/", true),
+            ("Été/", true),
+        ] {
+            let class = ClassKey::new(key).expect("a class key");
+            assert!(SuffixKey::Raw.holds(&class), "`{key}`");
+            assert_eq!(SuffixKey::Folded.holds(&class), folded, "`{key}`");
+        }
+    }
+
+    /// **`class_probe` validates like every other constructor here.** A stem
+    /// handed over unvalidated would format into a lower bound
+    /// [`ClassKey::of_prefix`] trusts, tripping its debug assertion downstream
+    /// instead of being refused at the boundary that took it.
+    #[test]
+    fn a_class_probe_refuses_what_no_class_opens() {
+        for (stem, needle) in [
+            ("", "empty"),
+            ("glossary/norn", "separator"),
+            (".", "`.` or `..`"),
+            ("..", "`.` or `..`"),
+            ("gloss\0ary", "NUL"),
+            ("gloss\u{7}ary", "control"),
+        ] {
+            let error = class_probe(stem).expect_err("not a class stem");
+            let StoreError::Path { problem, .. } = &error else {
+                panic!("`{stem}` was refused as {error:?} rather than as a path");
+            };
+            assert!(
+                problem.contains(needle),
+                "`{stem}` was refused for `{problem}`, which does not name {needle}"
+            );
+        }
+        let class = class_probe("glossary").expect("a class stem");
+        assert_eq!(class.key(), SuffixKey::Raw);
+        assert_eq!(
+            class.ranges().collect::<Vec<_>>(),
+            [("glossary/", "glossary0")]
+        );
+    }
 
     /// A separator steps to the character after it, which is what bounds a
     /// segment-aligned prefix: `a/` opens up to `a0`.

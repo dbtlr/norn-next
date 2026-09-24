@@ -377,7 +377,7 @@ pub use document::{
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReasonCode, TooFewNames};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
-pub use glob::{Pattern, PatternError};
+pub use glob::{CaseFold, Pattern, PatternError};
 pub use name::{IllegalVaultName, VaultName};
 pub use predicate::Predicate;
 pub use product::{Unsatisfied, VaultAnswer};

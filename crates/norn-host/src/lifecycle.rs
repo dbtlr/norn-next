@@ -165,6 +165,11 @@ pub trait ReadSource: Send + Sync + 'static {
     /// [`SnapshotSource::open_reader`] does: an attempt that refused ran the
     /// statement that refused it under the caller's gate hold, and the gate
     /// was held for it exactly as for one that answered.
+    ///
+    /// The entry hands the snapshot no case behaviour. What a read's paths and
+    /// targets are compared under is the order the rows it reads were derived
+    /// under, which is the store's own record and travels with the handle the
+    /// store minted.
     fn establish(turn: Self::Turn) -> Establishment<Self::Snapshot>;
 }
 
@@ -10790,16 +10795,22 @@ mod tests {
     /// The case arms the withholding while the rung is running, which is the
     /// one moment an attach or a recovery cannot have answered it: what the
     /// entry publishes at the rung's end is decided at the rung's end.
+    ///
+    /// The case runs without ambient polling and drives the one poll that
+    /// finds the maintenance due. A watcher poll takes the entry's coverage for
+    /// as long as it runs, so a dispatcher ticking beside the case would hold
+    /// the coverage the rung kept at whatever instant the case reads it.
     #[test]
     fn a_rebuild_over_coverage_whose_trust_is_withheld_publishes_the_withheld_reason() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         arrange_for(&ops.damaged_maintenance_at, &name);
         ops.block_rebuild.store(true, Ordering::SeqCst);
         arrange_for(&ops.maintenance_due_at, &name);
+        poll_watchers(&host.shared);
         wait_for_flag("rebuild_started", &ops.rebuild_started);
         ops.withholds_trust.store(true, Ordering::SeqCst);
         ops.rebuild_release.store(true, Ordering::SeqCst);

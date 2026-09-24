@@ -58,7 +58,7 @@ pub use norn_config::registry::Entry as Registration;
 pub use norn_wire::AttachMode;
 pub use production::{
     MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy, ProductionPolicyError,
-    WATCH_SYNCHRONIZATION_DEADLINE,
+    WATCH_SYNCHRONIZATION_DEADLINE, stored_path_order,
 };
 pub use registry::{AliasConflict, RegistryRead};
 pub use reload::{

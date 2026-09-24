@@ -38,7 +38,8 @@ impl Scratch {
     }
 
     pub fn store(&self) -> Store {
-        Store::open(self.store_path()).expect("opening a store")
+        Store::open(self.store_path(), norn_store::StoredPathOrder::Sensitive)
+            .expect("opening a store")
     }
 
     pub fn engine(&self, embedder: Arc<dyn Embedder>) -> Engine {
@@ -134,7 +135,8 @@ impl Embedder for InterferingEmbedder {
 
     fn embed(&self, text: &str) -> Result<Embedding, EmbedError> {
         if !self.fired.swap(true, Ordering::Relaxed) {
-            let mut store = Store::open(&self.store_path).expect("a second handle on the store");
+            let mut store = Store::open(&self.store_path, norn_store::StoredPathOrder::Sensitive)
+                .expect("a second handle on the store");
             (self.effect)(&mut store);
         }
         self.inner.embed(text)

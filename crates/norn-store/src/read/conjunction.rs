@@ -15,7 +15,8 @@ use crate::find::{
     FindStatement, compose_bare_directory, compose_known_key, compose_match_probe, compose_universe,
 };
 use crate::json::{FrontmatterValue, canonical_json};
-use crate::path::{DirectoryPrefix, DocumentPath, suffix_probe};
+use crate::path::{DirectoryPrefix, DocumentPath};
+use crate::resolve::TargetClass;
 use crate::store::Snapshot;
 
 /// Where a request named a key.
@@ -53,7 +54,7 @@ pub(crate) struct Conjunction {
 
 /// Whether the verb compiling a conjunction answers a `resolves` part.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Resolution {
+pub(crate) enum ResolvesPart {
     /// The part filters by the class its target opens.
     Answered,
     /// The part is reported as not applicable and filters nothing.
@@ -157,12 +158,12 @@ impl Snapshot {
     /// universe is reported and filters nothing among documents
     /// ([`Conjunction::names_unknown_key`]); a part that cannot be applied
     /// is reported and matches nothing. A `resolves` part is compiled into a
-    /// filter where `resolution` answers it, and reported as not applicable,
+    /// filter where `resolves` answers it, and reported as not applicable,
     /// filtering nothing, where it does not.
     pub(crate) fn compile_conjunction(
         &self,
         predicates: &[Predicate],
-        resolution: Resolution,
+        resolves: ResolvesPart,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
     ) -> Result<Conjunction, PageRefusal> {
@@ -175,7 +176,7 @@ impl Snapshot {
         for predicate in predicates {
             membership_bound(predicate)?;
             if let Predicate::Resolves { target, .. } = predicate
-                && resolution == Resolution::NotApplicable
+                && resolves == ResolvesPart::NotApplicable
             {
                 conjunction
                     .reports
@@ -294,16 +295,17 @@ impl Snapshot {
             Predicate::LinksTo { .. } => Err(PageRefusal::NotIndexed {
                 fact: "a link's target",
             }),
-            Predicate::Resolves { target, .. } => match suffix_probe(target.address()) {
+            Predicate::Resolves { target, .. } => match TargetClass::compile(
+                target.address(),
+                self.path_order(),
+                declared.ambiguity_ignore(),
+            ) {
                 Err(_) => Ok(Part::MatchesNothing(Unsatisfied::impossible_path(
                     target.address(),
                 ))),
-                Ok(probe) => filter(
-                    ReadFilter::Resolves,
-                    probe
-                        .ranges()
-                        .flat_map(|(lower, upper)| [text(lower), text(upper)])
-                        .collect(),
+                Ok(class) => filter(
+                    ReadFilter::Resolves(class.probe().key()),
+                    class.parameters(),
                 ),
             },
             Predicate::Tag { name, .. } => filter(ReadFilter::Tag, vec![text(name)]),

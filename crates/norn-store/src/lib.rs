@@ -53,6 +53,9 @@
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
+//! - [`TargetClass`] — the one resolver: a target compiled for its root, over
+//!   the suffix key the root's proven case behaviour selects and less the
+//!   places its schema's ambiguity-ignore set names.
 //!
 //! # The shapes the API is built out of
 //!
@@ -99,6 +102,7 @@ mod json;
 mod path;
 mod read;
 mod request;
+mod resolve;
 mod store;
 mod validate;
 
@@ -109,7 +113,7 @@ pub use facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, DocumentFacts, FeedDocument, FeedTombstone,
     FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport,
     Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder,
-    StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    StoredSuffixKeys, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
@@ -130,13 +134,13 @@ pub use read::{
 // rung whichever database met it.
 pub use norn_db::{EmittedPlan, OpenOutcome, PlanStep, RebuildReason};
 pub use path::{
-    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, SuffixProbe, class_probe,
-    suffix_probe,
+    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, SuffixKey, SuffixProbe, suffix_probe,
 };
 pub use request::{
     DiscardScope, ExplainedStatement, FINDING_ID_CHUNK, FeedCursor, FindingCursor, MAX_PAGE,
     POINT_READS, Request, STATEMENTS, SubjectScope,
 };
+pub use resolve::{AmbiguityIgnore, TargetClass};
 pub use store::{
     ConnectionTurn, ReaderMint, RecordedStoreSchema, Snapshot, SnapshotAttempt, SnapshotReader,
     Store, StoreMode, StoreReading,

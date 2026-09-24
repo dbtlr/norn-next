@@ -2293,6 +2293,20 @@ struct Vault {
     /// isolated by. A child adopts a tree its parent made and holds none, so
     /// nothing it drops takes the tree away.
     sandbox: Option<Sandbox>,
+    /// The case behaviour the tree's root proved when this view was taken,
+    /// which is the order an attach opens the derived store under. It is
+    /// retained rather than detected at each open, because a row here reads
+    /// the store while the tree is revoked or gone.
+    order: StoredPathOrder,
+}
+
+/// The order an attach opens the store over the tree at `vault` under.
+fn proven_order(vault: &Path) -> StoredPathOrder {
+    norn_host::stored_path_order(
+        norn_fs::PathNormalizer::detect(vault)
+            .expect("detect the vault's case behaviour")
+            .case_sensitivity(),
+    )
 }
 
 impl Vault {
@@ -2308,6 +2322,7 @@ impl Vault {
             .expect("the vault schema");
         std::fs::create_dir_all(sandbox.root().join("records")).expect("a record directory");
         Vault {
+            order: proven_order(&root.join("vault")),
             root,
             name: VaultName::new(VAULT_NAME).expect("a vault name"),
             sandbox: Some(sandbox),
@@ -2320,6 +2335,7 @@ impl Vault {
             root: root.to_path_buf(),
             name: VaultName::new(VAULT_NAME).expect("a vault name"),
             sandbox: None,
+            order: proven_order(&root.join("vault")),
         }
     }
 
@@ -2357,7 +2373,7 @@ impl Vault {
     }
 
     fn store(&self) -> Store {
-        Store::open(self.database()).expect("opening the derived store")
+        Store::open(self.database(), self.order).expect("opening the derived store")
     }
 
     /// A host serving this vault, holding the real-watcher lease while it does.
@@ -2575,6 +2591,7 @@ impl Vault {
             root: self.root.join("from-zero"),
             name: self.name.clone(),
             sandbox: None,
+            order: self.order,
         };
         std::fs::create_dir_all(beside.root()).expect("a second machine's directories");
         let entry = Entry::new(

@@ -77,7 +77,8 @@ use std::fmt::Write as _;
 
 use norn_store::{
     BlockFact, DocumentPath, FieldRows, FindingCursor, HeadingFact, IndexedTerm, LinkFact,
-    PillarReport, Store, StoreError, StoredFinding, StoredPathOrder, StoredTombstone, TagFact, ddl,
+    PillarReport, Store, StoreError, StoredFinding, StoredPathOrder, StoredSuffixKeys,
+    StoredTombstone, TagFact, ddl,
 };
 use norn_wire::{FindingKind, FindingScope};
 
@@ -718,12 +719,18 @@ pub fn assert_operationally_valid(store: &mut Store, subject: &str) {
 
     assert_every_finding_stands_where_its_scope_allows(store, subject);
 
-    for_each_stored_suffix_key(store, |path, stored| {
+    for_each_stored_suffix_key(store, |stored| {
         assert_eq!(
-            stored,
-            path.suffix_key(),
+            stored.raw,
+            stored.path.suffix_key(),
             "{subject}: the row at `{}` holds a suffix key its own path does not produce",
-            path.as_str()
+            stored.path.as_str()
+        );
+        assert_eq!(
+            stored.folded,
+            stored.path.folded_suffix_key(),
+            "{subject}: the row at `{}` holds a folded suffix key its own path does not produce",
+            stored.path.as_str()
         );
     })
     .unwrap_or_else(|problem| panic!("{subject}: draining the stored suffix keys: {problem}"));
@@ -790,26 +797,26 @@ fn assert_every_finding_stands_where_its_scope_allows(store: &mut Store, subject
     }
 }
 
-/// Hand every row's stored suffix key over beside its path, a bounded page at a
-/// time.
+/// Hand every row's stored suffix keys over beside its path, a bounded page at
+/// a time.
 ///
 /// The pair comes off the store's own suffix-key enumerator rather than off a
 /// document page, so the recompute reaches every row without putting the key
 /// column on the readers that page documents for their facts.
 fn for_each_stored_suffix_key(
     store: &mut Store,
-    mut visit: impl FnMut(&DocumentPath, &str),
+    mut visit: impl FnMut(&StoredSuffixKeys),
 ) -> Result<(), StoreError> {
     let request = store.begin_request();
     let mut after: Option<DocumentPath> = None;
     loop {
         let page = request.suffix_keys_after(after.as_ref(), PAGE)?;
-        let Some((last, _)) = page.last() else {
+        let Some(last) = page.last() else {
             return Ok(());
         };
-        after = Some(last.clone());
-        for (path, stored) in &page {
-            visit(path, stored);
+        after = Some(last.path.clone());
+        for stored in &page {
+            visit(stored);
         }
     }
 }

@@ -83,8 +83,9 @@
 //! field universe, and reads
 //! [`FieldType`] to give one comparison rule to sorts, ranges and comparison
 //! operators alike — see [`typed`]. The ambiguity-ignore patterns name the
-//! paths the resolution ladder does not count as candidates, which is the
-//! read surface's to apply.
+//! paths the resolution ladder does not count as candidates: derivation hands
+//! them to the store with the declared fields, and the store's resolver applies
+//! them wherever a target's class is read.
 
 pub mod typed;
 
@@ -93,7 +94,7 @@ use std::fmt;
 
 use serde_yaml::Value;
 
-pub use norn_wire::{Pattern, PatternError};
+pub use norn_wire::{CaseFold, Pattern, PatternError};
 pub use typed::{Comparison, ComparisonSignal, FieldType, TypedValue};
 
 /// The schema version this build reads.
@@ -193,11 +194,16 @@ impl VaultSchema {
 
     /// The paths the resolution ladder does not count as candidates.
     ///
-    /// **Read by the resolution ladder, and backlinks and findings apply the
-    /// same exclusion.** The current call graph does not reach it: no
-    /// resolution ladder is built — a find's `resolves` part enumerates a
-    /// target's suffix class and does not read this set — and no derivation
-    /// reads a path rule.
+    /// **Read by the resolution ladder.** Derivation hands the set to the store
+    /// beside the declared fields, and the store's one resolver applies it to
+    /// every class a target opens, which a find's `resolves` part reads today.
+    /// The globs match under the store's recorded path order: with ASCII case
+    /// folded on a root that folds it, bytewise on a root that does not.
+    ///
+    /// Backlinks and link-health findings are the dormant consumers of the
+    /// same exclusion: the link index lands them in Layer 3, and they read a
+    /// link target's class through that one resolver. The current call graph
+    /// does not reach them, because no link index exists yet.
     pub fn ambiguity_ignore(&self) -> &[Pattern] {
         &self.ambiguity_ignore
     }
@@ -345,7 +351,11 @@ impl TagFacet {
     /// are one tag is a matching policy the syntax layer deliberately leaves
     /// open and a schema that wants both declares both.
     pub fn admits(&self, name: &str) -> bool {
-        self.declared.contains(name) || self.patterns.iter().any(|pattern| pattern.matches(name))
+        self.declared.contains(name)
+            || self
+                .patterns
+                .iter()
+                .any(|pattern| pattern.matches(name, CaseFold::Exact))
     }
 
     /// Whether a tag outside the vocabulary is a finding.

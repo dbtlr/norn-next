@@ -11,7 +11,7 @@
 use norn_db::rusqlite::functions::FunctionFlags;
 use norn_db::rusqlite::types::{Value, ValueRef};
 use norn_db::rusqlite::{self, Connection};
-use norn_wire::Pattern;
+use norn_wire::{CaseFold, Pattern};
 
 use crate::error::{self, StoreError};
 use crate::path::prefix_successor;
@@ -44,7 +44,7 @@ pub(crate) fn register_functions(connection: &Connection) -> Result<(), StoreErr
                     .get_raw(1)
                     .as_str()
                     .map_err(|problem| rusqlite::Error::UserFunctionError(Box::new(problem)))?;
-                Ok(pattern.matches(path))
+                Ok(pattern.matches(path, CaseFold::Exact))
             },
         )
         .map_err(|problem| error::sql("registering the path-glob function", problem))

@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 
 use norn_config::schema::typed::{Comparison, ComparisonSignal, Offset};
 use norn_config::schema::{
-    FieldType, Pattern, TypedValue, UndeclaredTags, VaultSchema, VaultSchemaError,
+    CaseFold, FieldType, Pattern, TypedValue, UndeclaredTags, VaultSchema, VaultSchemaError,
 };
 
 /// A schema declaring one of everything the grammar has.
@@ -598,7 +598,7 @@ fn a_pattern_matches_the_set_its_grammar_names() {
     for (pattern, subject, expected) in cases {
         let pattern = Pattern::parse(pattern).expect("a pattern");
         assert_eq!(
-            pattern.matches(subject),
+            pattern.matches(subject, CaseFold::Exact),
             *expected,
             "{pattern} vs {subject}"
         );
@@ -606,11 +606,11 @@ fn a_pattern_matches_the_set_its_grammar_names() {
 }
 
 #[test]
-fn a_pattern_folds_no_case() {
+fn a_pattern_matched_exactly_folds_no_case() {
     let pattern = Pattern::parse("Archive/**").expect("a pattern");
 
-    assert!(pattern.matches("Archive/notes.md"));
-    assert!(!pattern.matches("archive/notes.md"));
+    assert!(pattern.matches("Archive/notes.md", CaseFold::Exact));
+    assert!(!pattern.matches("archive/notes.md", CaseFold::Exact));
 }
 
 /// **`-0` and `0` are one number, and equality is the order.** Rust requires
@@ -730,12 +730,12 @@ fn a_pathological_pattern_matches_in_bounded_time() {
     let deep = vec!["a"; 64].join("/");
 
     let started = std::time::Instant::now();
-    assert!(!pattern.matches(&subject));
-    assert!(!segments.matches(&deep));
+    assert!(!pattern.matches(&subject, CaseFold::Exact));
+    assert!(!segments.matches(&deep, CaseFold::Exact));
     // The same shapes that do match, so the bound covers the answering half
     // as well as the refusing one.
-    assert!(pattern.matches(&format!("{subject}b")));
-    assert!(segments.matches(&format!("{deep}/b")));
+    assert!(pattern.matches(&format!("{subject}b"), CaseFold::Exact));
+    assert!(segments.matches(&format!("{deep}/b"), CaseFold::Exact));
     let spent = started.elapsed();
 
     assert!(

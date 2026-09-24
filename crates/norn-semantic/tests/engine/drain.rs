@@ -179,7 +179,7 @@ fn a_store_rebuild_rescans_but_recomputes_nothing() {
     assert_eq!(embedder.calls(), 2);
 
     let mut store = store
-        .discard_and_reopen()
+        .discard_and_reopen(norn_store::StoredPathOrder::Sensitive)
         .expect("a store rebuilt from zero");
     write_document(&mut store, &document("docs/a.md", "hash-1", "alpha\n"));
     write_document(&mut store, &document("docs/b.md", "hash-2", "bravo\n"));
@@ -206,7 +206,7 @@ fn a_rescan_reconciles_paths_the_new_lifetime_does_not_hold() {
     engine.drain(&mut store.feed_read()).expect("a drain");
 
     let mut store = store
-        .discard_and_reopen()
+        .discard_and_reopen(norn_store::StoredPathOrder::Sensitive)
         .expect("a store rebuilt from zero");
     write_document(&mut store, &document("docs/b.md", "hash-2", "bravo\n"));
 

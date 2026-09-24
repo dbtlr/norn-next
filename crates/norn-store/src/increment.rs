@@ -17,7 +17,7 @@ use crate::facts::{DocumentFacts, FindingFacts, Invalidation, Provenance};
 use crate::fields::FieldRow;
 use crate::hash;
 use crate::json;
-use crate::path::{ClassKey, DocumentPath};
+use crate::path::{ClassKey, DocumentPath, SuffixKey};
 use crate::request::{self, DiscardScope};
 use crate::store::Store;
 
@@ -140,9 +140,12 @@ pub struct IncrementOutcome {
     /// derives the same path counts the death here and leaves no tombstone,
     /// because the document insert's trigger clears it.
     pub tombstones_recorded: u64,
-    /// Every ambiguity class the changed paths are in — the resolution axis of
-    /// the findings maintenance this changeset implies, and what a caller
-    /// re-records against.
+    /// Every ambiguity class the changed paths are in, spelled in the key space
+    /// the store's path order selects — raw where its root tells spellings
+    /// apart, folded by ASCII case where it folds — which is the space every
+    /// finding in the store is filed in. This is the resolution axis of the
+    /// findings maintenance this changeset implies, and what a caller re-records
+    /// against.
     ///
     /// The subject axis carries no field beside it: the paths whose findings
     /// went are the changeset's own entries, which the caller processed one by
@@ -187,6 +190,7 @@ pub(crate) fn apply(
     // lock and leaves nothing half applied.
     for finding in findings {
         request::check_finding_bounds(&finding.facts)?;
+        request::check_finding_classes(&finding.facts, store.path_order())?;
     }
 
     // The boundary between two acts: everything before this one has committed
@@ -198,6 +202,9 @@ pub(crate) fn apply(
     // One clock reading for the changeset, as there is one generation. Nothing
     // orders by it; it is what a person reads in a report.
     let recorded_at = request::unix_seconds();
+    // Every finding in this store is filed in the key space its order
+    // selects, so that is the space a changed path names its class in.
+    let class_space = SuffixKey::under(store.path_order());
     let transaction = store
         .database
         .immediate_transaction("opening the increment transaction")?;
@@ -234,6 +241,10 @@ pub(crate) fn apply(
             .and_then(|()| discard_the_subject(&mut statements.discard_subject, subject));
             tally.findings_discarded +=
                 applied.map_err(|problem| error::in_entry(index, subject, problem))?;
+            // A document joining a class and one leaving it both name it.
+            tally
+                .affected_classes
+                .insert(subject.class_key_in(class_space));
 
             // The point a changeset can be torn at, and the only one: between
             // two entries, with the transaction open and nothing committed. A
@@ -365,12 +376,13 @@ impl<'t> Statements<'t> {
             // the cascade fires only for one.
             upsert_document: prepared(
                 "INSERT INTO documents (
-                     path, suffix_key, content_hash, byte_length, body, body_hash, body_offset,
-                     frontmatter, frontmatter_projection_hash, frontmatter_diagnostic_count,
-                     generation, derived_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     path, suffix_key, folded_suffix_key, content_hash, byte_length, body,
+                     body_hash, body_offset, frontmatter, frontmatter_projection_hash,
+                     frontmatter_diagnostic_count, generation, derived_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(path) DO UPDATE SET
                      suffix_key                   = excluded.suffix_key,
+                     folded_suffix_key            = excluded.folded_suffix_key,
                      content_hash                 = excluded.content_hash,
                      byte_length                  = excluded.byte_length,
                      body                         = excluded.body,
@@ -479,6 +491,7 @@ fn upsert(
             params![
                 facts.path.as_str(),
                 facts.path.suffix_key(),
+                facts.path.folded_suffix_key(),
                 facts.content_hash,
                 facts.byte_length,
                 facts.body,
@@ -612,7 +625,6 @@ fn upsert(
     if projection.is_some() {
         tally.projections += 1;
     }
-    tally.affected_classes.insert(facts.path.class_key());
     Ok(())
 }
 
@@ -651,7 +663,6 @@ fn record_death(
         .map_err(|error| error::sql("recording a tombstone", error))?;
 
     tally.tombstones_recorded += 1;
-    tally.affected_classes.insert(path.class_key());
     Ok(())
 }
 
@@ -762,18 +773,11 @@ fn discard_affected_classes(
 ) -> Result<u64, StoreError> {
     let mut discarded = 0_u64;
     for class in classes {
-        let probe = class.probe();
-        // The statement was compiled for one range and binds two parameters. A
-        // class key is its own probe's single lower bound, so this holds by
-        // construction — and a probe that ever opened two would bind half its
-        // bounds and discard the wrong rows.
-        debug_assert_eq!(
-            probe.range_count(),
-            1,
-            "the class discard is prepared for one range"
-        );
+        // The statement was compiled for one range, and a class key is its
+        // own range's lower bound.
+        let (lower, upper) = class.bounds();
         discarded += statement
-            .execute(request::probe_parameters(&probe))
+            .execute(params![lower, upper])
             .map_err(|error| error::sql("discarding a class's findings", error))?
             as u64;
     }

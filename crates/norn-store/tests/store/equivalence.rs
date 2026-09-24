@@ -470,6 +470,24 @@ fn a_suffix_key_that_drifted_from_its_path_fails_the_operational_leg() {
     assert_operationally_valid(&mut store, "a store whose suffix key drifted from its path");
 }
 
+/// **The folded suffix key is checked against the path that produced it too.**
+/// A probe on a folding root ranges over the folded key alone, so a folded key
+/// that drifted answers the probes of every folding root while the raw key
+/// beside it still reads true.
+#[test]
+#[should_panic(expected = "holds a folded suffix key its own path does not produce")]
+fn a_folded_suffix_key_that_drifted_from_its_path_fails_the_operational_leg() {
+    let scratch = Scratch::new("operational-leg-folded-suffix-key");
+    let mut store = scratch.open();
+    populate(&mut store);
+    induced_failure::execute_out_of_band(
+        &mut store,
+        "UPDATE documents SET folded_suffix_key = 'drift/'",
+    )
+    .expect("moving the stored folded suffix key alone");
+    assert_operationally_valid(&mut store, "a store whose folded suffix key drifted");
+}
+
 /// The path of the `ordinal`-th document of a numbered vault, counting from one.
 ///
 /// The zero padding is what makes the numbering the byte order: `doc-0002.md`

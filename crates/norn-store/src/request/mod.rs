@@ -77,12 +77,13 @@ use crate::error::{self, StoreError};
 use crate::facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, FeedDocument, FeedTombstone, FindingFacts,
     HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport, Provenance,
-    SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone,
-    TagFact, TagSource, VaultSchemaPin,
+    SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredSuffixKeys,
+    StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 use crate::fields::{FieldContainer, FieldRow, FieldRows};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
-use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
+use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixKey, SuffixProbe};
+use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 use crate::store::Store;
 
 mod instrument;
@@ -336,8 +337,14 @@ impl<'a> Request<'a> {
     /// each, because a target's reductions are disjoint classes and a finding
     /// filed under one of them is invisible to the other's maintenance. A finding
     /// that is not about resolution carries no class and writes no such row.
+    ///
+    /// A class key outside the key space the store's path order selects is
+    /// refused ([`StoreError::KeySpace`]): no change in this store names it, so
+    /// a finding filed under it is one no maintenance reaches. A producer
+    /// files under [`TargetClass::class_keys`] of a class this store compiled.
     pub fn record_finding(&mut self, finding: &FindingFacts) -> Result<(), StoreError> {
         check_finding_bounds(finding)?;
+        check_finding_classes(finding, self.store.path_order())?;
         let transaction = self
             .store
             .database
@@ -372,10 +379,15 @@ impl<'a> Request<'a> {
     /// range matched identifies the finding, and deleting the finding takes its
     /// other memberships with it. The count is findings rather than rows, because
     /// a cascade is not what `changes()` reports.
+    ///
+    /// The probe is one in the store's own key space, as
+    /// [`Request::class_probe`] and [`TargetClass::probe`] build it; a probe
+    /// over the other key is refused ([`StoreError::KeySpace`]).
     pub fn discard_findings_in_class(
         &mut self,
         probe: &SuffixProbe,
     ) -> Result<Invalidation, StoreError> {
+        self.check_probe(probe)?;
         let discarded = self
             .store
             .connection()
@@ -988,12 +1000,13 @@ impl<'a> Request<'a> {
         )
     }
 
-    /// The next bounded page of stored suffix keys, each beside the path whose
-    /// row holds it, in path order.
+    /// The next bounded page of stored suffix keys, raw and folded, each beside
+    /// the path whose row holds them, in path order.
     ///
-    /// `documents.suffix_key` is a derived column: the path type writes it and
-    /// the resolution ladder ranges over it, and every read that would notice a
-    /// key drifting from its path goes through the drifted range. So the check
+    /// `documents.suffix_key` and `documents.folded_suffix_key` are derived
+    /// columns: the path type writes them and the resolution ladder ranges over
+    /// one or the other, and every read that would notice a key drifting from
+    /// its path goes through the drifted range. So the check
     /// is a recompute at rest over every row, and this is the page that reaches
     /// every row to make it — no keyed read asks the question, and carrying the
     /// column on the document row instead would put a string on every reader of
@@ -1007,7 +1020,7 @@ impl<'a> Request<'a> {
         &self,
         after: Option<&DocumentPath>,
         limit: usize,
-    ) -> Result<Vec<(DocumentPath, String)>, StoreError> {
+    ) -> Result<Vec<StoredSuffixKeys>, StoreError> {
         if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "a suffix-key page",
@@ -1106,20 +1119,73 @@ impl<'a> Request<'a> {
 
     // ---- probe reads ----
 
-    /// Every document in the class a probe opens, in suffix-key order.
+    /// Compile `target` — a suffix address, with any `#` anchor already split
+    /// off — into the class it names on this store's root, excluding the places
+    /// `ignore` names.
+    ///
+    /// **The order is the store's.** A class is compiled under the path order
+    /// the store records, which selects the suffix key it probes, the key space
+    /// its class keys are spelled in, and the case its ignore globs match
+    /// under; no caller names one. A find compiles its `resolves` part the
+    /// same way under its snapshot's order.
+    ///
+    /// The refusals are [`crate::suffix_probe`]'s: a spelling that is not a
+    /// suffix address names no class under any root.
+    pub fn target_class(
+        &self,
+        target: &str,
+        ignore: &AmbiguityIgnore,
+    ) -> Result<TargetClass, StoreError> {
+        TargetClass::compile(target, self.store.path_order(), ignore)
+    }
+
+    /// The probe over the ambiguity class `stem` names, in the key space the
+    /// store's path order selects: the stem as written where the root tells
+    /// spellings apart, and folded by ASCII case where it folds them.
+    ///
+    /// Every document whose leaf reduces to the stem is in the range, whatever
+    /// directory it sits in, and so is every finding whose class key opens
+    /// with it. The refusals are a stem's: an empty one, one carrying the
+    /// separator, a `.` or `..` name, and one carrying a control byte.
+    pub fn class_probe(&self, stem: &str) -> Result<SuffixProbe, StoreError> {
+        Ok(crate::path::class_probe(stem)?.in_space(SuffixKey::under(self.store.path_order())))
+    }
+
+    /// The key of the ambiguity class `path` belongs to, in the key space the
+    /// store's path order selects.
+    ///
+    /// The order is the store's, the same one [`Request::class_probe`] and
+    /// [`Request::target_class`] read it under: minting a class key in a space
+    /// the store's root does not probe would name a class no finding here is
+    /// ever filed under, so this is the one door a document's own class key
+    /// leaves the crate through.
+    pub fn class_key_of(&self, path: &DocumentPath) -> ClassKey {
+        path.class_key_in(SuffixKey::under(self.store.path_order()))
+    }
+
+    /// Every document in the class a target names, in suffix-key order.
     ///
     /// The full candidate enumeration behind a finding's bounded head, and the
-    /// membership of an ambiguity class: ranges over `documents(suffix_key)`,
-    /// costing the class rather than the vault.
+    /// membership of an ambiguity class: ranges over the suffix key the
+    /// target's root probes, costing the class rather than the vault, with the
+    /// places its schema ignores left out.
     ///
-    /// The order is total — `suffix_key` then `path` — because equal suffix keys
-    /// are exactly what an ambiguity class is made of, and a ladder whose ties
-    /// fall out in row-insertion order is a ladder that reorders itself when a
-    /// document is re-derived.
-    pub fn suffix_candidates(&self, probe: &SuffixProbe) -> Result<Vec<DocumentPath>, StoreError> {
+    /// The order is total — the probed key, then `path` — because equal suffix
+    /// keys are exactly what an ambiguity class is made of, and a ladder whose
+    /// ties fall out in row-insertion order is a ladder that reorders itself
+    /// when a document is re-derived.
+    ///
+    /// The class is one [`Request::target_class`] compiled on a store under
+    /// the same path order; one compiled under another is refused
+    /// ([`StoreError::KeySpace`]).
+    pub fn suffix_candidates(
+        &self,
+        resolution: &TargetClass,
+    ) -> Result<Vec<DocumentPath>, StoreError> {
+        self.check_class(resolution)?;
         self.read_all(
-            &suffix_candidates_sql(probe.range_count()),
-            probe_parameters(probe),
+            &suffix_candidates_sql(resolution),
+            params_from_iter(resolution.parameters()),
             |row| Ok(DocumentPath::new(&row.get::<_, String>(0)?)),
             "reading suffix candidates",
         )
@@ -1139,11 +1205,43 @@ impl<'a> Request<'a> {
     /// longer-suffix finding in the same class is read even where the particular
     /// change cannot have reached it, which costs a re-decision rather than a
     /// stale finding nothing revisits.
+    ///
+    /// The probe is one in the store's own key space, as
+    /// [`Request::class_probe`] and [`TargetClass::probe`] build it; a probe
+    /// over the other key is refused ([`StoreError::KeySpace`]).
     pub fn findings_in_class(&self, probe: &SuffixProbe) -> Result<Vec<StoredFinding>, StoreError> {
+        self.check_probe(probe)?;
         self.findings(
             &findings_in_class_sql(probe.range_count()),
             probe_parameters(probe),
         )
+    }
+
+    /// Refuse a class compiled under another path order than the store's.
+    fn check_class(&self, resolution: &TargetClass) -> Result<(), StoreError> {
+        let order = self.store.path_order();
+        if resolution.order() == order {
+            Ok(())
+        } else {
+            Err(StoreError::KeySpace {
+                what: "a class compiled under another path order",
+                order,
+            })
+        }
+    }
+
+    /// Refuse a class probe over another suffix key than the store's path
+    /// order selects.
+    fn check_probe(&self, probe: &SuffixProbe) -> Result<(), StoreError> {
+        let order = self.store.path_order();
+        if probe.key() == SuffixKey::under(order) {
+            Ok(())
+        } else {
+            Err(StoreError::KeySpace {
+                what: "a class probe over another suffix key",
+                order,
+            })
+        }
     }
 
     /// The full-text matches for one FTS5 match expression, in path order.
@@ -1395,6 +1493,27 @@ pub(crate) fn check_finding_bounds(finding: &FindingFacts) -> Result<(), StoreEr
         });
     }
     Ok(())
+}
+
+/// Refuse a finding filed under a class key outside the key space a store
+/// derived under `order` files its findings in.
+///
+/// A change names its class in that key space alone, so a finding filed under
+/// a key outside it is one no change ever takes: the raw key `Foo/` on a root
+/// that folds ASCII case stands through `b/FOO.md` joining the class of `Foo`.
+pub(crate) fn check_finding_classes(
+    finding: &FindingFacts,
+    order: StoredPathOrder,
+) -> Result<(), StoreError> {
+    let space = SuffixKey::under(order);
+    if finding.class_keys.iter().all(|class| space.holds(class)) {
+        Ok(())
+    } else {
+        Err(StoreError::KeySpace {
+            what: "a finding's class key",
+            order,
+        })
+    }
 }
 
 /// Write one finding, its candidate head and its class memberships, inside the
@@ -1680,12 +1799,14 @@ fn finding_id_parameters(chunk: &[i64]) -> impl Params + '_ {
     params_from_iter(chunk.iter())
 }
 
-/// The statement [`Request::suffix_candidates`] emits for a probe of
-/// `ranges` ranges.
-fn suffix_candidates_sql(ranges: usize) -> String {
+/// The statement [`Request::suffix_candidates`] emits for `resolution`: its
+/// ranges over the key it probes, its exclusion, and the ladder's order.
+fn suffix_candidates_sql(resolution: &TargetClass) -> String {
+    let key = resolution.probe().key();
     format!(
-        "SELECT path FROM documents WHERE {} ORDER BY suffix_key, path",
-        range_predicate("suffix_key", ranges)
+        "SELECT dr.path FROM documents AS dr WHERE {} ORDER BY dr.{}, dr.path",
+        resolve::predicate("dr", key, resolution.probe().range_count(), 1),
+        key.column()
     )
 }
 
@@ -2045,7 +2166,7 @@ const TOMBSTONE_PAGE_SQL: &str = "SELECT path, last_content_hash, provenance, ge
 /// column is read off the row the seek reached rather than off an index of its
 /// own, because `documents_suffix_key` orders by the key and this page orders
 /// by the path.
-const SUFFIX_KEY_PAGE_SQL: &str = "SELECT path, suffix_key
+const SUFFIX_KEY_PAGE_SQL: &str = "SELECT path, suffix_key, folded_suffix_key
              FROM documents
              WHERE path > COALESCE(?1, '')
              ORDER BY path
@@ -2236,11 +2357,12 @@ fn stored_document(row: &Row<'_>, first: usize) -> Reading<StoredDocument> {
     }))
 }
 
-/// One row's path and the suffix key stored beside it.
-fn stored_suffix_key(row: &Row<'_>) -> Reading<(DocumentPath, String)> {
+/// One row's path and the two suffix keys stored beside it.
+fn stored_suffix_key(row: &Row<'_>) -> Reading<StoredSuffixKeys> {
     let path: String = row.get(0)?;
-    let suffix_key: String = row.get(1)?;
-    Ok(DocumentPath::new(&path).map(|path| (path, suffix_key)))
+    let raw: String = row.get(1)?;
+    let folded: String = row.get(2)?;
+    Ok(DocumentPath::new(&path).map(|path| StoredSuffixKeys { path, raw, folded }))
 }
 
 fn stored_tombstone(row: &Row<'_>) -> Reading<StoredTombstone> {
@@ -2440,7 +2562,9 @@ mod tests {
     #[test]
     fn findings_reassemble_correctly_across_a_chunk_boundary() {
         let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk");
-        let mut store = Store::open_throwaway(root.join("store.sqlite3")).expect("opening a store");
+        let mut store =
+            Store::open_throwaway(root.join("store.sqlite3"), StoredPathOrder::Sensitive)
+                .expect("opening a store");
         let subject = DocumentPath::new("notes.md").expect("a document path");
 
         let mut request = store.begin_request();
@@ -2495,7 +2619,9 @@ mod tests {
     #[test]
     fn a_findings_read_runs_each_detail_statement_once_per_chunk_of_ids() {
         let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk-count");
-        let mut store = Store::open_throwaway(root.join("store.sqlite3")).expect("opening a store");
+        let mut store =
+            Store::open_throwaway(root.join("store.sqlite3"), StoredPathOrder::Sensitive)
+                .expect("opening a store");
         let subject = DocumentPath::new("notes.md").expect("a document path");
         let findings = 10;
 

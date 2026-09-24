@@ -68,7 +68,7 @@ use norn_wire::{
 use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
 use crate::read::{
-    Conjunction, FindingBase, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, Resolution,
+    Conjunction, FindingBase, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, ResolvesPart,
     Stepped, finding_base, page_limit,
 };
 use crate::request::unreadable;
@@ -253,7 +253,7 @@ impl Snapshot {
         self.declaration_pinned(declared, lookups)?;
         let conjunction = self.compile_conjunction(
             &params.predicates,
-            Resolution::NotApplicable,
+            ResolvesPart::NotApplicable,
             declared,
             lookups,
         )?;

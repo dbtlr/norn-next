@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use norn_store::{
-    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, StoreError, class_probe, suffix_probe,
+    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, StoreError, suffix_probe,
 };
 
 /// The one range a single-reduction probe opens.
@@ -31,6 +31,15 @@ fn prefixes(target: &str) -> Vec<String> {
         .ranges()
         .map(|(lower, _)| lower.to_string())
         .collect()
+}
+
+/// The raw class key a document's own stem opens: its stem with the
+/// terminating separator, unfolded. This is the form `class_key_in` builds
+/// for `SuffixKey::Raw` — crate-private, because a store mints one under its
+/// own path order through `Request::class_key_of` — so a test that wants the
+/// raw form on its own reconstructs it from the stem, which is public.
+fn raw_class_key(stem: &str) -> ClassKey {
+    ClassKey::new(&format!("{stem}/")).expect("a class key")
 }
 
 /// Every ambiguity class a probe names, in the set's own order.
@@ -383,9 +392,9 @@ fn a_target_that_is_not_a_suffix_address_is_refused() {
 #[test]
 fn a_class_key_is_the_stem_with_the_separator() {
     let document = DocumentPath::new("docs/norn/glossary.md").expect("a document path");
-    assert_eq!(document.class_key().as_str(), "glossary/");
+    assert_eq!(raw_class_key(document.stem()).as_str(), "glossary/");
 
-    let class = class_probe("glossary").expect("a class stem");
+    let class = suffix_probe("glossary").expect("a class stem");
     assert_eq!(class.range_count(), 1);
     let (lower, upper) = class.ranges().next().expect("a range");
     assert_eq!(lower, "glossary/");
@@ -398,7 +407,7 @@ fn a_class_key_is_the_stem_with_the_separator() {
         let probe = suffix_probe(target).expect("a suffix target");
         for (lower, _) in probe.ranges() {
             assert!(
-                lower.starts_with(document.class_key().as_str()),
+                lower.starts_with(raw_class_key(document.stem()).as_str()),
                 "`{target}` is outside the class of `{}`",
                 document.as_str()
             );
@@ -429,7 +438,7 @@ fn a_class_key_is_the_stem_with_the_separator() {
             suffix_probe(target)
                 .expect("a suffix target")
                 .class_keys()
-                .contains(&document.class_key()),
+                .contains(&raw_class_key(document.stem())),
             "`{target}` does not name the class `{at}` is in"
         );
     }
@@ -501,27 +510,27 @@ fn a_class_key_reads_back_as_the_address_whose_probe_opens_it() {
     );
 }
 
-/// **`class_probe` validates like every other public constructor here.** A
-/// stem handed over unvalidated would format into a lower bound
-/// [`ClassKey::of_prefix`] trusts, tripping its debug assertion downstream
-/// instead of being refused at the boundary that took it.
+/// **The folded suffix key folds ASCII case and nothing else.** `A`-`Z` become
+/// `a`-`z`; every other byte is itself, so a non-ASCII letter keeps its case
+/// and a folded key never claims two spellings the filesystem seam keeps apart.
 #[test]
-fn a_class_probe_refuses_what_no_class_opens() {
-    for (stem, needle) in [
-        ("", "empty"),
-        ("glossary/norn", "separator"),
-        (".", "`.` or `..`"),
-        ("..", "`.` or `..`"),
-        ("gloss\0ary", "NUL"),
-        ("gloss\u{7}ary", "control"),
+fn the_folded_suffix_key_folds_ascii_case_alone() {
+    for (path, raw, folded) in [
+        (
+            "Docs/Norn/Glossary.MD",
+            "Glossary/Norn/Docs/",
+            "glossary/norn/docs/",
+        ),
+        ("notes/v1.2.md", "v1.2/notes/", "v1.2/notes/"),
+        ("Écoles/Été.md", "Été/Écoles/", "Été/Écoles/"),
+        ("ÄRGER/Straße.md", "Straße/ÄRGER/", "straße/Ärger/"),
     ] {
-        let error = class_probe(stem).expect_err("not a class stem");
-        let StoreError::Path { problem, .. } = &error else {
-            panic!("`{stem}` was refused as {error:?} rather than as a path");
-        };
-        assert!(
-            problem.contains(needle),
-            "`{stem}` was refused for `{problem}`, which does not name {needle}"
+        let read = DocumentPath::new(path).expect("a document path");
+        assert_eq!(read.suffix_key(), raw, "the raw key of `{path}`");
+        assert_eq!(
+            read.folded_suffix_key(),
+            folded,
+            "the folded key of `{path}`"
         );
     }
 }

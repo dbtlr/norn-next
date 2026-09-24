@@ -73,9 +73,25 @@
 //! # Full candidate enumeration is a query, and it is indexed
 //!
 //! The head is a head *because* the full list stays reachable. It is not a
-//! table: it is a range scan over `documents(suffix_key)` keyed by a class the
-//! finding is in, which costs the class rather than the vault and returns the
-//! class as it stands rather than as it stood.
+//! table: it is a range scan over the suffix key the root probes — raw, or
+//! folded by ASCII case — keyed by a class the finding is in, which costs the
+//! class rather than the vault and returns the class as it stands rather than
+//! as it stood. The scan is the one resolver's ([`crate::TargetClass`]), so a
+//! finding's class is the class a find's `resolves` part reads on that root.
+//!
+//! The class-bearing findings are a dormant carrier: their producer is the
+//! link-health findings the link index lands in Layer 3, which reads a link
+//! target's class and files what it found under the class's keys. The current
+//! call graph files none, because no link index exists yet — every finding the
+//! host files is about its own subject and carries no class key — so the
+//! class half of this table is reached by its maintenance and its tests alone.
+//!
+//! A finding's class keys are spelled in the key space its root probes, which
+//! the store's path order selects, and a changed path names its class in that
+//! same space — see [`crate::IncrementOutcome::affected_classes`] — so
+//! maintenance reaches every finding filed in the store. A finding filed under
+//! a key outside that space is refused where it is written, and a class or a
+//! class probe from another space is refused where it is read.
 //!
 //! # Ambiguity classes, and why maintenance is scoped by class
 //!
@@ -104,7 +120,8 @@
 //!   that path's class key prefixes — one prefix range over
 //!   `finding_classes(class_key)`, joined back by finding id — and the
 //!   candidates of each are one prefix range over `documents(suffix_key)`. Both
-//!   bounds come from [`crate::path::class_probe`].
+//!   bounds come from [`crate::Request::class_probe`], in the key space the
+//!   store's path order selects.
 //!
 //! The class range is **correct in the no-miss direction, and a superset**: a
 //! probe of one class key opens every finding holding a class key it prefixes, so

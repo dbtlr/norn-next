@@ -43,8 +43,9 @@ use std::path::Path;
 
 use norn_config::schema::VaultSchema;
 use norn_store::{
-    BlockFact, Change, DeclaredFields, DiscardScope, DocumentFacts, DocumentPath, FrontmatterValue,
-    HeadingFact, LinkFact, LinkFamily, Provenance, Span, TagFact, TagSource, TypedOrder,
+    AmbiguityIgnore, BlockFact, Change, DeclaredFields, DiscardScope, DocumentFacts, DocumentPath,
+    FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Provenance, Span, TagFact, TagSource,
+    TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, FindingScope, Severity};
@@ -846,15 +847,17 @@ impl Declared {
 }
 
 /// The declared fields of `schema`, pinned under `fingerprint`, as the store
-/// reads them: every declared key, and for each whose type does not order as
-/// text, the typed order that type reads a raw value into.
+/// reads them: every declared key, for each whose type does not order as text
+/// the typed order that type reads a raw value into, and the places the schema
+/// keeps out of ambiguity classes.
 ///
 /// A raw value that does not read as its declared type has no sort key, which
 /// is the store's `NULL`: the document still carries the value, and a typed
 /// order has nothing to place it by.
 fn declared_fields(schema: &VaultSchema, fingerprint: String) -> DeclaredFields {
+    let ignore = AmbiguityIgnore::new(schema.ambiguity_ignore().iter().cloned());
     schema.fields().fold(
-        DeclaredFields::under(fingerprint),
+        DeclaredFields::under(fingerprint).ignoring_ambiguity(ignore),
         |declared, (key, field)| {
             let kind = field.kind();
             if kind.orders_as_text() {
@@ -990,6 +993,33 @@ mod tests {
             .expect("a schema declaring a tag facet"),
             "reporting",
         )
+    }
+
+    /// **The declaration a find is compiled under carries the schema's
+    /// ambiguity-ignore set**, so a resolution reads the set of the schema the
+    /// snapshot pins and no other.
+    #[test]
+    fn the_declaration_carries_the_schemas_ambiguity_ignore_set() {
+        let declared = Declared::pinned(
+            VaultSchema::parse(b"version: 1\npaths:\n  ambiguity_ignore: [\"archive/**\"]\n")
+                .expect("a schema declaring an ambiguity-ignore set"),
+            "ignoring",
+        );
+        let globs: Vec<&str> = declared
+            .fields()
+            .ambiguity_ignore()
+            .patterns()
+            .iter()
+            .map(|glob| glob.as_str())
+            .collect();
+        assert_eq!(globs, ["archive/**"]);
+        assert!(
+            Declared::unpinned()
+                .fields()
+                .ambiguity_ignore()
+                .patterns()
+                .is_empty()
+        );
     }
 
     /// **The two discard sides partition the causes.** The sides are read off
@@ -1674,8 +1704,11 @@ mod tests {
                 FINGERPRINT,
             );
             let scratch = norn_testkit::scratch::Scratch::new(label);
-            let mut store =
-                norn_store::Store::open(scratch.join("store.sqlite3")).expect("a store");
+            let mut store = norn_store::Store::open(
+                scratch.join("store.sqlite3"),
+                norn_store::StoredPathOrder::Sensitive,
+            )
+            .expect("a store");
             store
                 .begin_request()
                 .pin_vault_schema(schema, FINGERPRINT)
