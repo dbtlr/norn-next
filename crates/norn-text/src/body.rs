@@ -53,13 +53,13 @@
 
 use std::ops::Range;
 
-use pulldown_cmark::{Event, HeadingLevel, LinkType, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Parser, Tag, TagEnd};
 
 use crate::heading::{Heading, SlugCounter};
 use crate::link::{
     BlockId, Link, markdown_link, parse_block_ids_in, parse_tokens, splice_tokens, wikilink_ranges,
 };
-use crate::section::{SectionAddress, SectionError, SectionSpan, resolve_section_in};
+use crate::section::{SectionAddress, SectionError, SectionSpan, is_ascii_space, resolve_section};
 use crate::span::{LineCursor, lf_normalized, split_lines_inclusive};
 use crate::tag::{Tag as TagFact, scan_tags};
 
@@ -76,6 +76,12 @@ pub struct BodyScan<'a> {
     markdown_links: Vec<MarkdownToken>,
     code_ranges: Vec<Range<usize>>,
     construct_ranges: Vec<Range<usize>>,
+    /// The leaf blocks a block-id definition can name: each paragraph,
+    /// heading and code block, and each run of a list item's own text outside
+    /// every leaf block the item holds, in document order. No two overlap.
+    leaves: Vec<Leaf>,
+    /// The fenced code blocks, fences included, in document order.
+    fenced: Vec<Leaf>,
 }
 
 impl<'a> BodyScan<'a> {
@@ -85,6 +91,19 @@ impl<'a> BodyScan<'a> {
         let mut markdown_links = Vec::new();
         let mut code_ranges: Vec<Range<usize>> = Vec::new();
         let mut construct_ranges: Vec<Range<usize>> = Vec::new();
+        let mut leaves: Vec<Leaf> = Vec::new();
+        let mut fenced: Vec<Leaf> = Vec::new();
+        // How many leaf blocks are open around the event being read, and, for
+        // each open list item, the run of its own text read so far outside
+        // any leaf: a tight item holds its text directly, with no paragraph.
+        let mut open_leaves: usize = 0;
+        let mut item_runs: Vec<ItemRun> = Vec::new();
+        // The block quotes and list items open around the event being read,
+        // innermost last, each by the number it was opened as, and how many
+        // have been opened: a leaf's container is the innermost, and `0` is
+        // the body's own.
+        let mut containers: Vec<usize> = Vec::new();
+        let mut opened: usize = 0;
         let mut active_heading: Option<ActiveHeading> = None;
         let mut active_link: Option<ActiveLink> = None;
         let mut active_code_block: Option<usize> = None;
@@ -147,6 +166,60 @@ impl<'a> BodyScan<'a> {
                 active.text_end = active.text_end.max(range.end.min(active.range.end));
             }
 
+            match &event {
+                Event::Start(Tag::BlockQuote(_)) => {
+                    opened += 1;
+                    containers.push(opened);
+                }
+                Event::End(TagEnd::BlockQuote(_)) => {
+                    containers.pop();
+                }
+                Event::Start(Tag::Item) => {
+                    opened += 1;
+                    containers.push(opened);
+                    item_runs.push(ItemRun {
+                        container: opened,
+                        run: None,
+                    });
+                }
+                Event::End(TagEnd::Item) => {
+                    end_run(&mut leaves, &mut item_runs);
+                    item_runs.pop();
+                    containers.pop();
+                }
+                // A nested list ends the text its item holds before it.
+                Event::Start(Tag::List(_)) => end_run(&mut leaves, &mut item_runs),
+                Event::Start(Tag::Paragraph | Tag::Heading { .. } | Tag::CodeBlock(_)) => {
+                    // So does a leaf block the item holds.
+                    if open_leaves == 0 {
+                        end_run(&mut leaves, &mut item_runs);
+                    }
+                    open_leaves += 1;
+                    let leaf = Leaf {
+                        range: range.clone(),
+                        container: containers.last().copied().unwrap_or(0),
+                    };
+                    if matches!(
+                        event,
+                        Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_)))
+                    ) {
+                        fenced.push(leaf.clone());
+                    }
+                    leaves.push(leaf);
+                }
+                Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock) => {
+                    open_leaves = open_leaves.saturating_sub(1);
+                }
+                // Inline markup opening outside a leaf is the item's own text
+                // from its first byte: the `**` of `- **bold**`.
+                Event::Start(tag) if open_leaves == 0 && is_inline(tag) => {
+                    extend_run(&mut item_runs, &range);
+                }
+                Event::End(_) | Event::Start(_) if open_leaves == 0 => {}
+                _ if open_leaves == 0 => extend_run(&mut item_runs, &range),
+                _ => {}
+            }
+
             match event {
                 Event::Start(Tag::BlockQuote(_) | Tag::List(_) | Tag::Item) => {
                     container_depth += 1;
@@ -164,7 +237,7 @@ impl<'a> BodyScan<'a> {
                 }
                 Event::End(TagEnd::Heading(_)) => {
                     if let Some(active) = active_heading.take() {
-                        let text = active.text.trim().to_string();
+                        let text = active.text.trim_matches(is_ascii_space).to_string();
                         headings.push(Heading {
                             level: active.level,
                             slug: slugs.issue(&text),
@@ -242,12 +315,21 @@ impl<'a> BodyScan<'a> {
             }
         }
 
+        leaves.sort_by_key(|leaf| leaf.range.start);
+        debug_assert!(
+            leaves
+                .windows(2)
+                .all(|pair| pair[0].range.end <= pair[1].range.start),
+            "the leaf blocks of one body are disjoint"
+        );
         BodyScan {
             body,
             headings,
             markdown_links,
             code_ranges,
             construct_ranges,
+            leaves,
+            fenced,
         }
     }
 
@@ -322,12 +404,62 @@ impl<'a> BodyScan<'a> {
         parse_block_ids_in(self.body, &self.code_ranges)
     }
 
-    /// Resolve a heading-addressed section to the byte ranges it owns.
+    /// The block a block-id definition names, given where its `^` marker
+    /// stands: the byte range of the leaf block the marker trails, its
+    /// trailing break left out.
+    ///
+    /// That is the paragraph it ends, every line of it; the heading it ends;
+    /// or, in a list item, the item's own text from its first byte, inline
+    /// markup included — never its list marker, a sibling, a nested list, or a
+    /// leaf block the item holds. A marker opening the line after a closing
+    /// fence names the fenced block, fences included, where the two stand in
+    /// one container and only that container's prefix — a block quote's `>`,
+    /// a list item's indent — stands between them.
+    ///
+    /// The body is read as CommonMark with no extension, as every fact this
+    /// scan reports is, so a table is the paragraph its lines make and a
+    /// marker ending a row names that paragraph: the whole table. A marker no
+    /// leaf block holds — one inside a raw HTML block — names the line it
+    /// stands on.
+    pub fn block_extent(&self, marker: usize) -> Range<usize> {
+        let marker = marker.min(self.body.len());
+        // The leaves are disjoint and in document order, so the only one that
+        // can hold the marker is the last that starts at or before it.
+        let starting = self
+            .leaves
+            .partition_point(|leaf| leaf.range.start <= marker);
+        let holding = starting
+            .checked_sub(1)
+            .map(|at| &self.leaves[at])
+            .filter(|leaf| marker < leaf.range.end);
+        let Some(leaf) = holding else {
+            return line_around(self.body, marker);
+        };
+        let opens_its_block = self.body[leaf.range.start..marker]
+            .chars()
+            .all(crate::section::is_ascii_space);
+        let after_a_fence = self.fenced.iter().find(|fence| {
+            fence.container == leaf.container
+                && fence.range.end <= leaf.range.start
+                && one_line_apart(&self.body[fence.range.end..leaf.range.start])
+        });
+        let range = match after_a_fence {
+            Some(fence) if opens_its_block => fence.range.clone(),
+            _ => leaf.range.clone(),
+        };
+        let kept = self.body[range.clone()]
+            .trim_end_matches(['\n', '\r'])
+            .len();
+        range.start..range.start + kept
+    }
+
+    /// Resolve a heading-addressed section to the byte ranges it owns,
+    /// through [`crate::resolve_section`] over this scan's headings.
     pub fn resolve_section(
         &self,
         address: SectionAddress<'_>,
     ) -> Result<SectionSpan, SectionError> {
-        resolve_section_in(&self.headings, self.body, address)
+        resolve_section(&self.headings, self.body, address)
     }
 
     /// The inline Markdown links as facts, positions counted once across the
@@ -358,6 +490,89 @@ impl<'a> BodyScan<'a> {
         ranges.extend(definition_lines(self.body, &self.code_ranges));
         merge_ranges(ranges)
     }
+}
+
+/// A block a block-id definition can name, and the container it stands in.
+#[derive(Debug, Clone)]
+struct Leaf {
+    range: Range<usize>,
+    /// The innermost block quote or list item holding the block, by the
+    /// number it was opened as in the walk, and `0` for the body itself.
+    container: usize,
+}
+
+/// One open list item's run of its own text outside every leaf block, as
+/// far as the walk has read it.
+struct ItemRun {
+    /// The number the item was opened as, which is the container its text
+    /// stands in.
+    container: usize,
+    run: Option<Range<usize>>,
+}
+
+/// Extend the innermost open item's run of text over `range`.
+fn extend_run(item_runs: &mut [ItemRun], range: &Range<usize>) {
+    if let Some(item) = item_runs.last_mut() {
+        item.run = Some(match item.run.take() {
+            Some(held) => held.start..range.end.max(held.end),
+            None => range.clone(),
+        });
+    }
+}
+
+/// End the innermost open item's run of text, recording it as a leaf.
+fn end_run(leaves: &mut Vec<Leaf>, item_runs: &mut [ItemRun]) {
+    if let Some(item) = item_runs.last_mut()
+        && let Some(range) = item.run.take()
+    {
+        leaves.push(Leaf {
+            range,
+            container: item.container,
+        });
+    }
+}
+
+/// Whether `tag` opens inline markup rather than a block.
+fn is_inline(tag: &Tag<'_>) -> bool {
+    matches!(
+        tag,
+        Tag::Emphasis
+            | Tag::Strong
+            | Tag::Strikethrough
+            | Tag::Superscript
+            | Tag::Subscript
+            | Tag::Link { .. }
+            | Tag::Image { .. }
+    )
+}
+
+/// Whether `gap` — the bytes between a closing fence and the block after it
+/// — puts the block on the fence's next line: one line break at most, and
+/// otherwise only a container's prefix on that line, which is spaces, tabs
+/// and `>`.
+fn one_line_apart(gap: &str) -> bool {
+    let prefix = gap
+        .strip_prefix("\r\n")
+        .or_else(|| gap.strip_prefix(['\n', '\r']))
+        .unwrap_or(gap);
+    prefix
+        .bytes()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'>'))
+}
+
+/// The line holding `at`, its break left out: from the break before it, or
+/// the start of the body, to the break after it, or the end of the body.
+fn line_around(body: &str, at: usize) -> Range<usize> {
+    let is_break = |byte: &u8| matches!(byte, b'\n' | b'\r');
+    let start = body.as_bytes()[..at]
+        .iter()
+        .rposition(is_break)
+        .map_or(0, |found| found + 1);
+    let end = body.as_bytes()[at..]
+        .iter()
+        .position(is_break)
+        .map_or(body.len(), |found| at + found);
+    start..end
 }
 
 /// The byte range of every link reference definition line (`[label]: target`),

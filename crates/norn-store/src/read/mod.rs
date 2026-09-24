@@ -30,12 +30,13 @@ mod reading;
 mod run;
 mod suggest;
 
-use norn_wire::CursorOrderChanged;
+use norn_wire::{CandidateHead, CollectionSelector, CursorOrderChanged, Hint, ResolutionTarget};
 
 use crate::count::CountStatement;
 use crate::describe::DescribeStatement;
 use crate::error::StoreError;
 use crate::find::FindStatement;
+use crate::get::GetStatement;
 use crate::request::MAX_PAGE;
 use crate::search::SearchStatement;
 #[cfg(doc)]
@@ -116,10 +117,11 @@ impl FieldOrder {
 /// A statement a read builder ran, named by the builder that names it.
 ///
 /// A read compiles its conjunction through probes the find builder names, and
-/// reads finding rows, document rows and the active fingerprint through
-/// statements the find builder names, so a count, a validate, a describe and a
-/// search run find's statements beside their own; the record of what
-/// a read ran holds any of them, and each builder's enumeration stays its own.
+/// reads finding rows and the active fingerprint, and hydrates document rows,
+/// through statements the find builder names, so a count, a validate, a
+/// describe, a search and a get run find's statements beside their own; the
+/// record of what a read ran holds any of them, and each builder's enumeration
+/// stays its own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadStatement {
     /// A statement [`FindStatement`] names.
@@ -132,6 +134,8 @@ pub enum ReadStatement {
     Describe(DescribeStatement),
     /// A statement [`SearchStatement`] names.
     Search(SearchStatement),
+    /// A statement [`GetStatement`] names.
+    Get(GetStatement),
 }
 
 impl From<SearchStatement> for ReadStatement {
@@ -143,6 +147,12 @@ impl From<SearchStatement> for ReadStatement {
 impl From<DescribeStatement> for ReadStatement {
     fn from(statement: DescribeStatement) -> Self {
         ReadStatement::Describe(statement)
+    }
+}
+
+impl From<GetStatement> for ReadStatement {
+    fn from(statement: GetStatement) -> Self {
+        ReadStatement::Get(statement)
     }
 }
 
@@ -164,24 +174,87 @@ impl From<CountStatement> for ReadStatement {
     }
 }
 
+/// A target that names more than one document, as a refusal carries it.
+///
+/// The same bounded head and the same hint a finding over the class carries,
+/// so a refusal and a finding say one thing. It maps one-to-one, field for
+/// field, onto the wire's `vault/ambiguous-target` detail
+/// ([`norn_wire::ErrorDetail::AmbiguousTarget`]); the store keeps its own
+/// type because a refusal is typed by what it refuses and the wire detail is
+/// one variant of every detail an error carries. The mapping lives in the
+/// host's get handler (NORN-230), which turns a refusal into a wire error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TargetAmbiguity {
+    /// The target as the request named it, anchor included.
+    pub target: ResolutionTarget,
+    /// The first of the documents it names in the resolution ladder's order,
+    /// at most [`crate::CANDIDATE_HEAD`], each named by its minimal
+    /// disambiguating suffix, with how many there were.
+    pub head: CandidateHead,
+    /// The target whose `find` resolves every one of them: the target's
+    /// address, anchor left off.
+    pub hint: Hint,
+}
+
+/// A part of a get request an answer may not take, as a refusal names it.
+///
+/// On its own it reads with its article, `an anchor`; a refusal that
+/// negates it names the noun alone, `a section takes no anchor`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RequestPart {
+    Anchor,
+    Column,
+    Cursor,
+    Limit,
+}
+
+impl RequestPart {
+    /// The part's noun.
+    pub const fn noun(self) -> &'static str {
+        match self {
+            RequestPart::Anchor => "anchor",
+            RequestPart::Column => "column",
+            RequestPart::Cursor => "cursor",
+            RequestPart::Limit => "limit",
+        }
+    }
+
+    /// The indefinite article the noun takes.
+    pub const fn article(self) -> &'static str {
+        match self {
+            RequestPart::Anchor => "an",
+            RequestPart::Column | RequestPart::Cursor | RequestPart::Limit => "a",
+        }
+    }
+}
+
+impl std::fmt::Display for RequestPart {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} {}", self.article(), self.noun())
+    }
+}
+
 /// Why a read builder answered no page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum PageRefusal {
     /// The request filters by a fact the store keeps no index of.
     ///
-    /// A **dormant carrier** for the link index NORN-229 builds: `links` stores
+    /// A **dormant carrier** for the Layer 3 link index unit: `links` stores
     /// a link's target raw and unindexed, so no seek answers a `links_to` part,
     /// and nothing reaches the part's filter until that index stands. Until
     /// then no request naming one can be answered, and saying so is the answer.
     NotIndexed { fact: &'static str },
-    /// The request names a row column a find does not project yet.
+    /// The request names a document's links — the links column on a find's
+    /// row, or the links collection a get pages — which no read projects yet.
     ///
-    /// A **dormant carrier** for the resolved link column NORN-229 builds: the
-    /// store holds a document's link rows, but a find's row carries no link
-    /// column until the link index resolves what a link names, so no row
-    /// composition reads them yet.
-    NotProjected { column: &'static str },
+    /// A **dormant carrier** for the Layer 3 link index unit: the store holds
+    /// a document's link rows with each target raw and unresolved, so a link
+    /// row would name no document its target resolves to and read as broken
+    /// whatever the vault holds. No answer carries a link row until that unit
+    /// resolves what a link names.
+    NotProjected { part: &'static str },
     /// A value a comparing part names — an equality, an inequality, a
     /// membership or a `before`/`after` bound — on a key declared with a typed
     /// order does not read as that type, so it names no place in the key's
@@ -226,6 +299,35 @@ pub enum PageRefusal {
     OutOfBound { bound: ReadBound, given: usize },
     /// The request carries a part this build of the store does not know.
     UnknownPart { part: &'static str },
+    /// The target names more than one document.
+    AmbiguousTarget(Box<TargetAmbiguity>),
+    /// The target names no document.
+    UnknownTarget { target: ResolutionTarget },
+    /// The cursor names no position in the collection a get pages: it is no
+    /// collection's cursor, an ordinal cursor naming the findings, which are
+    /// paged by a finding's cursor, or a finding's at another path than the
+    /// document's.
+    ///
+    /// What sets the two cursors apart is what each carries. A finding's
+    /// cursor names the path it was minted at, so at another document's path
+    /// it names no position; an ordinal cursor names no document, so it
+    /// continues its collection at any document.
+    NotACollectionCursor,
+    /// The cursor was minted paging the collection `minted`, and the request
+    /// pages `paged`: each collection is its own row type, so a position in
+    /// one names no place in another.
+    CursorOfAnotherCollection {
+        minted: CollectionSelector,
+        paged: CollectionSelector,
+    },
+    /// The request carries `part`, which the answer it asks for — `answer` —
+    /// does not take: an anchor or a column on a collection page, a column on
+    /// a section or a block, or a cursor or a limit on anything but a
+    /// collection page.
+    PartNotTaken {
+        part: RequestPart,
+        answer: &'static str,
+    },
     /// The store refused a statement.
     Store(StoreError),
 }
@@ -236,9 +338,10 @@ impl std::fmt::Display for PageRefusal {
             PageRefusal::NotIndexed { fact } => {
                 write!(formatter, "the store keeps no index of {fact}")
             }
-            PageRefusal::NotProjected { column } => {
-                write!(formatter, "{column} is not yet projected onto a find's row")
-            }
+            PageRefusal::NotProjected { part } => write!(
+                formatter,
+                "{part} is not projected until the link index resolves what a link names"
+            ),
             PageRefusal::UnreadableBound { key, value } => write!(
                 formatter,
                 "`{value}` does not read as the type `{key}` is declared with"
@@ -294,12 +397,45 @@ impl std::fmt::Display for PageRefusal {
             PageRefusal::UnknownPart { part } => {
                 write!(formatter, "this store does not know {part}")
             }
+            PageRefusal::AmbiguousTarget(ambiguity) => write!(
+                formatter,
+                "`{}` names {} documents, and a get answers about one",
+                ambiguity.target,
+                ambiguity.head.total()
+            ),
+            PageRefusal::UnknownTarget { target } => {
+                write!(formatter, "`{target}` names no document")
+            }
+            PageRefusal::NotACollectionCursor => {
+                formatter.write_str("the cursor names no position in the collection paged")
+            }
+            PageRefusal::CursorOfAnotherCollection { minted, paged } => write!(
+                formatter,
+                "the cursor was minted paging a document's {}, and the request pages its {}",
+                collection_named(*minted),
+                collection_named(*paged)
+            ),
+            PageRefusal::PartNotTaken { part, answer } => {
+                write!(formatter, "{answer} takes no {}", part.noun())
+            }
             PageRefusal::Store(problem) => problem.fmt(formatter),
         }
     }
 }
 
 impl std::error::Error for PageRefusal {}
+
+/// A collection as a refusal names it.
+fn collection_named(selector: CollectionSelector) -> &'static str {
+    match selector {
+        CollectionSelector::Links => "links",
+        CollectionSelector::Headings => "headings",
+        CollectionSelector::Blocks => "block identifiers",
+        CollectionSelector::Tags => "tags",
+        CollectionSelector::Findings => "findings",
+        _ => "collection",
+    }
+}
 
 /// A schema fingerprint as a refusal names it: quoted, or "no schema".
 fn schema_named(fingerprint: Option<&str>) -> String {

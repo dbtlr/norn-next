@@ -60,6 +60,12 @@
 //!   conjunction compiled as a find compiles it, answering a page of hits in
 //!   score order with the path breaking a tie, each carrying the row its
 //!   columns name. [`Snapshot::search_plans`] explains what it ran.
+//! - [`Snapshot::get`] — the get builder: one document named by a
+//!   resolution target through the one resolver, answered as a find's row, as
+//!   the section or block its anchor names — read through the document reader
+//!   its caller hands it, since nothing here parses — or as one page of one
+//!   nested collection, and refused where the target names several documents
+//!   or none. [`Snapshot::get_plans`] explains what it ran.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -91,9 +97,10 @@
 //!   it: a tombstone is kept until something says otherwise.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
 //! - **The read shape no builder emits.** Nothing indexes a link's target,
-//!   so a find refuses a `links_to` part by name, and a find's row projects no
-//!   link column, so it refuses that column by name. Both refusals are dormant
-//!   carriers whose consumer is NORN-229, the task that builds the link index.
+//!   so a find refuses a `links_to` part by name, and no read resolves one, so
+//!   a find refuses the links column and a get refuses the links collection by
+//!   name. The refusals are dormant carriers whose consumer is the Layer 3 link
+//!   index unit.
 
 pub mod ddl;
 
@@ -107,6 +114,7 @@ mod faults;
 mod feed;
 mod fields;
 mod find;
+mod get;
 mod hash;
 mod increment;
 mod json;
@@ -136,11 +144,14 @@ pub use find::{
     BODY_ROW_CEILING, FIND_STATEMENTS, FindPlan, FindStatement, FindWork, Found,
     NESTED_ROW_CEILING, Nested, NestedRows, PageDirection,
 };
+pub use get::{
+    Collection, DocumentText, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, SectionAt,
+};
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use read::{
     DEFAULT_PAGE, FieldOrder, IN_VALUES_CEILING, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
-    ReadStatement,
+    ReadStatement, RequestPart, TargetAmbiguity,
 };
 // The open ceremony's own vocabulary, which is this crate's too: a store is
 // one client of that ceremony, and the rung a disagreement names is the same

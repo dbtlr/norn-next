@@ -146,7 +146,7 @@ pub use link::{
     BlockId, Link, LinkFamily, Resolution, parse_wikilinks_in_text, reconstruct_wikilink,
     splice_wikilinks_in_text, wikilink_target_is_representable,
 };
-pub use section::{SectionAddress, SectionError, SectionSpan};
+pub use section::{Duplicates, SectionAddress, SectionError, SectionSpan, resolve_section};
 pub use span::SourceSpan;
 pub use tag::Tag;
 pub use value::{Mapping, Value};

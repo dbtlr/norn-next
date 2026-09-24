@@ -483,6 +483,7 @@ dependencies = [
  "norn-db",
  "norn-store",
  "norn-testkit",
+ "norn-text",
  "norn-wire",
  "sha2",
 ]

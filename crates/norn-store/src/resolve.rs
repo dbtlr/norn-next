@@ -305,6 +305,24 @@ pub(crate) fn predicate(alias: &str, key: SuffixKey, ranges: usize, first: usize
     format!("({seeks}) AND {ADMITS_FUNCTION}(?{ignored}, ?{segments}, ?{order}, {alias}.path)")
 }
 
+/// The rows of `documents` a statement calls `dr` that are in `class`: the
+/// `FROM` and `WHERE` clauses every read of a class spells, its values numbered
+/// from `?1` in [`TargetClass::parameters`]'s order.
+pub(crate) fn class_rows(class: &TargetClass) -> String {
+    format!(
+        "FROM documents AS dr WHERE {}",
+        predicate("dr", class.probe().key(), class.probe().range_count(), 1)
+    )
+}
+
+/// The resolution ladder's order over the rows [`class_rows`] reads: the
+/// probed key, then the path. Total, because equal suffix keys are exactly
+/// what an ambiguity class is made of, and a ladder whose ties fell out in
+/// row-insertion order would reorder itself when a document is re-derived.
+pub(crate) fn ladder_order(class: &TargetClass) -> String {
+    format!("ORDER BY dr.{}, dr.path", class.probe().key().column())
+}
+
 /// Register the exclusion on `connection`, so every statement a resolution
 /// spells can call it: the writer's and every read snapshot's alike.
 ///

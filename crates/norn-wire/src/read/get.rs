@@ -24,7 +24,12 @@ use crate::document::{
 use crate::finding_row::FindingRow;
 use crate::target::ResolutionTarget;
 
-/// Which nested collection a request pages by ordinal.
+/// Which nested collection of one document a request pages.
+///
+/// Links, headings, block identifiers and tags are paged in document order by
+/// each row's position in its collection, and their cursor names the
+/// collection and the position. Findings are paged in `(kind, id)` order, and
+/// their cursor is a finding's.
 ///
 /// On the wire a selector is the flat string itself: `"links"`,
 /// `"headings"`.
@@ -153,8 +158,8 @@ pub enum GetReport {
         path: DocumentPath,
         /// The heading that opens it.
         heading: HeadingRow,
-        /// The section body, from the heading to the next one at its level or
-        /// above.
+        /// The section body, from the heading to the start of the line
+        /// holding the next one at its level or above.
         body: BodyText,
     },
     /// The block the target's block anchor named.

@@ -38,7 +38,7 @@
 //!
 //! **`limit` bounds the rows a page carries and nothing else.** Whichever row
 //! a verb pages — a document, a hit, a tally, a finding, a facet, or a row of
-//! the one nested collection a `get` pages by ordinal — the limit says how
+//! the one nested collection a `get` pages — the limit says how
 //! many of them come back. It never says how much of one row does: a nested
 //! collection carried *on* a row is bounded by the per-row ceiling the handler
 //! keeps and reports what it cut through

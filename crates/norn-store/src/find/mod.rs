@@ -172,6 +172,9 @@ use crate::read::{
 use crate::store::Snapshot;
 
 pub use hydrate::{BODY_ROW_CEILING, FindWork, NESTED_ROW_CEILING, NestedRows};
+pub(crate) use hydrate::{
+    block_row, bounded_body, heading_row, tag_row, wire_block, wire_heading, wire_span,
+};
 pub use statement::{FIND_STATEMENTS, FindStatement, Nested, PageDirection};
 use statement::{Section, SectionStart, compose_page};
 pub(crate) use statement::{
@@ -332,6 +335,18 @@ pub(crate) struct Projection<'a> {
 }
 
 impl<'a> Projection<'a> {
+    /// Every column a row can carry: every field, the body, each nested
+    /// collection a find projects, and the findings.
+    pub(crate) fn whole() -> Self {
+        Projection {
+            all_fields: true,
+            keys: Vec::new(),
+            body: true,
+            nested: Nested::ALL.to_vec(),
+            findings: true,
+        }
+    }
+
     /// What `columns` projects, or the refusal of a column the store keeps no
     /// index of.
     pub(crate) fn of(columns: &'a [Column]) -> Result<Self, PageRefusal> {
@@ -364,7 +379,7 @@ impl<'a> Projection<'a> {
                 }
                 Column::Links {} => {
                     return Err(PageRefusal::NotProjected {
-                        column: "the links column",
+                        part: "the links column",
                     });
                 }
                 Column::Findings {} => projection.findings = true,

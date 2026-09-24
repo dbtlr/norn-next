@@ -75,6 +75,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::base64url;
 use crate::finding::FindingKind;
+use crate::read::get::CollectionSelector;
 
 /// What a facet row is a facet of.
 ///
@@ -257,9 +258,14 @@ pub enum CursorKey {
         /// The facet's key.
         key: String,
     },
-    /// A row of a nested collection, paged by its position in that collection.
+    /// A row of one nested collection of a document, paged by its position
+    /// in that collection. The collection is part of the key, because each
+    /// collection is its own row type and its positions are its own order: a
+    /// position among a document's headings names no place among its tags.
     #[non_exhaustive]
     Ordinal {
+        /// The collection the page read.
+        of: CollectionSelector,
         /// The position the page stopped at.
         index: u64,
     },
@@ -306,9 +312,9 @@ impl CursorKey {
         }
     }
 
-    /// A nested collection stopped at `index`.
-    pub const fn ordinal(index: u64) -> Self {
-        CursorKey::Ordinal { index }
+    /// The nested collection `of` stopped at `index`.
+    pub const fn ordinal(of: CollectionSelector, index: u64) -> Self {
+        CursorKey::Ordinal { of, index }
     }
 }
 

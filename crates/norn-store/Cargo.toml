@@ -49,6 +49,14 @@ induced-failure = ["norn-db/induced-failure"]
 # the integration suite in `tests/` links against `norn-store` as an external
 # crate and needs the fenced seam the feature gates — the same reason a
 # feature-gated test module cannot simply live behind `#[cfg(test)]`.
+#
+# `norn-text` is a development dependency alone: a get reads a document's
+# sections and blocks through the reader its caller hands it (`DocumentText`),
+# and the suite hands it one over `norn-text`. That reader is a dormant carrier
+# for the host's get handler (NORN-230), which implements it over `norn-text`;
+# no handler calls a get yet, so the suite's is the only implementation. The
+# store itself parses nothing, so the normal edge stays absent.
 [dev-dependencies]
 norn-store = { path = ".", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }
+norn-text = { path = "../norn-text" }

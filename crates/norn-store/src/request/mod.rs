@@ -1688,7 +1688,7 @@ const DOCUMENT_LINKS_SQL: &str = "SELECT family, embed, protocol, target, title,
                  FROM links WHERE document = ?1 ORDER BY ordinal";
 
 /// The statement [`Request::stored_facts`] reads a document's headings with.
-const DOCUMENT_HEADINGS_SQL: &str =
+pub(crate) const DOCUMENT_HEADINGS_SQL: &str =
     "SELECT text, slug, level, span_line, span_column, span_offset, body_offset,
                         inside_container
                  FROM headings WHERE document = ?1 ORDER BY ordinal";
@@ -1784,11 +1784,10 @@ fn finding_id_parameters(chunk: &[i64]) -> impl Params + '_ {
 /// The statement [`Request::suffix_candidates`] emits for `resolution`: its
 /// ranges over the key it probes, its exclusion, and the ladder's order.
 fn suffix_candidates_sql(resolution: &TargetClass) -> String {
-    let key = resolution.probe().key();
     format!(
-        "SELECT dr.path FROM documents AS dr WHERE {} ORDER BY dr.{}, dr.path",
-        resolve::predicate("dr", key, resolution.probe().range_count(), 1),
-        key.column()
+        "SELECT dr.path {} {}",
+        resolve::class_rows(resolution),
+        resolve::ladder_order(resolution)
     )
 }
 
@@ -2422,7 +2421,7 @@ fn stored_class(row: &Row<'_>) -> Reading<(i64, ClassKey)> {
     })
 }
 
-fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
+pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
     let written: String = row.get(0)?;
     let Some(family) = LinkFamily::from_str(&written) else {
         return Ok(Err(unreadable("links.family", &written)));

@@ -193,3 +193,150 @@ fn a_block_reference_splits_the_same_way_in_both_families() {
     assert_eq!(wikilink.anchor, None);
     assert_eq!(markdown.anchor, None);
 }
+
+// ── The block a definition names ─────────────────────────────────────────
+
+/// The text of the block the definition `id` names in `body`.
+fn block_of<'a>(body: &'a str, id: &str) -> &'a str {
+    let scan = BodyScan::new(body);
+    let definition = scan
+        .block_ids()
+        .into_iter()
+        .find(|block| block.id == id)
+        .unwrap_or_else(|| panic!("no definition of `{id}` in {body:?}"));
+    &body[scan.block_extent(definition.span.byte_offset)]
+}
+
+/// A marker trailing a paragraph names the whole paragraph, every line of it,
+/// its trailing break left out.
+#[test]
+fn a_block_is_the_paragraph_its_marker_trails() {
+    let body = "intro\n\nfirst line\nsecond line ^para\n\nafter\n";
+    assert_eq!(block_of(body, "para"), "first line\nsecond line ^para");
+    assert_eq!(block_of("only ^solo", "solo"), "only ^solo");
+    let quoted = "> quoted line\n> more ^q\n\nafter\n";
+    assert_eq!(block_of(quoted, "q"), "quoted line\n> more ^q");
+}
+
+/// A marker in a list item names the item's own text, tight or loose, and
+/// never a sibling or a nested list.
+#[test]
+fn a_block_in_a_list_is_the_item_text_its_marker_trails() {
+    assert_eq!(
+        block_of("- one\n- two ^item\n- three\n", "item"),
+        "two ^item"
+    );
+    assert_eq!(
+        block_of("- one\n\n- two ^item\n\n- three\n", "item"),
+        "two ^item"
+    );
+    let nested = "- parent ^top\n  - child ^deep\n- sibling\n";
+    assert_eq!(block_of(nested, "top"), "parent ^top");
+    assert_eq!(block_of(nested, "deep"), "child ^deep");
+}
+
+/// A tight list item's own text starts at the item's first byte of text,
+/// whatever inline markup opens it: emphasis, a link, a code span, in a
+/// bulleted or an ordered list.
+#[test]
+fn a_block_in_a_list_item_opening_with_inline_markup_keeps_the_markup() {
+    for (body, id, held) in [
+        ("- **bold** ^b1\n", "b1", "**bold** ^b1"),
+        ("- *em* ^e1\n- other\n", "e1", "*em* ^e1"),
+        ("- [link](x.md) tail ^l1\n", "l1", "[link](x.md) tail ^l1"),
+        ("- `code` ^c1\n", "c1", "`code` ^c1"),
+        ("1. **bold** ^o1\n2. two\n", "o1", "**bold** ^o1"),
+        ("- one\n  - *deep* ^d1\n", "d1", "*deep* ^d1"),
+    ] {
+        assert_eq!(block_of(body, id), held, "for {body:?}");
+    }
+}
+
+/// The body is read as CommonMark with no extension, so a table is the
+/// paragraph its lines make, and a marker ending one of its rows names that
+/// paragraph: the whole table.
+#[test]
+fn a_marker_in_a_table_row_names_the_paragraph_the_table_is() {
+    let body = "intro\n\n| a | b |\n|---|---|\n| c | d | ^t\n\nafter\n";
+    assert_eq!(block_of(body, "t"), "| a | b |\n|---|---|\n| c | d | ^t");
+}
+
+/// A marker no leaf block holds — inside a raw HTML block — names the line it
+/// stands on.
+#[test]
+fn a_marker_in_an_html_block_names_its_line() {
+    assert_eq!(block_of("<div>\ntext ^hb\n</div>\n", "hb"), "text ^hb");
+}
+
+/// A marker names the leaf block it stands in, never a block around it or
+/// beside it: a heading inside a tight list item is its own block, and the
+/// item's text on either side of it is the item's.
+#[test]
+fn a_block_in_a_list_item_holding_a_heading_is_the_heading_or_the_text_beside_it() {
+    let body = "- intro\n  # H ^mx\n  tail ^tl\n";
+    assert_eq!(block_of(body, "mx"), "# H ^mx");
+    assert_eq!(block_of(body, "tl"), "tail ^tl");
+}
+
+/// A marker opening the line after a closing fence names the fenced block
+/// inside a container as outside one, the container's own prefix on its line
+/// between them: a block quote's `>`, a list item's indent. A marker in
+/// another container — a sibling item, a nested quote — or apart from the
+/// fence by a blank line names its own text.
+#[test]
+fn a_marker_after_a_closing_fence_in_a_container_names_the_fenced_block() {
+    for (body, id, held) in [
+        ("> ```\n> x\n> ```\n> ^qf\n", "qf", "```\n> x\n> ```"),
+        (
+            "- item\n  ```\n  x\n  ```\n  ^lf\n",
+            "lf",
+            "```\n  x\n  ```",
+        ),
+        ("- ```\n  x\n  ```\n- ^s\n", "s", "^s"),
+        ("> ```\n> x\n> ```\n> > ^nq\n", "nq", "^nq"),
+        ("> ```\n> x\n> ```\n>\n> ^gap\n", "gap", "^gap"),
+    ] {
+        assert_eq!(block_of(body, id), held, "for {body:?}");
+    }
+}
+
+/// A list item holding a fenced block answers the item's own text on either
+/// side of the fence, never the fence, and never a sibling.
+#[test]
+fn a_list_item_holding_a_fence_answers_its_own_text() {
+    let body = "- intro ^i\n  ```\n  x\n  ```\n  tail ^t\n- sib ^sib\n";
+    assert_eq!(block_of(body, "i"), "intro ^i");
+    assert_eq!(block_of(body, "t"), "tail ^t");
+    assert_eq!(block_of(body, "sib"), "sib ^sib");
+}
+
+/// A marker on the line after a closing fence names the fenced block, fences
+/// included; one anywhere else names the paragraph it is.
+#[test]
+fn a_marker_after_a_closing_fence_names_the_fenced_block() {
+    let body = "intro\n\n```rust\nfn main() {}\n```\n^code\n\nafter\n";
+    assert_eq!(block_of(body, "code"), "```rust\nfn main() {}\n```");
+    let apart = "```\nx\n```\n\n^loose\n";
+    assert_eq!(block_of(apart, "loose"), "^loose");
+    let trailing = "```\nx\n```\ntext ^pa\n";
+    assert_eq!(block_of(trailing, "pa"), "text ^pa");
+    // A no-break space is text, not the whitespace a marker-only line holds.
+    let nbsp = "```\nx\n```\n\u{a0}^nb\n";
+    assert_eq!(block_of(nbsp, "nb"), "\u{a0}^nb");
+}
+
+/// A heading carrying a marker is its own block.
+#[test]
+fn a_marker_on_a_heading_names_the_heading() {
+    assert_eq!(block_of("## Title ^h\nbody\n", "h"), "## Title ^h");
+}
+
+/// A body broken by lone CR names the same block its LF spelling does, at the
+/// same bytes: the parse normalizes the breaks without moving an offset.
+#[test]
+fn a_lone_cr_body_names_the_block_its_lf_spelling_names() {
+    let lf = "intro\n\nfirst\nsecond ^para\n\n- a\n- b ^item\n";
+    let cr = lf.replace('\n', "\r");
+    assert_eq!(block_of(&cr, "para"), "first\rsecond ^para");
+    assert_eq!(block_of(&cr, "item"), "b ^item");
+}

@@ -15,7 +15,8 @@ use crate::tag::is_mark;
 pub struct Heading {
     pub level: u8,
     /// The heading's text with inline markup flattened: `## Use \`norn\`` is
-    /// `Use norn`.
+    /// `Use norn`. It is trimmed of ASCII whitespace alone, so a no-break
+    /// space ending a heading is part of its text.
     pub text: String,
     /// The GFM anchor form of [`Heading::text`] — [`slugify`], plus the
     /// document-order suffix that tells repeated headings apart. This is what
