@@ -142,6 +142,13 @@ pub struct ProductionAttachment {
     /// control reads, write normalization, and shadow placement.
     covered_root: PathBuf,
     controls: ReloadCandidate,
+    /// Whether the engines are owed the config `controls` carries.
+    ///
+    /// It is set only where a leg holds controls it could not pin because
+    /// the store owes rung 3 first, and only for a declaration this build can
+    /// read. The rebuild that pins those controls delivers their config once
+    /// it succeeds, and every delivery clears it.
+    config_delivery_owed: bool,
     subscription: Option<Subscription>,
     store: Store,
     heal_observed: norn_fs::Batch,
@@ -202,6 +209,15 @@ impl ProductionAttachment {
     fn path_order_moved(&self) -> Option<RebuildReason> {
         self.proven_order()
             .and_then(|proven| self.store.path_order_moved(proven))
+    }
+
+    /// Hold the controls a leg read but cannot pin, because its store owes
+    /// rung 3 first. A readable declaration owes the engines its config at the
+    /// rebuild that pins it; an unreadable one pins nothing and delivers
+    /// nothing.
+    fn hold_for_rung_three(&mut self, candidate: ReloadCandidate) {
+        self.config_delivery_owed = candidate.undeclarable().is_none();
+        self.controls = candidate;
     }
 }
 
@@ -322,10 +338,17 @@ impl ProductionEntryOps {
         }
     }
 
-    fn dispatch_config(&self, vault: &VaultName, config: &norn_config::vault::VaultConfig) {
+    /// Deliver the config of the controls the attachment holds to every
+    /// engine receiver, which settles any delivery those controls were owed.
+    fn dispatch_config(&self, attachment: &mut ProductionAttachment) {
+        let config = attachment.controls.config();
         for receiver in &self.engine_config_receivers {
-            receiver.receive(vault, config.engine(receiver.name()));
+            receiver.receive(
+                &attachment.registration.name,
+                config.engine(receiver.name()),
+            );
         }
+        attachment.config_delivery_owed = false;
     }
 
     /// A handle on the account, for a caller that is about to give the ops away.
@@ -736,6 +759,7 @@ impl EntryOps for ProductionEntryOps {
             registration: registration.clone(),
             covered_root,
             controls: candidate.clone(),
+            config_delivery_owed: false,
             maintainership,
             store,
             subscription: Some(subscription),
@@ -765,7 +789,7 @@ impl EntryOps for ProductionEntryOps {
             Err(JobFailure::StoreDamaged(_)) => self.rung_three(attachment, progress),
             Err(failure) => Err(failure),
         }?;
-        self.dispatch_config(&registration.name, candidate.config());
+        self.dispatch_config(&mut attached);
         self.drain_semantic(&registration.name, &mut attached);
         Ok(attached)
     }
@@ -846,9 +870,10 @@ impl EntryOps for ProductionEntryOps {
         // nothing is pinned or derived into it and no read is served from it:
         // it owes rung 3, which discards it and derives the vault again under
         // the order this coverage proved, where the declaration read here
-        // lets it derive at all.
+        // lets it derive at all, and delivers that declaration's config once
+        // the rebuild has pinned it.
         if let Some(reason) = attachment.path_order_moved() {
-            attachment.controls = candidate;
+            attachment.hold_for_rung_three(candidate);
             return Err(JobFailure::StoreDamaged(reason.to_string()));
         }
         if candidate.undeclarable().is_some() {
@@ -861,7 +886,7 @@ impl EntryOps for ProductionEntryOps {
         }
         Self::pin_candidate(&mut attachment.store, &candidate)?;
         attachment.controls = candidate;
-        self.dispatch_config(&attachment.registration.name, attachment.controls.config());
+        self.dispatch_config(attachment);
         self.heal_under_coverage(attachment, progress)?;
         self.drain_semantic(name, attachment);
         Ok(())
@@ -890,16 +915,17 @@ impl EntryOps for ProductionEntryOps {
         // A store whose rows were derived under another order than the
         // coverage proved is neither pinned nor derived into here: it owes
         // rung 3, which derives the vault again under the proven order and
-        // under the declaration this reload read.
+        // under the declaration this reload read, and delivers that
+        // declaration's config once the rebuild has pinned it.
         if let Some(reason) = attachment.path_order_moved() {
-            attachment.controls = candidate;
+            attachment.hold_for_rung_three(candidate);
             return Err(JobFailure::StoreDamaged(reason.to_string()).into());
         }
         let schema_changed =
             candidate.fingerprints().schema != attachment.controls.fingerprints().schema;
         if !schema_changed {
-            self.dispatch_config(name, candidate.config());
             attachment.controls = candidate;
+            self.dispatch_config(attachment);
             self.drain_semantic(name, attachment);
             return Ok(ReloadOutcome::ConfigOnly);
         }
@@ -914,7 +940,7 @@ impl EntryOps for ProductionEntryOps {
             },
         )?;
         attachment.controls = candidate;
-        self.dispatch_config(name, attachment.controls.config());
+        self.dispatch_config(attachment);
         self.heal_under_coverage(attachment, progress)?;
         self.drain_semantic(name, attachment);
         Ok(ReloadOutcome::SchemaChanged)
@@ -999,11 +1025,16 @@ impl EntryOps for ProductionEntryOps {
         self.evidence.count_rebuild();
         let rebuilt = match attachment.maintainership.still_current() {
             Ok(true) => {
-                // The rebuilt store is a new epoch, which is exactly the
-                // reading a cursor must not sleep through: the drain's
-                // rescan reconciles and re-triages here, not at whenever the
-                // next leg happens to commit.
+                // Controls a recovery or reload held for this rung are pinned
+                // only once it succeeds, so their config reaches the engines
+                // here and never ahead of the pin. The rebuilt store is a new
+                // epoch, which is exactly the reading a cursor must not sleep
+                // through: the drain's rescan reconciles and re-triages here,
+                // not at whenever the next leg happens to commit.
                 self.rung_three(attachment, progress).map(|mut rebuilt| {
+                    if rebuilt.config_delivery_owed {
+                        self.dispatch_config(&mut rebuilt);
+                    }
                     self.drain_semantic(name, &mut rebuilt);
                     rebuilt
                 })
@@ -8114,6 +8145,182 @@ mod tests {
             foo_resolves_through(&mut attachment),
             foo_resolves_under(proven)
         );
+        ops.detach(&name, attachment);
+    }
+
+    /// Ops over the fixture whose one engine config receiver records every
+    /// `[engine.sample]` section it is delivered, with the config file holding
+    /// `value = 1`.
+    fn ops_recording_sample_config(
+        f: &Fixture,
+    ) -> (ProductionEntryOps, VaultName, Arc<RecordingEngineConfig>) {
+        write_sample_config(f, 1);
+        let receiver = Arc::new(RecordingEngineConfig {
+            name: "sample",
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let (ops, name) = f.ops(64);
+        (
+            ops.with_engine_config_receiver(receiver.clone()),
+            name,
+            receiver,
+        )
+    }
+
+    fn write_sample_config(f: &Fixture, value: i64) {
+        fs::write(
+            f.vault().join(".norn/config.toml"),
+            format!("[engine.sample]\nvalue = {value}\n"),
+        )
+        .unwrap();
+    }
+
+    /// The `value` of every section the receiver was delivered, in delivery
+    /// order.
+    fn delivered_sample_values(receiver: &RecordingEngineConfig) -> Vec<Option<i64>> {
+        receiver
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, section)| {
+                section
+                    .as_ref()
+                    .and_then(|section| section.table().get("value"))
+                    .and_then(|value| value.as_integer())
+            })
+            .collect()
+    }
+
+    /// Replace the attachment's store with one derived under the order its
+    /// coverage does not prove.
+    fn derive_under_the_other_order(
+        f: &Fixture,
+        mut attachment: ProductionAttachment,
+    ) -> ProductionAttachment {
+        attachment.store = attachment
+            .store
+            .discard_and_reopen(other_order(proven_order(f)))
+            .unwrap();
+        derive_stale_rows(&mut attachment.store);
+        attachment
+    }
+
+    /// **A recovery that owes rung 3 for the path order delivers the config it
+    /// read once, at the rung 3 that pins it.** The recovery holds the new
+    /// controls without pinning them, so the engines receive `value = 2` from
+    /// the rebuild, exactly once.
+    #[test]
+    fn a_recovery_owing_rung_three_for_the_path_order_delivers_its_config_at_the_rebuild() {
+        let f = Fixture::new("recover-order-moved-config");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name, receiver) = ops_recording_sample_config(&f);
+        let progress = ProgressReporter::disconnected();
+
+        let mut attachment =
+            derive_under_the_other_order(&f, ops.attach(&f.registration(), &progress).unwrap());
+        write_sample_config(&f, 2);
+
+        let failure = ops
+            .recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over a store derived under the other order");
+        assert!(
+            matches!(failure, JobFailure::StoreDamaged(_)),
+            "{failure:?}"
+        );
+        assert_eq!(
+            delivered_sample_values(&receiver),
+            [Some(1)],
+            "the recovery delivered config it had not pinned"
+        );
+
+        let attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 under the order the coverage proved");
+        assert_eq!(delivered_sample_values(&receiver), [Some(1), Some(2)]);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A reload that owes rung 3 for the path order delivers the config it
+    /// read once, at the rung 3 that pins it.**
+    #[test]
+    fn a_reload_owing_rung_three_for_the_path_order_delivers_its_config_at_the_rebuild() {
+        let f = Fixture::new("reload-order-moved-config");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name, receiver) = ops_recording_sample_config(&f);
+        let progress = ProgressReporter::disconnected();
+
+        let mut attachment =
+            derive_under_the_other_order(&f, ops.attach(&f.registration(), &progress).unwrap());
+        write_sample_config(&f, 2);
+
+        let failure = ops
+            .reload(&name, &mut attachment, &progress)
+            .expect_err("a reload over a store derived under the other order");
+        assert!(
+            matches!(
+                failure,
+                crate::EntryReloadFailure::Runtime(JobFailure::StoreDamaged(_))
+            ),
+            "{failure:?}"
+        );
+        assert_eq!(
+            delivered_sample_values(&receiver),
+            [Some(1)],
+            "the reload delivered config it had not pinned"
+        );
+
+        let attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 under the order the coverage proved");
+        assert_eq!(delivered_sample_values(&receiver), [Some(1), Some(2)]);
+        ops.detach(&name, attachment);
+    }
+
+    /// **Config held for a rung 3 that fails reaches no engine.** The rebuild
+    /// never pinned the controls the recovery held, so nothing is delivered
+    /// for them.
+    #[test]
+    fn config_held_for_a_rung_three_that_fails_is_never_delivered() {
+        let f = Fixture::new("recover-order-moved-config-failed");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name, receiver) = ops_recording_sample_config(&f);
+        let progress = ProgressReporter::disconnected();
+
+        let mut attachment =
+            derive_under_the_other_order(&f, ops.attach(&f.registration(), &progress).unwrap());
+        write_sample_config(&f, 2);
+        ops.recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over a store derived under the other order");
+        norn_store::induced_failure::corrupt_the_next_store_creation_at(attachment.store.path());
+
+        ops.rebuild(&name, attachment, &progress)
+            .err()
+            .expect("a rung 3 whose replacement store cannot be created");
+        assert_eq!(delivered_sample_values(&receiver), [Some(1)]);
+    }
+
+    /// **A rung 3 over controls the engines already hold delivers nothing.**
+    /// Damage met under standing controls is rebuilt under those same
+    /// controls, so the one delivery is the attach's.
+    #[test]
+    fn a_rung_three_under_delivered_controls_delivers_nothing_again() {
+        let f = Fixture::new("rebuild-delivered-config");
+        write_a_vault_of_documents(&f, 4);
+        let (ops, name, receiver) = ops_recording_sample_config(&f);
+        let progress = ProgressReporter::disconnected();
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        norn_store::induced_failure::execute_out_of_band(
+            &mut attachment.store,
+            "DROP TRIGGER documents_fts_delete; DELETE FROM documents",
+        )
+        .unwrap();
+
+        let attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 over a damaged store");
+        assert_eq!(delivered_sample_values(&receiver), [Some(1)]);
         ops.detach(&name, attachment);
     }
 

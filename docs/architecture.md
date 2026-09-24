@@ -1656,9 +1656,12 @@ a recovery from there; a demand after the schema is corrected re-reads it and re
 vault to service.
 
 The host dispatches the vault identity and each registered engine's optional config
-section. The receiving engine owns the section after dispatch. The parser ignores unknown
-top-level keys. The host silently ignores engine sections that have no registered
-receiver.
+section. A candidate's config is dispatched once, by the leg that makes the candidate active
+over a pinned declaration. A recovery or reload whose store owes a rebuild holds its
+candidate unpinned, and the rebuild dispatches the config after it pins the declaration. A
+declaration this build cannot read is never pinned, and its config is not dispatched. The
+receiving engine owns the section after dispatch. The parser ignores unknown top-level keys.
+The host silently ignores engine sections that have no registered receiver.
 
 The schema fingerprint alone decides whether Lane 1 runs. A config-only reload stays
 `Ready` and does not re-derive Lane 1. A schema change enters `Warming`, pins the new schema,
