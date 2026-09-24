@@ -5,10 +5,13 @@
 //! The builder is inherent methods on [`Snapshot`], as the find, count and
 //! validate builders are, so every statement it runs reads the one instant
 //! the snapshot was established at and is counted on the snapshot's own
-//! statement counter. **A get's work follows the one document it answers and
-//! the page it reads, never the vault**: the target's class is ranges of a
-//! suffix key index, and everything after it is read by the document's row id
-//! or its path. [`GetStatement`] names what each statement reads.
+//! statement counter. **A get's work follows the target's class, the one
+//! document it answers and the page it reads**: resolving the target reads
+//! the class its address opens — ranges of a suffix key index whose head
+//! sorts every document the ranges reach — so it costs the class, which grows
+//! with the vault only where the vault adds documents the target names.
+//! Everything after it is read by the document's row id or its path.
+//! [`GetStatement`] names what each statement reads.
 //!
 //! # A target names one document, or the get refuses
 //!
@@ -101,8 +104,8 @@ use crate::find::{
     wire_block, wire_heading, wire_span,
 };
 use crate::read::{
-    Lookups, PageRefusal, ReadFilter, ReadStatement, RequestPart, TargetAmbiguity, finding_base,
-    page_limit,
+    Lookups, PageRefusal, ReadFilter, ReadStatement, RequestPart, Stepped, TargetAmbiguity,
+    finding_base, page_limit,
 };
 use crate::request::{Reading, stored_block, stored_heading, stored_link, unreadable};
 use crate::resolve::TargetClass;
@@ -189,6 +192,26 @@ pub struct GetWork {
     pub vm_steps: u64,
 }
 
+impl GetWork {
+    /// The work of one statement SQLite counted `stepped` for.
+    fn of(stepped: Stepped) -> Self {
+        let mut work = GetWork {
+            statements: 1,
+            ..GetWork::default()
+        };
+        work.add(stepped);
+        work
+    }
+
+    /// Add what SQLite counted stepping one statement, leaving the statement
+    /// count to the caller.
+    fn add(&mut self, stepped: Stepped) {
+        self.full_scan_steps += stepped.full_scan_steps;
+        self.sorts += stepped.sorts;
+        self.vm_steps += stepped.vm_steps;
+    }
+}
+
 /// A statement a get ran, with the plan SQLite reported for the text and the
 /// values it ran with.
 #[derive(Clone, Debug)]
@@ -199,6 +222,9 @@ pub struct GetPlan {
     /// The filters the statement narrows by: a get's narrow by none.
     pub filters: Vec<ReadFilter>,
     pub plan: EmittedPlan,
+    /// What SQLite counted stepping the statement as the get ran it, one
+    /// statement's [`GetWork`]: the work of a get it refused is read here.
+    pub work: GetWork,
 }
 
 /// What a request asks of its one document.
@@ -341,11 +367,18 @@ impl Snapshot {
             Ok(_) | Err(PageRefusal::AmbiguousTarget(_) | PageRefusal::UnknownTarget { .. }) => {}
             Err(refusal) => return Err(refusal),
         }
+        let mut stepped = lookups
+            .ran
+            .iter()
+            .map(|ran| ran.stepped)
+            .collect::<Vec<_>>()
+            .into_iter();
         Ok(
             self.explained(lookups.ran, |statement, filters, plan| GetPlan {
                 statement,
                 filters,
                 plan,
+                work: GetWork::of(stepped.next().unwrap_or_default()),
             })?,
         )
     }
@@ -410,9 +443,7 @@ impl Snapshot {
             ..GetWork::default()
         };
         for ran in &lookups.ran {
-            work.full_scan_steps += ran.stepped.full_scan_steps;
-            work.sorts += ran.stepped.sorts;
-            work.vm_steps += ran.stepped.vm_steps;
+            work.add(ran.stepped);
         }
         Ok(Gotten {
             report,

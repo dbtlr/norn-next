@@ -956,8 +956,11 @@ probes; the document's headings and its block definition, seeks of their
 `(document, ordinal)` indexes at the document; its body, by row id; a collection's page, a
 seek of its `(document, ordinal)` index from the cursor's ordinal; and the findings' page, a
 seek of `findings_path` at the document's path and the active fingerprint from the cursor's
-kind. A work bar reads the SQLite counters of every statement a get ran over two vault
-sizes: every shape costs the same at both.
+kind. Resolving a target costs its class: the head sorts every document the class's ranges
+reach, so the class grows with the vault only where the vault adds documents the target
+names. A work bar reads the SQLite counters of every statement a get ran over two vault
+sizes whose classes did not grow: every shape costs the same at both, an ambiguous target's
+refusal among them.
 
 **Links-to carries no bar**: no builder emits it, and a find refuses a links-to part by
 name, because the link index it would filter by does not exist. The count shape carries

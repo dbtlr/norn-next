@@ -11,9 +11,10 @@ use std::sync::Arc;
 
 use norn_store::{
     BODY_ROW_CEILING, BlockFact, Collection, ContentModel, DocumentFacts, DocumentText,
-    FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, Gotten, HeadingFact, LinkFact, LinkFamily,
-    NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, RequestPart, SectionAt, Snapshot,
-    SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity, induced_failure,
+    FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, HeadingFact, LinkFact,
+    LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, RequestPart, SectionAt,
+    Snapshot, SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity,
+    induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
@@ -759,7 +760,7 @@ fn a_block_anchor_answers_its_block_or_reports_it_missing() {
 const HELD: usize = 5;
 
 /// A vault whose `paged.md` holds [`HELD`] rows of every collection, beside
-/// `bulk` more documents.
+/// two documents the target `twin` names and `bulk` more documents.
 fn paged_vault(label: &str, bulk: usize) -> Vault {
     let body: String = (0..HELD)
         .map(|at| format!("## Heading {at}\npara {at} ^b{at}\n\n"))
@@ -788,7 +789,12 @@ fn paged_vault(label: &str, bulk: usize) -> Vault {
             span: None,
         })
         .collect();
-    let mut documents = vec![paged, document("other.md", "hash-other", "o\n")];
+    let mut documents = vec![
+        paged,
+        document("other.md", "hash-other", "o\n"),
+        document("a/twin.md", "hash-twin-a", "a\n"),
+        document("b/twin.md", "hash-twin-b", "b\n"),
+    ];
     documents.extend((0..bulk).map(|at| {
         document(
             &format!("bulk/{at:04}.md"),
@@ -1123,12 +1129,16 @@ fn a_part_the_answer_does_not_take_is_refused() {
 
 // ---- the work bar ----
 
-/// **A get's work follows the one document it answers and the page it reads,
-/// not the vault**: every shape, over a vault four hundred documents larger,
-/// runs the same statements and SQLite counts the same work stepping them.
+/// **A get's work follows the target's class, the one document it answers
+/// and the page it reads, not the vault**: every shape, over a vault four
+/// hundred documents larger whose classes did not grow, runs the same
+/// statements and SQLite counts the same work stepping them — an ambiguous
+/// target's refusal among them, read off the statements its plans ran.
 ///
-/// Control: a find paging the whole vault, read by the same kind of counters,
-/// grows with it, so the counters see a vault's size where a read pays it.
+/// Controls: the plans of a get count the work the get counts, so the
+/// refusal's work is read by the same measure; a find paging the whole vault,
+/// read by the same kind of counters, grows with it, so the counters see a
+/// vault's size where a read pays it.
 #[test]
 fn a_gets_work_follows_its_document_not_the_vault() {
     let small = paged_vault("get-work-small", 0);
@@ -1149,7 +1159,16 @@ fn a_gets_work_follows_its_document_not_the_vault() {
         let (at_small, at_large) = (small.get(&params).work, large.get(&params).work);
         assert_eq!(at_small, at_large, "{params:?}");
         assert!(at_small.statements > 0);
+        assert_eq!(planned_work(&small, &params), at_small, "{params:?}");
     }
+    let ambiguous = getting("twin#Heading");
+    assert!(matches!(
+        small.refusal(&ambiguous),
+        PageRefusal::AmbiguousTarget(_)
+    ));
+    let at_small = planned_work(&small, &ambiguous);
+    assert_eq!(at_small, planned_work(&large, &ambiguous));
+    assert!(at_small.statements > 0 && at_small.vm_steps > 0);
 
     let paging = FindParams::new(address()).with_limit(500);
     let work = |vault: &Vault| {
@@ -1161,6 +1180,20 @@ fn a_gets_work_follows_its_document_not_the_vault() {
             .page_vm_steps
     };
     assert!(work(&large) > work(&small));
+}
+
+/// The work the statements a get of `params` ran counted, summed, read off
+/// its plans.
+fn planned_work(vault: &Vault, params: &GetParams) -> GetWork {
+    vault
+        .plans(params)
+        .iter()
+        .fold(GetWork::default(), |sum, plan| GetWork {
+            statements: sum.statements + plan.work.statements,
+            full_scan_steps: sum.full_scan_steps + plan.work.full_scan_steps,
+            sorts: sum.sorts + plan.work.sorts,
+            vm_steps: sum.vm_steps + plan.work.vm_steps,
+        })
 }
 
 // ---- the plan bars ----
