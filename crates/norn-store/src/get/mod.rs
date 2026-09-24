@@ -60,8 +60,13 @@
 //! # A collection page is a keyset page by ordinal
 //!
 //! One nested collection — links, headings, block definitions or tags — is
-//! paged in document order by its ordinal, with the ordinal the page stopped
-//! at as its cursor ([`norn_wire::CursorKey::Ordinal`]). The findings
+//! paged in document order by its ordinal, with the collection and the
+//! ordinal the page stopped at as its cursor
+//! ([`norn_wire::CursorKey::Ordinal`]). Each collection is its own row type,
+//! so a cursor minted paging one refuses on another
+//! ([`PageRefusal::CursorOfAnotherCollection`]); within one, the order is
+//! total, so a cursor continues the same collection of any document from its
+//! position, and one past the last row answers an empty page. The findings
 //! standing over the document are paged in `(kind, id)` order at its path, the
 //! order a find's findings column and a validate read them in at one path,
 //! with a finding's cursor ([`norn_wire::CursorKey::Finding`]). Either reads
@@ -240,6 +245,9 @@ impl<'a> Shape<'a> {
 
 /// One page of one collection a get pages by ordinal.
 struct OrdinalPage<'a> {
+    /// The collection as the request named it, which the next page's cursor
+    /// names.
+    selector: CollectionSelector,
     collection: Collection,
     document: i64,
     limit: usize,
@@ -270,7 +278,8 @@ impl Snapshot {
     /// states; a declaration read from another schema than the snapshot pins;
     /// a page bound outside `1..=`[`crate::MAX_PAGE`]; a projected column the
     /// store does not project yet; a cursor that names no position in the
-    /// collection paged, or that the snapshot's reading refuses; and a part
+    /// collection paged, that was minted paging another collection, or that
+    /// the snapshot's reading refuses; and a part
     /// the answer asked for does not take ([`PageRefusal::PartNotTaken`]).
     pub fn get(
         &self,
@@ -605,8 +614,9 @@ impl Snapshot {
                 });
             }
         };
-        let (after, moved) = self.ordinal_after(after, lookups)?;
+        let (after, moved) = self.ordinal_after(selector, after, lookups)?;
         let page = OrdinalPage {
+            selector,
             collection,
             document: named.document,
             limit,
@@ -633,18 +643,30 @@ impl Snapshot {
         })
     }
 
-    /// Where an ordinal page continues from, and what moved since its cursor
-    /// was minted; a first page starts at the first row and nothing moved.
+    /// Where a page of `paged` continues from, and what moved since its
+    /// cursor was minted; a first page starts at the first row and nothing
+    /// moved. A cursor minted paging another collection is refused.
     fn ordinal_after(
         &self,
+        paged: CollectionSelector,
         after: Option<&Cursor>,
         lookups: &mut Lookups,
     ) -> Result<(Option<i64>, Vec<norn_wire::Moved>), PageRefusal> {
         let Some(cursor) = after else {
             return Ok((None, Vec::new()));
         };
-        let CursorKey::Ordinal { index, .. } = cursor.key() else {
-            return Err(PageRefusal::NotACollectionCursor);
+        let index = match cursor.key() {
+            CursorKey::Ordinal { of, index, .. } if *of == paged => index,
+            CursorKey::Ordinal { of, .. } => {
+                return Err(PageRefusal::CursorOfAnotherCollection { minted: *of, paged });
+            }
+            CursorKey::Finding { .. } => {
+                return Err(PageRefusal::CursorOfAnotherCollection {
+                    minted: CollectionSelector::Findings,
+                    paged,
+                });
+            }
+            _ => return Err(PageRefusal::NotACollectionCursor),
         };
         let index = i64::try_from(*index).map_err(|_| PageRefusal::NotACollectionCursor)?;
         let moved = self.judge_reading(cursor, None, false, lookups)?;
@@ -683,7 +705,7 @@ impl Snapshot {
         let next = read.next.map(|(ordinal, _)| {
             Cursor::new(
                 page.snapshot.clone(),
-                CursorKey::ordinal(u64::try_from(ordinal).unwrap_or_default()),
+                CursorKey::ordinal(page.selector, u64::try_from(ordinal).unwrap_or_default()),
             )
         });
         Ok((read.rows.into_iter().map(|(_, item)| item).collect(), next))
@@ -705,8 +727,15 @@ impl Snapshot {
         let (resume, moved) = match after {
             None => (None, Vec::new()),
             Some(cursor) => {
-                let CursorKey::Finding { kind, path, id, .. } = cursor.key() else {
-                    return Err(PageRefusal::NotACollectionCursor);
+                let (kind, path, id) = match cursor.key() {
+                    CursorKey::Finding { kind, path, id, .. } => (kind, path, id),
+                    CursorKey::Ordinal { of, .. } => {
+                        return Err(PageRefusal::CursorOfAnotherCollection {
+                            minted: *of,
+                            paged: CollectionSelector::Findings,
+                        });
+                    }
+                    _ => return Err(PageRefusal::NotACollectionCursor),
                 };
                 if *path != named.path {
                     return Err(PageRefusal::NotACollectionCursor);

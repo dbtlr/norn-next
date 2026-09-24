@@ -380,8 +380,17 @@ fn cursor_keys() -> Vec<CursorKey> {
         CursorKey::hit(score(0.5), "notes/a.md"),
         CursorKey::tally([Some("note".to_string()), None]),
         CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", 7),
-        CursorKey::ordinal(3),
     ];
+    keys.extend(
+        [
+            CollectionSelector::Links,
+            CollectionSelector::Headings,
+            CollectionSelector::Blocks,
+            CollectionSelector::Tags,
+        ]
+        .into_iter()
+        .map(|of| CursorKey::ordinal(of, 3)),
+    );
     keys.extend(
         facet_kinds()
             .into_iter()
@@ -403,7 +412,7 @@ fn cursors() -> Vec<Cursor> {
         .collect();
     cursors.push(Cursor::new(
         Snapshot::new("epoch-1", 0, None, None),
-        CursorKey::ordinal(0),
+        CursorKey::ordinal(CollectionSelector::Tags, 0),
     ));
     cursors
 }
@@ -2503,9 +2512,12 @@ fn a_cursor_is_one_opaque_string_a_client_passes_back_unchanged() {
 fn a_cursor_spelled_any_other_way_names_no_position() {
     let canonical = concat!(
         r#"{"snapshot":{"epoch":"e","generation":1,"schema_fingerprint":null,"#,
-        r#""sidecar_revision":null},"key":{"row":"ordinal","index":3}}"#
+        r#""sidecar_revision":null},"key":{"row":"ordinal","of":"headings","index":3}}"#
     );
-    let minted = Cursor::new(Snapshot::new("e", 1, None, None), CursorKey::ordinal(3));
+    let minted = Cursor::new(
+        Snapshot::new("e", 1, None, None),
+        CursorKey::ordinal(CollectionSelector::Headings, 3),
+    );
     assert_eq!(
         serde_json::from_str::<Cursor>(&opaque(canonical.as_bytes()))
             .expect("the canonical spelling reads"),
@@ -2518,15 +2530,15 @@ fn a_cursor_spelled_any_other_way_names_no_position() {
         // An extra field the fields do not hold.
         concat!(
             r#"{"snapshot":{"epoch":"e","generation":1,"schema_fingerprint":null,"#,
-            r#""sidecar_revision":null},"key":{"row":"ordinal","index":3},"page":2}"#
+            r#""sidecar_revision":null},"key":{"row":"ordinal","of":"headings","index":3},"page":2}"#
         ),
         // The same fields in another order.
         concat!(
-            r#"{"key":{"row":"ordinal","index":3},"snapshot":{"epoch":"e","#,
+            r#"{"key":{"row":"ordinal","of":"headings","index":3},"snapshot":{"epoch":"e","#,
             r#""generation":1,"schema_fingerprint":null,"sidecar_revision":null}}"#
         ),
         // The optional parts left out rather than written null.
-        r#"{"snapshot":{"epoch":"e","generation":1},"key":{"row":"ordinal","index":3}}"#,
+        r#"{"snapshot":{"epoch":"e","generation":1},"key":{"row":"ordinal","of":"headings","index":3}}"#,
     ];
     for spelling in lax {
         let read = serde_json::from_str::<Cursor>(&opaque(spelling.as_bytes()));
@@ -2629,7 +2641,7 @@ fn norn_wire_test_base64(bytes: &[u8]) -> String {
 fn minted() -> Cursor {
     Cursor::new(
         Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4)),
-        CursorKey::ordinal(1),
+        CursorKey::ordinal(CollectionSelector::Headings, 1),
     )
 }
 
@@ -2693,7 +2705,7 @@ fn a_sidecar_moves_with_its_revision_and_with_its_epoch() {
 fn a_cursor_that_read_no_sidecar_reports_nothing_about_one() {
     let without = Cursor::new(
         Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), None),
-        CursorKey::ordinal(1),
+        CursorKey::ordinal(CollectionSelector::Headings, 1),
     );
     for revision in [None, Some(4)] {
         assert_eq!(
@@ -2732,7 +2744,7 @@ fn a_continuation_reports_every_part_in_one_fixed_order() {
 fn a_changed_order_refuses_the_continuation() {
     let typed = Cursor::new(
         Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), None),
-        CursorKey::ordinal(1),
+        CursorKey::ordinal(CollectionSelector::Headings, 1),
     );
     assert_eq!(
         typed.continuation(&Snapshot::new(
@@ -2757,7 +2769,7 @@ fn a_changed_order_refuses_the_continuation() {
 fn a_raw_order_never_changes() {
     let raw = Cursor::new(
         Snapshot::new("epoch-1", 12, None, None),
-        CursorKey::ordinal(1),
+        CursorKey::ordinal(CollectionSelector::Headings, 1),
     );
     for fingerprint in [None, Some("fp-1".to_string()), Some("fp-2".to_string())] {
         assert_eq!(
@@ -2778,7 +2790,7 @@ fn a_page_carries_its_rows_its_continuation_and_what_moved() {
 
     let cursor = Cursor::new(
         Snapshot::new("epoch-1", 1, None, None),
-        CursorKey::ordinal(1),
+        CursorKey::ordinal(CollectionSelector::Headings, 1),
     );
     let continued: Page<String> = Page::new(
         vec!["a".to_string()],

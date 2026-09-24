@@ -910,9 +910,10 @@ fn a_link_row_carries_the_facts_the_store_holds() {
 }
 
 /// **A cursor names a position in the collection it was minted in**: an
-/// ordinal continues a collection paged by ordinal, and a finding's cursor
-/// continues the findings at the document's own path. Anything else is
-/// refused.
+/// ordinal continues the collection it names, and a finding's cursor
+/// continues the findings at the document's own path. A cursor minted paging
+/// one collection refuses on another, naming both; anything else is refused
+/// as no position in the collection paged.
 #[test]
 fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
     let vault = paged_vault("get-cursors", 0);
@@ -925,12 +926,47 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
         .1
         .expect("a next page")
     };
-    let ordinal = first(CollectionSelector::Headings);
+    let headings = first(CollectionSelector::Headings);
     let finding = first(CollectionSelector::Findings);
-    let snapshot = ordinal.snapshot().clone();
+    let snapshot = headings.snapshot().clone();
+    for (paged, cursor, minted) in [
+        (
+            CollectionSelector::Blocks,
+            &headings,
+            CollectionSelector::Headings,
+        ),
+        (
+            CollectionSelector::Tags,
+            &headings,
+            CollectionSelector::Headings,
+        ),
+        (
+            CollectionSelector::Findings,
+            &headings,
+            CollectionSelector::Headings,
+        ),
+        (
+            CollectionSelector::Tags,
+            &finding,
+            CollectionSelector::Findings,
+        ),
+        (
+            CollectionSelector::Headings,
+            &first(CollectionSelector::Tags),
+            CollectionSelector::Tags,
+        ),
+    ] {
+        assert_eq!(
+            vault.refusal(
+                &getting("paged")
+                    .with_collection(paged)
+                    .with_after(cursor.clone())
+            ),
+            PageRefusal::CursorOfAnotherCollection { minted, paged },
+            "{paged:?}"
+        );
+    }
     for (selector, cursor) in [
-        (CollectionSelector::Findings, ordinal.clone()),
-        (CollectionSelector::Tags, finding.clone()),
         (
             CollectionSelector::Findings,
             Cursor::new(
@@ -939,7 +975,7 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
             ),
         ),
         (
-            CollectionSelector::Links,
+            CollectionSelector::Tags,
             Cursor::new(snapshot, CursorKey::document(None, "paged.md")),
         ),
     ] {
@@ -953,6 +989,47 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
             "{selector:?}"
         );
     }
+}
+
+/// **An ordinal cursor continues its collection positionally**: minted on
+/// one document's headings, it continues another document's headings from
+/// the same position, as every builder's cursor continues its row type's
+/// order, and an ordinal past the last row answers an empty last page.
+#[test]
+fn an_ordinal_cursor_continues_its_collection_by_position() {
+    let body: String = (0..HELD).map(|at| format!("## Heading {at}\n")).collect();
+    let vault = Vault::holding(
+        "get-ordinal-position",
+        Sensitive,
+        &[
+            parsed("one.md", &body),
+            parsed("two.md", &body.to_uppercase()),
+        ],
+    );
+    let texts = |gotten: &Gotten| -> Vec<String> {
+        let GetReport::Collection {
+            page: CollectionPage::Headings { page, .. },
+            ..
+        } = &gotten.report
+        else {
+            panic!("a headings page answered {:?}", gotten.report);
+        };
+        page.rows.iter().map(|row| row.text.clone()).collect()
+    };
+    let headings = |at: &str| getting(at).with_collection(CollectionSelector::Headings);
+    let first = vault.get(&headings("one").with_limit(2));
+    let (_, next) = page_of(&first.report);
+    let cursor = next.expect("a next page");
+    let continued = vault.get(&headings("two").with_after(cursor.clone()));
+    assert_eq!(texts(&continued), ["HEADING 2", "HEADING 3", "HEADING 4"]);
+
+    let past = Cursor::new(
+        cursor.snapshot().clone(),
+        CursorKey::ordinal(CollectionSelector::Headings, 99),
+    );
+    let beyond = vault.get(&headings("one").with_after(past));
+    assert!(texts(&beyond).is_empty());
+    assert!(page_of(&beyond.report).1.is_none());
 }
 
 /// **A part the answer asked for does not take is refused by name**: an

@@ -11,9 +11,9 @@ use norn_store::{
     TagFact, TagSource, Validation,
 };
 use norn_wire::{
-    BlockRow, Column, Cursor, CursorKey, CursorOrderChanged, Direction, FieldValue, FindParams,
-    FindingKind, Moved, Predicate, Snapshot as WireSnapshot, Sort, SortKey, TagRow, Unsatisfied,
-    ValidateParams, VaultAddress, VaultName,
+    BlockRow, CollectionSelector, Column, Cursor, CursorKey, CursorOrderChanged, Direction,
+    FieldValue, FindParams, FindingKind, Moved, Predicate, Snapshot as WireSnapshot, Sort, SortKey,
+    TagRow, Unsatisfied, ValidateParams, VaultAddress, VaultName,
 };
 
 use crate::common::{Scratch, ambiguity, document, unread_block, violation, write_documents};
@@ -420,7 +420,7 @@ fn a_cursor_among_other_rows_is_refused() {
     let seeded = Seeded::new("find-cursor-other-rows");
     let cursor = Cursor::new(
         WireSnapshot::new(seeded.snapshot().epoch(), 1, None, None),
-        CursorKey::ordinal(3),
+        CursorKey::ordinal(CollectionSelector::Headings, 3),
     );
     assert_eq!(
         seeded

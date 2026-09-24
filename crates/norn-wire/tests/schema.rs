@@ -1108,6 +1108,15 @@ fn a_cursor_key_advertises_its_row_tag() {
         property_names(document),
         ["row", "sort", "path"].into_iter().collect()
     );
+    let ordinal = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "row") == Some("ordinal"))
+        .expect("the ordinal branch");
+    assert_eq!(
+        property_names(ordinal),
+        ["row", "of", "index"].into_iter().collect(),
+        "an ordinal names the collection it pages"
+    );
     let hit = branches(&schema)
         .iter()
         .find(|branch| tag_constant(branch, "row") == Some("hit"))

@@ -30,7 +30,7 @@ mod reading;
 mod run;
 mod suggest;
 
-use norn_wire::{CandidateHead, CursorOrderChanged, Hint, ResolutionTarget};
+use norn_wire::{CandidateHead, CollectionSelector, CursorOrderChanged, Hint, ResolutionTarget};
 
 use crate::count::CountStatement;
 use crate::describe::DescribeStatement;
@@ -257,9 +257,17 @@ pub enum PageRefusal {
     AmbiguousTarget(Box<TargetAmbiguity>),
     /// The target names no document.
     UnknownTarget { target: ResolutionTarget },
-    /// The cursor names no position in the collection a get pages: it is not
-    /// an ordinal, or not a finding's at the document's path.
+    /// The cursor names no position in the collection a get pages: it is no
+    /// collection's cursor, or a finding's at another path than the
+    /// document's.
     NotACollectionCursor,
+    /// The cursor was minted paging the collection `minted`, and the request
+    /// pages `paged`: each collection is its own row type, so a position in
+    /// one names no place in another.
+    CursorOfAnotherCollection {
+        minted: CollectionSelector,
+        paged: CollectionSelector,
+    },
     /// The request carries `part`, which the answer it asks for — `answer` —
     /// does not take: an anchor or a column on a collection page, a column on
     /// a section or a block, or a cursor on anything but a collection page.
@@ -347,6 +355,12 @@ impl std::fmt::Display for PageRefusal {
             PageRefusal::NotACollectionCursor => {
                 formatter.write_str("the cursor names no position in the collection paged")
             }
+            PageRefusal::CursorOfAnotherCollection { minted, paged } => write!(
+                formatter,
+                "the cursor was minted paging a document's {}, and the request pages its {}",
+                collection_named(*minted),
+                collection_named(*paged)
+            ),
             PageRefusal::PartNotTaken { part, answer } => {
                 write!(
                     formatter,
@@ -360,6 +374,18 @@ impl std::fmt::Display for PageRefusal {
 }
 
 impl std::error::Error for PageRefusal {}
+
+/// A collection as a refusal names it.
+fn collection_named(selector: CollectionSelector) -> &'static str {
+    match selector {
+        CollectionSelector::Links => "links",
+        CollectionSelector::Headings => "headings",
+        CollectionSelector::Blocks => "block identifiers",
+        CollectionSelector::Tags => "tags",
+        CollectionSelector::Findings => "findings",
+        _ => "collection",
+    }
+}
 
 /// A schema fingerprint as a refusal names it: quoted, or "no schema".
 fn schema_named(fingerprint: Option<&str>) -> String {
