@@ -1321,7 +1321,7 @@
       "name": "set-valued-answers-are-pushed-down",
       "kind": "defect-class",
       "venue": 3,
-      "property": "Cardinality, grouping and distinct-value answers execute as aggregate SQL with zero document rows hydrated, and their cost follows the index entries they read — the distinct keys a distinct-value page reaches, the entries a tally counts — and never the body bytes of the documents they answer about. Counting by hydrating every match and taking the length, and folding folder names out of fully hydrated documents, are the same defect.",
+      "property": "Cardinality, grouping and distinct-value answers execute as aggregate SQL with zero document rows hydrated, and their cost follows the index entries they read — the distinct keys a distinct-value page reaches, the entries a tally counts — and never the body bytes of the documents they answer about: no statement they run reads a document's body or frontmatter. Counting by hydrating every match and taking the length, and folding folder names out of fully hydrated documents, are the same defect.",
       "sources": ["NRN-a59", "NRN-a60", "NRN-a62", "NRN-a58"],
       "binding": {
         "status": "bound",
@@ -1329,11 +1329,14 @@
           "crates/norn-store/tests/store/describe.rs::an_observed_field_page_walks_the_presence_index_key_by_key",
           "crates/norn-store/tests/store/describe.rs::an_observed_field_pages_work_follows_the_keys_it_pages",
           "crates/norn-store/tests/store/describe.rs::a_declared_section_adds_no_statement_work_to_a_page",
+          "crates/norn-store/tests/store/describe.rs::no_statement_a_describe_runs_reads_a_documents_payload",
           "crates/norn-store/tests/store/count.rs::a_counts_work_does_not_follow_the_body_bytes_it_counts",
+          "crates/norn-store/tests/store/count.rs::no_statement_a_count_runs_reads_a_documents_payload",
           "crates/norn-store/tests/store/count.rs::an_ungrouped_count_counts_the_documents_or_reaches_them_by_its_filters_seek",
           "crates/norn-store/tests/store/count.rs::a_valued_section_seeks_its_leading_index_from_the_pages_position",
           "crates/norn-store/tests/store/count.rs::a_null_lead_section_probes_each_document_for_its_leading_key_by_the_document",
-          "crates/norn-store/tests/store/validate.rs::a_summary_aggregates_over_the_kind_and_severity_index"
+          "crates/norn-store/tests/store/validate.rs::a_summary_aggregates_over_the_kind_and_severity_index",
+          "crates/norn-store/tests/store/validate.rs::no_statement_a_validate_runs_reads_a_documents_payload"
         ]
       }
     },

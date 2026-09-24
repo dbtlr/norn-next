@@ -743,9 +743,11 @@ fn an_observed_field_page_walks_the_presence_index_key_by_key() {
 /// of 64-byte bodies, and beside 1000 more of 16 KiB bodies of which 200 each
 /// carry a key of their own, a page of two observed fields runs the same
 /// statements and the same VM steps, reads the same facets, steps through no
-/// full scan and sorts nothing: neither the documents carrying a key, nor
-/// their bodies, nor the keys past the page are read. A page of three reads
-/// more than a page of one, because it reaches more keys.
+/// full scan and sorts nothing: neither the documents carrying a key nor the
+/// keys past the page are read. A page of three reads more than a page of one,
+/// because it reaches more keys. The counters count a statement's steps and
+/// not the bytes a step reads, so that no statement reads a body is
+/// [`no_statement_a_describe_runs_reads_a_documents_payload`]'s to hold.
 ///
 /// Control: `document_fields_presence` dropped on the larger vault, the page
 /// reads the rows the documents carry, and the bar fails.

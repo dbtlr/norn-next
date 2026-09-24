@@ -1487,7 +1487,10 @@ fn a_count_runs(statement: ReadStatement) -> bool {
 /// What a tally costs follows the index entries it reads — the documents it
 /// counts, and the leading key's rows a valued section pages — rather than the
 /// groups alone, which the narrowing bar reads; this pair holds those fixed
-/// and varies the bodies alone.
+/// and varies the bodies alone. The counters count a statement's steps and
+/// not the bytes a step reads, so a statement reading a body by its row id
+/// steps the same over both: that no statement reads one is
+/// [`no_statement_a_count_runs_reads_a_documents_payload`]'s to hold.
 #[test]
 fn a_counts_work_does_not_follow_the_body_bytes_it_counts() {
     let short = Counting::with_bulk_bodies("count-bodies-short", 200, &"b".repeat(64));
