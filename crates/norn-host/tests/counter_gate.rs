@@ -767,4 +767,3 @@ fn a_derived_document(store: &mut Store) -> StoredDocument {
         .next()
         .expect("an attachment over a generated tree derives documents")
 }
-

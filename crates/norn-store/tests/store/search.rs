@@ -33,8 +33,7 @@ fn declared() -> ContentModel {
 }
 
 /// The body every character FTS5 reads as query syntax stands in, as words.
-const SYNTAX_BODY: &str =
-    "foo-bar body:foo NEAR NOT AND OR said \"quoted\" ^caret star* (paren)\n";
+const SYNTAX_BODY: &str = "foo-bar body:foo NEAR NOT AND OR said \"quoted\" ^caret star* (paren)\n";
 
 /// The fixture's documents:
 ///
@@ -98,7 +97,7 @@ fn seed(store: &mut Store, more: Vec<norn_store::DocumentFacts>) {
     request
         .record_finding(&violation("other/finding.md"))
         .expect("recording a finding");
-    drop(request);
+    request.finish();
     if !more.is_empty() {
         write_documents(&mut store.begin_request(), &more);
     }
@@ -172,11 +171,7 @@ fn searching(query: &str) -> SearchParams {
 
 /// The paths a page's hits stand at, in its order.
 fn hit_paths(searched: &Searched) -> Vec<&str> {
-    searched
-        .hits
-        .iter()
-        .map(|hit| hit.path.as_str())
-        .collect()
+    searched.hits.iter().map(|hit| hit.path.as_str()).collect()
 }
 
 fn scores(searched: &Searched) -> Vec<f64> {
@@ -287,7 +282,13 @@ fn a_query_is_plain_text() {
     }
     // As FTS5 syntax, `OR` would answer every document holding `gardens` and
     // `NOT` every one holding `foo` without `bar`.
-    for query in ["bar-foo", "sta*", "foo OR gardens", "foo NOT bar-foo", "NEAR/2"] {
+    for query in [
+        "bar-foo",
+        "sta*",
+        "foo OR gardens",
+        "foo NOT bar-foo",
+        "NEAR/2",
+    ] {
         assert_eq!(
             hit_paths(&searching_store.search(&searching(query))),
             Vec::<&str>::new(),
@@ -298,7 +299,11 @@ fn a_query_is_plain_text() {
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<String>>();
-    for spelled in ["lantern -harbor", "lantern\0harbor", "  lantern\t\nharbor  "] {
+    for spelled in [
+        "lantern -harbor",
+        "lantern\0harbor",
+        "  lantern\t\nharbor  ",
+    ] {
         assert_eq!(
             hit_paths(&searching_store.search(&searching(spelled))),
             plain,
@@ -343,7 +348,10 @@ fn drained(snapshot: &Snapshot, params: &SearchParams, limit: u32) -> Vec<(Strin
             searched.hits.len() <= limit as usize,
             "a page held more than its bound"
         );
-        assert!(searched.moved.is_empty(), "one snapshot moved under a drain");
+        assert!(
+            searched.moved.is_empty(),
+            "one snapshot moved under a drain"
+        );
         hits.extend(
             searched
                 .hits
@@ -472,8 +480,9 @@ fn a_document_edited_is_searched_as_it_now_reads() {
     let mut searching_store = Searching::new("search-edited");
     let before = searching_store.search(&searching("lantern harbor").with_limit(1));
     let cursor = before.next.clone().expect("a next page");
-    assert!(hit_paths(&searching_store.search(&searching("lantern harbor")))
-        .contains(&"notes/walk.md"));
+    assert!(
+        hit_paths(&searching_store.search(&searching("lantern harbor"))).contains(&"notes/walk.md")
+    );
 
     write_documents(
         &mut searching_store.store.begin_request(),
@@ -577,9 +586,8 @@ fn a_part_a_search_cannot_apply_is_reported_as_a_find_reports_it() {
         .collect::<Vec<String>>();
     let target = ResolutionTarget::new("lantern").expect("a target");
 
-    let unknown = searching_store.search(
-        &searching("lantern").with_predicates([Predicate::equal_to("statis", "open")]),
-    );
+    let unknown = searching_store
+        .search(&searching("lantern").with_predicates([Predicate::equal_to("statis", "open")]));
     assert_eq!(hit_paths(&unknown), whole);
     assert_eq!(
         unknown.unsatisfied,
@@ -605,8 +613,7 @@ fn a_part_a_search_cannot_apply_is_reported_as_a_find_reports_it() {
         [Unsatisfied::MalformedQuery { .. }]
     ));
 
-    let glob =
-        searching_store.search(&searching("lantern").with_predicates([Predicate::path("")]));
+    let glob = searching_store.search(&searching("lantern").with_predicates([Predicate::path("")]));
     assert_eq!(hit_paths(&glob), Vec::<&str>::new());
     assert_eq!(
         glob.unsatisfied,
@@ -652,7 +659,11 @@ fn a_hit_carries_the_row_its_columns_name() {
             .clone()
             .with_limit(3)
             .with_predicates([Predicate::equal_to("statis", "x")])
-            .with_columns([Column::field("status"), Column::field("stat"), Column::body()]),
+            .with_columns([
+                Column::field("status"),
+                Column::field("stat"),
+                Column::body(),
+            ]),
     );
     assert_eq!(
         hit_paths(&projected),
@@ -669,7 +680,10 @@ fn a_hit_carries_the_row_its_columns_name() {
         assert_eq!(row(at).path, hit.path);
     }
     assert_eq!(
-        row(0).fields.as_ref().and_then(|fields| fields.get("status")),
+        row(0)
+            .fields
+            .as_ref()
+            .and_then(|fields| fields.get("status")),
         Some(&FieldValue::scalar("open"))
     );
     assert_eq!(
@@ -1015,10 +1029,7 @@ fn page_work(searched: &Searched) -> (u64, u64, u64, u64) {
 /// reorder.
 fn vault_size_requests(store: &Searching) -> Vec<SearchParams> {
     let lantern = searching("lantern").with_limit(2);
-    let next = store
-        .search(&lantern)
-        .next
-        .expect("a next page of lantern");
+    let next = store.search(&lantern).next.expect("a next page of lantern");
     vec![
         searching("lantern harbor").with_limit(3),
         searching("lantern harbor"),
@@ -1057,11 +1068,7 @@ fn a_search_costs_the_documents_its_query_matches_and_never_the_vault() {
             .zip(vault_size_requests(large))
         {
             let (on_small, on_large) = (small.search(&at_small), large.search(&at_large));
-            assert_eq!(
-                hit_paths(&on_small),
-                hit_paths(&on_large),
-                "{at_small:?}"
-            );
+            assert_eq!(hit_paths(&on_small), hit_paths(&on_large), "{at_small:?}");
             assert_eq!(
                 on_small.work.statements, on_large.work.statements,
                 "{at_small:?}"
@@ -1130,11 +1137,8 @@ fn ranking_costs_every_match_and_a_narrowing_part_narrows_what_is_scored() {
         );
     }
 
-    let (narrowed, on_small, on_large) = growth(&|_| {
-        first
-            .clone()
-            .with_predicates([Predicate::tag("draft")])
-    });
+    let (narrowed, on_small, on_large) =
+        growth(&|_| first.clone().with_predicates([Predicate::tag("draft")]));
     assert_eq!(hit_paths(&on_small), ["notes/lantern.md"]);
     assert_eq!(hit_paths(&on_large), ["notes/lantern.md"]);
     assert!(
@@ -1213,9 +1217,8 @@ fn no_statement_a_search_runs_reads_a_documents_payload() {
         );
     }
 
-    let hydrated = searching_store.plans(
-        &searching("lantern").with_columns([Column::fields(), Column::body()]),
-    );
+    let hydrated = searching_store
+        .plans(&searching("lantern").with_columns([Column::fields(), Column::body()]));
     let rows = hydrated
         .iter()
         .find(|emitted| emitted.statement == ReadStatement::Find(FindStatement::HydrateDocuments))

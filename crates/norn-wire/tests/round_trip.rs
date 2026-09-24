@@ -2449,8 +2449,9 @@ fn a_hit_cursor_carries_its_score_bit_for_bit() {
             CursorKey::hit(score(value), "notes/a.md"),
         );
         let json = wire(&cursor);
-        let back: Cursor = serde_json::from_str(&json)
-            .unwrap_or_else(|error| panic!("the cursor scored {value:e} did not read back: {error}"));
+        let back: Cursor = serde_json::from_str(&json).unwrap_or_else(|error| {
+            panic!("the cursor scored {value:e} did not read back: {error}")
+        });
         let CursorKey::Hit { score: read, .. } = back.key() else {
             panic!("a hit cursor read back as {:?}", back.key());
         };

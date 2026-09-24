@@ -68,7 +68,9 @@
 mod statement;
 
 use norn_db::EmittedPlan;
-use norn_wire::{Cursor, CursorKey, Hit, Moved, Page, Score, SearchParams, SearchReport, Unsatisfied};
+use norn_wire::{
+    Column, Cursor, CursorKey, Hit, Moved, Page, Score, SearchParams, SearchReport, Unsatisfied,
+};
 
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
@@ -78,8 +80,8 @@ use crate::read::{
 };
 use crate::store::Snapshot;
 
-pub use statement::{SEARCH_STATEMENTS, SearchStatement};
 use statement::{HitPosition, LexicalPage, compose_lexical_page, lexical_expression};
+pub use statement::{SEARCH_STATEMENTS, SearchStatement};
 
 /// What [`Snapshot::search`] answers: a page of ranked hits, where the next
 /// begins, and what the request could not apply.
@@ -107,7 +109,10 @@ impl Searched {
     /// The unsatisfied parts and the report a handler wraps in a
     /// [`norn_wire::VaultAnswer`].
     pub fn into_report(self) -> (Vec<Unsatisfied>, SearchReport) {
-        (self.unsatisfied, Page::new(self.hits, self.next, self.moved))
+        (
+            self.unsatisfied,
+            Page::new(self.hits, self.next, self.moved),
+        )
     }
 }
 
@@ -254,7 +259,14 @@ impl Snapshot {
             .transpose()?
             .map(|key| Cursor::new(snapshot.clone(), key));
         let unsatisfied = self.resolve(conjunction.reports, declared, lookups)?;
-        let hits = self.hits(&ranked, &params.columns, &projection, &fields, lookups, &mut work)?;
+        let hits = self.hits(
+            &ranked,
+            &params.columns,
+            &projection,
+            &fields,
+            lookups,
+            &mut work,
+        )?;
         work.statements = self.counters().statements_executed() - started;
         Ok(Searched {
             hits,
@@ -345,7 +357,7 @@ impl Snapshot {
     fn hits(
         &self,
         ranked: &[RankedKey],
-        columns: &[norn_wire::Column],
+        columns: &[Column],
         projection: &Projection<'_>,
         fields: &[&str],
         lookups: &mut Lookups,

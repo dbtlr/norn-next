@@ -11,8 +11,7 @@
 use crate::common::{
     Scratch, ambiguity, ambiguity_for_target, class, class_named, classes, document,
     document_with_every_fact, drained, full_text_matches, path, record_death, violation,
-    write_document,
-    write_documents,
+    write_document, write_documents,
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, StoreError,
