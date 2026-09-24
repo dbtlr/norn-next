@@ -1278,9 +1278,10 @@
       "sources": ["NRN-a59", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the one read builder answers in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others. The property is stated over each read verb, and no read verb exists: search, get, count, validate and describe have no builder, and nothing dispatches a verb, because crates/norn-serve is not in the workspace.",
+        "reason": "the landed read builders, find and count, answer in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others, and crates/norn-store/src/count/mod.rs answers a count's tallies as aggregate SQL and hydrates no document row. The property is stated over each read verb, and no read verb exists: search, get, validate and describe have no builder, and nothing dispatches a verb, because crates/norn-serve is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-store/src/find/mod.rs" },
+          { "present": "crates/norn-store/src/count/mod.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -1309,8 +1310,11 @@
       "sources": ["NRN-a59", "NRN-a60", "NRN-a62", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the count builder, crates/norn-store/src/count, answers cardinality and grouping as aggregate SQL and hydrates no document row: its store suite bars the plan of every statement it runs, and bars that a narrowing part narrows its work. The property is wider than that builder. Its cost clause, a function of the distinct groups rather than of body bytes, is held by no bar yet, because the count work bar varies how many documents a vault holds and never their bodies; and its distinct-value answers, the folders and values describe reports, have no builder, and no decision has picked a home for one.",
-        "grounds": [{ "present": "crates/norn-store/src/count" }]
+        "reason": "the count builder, crates/norn-store/src/count, answers cardinality and grouping as aggregate SQL and hydrates no document row: its store suite bars the plan of every statement it runs, and bars that a narrowing part narrows its work. The property is wider than that builder. Its cost clause, a function of the distinct groups rather than of body bytes, is held by no bar yet, because the count work bar varies how many documents a vault holds and never their bodies; and its distinct-value answers, the folders and values describe reports, have no builder. The read builders live in norn-store, so that builder's home is pre-committed as crates/norn-store/src/describe, beside the find and count builders.",
+        "grounds": [
+          { "present": "crates/norn-store/src/count" },
+          { "absent": "crates/norn-store/src/describe" }
+        ]
       }
     },
     {
