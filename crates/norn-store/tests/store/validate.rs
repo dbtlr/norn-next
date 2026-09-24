@@ -256,8 +256,9 @@ fn names(rows: &[FindingRow]) -> Vec<(FindingKind, String, Option<String>)> {
 // ---- what a page answers ----
 
 /// **With no predicates every finding standing under the active fingerprint
-/// answers, in `(kind, path, id)` order**: kinds in their spelled order, a
-/// kind's findings by path, and two findings of one kind at one path by id.
+/// answers, in `(kind, path, id)` order**: kinds in the byte order of their
+/// codes, a kind's findings by path, and two findings of one kind at one path
+/// by id.
 /// A finding stands whether or not a document row stands at its path.
 #[test]
 fn with_no_predicates_every_finding_standing_answers_in_kind_path_id_order() {
@@ -370,7 +371,8 @@ fn kinds_and_a_severity_floor_narrow_the_findings() {
             every[5].clone(),
             every[6].clone()
         ],
-        "kinds are read in their spelled order, each once, whatever the request's order"
+        "kinds are read in the byte order of their codes, each once, whatever the request's \
+         order"
     );
     assert_eq!(
         names(&validating_store.rows(&validating().with_severity(Severity::Error))),

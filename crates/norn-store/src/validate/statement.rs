@@ -24,9 +24,9 @@ use crate::read::{Binder, FINDING_ROW_COLUMNS, Filter, glob_test};
 /// find's findings column reads through; the statements both run are
 /// [`crate::FindStatement`]s and are named there.
 ///
-/// A page of findings reads one kind after another, in the kinds' order, so
-/// each kind is a section whose findings stand in `(path, id)` order, and the
-/// page is in `(kind, path, id)` order.
+/// A page of findings reads one kind after another, in the byte order of the
+/// kind's code, so each kind is a section whose findings stand in `(path, id)`
+/// order, and the page is in `(kind, path, id)` order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidateStatement {
     /// One kind's findings standing under the active fingerprint, from the

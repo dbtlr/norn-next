@@ -12,15 +12,16 @@
 //!
 //! # A page is the findings in `(kind, path, id)` order
 //!
-//! A page reads one kind after another, in the kinds' order, and each kind is
-//! a section in `(path, id)` order: a seek of the kind's findings from the
-//! page's position that stops at the page's bound, so nothing sorts. A page
-//! reads at most one finding past its bound to learn a next page exists, and
-//! the cursor it mints names the last finding's kind, path and id, where the
-//! next page resumes. The kinds are the request's, or every kind where it
-//! names none; a severity floor admits the severities at it or above, and
-//! where that is one severity the section seeks the findings of that severity
-//! alone. [`ValidateStatement`] names what each statement reads.
+//! A page reads one kind after another, in the byte order of the kind's code,
+//! and each kind is a section in `(path, id)` order: a seek of the kind's
+//! findings from the page's position that stops at the page's bound, so
+//! nothing sorts. A page reads at most one finding past its bound to learn a
+//! next page exists, and the cursor it mints names the last finding's kind,
+//! path and id, where the next page resumes. The kinds are the request's, or
+//! every kind where it names none; a severity floor admits the severities at
+//! it or above, and where that is one severity the section seeks the findings
+//! of that severity alone. [`ValidateStatement`] names what each statement
+//! reads.
 //!
 //! Each finding is answered as the row the finding row accessor reads, which
 //! is the one a find's findings column reads: its bounded candidate head, the
