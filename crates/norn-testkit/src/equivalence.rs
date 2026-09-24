@@ -71,9 +71,22 @@
 //! part of the verdict rather than something a reader has to go and check. And
 //! [`StoreProjection::assert_holds`] states concrete rows a projection must hold,
 //! so a case pairs its relative claim with an absolute one.
+//!
+//! # One store's rows, as one number
+//!
+//! [`DerivedRows`] is the same projection taken for one store on its own, with
+//! each row's stored suffix keys beside it, and digested: the number a pinned
+//! corpus derived from zero is held to, so a change to what derivation writes
+//! for unchanged input cannot land without being seen. The suffix keys are in
+//! it and not in the projection because the projection compares two stores
+//! over one tree, where a key is a pure function of a path both hold; the
+//! digest compares one build's derivation with another's, where the function
+//! itself is what may have moved.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+
+use sha2::{Digest, Sha256};
 
 use norn_store::{
     BlockFact, DocumentPath, FieldRows, FindingCursor, HeadingFact, IndexedTerm, LinkFact,
@@ -609,6 +622,77 @@ impl StoreProjection {
              report nothing about the other"
         );
         rendered
+    }
+}
+
+/// Every derived row one store holds, rendered field by field in field order.
+///
+/// Read it with [`DerivedRows::read`]. It carries what [`StoreProjection`]
+/// carries and drops what it drops — row identifiers, write generations and
+/// timestamps, none of which is a function of the vault — plus each document
+/// row's stored suffix keys, raw and folded. Tombstones stay out for the
+/// projection's reason: a death is one store's history, and a store derived
+/// from zero records none.
+#[derive(Clone, Debug)]
+pub struct DerivedRows {
+    projection: StoreProjection,
+    fields: BTreeMap<String, String>,
+}
+
+impl DerivedRows {
+    /// Read every derived row `store` holds.
+    pub fn read(store: &mut Store) -> Result<Self, StoreError> {
+        let projection = StoreProjection::read(store)?;
+        let mut fields = projection.entries();
+        let mut suffix_keys = Vec::new();
+        for_each_stored_suffix_key(store, |stored| {
+            let at = format!("document[{}]", stored.path.as_str());
+            suffix_keys.push((format!("{at}.suffix_key"), quoted(&stored.raw)));
+            suffix_keys.push((format!("{at}.folded_suffix_key"), quoted(&stored.folded)));
+        })?;
+        for (field, value) in suffix_keys {
+            let collided = fields.insert(field, value);
+            assert!(
+                collided.is_none(),
+                "a suffix key rendered as a field the projection already carries"
+            );
+        }
+        Ok(DerivedRows { projection, fields })
+    }
+
+    /// The projection the rows were read through, for the claims a case makes
+    /// about what the rows hold.
+    pub fn projection(&self) -> &StoreProjection {
+        &self.projection
+    }
+
+    /// The rows, one field to a value, in field order.
+    pub fn fields(&self) -> &BTreeMap<String, String> {
+        &self.fields
+    }
+
+    /// SHA-256 over every field and its value in field order, as 64 lowercase
+    /// hex digits.
+    ///
+    /// Each field and each value is followed by a separator byte no rendered
+    /// field or value carries — every text inside a value is rendered with its
+    /// control bytes escaped, and a stored path refuses them — so moving a
+    /// boundary between two of them moves the digest. Nothing in it depends on where the store sits on disk
+    /// or on the order its rows were written in: the fields are vault-relative
+    /// and sorted, and every value is text.
+    pub fn digest(&self) -> String {
+        let mut hasher = Sha256::new();
+        for (field, value) in &self.fields {
+            hasher.update(field.as_bytes());
+            hasher.update(b"\x1f");
+            hasher.update(value.as_bytes());
+            hasher.update(b"\x1e");
+        }
+        let mut hex = String::with_capacity(64);
+        for byte in hasher.finalize() {
+            write!(hex, "{byte:02x}").expect("writing to a string");
+        }
+        hex
     }
 }
 
