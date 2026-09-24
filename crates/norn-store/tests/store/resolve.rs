@@ -8,8 +8,9 @@ use std::sync::Arc;
 use std::collections::BTreeSet;
 
 use norn_store::{
-    AmbiguityIgnore, CandidateFact, DeclaredFields, FindingFacts, Provenance, SnapshotReader,
-    Store, StoredPathOrder, SuffixKey, TargetClass,
+    AmbiguityIgnore, CandidateFact, Change, ClassKey, DeclaredFields, DerivedFinding,
+    ExplainedStatement, FindingFacts, IncrementProvenance, Provenance, SnapshotReader, Store,
+    StoreError, StoredPathOrder, SuffixKey, TargetClass,
 };
 use norn_wire::{FindParams, FindingKind, Pattern, Predicate, ResolutionTarget, Severity};
 
@@ -74,6 +75,14 @@ impl Vault {
             .iter()
             .map(|row| row.path.as_str().to_string())
             .collect()
+    }
+
+    /// `target` compiled on this vault's store, the schema ignoring `ignored`.
+    fn target_class(&mut self, target: &str, ignored: &[&str]) -> TargetClass {
+        self.store
+            .begin_request()
+            .target_class(target, &ignoring(ignored))
+            .expect("a suffix target")
     }
 
     /// The class the same resolution reads through the store's class read, in
@@ -259,12 +268,10 @@ fn a_folding_root_matches_an_ignore_glob_with_ascii_case_folded() {
         strings(&["Archive/norn/glossary.md"])
     );
 
-    let ignore = ignoring(&["archive/**"]);
-    let class = TargetClass::new("glossary", Folding, &ignore).expect("a suffix target");
+    let class = vault.target_class("glossary", &["archive/**"]);
     assert!(!class.admits("Archive/norn/glossary.md"));
     assert_eq!(vault.class(&class), strings(&["docs/norn/glossary.md"]));
-    let ignore = ignoring(&["Archive/**"]);
-    let class = TargetClass::new("term", Folding, &ignore).expect("a suffix target");
+    let class = vault.target_class("term", &["Archive/**"]);
     assert!(!class.admits("archive/deep/term.md"));
     assert_eq!(vault.class(&class), strings(&["notes/term.md"]));
 }
@@ -298,15 +305,13 @@ fn a_sensitive_root_matches_an_ignore_glob_bytewise() {
         strings(&["notes/term.md"])
     );
 
-    let ignore = ignoring(&["archive/**"]);
-    let class = TargetClass::new("glossary", Sensitive, &ignore).expect("a suffix target");
+    let class = vault.target_class("glossary", &["archive/**"]);
     assert!(class.admits("Archive/norn/glossary.md"));
     assert_eq!(
         vault.class(&class),
         strings(&["Archive/norn/glossary.md", "docs/norn/glossary.md"])
     );
-    let ignore = ignoring(&["Archive/**"]);
-    let class = TargetClass::new("term", Sensitive, &ignore).expect("a suffix target");
+    let class = vault.target_class("term", &["Archive/**"]);
     assert!(class.admits("archive/deep/term.md"));
     assert_eq!(
         vault.class(&class),
@@ -394,8 +399,7 @@ fn a_findings_class_is_the_class_resolves_reads_on_that_root() {
             order,
             &["a/Foo.md", "b/foo.md", "archive/foo.md"],
         );
-        let ignore = ignoring(&["archive/**"]);
-        let resolution = TargetClass::new("Foo", order, &ignore).expect("a suffix target");
+        let resolution = vault.target_class("Foo", &["archive/**"]);
         let class = vault.class(&resolution);
         assert_eq!(class, vault.resolves("Foo", &["archive/**"]));
 
@@ -468,8 +472,7 @@ fn a_document_leaving_a_class_takes_the_findings_filed_under_it() {
             order,
             &["a/Foo.md", leaving],
         );
-        let resolution =
-            TargetClass::new("Foo", order, &AmbiguityIgnore::none()).expect("a suffix target");
+        let resolution = vault.target_class("Foo", &[]);
         let class = vault.class(&resolution);
         assert_eq!(class, strings(&["a/Foo.md", leaving]), "under {order:?}");
 
@@ -511,8 +514,7 @@ fn a_class_read_orders_its_candidates_by_the_probed_key_then_path() {
         "a/x/Foo.md",
     ];
     let mut vault = Vault::holding("resolve-class-order", Folding, &paths);
-    let class =
-        TargetClass::new("foo", Folding, &AmbiguityIgnore::none()).expect("a suffix target");
+    let class = vault.target_class("foo", &[]);
     let read: Vec<String> = vault
         .store
         .begin_request()
@@ -540,4 +542,155 @@ fn a_class_read_orders_its_candidates_by_the_probed_key_then_path() {
         "the fixture does not tell the key from the path"
     );
     assert_eq!(read, expected);
+}
+
+/// The finding a producer files about `Foo` under `class_keys`, with no
+/// candidate head.
+fn finding_filed_under(class_keys: &[&str]) -> FindingFacts {
+    FindingFacts {
+        kind: FindingKind::PathNamesNoDocument,
+        severity: Severity::Warning,
+        path: path("note.md"),
+        class_keys: class_keys
+            .iter()
+            .map(|key| ClassKey::new(key).expect("a class key"))
+            .collect(),
+        target: Some("Foo".to_string()),
+        span: None,
+        candidates: Vec::new(),
+        candidates_total: 0,
+        message: "`Foo` names more than one document".to_string(),
+        detail: None,
+    }
+}
+
+/// **A class is read only under the order it was compiled under, which is
+/// its store's.** A class compiled on a store whose root folds ASCII case
+/// reads the folded key; handed to a store whose root tells spellings apart,
+/// it would serve `a/Foo.md` and `b/foo.md` as one class that root keeps
+/// apart, so the read and its plan are refused. The class that store compiles
+/// itself holds `a/Foo.md` alone.
+#[test]
+fn a_class_compiled_under_another_order_is_refused() {
+    let held = ["a/Foo.md", "b/foo.md"];
+    let mut sensitive = Vault::holding("resolve-foreign-class", Sensitive, &held);
+    let mut folding = Vault::holding("resolve-foreign-class-folded", Folding, &held);
+    let foreign = folding.target_class("Foo", &[]);
+    assert_eq!(folding.class(&foreign), strings(&held));
+
+    {
+        let request = sensitive.store.begin_request();
+        for refused in [
+            request.suffix_candidates(&foreign).map(|_| ()),
+            request
+                .emitted_plan(ExplainedStatement::SuffixCandidates(&foreign))
+                .map(|_| ()),
+        ] {
+            assert!(
+                matches!(
+                    refused,
+                    Err(StoreError::KeySpace {
+                        order: Sensitive,
+                        ..
+                    })
+                ),
+                "a sensitive store read a folded class: {refused:?}"
+            );
+        }
+    }
+    let own = sensitive.target_class("Foo", &[]);
+    assert_eq!(sensitive.class(&own), strings(&["a/Foo.md"]));
+}
+
+/// **A class probe for findings ranges over the store's own key space.** On a
+/// folding root a finding about `Foo` is filed under the folded key `foo/`, so
+/// the class probe the store builds for the stem `Foo` reaches it, and a probe
+/// over the raw key — which ranges over `Foo/` and would miss it — is refused
+/// by the read, the discard and the plan alike.
+#[test]
+fn a_class_probe_reaches_the_findings_filed_in_the_store_s_key_space() {
+    let mut vault = Vault::holding("resolve-class-probe", Folding, &["a/Foo.md", "b/foo.md"]);
+    let mut request = vault.store.begin_request();
+    request
+        .record_finding(&finding_filed_under(&["foo/"]))
+        .expect("recording the finding");
+    let probe = request.class_probe("Foo").expect("a class stem");
+    assert_eq!(probe.key(), SuffixKey::Folded);
+    let found = request
+        .findings_in_class(&probe)
+        .expect("reading the class");
+    assert_eq!(
+        found.len(),
+        1,
+        "the class probe for `Foo` missed the finding"
+    );
+
+    let raw = norn_store::suffix_probe("Foo").expect("a suffix target");
+    assert_eq!(raw.key(), SuffixKey::Raw);
+    for refused in [
+        request.findings_in_class(&raw).map(|_| ()),
+        request
+            .emitted_plan(ExplainedStatement::FindingsInClass(&raw))
+            .map(|_| ()),
+        request
+            .emitted_plan(ExplainedStatement::ClassDiscard(&raw))
+            .map(|_| ()),
+        request.discard_findings_in_class(&raw).map(|_| ()),
+    ] {
+        assert!(
+            matches!(refused, Err(StoreError::KeySpace { order: Folding, .. })),
+            "a folding store ranged over the raw key: {refused:?}"
+        );
+    }
+    assert_eq!(
+        request
+            .findings_in_class(&probe)
+            .expect("reading the class")
+            .len(),
+        1,
+        "a refused discard took the finding"
+    );
+}
+
+/// **A finding filed under a class key outside the store's key space is
+/// refused**, through the door for a lone finding and inside a changeset
+/// alike. On a folding root `Foo/` is a raw key no change there names, so a
+/// finding filed under it would stand through `b/FOO.md` joining the class of
+/// `Foo`. A sensitive root's key space holds every class key.
+#[test]
+fn a_finding_filed_outside_the_store_s_key_space_is_refused() {
+    let mut vault = Vault::holding("resolve-foreign-key", Folding, &["a/Foo.md"]);
+    let mut request = vault.store.begin_request();
+    let filed = finding_filed_under(&["Foo/"]);
+    let refused = request.record_finding(&filed);
+    assert!(
+        matches!(refused, Err(StoreError::KeySpace { order: Folding, .. })),
+        "a folding store filed a finding under `Foo/`: {refused:?}"
+    );
+    let refused = request.apply_increment(
+        IncrementProvenance::Derived,
+        [Change::Upsert(document("b/FOO.md", "hash-b", "a body\n"))],
+        &[DerivedFinding {
+            facts: filed,
+            replaces: None,
+        }],
+    );
+    assert!(
+        matches!(refused, Err(StoreError::KeySpace { order: Folding, .. })),
+        "a folding store's changeset filed a finding under `Foo/`: {refused:?}"
+    );
+    assert!(
+        request
+            .stored_findings(&path("note.md"))
+            .expect("reading findings")
+            .is_empty(),
+        "a refused finding is at rest"
+    );
+
+    let mut sensitive = Vault::holding("resolve-foreign-key-raw", Sensitive, &["a/Foo.md"]);
+    sensitive
+        .store
+        .begin_request()
+        .record_finding(&finding_filed_under(&["Foo/", "foo/"]))
+        .expect("a sensitive store files under any class key");
 }

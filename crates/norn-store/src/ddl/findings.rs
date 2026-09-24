@@ -89,7 +89,9 @@
 //! A finding's class keys are spelled in the key space its root probes, which
 //! the store's path order selects, and a changed path names its class in that
 //! same space — see [`crate::IncrementOutcome::affected_classes`] — so
-//! maintenance reaches every finding filed in the store.
+//! maintenance reaches every finding filed in the store. A finding filed under
+//! a key outside that space is refused where it is written, and a class or a
+//! class probe from another space is refused where it is read.
 //!
 //! # Ambiguity classes, and why maintenance is scoped by class
 //!
@@ -118,7 +120,8 @@
 //!   that path's class key prefixes — one prefix range over
 //!   `finding_classes(class_key)`, joined back by finding id — and the
 //!   candidates of each are one prefix range over `documents(suffix_key)`. Both
-//!   bounds come from [`crate::path::class_probe`].
+//!   bounds come from [`crate::Request::class_probe`], in the key space the
+//!   store's path order selects.
 //!
 //! The class range is **correct in the no-miss direction, and a superset**: a
 //! probe of one class key opens every finding holding a class key it prefixes, so

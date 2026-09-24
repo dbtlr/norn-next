@@ -82,8 +82,8 @@ use crate::facts::{
 };
 use crate::fields::{FieldContainer, FieldRow, FieldRows};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
-use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
-use crate::resolve::{self, TargetClass};
+use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixKey, SuffixProbe};
+use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 use crate::store::Store;
 
 mod instrument;
@@ -337,8 +337,14 @@ impl<'a> Request<'a> {
     /// each, because a target's reductions are disjoint classes and a finding
     /// filed under one of them is invisible to the other's maintenance. A finding
     /// that is not about resolution carries no class and writes no such row.
+    ///
+    /// A class key outside the key space the store's path order selects is
+    /// refused ([`StoreError::KeySpace`]): no change in this store names it, so
+    /// a finding filed under it is one no maintenance reaches. A producer
+    /// files under [`TargetClass::class_keys`] of a class this store compiled.
     pub fn record_finding(&mut self, finding: &FindingFacts) -> Result<(), StoreError> {
         check_finding_bounds(finding)?;
+        check_finding_classes(finding, self.store.path_order())?;
         let transaction = self
             .store
             .database
@@ -373,10 +379,15 @@ impl<'a> Request<'a> {
     /// range matched identifies the finding, and deleting the finding takes its
     /// other memberships with it. The count is findings rather than rows, because
     /// a cascade is not what `changes()` reports.
+    ///
+    /// The probe is one in the store's own key space, as
+    /// [`Request::class_probe`] and [`TargetClass::probe`] build it; a probe
+    /// over the other key is refused ([`StoreError::KeySpace`]).
     pub fn discard_findings_in_class(
         &mut self,
         probe: &SuffixProbe,
     ) -> Result<Invalidation, StoreError> {
+        self.check_probe(probe)?;
         let discarded = self
             .store
             .connection()
@@ -1108,6 +1119,38 @@ impl<'a> Request<'a> {
 
     // ---- probe reads ----
 
+    /// Compile `target` — a suffix address, with any `#` anchor already split
+    /// off — into the class it names on this store's root, excluding the places
+    /// `ignore` names.
+    ///
+    /// **The order is the store's.** A class is compiled under the path order
+    /// the store records, which selects the suffix key it probes, the key space
+    /// its class keys are spelled in, and the case its ignore globs match
+    /// under; no caller names one. A find compiles its `resolves` part the
+    /// same way under its snapshot's order.
+    ///
+    /// The refusals are [`crate::suffix_probe`]'s: a spelling that is not a
+    /// suffix address names no class under any root.
+    pub fn target_class(
+        &self,
+        target: &str,
+        ignore: &AmbiguityIgnore,
+    ) -> Result<TargetClass, StoreError> {
+        TargetClass::compile(target, self.store.path_order(), ignore)
+    }
+
+    /// The probe over the ambiguity class `stem` names, in the key space the
+    /// store's path order selects: the stem as written where the root tells
+    /// spellings apart, and folded by ASCII case where it folds them.
+    ///
+    /// Every document whose leaf reduces to the stem is in the range, whatever
+    /// directory it sits in, and so is every finding whose class key opens
+    /// with it. The refusals are a stem's: an empty one, one carrying the
+    /// separator, a `.` or `..` name, and one carrying a control byte.
+    pub fn class_probe(&self, stem: &str) -> Result<SuffixProbe, StoreError> {
+        Ok(crate::path::class_probe(stem)?.in_space(SuffixKey::under(self.store.path_order())))
+    }
+
     /// Every document in the class a target names, in suffix-key order.
     ///
     /// The full candidate enumeration behind a finding's bounded head, and the
@@ -1119,10 +1162,15 @@ impl<'a> Request<'a> {
     /// keys are exactly what an ambiguity class is made of, and a ladder whose
     /// ties fall out in row-insertion order is a ladder that reorders itself
     /// when a document is re-derived.
+    ///
+    /// The class is one [`Request::target_class`] compiled on a store under
+    /// the same path order; one compiled under another is refused
+    /// ([`StoreError::KeySpace`]).
     pub fn suffix_candidates(
         &self,
         resolution: &TargetClass,
     ) -> Result<Vec<DocumentPath>, StoreError> {
+        self.check_class(resolution)?;
         self.read_all(
             &suffix_candidates_sql(resolution),
             params_from_iter(resolution.parameters()),
@@ -1145,11 +1193,43 @@ impl<'a> Request<'a> {
     /// longer-suffix finding in the same class is read even where the particular
     /// change cannot have reached it, which costs a re-decision rather than a
     /// stale finding nothing revisits.
+    ///
+    /// The probe is one in the store's own key space, as
+    /// [`Request::class_probe`] and [`TargetClass::probe`] build it; a probe
+    /// over the other key is refused ([`StoreError::KeySpace`]).
     pub fn findings_in_class(&self, probe: &SuffixProbe) -> Result<Vec<StoredFinding>, StoreError> {
+        self.check_probe(probe)?;
         self.findings(
             &findings_in_class_sql(probe.range_count()),
             probe_parameters(probe),
         )
+    }
+
+    /// Refuse a class compiled under another path order than the store's.
+    fn check_class(&self, resolution: &TargetClass) -> Result<(), StoreError> {
+        let order = self.store.path_order();
+        if resolution.order() == order {
+            Ok(())
+        } else {
+            Err(StoreError::KeySpace {
+                what: "a class compiled under another path order",
+                order,
+            })
+        }
+    }
+
+    /// Refuse a class probe over another suffix key than the store's path
+    /// order selects.
+    fn check_probe(&self, probe: &SuffixProbe) -> Result<(), StoreError> {
+        let order = self.store.path_order();
+        if probe.key() == SuffixKey::under(order) {
+            Ok(())
+        } else {
+            Err(StoreError::KeySpace {
+                what: "a class probe over another suffix key",
+                order,
+            })
+        }
     }
 
     /// The full-text matches for one FTS5 match expression, in path order.
@@ -1401,6 +1481,27 @@ pub(crate) fn check_finding_bounds(finding: &FindingFacts) -> Result<(), StoreEr
         });
     }
     Ok(())
+}
+
+/// Refuse a finding filed under a class key outside the key space a store
+/// derived under `order` files its findings in.
+///
+/// A change names its class in that key space alone, so a finding filed under
+/// a key outside it is one no change ever takes: the raw key `Foo/` on a root
+/// that folds ASCII case stands through `b/FOO.md` joining the class of `Foo`.
+pub(crate) fn check_finding_classes(
+    finding: &FindingFacts,
+    order: StoredPathOrder,
+) -> Result<(), StoreError> {
+    let space = SuffixKey::under(order);
+    if finding.class_keys.iter().all(|class| space.holds(class)) {
+        Ok(())
+    } else {
+        Err(StoreError::KeySpace {
+            what: "a finding's class key",
+            order,
+        })
+    }
 }
 
 /// Write one finding, its candidate head and its class memberships, inside the

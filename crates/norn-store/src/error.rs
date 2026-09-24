@@ -26,6 +26,8 @@ use std::path::PathBuf;
 
 use norn_db::{DbError, rusqlite};
 
+use crate::facts::StoredPathOrder;
+
 /// A store operation that did not happen.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -73,6 +75,17 @@ pub enum StoreError {
         /// The fingerprint the store pins, or `None` where it pins none.
         pinned: Option<String>,
     },
+    /// A class, a class probe or a class key spelled in another key space than
+    /// the one the store's path order selects. Refused rather than read or
+    /// written: a read would range over the other suffix key and answer with
+    /// spellings the root merges or splits another way, and a finding filed
+    /// under a key no change in this store names is one no maintenance ever
+    /// reaches.
+    KeySpace {
+        what: &'static str,
+        /// The path order the store's rows were derived under.
+        order: StoredPathOrder,
+    },
     /// One entry of a changeset was refused, named by where it sits and what it
     /// is about. A streaming heal hands over tens of thousands of entries and
     /// fails on whichever one is pathological, so the refusal that reaches the
@@ -111,6 +124,11 @@ impl fmt::Display for StoreError {
                 schema_named(derived_under.as_deref()),
                 schema_named(pinned.as_deref())
             ),
+            StoreError::KeySpace { what, order } => write!(
+                f,
+                "{what} is spelled in another key space than the store's `{}` path order selects",
+                order.as_str()
+            ),
             StoreError::Entry {
                 index,
                 path,
@@ -143,7 +161,8 @@ impl StoreError {
             | StoreError::Sql { .. }
             | StoreError::Lifecycle { .. }
             | StoreError::Bound { .. }
-            | StoreError::UnpinnedDeclaration { .. } => None,
+            | StoreError::UnpinnedDeclaration { .. }
+            | StoreError::KeySpace { .. } => None,
         }
     }
 }

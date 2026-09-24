@@ -15,7 +15,7 @@ use crate::common::{
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, StoreError,
-    class_probe, induced_failure, suffix_probe,
+    induced_failure, suffix_probe,
 };
 use std::num::NonZeroUsize;
 
@@ -455,7 +455,7 @@ fn a_finding_cannot_carry_a_class_key_no_probe_opens() {
         .expect("recording a finding");
     assert_eq!(
         request
-            .findings_in_class(&class_probe("glossary").expect("a class stem"))
+            .findings_in_class(&request.class_probe("glossary").expect("a class stem"))
             .expect("reading findings")
             .len(),
         1
@@ -490,7 +490,7 @@ fn the_full_candidate_enumeration_is_a_range_over_the_suffix_key() {
 
     let paths = |target: &str| {
         request
-            .suffix_candidates(&class_named(target))
+            .suffix_candidates(&class_named(&request, target))
             .expect("reading candidates")
             .iter()
             .map(|path| path.as_str().to_string())
@@ -558,7 +558,7 @@ fn a_target_whose_leaf_carries_a_dot_reaches_both_readings_of_it() {
 
     let paths = |target: &str| {
         let mut found = request
-            .suffix_candidates(&class_named(target))
+            .suffix_candidates(&class_named(&request, target))
             .expect("reading candidates")
             .iter()
             .map(|path| path.as_str().to_string())
@@ -597,7 +597,7 @@ fn the_candidate_order_is_total_and_survives_a_re_derivation() {
     }
     let ladder = |request: &norn_store::Request<'_>| {
         request
-            .suffix_candidates(&class_named("tie"))
+            .suffix_candidates(&class_named(request, "tie"))
             .expect("reading candidates")
             .iter()
             .map(|path| path.as_str().to_string())
@@ -741,18 +741,47 @@ fn assert_cascade_seeks_the_primary_key(plan: &QueryPlan, table: &str) {
 fn a_class_read_seeks_the_suffix_key_its_root_probes() {
     use norn_store::{AmbiguityIgnore, StoredPathOrder, TargetClass};
 
-    let scratch = Scratch::new("class-read-plans");
-    let mut store = scratch.open();
-    write_documents(
-        &mut store.begin_request(),
-        &[
-            document("one/glossary.md", "hash-1", "a body\n"),
-            document("Two/Glossary.md", "hash-1", "a body\n"),
-            document("archive/glossary.md", "hash-1", "a body\n"),
-        ],
-    );
+    let judge = |store: &mut norn_store::Store,
+                 target: &str,
+                 ignore: &AmbiguityIgnore,
+                 index: &str,
+                 column: &str| {
+        let request = store.begin_request();
+        let resolution: TargetClass = request
+            .target_class(target, ignore)
+            .expect("a suffix target");
+        let read = plan(
+            request
+                .emitted_plan(ExplainedStatement::SuffixCandidates(&resolution))
+                .expect("a query plan"),
+        );
+        read.assert_no_full_scan_of("documents");
+        read.assert_searches_through("documents", Access::Index(index));
+        read.assert_search_constraint("documents", &format!("({column}>? AND {column}<?)"));
+        assert_eq!(
+            read.searches_of("documents").len(),
+            resolution.probe().range_count(),
+            "a resolution does not open one seek per reduction: {:?}\nemitted SQL: {}",
+            read.rows(),
+            read.sql()
+        );
+        let sorters: Vec<&PlanRow> = read
+            .rows()
+            .iter()
+            .filter(|row| row.detail.contains("TEMP B-TREE"))
+            .collect();
+        assert!(
+            sorters.len() == 1 && sorters[0].detail.contains("ORDER BY"),
+            "the candidates direction no longer sorts through exactly one temporary B-tree for \
+             its own order, so the baseline this bar states has moved: {:?}",
+            read.rows()
+        );
+    };
+
     let archive = AmbiguityIgnore::new([norn_wire::Pattern::parse("archive/**").expect("a glob")]);
-    let resolutions: Vec<(TargetClass, &'static str, &'static str)> = [
+    let ignores = [AmbiguityIgnore::none(), archive];
+    let targets = ["glossary", "Glossary.md", "one/glossary"];
+    for (order, index, column) in [
         (
             StoredPathOrder::Sensitive,
             "documents_suffix_key",
@@ -763,72 +792,36 @@ fn a_class_read_seeks_the_suffix_key_its_root_probes() {
             "documents_folded_suffix_key",
             "folded_suffix_key",
         ),
-    ]
-    .into_iter()
-    .flat_map(|(order, index, column)| {
-        let archive = archive.clone();
-        ["glossary", "Glossary.md", "one/glossary"]
-            .into_iter()
-            .flat_map(move |target| {
-                [AmbiguityIgnore::none(), archive.clone()]
-                    .into_iter()
-                    .map(move |ignore| {
-                        (
-                            TargetClass::new(target, order, &ignore).expect("a suffix target"),
-                            index,
-                            column,
-                        )
-                    })
-            })
-    })
-    .collect();
-    let judge =
-        |store: &mut norn_store::Store, resolution: &TargetClass, index: &str, column: &str| {
-            let read = plan(
-                store
-                    .begin_request()
-                    .emitted_plan(ExplainedStatement::SuffixCandidates(resolution))
-                    .expect("a query plan"),
-            );
-            read.assert_no_full_scan_of("documents");
-            read.assert_searches_through("documents", Access::Index(index));
-            read.assert_search_constraint("documents", &format!("({column}>? AND {column}<?)"));
-            assert_eq!(
-                read.searches_of("documents").len(),
-                resolution.probe().range_count(),
-                "a resolution does not open one seek per reduction: {:?}\nemitted SQL: {}",
-                read.rows(),
-                read.sql()
-            );
-            let sorters: Vec<&PlanRow> = read
-                .rows()
-                .iter()
-                .filter(|row| row.detail.contains("TEMP B-TREE"))
-                .collect();
-            assert!(
-                sorters.len() == 1 && sorters[0].detail.contains("ORDER BY"),
-                "the candidates direction no longer sorts through exactly one temporary B-tree for \
-             its own order, so the baseline this bar states has moved: {:?}",
-                read.rows()
-            );
-        };
-    for (resolution, index, column) in &resolutions {
-        judge(&mut store, resolution, index, column);
-    }
+    ] {
+        let scratch = Scratch::new(&format!("class-read-plans-{}", order.as_str()));
+        let mut store =
+            norn_store::Store::open(scratch.database(), order).expect("opening a store");
+        write_documents(
+            &mut store.begin_request(),
+            &[
+                document("one/glossary.md", "hash-1", "a body\n"),
+                document("Two/Glossary.md", "hash-1", "a body\n"),
+                document("archive/glossary.md", "hash-1", "a body\n"),
+            ],
+        );
+        for target in targets {
+            for ignore in &ignores {
+                judge(&mut store, target, ignore, index, column);
+            }
+        }
 
-    for dropped in ["documents_suffix_key", "documents_folded_suffix_key"] {
-        induced_failure::execute_out_of_band(&mut store, &format!("DROP INDEX {dropped}"))
-            .unwrap_or_else(|problem| panic!("dropping {dropped}: {problem}"));
-        for (resolution, index, column) in
-            resolutions.iter().filter(|(_, index, _)| *index == dropped)
-        {
-            let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                judge(&mut store, resolution, index, column)
-            }));
-            assert!(
-                failed.is_err(),
-                "the bar held with {dropped} dropped under {resolution:?}"
-            );
+        induced_failure::execute_out_of_band(&mut store, &format!("DROP INDEX {index}"))
+            .unwrap_or_else(|problem| panic!("dropping {index}: {problem}"));
+        for target in targets {
+            for ignore in &ignores {
+                let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    judge(&mut store, target, ignore, index, column)
+                }));
+                assert!(
+                    failed.is_err(),
+                    "the bar held with {index} dropped under {order:?} for `{target}`"
+                );
+            }
         }
     }
 }
@@ -861,7 +854,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     let findings = plan(
         request
             .emitted_plan(ExplainedStatement::FindingsInClass(
-                &class_probe("glossary").expect("a class stem"),
+                &request.class_probe("glossary").expect("a class stem"),
             ))
             .expect("a query plan"),
     );
@@ -882,7 +875,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     let class_discard = plan(
         request
             .emitted_plan(ExplainedStatement::ClassDiscard(
-                &class_probe("glossary").expect("a class stem"),
+                &request.class_probe("glossary").expect("a class stem"),
             ))
             .expect("a query plan"),
     );
@@ -995,13 +988,10 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     // every slot of `ExplainedStatement::all` exactly once, so a statement
     // dropped from a list its bar iterates leaves a slot empty here rather
     // than leaving the bar one statement narrower without a word.
-    let probe = class_probe("glossary").expect("a class stem");
-    let resolution = norn_store::TargetClass::new(
-        "glossary",
-        norn_store::StoredPathOrder::Sensitive,
-        &norn_store::AmbiguityIgnore::none(),
-    )
-    .expect("a suffix target");
+    let probe = request.class_probe("glossary").expect("a class stem");
+    let resolution = request
+        .target_class("glossary", &norn_store::AmbiguityIgnore::none())
+        .expect("a suffix target");
     let subject = path("one/glossary.md");
     let width = NonZeroUsize::MIN;
     let judged: Vec<ExplainedStatement<'_>> = [
@@ -1142,16 +1132,16 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
 /// members, same order.
 #[test]
 fn the_point_read_census_holds_every_statement_that_says_it_is_one() {
+    let scratch = Scratch::new("point-read-census");
+    let mut store = scratch.open();
+    let request = store.begin_request();
     let subject = path("one/glossary.md");
-    let probe = class_probe("glossary").expect("a class stem");
+    let probe = request.class_probe("glossary").expect("a class stem");
     let kinds = [FindingKind::PathNamesNoDocument];
 
-    let resolution = norn_store::TargetClass::new(
-        "glossary",
-        norn_store::StoredPathOrder::Sensitive,
-        &norn_store::AmbiguityIgnore::none(),
-    )
-    .expect("a suffix target");
+    let resolution = request
+        .target_class("glossary", &norn_store::AmbiguityIgnore::none())
+        .expect("a suffix target");
     let every = ExplainedStatement::all(&subject, &resolution, &probe, &kinds, NonZeroUsize::MIN);
     assert_eq!(every.len(), norn_store::STATEMENTS);
     for (position, statement) in every.iter().enumerate() {
@@ -2601,7 +2591,7 @@ fn findings_are_reachable_by_the_ambiguity_class_a_change_affects() {
     // A change to any `**/glossary.md` reaches the class and the suffixes inside
     // it, whichever document each finding was written in.
     let affected = request
-        .findings_in_class(&class_probe("glossary").expect("a class stem"))
+        .findings_in_class(&request.class_probe("glossary").expect("a class stem"))
         .expect("reading findings");
     let mut targets: Vec<&str> = affected
         .iter()
@@ -2612,7 +2602,7 @@ fn findings_are_reachable_by_the_ambiguity_class_a_change_affects() {
 
     // And it reaches nothing outside the class.
     let other = request
-        .findings_in_class(&class_probe("index").expect("a class stem"))
+        .findings_in_class(&request.class_probe("index").expect("a class stem"))
         .expect("reading findings");
     assert_eq!(other.len(), 1);
     assert_eq!(other[0].target.as_deref(), Some("index"));
@@ -2665,7 +2655,7 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
         );
         assert!(
             request
-                .suffix_candidates(&class_named(target))
+                .suffix_candidates(&class_named(&request, target))
                 .expect("reading candidates")
                 .contains(&subject),
             "`{target}` does not resolve to `{at}`"
@@ -2683,11 +2673,13 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
         // The class the document is in is one of the finding's, which is what
         // makes a change to that document reach it.
         assert!(
-            probe.class_keys().contains(&subject.class_key()),
+            probe
+                .class_keys()
+                .contains(&subject.class_key_in(norn_store::SuffixKey::Raw)),
             "a finding about `{target}` is not in the class `{at}` is in"
         );
         let stored = request
-            .findings_in_class(&class_probe(subject.stem()).expect("a class stem"))
+            .findings_in_class(&request.class_probe(subject.stem()).expect("a class stem"))
             .expect("reading findings");
         assert_eq!(
             stored.len(),
@@ -2705,7 +2697,7 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
                 .expect("a class key is separator-terminated");
             assert_eq!(
                 request
-                    .findings_in_class(&class_probe(stem).expect("a class stem"))
+                    .findings_in_class(&request.class_probe(stem).expect("a class stem"))
                     .expect("reading findings")
                     .len(),
                 1,
@@ -2718,7 +2710,7 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
         // whole finding — every membership row it had included, so no other class
         // still holds it and nothing is left referencing a finding that is gone.
         let invalidation = request
-            .discard_findings_in_class(&class_probe(subject.stem()).expect("a class stem"))
+            .discard_findings_in_class(&request.class_probe(subject.stem()).expect("a class stem"))
             .expect("discarding a class");
         assert_eq!(
             invalidation.findings_discarded, 1,
@@ -2728,7 +2720,7 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
             let stem = key.as_str().strip_suffix('/').expect("a class key");
             assert!(
                 request
-                    .findings_in_class(&class_probe(stem).expect("a class stem"))
+                    .findings_in_class(&request.class_probe(stem).expect("a class stem"))
                     .expect("reading findings")
                     .is_empty(),
                 "the finding survives in `{}` after its class was discarded",
@@ -2802,7 +2794,10 @@ fn a_deleted_paths_class_is_still_computable_from_its_tombstone() {
         .stored_tombstone(&subject)
         .expect("reading a tombstone")
         .expect("a tombstone");
-    assert_eq!(tombstone.path.class_key(), class("glossary/"));
+    assert_eq!(
+        tombstone.path.class_key_in(norn_store::SuffixKey::Raw),
+        class("glossary/")
+    );
     assert_eq!(tombstone.path.suffix_key(), "glossary/norn/docs/");
 
     // And that class reaches the findings a deletion has to revisit.
@@ -2811,7 +2806,11 @@ fn a_deleted_paths_class_is_still_computable_from_its_tombstone() {
         .expect("recording a finding");
     assert_eq!(
         request
-            .findings_in_class(&class_probe(tombstone.path.stem()).expect("a class stem"))
+            .findings_in_class(
+                &request
+                    .class_probe(tombstone.path.stem())
+                    .expect("a class stem")
+            )
             .expect("reading findings")
             .len(),
         1
@@ -3241,18 +3240,18 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
     // The class discard takes the whole class, longer suffixes inside it
     // included, and nothing outside it.
     let invalidation = request
-        .discard_findings_in_class(&class_probe("glossary").expect("a class stem"))
+        .discard_findings_in_class(&request.class_probe("glossary").expect("a class stem"))
         .expect("discarding a class");
     assert_eq!(invalidation.findings_discarded, 3);
     assert!(
         request
-            .findings_in_class(&class_probe("glossary").expect("a class stem"))
+            .findings_in_class(&request.class_probe("glossary").expect("a class stem"))
             .expect("reading findings")
             .is_empty()
     );
     assert_eq!(
         request
-            .findings_in_class(&class_probe("index").expect("a class stem"))
+            .findings_in_class(&request.class_probe("index").expect("a class stem"))
             .expect("reading findings")
             .len(),
         1
@@ -3270,7 +3269,7 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
     // dedupe rule to make that true.
     for _ in 0..2 {
         request
-            .discard_findings_in_class(&class_probe("glossary").expect("a class stem"))
+            .discard_findings_in_class(&request.class_probe("glossary").expect("a class stem"))
             .expect("discarding a class");
         request
             .record_finding(&ambiguity("one.md", "glossary", "glossary/", &[], 2))
@@ -3278,7 +3277,7 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
     }
     assert_eq!(
         request
-            .findings_in_class(&class_probe("glossary").expect("a class stem"))
+            .findings_in_class(&request.class_probe("glossary").expect("a class stem"))
             .expect("reading findings")
             .len(),
         1
@@ -3287,7 +3286,7 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
     // Discarding a class that holds nothing is a no-op rather than an error.
     assert_eq!(
         request
-            .discard_findings_in_class(&class_probe("absent").expect("a class stem"))
+            .discard_findings_in_class(&request.class_probe("absent").expect("a class stem"))
             .expect("discarding an empty class")
             .findings_discarded,
         0

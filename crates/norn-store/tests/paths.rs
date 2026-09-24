@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use norn_store::{
-    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, StoreError, class_probe, suffix_probe,
+    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, StoreError, SuffixKey, suffix_probe,
 };
 
 /// The one range a single-reduction probe opens.
@@ -383,9 +383,9 @@ fn a_target_that_is_not_a_suffix_address_is_refused() {
 #[test]
 fn a_class_key_is_the_stem_with_the_separator() {
     let document = DocumentPath::new("docs/norn/glossary.md").expect("a document path");
-    assert_eq!(document.class_key().as_str(), "glossary/");
+    assert_eq!(document.class_key_in(SuffixKey::Raw).as_str(), "glossary/");
 
-    let class = class_probe("glossary").expect("a class stem");
+    let class = suffix_probe("glossary").expect("a class stem");
     assert_eq!(class.range_count(), 1);
     let (lower, upper) = class.ranges().next().expect("a range");
     assert_eq!(lower, "glossary/");
@@ -398,7 +398,7 @@ fn a_class_key_is_the_stem_with_the_separator() {
         let probe = suffix_probe(target).expect("a suffix target");
         for (lower, _) in probe.ranges() {
             assert!(
-                lower.starts_with(document.class_key().as_str()),
+                lower.starts_with(document.class_key_in(SuffixKey::Raw).as_str()),
                 "`{target}` is outside the class of `{}`",
                 document.as_str()
             );
@@ -429,7 +429,7 @@ fn a_class_key_is_the_stem_with_the_separator() {
             suffix_probe(target)
                 .expect("a suffix target")
                 .class_keys()
-                .contains(&document.class_key()),
+                .contains(&document.class_key_in(SuffixKey::Raw)),
             "`{target}` does not name the class `{at}` is in"
         );
     }
@@ -499,31 +499,6 @@ fn a_class_key_reads_back_as_the_address_whose_probe_opens_it() {
         dotted,
         "the leaf as written reads back to the probe that opened both reductions"
     );
-}
-
-/// **`class_probe` validates like every other public constructor here.** A
-/// stem handed over unvalidated would format into a lower bound
-/// [`ClassKey::of_prefix`] trusts, tripping its debug assertion downstream
-/// instead of being refused at the boundary that took it.
-#[test]
-fn a_class_probe_refuses_what_no_class_opens() {
-    for (stem, needle) in [
-        ("", "empty"),
-        ("glossary/norn", "separator"),
-        (".", "`.` or `..`"),
-        ("..", "`.` or `..`"),
-        ("gloss\0ary", "NUL"),
-        ("gloss\u{7}ary", "control"),
-    ] {
-        let error = class_probe(stem).expect_err("not a class stem");
-        let StoreError::Path { problem, .. } = &error else {
-            panic!("`{stem}` was refused as {error:?} rather than as a path");
-        };
-        assert!(
-            problem.contains(needle),
-            "`{stem}` was refused for `{problem}`, which does not name {needle}"
-        );
-    }
 }
 
 /// **The folded suffix key folds ASCII case and nothing else.** `A`-`Z` become

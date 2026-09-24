@@ -305,19 +305,14 @@ impl DocumentPath {
         descendant_bounds(&self.path)
     }
 
-    /// The key of the ambiguity class this document belongs to: its stem, with
-    /// the separator that makes the match segment-aligned.
+    /// The key of the ambiguity class this document belongs to among probes of
+    /// `key`: its stem as stored, or folded by ASCII case, with the separator
+    /// that makes the match segment-aligned.
     ///
     /// One class, not a set: the store holds the whole path, so which segment is
     /// the leaf and which bytes are its extension are settled facts here. The
     /// ambiguity is the written target's, and it is [`SuffixProbe::class_keys`]
     /// that carries it.
-    pub fn class_key(&self) -> ClassKey {
-        self.class_key_in(SuffixKey::Raw)
-    }
-
-    /// The key of the ambiguity class this document belongs to among probes of
-    /// `key`: its stem as stored, or folded by ASCII case.
     ///
     /// Class-scoped maintenance reaches a finding through the class key its
     /// producer recorded, which is spelled in the key space the root probes,
@@ -390,8 +385,9 @@ impl DirectoryPrefix {
 /// range covers, so a finding stored under one is at rest and permanently
 /// invisible to the maintenance that owns its lifecycle.
 ///
-/// It is produced by [`DocumentPath::class_key`] and [`SuffixProbe::class_keys`],
-/// which is where the two sides of resolution mint the same form.
+/// It is produced by [`DocumentPath::class_key_in`] and
+/// [`SuffixProbe::class_keys`], which is where the two sides of resolution mint
+/// the same form.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ClassKey(String);
 
@@ -444,23 +440,18 @@ impl ClassKey {
         reversed.join(&SEPARATOR.to_string())
     }
 
-    /// The probe over exactly this class: one range, this key as its lower
-    /// bound.
+    /// The bounds of exactly this class: this key as the inclusive lower
+    /// bound, and the key just past everything it opens as the exclusive
+    /// upper one.
     ///
     /// A class key **is** a probe's lower bound, so this is the round trip back.
     /// It is what findings maintenance ranges over once a changed path has named
     /// the class it affects, and building the range here rather than from the
     /// stem again is what keeps the key that is reported and the key that is
     /// discarded the same bytes.
-    ///
-    /// The key does not say which key space it was minted in, so the caller
-    /// names it: `key` is the space the class key is spelled in, and the probe
-    /// reports it as the key its range bounds.
-    pub(crate) fn probe(&self, key: SuffixKey) -> SuffixProbe {
-        SuffixProbe {
-            key,
-            ranges: vec![bounded(self.0.clone())],
-        }
+    pub(crate) fn bounds(&self) -> (String, String) {
+        let Range { lower, upper } = bounded(self.0.clone());
+        (lower, upper)
     }
 
     /// A probe prefix as the class key it is.
@@ -503,6 +494,15 @@ impl SuffixKey {
         }
     }
 
+    /// Whether `class` is spelled in this key space: every class key is a raw
+    /// one, and a folded class key is one ASCII case folding leaves as it is.
+    pub(crate) fn holds(self, class: &ClassKey) -> bool {
+        match self {
+            SuffixKey::Raw => true,
+            SuffixKey::Folded => fold_ascii_case(class.as_str()) == class.as_str(),
+        }
+    }
+
     /// The `documents` column this key is stored in.
     pub(crate) fn column(self) -> &'static str {
         match self {
@@ -538,19 +538,23 @@ impl SuffixProbe {
         self.key
     }
 
-    /// The same probe over the folded key: each prefix with ASCII case folded,
-    /// and bounded again.
+    /// The same probe over `key`: a raw probe as it is, or over the folded key,
+    /// each prefix with ASCII case folded and bounded again.
     ///
-    /// Folding a prefix that is already folded changes nothing, so a folded
-    /// probe folds to itself.
-    pub fn folded(&self) -> SuffixProbe {
-        SuffixProbe {
-            key: SuffixKey::Folded,
-            ranges: self
-                .ranges
-                .iter()
-                .map(|range| bounded(fold_ascii_case(&range.lower)))
-                .collect(),
+    /// Probes are built raw, from the spelling a caller wrote, and taken into
+    /// the key space a store's path order selects here and only here.
+    pub(crate) fn in_space(self, key: SuffixKey) -> SuffixProbe {
+        debug_assert_eq!(self.key, SuffixKey::Raw, "a probe is built raw");
+        match key {
+            SuffixKey::Raw => self,
+            SuffixKey::Folded => SuffixProbe {
+                key: SuffixKey::Folded,
+                ranges: self
+                    .ranges
+                    .iter()
+                    .map(|range| bounded(fold_ascii_case(&range.lower)))
+                    .collect(),
+            },
         }
     }
 
@@ -666,7 +670,7 @@ pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
 /// unrefused stem into a lower bound is what the class key's own debug
 /// assertion trusts, so a caller-supplied stem is checked here rather than
 /// left to trip that assertion later.
-pub fn class_probe(stem: &str) -> Result<SuffixProbe, StoreError> {
+pub(crate) fn class_probe(stem: &str) -> Result<SuffixProbe, StoreError> {
     let refuse = |problem| {
         Err(StoreError::Path {
             path: stem.to_string(),
@@ -825,16 +829,58 @@ fn control_byte_problem(text: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    /// A class key's probe reports the key space the caller says the class key
-    /// is spelled in, and ranges over exactly that key.
+    /// A class key's bounds open exactly the class it names.
     #[test]
-    fn a_class_keys_probe_reports_the_key_space_it_ranges_over() {
+    fn a_class_key_bounds_the_class_it_names() {
         let class = ClassKey::new("foo/").expect("a class key");
-        for key in [SuffixKey::Raw, SuffixKey::Folded] {
-            let probe = class.probe(key);
-            assert_eq!(probe.key(), key);
-            assert_eq!(probe.ranges().collect::<Vec<_>>(), [("foo/", "foo0")]);
+        assert_eq!(class.bounds(), ("foo/".to_string(), "foo0".to_string()));
+    }
+
+    /// A folded class key is one ASCII case folding leaves as it is, and every
+    /// class key is a raw one.
+    #[test]
+    fn a_folded_key_space_holds_only_folded_class_keys() {
+        for (key, folded) in [
+            ("foo/", true),
+            ("Foo/", false),
+            ("été/", true),
+            ("Été/", true),
+        ] {
+            let class = ClassKey::new(key).expect("a class key");
+            assert!(SuffixKey::Raw.holds(&class), "`{key}`");
+            assert_eq!(SuffixKey::Folded.holds(&class), folded, "`{key}`");
         }
+    }
+
+    /// **`class_probe` validates like every other constructor here.** A stem
+    /// handed over unvalidated would format into a lower bound
+    /// [`ClassKey::of_prefix`] trusts, tripping its debug assertion downstream
+    /// instead of being refused at the boundary that took it.
+    #[test]
+    fn a_class_probe_refuses_what_no_class_opens() {
+        for (stem, needle) in [
+            ("", "empty"),
+            ("glossary/norn", "separator"),
+            (".", "`.` or `..`"),
+            ("..", "`.` or `..`"),
+            ("gloss\0ary", "NUL"),
+            ("gloss\u{7}ary", "control"),
+        ] {
+            let error = class_probe(stem).expect_err("not a class stem");
+            let StoreError::Path { problem, .. } = &error else {
+                panic!("`{stem}` was refused as {error:?} rather than as a path");
+            };
+            assert!(
+                problem.contains(needle),
+                "`{stem}` was refused for `{problem}`, which does not name {needle}"
+            );
+        }
+        let class = class_probe("glossary").expect("a class stem");
+        assert_eq!(class.key(), SuffixKey::Raw);
+        assert_eq!(
+            class.ranges().collect::<Vec<_>>(),
+            [("glossary/", "glossary0")]
+        );
     }
 
     /// A separator steps to the character after it, which is what bounds a

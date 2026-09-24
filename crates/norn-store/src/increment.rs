@@ -190,6 +190,7 @@ pub(crate) fn apply(
     // lock and leaves nothing half applied.
     for finding in findings {
         request::check_finding_bounds(&finding.facts)?;
+        request::check_finding_classes(&finding.facts, store.path_order())?;
     }
 
     // The boundary between two acts: everything before this one has committed
@@ -251,11 +252,8 @@ pub(crate) fn apply(
             #[cfg(feature = "induced-failure")]
             crate::faults::abort_if_the_changeset_is_torn(index as u64 + 1);
         }
-        let discarded = discard_affected_classes(
-            &mut statements.discard_class,
-            &tally.affected_classes,
-            class_space,
-        )?;
+        let discarded =
+            discard_affected_classes(&mut statements.discard_class, &tally.affected_classes)?;
         tally.findings_discarded += discarded;
     }
 
@@ -772,22 +770,14 @@ fn discard_the_subject(
 fn discard_affected_classes(
     statement: &mut CachedStatement<'_>,
     classes: &BTreeSet<ClassKey>,
-    space: SuffixKey,
 ) -> Result<u64, StoreError> {
     let mut discarded = 0_u64;
     for class in classes {
-        let probe = class.probe(space);
-        // The statement was compiled for one range and binds two parameters. A
-        // class key is its own probe's single lower bound, so this holds by
-        // construction — and a probe that ever opened two would bind half its
-        // bounds and discard the wrong rows.
-        debug_assert_eq!(
-            probe.range_count(),
-            1,
-            "the class discard is prepared for one range"
-        );
+        // The statement was compiled for one range, and a class key is its
+        // own range's lower bound.
+        let (lower, upper) = class.bounds();
         discarded += statement
-            .execute(request::probe_parameters(&probe))
+            .execute(params![lower, upper])
             .map_err(|error| error::sql("discarding a class's findings", error))?
             as u64;
     }

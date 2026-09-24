@@ -196,24 +196,30 @@ impl TargetClass {
     /// off — for a root whose proven case behaviour is `order`, excluding the
     /// places `ignore` names.
     ///
+    /// Crate-private, because the order is the store's: a class is compiled
+    /// by [`crate::Request::target_class`] under the order the store records,
+    /// or by a find under the order its snapshot reads, and never under an
+    /// order a caller names.
+    ///
     /// The refusals are [`suffix_probe`]'s: a spelling that is not a suffix
     /// address names no class under any root.
-    pub fn new(
+    pub(crate) fn compile(
         target: &str,
         order: StoredPathOrder,
         ignore: &AmbiguityIgnore,
     ) -> Result<Self, StoreError> {
-        let raw = suffix_probe(target)?;
-        let probe = match SuffixKey::under(order) {
-            SuffixKey::Raw => raw,
-            SuffixKey::Folded => raw.folded(),
-        };
         Ok(TargetClass {
-            probe,
+            probe: suffix_probe(target)?.in_space(SuffixKey::under(order)),
             target_segments: target.split(SEPARATOR).count(),
             ignore: ignore.clone(),
             order,
         })
+    }
+
+    /// The path order the class was compiled under, which is the order of the
+    /// store it was compiled for.
+    pub(crate) fn order(&self) -> StoredPathOrder {
+        self.order
     }
 
     /// The probe the class is read through.

@@ -295,7 +295,7 @@ impl Snapshot {
             Predicate::LinksTo { .. } => Err(PageRefusal::NotIndexed {
                 fact: "a link's target",
             }),
-            Predicate::Resolves { target, .. } => match TargetClass::new(
+            Predicate::Resolves { target, .. } => match TargetClass::compile(
                 target.address(),
                 self.path_order(),
                 declared.ambiguity_ignore(),

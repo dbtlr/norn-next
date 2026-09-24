@@ -630,14 +630,11 @@ fn an_ambiguity_classs_membership_change_converges_on_a_build_from_zero() {
     ];
     for (label, vault) in churned.both_derivations() {
         let mut store = vault.store();
-        let class = norn_store::TargetClass::new(
-            "shared",
-            store.path_order(),
-            &norn_store::AmbiguityIgnore::none(),
-        )
-        .expect("a suffix target");
-        let members: Vec<String> = store
-            .begin_request()
+        let request = store.begin_request();
+        let class = request
+            .target_class("shared", &norn_store::AmbiguityIgnore::none())
+            .expect("a suffix target");
+        let members: Vec<String> = request
             .suffix_candidates(&class)
             .expect("reading the class")
             .into_iter()

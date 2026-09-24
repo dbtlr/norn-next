@@ -155,7 +155,7 @@ use std::time::{Duration, Instant};
 
 use norn_fs::ContentHash;
 use norn_host::{AttachMode, DemandLease, Host, ProductionEntryOps};
-use norn_store::{DocumentPath, ExplainedStatement, Store, StoredPathOrder, class_probe};
+use norn_store::{DocumentPath, ExplainedStatement, Store, StoredPathOrder};
 use norn_testkit::attestation::{Attestation, SEAM};
 use norn_testkit::process::{Run, Sandbox, open_fd_count};
 use norn_testkit::wait::{Budget, Observed, wait_until};
@@ -1577,14 +1577,13 @@ fn assert_the_churn_reached_the_store(store: &mut Store, written: &Written) {
 /// **The counter-violation term.** A request that only reads derives nothing,
 /// however long the load beside it has been running.
 fn assert_warm_reads_derive_nothing(store: &mut Store, subject: &DocumentPath) {
-    let probe = class_probe(subject.stem()).expect("a class stem off a derived path");
-    let class = norn_store::TargetClass::new(
-        subject.stem(),
-        store.path_order(),
-        &norn_store::AmbiguityIgnore::none(),
-    )
-    .expect("a suffix target off a derived path");
     let mut warm = store.begin_request();
+    let probe = warm
+        .class_probe(subject.stem())
+        .expect("a class stem off a derived path");
+    let class = warm
+        .target_class(subject.stem(), &norn_store::AmbiguityIgnore::none())
+        .expect("a suffix target off a derived path");
     let _ = warm.stored_document(subject).expect("reading a document");
     let _ = warm.stored_facts(subject).expect("reading facts");
     let _ = warm.stored_tombstone(subject).expect("reading a tombstone");

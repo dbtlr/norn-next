@@ -71,7 +71,7 @@ use norn_fs::reads::{ReadTally, ReadWindow};
 use norn_host::Demand;
 use norn_store::{
     Change, DocumentFacts, DocumentPath, ExplainedStatement, IncrementProvenance, MAX_PAGE, Store,
-    StoredDocument, StoredPathOrder, class_probe,
+    StoredDocument, StoredPathOrder,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::process::Sandbox;
@@ -449,15 +449,13 @@ fn the_hosts_account_is_readable() {
 /// path did.
 fn a_warm_pass(store: &mut Store, subject: &StoredDocument) -> CounterSnapshot {
     let stem = subject.path.stem().to_string();
-    let probe = class_probe(&stem).expect("a class stem off a derived path");
-    let class = norn_store::TargetClass::new(
-        &stem,
-        store.path_order(),
-        &norn_store::AmbiguityIgnore::none(),
-    )
-    .expect("a suffix target off a derived path");
-
     let mut warm = store.begin_request();
+    let probe = warm
+        .class_probe(&stem)
+        .expect("a class stem off a derived path");
+    let class = warm
+        .target_class(&stem, &norn_store::AmbiguityIgnore::none())
+        .expect("a suffix target off a derived path");
     assert!(
         warm.stored_document(&subject.path)
             .expect("reading a document")

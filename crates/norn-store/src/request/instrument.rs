@@ -98,6 +98,14 @@ impl<'a> Request<'a> {
                 given: ids.get(),
             });
         }
+        // A class statement is explained over the key space its reader ranges
+        // over, so a class or probe that reader refuses is refused here too.
+        match statement {
+            ExplainedStatement::SuffixCandidates(resolution) => self.check_class(resolution)?,
+            ExplainedStatement::FindingsInClass(probe)
+            | ExplainedStatement::ClassDiscard(probe) => self.check_probe(probe)?,
+            _ => {}
+        }
         let sql = match statement {
             ExplainedStatement::SuffixCandidates(resolution) => suffix_candidates_sql(resolution),
             ExplainedStatement::FindingsInClass(probe) => {

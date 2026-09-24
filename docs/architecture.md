@@ -1609,9 +1609,12 @@ one-segment target does only where the ignored document stands at the root, whos
 the whole place. The globs match under the store's order — with ASCII case folded where it
 folds, bytewise where it does not — so `archive/**` ignores `Archive/notes.md` on a root
 that does not tell the two apart; a path part of a find, a count or a validate matches the
-same grammar bytewise on every root. Class-scoped findings maintenance names a changed path's class in the key
-space the store's order selects, the space every finding in the store is filed in, so a
-finding is re-decided when a document joins or leaves its class.
+same grammar bytewise on every root. Class-scoped findings maintenance names a changed path's
+class in the key space the store's order selects, the space every finding in the store is
+filed in, so a finding is re-decided when a document joins or leaves its class. A class and a
+class probe are compiled only under the store's recorded order, never under one a caller
+names, and a class, probe or finding class key from the other key space is refused where it
+is read or filed.
 
 The links table stores **syntactic facts only** — raw target, family, protocol, title, span —
 and resolution runs at query time through this one grammar; resolved edges are never stored,

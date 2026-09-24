@@ -7870,12 +7870,11 @@ mod tests {
             .iter()
             .map(|row| row.path.as_str().to_string())
             .collect();
-        let resolution =
-            norn_store::TargetClass::new("Foo", order, declared.fields().ambiguity_ignore())
-                .unwrap();
-        let mut class: Vec<String> = attachment
-            .store
-            .begin_request()
+        let request = attachment.store.begin_request();
+        let resolution = request
+            .target_class("Foo", declared.fields().ambiguity_ignore())
+            .unwrap();
+        let mut class: Vec<String> = request
             .suffix_candidates(&resolution)
             .unwrap()
             .iter()
