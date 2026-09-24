@@ -335,16 +335,23 @@ impl Facet {
     }
 }
 
-/// What `describe` answers with: one page of facets.
+/// What `describe` answers with: one page of facets, in `(kind, key)` order —
+/// the kinds in the byte order of their codes ([`FacetKind::in_code_order`]),
+/// and within a kind the facets in the byte order of their keys.
 pub type DescribeReport = Page<Facet>;
 
 /// What a `describe` request carries.
+///
+/// The facets it answers stand in `(kind, key)` order: the kind, in the byte
+/// order of its code, then the key in byte order, which is the order a facet
+/// cursor names a position in.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct DescribeParams {
     /// The vault to answer about.
     pub vault: VaultAddress,
-    /// The kinds of facet to report. Empty reports every kind.
+    /// The kinds of facet to report. Empty reports every kind. Whatever order
+    /// it names them in, they are answered in the byte order of their codes.
     pub facets: Vec<FacetKind>,
     /// How many facets at most. `null` leaves the ceiling to the host.
     pub limit: Option<u32>,

@@ -839,8 +839,8 @@ path part or a document part costs the same at both and steps through no full sc
 
 **The field universe has a builder** as well: the describe builder answers the vault's content
 model, declared and observed, as a page of facets in `(kind, key)` order — the kinds in the
-order the facet vocabulary declares them, each kind's facets in the byte order of the text
-that keys them — narrowed to the kinds a request names. It answers keys and declarations
+byte order of their codes, as a validate reads its finding kinds, each kind's facets in the
+byte order of the text that keys them — narrowed to the kinds a request names. It answers keys and declarations
 only. The declared facets — each declared field with its type, whether it is required and
 its closed set, the declared tags, the tag patterns, the declared folders, the path rules and
 the stance on an undeclared tag — are read off the declaration the host hands the store,

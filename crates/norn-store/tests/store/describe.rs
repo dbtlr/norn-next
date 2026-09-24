@@ -221,7 +221,9 @@ fn observed_only() -> DescribeParams {
     describing().with_facets([FacetKind::ObservedField])
 }
 
-/// Every facet the fixture answers, in `(kind, key)` order.
+/// Every facet the fixture answers, in `(kind, key)` order: the kinds in the
+/// byte order of their codes — `declared_field`, `declared_tag`, `folder`,
+/// `observed_field`, `path_rule`, `tag_pattern`, `undeclared_tags`.
 fn every_facet() -> Vec<Facet> {
     vec![
         Facet::declared_field("due", FieldType::Date, false, None),
@@ -232,13 +234,13 @@ fn every_facet() -> Vec<Facet> {
             true,
             Some(vec!["draft".to_string(), "live".to_string()]),
         ),
-        Facet::observed_field("aliases", [ContainerKind::Scalar, ContainerKind::Sequence]),
-        Facet::observed_field("meta", [ContainerKind::Map]),
-        Facet::observed_field("status", [ContainerKind::Scalar]),
         Facet::declared_tag("area"),
         Facet::declared_tag("project"),
         Facet::folder("archive", None),
         Facet::folder("journal", Some("One per day".to_string())),
+        Facet::observed_field("aliases", [ContainerKind::Scalar, ContainerKind::Sequence]),
+        Facet::observed_field("meta", [ContainerKind::Map]),
+        Facet::observed_field("status", [ContainerKind::Scalar]),
         Facet::path_rule(PathRuleKind::AmbiguityIgnore, "archive/**"),
         Facet::tag_pattern("person/**"),
         Facet::undeclared_tags(TagStance::Report),
@@ -256,8 +258,8 @@ fn of_kinds(kinds: &[FacetKind]) -> Vec<Facet> {
 // ---- what a page answers ----
 
 /// **With no kinds named every facet answers, in `(kind, key)` order**: the
-/// kinds in the order the vocabulary declares them, and within a kind by the
-/// byte order of the text that keys it. The declared facets are the pinned
+/// kinds in the byte order of their codes, and within a kind by the byte
+/// order of the text that keys it. The declared facets are the pinned
 /// declaration's; the observed fields are the keys the documents carry, one
 /// facet per key. The reading names no fingerprint, because the order is no
 /// schema's.
@@ -304,10 +306,10 @@ fn an_observed_field_carries_every_container_its_documents_hold_it_in() {
     assert_eq!(declared, ["due", "reviewer", "status"]);
 }
 
-/// **Naming kinds answers those kinds alone, in the vocabulary's order**,
-/// whatever order the request names them in and however often.
+/// **Naming kinds answers those kinds alone, in the byte order of their
+/// codes**, whatever order the request names them in and however often.
 #[test]
-fn naming_kinds_answers_those_kinds_alone_in_the_vocabularys_order() {
+fn naming_kinds_answers_those_kinds_alone_in_the_order_of_their_codes() {
     let describing_store = Describing::new("describe-kinds");
     for kinds in [
         vec![FacetKind::ObservedField],
@@ -319,6 +321,7 @@ fn naming_kinds_answers_those_kinds_alone_in_the_vocabularys_order() {
             FacetKind::DeclaredTag,
         ],
         vec![FacetKind::PathRule],
+        vec![FacetKind::ObservedField, FacetKind::Folder],
     ] {
         assert_eq!(
             describing_store.facets(&describing().with_facets(kinds.clone())),
@@ -385,7 +388,7 @@ fn a_drain_a_page_at_a_time_answers_the_facets_one_page_does() {
     let page = describing_store.describe(&describing().with_limit(4));
     assert_eq!(
         page.next.as_ref().map(Cursor::key),
-        Some(&CursorKey::facet(FacetKind::ObservedField, "aliases")),
+        Some(&CursorKey::facet(FacetKind::DeclaredTag, "area")),
         "a page stops at its last facet's kind and key"
     );
 }
@@ -393,8 +396,8 @@ fn a_drain_a_page_at_a_time_answers_the_facets_one_page_does() {
 /// **A cursor is a position in the one `(kind, key)` order, whichever kinds
 /// the request that minted it named**: a cursor minted at the first declared
 /// tag of a request naming tags alone continues a request naming every kind
-/// from the next tag on, and a request naming only kinds before it from
-/// nowhere.
+/// from the next tag on, a request naming only a kind before it from nowhere,
+/// and a request naming only a kind after it from that kind's first facet.
 #[test]
 fn a_cursor_continues_from_its_position_whichever_kinds_minted_it() {
     let describing_store = Describing::new("describe-cursor-position");
@@ -422,10 +425,14 @@ fn a_cursor_continues_from_its_position_whichever_kinds_minted_it() {
     assert_eq!(
         describing_store.facets(
             &describing()
-                .with_facets([FacetKind::DeclaredField, FacetKind::ObservedField])
-                .with_after(minted)
+                .with_facets([FacetKind::DeclaredField])
+                .with_after(minted.clone())
         ),
         Vec::new()
+    );
+    assert_eq!(
+        describing_store.facets(&observed_only().with_after(minted)),
+        of_kinds(&[FacetKind::ObservedField])
     );
 }
 

@@ -30,9 +30,10 @@
 //!
 //! # A page is the facets in `(kind, key)` order
 //!
-//! A page reads one kind after another, in the order the facet vocabulary
-//! declares them, each kind a section in the byte order of the text that keys
-//! its facets — the key a facet's cursor names. The kinds are the request's,
+//! A page reads one kind after another, in the byte order of the kind's code
+//! ([`FacetKind::in_code_order`]) as a validate reads its finding kinds, each
+//! kind a section in the byte order of the text that keys its facets — the
+//! key a facet's cursor names. The kinds are the request's,
 //! or every kind where it names none. A page reads at most one facet past its
 //! bound to learn a next page exists, and the cursor it mints names the last
 //! facet's kind and key.
@@ -258,7 +259,7 @@ fn container_kind(container: FieldContainer) -> ContainerKind {
 
 /// Where `kind` stands in the order a page reads the kinds in.
 fn position(kind: FacetKind) -> usize {
-    FacetKind::ALL
+    FacetKind::in_code_order()
         .iter()
         .position(|listed| *listed == kind)
         .expect("the vocabulary lists every kind")
@@ -275,7 +276,7 @@ fn sections<'a>(
     requested: &[FacetKind],
     at: Option<(FacetKind, &'a str)>,
 ) -> Vec<(FacetKind, Option<&'a str>)> {
-    FacetKind::ALL
+    FacetKind::in_code_order()
         .into_iter()
         .filter(|kind| requested.is_empty() || requested.contains(kind))
         .filter_map(|kind| match at {

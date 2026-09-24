@@ -1174,6 +1174,19 @@ fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
         sorted(FacetKind::ALL.map(|kind| kind.as_str())),
         "the walkable list of facet kinds drifted from the enum"
     );
+    assert_eq!(
+        FacetKind::in_code_order().map(|kind| kind.as_str()),
+        [
+            "declared_field",
+            "declared_tag",
+            "folder",
+            "observed_field",
+            "path_rule",
+            "tag_pattern",
+            "undeclared_tags",
+        ],
+        "a page reads the facet kinds in the byte order of their codes"
+    );
     let containers: Vec<String> = ContainerKind::ALL
         .iter()
         .map(|container| {
