@@ -160,7 +160,7 @@ pub struct ProductionAttachment {
     /// fingerprints the attachment reports as active stay the ones it serves
     /// under until rung 3 reopens the store and takes these into `controls`.
     /// No recovery or reload runs while they stand, which
-    /// [`ProductionAttachment::debug_assert_nothing_held_for_rung_three`]
+    /// [`ProductionAttachment::drop_controls_held_for_rung_three`]
     /// asserts.
     held_for_rung_three: Option<ReloadCandidate>,
     /// Whether the engines are owed the config `controls` carries.
@@ -231,8 +231,8 @@ impl ProductionAttachment {
         self.held_for_rung_three = Some(candidate);
     }
 
-    /// Assert that no controls stand held for rung 3, at the start of a
-    /// recovery or a reload.
+    /// Let go of any controls held for rung 3, at the start of a recovery or
+    /// a reload, which never meets any.
     ///
     /// Both legs put the controls they read into service, and neither meets
     /// held ones: a leg that holds controls returns the damage verdict, the
@@ -241,12 +241,16 @@ impl ProductionAttachment {
     /// while the entry publishes that verdict, and every other route gives
     /// the attachment to a release. A recovery or reload reached over held
     /// controls would put its own read beside them, and the rung after it
-    /// would pin and deliver the held controls over that read.
-    fn debug_assert_nothing_held_for_rung_three(&self) {
+    /// would pin and deliver the held controls over that read, so a debug
+    /// build refuses to go on, and a release build drops the held controls
+    /// and the delivery they owed before the leg reads its own.
+    fn drop_controls_held_for_rung_three(&mut self) {
         debug_assert!(
             self.held_for_rung_three.is_none(),
             "a recovery or reload ran over controls held for rung 3"
         );
+        self.held_for_rung_three = None;
+        self.config_delivery_owed = false;
     }
 }
 
@@ -871,7 +875,7 @@ impl EntryOps for ProductionEntryOps {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
-        attachment.debug_assert_nothing_held_for_rung_three();
+        attachment.drop_controls_held_for_rung_three();
         let _job = self.evidence.attributing();
         self.evidence.count_recovery();
         if !attachment.maintainership.still_current().map_err(effect)? {
@@ -934,7 +938,7 @@ impl EntryOps for ProductionEntryOps {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<ReloadOutcome, crate::EntryReloadFailure> {
-        attachment.debug_assert_nothing_held_for_rung_three();
+        attachment.drop_controls_held_for_rung_three();
         let _job = self.evidence.attributing();
         if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership.into());
