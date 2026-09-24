@@ -33,8 +33,18 @@
 //! - A scan of a co-routine or materialized subquery, whose own steps appear
 //!   as separate rows and are judged there.
 //!
-//! Nothing here opens a database. The rows are handed in by whoever ran the
-//! `EXPLAIN`, which is the store's own API.
+//! # What a plan cannot say
+//!
+//! A plan names the relations a statement reaches and what it reaches each
+//! through, and never which of a row's columns it reads: a probe that reads a
+//! row's widest column by its row id plans exactly as one that reads the id
+//! alone, and SQLite's step counters do not see the bytes either. [`StatementReads`]
+//! pairs the emitted statement with the columns SQLite's authorizer reported
+//! it reads at preparation, so a bar over *which columns* a statement may read
+//! is stated over the same text a plan bar is.
+//!
+//! Nothing here opens a database. The rows and the reads are handed in by
+//! whoever ran the `EXPLAIN`, which is the store's own API.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -665,9 +675,78 @@ fn bare_name(token: &str) -> &str {
     token.trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']')
 }
 
+/// The statement a builder emitted, paired with every column it reads: a
+/// `(table, column)` pair per read, the table as the schema names it.
+#[derive(Clone, Debug)]
+pub struct StatementReads {
+    sql: String,
+    reads: BTreeSet<(String, String)>,
+}
+
+impl StatementReads {
+    pub fn new(sql: impl Into<String>, reads: impl IntoIterator<Item = (String, String)>) -> Self {
+        StatementReads {
+            sql: sql.into(),
+            reads: reads.into_iter().collect(),
+        }
+    }
+
+    /// The statement the reads were taken of.
+    pub fn sql(&self) -> &str {
+        &self.sql
+    }
+
+    /// Whether the statement reads `column` of `table`.
+    pub fn reads(&self, table: &str, column: &str) -> bool {
+        self.reads
+            .iter()
+            .any(|(read_table, read_column)| read_table == table && read_column == column)
+    }
+
+    /// Fail, naming the statement and what it reads, if it reads any of
+    /// `columns`.
+    pub fn assert_reads_none_of(&self, columns: &[(&str, &str)]) {
+        let read: Vec<&(&str, &str)> = columns
+            .iter()
+            .filter(|(table, column)| self.reads(table, column))
+            .collect();
+        assert!(
+            read.is_empty(),
+            "a statement read {read:?}; it reads {:?}\nemitted SQL: {}",
+            self.reads,
+            self.sql
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_statement_reading_a_barred_column_fails_and_one_reading_none_passes() {
+        let reads = |columns: &[(&str, &str)]| {
+            StatementReads::new(
+                "SELECT d.id FROM documents AS d",
+                columns
+                    .iter()
+                    .map(|(table, column)| (table.to_string(), column.to_string())),
+            )
+        };
+        let barred = [("documents", "body")];
+        reads(&[("documents", "id"), ("document_tags", "body")]).assert_reads_none_of(&barred);
+        let failure = std::panic::catch_unwind(|| {
+            reads(&[("documents", "id"), ("documents", "body")]).assert_reads_none_of(&barred)
+        })
+        .expect_err("a statement reading a barred column passed");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("the bar names what it saw");
+        assert!(
+            message.contains("emitted SQL: SELECT d.id FROM documents AS d"),
+            "{message}"
+        );
+    }
 
     /// Canned rows in the shapes SQLite reports them.
     fn plan(details: &[&str]) -> QueryPlan {

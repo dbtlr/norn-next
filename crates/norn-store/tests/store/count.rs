@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::common::{Scratch, document, write_documents};
+use crate::common::{DOCUMENT_PAYLOAD, Scratch, document, reads_of, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
     COUNT_STATEMENTS, ContentModel, CountPlan, CountStatement, Counted, FieldDeclaration,
@@ -18,8 +18,8 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    CountParams, Cursor, CursorKey, FindParams, GroupKey, Predicate, ResolutionTarget, Tally,
-    Unsatisfied, VaultAddress, VaultName,
+    Column, CountParams, Cursor, CursorKey, FindParams, GroupKey, Predicate, ResolutionTarget,
+    Tally, Unsatisfied, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -1513,4 +1513,102 @@ fn a_counts_work_does_not_follow_the_body_bytes_it_counts() {
             );
         }
     }
+}
+
+// ---- the payload bar ----
+
+/// The conjunctions the payload bar compiles: none, and one of each part a
+/// count applies — the probes a compilation runs among them: a key the
+/// declaration names, a key it does not, a path naming no wildcard, and a
+/// full-text query.
+fn payload_narrowing() -> Vec<Vec<Predicate>> {
+    vec![
+        Vec::new(),
+        vec![Predicate::tag("draft")],
+        vec![Predicate::equal_to("status", "open")],
+        vec![
+            Predicate::tag("draft"),
+            Predicate::not_equal_to("status", "closed"),
+        ],
+        vec![Predicate::has("status")],
+        vec![Predicate::missing("status")],
+        vec![Predicate::before("n", "10")],
+        vec![Predicate::equal_to("unnamed", "x")],
+        vec![Predicate::path("notes")],
+        vec![Predicate::path("*.md")],
+        vec![Predicate::matches("body")],
+    ]
+}
+
+/// **No statement a count runs reads a document's payload.** Every statement
+/// a count emits — each tally statement, and each probe its conjunction's
+/// compilation runs — over every grouping the work bar reads under every part
+/// a count applies, and every continuation the plan bars resume, reads none
+/// of [`crate::common::DOCUMENT_PAYLOAD`] as SQLite's authorizer reports the
+/// columns it reads: so what a count costs never includes the body bytes of
+/// the documents it counts, whatever its plan and its step counts say.
+///
+/// Control: a find projecting the body and the fields, on the same snapshot,
+/// hydrates rows reading the body and the frontmatter, and the bar fails over
+/// it.
+#[test]
+fn no_statement_a_count_runs_reads_a_documents_payload() {
+    let counting_store = Counting::new("count-payload");
+    let mut shapes: Vec<CountParams> = Vec::new();
+    for by in work_groupings() {
+        for predicates in payload_narrowing() {
+            shapes.push(counting(by.clone()).with_predicates(predicates));
+        }
+    }
+    for bar in LEAD_BARS {
+        let alone = counting(vec![(bar.key)()]);
+        shapes.push(counting_store.resumed(&alone, &[Some(bar.label)]));
+        let crossed = counting(vec![(bar.key)(), GroupKey::tag(), field("aliases")]);
+        shapes.push(counting_store.resumed(&crossed, &[Some(bar.label), None, None]));
+        shapes.push(counting_store.resumed(&crossed, &[None, None, Some("x")]));
+    }
+    let mut reached: Vec<ReadStatement> = Vec::new();
+    for params in &shapes {
+        for emitted in counting_store.plans(params) {
+            reached.push(emitted.statement);
+            reads_of(&emitted.plan).assert_reads_none_of(DOCUMENT_PAYLOAD);
+        }
+    }
+    for statement in CountStatement::all() {
+        assert!(
+            reached.contains(&ReadStatement::Count(statement)),
+            "the payload bar never reached {statement:?}: {reached:?}"
+        );
+    }
+    for probe in [
+        FindStatement::KnownKey,
+        FindStatement::FieldUniverse,
+        FindStatement::BareDirectory,
+        FindStatement::MatchProbe,
+    ] {
+        assert!(
+            reached.contains(&ReadStatement::Find(probe)),
+            "the payload bar never reached {probe:?}: {reached:?}"
+        );
+    }
+
+    let hydrated = counting_store
+        .snapshot()
+        .find_plans(
+            &FindParams::new(vault()).with_columns([Column::fields(), Column::body()]),
+            &declared(),
+        )
+        .expect("the plans of a find");
+    let rows = hydrated
+        .iter()
+        .find(|emitted| emitted.statement == FindStatement::HydrateDocuments)
+        .expect("a find hydrates its rows");
+    let rows = reads_of(&rows.plan);
+    assert!(
+        rows.reads("documents", "body") && rows.reads("documents", "frontmatter"),
+        "a hydration projecting the body and the fields read neither: {rows:?}"
+    );
+    failure_of("a hydration of the body and the fields", || {
+        rows.assert_reads_none_of(DOCUMENT_PAYLOAD)
+    });
 }

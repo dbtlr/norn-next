@@ -110,12 +110,10 @@ impl Snapshot {
         record
             .into_iter()
             .map(|ran| {
-                let emitted = norn_db::emitted_plan(
-                    self.connection(),
-                    &ran.sql,
-                    params_from_iter(ran.values),
-                )
-                .map_err(StoreError::from)?;
+                let emitted = self
+                    .database()
+                    .emitted_plan(&ran.sql, params_from_iter(ran.values))
+                    .map_err(StoreError::from)?;
                 Ok(plan(ran.statement, ran.filters, emitted))
             })
             .collect()

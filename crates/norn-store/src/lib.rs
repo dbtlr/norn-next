@@ -139,7 +139,7 @@ pub use read::{
 // The open ceremony's own vocabulary, which is this crate's too: a store is
 // one client of that ceremony, and the rung a disagreement names is the same
 // rung whichever database met it.
-pub use norn_db::{EmittedPlan, OpenOutcome, PlanStep, RebuildReason};
+pub use norn_db::{ColumnRead, EmittedPlan, OpenOutcome, PlanStep, RebuildReason};
 pub use path::{
     ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, SuffixKey, SuffixProbe, suffix_probe,
 };

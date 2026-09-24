@@ -36,9 +36,10 @@
 //! disagreement means, are the client's. This module opens, mints, hands back
 //! and removes; the verdicts are read one layer up.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -46,6 +47,7 @@ use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 
 use crate::error::{self, DbError};
 use crate::meta;
+use crate::plan::ColumnRead;
 
 /// How long a connection waits on a lock before reporting the database busy.
 ///
@@ -107,6 +109,9 @@ pub struct Database {
     /// authorizer; a writable one has no authorizer and is unaffected by it.
     /// See [`arm_the_snapshot_control`].
     snapshot_control: Arc<AtomicBool>,
+    /// Whether the connection is read-only, and so sealed by the authorizer
+    /// [`arm_the_snapshot_control`] installs. A writable connection has none.
+    sealed: bool,
 }
 
 impl Database {
@@ -139,10 +144,10 @@ impl Database {
             }
         })?;
         let snapshot_control = Arc::new(AtomicBool::new(false));
-        if connection
+        let sealed = connection
             .is_readonly(rusqlite::MAIN_DB)
-            .map_err(|error| error::sql("reading the mode the database is open in", error))?
-        {
+            .map_err(|error| error::sql("reading the mode the database is open in", error))?;
+        if sealed {
             arm_the_snapshot_control(&connection, Arc::clone(&snapshot_control))?;
         }
         Ok(Database {
@@ -150,6 +155,7 @@ impl Database {
             path: path.to_path_buf(),
             epoch,
             snapshot_control,
+            sealed,
         })
     }
 
@@ -157,6 +163,61 @@ impl Database {
     /// and runs it here; opening is the act it may not perform for itself.
     pub fn connection(&self) -> &Connection {
         &self.connection
+    }
+
+    /// Run `prepare`, reporting every column a statement it prepares reads.
+    ///
+    /// **SQLite's authorizer is what reports a read**, once per column a
+    /// statement reads, while the statement is prepared, wherever in the
+    /// statement the read stands. A connection has one authorizer, so the one
+    /// installed for the length of `prepare` records each read and hands the
+    /// verdict to the connection's own: a sealed connection's seal, the
+    /// handle's transaction control included, judges every statement exactly
+    /// as it does outside, and a writable connection, which has no
+    /// authorizer, is refused nothing. The connection's own authorizer is
+    /// reinstated whichever way `prepare` ended.
+    ///
+    /// Installing an authorizer expires the connection's prepared statements,
+    /// so each is prepared again the next time it runs.
+    pub(crate) fn recording_reads<'a, T>(
+        &'a self,
+        prepare: impl FnOnce(&'a Connection) -> Result<T, DbError>,
+    ) -> Result<(T, BTreeSet<ColumnRead>), DbError> {
+        let recorded = Arc::new(Mutex::new(BTreeSet::new()));
+        let sink = Arc::clone(&recorded);
+        let seal = self.sealed.then(|| Arc::clone(&self.snapshot_control));
+        self.connection
+            .authorizer(Some(move |context: AuthContext<'_>| {
+                if let AuthAction::Read {
+                    table_name,
+                    column_name,
+                } = context.action
+                {
+                    sink.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(ColumnRead {
+                            table: table_name.to_string(),
+                            column: column_name.to_string(),
+                        });
+                }
+                match &seal {
+                    Some(control) => sealed_verdict(control, context),
+                    None => Authorization::Allow,
+                }
+            }))
+            .map_err(|error| error::sql("recording the columns a statement reads", error))?;
+        let prepared = prepare(&self.connection);
+        let reinstated = if self.sealed {
+            arm_the_snapshot_control(&self.connection, Arc::clone(&self.snapshot_control))
+        } else {
+            self.connection
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                .map_err(|error| error::sql("removing the read recorder", error))
+        };
+        let value = prepared?;
+        reinstated?;
+        let reads = std::mem::take(&mut *recorded.lock().unwrap_or_else(PoisonError::into_inner));
+        Ok((value, reads))
     }
 
     /// The database file this handle is holding.
@@ -507,14 +568,18 @@ fn arm_the_snapshot_control(
 ) -> Result<(), DbError> {
     connection
         .authorizer(Some(move |context: AuthContext<'_>| {
-            if matches!(context.action, AuthAction::Transaction { .. })
-                && control.load(Ordering::SeqCst)
-            {
-                return Authorization::Allow;
-            }
-            refuse_everything_but_reading(context)
+            sealed_verdict(&control, context)
         }))
         .map_err(|error| error::sql("binding the snapshot control to its handle", error))
+}
+
+/// What a sealed connection's authorizer answers: transaction control while
+/// `control` is raised, and otherwise [`refuse_everything_but_reading`].
+fn sealed_verdict(control: &AtomicBool, context: AuthContext<'_>) -> Authorization {
+    if matches!(context.action, AuthAction::Transaction { .. }) && control.load(Ordering::SeqCst) {
+        return Authorization::Allow;
+    }
+    refuse_everything_but_reading(context)
 }
 
 /// The one thing a read-only connection may do: read rows.

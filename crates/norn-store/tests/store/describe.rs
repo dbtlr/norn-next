@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use crate::common::{Scratch, document, write_documents};
+use crate::common::{DOCUMENT_PAYLOAD, Scratch, document, reads_of, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
     ContentModel, DESCRIBE_STATEMENTS, DescribePlan, DescribeStatement, DescribeWork, Described,
@@ -815,4 +815,40 @@ fn a_declared_section_adds_no_statement_work_to_a_page() {
         "the observed statement ran: {observed:?}"
     );
     assert_eq!(steps(every), steps(observed));
+}
+
+// ---- the payload bar ----
+
+/// **No statement a describe runs reads a document's payload.** Every
+/// statement a page of facets emits — on a first page, a continuation, a page
+/// of every kind and a page of the observed fields alone, bounded to one key
+/// and to every key — reads none of [`crate::common::DOCUMENT_PAYLOAD`] as
+/// SQLite's authorizer reports the columns it reads: so what a page costs
+/// never includes the body bytes of the documents that carry its keys.
+#[test]
+fn no_statement_a_describe_runs_reads_a_documents_payload() {
+    let describing_store = Describing::new("describe-payload");
+    let next = describing_store
+        .describe(&observed_only().with_limit(1))
+        .next
+        .expect("a next page");
+    let mut observed = 0;
+    for params in [
+        describing(),
+        observed_only(),
+        observed_only().with_limit(1),
+        observed_only().with_limit(2),
+        describing().with_after(next),
+    ] {
+        for emitted in describing_store.plans(&params) {
+            if emitted.statement == ReadStatement::Describe(DescribeStatement::ObservedFields) {
+                observed += 1;
+            }
+            reads_of(&emitted.plan).assert_reads_none_of(DOCUMENT_PAYLOAD);
+        }
+    }
+    assert_eq!(
+        observed, 5,
+        "a page ran its observed statement other than once"
+    );
 }

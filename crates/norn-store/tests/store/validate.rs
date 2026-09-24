@@ -18,7 +18,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::common::{
-    Scratch, ambiguity, ambiguity_for_target, document, unread_block, violation, write_documents,
+    DOCUMENT_PAYLOAD, Scratch, ambiguity, ambiguity_for_target, document, reads_of, unread_block,
+    violation, write_documents,
 };
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
@@ -1160,4 +1161,45 @@ fn a_narrowing_part_narrows_a_validates_work_to_the_findings_it_matches() {
     failure_of("findings_fingerprint_kind_severity dropped", || {
         judge_narrow(&small, &large, &validating().with_severity(Severity::Error))
     });
+}
+
+// ---- the payload bar ----
+
+/// **No statement a validate runs reads a document's payload.** Every
+/// statement a page of findings and a summary emit — the kind page, the
+/// summary, the probes the conjunction's compilation runs and the reads of
+/// each finding row's head and classes — under every narrowing the drain
+/// reads, a continuation, and a document part driving each, reads none of
+/// [`crate::common::DOCUMENT_PAYLOAD`] as SQLite's authorizer reports the
+/// columns it reads: so what a page or a summary costs never includes the
+/// body bytes of the documents its findings stand over.
+#[test]
+fn no_statement_a_validate_runs_reads_a_documents_payload() {
+    let validating_store = Validating::new("validate-payload");
+    let mut narrowings = requests();
+    narrowings.push(validating().with_predicates([Predicate::tag("draft")]));
+    narrowings.push(
+        validating()
+            .with_severity(Severity::Error)
+            .with_predicates([Predicate::tag("draft"), Predicate::path("*.md")]),
+    );
+    let (_, next) = validating_store.page(&validating().with_limit(3));
+    let mut shapes = vec![validating().with_after(next.expect("a next page"))];
+    for params in narrowings {
+        shapes.push(params.clone().summarized());
+        shapes.push(params);
+    }
+    let mut reached: Vec<ReadStatement> = Vec::new();
+    for params in &shapes {
+        for emitted in validating_store.plans(params) {
+            reached.push(emitted.statement);
+            reads_of(&emitted.plan).assert_reads_none_of(DOCUMENT_PAYLOAD);
+        }
+    }
+    for statement in ValidateStatement::all() {
+        assert!(
+            reached.contains(&ReadStatement::Validate(statement)),
+            "the payload bar never reached {statement:?}: {reached:?}"
+        );
+    }
 }

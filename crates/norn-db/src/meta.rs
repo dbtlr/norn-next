@@ -108,7 +108,7 @@ pub fn get_meta<T: rusqlite::types::FromSql>(
 
 /// The statement [`read_meta`] emits.
 ///
-/// It is public for the reason [`crate::emitted_plan`] exists: a client that
+/// It is public for the reason [`crate::Database::emitted_plan`] exists: a client that
 /// hands out a plan of its own pinned-scalar read explains this statement, and
 /// a plan taken of a copy of the SQL judges a string nobody executes. `meta` is
 /// `WITHOUT ROWID` with `key` as its primary key, so the key b-tree *is* the

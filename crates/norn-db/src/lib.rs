@@ -48,8 +48,9 @@
 //! - [`sql`] and [`is_damaged`] — the one judgment made about a driver error:
 //!   damaged state, which authorizes a rebuild, or a broken environment, which
 //!   does not.
-//! - [`emitted_plan`] — the plan SQLite reported for a statement a client
-//!   emitted, as plain data a bar can be asserted against.
+//! - [`Database::emitted_plan`] — the plan SQLite reported for a statement a
+//!   client emitted and the columns it reads, as plain data a bar can be
+//!   asserted against.
 //! - [`prepare_parent`], [`remove_database`] — the parts of a database file's
 //!   lifecycle the driver does not cover.
 //!
@@ -79,5 +80,5 @@ pub use database::{
     prepare_parent, remove_database,
 };
 pub use error::{DbError, damage_or_fail, is_damaged, sql, sql_at_statement};
-pub use plan::{EmittedPlan, PlanStep, emitted_plan};
+pub use plan::{ColumnRead, EmittedPlan, PlanStep};
 pub use schema::{digest, schema_digest};

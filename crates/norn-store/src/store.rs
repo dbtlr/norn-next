@@ -472,10 +472,15 @@ impl Snapshot {
     /// statements call are registered on this connection when its handle is
     /// minted, by [`Store::open_reader`].
     pub(crate) fn connection(&self) -> &Connection {
+        self.database().connection()
+    }
+
+    /// The handle this snapshot's connection belongs to, which is what takes
+    /// a plan of a statement the connection ran.
+    pub(crate) fn database(&self) -> &Database {
         self.database
             .as_ref()
             .expect("a snapshot holds its connection until it is dropped")
-            .connection()
     }
 
     /// The database this snapshot reads, from its creation to its discard.
@@ -1568,8 +1573,10 @@ mod tests {
 
         // The plan for that same statement, which is what an EXPLAIN bar reads
         // and the reason the two assertions above read rows instead.
-        let plan =
-            norn_db::emitted_plan(connection, MATCHED, ["interloper"]).expect("the match's plan");
+        let plan = snapshot
+            .database()
+            .emitted_plan(MATCHED, ["interloper"])
+            .expect("the match's plan");
         assert!(
             plan.steps
                 .iter()
