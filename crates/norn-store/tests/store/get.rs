@@ -379,6 +379,55 @@ fn a_folding_root_resolves_every_case_spelling_as_one_class() {
     }
 }
 
+/// **A get and a find resolving one target read one class**: the documents a
+/// get's refusal heads are documents a find resolving the same target answers,
+/// and its total is how many that find answers, under either order and the
+/// same ignored places.
+#[test]
+fn a_get_and_a_find_resolving_one_target_read_one_class() {
+    for (order, class) in [(Sensitive, 2), (Folding, 3)] {
+        let vault = Vault::at(
+            &format!("get-one-class-{order:?}"),
+            order,
+            &[
+                "a/Glossary.md",
+                "b/glossary.md",
+                "c/glossary.md",
+                "archive/glossary.md",
+                "notes/other.md",
+            ],
+        );
+        let archived = ignoring(&["archive/**"]);
+        let found: Vec<String> = vault
+            .snapshot()
+            .find(
+                &FindParams::new(address())
+                    .with_predicates([Predicate::resolves(target("glossary"))]),
+                &archived,
+            )
+            .expect("a find resolving the target")
+            .rows
+            .iter()
+            .map(|row| row.path.as_str().to_string())
+            .collect();
+        let PageRefusal::AmbiguousTarget(ambiguity) =
+            vault.refusal_under(&getting("glossary"), &archived)
+        else {
+            panic!("a target naming {class} documents answered");
+        };
+        assert_eq!(ambiguity.head.total(), found.len() as u64, "{order:?}");
+        assert_eq!(found.len(), class, "{order:?}");
+        let mut headed: Vec<String> = ambiguity
+            .head
+            .candidates()
+            .iter()
+            .map(|candidate| candidate.path.as_str().to_string())
+            .collect();
+        headed.sort();
+        assert_eq!(headed, found, "{order:?}");
+    }
+}
+
 /// **A target naming no document refuses as unknown**, under either order,
 /// and so does a target that is no suffix address at all.
 #[test]
