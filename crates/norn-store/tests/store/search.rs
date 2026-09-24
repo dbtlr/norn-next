@@ -249,7 +249,10 @@ fn hits_of_equal_relevance_are_ordered_by_path_in_byte_order() {
 /// `OR` is no disjunction: `foo OR gardens` answers no document, since none
 /// holds all three words. A
 /// hyphen before a term negates nothing, and NUL separates terms as
-/// whitespace does.
+/// whitespace does. So does every character Unicode reads as whitespace: a
+/// no-break space parts `lantern` from `harbor` into two terms, which every
+/// document holding both answers, rather than one term holding the two words
+/// adjacent, which only `notes/lantern.md` holds.
 #[test]
 fn a_query_is_plain_text() {
     let searching_store = Searching::new("search-plain-text");
@@ -300,6 +303,7 @@ fn a_query_is_plain_text() {
         "lantern -harbor",
         "lantern\0harbor",
         "  lantern\t\nharbor  ",
+        "lantern\u{00A0}harbor",
     ] {
         assert_eq!(
             hit_paths(&searching_store.search(&searching(spelled))),
@@ -307,6 +311,33 @@ fn a_query_is_plain_text() {
             "`{spelled:?}` is not the query `lantern harbor`"
         );
     }
+}
+
+/// **A quote inside a term is text, and parts the words either side of it.**
+/// `foo"bar` holds the words `foo` and `bar`, and matches them adjacent and in
+/// order: `notes/syntax.md` holds them so in `foo-bar`, and `notes/joined.md`
+/// holds the one word `foobar`, which is not the term. `a"b` holds `a` and `b`,
+/// which no document holds adjacent, and `notes/joined.md`'s one word `ab` is
+/// not it either.
+#[test]
+fn a_quote_inside_a_term_is_text_that_parts_its_words() {
+    let searching_store = Searching::with_documents(
+        "search-inner-quote",
+        vec![document("notes/joined.md", "hash-joined", "foobar ab\n")],
+    );
+    assert_eq!(
+        hit_paths(&searching_store.search(&searching("foo\"bar"))),
+        ["notes/syntax.md"]
+    );
+    assert_eq!(
+        hit_paths(&searching_store.search(&searching("a\"b"))),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        hit_paths(&searching_store.search(&searching("foobar ab"))),
+        ["notes/joined.md"],
+        "the fixture does not hold the joined words"
+    );
 }
 
 /// **A query naming no term answers no hit, and reports nothing.** An empty
