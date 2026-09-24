@@ -297,6 +297,41 @@ fn a_folder_path_of_the_wrong_shape_names_the_shape_it_found() {
     );
 }
 
+/// **A folder is declared once.** A folder path written twice would leave
+/// which declaration stands — and so which description the vault reports — to
+/// the order the two were written in, so the schema is refused and the path
+/// named. A trailing `/` names the same folder: `journal` and `journal/` are
+/// one path written twice, and a folder written `journal/` alone reads as
+/// `journal`.
+#[test]
+fn a_folder_declared_twice_is_refused() {
+    for bytes in [
+        &b"version: 1\nfolders:\n  - path: journal\n    description: one\n  - path: journal\n    description: two\n"[..],
+        b"version: 1\nfolders:\n  - path: journal\n  - path: journal/\n",
+    ] {
+        let error = VaultSchema::parse(bytes).expect_err("a folder declared twice");
+        assert_eq!(
+            error,
+            VaultSchemaError::RepeatedFolder {
+                path: "journal".to_string()
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "`folders` declares the folder `journal` twice"
+        );
+    }
+    let schema =
+        VaultSchema::parse(b"version: 1\nfolders:\n  - path: journal/\n  - path: archive\n")
+            .expect("two folders, one written with a trailing `/`");
+    let paths: Vec<&str> = schema
+        .folders()
+        .iter()
+        .map(|folder| folder.path())
+        .collect();
+    assert_eq!(paths, ["journal", "archive"]);
+}
+
 /// **An unknown key is a schema this build cannot act on.** A misspelled
 /// section or a misspelled key would otherwise read as a valid schema that
 /// declares nothing, so `undecalred: report` would turn a vault's reporting

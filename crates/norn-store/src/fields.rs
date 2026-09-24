@@ -280,8 +280,11 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 ///
 /// **Every declaration is held once, by the text that names it**: a field by
 /// its key, a tag by its name, a tag pattern and a path rule by the pattern, a
-/// folder by its path. A name declared twice is one declaration, and the last
-/// one stands, as a repeated frontmatter key's last value does.
+/// folder by its path. A schema names each field and each folder once — its
+/// grammar refuses a repeated field key and a folder path written twice — so
+/// the host hands neither twice. A tag, a tag pattern or a path rule written
+/// twice is the same text twice and carries nothing beyond it, so the two
+/// collapse to one and nothing is lost.
 #[derive(Clone, Debug, Default)]
 pub struct ContentModel {
     schema: Option<String>,
@@ -332,7 +335,8 @@ impl ContentModel {
         self
     }
 
-    /// The same declaration with the tag `name` declared.
+    /// The same declaration with the tag `name` declared. A name declared
+    /// again is the declaration already held.
     pub fn declare_tag(mut self, name: impl Into<String>) -> Self {
         let name = name.into();
         self.schema_declares(&name);
@@ -341,7 +345,8 @@ impl ContentModel {
     }
 
     /// The same declaration with the tag facet admitting `pattern` beyond its
-    /// literal names.
+    /// literal names. A pattern declared again is the declaration already
+    /// held.
     pub fn declare_tag_pattern(mut self, pattern: impl Into<String>) -> Self {
         let pattern = pattern.into();
         self.schema_declares(&pattern);
@@ -358,7 +363,8 @@ impl ContentModel {
     }
 
     /// The same declaration with the folder at `path` declared, for what
-    /// `description` says.
+    /// `description` says. A schema's grammar refuses a folder path written
+    /// twice, so the host declares each path once.
     pub fn declare_folder(mut self, path: impl Into<String>, description: Option<String>) -> Self {
         let path = path.into();
         self.schema_declares(&path);

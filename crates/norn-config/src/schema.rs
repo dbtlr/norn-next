@@ -181,7 +181,8 @@ impl VaultSchema {
         &self.tags
     }
 
-    /// The declared folders, in the order they were written.
+    /// The declared folders, in the order they were written, each path once
+    /// and without its trailing `/`.
     ///
     /// Read by derivation, which hands them to the store with the rest of the
     /// declaration, and `describe` reports each as a facet. No derivation
@@ -425,6 +426,12 @@ pub enum VaultSchemaError {
         /// The keys the section does hold, in grammar order.
         known: &'static [&'static str],
     },
+    /// `folders` declares one folder path twice. A trailing `/` does not make
+    /// a second folder, so `journal` and `journal/` are one path.
+    RepeatedFolder {
+        /// The path declared twice, without its trailing `/`.
+        path: String,
+    },
 }
 
 impl fmt::Display for VaultSchemaError {
@@ -461,6 +468,9 @@ impl fmt::Display for VaultSchemaError {
                 },
                 known.join(", ")
             ),
+            VaultSchemaError::RepeatedFolder { path } => {
+                write!(formatter, "`folders` declares the folder `{path}` twice")
+            }
         }
     }
 }
@@ -654,6 +664,7 @@ fn read_folders(document: &serde_yaml::Mapping) -> Result<Vec<DeclaredFolder>, V
     let Value::Sequence(folders) = value else {
         return Err(section_error("folders", "a sequence", value));
     };
+    let mut declared = BTreeSet::new();
     folders
         .iter()
         .map(|folder| {
@@ -672,9 +683,20 @@ fn read_folders(document: &serde_yaml::Mapping) -> Result<Vec<DeclaredFolder>, V
                     found: "absent".to_string(),
                 });
             };
+            // A folder path is read without its trailing `/`: `journal/` is
+            // the folder `journal`.
             let path = path
                 .as_str()
-                .ok_or_else(|| section_error("folders.path", "a path", path))?;
+                .ok_or_else(|| section_error("folders.path", "a path", path))?
+                .trim_end_matches('/');
+            // A path declared twice is refused as a repeated key is, rather
+            // than leaving which declaration stands to the order they were
+            // written in.
+            if !declared.insert(path) {
+                return Err(VaultSchemaError::RepeatedFolder {
+                    path: path.to_string(),
+                });
+            }
             let description = match at(folder, "description") {
                 None => None,
                 Some(value) => Some(
