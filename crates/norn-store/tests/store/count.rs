@@ -161,6 +161,32 @@ fn seed(store: &mut Store) {
     );
 }
 
+/// Three documents beside the fixture holding the empty text, which is the
+/// value that sorts first:
+///
+/// | path | status | aliases |
+/// |---|---|---|
+/// | `h.md` | | `[x, x, ""]` |
+/// | `i.md` | `""` | `[""]` |
+/// | `j.md` | `""` | `[x]` |
+fn blanks() -> Vec<norn_store::DocumentFacts> {
+    let fields = |at: &str, entries: Vec<(&str, FrontmatterValue)>| {
+        document(at, &format!("hash-{at}"), "a body\n")
+            .with_frontmatter(Some(map(entries)), &declared())
+    };
+    vec![
+        fields("h.md", vec![("aliases", texts(&["x", "x", ""]))]),
+        fields(
+            "i.md",
+            vec![("status", string("")), ("aliases", texts(&[""]))],
+        ),
+        fields(
+            "j.md",
+            vec![("status", string("")), ("aliases", texts(&["x"]))],
+        ),
+    ]
+}
+
 /// A seeded store and the read handle its snapshots are established on.
 pub(crate) struct Counting {
     _scratch: Scratch,
@@ -178,9 +204,6 @@ impl Counting {
     /// rows that a count whose work grows with the vault reads many times
     /// more of them.
     fn with_bulk(label: &str, bulk: usize) -> Self {
-        let scratch = Scratch::new(label);
-        let mut store = scratch.open();
-        seed(&mut store);
         let documents: Vec<_> = (0..bulk)
             .map(|at| {
                 tagged(
@@ -201,6 +224,14 @@ impl Counting {
                 )
             })
             .collect();
+        Self::with_documents(label, documents)
+    }
+
+    /// The fixture and `documents` beside it.
+    fn with_documents(label: &str, documents: Vec<norn_store::DocumentFacts>) -> Self {
+        let scratch = Scratch::new(label);
+        let mut store = scratch.open();
+        seed(&mut store);
         if !documents.is_empty() {
             write_documents(&mut store.begin_request(), &documents);
         }
@@ -350,6 +381,43 @@ fn an_empty_grouping_answers_one_tally_over_the_whole_match() {
             .count(&counting(Vec::new()).with_predicates([Predicate::equal_to("status", "open")]))
             .tallies,
         vec![tally(&[], 3)]
+    );
+}
+
+/// **A document stands in a group once however many of its values fall
+/// there**, in a tally whose leading member is `null` as in any other:
+/// `h.md` carries no `status` and holds `x` twice under `aliases`, and is
+/// counted once in `(null, x)`.
+#[test]
+fn a_document_repeating_a_value_stands_once_in_a_null_led_tally() {
+    let counting_store = Counting::with_documents("count-null-repeat", blanks());
+    let counted = counting_store.count(&counting(vec![field("status"), field("aliases")]));
+    assert_eq!(
+        counted.tallies,
+        vec![
+            tally(&[None, None], 2),
+            tally(&[None, Some("")], 1),
+            tally(&[None, Some("x")], 1),
+            tally(&[Some(""), Some("")], 1),
+            tally(&[Some(""), Some("x")], 1),
+            tally(&[Some("closed"), None], 2),
+            tally(&[Some("open"), Some("x")], 2),
+            tally(&[Some("open"), Some("y")], 2),
+        ]
+    );
+}
+
+/// **A grouped count answers no group holding no document.** Every `draft`
+/// document holds a value under `n`, so grouped by `n` they answer the one
+/// group they stand in, and no `null` tally of zero.
+#[test]
+fn a_grouped_count_answers_no_group_of_zero_documents() {
+    let counting_store = Counting::new("count-no-empty-group");
+    assert_eq!(
+        counting_store
+            .count(&counting(vec![field("n")]).with_predicates([Predicate::tag("draft")]))
+            .tallies,
+        vec![tally(&[Some("09")], 3)]
     );
 }
 
@@ -522,6 +590,52 @@ fn a_drain_a_page_at_a_time_answers_the_tallies_one_page_does() {
         Some(&CursorKey::tally([Some("3".to_string())])),
         "a page stops at its last tally's labels"
     );
+}
+
+/// **`null` and the empty text are two places in a member's order**, `null`
+/// first: a drain a page at a time over members holding the empty text beside
+/// members holding no value answers the tallies one page does, wherever the
+/// bound falls between them.
+#[test]
+fn a_drain_resumes_between_null_and_the_empty_text() {
+    let counting_store = Counting::with_documents("count-drain-blank", blanks());
+    for by in [
+        vec![field("status")],
+        vec![field("status"), field("aliases")],
+    ] {
+        let params = counting(by.clone());
+        let whole = counting_store
+            .count(&params.clone().with_limit(1000))
+            .tallies;
+        assert!(
+            whole.iter().any(|tally| tally.group[0].is_none())
+                && whole
+                    .iter()
+                    .any(|tally| tally.group[0].as_deref() == Some("")),
+            "the grouping holds both `null` and the empty text: {whole:?}"
+        );
+        for limit in [1, 2, 3] {
+            assert_eq!(
+                drained(&counting_store, &params, limit),
+                whole,
+                "{by:?} drained {limit} at a time"
+            );
+        }
+    }
+}
+
+/// **A count grouped by nothing has one tally, which a continuation has
+/// passed**: continued after it, the page is empty and the last, whether the
+/// match holds documents or a part the count cannot apply emptied it.
+#[test]
+fn an_ungrouped_count_continued_after_its_one_tally_answers_an_empty_page() {
+    let counting_store = Counting::new("count-ungrouped-resumed");
+    for predicates in [Vec::new(), vec![Predicate::path("")]] {
+        let params = counting(Vec::new()).with_predicates(predicates.clone());
+        let counted = counting_store.count(&counting_store.resumed(&params, &[]));
+        assert_eq!(counted.tallies, Vec::new(), "under {predicates:?}");
+        assert_eq!(counted.next, None, "under {predicates:?}");
+    }
 }
 
 // ---- the parts a count cannot apply ----
@@ -1222,10 +1336,11 @@ fn judge_narrow(small: &Counting, large: &Counting, params: &CountParams) {
 
 /// **A narrowing part narrows a count's work to the documents it matches.**
 /// Over the fixture and 50, then 500, more documents, a count narrowed to
-/// the fixture's own documents — by a tag, and by a field's value — runs the
-/// same statements and the same VM steps at both sizes, under every grouping,
-/// and steps through no full scan: every statement is driven from the part's
-/// seek.
+/// the fixture's own documents — by a tag, by a field's value, and by a tag
+/// beside an inequality — runs the same statements and the same VM steps at
+/// both sizes, under every grouping, and steps through no full scan: every
+/// statement is driven from the seek of a part that keeps what it seeks,
+/// whatever excluding part stands beside it.
 ///
 /// **An unfiltered grouped count is linear in the vault, and says so.** Its
 /// `null`-lead section walks every document once, so its full-scan steps grow
@@ -1242,15 +1357,19 @@ fn a_narrowing_part_narrows_a_counts_work_to_the_documents_it_matches() {
     let small = Counting::with_bulk("count-work-small", 50);
     let mut large = Counting::with_bulk("count-work-large", 500);
     let narrowing = [
-        Predicate::tag("draft"),
-        Predicate::equal_to("status", "open"),
+        vec![Predicate::tag("draft")],
+        vec![Predicate::equal_to("status", "open")],
+        vec![
+            Predicate::tag("draft"),
+            Predicate::not_equal_to("status", "closed"),
+        ],
     ];
     for by in work_groupings() {
-        for part in &narrowing {
+        for predicates in &narrowing {
             judge_narrow(
                 &small,
                 &large,
-                &counting(by.clone()).with_predicates([part.clone()]),
+                &counting(by.clone()).with_predicates(predicates.clone()),
             );
         }
         let whole = counting(by.clone());
