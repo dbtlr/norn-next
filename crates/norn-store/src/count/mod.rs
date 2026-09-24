@@ -259,7 +259,7 @@ impl Snapshot {
             &mut work,
         )?;
         let snapshot = self.reading_facts(order, lookups)?;
-        let next = next.map(|group| Cursor::new(snapshot.clone(), CursorKey::tally(group)));
+        let next = next.map(|last| Cursor::new(snapshot.clone(), last.cursor_key()));
         let unsatisfied = self.resolve(conjunction.reports, declared, lookups)?;
         work.statements = self.counters().statements_executed() - started;
         Ok(Counted {
@@ -308,8 +308,8 @@ impl Snapshot {
         Ok((at, moved))
     }
 
-    /// One page of tallies: at most `limit`, and the grouping tuple the next
-    /// page continues after.
+    /// One page of tallies: at most `limit`, and the tally the next page
+    /// continues after.
     fn page_tallies(
         &self,
         members: &[Member<'_>],
@@ -318,7 +318,7 @@ impl Snapshot {
         at: Option<&[Option<String>]>,
         lookups: &mut Lookups,
         work: &mut CountWork,
-    ) -> Result<(Vec<Tally>, Option<Vec<Option<String>>>), StoreError> {
+    ) -> Result<(Vec<Tally>, Option<Tally>), StoreError> {
         let mut tallies: Vec<Tally> = Vec::new();
         if !conjunction.matches_nothing {
             let shapes: Vec<FindFilter> = conjunction
@@ -347,7 +347,7 @@ impl Snapshot {
         work.tallies_read = tallies.len() as u64;
         let next = if tallies.len() > limit {
             tallies.truncate(limit);
-            tallies.last().map(|tally| tally.group.clone())
+            tallies.last().cloned()
         } else {
             None
         };
