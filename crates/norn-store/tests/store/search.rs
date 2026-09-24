@@ -340,19 +340,82 @@ fn a_quote_inside_a_term_is_text_that_parts_its_words() {
     );
 }
 
-/// **A query naming no term answers no hit, and reports nothing.** An empty
-/// query, whitespace, NUL, and terms of punctuation alone name no word, so no
-/// document holds every term; none of them is refused, and each answers a last
-/// page.
+/// **A query holding no word answers no hit, runs no lexical page, and is
+/// reported.** An empty query, whitespace, NUL, punctuation, a no-break space,
+/// and an emoji the full-text index reads no word in each hold no word, so
+/// the page is empty and last, no lexical page runs, and the query is the
+/// request's first unsatisfied part, before the conjunction's.
 #[test]
-fn a_query_naming_no_term_answers_no_hit() {
-    let searching_store = Searching::new("search-no-term");
-    for query in ["", "   \t\n", "\0", "--", "\"", "\"\" -- !!", "* ^ ( )"] {
+fn a_query_holding_no_word_answers_no_hit_and_is_reported() {
+    let searching_store = Searching::new("search-no-word");
+    for query in [
+        "",
+        "   \t\n",
+        "\0",
+        "--",
+        "\"",
+        "\"\" -- !!",
+        "* ^ ( )",
+        "\u{00A0}",
+        "\u{1F600}",
+    ] {
         let searched = searching_store.search(&searching(query));
         assert_eq!(hit_paths(&searched), Vec::<&str>::new(), "`{query:?}`");
-        assert!(searched.unsatisfied.is_empty(), "`{query:?}`");
+        assert_eq!(
+            searched.unsatisfied,
+            vec![Unsatisfied::query_names_no_word(query)],
+            "`{query:?}`"
+        );
         assert_eq!(searched.next, None, "`{query:?}`");
+        assert!(
+            !searching_store
+                .plans(&searching(query))
+                .iter()
+                .any(|plan| plan.statement == ReadStatement::Search(SearchStatement::LexicalPage)),
+            "`{query:?}` ran a lexical page"
+        );
     }
+    let narrowed = searching_store
+        .search(&searching("--").with_predicates([Predicate::equal_to("statis", "open")]));
+    assert_eq!(
+        narrowed.unsatisfied,
+        vec![
+            Unsatisfied::query_names_no_word("--"),
+            Unsatisfied::unknown_predicate_key("statis", vec!["status".to_string()]),
+        ]
+    );
+}
+
+/// **A term holding no word is dropped, and every other term still counts.**
+/// `lantern --`, `-- lantern !!` and `lantern` followed by an emoji the index
+/// reads no word in each answer what `lantern` answers, and report nothing. A
+/// character the index does read a word in is a term like any other: `🙂`
+/// answers the document holding it, and `lantern 🙂` answers nothing, since no
+/// document holds both.
+#[test]
+fn a_term_holding_no_word_is_dropped_and_every_other_term_counts() {
+    let searching_store = Searching::with_documents(
+        "search-wordless-term",
+        vec![document("notes/smile.md", "hash-smile", "\u{1F642}\n")],
+    );
+    let lantern = hit_paths(&searching_store.search(&searching("lantern")))
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<String>>();
+    assert_eq!(lantern.len(), 5);
+    for query in ["lantern --", "-- lantern !!", "lantern \u{1F600}"] {
+        let searched = searching_store.search(&searching(query));
+        assert_eq!(hit_paths(&searched), lantern, "`{query:?}`");
+        assert!(searched.unsatisfied.is_empty(), "`{query:?}`");
+    }
+    assert_eq!(
+        hit_paths(&searching_store.search(&searching("\u{1F642}"))),
+        ["notes/smile.md"]
+    );
+    assert_eq!(
+        hit_paths(&searching_store.search(&searching("lantern \u{1F642}"))),
+        Vec::<&str>::new()
+    );
 }
 
 // ---- paging ----

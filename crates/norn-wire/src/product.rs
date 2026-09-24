@@ -121,6 +121,13 @@ pub enum Unsatisfied {
         /// The target the request asked to resolve.
         target: ResolutionTarget,
     },
+    /// A search's query held no word, as the full-text index's tokenizer
+    /// reads words, so no document is a hit.
+    #[non_exhaustive]
+    QueryNamesNoWord {
+        /// The query the request named.
+        query: String,
+    },
 }
 
 impl Unsatisfied {
@@ -198,6 +205,13 @@ impl Unsatisfied {
     /// This verb answers no resolution of `target`.
     pub const fn resolves_not_applicable(target: ResolutionTarget) -> Self {
         Unsatisfied::ResolvesNotApplicable { target }
+    }
+
+    /// A search named `query`, which holds no word.
+    pub fn query_names_no_word(query: impl Into<String>) -> Self {
+        Unsatisfied::QueryNamesNoWord {
+            query: query.into(),
+        }
     }
 }
 

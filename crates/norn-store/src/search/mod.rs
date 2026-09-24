@@ -67,6 +67,7 @@
 //! names; a request naming none carries no row and hydrates nothing.
 
 mod statement;
+mod words;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
@@ -76,9 +77,7 @@ use norn_wire::{
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::find::{FindWork, FoundKey, NestedRows, Projection};
-use crate::read::{
-    Conjunction, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, ResolvesPart, page_limit,
-};
+use crate::read::{Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, ResolvesPart, page_limit};
 use crate::store::Snapshot;
 
 use statement::{HitPosition, LexicalPage, compose_lexical_page, lexical_expression};
@@ -326,19 +325,37 @@ impl Snapshot {
         let fields =
             self.projected_keys(&projection, declared, lookups, &mut conjunction.reports)?;
 
+        let expression = lexical_expression(&request.query);
         let mut work = SearchWork::default();
         let after = resume.as_ref().map(|(score, path)| HitPosition {
             score: *score,
             path: path.as_str(),
         });
-        let (ranked, next) =
-            self.page_hits(request, &conjunction, limit, after, lookups, &mut work)?;
+        let (ranked, next) = match expression.as_deref() {
+            Some(expression) if !conjunction.matches_nothing => self.page_hits(
+                &LexicalPage {
+                    expression,
+                    after,
+                    floor: request.min_score.map(Score::get),
+                    filters: &conjunction.filters,
+                    rows: limit,
+                },
+                lookups,
+                &mut work,
+            )?,
+            // No document can be a hit, so no lexical page runs.
+            _ => (Vec::new(), None),
+        };
         let snapshot = self.reading_facts(None, lookups)?;
         let next = next
             .map(|last| Ok::<_, StoreError>(CursorKey::hit(score_of(last.score)?, last.path)))
             .transpose()?
             .map(|key| Cursor::new(snapshot.clone(), key));
-        let unsatisfied = self.resolve(conjunction.reports, declared, lookups)?;
+        let mut unsatisfied = Vec::new();
+        if expression.is_none() {
+            unsatisfied.push(Unsatisfied::query_names_no_word(&request.query));
+        }
+        unsatisfied.extend(self.resolve(conjunction.reports, declared, lookups)?);
         let hits = self.hits(
             &ranked,
             &request.columns,
@@ -375,45 +392,24 @@ impl Snapshot {
         Ok(((score.get(), path.clone()), moved))
     }
 
-    /// One page of ranked hits: at most `limit`, and the hit the next page
-    /// continues after.
+    /// One page of ranked hits: at most `page.rows` of them, and the hit the
+    /// next page continues after.
     ///
-    /// A query naming no term, or a conjunction a part emptied, runs no
-    /// statement: no document can be a hit. `work` takes what the page
-    /// statement cost.
+    /// The statement reads one hit past the page's bound, to learn a next page
+    /// exists. `work` takes what the page statement cost.
     fn page_hits(
         &self,
-        request: &LexicalQuery,
-        conjunction: &Conjunction,
-        limit: usize,
-        after: Option<HitPosition<'_>>,
+        page: &LexicalPage<'_>,
         lookups: &mut Lookups,
         work: &mut SearchWork,
     ) -> Result<(Vec<RankedKey>, Option<RankedKey>), StoreError> {
-        let Some(expression) = lexical_expression(&request.query) else {
-            return Ok((Vec::new(), None));
-        };
-        if conjunction.matches_nothing {
-            return Ok((Vec::new(), None));
-        }
-        let floor = request.min_score.map(Score::get);
-        let shapes: Vec<ReadFilter> = conjunction
-            .filters
-            .iter()
-            .map(|filter| filter.shape)
-            .collect();
+        let shapes: Vec<ReadFilter> = page.filters.iter().map(|filter| filter.shape).collect();
         let page = self.read_page(
             [SearchStatement::LexicalPage],
-            limit,
+            page.rows,
             &mut lookups.ran,
             |record, statement, rows| {
-                let composed = compose_lexical_page(&LexicalPage {
-                    expression: &expression,
-                    after,
-                    floor,
-                    filters: &conjunction.filters,
-                    rows,
-                });
+                let composed = compose_lexical_page(&LexicalPage { rows, ..*page });
                 let section = Ran::new(statement, composed).narrowed_by(shapes.clone());
                 self.run_statement(record, section, |row| {
                     Ok(RankedKey {

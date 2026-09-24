@@ -12,6 +12,8 @@ use norn_db::rusqlite::types::Value;
 
 use crate::read::{Binder, Filter};
 
+use super::words::holds_word;
+
 /// Every statement shape the search builder runs, named.
 ///
 /// The same discipline as [`crate::FindStatement`]: [`SearchStatement::all`]
@@ -64,25 +66,25 @@ impl SearchStatement {
 }
 
 /// The full-text expression a plain-text query reads as, or `None` where it
-/// names no term.
+/// holds no word.
 ///
 /// **Any string is a query, and none of its characters is syntax.** A term is
-/// a run of characters between whitespace or NUL; each is quoted — an embedded
-/// `"` doubled — so FTS5 reads it as a string whatever it holds, and the terms
-/// are joined by spaces, which FTS5 reads as a conjunction: a document matches
-/// where its body holds every term. Inside a string, FTS5's tokenizer reads
-/// the term as it reads a body, so a term it splits into several tokens —
-/// `foo-bar`, `body:foo` — matches those tokens adjacent and in order, and a
-/// term it reads no token in — `--`, `"` — is a phrase of no token, which FTS5
-/// drops from the conjunction. NUL separates terms because FTS5 reads a
-/// string up to its first NUL and would find it unterminated.
+/// a run of characters between whitespace — every character Unicode reads as
+/// whitespace — or NUL. A term holding no word, as [`holds_word`] reads words,
+/// is dropped here; each other term is quoted — an embedded `"` doubled — so
+/// FTS5 reads it as a string whatever it holds, and the terms are joined by
+/// spaces, which FTS5 reads as a conjunction: a document matches where its
+/// body holds every term. Inside a string, FTS5's tokenizer reads the term as
+/// it reads a body, so a term holding several words — `foo-bar`, `body:foo` —
+/// matches those words adjacent and in order. NUL separates terms because FTS5
+/// reads a string up to its first NUL and would find it unterminated.
 ///
-/// A query holding no term at all is `None`: FTS5 refuses an empty
-/// expression, and a search naming nothing matches nothing.
+/// A query none of whose terms holds a word is `None`: FTS5 refuses an empty
+/// expression, and a query naming no word matches nothing.
 pub(crate) fn lexical_expression(query: &str) -> Option<String> {
     let terms: Vec<String> = query
         .split(|character: char| character.is_whitespace() || character == '\0')
-        .filter(|term| !term.is_empty())
+        .filter(|term| holds_word(term))
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect();
     (!terms.is_empty()).then(|| terms.join(" "))
@@ -99,6 +101,7 @@ pub(crate) struct HitPosition<'a> {
 /// What one lexical page reads: the full-text expression, where it resumes,
 /// the least score a hit may carry, the filters it narrows by, and how many
 /// hits.
+#[derive(Clone, Copy)]
 pub(crate) struct LexicalPage<'a> {
     pub(crate) expression: &'a str,
     pub(crate) after: Option<HitPosition<'a>>,

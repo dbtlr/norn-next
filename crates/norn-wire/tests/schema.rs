@@ -1373,6 +1373,7 @@ fn an_unsatisfied_part_advertises_its_part_tag() {
             "missing_section",
             "missing_block",
             "resolves_not_applicable",
+            "query_names_no_word",
         ])
     );
     let resolves = branches(&schema)

@@ -479,6 +479,7 @@ fn unsatisfied_parts() -> Vec<Unsatisfied> {
         Unsatisfied::missing_section("Design"),
         Unsatisfied::missing_block("a1"),
         Unsatisfied::resolves_not_applicable(target("norn/glossary")),
+        Unsatisfied::query_names_no_word("-- !!"),
     ]
 }
 
@@ -2942,6 +2943,10 @@ fn an_unsatisfied_part_is_an_object_tagged_part() {
         serde_json::from_str::<Unsatisfied>(r#"{"part":"resolves_not_applicable","target":""}"#)
             .is_err(),
         "a part carrying an addressless target read back as one"
+    );
+    assert_eq!(
+        wire(&Unsatisfied::query_names_no_word("-- !!")),
+        r#"{"part":"query_names_no_word","query":"-- !!"}"#
     );
 }
 
