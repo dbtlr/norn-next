@@ -9,8 +9,9 @@
 //! fingerprint that a schema edit invalidates by.
 
 use crate::common::{
-    Scratch, ambiguity, ambiguity_for_target, class, classes, document, document_with_every_fact,
-    drained, path, record_death, violation, write_document, write_documents,
+    Scratch, ambiguity, ambiguity_for_target, class, class_named, classes, document,
+    document_with_every_fact, drained, path, record_death, violation, write_document,
+    write_documents,
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, StoreError,
@@ -487,9 +488,9 @@ fn the_full_candidate_enumeration_is_a_range_over_the_suffix_key() {
         );
     }
 
-    let paths = |probe: norn_store::SuffixProbe| {
+    let paths = |target: &str| {
         request
-            .suffix_candidates(&probe.into())
+            .suffix_candidates(&class_named(target))
             .expect("reading candidates")
             .iter()
             .map(|path| path.as_str().to_string())
@@ -498,7 +499,7 @@ fn the_full_candidate_enumeration_is_a_range_over_the_suffix_key() {
 
     // The whole class of the stem: every `**/glossary.md`, and nothing whose
     // leaf merely starts the same way.
-    let mut whole_class = paths(class_probe("glossary").expect("a class stem"));
+    let mut whole_class = paths("glossary");
     whole_class.sort();
     assert_eq!(
         whole_class,
@@ -513,7 +514,7 @@ fn the_full_candidate_enumeration_is_a_range_over_the_suffix_key() {
 
     // A longer suffix narrows the same range, and segment alignment is what
     // keeps `norntest` out of it.
-    let mut narrowed = paths(suffix_probe("norn/glossary").expect("a suffix target"));
+    let mut narrowed = paths("norn/glossary");
     narrowed.sort();
     assert_eq!(
         narrowed,
@@ -522,20 +523,11 @@ fn the_full_candidate_enumeration_is_a_range_over_the_suffix_key() {
 
     // A target that names its extension reaches the same documents, because the
     // probe opens both readings of the dot.
-    assert_eq!(
-        paths(suffix_probe("norn/glossary.md").expect("a suffix target")).len(),
-        2
-    );
+    assert_eq!(paths("norn/glossary.md").len(), 2);
 
     // A suffix that identifies one document is not an ambiguity class at all.
-    assert_eq!(
-        paths(suffix_probe("docs/norn/index").expect("a suffix target")),
-        vec!["docs/norn/index.md"]
-    );
-    assert_eq!(
-        paths(suffix_probe("nothing").expect("a suffix target")).len(),
-        0
-    );
+    assert_eq!(paths("docs/norn/index"), vec!["docs/norn/index.md"]);
+    assert_eq!(paths("nothing").len(), 0);
 }
 
 /// **A written dot is ambiguous, and the probe answers with both readings rather
@@ -565,9 +557,8 @@ fn a_target_whose_leaf_carries_a_dot_reaches_both_readings_of_it() {
     }
 
     let paths = |target: &str| {
-        let probe = suffix_probe(target).expect("a suffix target");
         let mut found = request
-            .suffix_candidates(&probe.into())
+            .suffix_candidates(&class_named(target))
             .expect("reading candidates")
             .iter()
             .map(|path| path.as_str().to_string())
@@ -606,7 +597,7 @@ fn the_candidate_order_is_total_and_survives_a_re_derivation() {
     }
     let ladder = |request: &norn_store::Request<'_>| {
         request
-            .suffix_candidates(&class_probe("tie").expect("a class stem").into())
+            .suffix_candidates(&class_named("tie"))
             .expect("reading candidates")
             .iter()
             .map(|path| path.as_str().to_string())
@@ -1005,7 +996,12 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     // dropped from a list its bar iterates leaves a slot empty here rather
     // than leaving the bar one statement narrower without a word.
     let probe = class_probe("glossary").expect("a class stem");
-    let resolution = norn_store::Resolution::from(probe.clone());
+    let resolution = norn_store::Resolution::new(
+        "glossary",
+        norn_store::StoredPathOrder::Sensitive,
+        &norn_store::AmbiguityIgnore::none(),
+    )
+    .expect("a suffix target");
     let subject = path("one/glossary.md");
     let width = NonZeroUsize::MIN;
     let judged: Vec<ExplainedStatement<'_>> = [
@@ -1150,7 +1146,12 @@ fn the_point_read_census_holds_every_statement_that_says_it_is_one() {
     let probe = class_probe("glossary").expect("a class stem");
     let kinds = [FindingKind::PathNamesNoDocument];
 
-    let resolution = norn_store::Resolution::from(probe.clone());
+    let resolution = norn_store::Resolution::new(
+        "glossary",
+        norn_store::StoredPathOrder::Sensitive,
+        &norn_store::AmbiguityIgnore::none(),
+    )
+    .expect("a suffix target");
     let every = ExplainedStatement::all(&subject, &resolution, &probe, &kinds, NonZeroUsize::MIN);
     assert_eq!(every.len(), norn_store::STATEMENTS);
     for (position, statement) in every.iter().enumerate() {
@@ -2664,7 +2665,7 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
         );
         assert!(
             request
-                .suffix_candidates(&probe.clone().into())
+                .suffix_candidates(&class_named(target))
                 .expect("reading candidates")
                 .contains(&subject),
             "`{target}` does not resolve to `{at}`"

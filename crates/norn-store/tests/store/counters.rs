@@ -11,8 +11,8 @@
 //! `norn-testkit` owns the assertions over them.
 
 use crate::common::{
-    Scratch, document, document_with_every_fact, path, record_death, snapshot, violation,
-    write_document,
+    Scratch, class_named, document, document_with_every_fact, path, record_death, snapshot,
+    violation, write_document,
 };
 use norn_store::Provenance;
 
@@ -145,18 +145,12 @@ fn a_request_that_only_reads_finishes_at_zero() {
         .findings_in_class(&norn_store::class_probe("glossary").expect("a class stem"))
         .expect("reading findings");
     let _ = warm
-        .suffix_candidates(
-            &norn_store::class_probe("glossary")
-                .expect("a class stem")
-                .into(),
-        )
+        .suffix_candidates(&class_named("glossary"))
         .expect("reading candidates");
     let _ = warm.full_text_matches("body").expect("reading matches");
     let _ = warm
         .emitted_plan(norn_store::ExplainedStatement::SuffixCandidates(
-            &norn_store::class_probe("glossary")
-                .expect("a class stem")
-                .into(),
+            &class_named("glossary"),
         ))
         .expect("a query plan");
     let _ = warm.vault_schema_pin().expect("reading the pin");

@@ -214,18 +214,6 @@ impl Resolution {
     }
 }
 
-impl From<SuffixProbe> for Resolution {
-    /// The class a probe opens, with no place ignored: the whole class a
-    /// maintenance read ranges over.
-    fn from(probe: SuffixProbe) -> Self {
-        Resolution {
-            probe,
-            target_segments: 1,
-            ignore: AmbiguityIgnore::none(),
-        }
-    }
-}
-
 /// The predicate a resolution of `ranges` ranges over `key` spells against the
 /// `documents` rows a statement calls `alias`, its values numbered from
 /// `first` in [`Resolution::parameters`]'s order.

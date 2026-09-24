@@ -1578,17 +1578,21 @@ fn assert_the_churn_reached_the_store(store: &mut Store, written: &Written) {
 /// however long the load beside it has been running.
 fn assert_warm_reads_derive_nothing(store: &mut Store, subject: &DocumentPath) {
     let probe = class_probe(subject.stem()).expect("a class stem off a derived path");
+    let class = norn_store::Resolution::new(
+        subject.stem(),
+        store.path_order(),
+        &norn_store::AmbiguityIgnore::none(),
+    )
+    .expect("a suffix target off a derived path");
     let mut warm = store.begin_request();
     let _ = warm.stored_document(subject).expect("reading a document");
     let _ = warm.stored_facts(subject).expect("reading facts");
     let _ = warm.stored_tombstone(subject).expect("reading a tombstone");
     let _ = warm.stored_findings(subject).expect("reading findings");
     let _ = warm.findings_in_class(&probe).expect("reading a class");
+    let _ = warm.suffix_candidates(&class).expect("reading candidates");
     let _ = warm
-        .suffix_candidates(&probe.clone().into())
-        .expect("reading candidates");
-    let _ = warm
-        .emitted_plan(ExplainedStatement::SuffixCandidates(&probe.clone().into()))
+        .emitted_plan(ExplainedStatement::SuffixCandidates(&class))
         .expect("a query plan");
     let _ = warm.vault_schema_pin().expect("reading the pin");
 

@@ -450,6 +450,12 @@ fn the_hosts_account_is_readable() {
 fn a_warm_pass(store: &mut Store, subject: &StoredDocument) -> CounterSnapshot {
     let stem = subject.path.stem().to_string();
     let probe = class_probe(&stem).expect("a class stem off a derived path");
+    let class = norn_store::Resolution::new(
+        &stem,
+        store.path_order(),
+        &norn_store::AmbiguityIgnore::none(),
+    )
+    .expect("a suffix target off a derived path");
 
     let mut warm = store.begin_request();
     assert!(
@@ -467,14 +473,12 @@ fn a_warm_pass(store: &mut Store, subject: &StoredDocument) -> CounterSnapshot {
         .stored_findings(&subject.path)
         .expect("reading findings");
     let _ = warm.findings_in_class(&probe).expect("reading a class");
-    let _ = warm
-        .suffix_candidates(&probe.clone().into())
-        .expect("reading candidates");
+    let _ = warm.suffix_candidates(&class).expect("reading candidates");
     let _ = warm
         .full_text_matches(&phrase(&stem))
         .expect("reading matches");
     let _ = warm
-        .emitted_plan(ExplainedStatement::SuffixCandidates(&probe.clone().into()))
+        .emitted_plan(ExplainedStatement::SuffixCandidates(&class))
         .expect("a query plan");
     assert!(
         warm.vault_schema_pin().expect("reading the pin").is_some(),

@@ -327,3 +327,15 @@ pub fn violation(at: &str) -> FindingFacts {
         detail: Some(r#"{"field":"status"}"#.to_string()),
     }
 }
+
+/// The class `target` names on a root that tells spellings apart, with no place
+/// ignored: the resolution a store opened by [`Scratch::open`] reads a target
+/// through.
+pub fn class_named(target: &str) -> norn_store::Resolution {
+    norn_store::Resolution::new(
+        target,
+        norn_store::StoredPathOrder::Sensitive,
+        &norn_store::AmbiguityIgnore::none(),
+    )
+    .expect("a suffix target")
+}

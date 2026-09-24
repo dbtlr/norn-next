@@ -75,7 +75,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "induced-failure")]
 use norn_host::EvidenceReading;
 use norn_host::{AttachMode, DemandLease, ProductionEntryOps, ReloadRefusal};
-use norn_store::{DocumentPath, Provenance, class_probe};
+use norn_store::{DocumentPath, Provenance};
 use norn_testkit::churn::{self, Act, Applied, Family, Folding, Script, Step};
 use norn_testkit::equivalence::{
     Population, StoreProjection, assert_operationally_valid, tombstones,
@@ -630,10 +630,15 @@ fn an_ambiguity_classs_membership_change_converges_on_a_build_from_zero() {
     ];
     for (label, vault) in churned.both_derivations() {
         let mut store = vault.store();
-        let probe = class_probe("shared").expect("a class probe over a stem");
+        let class = norn_store::Resolution::new(
+            "shared",
+            store.path_order(),
+            &norn_store::AmbiguityIgnore::none(),
+        )
+        .expect("a suffix target");
         let members: Vec<String> = store
             .begin_request()
-            .suffix_candidates(&probe.clone().into())
+            .suffix_candidates(&class)
             .expect("reading the class")
             .into_iter()
             .map(|path| path.as_str().to_string())
