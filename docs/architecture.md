@@ -812,7 +812,9 @@ position, where a filter that keeps what it seeks instead drives the statement f
 matched documents. Every trailing member is reached by the document. A work bar reads
 the same statements' SQLite counters over two vault sizes: a count narrowed to the same
 documents costs the same at both and steps through no full scan, and an unfiltered
-grouped count is linear in the vault — its `null` section walks every document once.
+grouped count is linear in the vault — its `null` section walks every document once. A
+second pair holds the documents and their groups fixed and grows their bodies from 64 bytes
+to 16 KiB: every count costs the same over both, and none reads a document row to count it.
 
 **The findings-for-path shape has a builder** too: the validate builder reads the findings
 standing under the active fingerprint — every finding recorded under the schema the

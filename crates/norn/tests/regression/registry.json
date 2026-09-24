@@ -1321,17 +1321,19 @@
       "name": "set-valued-answers-are-pushed-down",
       "kind": "defect-class",
       "venue": 3,
-      "property": "Cardinality, grouping and distinct-value answers execute as aggregate SQL with zero document rows hydrated, and their cost is a function of the number of distinct groups rather than of body bytes. Counting by hydrating every match and taking the length, and folding folder names out of fully hydrated documents, are the same defect.",
+      "property": "Cardinality, grouping and distinct-value answers execute as aggregate SQL with zero document rows hydrated, and their cost follows the index entries they read — the distinct keys a distinct-value page reaches, the entries a tally counts — and never the body bytes of the documents they answer about. Counting by hydrating every match and taking the length, and folding folder names out of fully hydrated documents, are the same defect.",
       "sources": ["NRN-a59", "NRN-a60", "NRN-a62", "NRN-a58"],
       "binding": {
-        "status": "dormant",
-        "reason": "the distinct-value answer has a builder and a bar: the describe builder, crates/norn-store/src/describe, answers the keys documents carry as one statement over the field pillar's presence index, reading no field row and hydrating no document row, and crates/norn-store/tests/store/describe.rs::an_observed_field_pages_work_follows_the_keys_it_pages holds a page's work equal over a vault of 54 documents with 64-byte bodies and one of 1004 with 16 KiB bodies carrying 200 more distinct keys, so its cost follows the keys it pages and neither the documents, their body bytes, nor the keys past the page. The count builder, crates/norn-store/src/count, answers cardinality and grouping as aggregate SQL and hydrates no document row, and the validate builder's summary, crates/norn-store/src/validate, is one aggregate statement over the index that holds findings by kind and severity, reading no finding row. The cost clause does not yet hold of every answer: an unfiltered grouped count walks every document for its tallies whose leading member is null, so its cost is a function of the vault's documents rather than of its groups, and the count work bar varies how many documents a vault holds and never their bodies. The bar the case binds against for that half is pre-committed as crates/norn-store/tests/store/count.rs::a_grouped_counts_work_follows_its_groups_not_its_documents. No builder folds folder names out of documents: describe reports the folders the pinned schema declares, read off the declaration.",
-        "grounds": [
-          { "present": "crates/norn-store/src/count" },
-          { "present": "crates/norn-store/src/validate" },
-          { "present": "crates/norn-store/src/describe" },
-          { "symbol-present": "crates/norn-store/tests/store/describe.rs::an_observed_field_pages_work_follows_the_keys_it_pages" },
-          { "symbol-absent": "crates/norn-store/tests/store/count.rs::a_grouped_counts_work_follows_its_groups_not_its_documents" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/describe.rs::an_observed_field_page_walks_the_presence_index_key_by_key",
+          "crates/norn-store/tests/store/describe.rs::an_observed_field_pages_work_follows_the_keys_it_pages",
+          "crates/norn-store/tests/store/describe.rs::a_declared_section_adds_no_statement_work_to_a_page",
+          "crates/norn-store/tests/store/count.rs::a_counts_work_does_not_follow_the_body_bytes_it_counts",
+          "crates/norn-store/tests/store/count.rs::an_ungrouped_count_counts_the_documents_or_reaches_them_by_its_filters_seek",
+          "crates/norn-store/tests/store/count.rs::a_valued_section_seeks_its_leading_index_from_the_pages_position",
+          "crates/norn-store/tests/store/count.rs::a_null_lead_section_probes_each_document_for_its_leading_key_by_the_document",
+          "crates/norn-store/tests/store/validate.rs::a_summary_aggregates_over_the_kind_and_severity_index"
         ]
       }
     },
