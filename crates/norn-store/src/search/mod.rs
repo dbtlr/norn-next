@@ -39,13 +39,15 @@
 //! snapshot reports what moved, and resumes after the same `(score, path)` in a
 //! ranking the corpus may have moved under.
 //!
-//! **Ranking costs the matched set.** Every document matching the query is
-//! scored, and every match past the page's position is sorted before the page
-//! holds its first hit, so a page costs the query's matches rather than its
-//! bound, and a continuation scores every match again. What a page does not
-//! cost is the vault: a document the query does not match is never read, and a
-//! match's score reads the index and never its body. A part of the conjunction
-//! narrows what is sorted and hydrated, not what is matched.
+//! **Ranking costs the matched set.** The full-text index hands back every
+//! document matching the query; each is tested against the conjunction, every
+//! one it keeps is scored, and every one of those past the page's position is
+//! sorted before the page holds its first hit. So a page costs the query's
+//! matches rather than its bound, and a continuation scores every match again.
+//! A part of the conjunction narrows what is scored, sorted and hydrated, never
+//! what is matched. What a page does not cost is the vault: a document the
+//! query does not match is never read, and a match's score reads the index and
+//! never its body.
 //!
 //! # A conjunction means what it means to a find
 //!

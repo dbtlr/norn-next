@@ -28,13 +28,14 @@ pub enum SearchStatement {
     /// in score order from the page's position.
     ///
     /// **The full-text index drives it**: `documents_fts` is read through its
-    /// `MATCH` selection, which hands back each matching document's row id,
-    /// and each match reaches its document by that row id. **Ranking costs the
-    /// matched set**: a score is computed for every match, and the matches
-    /// past the page's position and at or above the floor are sorted before
-    /// the page's first hit is known — one temporary B-tree per page, whether
-    /// the page is a first page or a continuation. A filter narrows what is
-    /// scored and sorted, and never the matches the index hands back.
+    /// `MATCH` selection, which hands back each matching document's row id;
+    /// each match is tested against the conjunction's filters, and each one
+    /// they keep is scored and reaches its document by that row id. **Ranking
+    /// costs the matched set**: every match the filters keep is scored, and
+    /// the ones past the page's position and at or above the floor are sorted
+    /// before the page's first hit is known — one temporary B-tree per page,
+    /// whether the page is a first page or a continuation. A filter narrows
+    /// what is scored and sorted, and never the matches the index hands back.
     LexicalPage,
 }
 
@@ -111,11 +112,11 @@ pub(crate) struct LexicalPage<'a> {
 ///
 /// It selects each hit's document id, its path and its score, `-bm25()` over
 /// the match: FTS5's BM25 is lower for the more relevant match, and a score is
-/// higher for it. The index is read as `ft`, and FTS5 names the column a
-/// `MATCH` and `bm25()` take after its table, so both name it `ft.documents_fts`:
-/// the alias is what keeps the page's read of the index apart from a `matches`
-/// filter's read of the same table in a plan. The hits are ordered by score descending, then by path in
-/// byte order, which makes the order total.
+/// higher for it. The hits are ordered by score descending, then by path in
+/// byte order, which makes the order total. The index is read as `ft`; FTS5
+/// names the column a `MATCH` and `bm25()` take after its table, so both name
+/// it `ft.documents_fts`, and the alias keeps the page's read of the index
+/// apart from a `matches` filter's read of the same table in a plan.
 ///
 /// **Where the page resumes is a bound on `(score, path)`**, compared against
 /// the score the statement computes for each match — the same computation over
@@ -125,11 +126,15 @@ pub(crate) struct LexicalPage<'a> {
 /// negative infinity, which every score is at or above, so the text does not
 /// branch on either.
 ///
-/// `CROSS JOIN` keeps the full-text index the outer loop, so every filter is
-/// a test of the match's document rather than a seek the planner could put
-/// before the index: a filter seeking first would reach the index once per
-/// document it kept, and each reach scores its match against the whole index
-/// again.
+/// **The full-text index is the outer loop, and a filter tests its matches
+/// before they are scored.** `CROSS JOIN` keeps the index before `documents`,
+/// and each filter tests the match's row id — which is its document's — behind
+/// a unary `+`, which SQLite reads as the same value and never hands the index
+/// as a constraint: a row-id constraint would have the index answer the query
+/// once per document the filter kept. The filters stand before the score's
+/// terms, which read the index alone, so SQLite tests a match against them
+/// first, and a match a filter rejects is neither scored nor reached in
+/// `documents`.
 pub(crate) fn compose_lexical_page(page: &LexicalPage<'_>) -> (String, Vec<Value>) {
     let mut binder = Binder::default();
     let expression = binder.bind(Value::Text(page.expression.to_string()));
