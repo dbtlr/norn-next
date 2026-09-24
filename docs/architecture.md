@@ -653,7 +653,8 @@ specifically, because a gate against hand-written SQL tests a string nobody exec
 The contract is stated whole and filled shape by shape, as each builder lands. The seam an
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
 a statement it emitted, because a plan cannot be taken by a crate that may not reach the
-database — and twenty-five named statements carry a plan bar through it: suffix
+database — and, beside the statements the read builders below name, twenty-five named
+statements carry a plan bar through it: suffix
 candidates, findings in a class, the class- and subject-scoped findings discards — the
 subject discard in both the whole form and the form narrowed to the kinds a producer
 re-derives — the clear a schema pin runs over the field projection's typed values, the page a walk reads its scope's unaccounted finding subjects through, the
@@ -779,7 +780,9 @@ applied, except that a `resolves` part is reported as not applicable and filters
 nothing — and groups the matched documents into tallies. A key holding a set groups a
 document once per element, a tag grouping once per tag, and several keys by their cross
 product, so a tally counts documents and one document may stand in several groups; a
-key the declaration gives a typed order groups by typed equality. It names three
+key the declaration gives a typed order groups by typed equality. A member is `null`
+where the document carries no scalar value under its key — and, under a key with a typed
+order, where no scalar it carries reads as that type. It names three
 statements under the same discipline, each carrying a plan bar with a negative control
 and held by a census to exactly one bar: the ungrouped total, the count of `documents`
 or of the rows a filter's seek reaches by row id; the tallies whose leading member is

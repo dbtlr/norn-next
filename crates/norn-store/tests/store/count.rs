@@ -334,6 +334,19 @@ fn a_typed_key_groups_by_typed_equality_under_its_least_spelling() {
         counted.snapshot.schema_fingerprint.is_some(),
         "a count grouped by a typed key answers under the pinned schema"
     );
+    // A label is the least spelling among the tally's own documents: `a.md`
+    // alone stands in `(9, idea)`, and spells its value `9`.
+    let crossed = counting_store.count(&counting(vec![field("n"), GroupKey::tag()]));
+    assert!(
+        crossed
+            .tallies
+            .contains(&tally(&[Some("09"), Some("draft")], 3))
+            && crossed
+                .tallies
+                .contains(&tally(&[Some("9"), Some("idea")], 1)),
+        "{:?}",
+        crossed.tallies
+    );
 }
 
 /// **A tag grouping is one group per tag, and several keys group by their

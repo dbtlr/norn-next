@@ -27,9 +27,16 @@
 //!
 //! **A key with a typed order groups by typed equality.** Where the
 //! declaration gives the key a typed order, a group is the values sharing one
-//! typed sort key, ordered by it, and labelled by the byte-least raw spelling
-//! its members hold: `9` and `9.0` under a number are one group. Every other
-//! key, and a tag, groups and orders by its raw text.
+//! typed sort key, ordered by it: `9` and `9.0` under a number are one group.
+//! Every other key, and a tag, groups and orders by its raw text.
+//!
+//! **A typed member's label is the byte-least raw spelling among the tally's
+//! own documents**: the documents the conjunction matched that stand in that
+//! tally, and no others. So one typed value may carry different labels in two
+//! tallies of one grouping — `(09, draft)` beside `(9, idea)` — and under two
+//! conjunctions. Every label reads back as its group's typed sort key, so
+//! paging, and a tally's agreement with a find of its labels, hold tally by
+//! tally.
 //!
 //! **Tallies are ordered by the tuple, ascending, with `null` first in each
 //! member.** A page holds at most the request's bound of them; the cursor the
@@ -49,8 +56,8 @@
 //! documents' own leading values where one does. [`CountStatement`] names both
 //! and what each reads.
 //!
-//! **What an unfiltered count costs is linear in what it groups.** Its
-//! valued section reads the leading key's rows from the page's position on —
+//! **What an unfiltered grouped count costs is linear in the vault's
+//! documents.** Its valued section reads the leading key's rows from the page's position on —
 //! and, grouped by one key, stops at the page's bound — and its `null` section
 //! walks every document, since a document holding no value is found by no seek
 //! of the rows that hold one. **A filter that keeps what it seeks drives
@@ -97,8 +104,9 @@ pub struct Counted {
     /// What moved between the cursor this page continued and the snapshot it
     /// was answered from. Empty on a first page.
     pub moved: Vec<Moved>,
-    /// The parts of the conjunction that could not be applied as asked, in
-    /// the order the request names them.
+    /// The parts of the request that could not be applied as asked, in the
+    /// order the request names them: the grouping's keys, then the
+    /// conjunction's parts.
     pub unsatisfied: Vec<Unsatisfied>,
     /// The reading the page was answered from, as a cursor carries it: the
     /// schema fingerprint where some member groups under a typed order, and
