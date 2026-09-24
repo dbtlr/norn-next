@@ -704,12 +704,12 @@ fn a_link_column_is_refused_by_name() {
     assert_eq!(
         refusal,
         PageRefusal::NotProjected {
-            column: "the links column"
+            part: "the links column"
         }
     );
     assert_eq!(
         refusal.to_string(),
-        "the links column is not yet projected onto a find's row"
+        "the links column is not projected until the link index resolves what a link names"
     );
 }
 

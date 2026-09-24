@@ -59,7 +59,7 @@
 //!
 //! # A collection page is a keyset page by ordinal
 //!
-//! One nested collection — links, headings, block definitions or tags — is
+//! One nested collection — headings, block definitions or tags — is
 //! paged in document order by its ordinal, with the collection and the
 //! ordinal the page stopped at as its cursor
 //! ([`norn_wire::CursorKey::Ordinal`]). Each collection is its own row type,
@@ -72,6 +72,14 @@
 //! with a finding's cursor ([`norn_wire::CursorKey::Finding`]). Either reads
 //! one row past its bound to learn a next page exists, through the keyset
 //! page every read builder reads ([`Snapshot::read_page`]).
+//!
+//! The links collection is refused ([`PageRefusal::NotProjected`]) until the
+//! Layer 3 link index unit resolves what a link names: a stored link's target
+//! is unresolved, so a link row would name no document and read as broken
+//! whatever the vault holds. Its page is a **dormant carrier** for that unit,
+//! composed as the other ordinal pages are; no get reaches it, and
+//! [`Snapshot::get_plans`] composes and explains it, so its plan bar judges
+//! the statement the unit will run.
 
 mod statement;
 
@@ -243,6 +251,14 @@ impl<'a> Shape<'a> {
     }
 }
 
+/// Whether a run answers the links collection: a get refuses it, and
+/// [`Snapshot::get_plans`] composes its page, as the module states.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinkPages {
+    Refused,
+    Composed,
+}
+
 /// One page of one collection a get pages by ordinal.
 struct OrdinalPage<'a> {
     /// The collection as the request named it, which the next page's cursor
@@ -277,7 +293,8 @@ impl Snapshot {
     /// Refused: a target naming several documents or none, as the module
     /// states; a declaration read from another schema than the snapshot pins;
     /// a page bound outside `1..=`[`crate::MAX_PAGE`]; a projected column the
-    /// store does not project yet; a cursor that names no position in the
+    /// store does not project yet, and the links collection; a cursor that
+    /// names no position in the
     /// collection paged, that was minted paging another collection, or that
     /// the snapshot's reading refuses; and a part
     /// the answer asked for does not take ([`PageRefusal::PartNotTaken`]).
@@ -287,7 +304,13 @@ impl Snapshot {
         declared: &ContentModel,
         text: &dyn DocumentText,
     ) -> Result<Gotten, PageRefusal> {
-        self.run_get(params, declared, text, &mut Lookups::default())
+        self.run_get(
+            params,
+            declared,
+            text,
+            LinkPages::Refused,
+            &mut Lookups::default(),
+        )
     }
 
     /// Every statement [`Snapshot::get`] runs for `params`, in the order it
@@ -298,7 +321,9 @@ impl Snapshot {
     /// [`Snapshot::find_plans`] takes a find's. A statement the get did not
     /// run is not listed. A get refused because its target names several
     /// documents or none ran the statements that decided so, and those are
-    /// explained; any other refusal is returned.
+    /// explained; any other refusal is returned. The links collection a get
+    /// refuses is composed, run and explained here as a page of it would be,
+    /// because its page is the dormant carrier the module states.
     pub fn get_plans(
         &self,
         params: &GetParams,
@@ -306,7 +331,7 @@ impl Snapshot {
         text: &dyn DocumentText,
     ) -> Result<Vec<GetPlan>, PageRefusal> {
         let mut lookups = Lookups::default();
-        match self.run_get(params, declared, text, &mut lookups) {
+        match self.run_get(params, declared, text, LinkPages::Composed, &mut lookups) {
             Ok(_) | Err(PageRefusal::AmbiguousTarget(_) | PageRefusal::UnknownTarget { .. }) => {}
             Err(refusal) => return Err(refusal),
         }
@@ -326,10 +351,18 @@ impl Snapshot {
         params: &GetParams,
         declared: &ContentModel,
         text: &dyn DocumentText,
+        links: LinkPages,
         lookups: &mut Lookups,
     ) -> Result<Gotten, PageRefusal> {
         let started = self.counters().statements_executed();
         let shape = Shape::of(params)?;
+        if matches!(shape, Shape::Collection(CollectionSelector::Links))
+            && links == LinkPages::Refused
+        {
+            return Err(PageRefusal::NotProjected {
+                part: "the links collection",
+            });
+        }
         let limit = match shape {
             Shape::Collection(_) => page_limit(params.limit)?,
             _ => 0,
@@ -793,12 +826,13 @@ fn link_row(row: &Row<'_>) -> Reading<LinkRow> {
 
 /// A stored link as the wire's row carries it.
 ///
-/// **`targets` is a dormant carrier** for the link index the Layer 3 link
-/// index unit lands: a link's target is stored raw and unresolved, and no
-/// statement resolves it, so the row carries the empty head out of none, and
-/// the health derived from it reads broken whatever the vault holds. The
-/// link index resolves each link's target through the one resolver and fills
-/// the head; until then the row's syntactic half is the answer.
+/// **A dormant carrier** for the Layer 3 link index unit, reached only by the
+/// links page [`Snapshot::get_plans`] composes: a link's target is stored raw
+/// and unresolved, and no statement resolves it, so the row carries the empty
+/// head out of none, and the health derived from it would read broken
+/// whatever the vault holds. That is why a get refuses the links collection.
+/// The unit resolves each link's target through the one resolver and fills
+/// the head.
 fn wire_link(link: LinkFact) -> LinkRow {
     let family = match link.family {
         LinkFamily::Wikilink => norn_wire::LinkFamily::Wikilink,

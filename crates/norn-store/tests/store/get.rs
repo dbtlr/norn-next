@@ -18,7 +18,7 @@ use norn_store::{
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
 use norn_wire::{
-    Anchor, Candidate, CollectionPage, CollectionSelector, Column, Cursor, CursorKey, DocumentRow,
+    Candidate, CollectionPage, CollectionSelector, Column, Cursor, CursorKey, DocumentRow,
     FindParams, FindingKind, GetParams, GetReport, Hint, Pattern, Predicate, ResolutionTarget,
     Severity, Unsatisfied, VaultAddress, VaultName,
 };
@@ -608,7 +608,7 @@ fn an_unknown_projected_key_is_reported_and_the_links_column_refused() {
     assert_eq!(
         vault.refusal(&getting("notes/a").with_columns([Column::links()])),
         PageRefusal::NotProjected {
-            column: "the links column"
+            part: "the links column"
         }
     );
 }
@@ -813,8 +813,9 @@ fn paged_vault(label: &str, bulk: usize) -> Vault {
     vault
 }
 
-const SELECTORS: [CollectionSelector; 5] = [
-    CollectionSelector::Links,
+/// Every collection a get pages. The links collection is refused until the
+/// Layer 3 link index unit resolves what a link names, and is judged apart.
+const SELECTORS: [CollectionSelector; 4] = [
     CollectionSelector::Headings,
     CollectionSelector::Blocks,
     CollectionSelector::Tags,
@@ -877,36 +878,44 @@ fn each_collection_paged_at_one_two_and_three_is_its_one_whole_page() {
     }
 }
 
-/// **A link row carries the link's facts as the store holds them**: its
-/// family, target and anchor as written, and — until the link index resolves
-/// targets — no document it resolves to.
+/// **The links collection is refused by name until the link index lands**,
+/// as a find's links column is: a stored link's target is unresolved, so a
+/// link row would name no document it resolves to and read as broken
+/// whatever the vault holds. The refusal is the same on a first page and on
+/// a continuation, and the plans of the page it composes are still explained
+/// (judged by `a_collection_page_seeks_the_document_from_its_cursor`).
 #[test]
-fn a_link_row_carries_the_facts_the_store_holds() {
+fn the_links_collection_is_refused_until_the_link_index_lands() {
     let vault = paged_vault("get-links", 0);
-    let gotten = vault.get(
-        &getting("paged")
-            .with_collection(CollectionSelector::Links)
-            .with_limit(3),
-    );
-    let GetReport::Collection {
-        page: CollectionPage::Links { page, .. },
-        ..
-    } = gotten.report
-    else {
-        panic!("a links page answered something else");
-    };
-    let anchors: Vec<Option<Anchor>> = page.rows.iter().map(|row| row.anchor.clone()).collect();
+    let links = getting("paged").with_collection(CollectionSelector::Links);
+    let refusal = vault.refusal(&links.clone().with_limit(3));
     assert_eq!(
-        anchors,
-        [
-            None,
-            Some(Anchor::heading("Heading")),
-            Some(Anchor::block("b0"))
-        ]
+        refusal,
+        PageRefusal::NotProjected {
+            part: "the links collection"
+        }
     );
-    assert_eq!(page.rows[1].family, norn_wire::LinkFamily::Markdown);
-    assert_eq!(page.rows[0].target, "target-0");
-    assert!(page.rows.iter().all(|row| row.targets.total() == 0));
+    assert_eq!(
+        refusal.to_string(),
+        "the links collection is not projected until the link index resolves what a link names"
+    );
+    let cursor = Cursor::new(
+        vault
+            .get(&getting("paged").with_collection(CollectionSelector::Tags))
+            .snapshot,
+        CursorKey::ordinal(CollectionSelector::Links, 0),
+    );
+    assert_eq!(
+        vault.refusal(&links.clone().with_after(cursor)),
+        PageRefusal::NotProjected {
+            part: "the links collection"
+        }
+    );
+    assert!(
+        vault.plans(&links).iter().any(|plan| plan.statement
+            == ReadStatement::Get(GetStatement::CollectionPage(Collection::Links))),
+        "the links page is composed and explained"
+    );
 }
 
 /// **A cursor names a position in the collection it was minted in**: an
@@ -1330,17 +1339,27 @@ fn a_section_and_a_block_are_read_within_one_document() {
 #[test]
 fn a_collection_page_seeks_the_document_from_its_cursor() {
     let mut vault = paged_vault("get-page-plan", 0);
+    // A get refuses the links collection, so its continuation is minted
+    // where every other collection's is read off a first page.
     let continued = |vault: &Vault, selector| {
-        let (_, next) = page_of(
-            &vault
-                .get(&getting("paged").with_collection(selector).with_limit(1))
-                .report,
-        );
+        let next = if selector == CollectionSelector::Links {
+            let reading = vault
+                .get(&getting("paged").with_collection(CollectionSelector::Tags))
+                .snapshot;
+            Cursor::new(reading, CursorKey::ordinal(selector, 0))
+        } else {
+            let (_, next) = page_of(
+                &vault
+                    .get(&getting("paged").with_collection(selector).with_limit(1))
+                    .report,
+            );
+            next.expect("a next page")
+        };
         vault.plans(
             &getting("paged")
                 .with_collection(selector)
                 .with_limit(2)
-                .with_after(next.expect("a next page")),
+                .with_after(next),
         )
     };
     let judge_ordinal = |plan: &QueryPlan, table: &str| {

@@ -197,18 +197,20 @@ pub struct TargetAmbiguity {
 pub enum PageRefusal {
     /// The request filters by a fact the store keeps no index of.
     ///
-    /// A **dormant carrier** for the link index NORN-229 builds: `links` stores
+    /// A **dormant carrier** for the Layer 3 link index unit: `links` stores
     /// a link's target raw and unindexed, so no seek answers a `links_to` part,
     /// and nothing reaches the part's filter until that index stands. Until
     /// then no request naming one can be answered, and saying so is the answer.
     NotIndexed { fact: &'static str },
-    /// The request names a row column a find does not project yet.
+    /// The request names a document's links — the links column on a find's
+    /// row, or the links collection a get pages — which no read projects yet.
     ///
-    /// A **dormant carrier** for the resolved link column NORN-229 builds: the
-    /// store holds a document's link rows, but a find's row carries no link
-    /// column until the link index resolves what a link names, so no row
-    /// composition reads them yet.
-    NotProjected { column: &'static str },
+    /// A **dormant carrier** for the Layer 3 link index unit: the store holds
+    /// a document's link rows with each target raw and unresolved, so a link
+    /// row would name no document its target resolves to and read as broken
+    /// whatever the vault holds. No answer carries a link row until that unit
+    /// resolves what a link names.
+    NotProjected { part: &'static str },
     /// A value a comparing part names — an equality, an inequality, a
     /// membership or a `before`/`after` bound — on a key declared with a typed
     /// order does not read as that type, so it names no place in the key's
@@ -285,9 +287,10 @@ impl std::fmt::Display for PageRefusal {
             PageRefusal::NotIndexed { fact } => {
                 write!(formatter, "the store keeps no index of {fact}")
             }
-            PageRefusal::NotProjected { column } => {
-                write!(formatter, "{column} is not yet projected onto a find's row")
-            }
+            PageRefusal::NotProjected { part } => write!(
+                formatter,
+                "{part} is not projected until the link index resolves what a link names"
+            ),
             PageRefusal::UnreadableBound { key, value } => write!(
                 formatter,
                 "`{value}` does not read as the type `{key}` is declared with"

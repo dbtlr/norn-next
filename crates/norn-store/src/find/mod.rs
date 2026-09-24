@@ -379,7 +379,7 @@ impl<'a> Projection<'a> {
                 }
                 Column::Links {} => {
                     return Err(PageRefusal::NotProjected {
-                        column: "the links column",
+                        part: "the links column",
                     });
                 }
                 Column::Findings {} => projection.findings = true,
