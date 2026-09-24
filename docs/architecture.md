@@ -938,7 +938,11 @@ resolution ladder's order, at most five, each named by its minimal disambiguatin
 with the total and the hint naming the `find` that resolves them all; none as an unknown
 target. It answers the document's record through the hydration a find's rows are read
 through, the section a heading anchor names, the block a block anchor names, or one page of
-one nested collection. The store parses no document, so a section and a block are read
+one nested collection. A collection's cursor names the collection it pages, and refuses on
+another. The links collection is refused by name, as a find's links column is, until the
+link index resolves what a link names; its page is composed and held to its plan bar as the
+dormant carrier. A section runs to the start of the line holding the heading that ends it,
+so a container's prefix on that line is the next section's. The store parses no document, so a section and a block are read
 through the reader the caller hands a get — `norn-text`'s one section resolver and its one
 block reading — over the one document's heading rows and body. A heading anchor is matched
 by three readings, each tried only where the one before matched no heading, and a read and a
@@ -963,9 +967,9 @@ sizes whose classes did not grow: every shape costs the same at both, an ambiguo
 refusal among them.
 
 **Links-to carries no bar**: no builder emits it, and a find refuses a links-to part by
-name, because the link index it would filter by does not exist. The count shape carries
-no counter-lane, memory or timing bar yet, and neither do the validate, describe and
-search builders. The
+name, because the Layer 3 link index unit it would filter by has not landed. The count
+shape carries no counter-lane, memory or timing bar yet, and neither do the validate,
+describe and search builders. The
 warm-zero counter bar gates per PR, and the find shape carries four bars of its own. In the
 counter lane, a find through a live read hold reads nothing through `norn-fs` on its own
 thread and lands nothing in the host's account of its jobs, at a pinned number of statements
