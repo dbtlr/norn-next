@@ -10,8 +10,9 @@
 //! its rows until each file was edited.
 //!
 //! So the corpus below is attached by a real host, which derives it from zero
-//! through the heal every attach runs, and every derived row the store holds is
-//! digested: the document rows with their sub-fingerprints and their raw and
+//! through the heal every attach runs — the main vault, and a second one for
+//! the tag stance the main vault does not take, since a stance is a vault's own
+//! declaration — and every derived row each store holds is digested: the document rows with their sub-fingerprints and their raw and
 //! folded suffix keys, the links, headings, blocks and tags, the field rows
 //! with their typed halves, every finding with its candidates and classes, the
 //! terms the full-text index holds, and the pinned vault schema. Row
@@ -44,10 +45,11 @@
 
 mod attach;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_host::DERIVATION_VERSION;
-use norn_store::{DerivationVersion, LinkFamily, OpenOutcome, TagSource};
+use norn_store::{DerivationVersion, FieldContainer, FieldRow, LinkFamily, OpenOutcome, TagSource};
 use norn_testkit::equivalence::{DerivedRows, assert_operationally_valid};
 use norn_testkit::process::Sandbox;
 use norn_wire::FindingKind;
@@ -56,11 +58,11 @@ use norn_wire::FindingKind;
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(1),
-    "a5ac9debf90b9cf815032fc31987f4f81910c2c366d7be4b58c2d8e830ff8321",
+    "8cf3ecc2d7b7a66aaf76e768beaf8e6d254816e3e75ae04ae83d481c3d25aae4",
 );
 
-/// The vault schema the corpus is derived under: a field of every declared
-/// type, and a tag facet that reports what it does not declare.
+/// The vault schema the main corpus is derived under: a field of every
+/// declared type, and a tag facet that reports what it does not declare.
 const SCHEMA: &str = "\
 version: 1
 fields:
@@ -80,6 +82,25 @@ tags:
   declared: [project, area/norn, solo]
   undeclared: report
 ";
+
+/// The schema of the second vault: the other stance a tag facet can take on
+/// what it does not declare. A stance is a vault's own declaration, so the
+/// other one needs a vault of its own.
+const ALLOWING_SCHEMA: &str = "\
+version: 1
+tags:
+  declared: [kept]
+  undeclared: allow
+";
+
+/// The second vault's corpus: tags the facet does not declare, in both homes,
+/// under a stance that allows them.
+fn allowing_corpus() -> Vec<(&'static str, Vec<u8>)> {
+    vec![(
+        "Allowed.md",
+        b"---\ntags: [kept, free-form]\n---\n# Allowed\n\nA #free-body tag.\n".to_vec(),
+    )]
+}
 
 /// The corpus: every document and every non-document file, by the path it is
 /// written at.
@@ -133,8 +154,52 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         ),
         ("assets/pic.png", b"\x89PNG not a document".to_vec()),
         ("clutter.txt", b"# not a document either\n".to_vec()),
+        // Values whose typed keys only a sign or an offset decides.
+        (
+            "values/signed.md",
+            b"---\nrating: -3\nweight: -0.5\ncreated: 2026-09-24T10:00:00+02:00\n---\n# Signed\n"
+                .to_vec(),
+        ),
+        ("Markup.md", MARKUP.as_bytes().to_vec()),
+        // Lone CR line endings, around a fence whose content reads as a tag
+        // wherever the fence is not recognized.
+        (
+            "cr-only.md",
+            b"# CR only\r\rBefore #crtag\r\r```\r#fenced\r```\r\rAfter\r".to_vec(),
+        ),
+        // A document under a hidden directory.
+        (
+            ".hidden/Hidden Note.md",
+            b"# Hidden\n\nA #hidden-tag.\n".to_vec(),
+        ),
     ]
 }
+
+/// Constructs the text layer masks, skips or records nothing for: HTML
+/// comments holding tag markers, an autolink, a reference-style link, an empty
+/// heading, a block id after a table, and a setext heading over two lines.
+const MARKUP: &str = "# Markup
+
+<!-- #commented -->
+
+Inline <!-- #inline-commented --> comment.
+
+An autolink <https://example.com/auto> and a reference [shown][notes-ref] link.
+
+[notes-ref]: Notes.md
+
+#
+
+| a | b |
+| - | - |
+| 1 | 2 |
+
+^table-block
+
+Multi line
+setext title
+============
+";
 
 /// Every frontmatter value shape, a field of every declared type and one
 /// undeclared, both setext levels, every ATX level, containers, repeated and
@@ -214,33 +279,15 @@ fn the_derivation_digest_moves_only_with_the_derivation_version() {
     let sandbox =
         Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "derivation").expect("a sandbox");
     let root = sandbox.work_dir();
-    let vault = root.join("vault");
-    for (at, bytes) in corpus() {
-        let path = vault.join(at);
-        std::fs::create_dir_all(path.parent().expect("a corpus path has a parent"))
-            .expect("creating a corpus directory");
-        std::fs::write(&path, bytes).unwrap_or_else(|e| panic!("writing `{at}`: {e}"));
-    }
-    std::fs::create_dir_all(vault.join(".norn")).expect("creating the schema directory");
-    std::fs::write(vault.join(".norn/schema.yaml"), SCHEMA).expect("writing the vault schema");
-    let vault = attach::Vault::adopt(&root);
+    let reporting = derive(&root.join("reporting"), corpus(), SCHEMA);
+    let allowing = derive(&root.join("allowing"), allowing_corpus(), ALLOWING_SCHEMA);
+    assert_the_corpus_exercises_every_fact(&reporting);
+    assert_the_allowing_vault_exercises_its_stance(&allowing);
 
-    {
-        let host = vault.host();
-        drop(attach::attach_and_wait(&host, vault.name()));
-    }
-
-    let mut store = vault.store();
-    assert_eq!(
-        *store.open_outcome(),
-        OpenOutcome::Reused,
-        "the store the attach derived did not reopen under this build's derivation version"
-    );
-    assert_operationally_valid(&mut store, "the corpus derived from zero");
-    let rows = DerivedRows::read(&mut store).expect("reading the derived rows");
-    assert_the_corpus_exercises_every_fact(&rows);
-
-    let digest = rows.digest();
+    let digest = DerivedRows::digest(&BTreeMap::from([
+        ("reporting", reporting),
+        ("allowing", allowing),
+    ]));
     let (pinned_version, pinned_digest) = PINNED;
     assert!(
         DERIVATION_VERSION == pinned_version && digest == pinned_digest,
@@ -265,6 +312,35 @@ fn the_derivation_digest_moves_only_with_the_derivation_version() {
     );
 }
 
+/// Write `files` and `schema` into a vault under `root`, attach a real host to
+/// derive it from zero, and read every derived row the store holds.
+fn derive(root: &Path, files: Vec<(&'static str, Vec<u8>)>, schema: &str) -> DerivedRows {
+    let vault = root.join("vault");
+    for (at, bytes) in files {
+        let path = vault.join(at);
+        std::fs::create_dir_all(path.parent().expect("a corpus path has a parent"))
+            .expect("creating a corpus directory");
+        std::fs::write(&path, bytes).unwrap_or_else(|e| panic!("writing `{at}`: {e}"));
+    }
+    std::fs::create_dir_all(vault.join(".norn")).expect("creating the schema directory");
+    std::fs::write(vault.join(".norn/schema.yaml"), schema).expect("writing the vault schema");
+    let vault = attach::Vault::adopt(root);
+
+    {
+        let host = vault.host();
+        drop(attach::attach_and_wait(&host, vault.name()));
+    }
+
+    let mut store = vault.store();
+    assert_eq!(
+        *store.open_outcome(),
+        OpenOutcome::Reused,
+        "the store the attach derived did not reopen under this build's derivation version"
+    );
+    assert_operationally_valid(&mut store, "the corpus derived from zero");
+    DerivedRows::read(&mut store).expect("reading the derived rows")
+}
+
 /// **The shapes the digest stands on.** Each is a fact a derivation change
 /// could move; the corpus is edited with this list, so it keeps carrying all
 /// of them.
@@ -277,7 +353,7 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
     };
 
     let glossary = document("Glossary.md");
-    let levels: std::collections::BTreeSet<u8> = glossary
+    let levels: BTreeSet<u8> = glossary
         .headings
         .iter()
         .map(|heading| heading.level)
@@ -366,11 +442,133 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         "no suffix key that folds to another spelling is exercised"
     );
 
-    let kinds: std::collections::BTreeSet<&str> = projection
+    let field_rows: Vec<&FieldRow> = projection
+        .documents()
+        .iter()
+        .flat_map(|document| document.fields.rows())
+        .collect();
+    let rows_under = |key: &str| -> Vec<&FieldRow> {
+        field_rows
+            .iter()
+            .copied()
+            .filter(|row| row.key() == key)
+            .collect()
+    };
+    let containers: BTreeSet<&str> = field_rows
+        .iter()
+        .filter_map(|row| match row {
+            FieldRow::Presence { container, .. } => Some(container.as_str()),
+            FieldRow::Value { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        containers,
+        FieldContainer::ALL
+            .iter()
+            .map(|container| container.as_str())
+            .collect(),
+        "a field container is not exercised"
+    );
+    let values: Vec<(&Option<String>, &Option<String>, bool, bool)> = field_rows
+        .iter()
+        .filter_map(|row| match row {
+            FieldRow::Value {
+                raw,
+                typed,
+                least_raw,
+                least_typed,
+                ..
+            } => Some((raw, typed, *least_raw, *least_typed)),
+            FieldRow::Presence { .. } => None,
+        })
+        .collect();
+    assert!(
+        values.iter().any(|(_, typed, _, _)| typed.is_some()),
+        "no typed value is exercised"
+    );
+    assert!(
+        rows_under("rating").iter().any(|row| matches!(
+            row,
+            FieldRow::Value {
+                raw: Some(_),
+                typed: None,
+                ..
+            }
+        )),
+        "no value that does not read as its declared type is exercised"
+    );
+    assert!(
+        values.iter().any(|(_, _, least_raw, _)| *least_raw),
+        "no least-raw marker is exercised"
+    );
+    assert!(
+        values.iter().any(|(_, _, _, least_typed)| *least_typed),
+        "no least-typed marker is exercised"
+    );
+    // A typed key a sign or an offset decides: a negative integer, a negative
+    // float and an instant stated at an offset from UTC.
+    for (key, raw) in [
+        ("rating", "-3"),
+        ("weight", "-0.5"),
+        ("created", "2026-09-24T10:00:00+02:00"),
+    ] {
+        assert!(
+            rows_under(key).iter().any(|row| matches!(
+                row,
+                FieldRow::Value { raw: Some(held), typed: Some(_), .. } if held == raw
+            )),
+            "no typed `{key}: {raw}` is exercised"
+        );
+    }
+
+    let markup = document("Markup.md");
+    for written in [
+        "<!-- #commented -->",
+        "<!-- #inline-commented -->",
+        "<https://example.com/auto>",
+        "[shown][notes-ref]",
+        "[notes-ref]: Notes.md",
+        "\n#\n",
+        "| 1 | 2 |\n\n^table-block",
+    ] {
+        assert!(
+            markup.body.contains(written),
+            "the markup document does not carry `{written}`"
+        );
+    }
+    assert!(
+        markup
+            .headings
+            .iter()
+            .any(|heading| heading.text.is_empty()),
+        "no empty heading is exercised"
+    );
+    assert!(
+        markup
+            .headings
+            .iter()
+            .any(|heading| heading.text.starts_with("Multi line")
+                && heading.text.ends_with("setext title")),
+        "no setext heading over two lines is exercised"
+    );
+    let lone_cr = document("cr-only.md");
+    assert!(
+        !lone_cr.body.contains('\n') && lone_cr.body.contains("```\r#fenced\r```"),
+        "no lone-CR document with a fenced tag marker is exercised"
+    );
+    // The walk derives a document under a hidden directory like any other,
+    // and the digest pins that it does.
+    document(".hidden/Hidden Note.md");
+
+    let kinds: BTreeSet<&str> = projection
         .findings()
         .iter()
         .map(|finding| finding.kind.as_str())
         .collect();
+    // `path/bytes-not-utf8` is the one kind no corpus here can carry: APFS,
+    // where these lanes run on Darwin, refuses a name that is not UTF-8, so
+    // the file cannot be written. A corpus that wrote it on Linux alone would
+    // derive to a different digest on each host.
     for kind in [
         FindingKind::PathNamesNoDocument,
         FindingKind::BodyBytesNotUtf8,
@@ -388,4 +586,32 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         !projection.indexed_terms().is_empty(),
         "the full-text index holds no term"
     );
+}
+
+/// **The other stance, and what it derives.** Tags the facet does not declare,
+/// written in the body and in the frontmatter, under a schema that allows them.
+fn assert_the_allowing_vault_exercises_its_stance(rows: &DerivedRows) {
+    let projection = rows.projection();
+    let schema = projection
+        .vault_schema()
+        .expect("the allowing vault pinned its schema");
+    assert!(
+        String::from_utf8_lossy(&schema.bytes).contains("undeclared: allow"),
+        "the allowing vault's schema does not allow an undeclared tag"
+    );
+    let allowed = projection
+        .document("Allowed.md")
+        .expect("the allowing vault derived no row at `Allowed.md`");
+    for (name, source) in [
+        ("free-body", TagSource::Body),
+        ("free-form", TagSource::Frontmatter),
+    ] {
+        assert!(
+            allowed
+                .tags
+                .iter()
+                .any(|tag| tag.name == name && tag.source == source),
+            "no undeclared {source:?} tag `{name}` is exercised"
+        );
+    }
 }

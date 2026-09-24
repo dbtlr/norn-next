@@ -715,20 +715,28 @@ impl DerivedRows {
         &self.fields
     }
 
-    /// SHA-256 over every field and its value in field order, as 64 lowercase
-    /// hex digits.
+    /// SHA-256 over the rows of every vault in `vaults`, in name order, as 64
+    /// lowercase hex digits.
     ///
-    /// The count of fields leads, and every field and every value is absorbed
-    /// behind its own length, so no two different sets of rows run together
-    /// into the same bytes whatever their text holds. Nothing in it depends on
-    /// where the store sits on disk: the fields are vault-relative and sorted,
-    /// and every value is text.
-    pub fn digest(&self) -> String {
+    /// A corpus spans more than one vault where what it exercises is a
+    /// declaration a vault makes once — its stance on an undeclared tag — so
+    /// the digest is taken over them together and each is named in it. The
+    /// count of vaults leads, then each vault's name, the count of its fields,
+    /// and every field and value; every one of them is absorbed behind its own
+    /// length, so no two different sets of rows run together into the same
+    /// bytes whatever their text holds. Nothing in it depends on where a store
+    /// sits on disk: the fields are vault-relative and sorted, and every value
+    /// is text.
+    pub fn digest(vaults: &BTreeMap<&str, DerivedRows>) -> String {
         let mut hasher = Sha256::new();
-        hasher.update_framed(&(self.fields.len() as u64).to_be_bytes());
-        for (field, value) in &self.fields {
-            hasher.update_framed(field.as_bytes());
-            hasher.update_framed(value.as_bytes());
+        hasher.update_framed(&(vaults.len() as u64).to_be_bytes());
+        for (name, rows) in vaults {
+            hasher.update_framed(name.as_bytes());
+            hasher.update_framed(&(rows.fields.len() as u64).to_be_bytes());
+            for (field, value) in &rows.fields {
+                hasher.update_framed(field.as_bytes());
+                hasher.update_framed(value.as_bytes());
+            }
         }
         hex(&hasher.finish())
     }
