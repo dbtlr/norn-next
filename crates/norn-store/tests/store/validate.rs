@@ -928,6 +928,13 @@ fn a_kind_page_seeks_its_kind_from_the_pages_position() {
             ValidateStatement::Summary,
         );
         judge_driven(&summary[0]);
+        assert!(
+            rows_of(&summary[0], "f").rows().iter().all(|row| row
+                .detail
+                .contains("COVERING INDEX findings_fingerprint_kind_severity")),
+            "a driven summary read a finding's row: {:?}",
+            summary[0].rows()
+        );
     }
     // An excluding part alone drives nothing: the section seeks its kind and
     // tests each finding's document by its path.

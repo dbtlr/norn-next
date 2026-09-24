@@ -39,11 +39,15 @@ pub enum ValidateStatement {
     /// instead: the documents it matched each reach their findings by one
     /// seek at their path, and those are sorted.
     KindPage,
-    /// How many findings stand, one tally per kind and severity, grouped in
-    /// the order `findings_fingerprint_kind_severity` holds them: an aggregate
-    /// over that index, which covers every column a tally reads. It names
-    /// every kind and every severity it admits, so each `(kind, severity)`
-    /// cell is one seek of the index, which a path part's range bounds.
+    /// How many findings stand, one tally per kind and severity: an aggregate
+    /// over `findings_fingerprint_kind_severity`, which covers every column a
+    /// tally reads, so it reads no finding row. It names every kind and every
+    /// severity it admits, so each `(kind, severity)` cell is one seek of the
+    /// index, which a path part's range bounds, and the tallies are grouped
+    /// in the order the index holds them. A document part that keeps what it
+    /// seeks drives the statement instead: the documents it matched each take
+    /// one seek of the index at their path per cell, and the groups are
+    /// sorted.
     Summary,
 }
 

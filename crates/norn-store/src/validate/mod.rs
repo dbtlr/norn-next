@@ -49,8 +49,12 @@
 //!
 //! A summary answers how many findings the request admits, one tally per kind
 //! and severity, in that order, from one aggregate statement over the index
-//! that holds the findings in that order. It reads no finding row and answers
-//! every tally at once, so it takes no page bound and continues no cursor.
+//! that holds the findings in that order and covers every column a tally
+//! reads, so it reads no finding row. Its cells are each one seek of that
+//! index, grouped in the index's order; where a document part that keeps what
+//! it seeks drives it, the documents matched each take one seek per cell, and
+//! the groups are sorted. It answers every tally at once, so it takes no page
+//! bound and continues no cursor.
 
 mod statement;
 

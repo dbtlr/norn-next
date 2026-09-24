@@ -816,7 +816,8 @@ kind's page, a seek of `(fingerprint, kind)` in `(path, id)` order from the page
 of `(fingerprint, kind, severity)` where a severity floor admits one severity — that a path
 part's range bounds, and that a document part keeping what it seeks drives instead from the
 documents it matched; and the summary, a covering seek of `(fingerprint, kind, severity)` per
-cell it admits. A work bar reads their SQLite counters over two vault sizes: a validate
+cell it admits grouped in the index's order, or, where a document part keeping what it seeks
+drives it, one covering seek per matched document and cell, its groups sorted. A work bar reads their SQLite counters over two vault sizes: a validate
 narrowed by kind, severity, a path part or a document part costs the same at both and steps
 through no full scan.
 
