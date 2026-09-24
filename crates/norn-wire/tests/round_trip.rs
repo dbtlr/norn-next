@@ -2422,6 +2422,47 @@ fn every_cursor_survives_the_round_trip() {
     }
 }
 
+/// **A hit cursor carries its score exactly.** A continuation resumes after
+/// the score a page stopped at by comparing it with the scores it ranks, so a
+/// score read back one unit in the last place away from the one written names
+/// another position — and a spelling that re-encodes to other bytes is no
+/// cursor at all. Every finite double, spread across the whole range by its bit
+/// pattern and dense among the small relevances a ranking computes, reads back
+/// bit for bit through the opaque string.
+#[test]
+fn a_hit_cursor_carries_its_score_bit_for_bit() {
+    let mut bits: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut spread = Vec::new();
+    for _ in 0..20_000 {
+        // A 64-bit linear congruential step, so the doubles are the same on
+        // every run and reach every exponent.
+        bits = bits
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        spread.push(f64::from_bits(bits));
+        spread.push(f64::from_bits(bits) * 1e-300_f64.max(f64::MIN_POSITIVE));
+        spread.push((bits >> 11) as f64 / (1u64 << 53) as f64 * 1e-5);
+    }
+    for value in spread.into_iter().filter(|value| value.is_finite()) {
+        let cursor = Cursor::new(
+            Snapshot::new("epoch-1", 3, None, None),
+            CursorKey::hit(score(value), "notes/a.md"),
+        );
+        let json = wire(&cursor);
+        let back: Cursor = serde_json::from_str(&json)
+            .unwrap_or_else(|error| panic!("the cursor scored {value:e} did not read back: {error}"));
+        let CursorKey::Hit { score: read, .. } = back.key() else {
+            panic!("a hit cursor read back as {:?}", back.key());
+        };
+        assert_eq!(
+            read.get().to_bits(),
+            value.to_bits(),
+            "the cursor scored {value:e} read back as {:e}",
+            read.get()
+        );
+    }
+}
+
 #[test]
 fn every_facet_kind_and_movement_survives_the_round_trip() {
     for kind in facet_kinds() {
