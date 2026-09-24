@@ -82,9 +82,11 @@
 //!   field sort's valued section pages one of them from a `(value, path)`
 //!   position with no sort step, and a document whose field holds a set is
 //!   read once.
-//! - `document_fields_presence` holds the presence rows alone, by `key`:
-//!   `has` and `missing` are one seek on it, and the keys the vault holds are
-//!   its distinct leading column.
+//! - `document_fields_presence` holds the presence rows alone, by `(key,
+//!   container)`: `has` and `missing` are one seek on its leading column, the
+//!   keys the vault holds are its distinct leading column, and whether any
+//!   document holds a key in a container is one seek of both — so the
+//!   containers a key is observed in are read off the index, never the rows.
 
 use crate::fields::FieldContainer;
 
@@ -125,7 +127,7 @@ pub(crate) fn statements() -> Vec<String> {
         "CREATE INDEX document_fields_least_typed ON document_fields(key, typed, path)
     WHERE least_typed = 1"
             .to_string(),
-        "CREATE INDEX document_fields_presence ON document_fields(key)
+        "CREATE INDEX document_fields_presence ON document_fields(key, container)
     WHERE ordinal = 0"
             .to_string(),
     ]

@@ -352,7 +352,7 @@ impl Snapshot {
             sections,
             limit,
             &mut lookups.ran,
-            |(statement, after), rows| {
+            |record, (statement, after), rows| {
                 let composed = compose_tallies(&Tallies {
                     statement,
                     members,
@@ -360,9 +360,9 @@ impl Snapshot {
                     filters: &conjunction.filters,
                     rows,
                 });
-                Ran::new(statement, composed).narrowed_by(shapes.clone())
+                let section = Ran::new(statement, composed).narrowed_by(shapes.clone());
+                self.read_tallies(record, section, members.len())
             },
-            |record, section| self.read_tallies(record, section, members.len()),
         )?;
         work.tallies_read = page.read;
         work.stepped(page.stepped);
@@ -383,7 +383,8 @@ impl Snapshot {
             ReadStatement::Count(CountStatement::ValuedLead(_)) => (false, width),
             ReadStatement::Count(CountStatement::Total)
             | ReadStatement::Find(_)
-            | ReadStatement::Validate(_) => (false, 0),
+            | ReadStatement::Validate(_)
+            | ReadStatement::Describe(_) => (false, 0),
         };
         self.run_statement(record, section, |row| {
             let mut group: Vec<Option<String>> = Vec::with_capacity(width);

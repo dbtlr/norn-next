@@ -415,7 +415,7 @@ fn a_field_index_holds_only_the_rows_its_reads_match() {
             "key, typed, path",
             "least_typed = 1",
         ),
-        ("document_fields_presence", "key", "ordinal = 0"),
+        ("document_fields_presence", "key, container", "ordinal = 0"),
     ] {
         assert_eq!(
             index_shape(&declared, index),

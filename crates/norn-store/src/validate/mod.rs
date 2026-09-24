@@ -344,7 +344,7 @@ impl Snapshot {
             sections,
             limit,
             &mut lookups.ran,
-            |(kind, after), rows| {
+            |record, (kind, after), rows| {
                 let composed = compose_findings(&Findings {
                     statement: ValidateStatement::KindPage,
                     fingerprint: &narrowing.fingerprint,
@@ -355,9 +355,8 @@ impl Snapshot {
                     on_a_document: narrowing.conjunction.names_unknown_key,
                     rows,
                 });
-                Ran::new(ValidateStatement::KindPage, composed).narrowed_by(shapes.clone())
-            },
-            |record, section| {
+                let section =
+                    Ran::new(ValidateStatement::KindPage, composed).narrowed_by(shapes.clone());
                 self.run_statement(record, section, finding_base)
                     .map_err(|problem| error::sql("reading a page of findings", problem))
             },

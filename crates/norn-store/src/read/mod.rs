@@ -31,6 +31,7 @@ mod suggest;
 use norn_wire::CursorOrderChanged;
 
 use crate::count::CountStatement;
+use crate::describe::DescribeStatement;
 use crate::error::StoreError;
 use crate::find::FindStatement;
 use crate::request::MAX_PAGE;
@@ -111,8 +112,9 @@ impl FieldOrder {
 /// A statement a read builder ran, named by the builder that names it.
 ///
 /// A read compiles its conjunction through probes the find builder names, and
-/// reads finding rows through statements the find builder names, so a count
-/// and a validate run find's statements beside their own; the record of what
+/// reads finding rows and the active fingerprint through statements the find
+/// builder names, so a count, a validate and a describe run find's statements
+/// beside their own; the record of what
 /// a read ran holds any of them, and each builder's enumeration stays its own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadStatement {
@@ -122,6 +124,14 @@ pub enum ReadStatement {
     Count(CountStatement),
     /// A statement [`ValidateStatement`] names.
     Validate(ValidateStatement),
+    /// A statement [`DescribeStatement`] names.
+    Describe(DescribeStatement),
+}
+
+impl From<DescribeStatement> for ReadStatement {
+    fn from(statement: DescribeStatement) -> Self {
+        ReadStatement::Describe(statement)
+    }
 }
 
 impl From<ValidateStatement> for ReadStatement {
@@ -185,6 +195,9 @@ pub enum PageRefusal {
     /// The cursor names no position among a validate's findings: it is not a
     /// finding's.
     NotAFindingCursor,
+    /// The cursor names no position among a describe's facets: it is not a
+    /// facet's.
+    NotAFacetCursor,
     /// The request answers a summary and carries a cursor. A summary answers
     /// every tally at once and is not paged, so no cursor names a position it
     /// continues from.
@@ -238,6 +251,9 @@ impl std::fmt::Display for PageRefusal {
             }
             PageRefusal::NotAFindingCursor => {
                 formatter.write_str("the cursor names no position among this validate's findings")
+            }
+            PageRefusal::NotAFacetCursor => {
+                formatter.write_str("the cursor names no position among a describe's facets")
             }
             PageRefusal::SummaryNotPaged => {
                 formatter.write_str("a summary is not paged, so it continues no cursor")

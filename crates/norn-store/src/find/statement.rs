@@ -42,7 +42,8 @@ pub enum FindStatement {
     /// Whether any document carries a key the declaration does not name: one
     /// existence seek of `document_fields_presence`.
     KnownKey,
-    /// Every key a document carries, each once, in key order: a walk of
+    /// Every key a document carries, each once, in key order: the key walk
+    /// every enumeration of the keys shares, a walk of
     /// `document_fields_presence` that seeks past each key to the next, so it
     /// costs the distinct keys rather than the rows that carry them. Run only
     /// where some key a request named is unknown.
@@ -368,25 +369,41 @@ pub(crate) fn compose_known_key(key: &str) -> (String, Vec<Value>) {
 }
 
 /// [`FindStatement::FieldUniverse`]: every key a document carries, once each,
-/// in key order.
+/// in key order: the whole [`key_walk`], from the first key.
 ///
-/// Each step seeks the presence index for the least key after the one before
-/// it, so the walk reads one index entry per distinct key rather than one per
-/// document that carries it. Every key is text, and every text sorts at or
-/// after the empty one, so the first step's bound excludes none.
+/// Every key is text, and every text sorts at or after the empty one, so the
+/// first step's bound excludes none.
 pub(crate) fn compose_universe() -> (String, Vec<Value>) {
     (
-        "WITH RECURSIVE universe(key) AS (
-             SELECT (SELECT MIN(fu.key) FROM document_fields AS fu
-                      WHERE fu.ordinal = 0 AND fu.key >= '')
-             UNION ALL
-             SELECT (SELECT MIN(fx.key) FROM document_fields AS fx
-                      WHERE fx.ordinal = 0 AND fx.key > universe.key)
-               FROM universe WHERE universe.key IS NOT NULL
-         )
-         SELECT key FROM universe WHERE key IS NOT NULL"
-            .to_string(),
+        format!(
+            "{} SELECT key FROM walked WHERE key IS NOT NULL",
+            key_walk(">= ''", None)
+        ),
         Vec::new(),
+    )
+}
+
+/// The walk of the distinct keys documents carry, in key order: a recursive
+/// table `walked(key)` whose first row is the least key standing `from` —
+/// a comparison and its bound, such as `> ?1` — and each row after it the
+/// least key after the one before, ending in a `NULL` row once no key is left.
+/// `rows`, where named, is the placeholder bounding how many rows it yields.
+///
+/// **Each step is one seek of the presence index**, `document_fields_presence`,
+/// for the least key past a bound, so the walk reads one index entry per
+/// distinct key rather than one per document that carries it. Every read that
+/// enumerates the keys documents carry walks them through this one spelling.
+pub(crate) fn key_walk(from: &str, rows: Option<&str>) -> String {
+    let bounded = rows.map_or_else(String::new, |rows| format!("\n             LIMIT {rows}"));
+    format!(
+        "WITH RECURSIVE walked(key) AS (
+             SELECT (SELECT MIN(o.key) FROM document_fields AS o
+                      WHERE o.ordinal = 0 AND o.key {from})
+             UNION ALL
+             SELECT (SELECT MIN(o.key) FROM document_fields AS o
+                      WHERE o.ordinal = 0 AND o.key > walked.key)
+               FROM walked WHERE walked.key IS NOT NULL{bounded}
+         )"
     )
 }
 

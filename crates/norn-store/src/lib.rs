@@ -50,6 +50,11 @@
 //!   conjunction compiled as a find compiles it, answering a page of finding
 //!   rows in `(kind, path, id)` order or one tally per kind and severity.
 //!   [`Snapshot::validate_plans`] explains what it ran.
+//! - [`Snapshot::describe`] — the describe builder: the vault's content model
+//!   as a page of facets in `(kind, key)` order, the declared facets read off
+//!   the pinned declaration and the observed field keys off the field
+//!   pillar's presence index. [`Snapshot::describe_plans`] explains what it
+//!   ran.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -89,6 +94,7 @@ pub mod ddl;
 
 mod count;
 mod counters;
+mod describe;
 mod error;
 mod facts;
 #[cfg(feature = "induced-failure")]
@@ -108,6 +114,7 @@ mod validate;
 
 pub use count::{COUNT_STATEMENTS, CountPlan, CountStatement, CountWork, Counted, GroupMember};
 pub use counters::{DerivationCounters, SnapshotCounters};
+pub use describe::{DESCRIBE_STATEMENTS, DescribePlan, DescribeStatement, DescribeWork, Described};
 pub use error::StoreError;
 pub use facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, DocumentFacts, FeedDocument, FeedTombstone,

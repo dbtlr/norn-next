@@ -176,7 +176,7 @@ pub use statement::{FIND_STATEMENTS, FindStatement, Nested, PageDirection};
 use statement::{Section, SectionStart, compose_page};
 pub(crate) use statement::{
     compose_bare_directory, compose_finding_candidates, compose_finding_classes, compose_known_key,
-    compose_match_probe, compose_universe,
+    compose_match_probe, compose_universe, key_walk,
 };
 
 /// Where a page stopped, or where a continuation resumes: the value the row
@@ -627,7 +627,7 @@ impl Snapshot {
             sections,
             limit,
             &mut lookups.ran,
-            |(statement, start), rows| {
+            |record, (statement, start), rows| {
                 let composed = compose_page(&Section {
                     statement,
                     key: field_key(compiled.order),
@@ -635,9 +635,9 @@ impl Snapshot {
                     filters: &compiled.filters,
                     rows,
                 });
-                Ran::new(statement, composed).narrowed_by(compiled.filter_shapes())
+                let section = Ran::new(statement, composed).narrowed_by(compiled.filter_shapes());
+                self.read_keys(record, section)
             },
-            |record, section| self.read_keys(record, section),
         )?;
         work.keys_read = page.read;
         work.page_stepped(page.stepped);
