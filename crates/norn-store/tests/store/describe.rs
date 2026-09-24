@@ -19,7 +19,7 @@ use std::sync::Arc;
 use crate::common::{Scratch, document, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    ContentModel, DESCRIBE_STATEMENTS, DescribePlan, DescribeStatement, Described,
+    ContentModel, DESCRIBE_STATEMENTS, DescribePlan, DescribeStatement, DescribeWork, Described,
     FieldDeclaration, FrontmatterValue, PageRefusal, ReadStatement, Snapshot, SnapshotReader,
     Store, TypedOrder, induced_failure,
 };
@@ -733,4 +733,33 @@ fn an_observed_field_pages_work_follows_the_keys_it_pages() {
 
     large.drop_index("document_fields_presence");
     failure_of("document_fields_presence dropped", || judge(&small, &large));
+}
+
+/// **A declared section adds no statement work to a page.** A page of the
+/// declared kinds alone reports no full-scan step, no sort and no VM step,
+/// because its sections run no statement; and a page of every kind reports
+/// the same steps as a page of the observed fields alone, because the only
+/// statement it runs is theirs.
+#[test]
+fn a_declared_section_adds_no_statement_work_to_a_page() {
+    let describing_store = Describing::new("describe-declared-work");
+    let steps = |work: DescribeWork| (work.full_scan_steps, work.sorts, work.vm_steps);
+    let declared_kinds: Vec<FacetKind> = FacetKind::ALL
+        .into_iter()
+        .filter(|kind| *kind != FacetKind::ObservedField)
+        .collect();
+    let declared_only = describing_store.describe(&describing().with_facets(declared_kinds));
+    assert_eq!(
+        declared_only.facets.len(),
+        10,
+        "every declared facet answers"
+    );
+    assert_eq!(steps(declared_only.work), (0, 0, 0));
+    let every = describing_store.describe(&describing()).work;
+    let observed = describing_store.describe(&observed_only()).work;
+    assert!(
+        observed.vm_steps > 0,
+        "the observed statement ran: {observed:?}"
+    );
+    assert_eq!(steps(every), steps(observed));
 }
