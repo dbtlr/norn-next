@@ -60,6 +60,20 @@ impl Severity {
             Severity::Warning => "warning",
         }
     }
+
+    /// Whether this severity is reported at `floor` or more urgently: an error
+    /// is at least a warning, and a warning is not at least an error.
+    pub const fn is_at_least(self, floor: Severity) -> bool {
+        self.urgency() >= floor.urgency()
+    }
+
+    /// Where the severity stands in urgency, the least urgent lowest.
+    const fn urgency(self) -> u8 {
+        match self {
+            Severity::Warning => 0,
+            Severity::Error => 1,
+        }
+    }
 }
 
 impl fmt::Display for Severity {

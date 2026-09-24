@@ -709,6 +709,23 @@ fn a_severity_advertises_its_bare_string() {
     );
 }
 
+/// A severity floor admits itself and every severity more urgent: an error
+/// floor admits errors alone, and a warning floor admits both.
+#[test]
+fn a_severity_floor_admits_itself_and_what_is_more_urgent() {
+    let admitted = |floor: Severity| -> Vec<Severity> {
+        Severity::ALL
+            .into_iter()
+            .filter(|severity| severity.is_at_least(floor))
+            .collect()
+    };
+    assert_eq!(admitted(Severity::Error), vec![Severity::Error]);
+    assert_eq!(
+        admitted(Severity::Warning),
+        vec![Severity::Error, Severity::Warning]
+    );
+}
+
 /// The detail composes the reason type rather than restating its variants, so
 /// one definition describes the reason wherever it appears.
 #[test]
