@@ -16,6 +16,8 @@ use crate::common::{
     Scratch, ambiguity, classes, document, document_with_every_fact, drained, path, snapshot,
     unread_block, violation, write_document, write_documents,
 };
+use norn_wire::{CaseFold, Pattern};
+
 use norn_store::{
     Change, DirectoryPrefix, DocumentPath, IncrementProvenance, OpenOutcome, Provenance, Request,
     Store, StoreError, StoredPathOrder, SubjectScope,
@@ -110,8 +112,9 @@ fn stored_document_pages_share_ascii_folded_order_without_changing_sensitive_ord
     );
 }
 
-/// The sample the folded page order is pinned over, shared verbatim with
-/// `norn-fs`'s test of `CaseSensitivity::compare`.
+/// The sample every ASCII fold the store carries is pinned over — the folded
+/// page order, the folded suffix key and the ignore globs' fold — shared
+/// verbatim with `norn-fs`'s test of `CaseSensitivity::compare`.
 ///
 /// It is deliberately awkward: ASCII case pairs, the punctuation sitting
 /// between the two ASCII case ranges, and non-ASCII letters that do have case.
@@ -200,6 +203,61 @@ fn a_folded_page_states_the_written_ascii_fold_contract() {
     // would put "éa.md" first, and the ASCII fold leaves É where its bytes
     // put it.
     assert!(at("Éb.md") < at("éa.md"));
+}
+
+/// Whether the written contract makes two spellings one: their bytes, ASCII
+/// lowercased, are equal.
+fn contract_folds_together(left: &str, right: &str) -> bool {
+    left.bytes()
+        .map(|byte| byte.to_ascii_lowercase())
+        .eq(right.bytes().map(|byte| byte.to_ascii_lowercase()))
+}
+
+/// **The folded suffix key is the written ASCII-fold contract.** Over the
+/// sample the page order is pinned to, two paths share a folded key exactly
+/// where the contract makes their raw keys one, so a fold widened to Unicode
+/// merges `Éclair` and `éclair` here, and a fold narrowed splits `A` and `a`.
+#[test]
+fn the_folded_suffix_key_is_the_written_ascii_fold_contract() {
+    let keys: Vec<DocumentPath> = FOLD_CONTRACT_SAMPLE.iter().map(|at| path(at)).collect();
+    for left in &keys {
+        for right in &keys {
+            assert_eq!(
+                left.folded_suffix_key() == right.folded_suffix_key(),
+                contract_folds_together(left.suffix_key(), right.suffix_key()),
+                "`{}` and `{}`",
+                left.as_str(),
+                right.as_str()
+            );
+        }
+    }
+    let folded = |at: &str| path(at).folded_suffix_key().to_string();
+    assert_eq!(folded("A.md"), folded("a.md"));
+    assert_ne!(folded("Éclair.md"), folded("éclair.md"));
+    assert_ne!(folded("STRASSE.md"), folded("Straße.md"));
+}
+
+/// **An ambiguity-ignore glob's ASCII fold is the written contract.** Each
+/// sample spelling, read as a glob with no hole in it, matches another spelling
+/// under [`CaseFold::Ascii`] exactly where the contract makes the two one, and
+/// under [`CaseFold::Exact`] only itself.
+#[test]
+fn the_ignore_glob_fold_is_the_written_ascii_fold_contract() {
+    for pattern in FOLD_CONTRACT_SAMPLE {
+        let glob = Pattern::parse(pattern).expect("a glob");
+        for subject in FOLD_CONTRACT_SAMPLE {
+            assert_eq!(
+                glob.matches(subject, CaseFold::Ascii),
+                contract_folds_together(pattern, subject),
+                "`{pattern}` against `{subject}` under the fold"
+            );
+            assert_eq!(
+                glob.matches(subject, CaseFold::Exact),
+                pattern == subject,
+                "`{pattern}` against `{subject}` bytewise"
+            );
+        }
+    }
 }
 
 #[test]

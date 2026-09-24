@@ -42,9 +42,11 @@
 //! answers for every spelling of an entry, where the directory's listing
 //! answers only for the one it renders — so a descent handed a caller's
 //! spelling on a folding root passes a component only where its parent lists
-//! it (see `walk`). Widening the fold is a change to this module,
-//! to the store's collation and the keys it folds, and to the contract sample
-//! both are pinned to, never a local choice made at a comparison site.
+//! it (see `walk`). Widening the fold is a change to this module, to the
+//! store's collation, its folded suffix key and its ambiguity-ignore glob
+//! fold, and to the contract sample each of them is pinned to — this module's
+//! copy and the store's, one sample written twice — never a local choice made
+//! at a comparison site.
 //!
 //! **Whether the fold is applied at all is proven, not assumed.** The key
 //! folds only where an existing directory entry demonstrates that the root

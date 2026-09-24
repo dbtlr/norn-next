@@ -355,19 +355,33 @@ pub struct StoredSuffixKeys {
     pub folded: String,
 }
 
-/// Ordering used by a bounded stored-document scan.
+/// The case behaviour a vault root was **proven** to have at the filesystem
+/// seam, as the store carries it.
 ///
-/// The variant is the case behavior the vault's root was **proven** to have at
-/// the filesystem seam, carried into the store so a scan compares paths the way
-/// the root resolves them. It selects a collation and an index; it never
-/// rewrites a path. A stored path keeps the spelling the tree carries.
+/// It selects four things, and rewrites no path in any of them — a stored path
+/// keeps the spelling the tree carries:
 ///
-/// This crate depends on nothing in the filesystem seam, so the fold below is
-/// **a second implementation of the seam's rule, not a derivation of it**. The
-/// contract both are held to is written once — ASCII lowercase, then bytes,
-/// with the byte comparison breaking a fold's ties — and each side carries a
-/// test against it over the same sample, so widening one implementation and
-/// not the other fails.
+/// - **The store's recorded rebuild input.** A store records the order its rows
+///   were derived under, and an open under another one rebuilds from zero
+///   ([`crate::Store::path_order`]).
+/// - **The suffix key a class probes**: the raw key where the root tells
+///   spellings apart and the ASCII-folded key where it folds them
+///   ([`crate::SuffixKey::under`]), which is also the key space a finding's
+///   classes are filed in.
+/// - **The ambiguity-ignore globs' fold**: bytewise where the root tells
+///   spellings apart and with ASCII case folded where it folds them
+///   ([`crate::AmbiguityIgnore::admits`]).
+/// - **The collation a heal pages stored documents under**: bytewise, or
+///   `NOCASE` with a bytewise tie-break, as the walk it merges against orders
+///   paths. The heal hands the page its walk's proven order.
+///
+/// This crate depends on nothing in the filesystem seam, so each fold here —
+/// the `NOCASE` collation, the folded suffix key, and the ignore globs'
+/// [`norn_wire::CaseFold::Ascii`] — is **another implementation of the seam's
+/// rule, not a derivation of it**. The contract all of them are held to is
+/// written once — ASCII lowercase, then bytes, with the byte comparison
+/// breaking a fold's ties — and each carries a test against it over the same
+/// sample, so widening one implementation and not the others fails.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoredPathOrder {
     /// Preserve bytewise UTF-8 path order.

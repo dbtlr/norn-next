@@ -808,8 +808,9 @@ fn rendered_segment(segment: &str) -> String {
 ///
 /// This is the filesystem seam's fold and SQLite's `NOCASE`, term for term, so
 /// a folded key names exactly the spellings a folding root resolves to one
-/// entry. A non-ASCII letter keeps its case: a wider fold would claim two
-/// spellings the seam keeps apart as one document.
+/// entry, and the folded key is pinned to the fold contract sample those are
+/// (see [`crate::StoredPathOrder`]). A non-ASCII letter keeps its case: a
+/// wider fold would claim two spellings the seam keeps apart as one document.
 pub(crate) fn fold_ascii_case(text: &str) -> String {
     text.to_ascii_lowercase()
 }

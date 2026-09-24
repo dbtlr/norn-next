@@ -208,7 +208,8 @@ pub enum CaseFold {
     Exact,
     /// An ASCII letter compares with its other ASCII case — `A`–`Z` with
     /// `a`–`z` — and every other character, a letter outside ASCII included,
-    /// compares as itself.
+    /// compares as itself. It is the filesystem seam's fold: the store's
+    /// suite pins it to the fold contract sample the seam's fold is pinned to.
     Ascii,
 }
 
