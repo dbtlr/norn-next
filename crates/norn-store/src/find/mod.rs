@@ -176,7 +176,7 @@ pub use statement::{FIND_STATEMENTS, FindStatement, Nested, PageDirection};
 use statement::{Section, SectionStart, compose_page};
 pub(crate) use statement::{
     compose_bare_directory, compose_finding_candidates, compose_finding_classes, compose_known_key,
-    compose_match_probe, compose_universe, key_walk,
+    compose_match_probe, compose_universe,
 };
 
 /// Where a page stopped, or where a continuation resumes: the value the row

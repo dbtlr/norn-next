@@ -10,8 +10,7 @@
 use norn_db::rusqlite::types::Value;
 
 use crate::fields::FieldContainer;
-use crate::find::key_walk;
-use crate::read::Binder;
+use crate::read::{Binder, key_walk};
 
 /// Every statement shape the describe builder runs, named.
 ///

@@ -1,7 +1,8 @@
 //! What every read builder shares: the refusal a builder answers with instead
 //! of a page, the statements a read runs and records, the reading a cursor is
 //! judged against, the one compilation of a conjunction, the filters it
-//! spells, and the one keyset page a builder reads section after section.
+//! spells, the one walk of the keys documents carry, and the one keyset page a
+//! builder reads section after section.
 //!
 //! A read builder is inherent methods on [`Snapshot`], so every statement it
 //! runs reads the one instant the snapshot was established at and is counted
@@ -23,6 +24,7 @@ mod conjunction;
 mod filter;
 mod finding;
 mod glob;
+mod keys;
 mod page;
 mod reading;
 mod run;
@@ -45,6 +47,7 @@ pub(crate) use filter::{Binder, Filter};
 pub use filter::{READ_FILTERS, ReadFilter};
 pub(crate) use finding::{FINDING_ROW_COLUMNS, FindingBase, finding_base};
 pub(crate) use glob::register_functions;
+pub(crate) use keys::key_walk;
 pub(crate) use run::{Lookups, Ran, Stepped};
 
 /// How many rows a page holds when a request names no bound.
