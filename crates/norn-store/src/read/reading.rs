@@ -4,7 +4,7 @@
 use norn_db::rusqlite::types::Value;
 use norn_wire::{Cursor, CursorOrderChanged, Moved};
 
-use super::{FieldOrder, Lookups, Ran, ReadRefusal};
+use super::{FieldOrder, Lookups, PageRefusal, Ran};
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
@@ -25,17 +25,17 @@ impl Snapshot {
         order: Option<FieldOrder>,
         misplaced: bool,
         lookups: &mut Lookups,
-    ) -> Result<Vec<Moved>, ReadRefusal> {
+    ) -> Result<Vec<Moved>, PageRefusal> {
         let now = self.reading_facts(order, lookups)?;
         let minted_under = cursor.snapshot().schema_fingerprint.as_deref();
         if minted_under != now.schema_fingerprint.as_deref() || misplaced {
             let current = now.schema_fingerprint.clone();
-            return Err(ReadRefusal::OrderChanged(match minted_under {
+            return Err(PageRefusal::OrderChanged(match minted_under {
                 Some(minted_under) => CursorOrderChanged::new(minted_under, current),
                 None => CursorOrderChanged::minted_raw(current),
             }));
         }
-        cursor.continuation(&now).map_err(ReadRefusal::OrderChanged)
+        cursor.continuation(&now).map_err(PageRefusal::OrderChanged)
     }
 
     /// This snapshot's reading as a cursor carries it for a page in `order`:
@@ -91,10 +91,10 @@ impl Snapshot {
         &self,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<(), ReadRefusal> {
+    ) -> Result<(), PageRefusal> {
         let pinned = self.fingerprint(lookups)?;
         if declared.schema() != pinned.as_deref() {
-            return Err(ReadRefusal::DeclarationNotPinned {
+            return Err(PageRefusal::DeclarationNotPinned {
                 declared_under: declared.schema().map(str::to_string),
                 pinned,
             });

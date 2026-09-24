@@ -7,7 +7,7 @@ use norn_db::EmittedPlan;
 use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{self, Row, StatementStatus, params_from_iter};
 
-use super::{FindFilter, ReadStatement};
+use super::{ReadFilter, ReadStatement};
 use crate::error::{self, StoreError};
 use crate::store::Snapshot;
 
@@ -19,7 +19,7 @@ use crate::store::Snapshot;
 /// that ran rather than a second spelling of it.
 pub(crate) struct Ran {
     pub(crate) statement: ReadStatement,
-    pub(crate) filters: Vec<FindFilter>,
+    pub(crate) filters: Vec<ReadFilter>,
     sql: String,
     values: Vec<Value>,
     /// What SQLite counted while the statement was stepped, read once every
@@ -78,7 +78,7 @@ impl Ran {
     }
 
     /// The same statement, narrowing by `filters`.
-    pub(crate) fn narrowed_by(mut self, filters: Vec<FindFilter>) -> Self {
+    pub(crate) fn narrowed_by(mut self, filters: Vec<ReadFilter>) -> Self {
         self.filters = filters;
         self
     }
@@ -105,7 +105,7 @@ impl Snapshot {
     pub(crate) fn explained<P>(
         &self,
         record: Vec<Ran>,
-        mut plan: impl FnMut(ReadStatement, Vec<FindFilter>, EmittedPlan) -> P,
+        mut plan: impl FnMut(ReadStatement, Vec<ReadFilter>, EmittedPlan) -> P,
     ) -> Result<Vec<P>, StoreError> {
         record
             .into_iter()

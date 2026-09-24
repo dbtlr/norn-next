@@ -17,7 +17,7 @@ use crate::read::{Binder, FieldOrder, Filter};
 /// holds each shape once, [`FindStatement::slot`] is exhaustive over the enum,
 /// and [`FIND_STATEMENTS`] is the count a census is checked against. A page's
 /// filters are spelled inside the page statement they narrow, and are named by
-/// [`crate::FindFilter`]. Each page statement below is named by the index it seeks
+/// [`crate::ReadFilter`]. Each page statement below is named by the index it seeks
 /// with no filter; a filter that keeps what it seeks drives the statement
 /// instead, and the statement sorts what that seek handed it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -217,7 +217,7 @@ pub(crate) struct Section<'a> {
 /// each document the filter's seek handed it by that document's key and sorts
 /// them: its cost is the filter's matches, not the order index's rows. A
 /// section with no filter, or narrowed only by filters that exclude
-/// ([`crate::FindFilter::excludes`]), seeks its order index and tests each row it
+/// ([`crate::ReadFilter::excludes`]), seeks its order index and tests each row it
 /// reads.
 pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
     let mut binder = Binder::default();

@@ -56,7 +56,7 @@
 //! pins, and the store's own pinned key — the mode, which decides whether the
 //! file outlives the handle and is the one reading an open may refuse over.
 //! What it takes back is [`OpenOutcome`]: the rung the state was at, with a
-//! typed [`RebuildReason`] where the answer was a rebuild.
+//! typed [`norn_db::RebuildReason`] where the answer was a rebuild.
 //!
 //! **Rung 3 is for damaged state, never for a hostile environment.** A full
 //! disk, a revoked permission, a parent directory that cannot be created, a

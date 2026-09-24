@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 use norn_db::rusqlite::types::Value;
 use norn_wire::{Pattern, Predicate, Unsatisfied};
 
-use super::filter::{Filter, FindFilter};
+use super::filter::{Filter, ReadFilter};
 use super::run::StatementFailure;
-use super::{FieldOrder, FindBound, Lookups, Ran, ReadRefusal, glob, suggest};
+use super::{FieldOrder, Lookups, PageRefusal, Ran, ReadBound, glob, suggest};
 use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
 use crate::find::{
@@ -158,7 +158,7 @@ impl Snapshot {
         resolution: Resolution,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<Conjunction, ReadRefusal> {
+    ) -> Result<Conjunction, PageRefusal> {
         let mut conjunction = Conjunction {
             filters: Vec::new(),
             reports: Vec::new(),
@@ -207,10 +207,10 @@ impl Snapshot {
         predicate: &Predicate,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<Part, ReadRefusal> {
+    ) -> Result<Part, PageRefusal> {
         let text = |value: &str| Value::Text(value.to_string());
         let filter =
-            |shape: FindFilter, values: Vec<Value>| Ok(Part::Filter(Filter { shape, values }));
+            |shape: ReadFilter, values: Vec<Value>| Ok(Part::Filter(Filter { shape, values }));
         // The order a key's values compare under, and a request's value as a
         // place in it: its typed sort key where the key carries a typed order,
         // its text where it does not.
@@ -222,18 +222,18 @@ impl Snapshot {
             None => Ok(value.clone()),
             Some(typed) => typed
                 .sort_key(value)
-                .ok_or_else(|| ReadRefusal::UnreadableBound {
+                .ok_or_else(|| PageRefusal::UnreadableBound {
                     key: key.clone(),
                     value: value.clone(),
                 }),
         };
         match predicate {
             Predicate::Eq { key, value, .. } => filter(
-                FindFilter::Equal(order(key)),
+                ReadFilter::Equal(order(key)),
                 vec![text(key), Value::Text(compared(key, value)?)],
             ),
             Predicate::NotEq { key, value, .. } => filter(
-                FindFilter::NotEqual(order(key)),
+                ReadFilter::NotEqual(order(key)),
                 vec![text(key), Value::Text(compared(key, value)?)],
             ),
             Predicate::In { key, values, .. } => {
@@ -241,21 +241,21 @@ impl Snapshot {
                     values
                         .iter()
                         .map(|value| compared(key, value).map(FrontmatterValue::String))
-                        .collect::<Result<Vec<FrontmatterValue>, ReadRefusal>>()?,
+                        .collect::<Result<Vec<FrontmatterValue>, PageRefusal>>()?,
                 ))?;
                 filter(
-                    FindFilter::Member(order(key)),
+                    ReadFilter::Member(order(key)),
                     vec![text(key), Value::Text(listed)],
                 )
             }
-            Predicate::Has { key, .. } => filter(FindFilter::Present, vec![text(key)]),
-            Predicate::Missing { key, .. } => filter(FindFilter::Absent, vec![text(key)]),
+            Predicate::Has { key, .. } => filter(ReadFilter::Present, vec![text(key)]),
+            Predicate::Missing { key, .. } => filter(ReadFilter::Absent, vec![text(key)]),
             Predicate::Before { key, value, .. } | Predicate::After { key, value, .. } => {
                 let (order, bound) = (order(key), compared(key, value)?);
                 let shape = if matches!(predicate, Predicate::Before { .. }) {
-                    FindFilter::Before(order)
+                    ReadFilter::Before(order)
                 } else {
-                    FindFilter::After(order)
+                    ReadFilter::After(order)
                 };
                 filter(shape, vec![text(key), Value::Text(bound)])
             }
@@ -264,7 +264,7 @@ impl Snapshot {
                     query.clone(),
                     problem,
                 ))),
-                None => filter(FindFilter::FullText, vec![text(query)]),
+                None => filter(ReadFilter::FullText, vec![text(query)]),
             },
             Predicate::Path { glob, .. } => match Pattern::parse(glob) {
                 Err(problem) => Ok(Part::MatchesNothing(Unsatisfied::malformed_glob(
@@ -277,12 +277,12 @@ impl Snapshot {
                     }
                     let (lower, upper) = glob::path_range(&pattern);
                     filter(
-                        FindFilter::PathGlob,
+                        ReadFilter::PathGlob,
                         vec![Value::Text(lower), upper, text(glob)],
                     )
                 }
             },
-            Predicate::LinksTo { .. } => Err(ReadRefusal::NotIndexed {
+            Predicate::LinksTo { .. } => Err(PageRefusal::NotIndexed {
                 fact: "a link's target",
             }),
             Predicate::Resolves { target, .. } => match suffix_probe(target.address()) {
@@ -290,16 +290,16 @@ impl Snapshot {
                     target.address(),
                 ))),
                 Ok(probe) => filter(
-                    FindFilter::Resolves,
+                    ReadFilter::Resolves,
                     probe
                         .ranges()
                         .flat_map(|(lower, upper)| [text(lower), text(upper)])
                         .collect(),
                 ),
             },
-            Predicate::Tag { name, .. } => filter(FindFilter::Tag, vec![text(name)]),
+            Predicate::Tag { name, .. } => filter(ReadFilter::Tag, vec![text(name)]),
             Predicate::HasFinding { kind, .. } => filter(
-                FindFilter::Finding,
+                ReadFilter::Finding,
                 // A finding recorded under no schema is stamped with the
                 // empty fingerprint.
                 vec![
@@ -307,7 +307,7 @@ impl Snapshot {
                     text(kind.as_str()),
                 ],
             ),
-            _ => Err(ReadRefusal::UnknownPart {
+            _ => Err(PageRefusal::UnknownPart {
                 part: "a predicate",
             }),
         }
@@ -417,16 +417,16 @@ fn predicate_key(predicate: &Predicate) -> Option<&str> {
 
 /// A membership part's values held to `1..=`[`super::IN_VALUES_CEILING`]; every other
 /// part passes.
-fn membership_bound(predicate: &Predicate) -> Result<(), ReadRefusal> {
+fn membership_bound(predicate: &Predicate) -> Result<(), PageRefusal> {
     let Predicate::In { key, values, .. } = predicate else {
         return Ok(());
     };
     if values.is_empty() {
-        return Err(ReadRefusal::EmptyMembership { key: key.clone() });
+        return Err(PageRefusal::EmptyMembership { key: key.clone() });
     }
-    if values.len() > FindBound::MembershipValues.ceiling() {
-        return Err(ReadRefusal::OutOfBound {
-            bound: FindBound::MembershipValues,
+    if values.len() > ReadBound::MembershipValues.ceiling() {
+        return Err(PageRefusal::OutOfBound {
+            bound: ReadBound::MembershipValues,
             given: values.len(),
         });
     }

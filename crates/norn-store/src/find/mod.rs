@@ -49,7 +49,7 @@
 //! order is the request's, and a continuation's cursor is judged against it.
 //! **The declaration is the snapshot's.** It names the schema it was read from,
 //! and a find whose declaration is not the one the snapshot pins is refused
-//! ([`ReadRefusal::DeclarationNotPinned`]), so a typed order is always the one
+//! ([`PageRefusal::DeclarationNotPinned`]), so a typed order is always the one
 //! the typed column holds.
 //!
 //! **A part that compares values compares under the key's order.** Equality,
@@ -63,12 +63,12 @@
 //! # A filter is one seek, and a page drives from it
 //!
 //! Each part of the conjunction narrows every section by the rows one index
-//! seek of its own reaches — [`FindFilter`] names each and the index it
+//! seek of its own reaches — [`ReadFilter`] names each and the index it
 //! seeks — so a part costs the rows it matches, never the vault. A section a
 //! part narrows reaches each document the part's seek handed it by the
 //! document's key, and sorts them in the page's order: the order index is not
 //! read at all. Inequality and absence are the exception
-//! ([`FindFilter::excludes`]): their seek reaches the documents a page must
+//! ([`ReadFilter::excludes`]): their seek reaches the documents a page must
 //! not hold, so there is no seek of what they keep, and a section they alone
 //! narrow seeks its order index as a section with no filter does and tests
 //! each row against them.
@@ -163,7 +163,7 @@ use norn_wire::{
 use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
 use crate::read::{
-    FieldOrder, Filter, FindFilter, KeyPlace, Lookups, Ran, ReadRefusal, ReadStatement, Report,
+    FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, Report,
     Resolution, page_limit,
 };
 use crate::store::Snapshot;
@@ -255,7 +255,7 @@ impl Found {
 pub struct FindPlan {
     pub statement: FindStatement,
     /// The filters the statement narrows by, in the request's order.
-    pub filters: Vec<FindFilter>,
+    pub filters: Vec<ReadFilter>,
     pub plan: EmittedPlan,
 }
 
@@ -292,7 +292,7 @@ struct Compiled<'a> {
 }
 
 impl Compiled<'_> {
-    fn filter_shapes(&self) -> Vec<FindFilter> {
+    fn filter_shapes(&self) -> Vec<ReadFilter> {
         self.filters.iter().map(|filter| filter.shape).collect()
     }
 
@@ -317,7 +317,7 @@ pub(crate) struct Projection<'a> {
 impl<'a> Projection<'a> {
     /// What `columns` projects, or the refusal of a column the store keeps no
     /// index of.
-    fn of(columns: &'a [Column]) -> Result<Self, ReadRefusal> {
+    fn of(columns: &'a [Column]) -> Result<Self, PageRefusal> {
         let mut projection = Projection {
             all_fields: false,
             keys: Vec::new(),
@@ -345,16 +345,16 @@ impl<'a> Projection<'a> {
                     nested.insert(2);
                 }
                 Column::Links {} => {
-                    return Err(ReadRefusal::NotProjected {
+                    return Err(PageRefusal::NotProjected {
                         column: "the links column",
                     });
                 }
                 Column::Findings {} => {
-                    return Err(ReadRefusal::NotProjected {
+                    return Err(PageRefusal::NotProjected {
                         column: "the findings column",
                     });
                 }
-                _ => return Err(ReadRefusal::UnknownPart { part: "a column" }),
+                _ => return Err(PageRefusal::UnknownPart { part: "a column" }),
             }
         }
         projection.nested = nested.into_iter().map(|slot| Nested::ALL[slot]).collect();
@@ -388,7 +388,7 @@ impl Snapshot {
         &self,
         params: &FindParams,
         declared: &DeclaredFields,
-    ) -> Result<Found, ReadRefusal> {
+    ) -> Result<Found, PageRefusal> {
         self.run_find(params, declared, &mut Lookups::default())
     }
 
@@ -409,7 +409,7 @@ impl Snapshot {
         &self,
         params: &FindParams,
         declared: &DeclaredFields,
-    ) -> Result<Vec<FindPlan>, ReadRefusal> {
+    ) -> Result<Vec<FindPlan>, PageRefusal> {
         let mut lookups = Lookups::default();
         self.run_find(params, declared, &mut lookups)?;
         Ok(self.explained(lookups.ran, |statement, filters, plan| {
@@ -431,7 +431,7 @@ impl Snapshot {
         params: &FindParams,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<Found, ReadRefusal> {
+    ) -> Result<Found, PageRefusal> {
         let started = self.counters().statements_executed();
         let limit = page_limit(params.limit)?;
         let projection = Projection::of(&params.columns)?;
@@ -487,9 +487,9 @@ impl Snapshot {
         cursor: &Cursor,
         order: PageOrder<'_>,
         lookups: &mut Lookups,
-    ) -> Result<(Option<FindPosition>, Vec<Moved>), ReadRefusal> {
+    ) -> Result<(Option<FindPosition>, Vec<Moved>), PageRefusal> {
         let CursorKey::Document { sort, path, .. } = cursor.key() else {
-            return Err(ReadRefusal::NotADocumentCursor);
+            return Err(PageRefusal::NotADocumentCursor);
         };
         let path_ordered = matches!(order, PageOrder::Path(_));
         let moved = self.judge_reading(
@@ -540,7 +540,7 @@ impl Snapshot {
         params: &'a FindParams,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<Compiled<'a>, ReadRefusal> {
+    ) -> Result<Compiled<'a>, PageRefusal> {
         self.declaration_pinned(declared, lookups)?;
         let mut reports = Vec::new();
         let order = match &params.sort {
@@ -550,7 +550,7 @@ impl Snapshot {
                     Direction::Ascending => PageDirection::Ascending,
                     Direction::Descending => PageDirection::Descending,
                     _ => {
-                        return Err(ReadRefusal::UnknownPart {
+                        return Err(PageRefusal::UnknownPart {
                             part: "a sort direction",
                         });
                     }
@@ -569,7 +569,7 @@ impl Snapshot {
                         },
                         direction,
                     },
-                    _ => return Err(ReadRefusal::UnknownPart { part: "a sort key" }),
+                    _ => return Err(PageRefusal::UnknownPart { part: "a sort key" }),
                 }
             }
         };

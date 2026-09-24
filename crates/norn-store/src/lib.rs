@@ -117,7 +117,7 @@ pub use find::{
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use read::{
-    DEFAULT_PAGE, FIND_FILTERS, FieldOrder, FindBound, FindFilter, IN_VALUES_CEILING, ReadRefusal,
+    DEFAULT_PAGE, FieldOrder, IN_VALUES_CEILING, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
     ReadStatement,
 };
 // The open ceremony's own vocabulary, which is this crate's too: a store is

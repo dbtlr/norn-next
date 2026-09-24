@@ -86,7 +86,7 @@ use norn_wire::{
 use crate::error::{self, StoreError};
 use crate::fields::DeclaredFields;
 use crate::read::{
-    Conjunction, FieldOrder, FindFilter, KeyPlace, Lookups, Ran, ReadRefusal, ReadStatement,
+    Conjunction, FieldOrder, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement,
     Report, Resolution, Stepped, page_limit,
 };
 use crate::store::Snapshot;
@@ -171,7 +171,7 @@ pub struct CountPlan {
     /// or a probe the conjunction's compilation ran.
     pub statement: ReadStatement,
     /// The filters the statement narrows by, in the request's order.
-    pub filters: Vec<FindFilter>,
+    pub filters: Vec<ReadFilter>,
     pub plan: EmittedPlan,
 }
 
@@ -192,14 +192,14 @@ impl Snapshot {
     /// from another schema than the snapshot pins, a part the store keeps no
     /// index of, and a bound that does not read as its key's declared type.
     /// And refused as a cursor that names no position among the request's
-    /// tallies ([`ReadRefusal::NotATallyCursor`]), or one minted under
+    /// tallies ([`PageRefusal::NotATallyCursor`]), or one minted under
     /// another schema fingerprint than the grouping reads under
-    /// ([`ReadRefusal::OrderChanged`]).
+    /// ([`PageRefusal::OrderChanged`]).
     pub fn count(
         &self,
         params: &CountParams,
         declared: &DeclaredFields,
-    ) -> Result<Counted, ReadRefusal> {
+    ) -> Result<Counted, PageRefusal> {
         self.run_count(params, declared, &mut Lookups::default())
     }
 
@@ -214,7 +214,7 @@ impl Snapshot {
         &self,
         params: &CountParams,
         declared: &DeclaredFields,
-    ) -> Result<Vec<CountPlan>, ReadRefusal> {
+    ) -> Result<Vec<CountPlan>, PageRefusal> {
         let mut lookups = Lookups::default();
         self.run_count(params, declared, &mut lookups)?;
         Ok(
@@ -233,7 +233,7 @@ impl Snapshot {
         params: &CountParams,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<Counted, ReadRefusal> {
+    ) -> Result<Counted, PageRefusal> {
         let started = self.counters().statements_executed();
         let limit = page_limit(params.limit)?;
         self.declaration_pinned(declared, lookups)?;
@@ -295,12 +295,12 @@ impl Snapshot {
         order: Option<FieldOrder>,
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<(Vec<Option<String>>, Vec<Moved>), ReadRefusal> {
+    ) -> Result<(Vec<Option<String>>, Vec<Moved>), PageRefusal> {
         let CursorKey::Tally { group, .. } = cursor.key() else {
-            return Err(ReadRefusal::NotATallyCursor);
+            return Err(PageRefusal::NotATallyCursor);
         };
         if group.len() != members.len() {
-            return Err(ReadRefusal::NotATallyCursor);
+            return Err(PageRefusal::NotATallyCursor);
         }
         let moved = self.judge_reading(cursor, order, false, lookups)?;
         let at = members
@@ -310,9 +310,9 @@ impl Snapshot {
                 None => Ok(None),
                 Some(label) => sort_key(member, label, declared)
                     .map(Some)
-                    .ok_or(ReadRefusal::NotATallyCursor),
+                    .ok_or(PageRefusal::NotATallyCursor),
             })
-            .collect::<Result<Vec<Option<String>>, ReadRefusal>>()?;
+            .collect::<Result<Vec<Option<String>>, PageRefusal>>()?;
         Ok((at, moved))
     }
 
@@ -343,7 +343,7 @@ impl Snapshot {
             };
             return Ok((tallies, None));
         }
-        let shapes: Vec<FindFilter> = conjunction
+        let shapes: Vec<ReadFilter> = conjunction
             .filters
             .iter()
             .map(|filter| filter.shape)
@@ -407,7 +407,7 @@ impl Snapshot {
         by: &'a [GroupKey],
         declared: &DeclaredFields,
         lookups: &mut Lookups,
-    ) -> Result<(Vec<Member<'a>>, Vec<Report>), ReadRefusal> {
+    ) -> Result<(Vec<Member<'a>>, Vec<Report>), PageRefusal> {
         let mut reports = Vec::new();
         let members = by
             .iter()
@@ -428,11 +428,11 @@ impl Snapshot {
                     shape: GroupMember::Tag,
                     key: None,
                 }),
-                _ => Err(ReadRefusal::UnknownPart {
+                _ => Err(PageRefusal::UnknownPart {
                     part: "a group key",
                 }),
             })
-            .collect::<Result<Vec<Member<'a>>, ReadRefusal>>()?;
+            .collect::<Result<Vec<Member<'a>>, PageRefusal>>()?;
         Ok((members, reports))
     }
 }

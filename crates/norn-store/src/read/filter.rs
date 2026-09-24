@@ -10,10 +10,10 @@ use crate::request::range_predicate_from;
 ///
 /// Each is a membership test of the page's document against rows one index
 /// seek reaches, so a filter costs the rows it matches rather than the vault.
-/// [`FindFilter::all`] and [`FindFilter::slot`] keep the same discipline as
+/// [`ReadFilter::all`] and [`ReadFilter::slot`] keep the same discipline as
 /// [`crate::FindStatement`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FindFilter {
+pub enum ReadFilter {
     /// A value row under the key equals the value under the order: `(key,
     /// raw)` on `document_fields_raw`, or `(key, typed)` on
     /// `document_fields_typed` against the value's typed sort key.
@@ -48,13 +48,13 @@ pub enum FindFilter {
     Finding,
 }
 
-/// How many filter shapes [`FindFilter::all`] holds.
-pub const FIND_FILTERS: usize = 12;
+/// How many filter shapes [`ReadFilter::all`] holds.
+pub const READ_FILTERS: usize = 12;
 
-impl FindFilter {
+impl ReadFilter {
     /// Every filter shape, in slot order. A filter that compares values is
     /// named under the raw order; the typed order is the same slot.
-    pub fn all() -> [Self; FIND_FILTERS] {
+    pub fn all() -> [Self; READ_FILTERS] {
         [
             Self::Equal(FieldOrder::Raw),
             Self::NotEqual(FieldOrder::Raw),
@@ -97,8 +97,8 @@ impl FindFilter {
             Self::Finding => 11,
         };
         assert!(
-            slot < FIND_FILTERS,
-            "slot {slot} is outside the enumeration: grow `all` and `FIND_FILTERS` with the \
+            slot < READ_FILTERS,
+            "slot {slot} is outside the enumeration: grow `all` and `READ_FILTERS` with the \
              filter that took it"
         );
         slot
@@ -109,7 +109,7 @@ impl FindFilter {
 /// the order its fragment numbers them.
 #[derive(Clone, Debug)]
 pub(crate) struct Filter {
-    pub(crate) shape: FindFilter,
+    pub(crate) shape: ReadFilter,
     /// The values the fragment binds, in the order [`Filter::spell`] writes
     /// their placeholders. A resolution filter binds two per suffix range, so
     /// the count is also how many ranges it opens.
@@ -140,10 +140,10 @@ impl Filter {
             )
         };
         match self.shape {
-            FindFilter::Equal(order) | FindFilter::NotEqual(order) => {
+            ReadFilter::Equal(order) | ReadFilter::NotEqual(order) => {
                 let column = order.column();
                 let (key, value) = (next(), next());
-                let membership = if matches!(self.shape, FindFilter::Equal(_)) {
+                let membership = if matches!(self.shape, ReadFilter::Equal(_)) {
                     "IN"
                 } else {
                     "NOT IN"
@@ -153,7 +153,7 @@ impl Filter {
                      WHERE fv.key = {key} AND fv.{column} = {value})"
                 )
             }
-            FindFilter::Member(order) => {
+            ReadFilter::Member(order) => {
                 let column = order.column();
                 let (key, values) = (next(), next());
                 format!(
@@ -162,9 +162,9 @@ impl Filter {
                        AND fv.{column} IN (SELECT value FROM json_each({values})))"
                 )
             }
-            FindFilter::Present | FindFilter::Absent => {
+            ReadFilter::Present | ReadFilter::Absent => {
                 let key = next();
-                let membership = if self.shape == FindFilter::Present {
+                let membership = if self.shape == ReadFilter::Present {
                     "IN"
                 } else {
                     "NOT IN"
@@ -174,15 +174,15 @@ impl Filter {
                      WHERE fp.key = {key} AND fp.ordinal = 0)"
                 )
             }
-            FindFilter::Before(order) => bounded(order, "<", &mut next),
-            FindFilter::After(order) => bounded(order, ">", &mut next),
-            FindFilter::FullText => {
+            ReadFilter::Before(order) => bounded(order, "<", &mut next),
+            ReadFilter::After(order) => bounded(order, ">", &mut next),
+            ReadFilter::FullText => {
                 let query = next();
                 format!(
                     "{id} IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH {query})"
                 )
             }
-            FindFilter::PathGlob => {
+            ReadFilter::PathGlob => {
                 let (lower, upper, pattern) = (next(), next(), next());
                 format!(
                     "{id} IN (SELECT dg.id FROM documents AS dg
@@ -191,7 +191,7 @@ impl Filter {
                     function = super::glob::GLOB_FUNCTION
                 )
             }
-            FindFilter::Resolves => {
+            ReadFilter::Resolves => {
                 // Each bound takes its number in turn, and the range predicate
                 // spells the ranges over those numbers from `first`.
                 for _ in &self.values {
@@ -200,13 +200,13 @@ impl Filter {
                 let ranges = range_predicate_from("dr.suffix_key", self.values.len() / 2, first);
                 format!("{id} IN (SELECT dr.id FROM documents AS dr WHERE {ranges})")
             }
-            FindFilter::Tag => {
+            ReadFilter::Tag => {
                 let name = next();
                 format!(
                     "{id} IN (SELECT tg.document FROM document_tags AS tg WHERE tg.name = {name})"
                 )
             }
-            FindFilter::Finding => {
+            ReadFilter::Finding => {
                 let (fingerprint, kind) = (next(), next());
                 format!(
                     "{id} IN (SELECT df.id FROM documents AS df

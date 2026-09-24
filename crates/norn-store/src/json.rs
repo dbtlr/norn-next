@@ -277,7 +277,7 @@ fn write_string(text: &str, out: &mut String) {
 ///
 /// **The reader of the text [`canonical_json`] writes.** A string crosses as
 /// its content, a number and a boolean as the digits and the word the
-/// projection spelled, a null as [`FieldValue::Null`], and a sequence and a
+/// projection spelled, a null as [`FrontmatterValue::Null`], and a sequence and a
 /// map as the containers they are. A number reads only in the plain decimal
 /// spelling the projection writes, and any other spelling is damage, so a
 /// scalar's text is the field pillar's raw text for the same value, and a

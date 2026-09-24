@@ -38,7 +38,7 @@ use crate::store::Snapshot;
 
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, Resolution};
 pub(crate) use filter::{Binder, Filter};
-pub use filter::{FIND_FILTERS, FindFilter};
+pub use filter::{READ_FILTERS, ReadFilter};
 pub(crate) use glob::register_functions;
 pub(crate) use run::{Lookups, Ran, Stepped};
 
@@ -46,33 +46,33 @@ pub(crate) use run::{Lookups, Ran, Stepped};
 ///
 /// The store's default. A handler may narrow it by naming a bound of its own;
 /// a bound outside `1..=`[`MAX_PAGE`] is refused
-/// ([`ReadRefusal::OutOfBound`]), never clamped.
+/// ([`PageRefusal::OutOfBound`]), never clamped.
 pub const DEFAULT_PAGE: usize = 100;
 
 /// The most values one membership part may name.
 ///
 /// Every value is bound into the part's one statement, so the ceiling is what
 /// bounds that statement's text and its parameters. A part naming more is
-/// refused ([`ReadRefusal::OutOfBound`]), and one naming none
-/// ([`ReadRefusal::EmptyMembership`]).
+/// refused ([`PageRefusal::OutOfBound`]), and one naming none
+/// ([`PageRefusal::EmptyMembership`]).
 pub const IN_VALUES_CEILING: usize = 256;
 
 /// A count a request names that the store holds to a range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FindBound {
+pub enum ReadBound {
     /// The rows a page holds: `1..=`[`MAX_PAGE`].
     PageRows,
     /// The values one membership part names: at most [`IN_VALUES_CEILING`].
-    /// A part naming none is refused as [`ReadRefusal::EmptyMembership`].
+    /// A part naming none is refused as [`PageRefusal::EmptyMembership`].
     MembershipValues,
 }
 
-impl FindBound {
+impl ReadBound {
     /// The most the count may be.
     pub const fn ceiling(self) -> usize {
         match self {
-            FindBound::PageRows => MAX_PAGE,
-            FindBound::MembershipValues => IN_VALUES_CEILING,
+            ReadBound::PageRows => MAX_PAGE,
+            ReadBound::MembershipValues => IN_VALUES_CEILING,
         }
     }
 }
@@ -132,7 +132,7 @@ impl From<CountStatement> for ReadStatement {
 /// Why a read builder answered no page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum ReadRefusal {
+pub enum PageRefusal {
     /// The request filters by a fact the store keeps no index of.
     ///
     /// A **dormant carrier** for the link index NORN-229 builds: `links` stores
@@ -175,27 +175,27 @@ pub enum ReadRefusal {
     EmptyMembership { key: String },
     /// A count the request names is outside the range `bound` holds it to:
     /// `given` rows for a page, or `given` values for one membership part.
-    OutOfBound { bound: FindBound, given: usize },
+    OutOfBound { bound: ReadBound, given: usize },
     /// The request carries a part this build of the store does not know.
     UnknownPart { part: &'static str },
     /// The store refused a statement.
     Store(StoreError),
 }
 
-impl std::fmt::Display for ReadRefusal {
+impl std::fmt::Display for PageRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReadRefusal::NotIndexed { fact } => {
+            PageRefusal::NotIndexed { fact } => {
                 write!(formatter, "the store keeps no index of {fact}")
             }
-            ReadRefusal::NotProjected { column } => {
+            PageRefusal::NotProjected { column } => {
                 write!(formatter, "{column} is not yet projected onto a find's row")
             }
-            ReadRefusal::UnreadableBound { key, value } => write!(
+            PageRefusal::UnreadableBound { key, value } => write!(
                 formatter,
                 "`{value}` does not read as the type `{key}` is declared with"
             ),
-            ReadRefusal::DeclarationNotPinned {
+            PageRefusal::DeclarationNotPinned {
                 declared_under,
                 pinned,
             } => write!(
@@ -204,42 +204,42 @@ impl std::fmt::Display for ReadRefusal {
                 schema_named(declared_under.as_deref()),
                 schema_named(pinned.as_deref())
             ),
-            ReadRefusal::OrderChanged(changed) => write!(
+            PageRefusal::OrderChanged(changed) => write!(
                 formatter,
                 "the cursor was minted in an order under {}, and the request reads one under {}",
                 schema_named(changed.minted_under.as_deref()),
                 schema_named(changed.current.as_deref())
             ),
-            ReadRefusal::NotADocumentCursor => {
+            PageRefusal::NotADocumentCursor => {
                 formatter.write_str("the cursor names a position among rows that are not documents")
             }
-            ReadRefusal::NotATallyCursor => {
+            PageRefusal::NotATallyCursor => {
                 formatter.write_str("the cursor names no position among this count's tallies")
             }
-            ReadRefusal::EmptyMembership { key } => {
+            PageRefusal::EmptyMembership { key } => {
                 write!(formatter, "the membership part on `{key}` names no value")
             }
-            ReadRefusal::OutOfBound { bound, given } => match bound {
-                FindBound::PageRows => write!(
+            PageRefusal::OutOfBound { bound, given } => match bound {
+                ReadBound::PageRows => write!(
                     formatter,
                     "a page holds 1 to {} rows, and {given} were asked for",
                     bound.ceiling()
                 ),
-                FindBound::MembershipValues => write!(
+                ReadBound::MembershipValues => write!(
                     formatter,
                     "a membership part names at most {} values, and {given} were named",
                     bound.ceiling()
                 ),
             },
-            ReadRefusal::UnknownPart { part } => {
+            PageRefusal::UnknownPart { part } => {
                 write!(formatter, "this store does not know {part}")
             }
-            ReadRefusal::Store(problem) => problem.fmt(formatter),
+            PageRefusal::Store(problem) => problem.fmt(formatter),
         }
     }
 }
 
-impl std::error::Error for ReadRefusal {}
+impl std::error::Error for PageRefusal {}
 
 /// A schema fingerprint as a refusal names it: quoted, or "no schema".
 fn schema_named(fingerprint: Option<&str>) -> String {
@@ -249,22 +249,22 @@ fn schema_named(fingerprint: Option<&str>) -> String {
     )
 }
 
-impl From<StoreError> for ReadRefusal {
+impl From<StoreError> for PageRefusal {
     fn from(problem: StoreError) -> Self {
-        ReadRefusal::Store(problem)
+        PageRefusal::Store(problem)
     }
 }
 
 /// The page bound a request names, or [`DEFAULT_PAGE`] where it names none;
 /// a bound outside `1..=`[`MAX_PAGE`] is refused.
-pub(crate) fn page_limit(limit: Option<u32>) -> Result<usize, ReadRefusal> {
+pub(crate) fn page_limit(limit: Option<u32>) -> Result<usize, PageRefusal> {
     let Some(limit) = limit else {
         return Ok(DEFAULT_PAGE);
     };
     let given = usize::try_from(limit).unwrap_or(usize::MAX);
-    if given == 0 || given > FindBound::PageRows.ceiling() {
-        return Err(ReadRefusal::OutOfBound {
-            bound: FindBound::PageRows,
+    if given == 0 || given > ReadBound::PageRows.ceiling() {
+        return Err(PageRefusal::OutOfBound {
+            bound: ReadBound::PageRows,
             given,
         });
     }
