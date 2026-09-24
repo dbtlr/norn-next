@@ -26,6 +26,7 @@ use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
 const CHILD_ENV: &str = "NORN_HOST_TORN_INCREMENT_CHILD";
 const DATABASE_ENV: &str = "NORN_HOST_TORN_INCREMENT_DATABASE";
+const VAULT_ENV: &str = "NORN_HOST_TORN_INCREMENT_VAULT";
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
 
 #[test]
@@ -40,7 +41,7 @@ fn next_attach_converges_after_process_death_mid_increment() {
 
     attach_and_wait(fixture.host(), &fixture.name);
 
-    let before = read_rows(&fixture.database);
+    let before = read_rows(&fixture.database, &fixture.vault);
     assert_eq!(before.len(), 2);
     let generation_before = before[0].generation;
     assert!(before.iter().all(|row| row.generation == generation_before));
@@ -59,6 +60,7 @@ fn next_attach_converges_after_process_death_mid_increment() {
         ])
         .env(CHILD_ENV, "1")
         .env(DATABASE_ENV, &fixture.database)
+        .env(VAULT_ENV, &fixture.vault)
         .output()
         .expect("run torn-increment subprocess");
     assert!(
@@ -70,7 +72,7 @@ fn next_attach_converges_after_process_death_mid_increment() {
 
     // No prefix of the false changeset and no generation belonging to it is at
     // rest. This is checked before healing so convergence cannot hide a tear.
-    let after_death = read_rows(&fixture.database);
+    let after_death = read_rows(&fixture.database, &fixture.vault);
     assert_eq!(after_death.len(), 2);
     for row in &after_death {
         assert_eq!(row.generation, generation_before);
@@ -89,7 +91,7 @@ fn next_attach_converges_after_process_death_mid_increment() {
     // ordered heal must replace both stale rows and insert the new filesystem
     // document without any crash-specific repair path.
     attach_and_wait(fixture.host(), &fixture.name);
-    let converged = read_rows(&fixture.database);
+    let converged = read_rows(&fixture.database, &fixture.vault);
     assert_eq!(converged.len(), 3);
     let healed_generation = converged[0].generation;
     assert_eq!(
@@ -122,7 +124,8 @@ fn next_attach_converges_after_process_death_mid_increment() {
 fn tear_increment() -> ! {
     let database =
         PathBuf::from(std::env::var_os(DATABASE_ENV).expect("database passed to child process"));
-    let mut store = Store::open(database).expect("open seeded derived store");
+    let vault = PathBuf::from(std::env::var_os(VAULT_ENV).expect("vault passed to child process"));
+    let mut store = Store::open(database, proven_order(&vault)).expect("open seeded derived store");
     norn_store::induced_failure::abort_after_changeset_entries(2);
     let changes = ["a.md", "b.md", "c.md"].map(|path| {
         Change::Upsert(DocumentFacts::new(
@@ -170,8 +173,18 @@ fn names_no_vault(observed: &Result<TrustState, ErrorEnvelope>) -> bool {
     matches!(observed, Err(envelope) if envelope.code() == &ReasonCode::HostUnknownVault)
 }
 
-fn read_rows(database: &Path) -> Vec<norn_store::StoredDocument> {
-    let mut store = Store::open(database).expect("open derived store");
+/// The order the attach opens a store over `vault` under: the one the root
+/// proves. An open under the other one would rebuild the store it is reading.
+fn proven_order(vault: &Path) -> StoredPathOrder {
+    norn_host::stored_path_order(
+        norn_fs::PathNormalizer::detect(vault)
+            .expect("detect the vault's case behaviour")
+            .case_sensitivity(),
+    )
+}
+
+fn read_rows(database: &Path, vault: &Path) -> Vec<norn_store::StoredDocument> {
+    let mut store = Store::open(database, proven_order(vault)).expect("open derived store");
     store
         .begin_request()
         .stored_documents_after_ordered(None, 16, StoredPathOrder::Sensitive)

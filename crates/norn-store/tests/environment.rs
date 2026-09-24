@@ -24,8 +24,8 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use norn_store::{
-    Change, DocumentFacts, DocumentPath, IncrementProvenance, OpenOutcome, Store, StoreError, ddl,
-    induced_failure,
+    Change, DocumentFacts, DocumentPath, IncrementProvenance, OpenOutcome, Store, StoreError,
+    StoredPathOrder, ddl, induced_failure,
 };
 use norn_testkit::scratch::Scratch as TestkitScratch;
 
@@ -68,7 +68,7 @@ impl Scratch {
     }
 
     fn open(&self) -> Store {
-        Store::open(self.database()).expect("opening a store")
+        Store::open(self.database(), StoredPathOrder::Sensitive).expect("opening a store")
     }
 }
 
@@ -177,13 +177,14 @@ fn a_database_that_reports_itself_busy_is_refused_rather_than_rebuilt() {
     drop(store);
 
     induced_failure::fail_next_meta_read_as_busy();
-    let error = Store::open(&database).expect_err("a busy database");
+    let error = Store::open(&database, StoredPathOrder::Sensitive).expect_err("a busy database");
     assert!(
         matches!(error, StoreError::Sql { .. }),
         "a busy database was reported as {error:?} rather than as a refused operation"
     );
 
-    let mut reopened = Store::open(&database).expect("reopening a store");
+    let mut reopened =
+        Store::open(&database, StoredPathOrder::Sensitive).expect("reopening a store");
     assert_eq!(*reopened.open_outcome(), OpenOutcome::Reused);
     assert!(
         reopened
@@ -208,7 +209,8 @@ fn a_store_schema_that_meets_a_corrupt_database_is_damage() {
     let scratch = Scratch::new("create-corrupt");
 
     induced_failure::corrupt_the_next_store_creation_at(&scratch.database());
-    let error = Store::open(scratch.database()).expect_err("a store schema that met corruption");
+    let error = Store::open(scratch.database(), StoredPathOrder::Sensitive)
+        .expect_err("a store schema that met corruption");
     assert!(
         error.damage().is_some(),
         "a store schema that met a corrupt database reported {error:?}"
@@ -216,7 +218,8 @@ fn a_store_schema_that_meets_a_corrupt_database_is_damage() {
 
     // One-shot: the arm is taken by the statement that met it, so the next
     // creation is an ordinary one and the case leaves nothing armed behind it.
-    let mut store = Store::open(scratch.database()).expect("creating a store afterwards");
+    let mut store = Store::open(scratch.database(), StoredPathOrder::Sensitive)
+        .expect("creating a store afterwards");
     write_document(&mut store, document("notes/after.md", "hash-1", "a body\n"));
 }
 
@@ -239,7 +242,8 @@ fn a_store_schema_refused_at_a_statement_names_the_statement() {
         .expect("the statement list is not empty");
 
     induced_failure::refuse_the_next_store_creation_at(&scratch.database());
-    let error = Store::open(scratch.database()).expect_err("a store schema that was refused");
+    let error = Store::open(scratch.database(), StoredPathOrder::Sensitive)
+        .expect_err("a store schema that was refused");
     assert!(
         error.damage().is_none(),
         "a read-only database was typed as damage: {error:?}"

@@ -379,6 +379,27 @@ pub enum StoredPathOrder {
     AsciiCaseInsensitive,
 }
 
+impl StoredPathOrder {
+    /// The spelling a store records the order its rows were derived under by.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            StoredPathOrder::Sensitive => "case-sensitive",
+            StoredPathOrder::AsciiCaseInsensitive => "ascii-case-insensitive",
+        }
+    }
+
+    /// The order a recorded spelling names, or `None` for a spelling no build
+    /// records.
+    pub(crate) fn from_recorded(recorded: &str) -> Option<Self> {
+        [
+            StoredPathOrder::Sensitive,
+            StoredPathOrder::AsciiCaseInsensitive,
+        ]
+        .into_iter()
+        .find(|order| order.as_str() == recorded)
+    }
+}
+
 /// A document's row and every fact row derived from it, in ordinal order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredFacts {

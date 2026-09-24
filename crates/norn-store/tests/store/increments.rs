@@ -1542,7 +1542,7 @@ fn a_torn_changeset_leaves_the_previous_generation_whole() {
     let scratch = Scratch::new("torn-changeset");
     let database = scratch.database();
 
-    let mut store = Store::open(&database).expect("creating a store");
+    let mut store = Store::open(&database, StoredPathOrder::Sensitive).expect("creating a store");
     let mut request = store.begin_request();
     let before = write_documents(
         &mut request,
@@ -1591,7 +1591,8 @@ fn a_torn_changeset_leaves_the_previous_generation_whole() {
          and what survived the tear was one process's memory"
     );
 
-    let mut reopened = Store::open(&database).expect("reopening a store");
+    let mut reopened =
+        Store::open(&database, StoredPathOrder::Sensitive).expect("reopening a store");
     assert_eq!(
         *reopened.open_outcome(),
         OpenOutcome::Reused,
@@ -1666,7 +1667,8 @@ fn write_ahead_log_size(database: &Path) -> u64 {
 /// The child half of the case above: apply a changeset this process does not
 /// survive, and never return.
 fn tear_a_changeset(database: &Path) -> ! {
-    let mut store = Store::open(database).expect("opening the store the parent wrote");
+    let mut store = Store::open(database, StoredPathOrder::Sensitive)
+        .expect("opening the store the parent wrote");
     // A page cache far smaller than the changeset's own pages. SQLite then
     // writes the uncommitted pages into the write-ahead log rather than holding
     // them, which is what makes the file — and not one process's memory — the

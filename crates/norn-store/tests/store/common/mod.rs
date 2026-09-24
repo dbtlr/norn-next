@@ -46,7 +46,8 @@ impl Scratch {
     }
 
     pub fn open(&self) -> Store {
-        Store::open(self.database()).expect("opening a store")
+        Store::open(self.database(), norn_store::StoredPathOrder::Sensitive)
+            .expect("opening a store")
     }
 }
 

@@ -1704,8 +1704,11 @@ mod tests {
                 FINGERPRINT,
             );
             let scratch = norn_testkit::scratch::Scratch::new(label);
-            let mut store =
-                norn_store::Store::open(scratch.join("store.sqlite3")).expect("a store");
+            let mut store = norn_store::Store::open(
+                scratch.join("store.sqlite3"),
+                norn_store::StoredPathOrder::Sensitive,
+            )
+            .expect("a store");
             store
                 .begin_request()
                 .pin_vault_schema(schema, FINGERPRINT)

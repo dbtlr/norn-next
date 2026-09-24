@@ -141,9 +141,10 @@ pub struct ProductionAttachment {
     /// control reads, write normalization, and shadow placement.
     covered_root: PathBuf,
     /// The case behaviour the coverage proved for `covered_root` when it was
-    /// installed, retained so a read resolves under it rather than detecting
-    /// it. It moves with the coverage: a recovery that installs coverage again
-    /// takes the proof that coverage made.
+    /// installed. It moves with the coverage: a recovery that installs
+    /// coverage again takes the proof that coverage made. The store is opened
+    /// under it, and rebuilt under it wherever the two disagree, so a read
+    /// resolving under the store's order resolves under this proof.
     path_order: StoredPathOrder,
     controls: ReloadCandidate,
     subscription: Option<Subscription>,
@@ -211,9 +212,12 @@ impl SnapshotSource for ProductionAttachment {
         }
     }
 
-    /// The proof the coverage made when it was installed.
+    /// The order the store's rows were derived under. It is the coverage's
+    /// proof wherever the attachment derives, and where a recovery proved
+    /// another order and derived nothing, it is still the order of the rows a
+    /// read would answer from.
     fn path_order(&self) -> StoredPathOrder {
-        self.path_order
+        self.store.path_order()
     }
 }
 
@@ -528,7 +532,7 @@ impl ProductionEntryOps {
         // left in the order a detach gives it back: coverage first and the
         // maintainer lock last, so no second maintainer takes this vault while
         // a watch over it still stands.
-        match attachment.store.discard_and_reopen() {
+        match attachment.store.discard_and_reopen(attachment.path_order) {
             Ok(store) => attachment.store = store,
             Err(error) => {
                 drop(attachment.subscription);
@@ -678,7 +682,7 @@ impl EntryOps for ProductionEntryOps {
         let (subscription, own_writes) =
             Self::start_watch(registration, &schema).map_err(watcher)?;
         let covered_root = subscription.covered_root().to_owned();
-        let path_order = store_order(subscription.case_sensitivity());
+        let path_order = stored_path_order(subscription.case_sensitivity());
         let root = covered_root.as_path();
         let shadows = ShadowHome::resolve(root, &derived.join("tmp"), &key).map_err(effect)?;
         shadows.sweep(Duration::ZERO).map_err(effect)?;
@@ -693,7 +697,11 @@ impl EntryOps for ProductionEntryOps {
             let _ = norn_fs::sweep_fallback_root(root);
             let _ = norn_fs::sweep_fallback_tree(root);
         }
-        let store = Store::open(derived.join("store.sqlite3")).map_err(store_effect)?;
+        // The store is opened under the case behaviour the coverage just
+        // proved, which the open judges against the order its rows were
+        // derived under: a store derived under the other one is rebuilt from
+        // zero here, before anything derives into it or reads from it.
+        let store = Store::open(derived.join("store.sqlite3"), path_order).map_err(store_effect)?;
         subscription
             .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
             .map_err(watcher)?;
@@ -795,7 +803,7 @@ impl EntryOps for ProductionEntryOps {
             .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
             .map_err(watcher)?;
         let covered_root = subscription.covered_root().to_owned();
-        let path_order = store_order(subscription.case_sensitivity());
+        let path_order = stored_path_order(subscription.case_sensitivity());
         let candidate = ReloadCandidate::read_at(&attachment.registration, &covered_root)
             .map_err(JobFailure::Reload)?;
         let derived = self.derived(&attachment.registration.name);
@@ -815,6 +823,17 @@ impl EntryOps for ProductionEntryOps {
             // is corrected is what returns the vault to service.
             attachment.controls = candidate;
             return Ok(());
+        }
+        // The first point a recovery holds both the order its new coverage
+        // proved and the store it will derive into. A store derived under the
+        // other order is not one a heal may converge — the merge would compare
+        // rows paged in one order against a walk in the other — so nothing is
+        // pinned or derived into it: it owes rung 3, which discards it, pins
+        // the declaration read here, and derives the vault again under the
+        // order this coverage proved.
+        if let Some(reason) = attachment.store.path_order_moved(path_order) {
+            attachment.controls = candidate;
+            return Err(JobFailure::StoreDamaged(reason.to_string()));
         }
         Self::pin_candidate(&mut attachment.store, &candidate)?;
         attachment.controls = candidate;
@@ -1133,7 +1152,7 @@ fn merge_walk<I>(
 where
     I: Iterator<Item = Result<norn_fs::WalkFact, norn_fs::WalkError>>,
 {
-    let order = store_order(sensitivity);
+    let order = stored_path_order(sensitivity);
     let mut files = facts.peekable();
     let mut after: Option<DocumentPath> = None;
     let mut stored = Vec::new();
@@ -1358,7 +1377,7 @@ fn scoped_increment(
                     skip.reason().stands(),
                     policy,
                     progress,
-                    store_order(sensitivity),
+                    stored_path_order(sensitivity),
                     pending.account,
                 )?;
                 refused.push(skip);
@@ -1419,7 +1438,7 @@ fn scoped_increment(
                         scope,
                         policy,
                         progress,
-                        store_order(sensitivity),
+                        stored_path_order(sensitivity),
                         pending.account,
                     )?;
                     // **Either kind is a scope read to its end.** Nothing is at
@@ -1438,7 +1457,7 @@ fn scoped_increment(
                     // spellings — so the place is the vault heal's to conclude.
                     pending
                         .account
-                        .walked(HealScope::from(scope), store_order(sensitivity));
+                        .walked(HealScope::from(scope), stored_path_order(sensitivity));
                 }
                 continue;
             }
@@ -1479,7 +1498,7 @@ fn scoped_increment(
         if let Some(beneath) = &prefix {
             pending
                 .account
-                .walked(HealScope::Prefix(beneath), store_order(sensitivity));
+                .walked(HealScope::Prefix(beneath), stored_path_order(sensitivity));
         }
         if !is_markdown(path) {
             continue;
@@ -1904,7 +1923,7 @@ fn prune_descendants_and_aliases(
                 root,
                 after.as_ref(),
                 policy.store_page_size,
-                store_order(sensitivity),
+                stored_path_order(sensitivity),
             )
             .map_err(store_effect)?;
         if page.is_empty() {
@@ -1991,7 +2010,14 @@ fn is_markdown(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
 }
 
-fn store_order(sensitivity: norn_fs::CaseSensitivity) -> StoredPathOrder {
+/// The order a store's rows are derived under, for a vault root the
+/// filesystem seam proved to have `sensitivity`.
+///
+/// It is the one mapping between the two crates' spellings of case behaviour:
+/// the attach opens its store under it, a recovery judges its store against
+/// it, and a caller that opens a store an attachment derived opens it under the
+/// same order, since an open under the other one rebuilds it from zero.
+pub fn stored_path_order(sensitivity: norn_fs::CaseSensitivity) -> StoredPathOrder {
     match sensitivity {
         norn_fs::CaseSensitivity::Sensitive => StoredPathOrder::Sensitive,
         norn_fs::CaseSensitivity::Insensitive => StoredPathOrder::AsciiCaseInsensitive,
@@ -3053,7 +3079,8 @@ mod tests {
     use norn_config::registry::{SchemaSource, VaultRoot};
     use norn_config::schema::FieldType;
     use norn_store::{
-        BlockFact, DeclaredFields, FieldRow, FieldRows, HeadingFact, LinkFact, OpenOutcome, TagFact,
+        BlockFact, DeclaredFields, FieldRow, FieldRows, HeadingFact, LinkFact, OpenOutcome,
+        RebuildReason, TagFact,
     };
     use norn_testkit::scratch::Scratch;
     use norn_testkit::wait::{Budget, Observed, wait_until};
@@ -3745,7 +3772,7 @@ mod tests {
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
 
-        let mut store = Store::open(dirs_store(&f, &name)).unwrap();
+        let mut store = Store::open(dirs_store(&f, &name), proven_order(&f)).unwrap();
         assert_eq!(stored_paths(&mut store), ["note.md"]);
         let findings = findings_at(&mut store, "note.md");
         assert_eq!(findings.len(), 1, "{findings:?}");
@@ -3777,7 +3804,7 @@ mod tests {
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
 
-        let mut store = Store::open(dirs_store(&f, &name)).unwrap();
+        let mut store = Store::open(dirs_store(&f, &name), proven_order(&f)).unwrap();
         assert_eq!(stored_paths(&mut store), ["note.md"]);
     }
 
@@ -3787,6 +3814,26 @@ mod tests {
             .expect("the fixture's directories")
             .derived_dir(name)
             .join("store.sqlite3")
+    }
+
+    /// The order a store over this fixture's vault is opened under: the one
+    /// the vault root proves, which is the one an attach opens it under, so
+    /// opening an attachment's store from outside reuses it rather than
+    /// rebuilding it.
+    fn proven_order(f: &Fixture) -> StoredPathOrder {
+        stored_path_order(
+            norn_fs::PathNormalizer::detect(&f.vault())
+                .unwrap()
+                .case_sensitivity(),
+        )
+    }
+
+    /// The order a root with the other case behaviour proves.
+    fn other_order(order: StoredPathOrder) -> StoredPathOrder {
+        match order {
+            StoredPathOrder::Sensitive => StoredPathOrder::AsciiCaseInsensitive,
+            StoredPathOrder::AsciiCaseInsensitive => StoredPathOrder::Sensitive,
+        }
     }
 
     /// Wait until the entry publishes an untrusted reason, and hand it back.
@@ -3927,7 +3974,7 @@ mod tests {
         drop(lease);
         drop(host);
 
-        let mut store = Store::open(derived.join("store.sqlite3")).unwrap();
+        let mut store = Store::open(derived.join("store.sqlite3"), proven_order(&f)).unwrap();
         let findings = findings_at(&mut store, "note.md");
         assert_eq!(findings.len(), 1);
         assert_eq!(
@@ -6356,7 +6403,11 @@ mod tests {
         fs::write(f.vault().join("notes/a.md"), "a").unwrap();
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
 
-        let mut store = Store::open(f.root.join("folded-vanished-root.sqlite3")).unwrap();
+        let mut store = Store::open(
+            f.root.join("folded-vanished-root.sqlite3"),
+            proven_order(&f),
+        )
+        .unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -6734,7 +6785,7 @@ mod tests {
         let f = Fixture::watcherless("heal-open-window");
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         fs::write(f.vault().join("vanishing.md"), "here for now").unwrap();
-        let mut store = Store::open(f.root.join("window.sqlite3")).unwrap();
+        let mut store = Store::open(f.root.join("window.sqlite3"), proven_order(&f)).unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -6782,7 +6833,7 @@ mod tests {
         let f = Fixture::watcherless("heal-open-window-replace");
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         fs::write(f.vault().join("swapped.md"), "a document for now").unwrap();
-        let mut store = Store::open(f.root.join("replace.sqlite3")).unwrap();
+        let mut store = Store::open(f.root.join("replace.sqlite3"), proven_order(&f)).unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -6845,7 +6896,7 @@ mod tests {
         let f = Fixture::watcherless("heal-open-window-churn");
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         fs::write(f.vault().join("swapped.md"), "# the bytes before\n").unwrap();
-        let mut store = Store::open(f.root.join("window-churn.sqlite3")).unwrap();
+        let mut store = Store::open(f.root.join("window-churn.sqlite3"), proven_order(&f)).unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -6919,7 +6970,8 @@ mod tests {
         let f = Fixture::watcherless("heal-open-window-finding");
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
-        let mut store = Store::open(f.root.join("window-finding.sqlite3")).unwrap();
+        let mut store =
+            Store::open(f.root.join("window-finding.sqlite3"), proven_order(&f)).unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -6979,7 +7031,8 @@ mod tests {
             return;
         }
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
-        let mut store = Store::open(f.root.join("refused-window.sqlite3")).unwrap();
+        let mut store =
+            Store::open(f.root.join("refused-window.sqlite3"), proven_order(&f)).unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -7068,7 +7121,7 @@ mod tests {
         // run when it goes.
         fs::create_dir_all(f.vault().join("zhidden\\dir")).unwrap();
         fs::write(f.vault().join("zhidden\\dir/note.md"), "note").unwrap();
-        let mut store = Store::open(f.root.join("refused-root.sqlite3")).unwrap();
+        let mut store = Store::open(f.root.join("refused-root.sqlite3"), proven_order(&f)).unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -7149,7 +7202,11 @@ mod tests {
         }
         fs::write(f.vault().join("linked/note.md"), "note").unwrap();
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
-        let mut store = Store::open(f.root.join("refused-root-findings.sqlite3")).unwrap();
+        let mut store = Store::open(
+            f.root.join("refused-root-findings.sqlite3"),
+            proven_order(&f),
+        )
+        .unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -7338,7 +7395,8 @@ mod tests {
             return;
         }
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
-        let mut store = Store::open(f.root.join("unaddressable-root.sqlite3")).unwrap();
+        let mut store =
+            Store::open(f.root.join("unaddressable-root.sqlite3"), proven_order(&f)).unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -7542,7 +7600,8 @@ mod tests {
         fs::write(f.vault().join("notes/sub/kept.md"), "kept").unwrap();
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
 
-        let mut store = Store::open(f.root.join("descent-window.sqlite3")).unwrap();
+        let mut store =
+            Store::open(f.root.join("descent-window.sqlite3"), proven_order(&f)).unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -7669,6 +7728,217 @@ mod tests {
             findings_at(&mut attachment.store, "unreadable.md").len(),
             1,
             "the rebuild derived no finding, so the equality above compared none"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// A vault holding `a/Foo.md` and `b/foo.md`: two documents a target
+    /// `Foo` tells apart on a root that tells spellings apart, and one class on
+    /// a root that folds ASCII case.
+    fn write_two_spellings_of_one_stem(f: &Fixture) {
+        for (at, body) in [("a/Foo.md", "# Foo\n"), ("b/foo.md", "# foo\n")] {
+            let path = f.vault().join(at);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+    }
+
+    /// What `Foo` names on a root that proves `order`.
+    fn foo_resolves_under(order: StoredPathOrder) -> Vec<String> {
+        match order {
+            StoredPathOrder::Sensitive => vec!["a/Foo.md".to_string()],
+            StoredPathOrder::AsciiCaseInsensitive => {
+                vec!["a/Foo.md".to_string(), "b/foo.md".to_string()]
+            }
+        }
+    }
+
+    /// Rows a store derived under another order holds: one the vault holds
+    /// under a stale hash, and one it does not hold at all.
+    fn derive_stale_rows(store: &mut Store) {
+        let changes = [("a/Foo.md", "stale-foo"), ("stale.md", "stale-gone")].map(|(at, hash)| {
+            norn_store::Change::Upsert(norn_store::DocumentFacts::new(
+                DocumentPath::new(at).unwrap(),
+                hash,
+                "a body\n",
+                7,
+            ))
+        });
+        store
+            .begin_request()
+            .apply_increment(norn_store::IncrementProvenance::Derived, changes, &[])
+            .unwrap();
+    }
+
+    /// The paths `Foo` resolves to through the read an attachment serves —
+    /// its read handle, established under the order the attachment hands
+    /// reads — and through the class read a finding about `Foo` is filed
+    /// under, which has to be the same set.
+    fn foo_resolves_through(attachment: &mut ProductionAttachment) -> Vec<String> {
+        let order = SnapshotSource::path_order(attachment);
+        let declared = crate::derivation::Declared::pinned(
+            VaultSchema::parse(attachment.controls.schema_bytes()).unwrap(),
+            attachment.controls.fingerprints().schema.to_string(),
+        );
+        let reader = Arc::new(attachment.open_reader().reader.expect("a reader"));
+        let params = norn_wire::FindParams::new(norn_wire::VaultAddress::name(
+            attachment.registration.name.clone(),
+        ))
+        .with_predicates([norn_wire::Predicate::resolves(
+            norn_wire::ResolutionTarget::new("Foo").unwrap(),
+        )]);
+        let found: Vec<String> = reader
+            .try_take()
+            .expect("an idle reader")
+            .establish(order)
+            .snapshot
+            .expect("a snapshot")
+            .find(&params, declared.fields())
+            .expect("a find resolving `Foo`")
+            .rows
+            .iter()
+            .map(|row| row.path.as_str().to_string())
+            .collect();
+        let resolution =
+            norn_store::Resolution::new("Foo", order, declared.fields().ambiguity_ignore())
+                .unwrap();
+        let mut class: Vec<String> = attachment
+            .store
+            .begin_request()
+            .suffix_candidates(&resolution)
+            .unwrap()
+            .iter()
+            .map(|at| at.as_str().to_string())
+            .collect();
+        class.sort();
+        assert_eq!(
+            found, class,
+            "the find and the class a finding about `Foo` is filed under disagree"
+        );
+        found
+    }
+
+    /// **A store derived under the case behaviour its root does not prove is
+    /// rebuilt from zero at the attach that opens it, and the reason names both
+    /// orders.** What the attach then derives resolves under the order the root
+    /// proves — `Foo` names `a/Foo.md` alone where the root tells spellings
+    /// apart and both documents where it folds, in the find a read runs and in
+    /// the class a finding is filed under — and an attach under the same order
+    /// afterwards reuses the store.
+    ///
+    /// The root's real case behaviour cannot be flipped from here, so the
+    /// store is what is derived under the other order: it is created at the
+    /// derived path under the order this root does not prove, before the first
+    /// attach.
+    #[test]
+    fn a_store_derived_under_the_other_path_order_is_rebuilt_at_attach() {
+        let f = Fixture::new("attach-order-moved");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name) = f.ops(64);
+        let policy = ProductionPolicy::new(64, 2).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let proven = proven_order(&f);
+        let derived_under = other_order(proven);
+
+        let mut stale = Store::open(dirs_store(&f, &name), derived_under).unwrap();
+        derive_stale_rows(&mut stale);
+        let stale_epoch = stale.epoch().to_string();
+        drop(stale);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let OpenOutcome::RebuiltFromZero(RebuildReason::Client { detail }) =
+            attachment.store.open_outcome()
+        else {
+            panic!(
+                "a store derived under {derived_under:?} opened under {proven:?} as {:?}",
+                attachment.store.open_outcome()
+            );
+        };
+        assert!(
+            detail.contains(&format!("`{}`", derived_under.as_str()))
+                && detail.contains(&format!("`{}`", proven.as_str())),
+            "the reason does not name both orders: {detail}"
+        );
+        assert_ne!(attachment.store.epoch(), stale_epoch);
+        assert_eq!(attachment.store.path_order(), proven);
+        assert_eq!(SnapshotSource::path_order(&attachment), proven);
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "attach-order-moved-oracle", policy),
+            "the rebuild derived something a from-scratch build does not"
+        );
+        assert_eq!(
+            foo_resolves_through(&mut attachment),
+            foo_resolves_under(proven)
+        );
+        ops.detach(&name, attachment);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            *attachment.store.open_outcome(),
+            OpenOutcome::Reused,
+            "an attach under the order the store was derived under rebuilt it"
+        );
+        assert_eq!(
+            foo_resolves_through(&mut attachment),
+            foo_resolves_under(proven)
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A recovery whose coverage proves another order than its store was
+    /// derived under derives nothing into that store, and owes rung 3**, which
+    /// discards it and derives the vault again under the order the coverage
+    /// proved. The recovery is the first point that holds both the new proof
+    /// and the store, so the verdict is taken there, ahead of the pin and the
+    /// heal.
+    ///
+    /// The store is replaced from inside the attachment with one derived under
+    /// the other order, which is the state a root whose case behaviour moved
+    /// under a standing attachment leaves.
+    #[test]
+    fn a_recovery_proving_another_path_order_derives_nothing_and_owes_rung_three() {
+        let f = Fixture::new("recover-order-moved");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name) = f.ops(64);
+        let policy = ProductionPolicy::new(64, 2).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let proven = proven_order(&f);
+        let derived_under = other_order(proven);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        attachment.store = attachment.store.discard_and_reopen(derived_under).unwrap();
+        derive_stale_rows(&mut attachment.store);
+
+        let failure = ops
+            .recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over a store derived under the other order");
+        let JobFailure::StoreDamaged(detail) = &failure else {
+            panic!("the moved order was reported as {failure:?} rather than owing rung 3");
+        };
+        assert!(
+            detail.contains(&format!("`{}`", derived_under.as_str()))
+                && detail.contains(&format!("`{}`", proven.as_str())),
+            "the verdict does not name both orders: {detail}"
+        );
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["a/Foo.md", "stale.md"],
+            "the recovery derived into a store derived under the other order"
+        );
+
+        let mut attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 under the order the coverage proved");
+        assert_eq!(attachment.store.path_order(), proven);
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "recover-order-moved-oracle", policy),
+            "the rebuild derived something a from-scratch build does not"
+        );
+        assert_eq!(
+            foo_resolves_through(&mut attachment),
+            foo_resolves_under(proven)
         );
         ops.detach(&name, attachment);
     }
@@ -8001,7 +8271,8 @@ mod tests {
     /// stopped agreeing with a from-scratch derivation would have to disagree
     /// with this.
     fn from_scratch(f: &Fixture, label: &str, policy: ProductionPolicy) -> DerivedVault {
-        let mut store = Store::open(f.root.join(format!("{label}.sqlite3"))).unwrap();
+        let mut store =
+            Store::open(f.root.join(format!("{label}.sqlite3")), proven_order(f)).unwrap();
         let registration = f.registration();
         let progress = ProgressReporter::disconnected();
         ProductionEntryOps::pin_schema(&mut store, &registration).unwrap();
@@ -8040,7 +8311,7 @@ mod tests {
     /// finished file names the same boundary only until the schema next grows.
     fn corrupt_the_document_pages(f: &Fixture, database: &Path) {
         let measured = f.root.join("created-length.sqlite3");
-        Store::open(&measured)
+        Store::open(&measured, proven_order(f))
             .expect("creating a store to measure a create by")
             .close()
             .expect("closing the measured store");
@@ -9695,7 +9966,7 @@ mod tests {
         assert_eq!(attaches.load(std::sync::atomic::Ordering::SeqCst), 1);
         drop(host);
 
-        let mut store = Store::open(derived.join("store.sqlite3")).unwrap();
+        let mut store = Store::open(derived.join("store.sqlite3"), proven_order(&f)).unwrap();
         assert_eq!(
             stored_paths(&mut store),
             ["ok-0.md", "ok-1.md", "ok-2.md"],
@@ -10769,7 +11040,7 @@ mod tests {
         released.store(true, std::sync::atomic::Ordering::SeqCst);
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         drop(host);
-        let mut store = Store::open(derived.join("store.sqlite3")).unwrap();
+        let mut store = Store::open(derived.join("store.sqlite3"), proven_order(&f)).unwrap();
         let row = store
             .begin_request()
             .stored_document(&DocumentPath::new("note.md").unwrap())
@@ -11209,7 +11480,7 @@ mod tests {
 
         drop(demand);
         drop(host);
-        let mut store = Store::open(derived.join("store.sqlite3")).unwrap();
+        let mut store = Store::open(derived.join("store.sqlite3"), proven_order(&f)).unwrap();
         let row = store
             .begin_request()
             .stored_document(&DocumentPath::new("note.md").unwrap())

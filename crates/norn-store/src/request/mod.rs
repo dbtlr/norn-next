@@ -2450,7 +2450,9 @@ mod tests {
     #[test]
     fn findings_reassemble_correctly_across_a_chunk_boundary() {
         let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk");
-        let mut store = Store::open_throwaway(root.join("store.sqlite3")).expect("opening a store");
+        let mut store =
+            Store::open_throwaway(root.join("store.sqlite3"), StoredPathOrder::Sensitive)
+                .expect("opening a store");
         let subject = DocumentPath::new("notes.md").expect("a document path");
 
         let mut request = store.begin_request();
@@ -2505,7 +2507,9 @@ mod tests {
     #[test]
     fn a_findings_read_runs_each_detail_statement_once_per_chunk_of_ids() {
         let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk-count");
-        let mut store = Store::open_throwaway(root.join("store.sqlite3")).expect("opening a store");
+        let mut store =
+            Store::open_throwaway(root.join("store.sqlite3"), StoredPathOrder::Sensitive)
+                .expect("opening a store");
         let subject = DocumentPath::new("notes.md").expect("a document path");
         let findings = 10;
 
