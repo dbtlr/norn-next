@@ -64,7 +64,8 @@ impl LinkFamily {
     /// The whole vocabulary, which is what `links.family` is checked against.
     pub(crate) const ALL: &'static [LinkFamily] = &[LinkFamily::Wikilink, LinkFamily::Markdown];
 
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// The family as `links.family` holds it.
+    pub const fn as_str(self) -> &'static str {
         match self {
             LinkFamily::Wikilink => "wikilink",
             LinkFamily::Markdown => "markdown",
@@ -96,7 +97,8 @@ impl TagSource {
     /// against.
     pub(crate) const ALL: &'static [TagSource] = &[TagSource::Body, TagSource::Frontmatter];
 
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// The source as `document_tags.source` holds it.
+    pub const fn as_str(self) -> &'static str {
         match self {
             TagSource::Body => "body",
             TagSource::Frontmatter => "frontmatter",

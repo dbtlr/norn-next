@@ -88,9 +88,9 @@ use std::fmt::Write as _;
 
 use norn_fixtures::digest::{Sha256, hex};
 use norn_store::{
-    BlockFact, DocumentPath, FieldRows, FindingCursor, HeadingFact, IndexedTerm, LinkFact,
-    PillarReport, Store, StoreError, StoredFinding, StoredPathOrder, StoredSuffixKeys,
-    StoredTombstone, TagFact, ddl,
+    BlockFact, DocumentPath, FieldRow, FieldRows, FindingCursor, HeadingFact, IndexedTerm,
+    LinkFact, PillarReport, Span, Store, StoreError, StoredFinding, StoredPathOrder,
+    StoredSuffixKeys, StoredTombstone, TagFact, ddl,
 };
 use norn_wire::{FindingKind, FindingScope};
 
@@ -529,6 +529,14 @@ impl StoreProjection {
     /// term's carry the term. So a fact one store holds and the other does not
     /// is a field with nothing opposite it, rather than a shift that renames
     /// every field after it.
+    ///
+    /// **A row is rendered column by column, as the database holds it**: each
+    /// field ends in the name of the column it reads, and holds that column's
+    /// value — text quoted, an integer or a flag as its digits, a closed
+    /// vocabulary as the word the column stores, and [`NULL`] where the column
+    /// holds none. So the rendering is a function of the stored rows alone:
+    /// renaming a Rust field or variant that carries a column moves nothing
+    /// here, and a changed stored value moves exactly the field that holds it.
     fn entries(&self) -> BTreeMap<String, String> {
         let mut entries = Vec::new();
         for document in &self.documents {
@@ -537,10 +545,7 @@ impl StoreProjection {
             entries.push((format!("{at}.body_hash"), quoted(&document.body_hash)));
             entries.push((
                 format!("{at}.frontmatter_projection_hash"),
-                document
-                    .frontmatter_projection_hash
-                    .as_deref()
-                    .map_or_else(|| "(none)".to_string(), quoted),
+                optional_text(document.frontmatter_projection_hash.as_deref()),
             ));
             entries.push((
                 format!("{at}.byte_length"),
@@ -552,10 +557,7 @@ impl StoreProjection {
             ));
             entries.push((
                 format!("{at}.frontmatter"),
-                document
-                    .frontmatter
-                    .as_deref()
-                    .map_or_else(|| "(none)".to_string(), quoted),
+                optional_text(document.frontmatter.as_deref()),
             ));
             entries.push((
                 format!("{at}.frontmatter_diagnostic_count"),
@@ -570,26 +572,38 @@ impl StoreProjection {
         }
         // A finding has no key of its own that survives being written to a
         // second store, so its field is its subject and its position among the
-        // findings about that subject. Two findings that differ only in where
-        // they sort therefore report as two fields rather than as one shifted
-        // list.
+        // findings about that subject, in the order this projection holds
+        // them. Two findings that differ only in where they sort therefore
+        // report as two fields rather than as one shifted list.
         let mut at_subject: BTreeMap<&str, usize> = BTreeMap::new();
         for finding in &self.findings {
             let ordinal = at_subject.entry(finding.path.as_str()).or_default();
+            let at = format!("finding[{}][{ordinal}]", finding.path);
+            push_columns(&mut entries, &at, finding);
+            // The candidate head by the rank each row is stored at, and the
+            // class memberships in the key order they are read in.
             entries.push((
-                format!("finding[{}][{ordinal}]", finding.path),
-                format!("{finding:?}"),
+                format!("{at}.candidate count"),
+                finding.candidates.len().to_string(),
             ));
+            for (rank, (path, suffix)) in finding.candidates.iter().enumerate() {
+                entries.push((format!("{at}.candidate[{rank}].path"), quoted(path)));
+                entries.push((format!("{at}.candidate[{rank}].suffix"), quoted(suffix)));
+            }
+            entries.push((
+                format!("{at}.class_key count"),
+                finding.class_keys.len().to_string(),
+            ));
+            for (index, key) in finding.class_keys.iter().enumerate() {
+                entries.push((format!("{at}.class_key[{index}]"), quoted(key)));
+            }
             *ordinal += 1;
         }
         for term in &self.terms {
-            entries.push((
-                format!("indexed term[{}]", term.term),
-                format!(
-                    "{} documents, {} occurrences",
-                    term.documents, term.occurrences
-                ),
-            ));
+            // The columns the full-text vocabulary reports a term's counts in.
+            let at = format!("indexed term[{}]", term.term);
+            entries.push((format!("{at}.doc"), term.documents.to_string()));
+            entries.push((format!("{at}.cnt"), term.occurrences.to_string()));
         }
         // The schema's bytes are rendered as their own escaped content, so the
         // comparison reads the bytes themselves. A length summarises them and a
@@ -601,9 +615,8 @@ impl StoreProjection {
         // schema apart from an absent one: a rendering left bare could spell the
         // absent marker with content, and quoting puts the marker outside the
         // range every present value renders into.
-        const NONE: &str = "(none)";
         let (bytes, fingerprint) = self.vault_schema.as_ref().map_or_else(
-            || (NONE.to_string(), NONE.to_string()),
+            || (NULL.to_string(), NULL.to_string()),
             |schema| {
                 (
                     quoted(&schema.bytes.escape_ascii().to_string()),
@@ -951,7 +964,7 @@ fn project_finding(finding: StoredFinding) -> ProjectedFinding {
 
 /// Render a document's ordered fact rows, ordinal included: the order is what
 /// the text layer emitted and is itself a derived fact.
-fn push_indexed<T: std::fmt::Debug>(
+fn push_indexed<T: StoredColumns>(
     entries: &mut Vec<(String, String)>,
     at: &str,
     name: &str,
@@ -959,8 +972,164 @@ fn push_indexed<T: std::fmt::Debug>(
 ) {
     entries.push((format!("{at}.{name} count"), rows.len().to_string()));
     for (ordinal, row) in rows.iter().enumerate() {
-        entries.push((format!("{at}.{name}[{ordinal}]"), format!("{row:?}")));
+        push_columns(entries, &format!("{at}.{name}[{ordinal}]"), row);
     }
+}
+
+/// Render one stored row at `at`, one field to a column.
+fn push_columns(entries: &mut Vec<(String, String)>, at: &str, row: &impl StoredColumns) {
+    for (column, value) in row.columns() {
+        entries.push((format!("{at}.{column}"), value));
+    }
+}
+
+/// What a column holding SQL `NULL` renders as. Every present text value is
+/// quoted and every present integer is bare digits, so nothing present
+/// renders as this.
+const NULL: &str = "(none)";
+
+/// One stored row, as the names of its columns and the values the database
+/// holds in them.
+///
+/// Every column the row's table carries a derived value in is here; the row
+/// identifier, the owning document's key and the write generation are not,
+/// for the reasons this module drops them.
+trait StoredColumns {
+    fn columns(&self) -> Vec<(&'static str, String)>;
+}
+
+impl StoredColumns for LinkFact {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        let mut columns = vec![
+            ("family", quoted(self.family.as_str())),
+            ("embed", flag(self.embed)),
+            ("protocol", optional_text(self.protocol.as_deref())),
+            ("target", quoted(&self.target)),
+            ("title", optional_text(self.title.as_deref())),
+            ("anchor", optional_text(self.anchor.as_deref())),
+            ("block_ref", optional_text(self.block_ref.as_deref())),
+        ];
+        columns.extend(span_columns(Some(self.span)));
+        columns
+    }
+}
+
+impl StoredColumns for HeadingFact {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        let mut columns = vec![
+            ("text", quoted(&self.text)),
+            ("slug", quoted(&self.slug)),
+            ("level", self.level.to_string()),
+        ];
+        columns.extend(span_columns(Some(self.span)));
+        columns.push(("body_offset", self.body_offset.to_string()));
+        columns.push(("inside_container", flag(self.inside_container)));
+        columns
+    }
+}
+
+impl StoredColumns for BlockFact {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        let mut columns = vec![("block_id", quoted(&self.block_id))];
+        columns.extend(span_columns(self.span));
+        columns
+    }
+}
+
+impl StoredColumns for TagFact {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        let mut columns = vec![
+            ("name", quoted(&self.name)),
+            ("source", quoted(self.source.as_str())),
+        ];
+        columns.extend(span_columns(self.span));
+        columns
+    }
+}
+
+/// A presence row stores its container and no value; a value row stores its
+/// value and no container. Both store both least-value flags, a presence row's
+/// as zero.
+impl StoredColumns for FieldRow {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        let (container, raw, typed, least_raw, least_typed) = match self {
+            FieldRow::Presence { container, .. } => {
+                (Some(container.as_str()), None, None, false, false)
+            }
+            FieldRow::Value {
+                raw,
+                typed,
+                least_raw,
+                least_typed,
+                ..
+            } => (
+                None,
+                raw.as_deref(),
+                typed.as_deref(),
+                *least_raw,
+                *least_typed,
+            ),
+        };
+        vec![
+            ("key", quoted(self.key())),
+            ("ordinal", self.ordinal().to_string()),
+            ("container", optional_text(container)),
+            ("raw", optional_text(raw)),
+            ("typed", optional_text(typed)),
+            ("least_raw", flag(least_raw)),
+            ("least_typed", flag(least_typed)),
+        ]
+    }
+}
+
+/// A finding's own columns. Its candidates and class memberships are rows of
+/// their own tables, rendered beside it by [`StoreProjection::entries`].
+impl StoredColumns for ProjectedFinding {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        let mut columns = vec![
+            ("kind", quoted(&self.kind)),
+            ("severity", quoted(&self.severity)),
+            ("target", optional_text(self.target.as_deref())),
+        ];
+        columns.extend(span_columns(self.span.map(
+            |(line, column, byte_offset)| Span {
+                line,
+                column,
+                byte_offset,
+            },
+        )));
+        columns.extend([
+            ("candidates_total", self.candidates_total.to_string()),
+            ("message", quoted(&self.message)),
+            ("detail", optional_text(self.detail.as_deref())),
+            (
+                "vault_schema_fingerprint",
+                quoted(&self.vault_schema_fingerprint),
+            ),
+        ]);
+        columns
+    }
+}
+
+/// The three columns a span is stored in, each [`NULL`] where there is no
+/// span.
+fn span_columns(span: Option<Span>) -> [(&'static str, String); 3] {
+    let column = |value: Option<u64>| value.map_or_else(|| NULL.to_string(), |v| v.to_string());
+    [
+        ("span_line", column(span.map(|span| span.line))),
+        ("span_column", column(span.map(|span| span.column))),
+        ("span_offset", column(span.map(|span| span.byte_offset))),
+    ]
+}
+
+/// A flag as the integer column holding it.
+fn flag(value: bool) -> String {
+    u8::from(value).to_string()
+}
+
+/// A text column that may hold `NULL`.
+fn optional_text(value: Option<&str>) -> String {
+    value.map_or_else(|| NULL.to_string(), quoted)
 }
 
 /// The first field the two disagree about, reading every field either of them
@@ -1063,6 +1232,48 @@ mod tests {
             divergence.field.starts_with("document[docs/a.md]"),
             "{divergence}"
         );
+    }
+
+    /// A row renders as the columns its table stores and the values the
+    /// columns hold, so what names a field is the column and not the Rust
+    /// field or variant carrying it.
+    #[test]
+    fn a_row_renders_by_its_column_names_and_stored_values() {
+        let mut linked = projection();
+        linked.documents[0].links.push(LinkFact {
+            family: norn_store::LinkFamily::Wikilink,
+            embed: true,
+            protocol: None,
+            target: "Notes".to_string(),
+            title: None,
+            anchor: None,
+            block_ref: Some("para".to_string()),
+            span: Span {
+                line: 1,
+                column: 2,
+                byte_offset: 1,
+            },
+        });
+        let entries = linked.entries();
+        let at = |column: &str| {
+            entries
+                .get(&format!("document[docs/a.md].link[0].{column}"))
+                .unwrap_or_else(|| panic!("no `{column}` column in {entries:#?}"))
+                .as_str()
+        };
+        assert_eq!(at("family"), "\"wikilink\"");
+        assert_eq!(at("embed"), "1");
+        assert_eq!(at("protocol"), NULL);
+        assert_eq!(at("block_ref"), "\"para\"");
+        assert_eq!(at("span_offset"), "1");
+
+        let mut moved = linked.clone();
+        moved.documents[0].links[0].block_ref = Some("other".to_string());
+        let divergence = linked
+            .compare(&moved)
+            .divergence
+            .expect("a changed stored value diverges");
+        assert_eq!(divergence.field, "document[docs/a.md].link[0].block_ref");
     }
 
     #[test]
