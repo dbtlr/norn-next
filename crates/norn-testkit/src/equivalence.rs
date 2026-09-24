@@ -86,8 +86,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use sha2::{Digest, Sha256};
-
+use norn_fixtures::digest::{Sha256, hex};
 use norn_store::{
     BlockFact, DocumentPath, FieldRows, FindingCursor, HeadingFact, IndexedTerm, LinkFact,
     PillarReport, Store, StoreError, StoredFinding, StoredPathOrder, StoredSuffixKeys,
@@ -674,25 +673,19 @@ impl DerivedRows {
     /// SHA-256 over every field and its value in field order, as 64 lowercase
     /// hex digits.
     ///
-    /// Each field and each value is followed by a separator byte no rendered
-    /// field or value carries — every text inside a value is rendered with its
-    /// control bytes escaped, and a stored path refuses them — so moving a
-    /// boundary between two of them moves the digest. Nothing in it depends on where the store sits on disk
-    /// or on the order its rows were written in: the fields are vault-relative
-    /// and sorted, and every value is text.
+    /// The count of fields leads, and every field and every value is absorbed
+    /// behind its own length, so no two different sets of rows run together
+    /// into the same bytes whatever their text holds. Nothing in it depends on
+    /// where the store sits on disk: the fields are vault-relative and sorted,
+    /// and every value is text.
     pub fn digest(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update_framed(&(self.fields.len() as u64).to_be_bytes());
         for (field, value) in &self.fields {
-            hasher.update(field.as_bytes());
-            hasher.update(b"\x1f");
-            hasher.update(value.as_bytes());
-            hasher.update(b"\x1e");
+            hasher.update_framed(field.as_bytes());
+            hasher.update_framed(value.as_bytes());
         }
-        let mut hex = String::with_capacity(64);
-        for byte in hasher.finalize() {
-            write!(hex, "{byte:02x}").expect("writing to a string");
-        }
-        hex
+        hex(&hasher.finish())
     }
 }
 

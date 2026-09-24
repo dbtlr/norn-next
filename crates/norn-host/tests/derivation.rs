@@ -56,7 +56,7 @@ use norn_wire::FindingKind;
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(1),
-    "640c763dad6a87b64bfd64397f51b56d744c13ecbb3a40d88b551ab82a033f60",
+    "196a01a52f97df8c8e9ad37ea0affa74bb88a79dd19f06dc42541aac2c220992",
 );
 
 /// The vault schema the corpus is derived under: a field of every declared
@@ -251,8 +251,8 @@ fn the_derivation_digest_moves_only_with_the_derivation_version() {
                  derived it to {pinned_digest}. Where derivation writes different rows for the \
                  same bytes, every store an earlier build derived needs the rebuild only a new \
                  version forces: move DERIVATION_VERSION in crates/norn-host/src/derivation.rs \
-                 and pin ({}, \"{digest}\") here. Where this corpus or its schema is all that \
-                 changed, pin ({pinned_version}, \"{digest}\"); a corpus edit that lands with a \
+                 and pin ({}, \"{digest}\") here. Where this corpus, its schema or the way the \
+                 rows are digested is all that changed, pin ({pinned_version}, \"{digest}\"); a corpus edit that lands with a \
                  derivation change still owes the new version.",
                 DERIVATION_VERSION.get() + 1
             )
