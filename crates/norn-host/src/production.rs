@@ -2046,9 +2046,10 @@ fn is_markdown(path: &Path) -> bool {
 /// filesystem seam proved to have `sensitivity`.
 ///
 /// It is the one mapping between the two crates' spellings of case behaviour:
-/// the attach opens its store under it, a recovery judges its store against
-/// it, and a caller that opens a store an attachment derived opens it under the
-/// same order, since an open under the other one rebuilds it from zero.
+/// the attach opens its store under it, a recovery, a reload and rung 3 judge
+/// or rebuild the store against it, and a caller that opens a store an
+/// attachment derived opens it under the same order, since an open under the
+/// other one rebuilds it from zero.
 pub fn stored_path_order(sensitivity: norn_fs::CaseSensitivity) -> StoredPathOrder {
     match sensitivity {
         norn_fs::CaseSensitivity::Sensitive => StoredPathOrder::Sensitive,
