@@ -1043,7 +1043,7 @@ fn an_ordinal_cursor_continues_its_collection_by_position() {
 
 /// **A part the answer asked for does not take is refused by name**: an
 /// anchor or a column on a collection page, a column on a section or a block,
-/// and a cursor on anything but a collection page.
+/// and a cursor or a limit on anything but a collection page.
 #[test]
 fn a_part_the_answer_does_not_take_is_refused() {
     let vault = paged_vault("get-parts", 0);
@@ -1084,6 +1084,21 @@ fn a_part_the_answer_does_not_take_is_refused() {
         (
             getting("paged").with_after(cursor),
             "a cursor",
+            "a record, a section or a block",
+        ),
+        (
+            getting("paged").with_limit(2),
+            "a limit",
+            "a record, a section or a block",
+        ),
+        (
+            getting("paged#Heading 0").with_limit(1),
+            "a limit",
+            "a record, a section or a block",
+        ),
+        (
+            getting("paged#^b0").with_limit(1),
+            "a limit",
             "a record, a section or a block",
         ),
     ] {

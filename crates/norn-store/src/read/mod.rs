@@ -272,7 +272,8 @@ pub enum PageRefusal {
     },
     /// The request carries `part`, which the answer it asks for — `answer` —
     /// does not take: an anchor or a column on a collection page, a column on
-    /// a section or a block, or a cursor on anything but a collection page.
+    /// a section or a block, or a cursor or a limit on anything but a
+    /// collection page.
     PartNotTaken {
         part: &'static str,
         answer: &'static str,

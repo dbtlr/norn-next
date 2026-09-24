@@ -211,7 +211,8 @@ enum Shape<'a> {
 impl<'a> Shape<'a> {
     /// What `params` asks for, or the refusal of a part the answer it asks for
     /// does not take: an anchor or a column on a collection page, a column on
-    /// a section or a block, and a cursor on anything but a collection page.
+    /// a section or a block, and a cursor or a limit on anything but a
+    /// collection page.
     fn of(params: &'a GetParams) -> Result<Self, PageRefusal> {
         let not_taken = |part, answer| Err(PageRefusal::PartNotTaken { part, answer });
         if let Some(selector) = params.collection {
@@ -225,6 +226,9 @@ impl<'a> Shape<'a> {
         }
         if params.after.is_some() {
             return not_taken("a cursor", "a record, a section or a block");
+        }
+        if params.limit.is_some() {
+            return not_taken("a limit", "a record, a section or a block");
         }
         let anchored = match params.target.anchor() {
             None => {
@@ -288,7 +292,8 @@ impl Snapshot {
     /// — beside the keys documents carry — it says which projected keys are
     /// known. `text` reads a section or a block out of the document's text. A
     /// collection page holds `params.limit` rows, [`crate::DEFAULT_PAGE`] where
-    /// it names none; any other answer is not paged and takes no bound.
+    /// it names none; any other answer is not paged, and a bound on one is
+    /// refused.
     ///
     /// Refused: a target naming several documents or none, as the module
     /// states; a declaration read from another schema than the snapshot pins;
