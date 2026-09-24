@@ -27,7 +27,10 @@
 //!    inline Markdown `#fragment` addresses.
 //!
 //! The text readings come first, so an anchor that names a heading by its
-//! text is never reinterpreted as another heading's slug.
+//! text is never reinterpreted as another heading's slug. A read and a write
+//! match through the same three readings, so headings the first reading folds
+//! together are one anchor's matches for both: a write of `dup` over `## Dup`
+//! and `## dup` refuses as ambiguous, and an occurrence reaches either one.
 //!
 //! # Separator-aware ranges
 //!

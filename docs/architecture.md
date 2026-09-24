@@ -940,9 +940,14 @@ target. It answers the document's record through the hydration a find's rows are
 through, the section a heading anchor names, the block a block anchor names, or one page of
 one nested collection. The store parses no document, so a section and a block are read
 through the reader the caller hands a get — `norn-text`'s one section resolver and its one
-block reading — over the one document's heading rows and body. A heading anchor matches
-text with case and whitespace folded, which no index orders by, so matching one reads the
-document's headings and costs them, a pass bounded by the one document. A section or a
+block reading — over the one document's heading rows and body. A heading anchor is matched
+by three readings, each tried only where the one before matched no heading, and a read and a
+write match through the same three: the heading's text with ASCII case and ASCII whitespace
+folded; the text of an ATX-shaped anchor (`## X` names the heading `X`), folded the same way;
+and the heading's slug, exactly. Headings the fold makes one are one anchor's matches, so a
+write of `dup` over `## Dup` and `## dup` refuses as ambiguous where a read takes the first.
+No index orders by the folded text, so matching an anchor reads the document's headings and
+costs them, a pass bounded by the one document. A section or a
 block the document does not carry is answered in band beside the record of its path alone.
 It names eight statements under the same discipline, each carrying a plan bar with a
 negative control and held by a census: the class's head, its total where the head filled,
