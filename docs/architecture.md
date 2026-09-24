@@ -1593,13 +1593,13 @@ wire's bounded head stays a head rather than becoming the query surface.
 
 **One resolver compiles a target for its root**, and every surface that reads a class reads
 it through that one: a find's `resolves` part and a class read today, and the link-health
-findings the link index lands in Layer 3, which file under the class keys it compiles. Case is the root's: the coverage proves the root's case behaviour when it is installed,
-and the store records the order its rows were derived under. A read answers under the store's
-order, which its snapshot takes from the handle the store minted, so no read detects one; an
-attach, a recovery and a reload judge the store's order against the coverage's proof, and a
-store derived under the other order is rebuilt from zero under the proven one before anything
-derives into it.
-Every store holds each document's suffix key twice — as written, and with ASCII case folded —
+findings the link index lands in Layer 3, which file under the class keys it compiles. Case
+is the root's: the coverage proves the root's case behaviour when it is installed, and the
+store records the order its rows were derived under. A read answers under the store's order,
+which its snapshot takes from the handle the store minted, so no read detects one; an attach,
+a recovery and a reload judge the store's order against the coverage's proof, and a store
+derived under the other order is rebuilt from zero under the proven one before anything
+derives into it. Every store holds each document's suffix key twice — as written, and with ASCII case folded —
 each under its own index; a root that tells spellings apart probes the raw key and never the
 folded one, and a root that folds ASCII case probes the folded key, where every spelling of a
 target is one class and an exact-case match takes no precedence. The vault schema's
