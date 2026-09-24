@@ -7,13 +7,13 @@
 
 use norn_store::{
     BODY_ROW_CEILING, BlockFact, ContentModel, FieldDeclaration, FindStatement, FindWork, Found,
-    HeadingFact, NESTED_ROW_CEILING, Nested, NestedRows, PageRefusal, SnapshotReader, Span, Store,
-    TagFact, TagSource, Validation,
+    HeadingFact, LinkFact, LinkFamily, NESTED_ROW_CEILING, Nested, NestedRows, PageRefusal,
+    SnapshotReader, Span, Store, TagFact, TagSource, Validation,
 };
 use norn_wire::{
     BlockRow, CollectionSelector, Column, Cursor, CursorKey, CursorOrderChanged, Direction,
-    FieldValue, FindParams, FindingKind, Moved, Predicate, Snapshot as WireSnapshot, Sort, SortKey,
-    TagRow, Unsatisfied, ValidateParams, VaultAddress, VaultName,
+    FieldValue, FindParams, FindingKind, LinkHealth, Moved, Predicate, Snapshot as WireSnapshot,
+    Sort, SortKey, TagRow, Unsatisfied, ValidateParams, VaultAddress, VaultName,
 };
 
 use crate::common::{Scratch, ambiguity, document, unread_block, violation, write_documents};
@@ -466,6 +466,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
         tags,
         headings,
         blocks,
+        links: 0,
     };
 
     assert_eq!(
@@ -603,6 +604,7 @@ fn a_finds_work_reads_out_every_count_by_name() {
             tags: 7,
             headings: 0,
             blocks: 9,
+            links: 11,
         },
         finding_rows: 10,
     };
@@ -618,6 +620,7 @@ fn a_finds_work_reads_out_every_count_by_name() {
             ("find_tag_rows", 7),
             ("find_heading_rows", 0),
             ("find_block_rows", 9),
+            ("find_link_rows", 11),
             ("find_finding_rows", 10),
         ]
     );
@@ -686,30 +689,6 @@ fn a_row_carries_the_columns_it_names_read_off_the_projection() {
     assert_eq!(
         bare.rows[0],
         norn_wire::DocumentRow::new(bare.rows[0].path.clone())
-    );
-}
-
-/// **A link column is refused by name** as a column a find does not project
-/// yet, and its refusal reads as that fact.
-#[test]
-fn a_link_column_is_refused_by_name() {
-    let seeded = Seeded::new("find-dormant-columns");
-    let refusal = seeded
-        .snapshot()
-        .find(
-            &request().with_columns([Column::body(), Column::links()]),
-            &declared(),
-        )
-        .expect_err("a dormant column");
-    assert_eq!(
-        refusal,
-        PageRefusal::NotProjected {
-            part: "the links column"
-        }
-    );
-    assert_eq!(
-        refusal.to_string(),
-        "the links column is not projected until the link index resolves what a link names"
     );
 }
 
@@ -888,6 +867,24 @@ fn a_row_cut_by_a_ceiling_says_how_much_the_whole_held() {
             span: None,
         })
         .collect();
+    // Links written with a protocol name no document, so a row carries them
+    // without resolving any: what this case measures is the cut.
+    long.links = (0..NESTED_ROW_CEILING + 2)
+        .map(|index| LinkFact {
+            family: LinkFamily::Markdown,
+            embed: false,
+            protocol: Some("https".to_string()),
+            target: format!("example.com/{index:03}"),
+            title: Some(String::new()),
+            anchor: None,
+            block_ref: None,
+            span: Span {
+                line: 1,
+                column: 1,
+                byte_offset: 0,
+            },
+        })
+        .collect();
     seeded.write(&[long]);
 
     let found = seeded.found(
@@ -898,11 +895,19 @@ fn a_row_cut_by_a_ceiling_says_how_much_the_whole_held() {
                 Column::tags(),
                 Column::headings(),
                 Column::blocks(),
+                Column::links(),
             ]),
     );
     let [row] = &found.rows[..] else {
         panic!("one row: {:?}", paths(&found));
     };
+    let links = row.links.clone().expect("links");
+    assert_eq!(
+        (links.items.len(), links.total),
+        (NESTED_ROW_CEILING, NESTED_ROW_CEILING as u64 + 2)
+    );
+    assert_eq!(links.items[1].target, "example.com/001");
+    assert_eq!(links.items[1].health(), LinkHealth::NotJudged);
     let tags = row.tags.clone().expect("tags");
     assert_eq!((tags.items.len(), tags.total), (NESTED_ROW_CEILING, 300));
     assert_eq!(tags.items[0].name, "t000");
@@ -933,6 +938,7 @@ fn a_row_cut_by_a_ceiling_says_how_much_the_whole_held() {
             tags: NESTED_ROW_CEILING as u64,
             headings: NESTED_ROW_CEILING as u64,
             blocks: NESTED_ROW_CEILING as u64,
+            links: NESTED_ROW_CEILING as u64,
         }
     );
 }

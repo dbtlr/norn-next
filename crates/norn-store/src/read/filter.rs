@@ -44,6 +44,15 @@ pub enum ReadFilter {
     Resolves(SuffixKey),
     /// The document carries the tag, on `document_tags_name`.
     Tag,
+    /// The document holds a link that resolves to exactly the one document a
+    /// links-to part's target names: an equality seek of `link_keys_key`
+    /// where the root tells spellings apart, and of `link_keys_folded_key`
+    /// where it folds ASCII case, at each key that document is named by, then
+    /// for each link reached, a seek of `link_keys_link` for the link's keys
+    /// and of the documents each of them reaches — a range of the suffix key
+    /// the root probes, or the path — to confirm no other document is in the
+    /// link's resolution.
+    LinksTo(SuffixKey),
     /// A finding of the kind stands over the document under the active
     /// fingerprint: one covering seek of the findings at `(fingerprint,
     /// kind)`, which `findings_fingerprint_kind_severity` and
@@ -54,7 +63,7 @@ pub enum ReadFilter {
 }
 
 /// How many filter shapes [`ReadFilter::all`] holds.
-pub const READ_FILTERS: usize = 12;
+pub const READ_FILTERS: usize = 13;
 
 impl ReadFilter {
     /// Every filter shape, in slot order. A filter that compares values is
@@ -73,6 +82,7 @@ impl ReadFilter {
             Self::Resolves(SuffixKey::Raw),
             Self::Tag,
             Self::Finding,
+            Self::LinksTo(SuffixKey::Raw),
         ]
     }
 
@@ -100,6 +110,7 @@ impl ReadFilter {
             Self::Resolves(_) => 9,
             Self::Tag => 10,
             Self::Finding => 11,
+            Self::LinksTo(_) => 12,
         };
         assert!(
             slot < READ_FILTERS,
@@ -119,7 +130,8 @@ pub(crate) struct Filter {
     /// their placeholders. A resolution filter binds two per suffix range and
     /// [`crate::resolve::EXCLUSION_PARAMETERS`] more — the ignore set, the
     /// target's segment count and the path order — so the count also says how
-    /// many ranges it opens.
+    /// many ranges it opens. A links-to filter binds each key it seeks and
+    /// [`LINKS_TO_PARAMETERS`] more.
     pub(crate) values: Vec<Value>,
 }
 
@@ -228,6 +240,38 @@ impl Filter {
                     "{id} IN (SELECT tg.document FROM document_tags AS tg WHERE tg.name = {name})"
                 )
             }
+            ReadFilter::LinksTo(key) => {
+                let listed: Vec<String> = (0..self.values.len() - LINKS_TO_PARAMETERS)
+                    .map(|_| next())
+                    .collect();
+                let (ignored, order, path, document) = (next(), next(), next(), next());
+                let (link_key, suffix_key, path_match) = match key {
+                    SuffixKey::Raw => ("key", "suffix_key", "dp.path = lp.key"),
+                    SuffixKey::Folded => (
+                        "folded_key",
+                        "folded_suffix_key",
+                        "dp.path = lp.folded_key COLLATE NOCASE",
+                    ),
+                };
+                let admits = crate::resolve::ADMITS_FUNCTION;
+                format!(
+                    "{id} IN (SELECT lk.document FROM link_keys AS lk
+                     WHERE lk.{link_key} IN ({listed})
+                       AND (lk.segments IS NULL
+                            OR {admits}({ignored}, lk.segments, {order}, {path}))
+                       AND NOT EXISTS (SELECT 1 FROM link_keys AS lo, documents AS dl
+                           WHERE lo.link = lk.link AND lo.segments IS NOT NULL
+                             AND dl.{suffix_key} >= lo.{link_key}
+                             AND dl.{suffix_key}
+                                 < substr(lo.{link_key}, 1, length(lo.{link_key}) - 1) || '0'
+                             AND dl.id <> {document}
+                             AND {admits}({ignored}, lo.segments, {order}, dl.path))
+                       AND NOT EXISTS (SELECT 1 FROM link_keys AS lp, documents AS dp
+                           WHERE lp.link = lk.link AND lp.segments IS NULL
+                             AND {path_match} AND dp.id <> {document}))",
+                    listed = listed.join(", "),
+                )
+            }
             ReadFilter::Finding => {
                 let (fingerprint, kind) = (next(), next());
                 format!(
@@ -240,6 +284,11 @@ impl Filter {
         }
     }
 }
+
+/// How many values a links-to filter binds after the keys it seeks: the
+/// ignore set, the path order it is matched under, and the named document's
+/// path and row id.
+pub(crate) const LINKS_TO_PARAMETERS: usize = 4;
 
 /// The test that `path`, a column holding a path, matches the glob bound at
 /// `pattern`: the one spelling of a glob match every statement runs.

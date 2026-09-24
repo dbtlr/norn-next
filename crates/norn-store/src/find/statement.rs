@@ -10,8 +10,10 @@
 use norn_db::rusqlite::types::Value;
 
 use crate::error::StoreError;
+use crate::facts::StoredPathOrder;
 use crate::json::{FrontmatterValue, canonical_json};
 use crate::read::{Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter, key_walk};
+use crate::resolve::{self, TargetClass};
 
 /// Every statement shape the find builder runs, named.
 ///
@@ -84,10 +86,34 @@ pub enum FindStatement {
     /// `finding_classes`' primary key per finding. Run by every read that
     /// answers finding rows.
     FindingClasses,
+    /// The head of the class a target opens, in the resolution ladder's
+    /// order: the target's suffix ranges on `documents_suffix_key` where the
+    /// root tells spellings apart and on `documents_folded_suffix_key` where
+    /// it folds ASCII case, less the places the schema ignores, at most
+    /// [`crate::CANDIDATE_HEAD`] of them. The ladder's tie-break on the path
+    /// sorts the rows the ranges reached, so it costs the class. Run by every
+    /// read that resolves a target: a get's, a links-to part's, and each
+    /// wikilink's on a row's links.
+    ClassHead,
+    /// How many documents the class holds, run only where the head filled
+    /// [`crate::CANDIDATE_HEAD`]: a count over the same ranges.
+    ClassTotal,
+    /// Whether a suffix of a candidate's path names that candidate alone: at
+    /// most two documents of the suffix's class, over the same ranges, in no
+    /// order, so it stops at the second. Run for each candidate a head names.
+    CandidateSuffix,
+    /// The documents standing at the one vault path a Markdown link's target
+    /// names, in path order, at most [`crate::CANDIDATE_HEAD`] of them: one
+    /// seek of `documents_path` where the root tells spellings apart, and of
+    /// `documents_path_nocase` where it folds ASCII case.
+    PathHead,
+    /// How many documents stand at that path, run only where the head filled
+    /// [`crate::CANDIDATE_HEAD`]: a count over the same seek.
+    PathTotal,
 }
 
 /// How many statement shapes [`FindStatement::all`] holds.
-pub const FIND_STATEMENTS: usize = 15;
+pub const FIND_STATEMENTS: usize = 20;
 
 impl FindStatement {
     /// Every statement shape, in slot order.
@@ -112,6 +138,11 @@ impl FindStatement {
             Self::FindingTotal,
             Self::FindingCandidates,
             Self::FindingClasses,
+            Self::ClassHead,
+            Self::ClassTotal,
+            Self::CandidateSuffix,
+            Self::PathHead,
+            Self::PathTotal,
         ]
     }
 
@@ -134,6 +165,11 @@ impl FindStatement {
             Self::FindingTotal => 12,
             Self::FindingCandidates => 13,
             Self::FindingClasses => 14,
+            Self::ClassHead => 15,
+            Self::ClassTotal => 16,
+            Self::CandidateSuffix => 17,
+            Self::PathHead => 18,
+            Self::PathTotal => 19,
         };
         assert!(
             slot < FIND_STATEMENTS,
@@ -156,11 +192,18 @@ pub enum Nested {
     Headings,
     /// The block identifiers the document defines, in `blocks`.
     Blocks,
+    /// The links the document carries, in `links`, each resolved at the read.
+    Links,
 }
 
 impl Nested {
     /// Every collection, in the order a row's columns are hydrated in.
-    pub const ALL: [Nested; 3] = [Nested::Tags, Nested::Headings, Nested::Blocks];
+    pub const ALL: [Nested; 4] = [
+        Nested::Tags,
+        Nested::Headings,
+        Nested::Blocks,
+        Nested::Links,
+    ];
 
     /// The table the collection's rows live in.
     pub const fn table(self) -> &'static str {
@@ -168,6 +211,7 @@ impl Nested {
             Nested::Tags => "document_tags",
             Nested::Headings => "headings",
             Nested::Blocks => "blocks",
+            Nested::Links => "links",
         }
     }
 
@@ -181,6 +225,10 @@ impl Nested {
                  n.body_offset, n.inside_container"
             }
             Nested::Blocks => "n.block_id, n.span_line, n.span_column, n.span_offset",
+            Nested::Links => {
+                "n.family, n.embed, n.protocol, n.target, n.title, n.anchor, n.block_ref, \
+                 n.span_line, n.span_column, n.span_offset"
+            }
         }
     }
 
@@ -191,6 +239,7 @@ impl Nested {
             Nested::Tags => 5,
             Nested::Headings => 8,
             Nested::Blocks => 4,
+            Nested::Links => 10,
         }
     }
 }
@@ -270,7 +319,12 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
         | FindStatement::FindingHead
         | FindStatement::FindingTotal
         | FindStatement::FindingCandidates
-        | FindStatement::FindingClasses => {
+        | FindStatement::FindingClasses
+        | FindStatement::ClassHead
+        | FindStatement::ClassTotal
+        | FindStatement::CandidateSuffix
+        | FindStatement::PathHead
+        | FindStatement::PathTotal => {
             unreachable!("{:?} is not a page section", section.statement)
         }
         FindStatement::PathPage(direction) => {
@@ -572,5 +626,86 @@ pub(crate) fn compose_finding_classes(ids: &[i64]) -> (String, Vec<Value>) {
              WHERE k.finding IN (SELECT value FROM json_each(?1))"
             .to_string(),
         vec![id_list(ids)],
+    )
+}
+
+/// [`FindStatement::ClassHead`]: at most `rows` of `class`, each as its id and
+/// its path, in the resolution ladder's order.
+///
+/// **A class is read as every read of a class reads it**: its rows are
+/// [`resolve::class_rows`], and a head of it is in [`resolve::ladder_order`].
+pub(crate) fn compose_class_head(class: &TargetClass, rows: usize) -> (String, Vec<Value>) {
+    let mut values = class.parameters();
+    let limit = values.len() + 1;
+    values.push(Value::Integer(
+        i64::try_from(rows).expect("a row count fits i64"),
+    ));
+    (
+        format!(
+            "SELECT dr.id, dr.path {} {} LIMIT ?{limit}",
+            resolve::class_rows(class),
+            resolve::ladder_order(class)
+        ),
+        values,
+    )
+}
+
+/// [`FindStatement::ClassTotal`]: how many documents `class` holds.
+pub(crate) fn compose_class_total(class: &TargetClass) -> (String, Vec<Value>) {
+    (
+        format!("SELECT COUNT(*) {}", resolve::class_rows(class)),
+        class.parameters(),
+    )
+}
+
+/// [`FindStatement::CandidateSuffix`]: at most two documents of `class`, each
+/// as its id, in no order.
+pub(crate) fn compose_candidate_suffix(class: &TargetClass) -> (String, Vec<Value>) {
+    (
+        format!("SELECT dr.id {} LIMIT 2", resolve::class_rows(class)),
+        class.parameters(),
+    )
+}
+
+/// The comparison and the order a path lookup spells under `order`: bytewise
+/// on `documents_path`, or with ASCII case folded on `documents_path_nocase`,
+/// whose bytewise tie-break is the path order among the documents it reaches.
+fn path_lookup(order: StoredPathOrder) -> (&'static str, &'static str) {
+    match order {
+        StoredPathOrder::Sensitive => ("dr.path = ?1", "dr.path"),
+        StoredPathOrder::AsciiCaseInsensitive => (
+            "dr.path = ?1 COLLATE NOCASE",
+            "dr.path COLLATE NOCASE, dr.path",
+        ),
+    }
+}
+
+/// [`FindStatement::PathHead`]: at most `rows` of the documents standing at
+/// `path` under `order`, each as its id and its path, in path order.
+pub(crate) fn compose_path_head(
+    path: &str,
+    order: StoredPathOrder,
+    rows: usize,
+) -> (String, Vec<Value>) {
+    let (comparison, ordering) = path_lookup(order);
+    (
+        format!(
+            "SELECT dr.id, dr.path FROM documents AS dr WHERE {comparison}
+             ORDER BY {ordering} LIMIT ?2"
+        ),
+        vec![
+            Value::Text(path.to_string()),
+            Value::Integer(i64::try_from(rows).expect("a row count fits i64")),
+        ],
+    )
+}
+
+/// [`FindStatement::PathTotal`]: how many documents stand at `path` under
+/// `order`.
+pub(crate) fn compose_path_total(path: &str, order: StoredPathOrder) -> (String, Vec<Value>) {
+    let (comparison, _) = path_lookup(order);
+    (
+        format!("SELECT COUNT(*) FROM documents AS dr WHERE {comparison}"),
+        vec![Value::Text(path.to_string())],
     )
 }

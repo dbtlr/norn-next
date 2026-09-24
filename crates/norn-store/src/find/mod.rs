@@ -178,8 +178,9 @@ pub(crate) use hydrate::{
 pub use statement::{FIND_STATEMENTS, FindStatement, Nested, PageDirection};
 use statement::{Section, SectionStart, compose_page};
 pub(crate) use statement::{
-    compose_bare_directory, compose_finding_candidates, compose_finding_classes, compose_known_key,
-    compose_match_probe, compose_universe,
+    compose_bare_directory, compose_candidate_suffix, compose_class_head, compose_class_total,
+    compose_finding_candidates, compose_finding_classes, compose_known_key, compose_match_probe,
+    compose_path_head, compose_path_total, compose_universe,
 };
 
 /// Where a page stopped, or where a continuation resumes: the value the row
@@ -347,8 +348,8 @@ impl<'a> Projection<'a> {
         }
     }
 
-    /// What `columns` projects, or the refusal of a column the store keeps no
-    /// index of.
+    /// What `columns` projects, or the refusal of a column this build of the
+    /// store does not know.
     pub(crate) fn of(columns: &'a [Column]) -> Result<Self, PageRefusal> {
         let mut projection = Projection {
             all_fields: false,
@@ -378,9 +379,7 @@ impl<'a> Projection<'a> {
                     nested.insert(2);
                 }
                 Column::Links {} => {
-                    return Err(PageRefusal::NotProjected {
-                        part: "the links column",
-                    });
+                    nested.insert(3);
                 }
                 Column::Findings {} => projection.findings = true,
                 _ => return Err(PageRefusal::UnknownPart { part: "a column" }),
@@ -410,9 +409,9 @@ impl Snapshot {
     /// naming no value or more than [`crate::IN_VALUES_CEILING`]; a declaration read
     /// from another schema than the snapshot pins; a cursor among rows that
     /// are not documents; a cursor that is not a position in the request's
-    /// order, as the module states; a projected column or a part the store
-    /// keeps no index of; and a bound that does not read as its key's declared
-    /// type.
+    /// order, as the module states; a projected column or a part this build
+    /// of the store does not know; and a bound that does not read as its key's
+    /// declared type.
     pub fn find(&self, params: &FindParams, declared: &ContentModel) -> Result<Found, PageRefusal> {
         self.run_find(params, declared, &mut Lookups::default())
     }
@@ -474,7 +473,7 @@ impl Snapshot {
         let next =
             next.map(|at| Cursor::new(snapshot.clone(), CursorKey::document(at.sort, at.path)));
         let unsatisfied = self.resolve(compiled.reports, declared, lookups)?;
-        let rows = self.hydrate_rows(&keys, &projection, &fields, lookups, &mut work)?;
+        let rows = self.hydrate_rows(&keys, &projection, &fields, declared, lookups, &mut work)?;
         work.statements = self.counters().statements_executed() - started;
         Ok(Found {
             rows,
@@ -559,12 +558,14 @@ impl Snapshot {
     /// Every read that answers document rows hydrates them here, so a row
     /// carries the same columns at the same cost whichever verb paged it. The
     /// findings column reads under the active fingerprint, which is read only
-    /// where the projection names that column.
+    /// where the projection names that column, and the links column resolves
+    /// under `declared`'s ambiguity-ignore set.
     pub(crate) fn hydrate_rows(
         &self,
         keys: &[FoundKey],
         projection: &Projection<'_>,
         fields: &[&str],
+        declared: &ContentModel,
         lookups: &mut Lookups,
         work: &mut FindWork,
     ) -> Result<Vec<DocumentRow>, StoreError> {
@@ -580,6 +581,7 @@ impl Snapshot {
             projection,
             fields,
             findings_under.as_deref(),
+            declared.ambiguity_ignore(),
             work,
             &mut lookups.ran,
         )

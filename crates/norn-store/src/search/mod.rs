@@ -269,9 +269,9 @@ impl Snapshot {
     /// Refused as a find is refused, through the same compilation: a page
     /// bound outside `1..=`[`crate::MAX_PAGE`], a membership part naming no
     /// value or more than [`crate::IN_VALUES_CEILING`], a declaration read from
-    /// another schema than the snapshot pins, a part or a projected column the
-    /// store keeps no index of, and a bound that does not read as its key's
-    /// declared type. And refused as a cursor that names no position among
+    /// another schema than the snapshot pins, a part or a projected column
+    /// this build of the store does not know, and a bound that does not read
+    /// as its key's declared type. And refused as a cursor that names no position among
     /// hits ([`PageRefusal::NotAHitCursor`]), or one minted under a schema
     /// fingerprint, which no ranking is ([`PageRefusal::OrderChanged`]).
     pub fn search(
@@ -369,6 +369,7 @@ impl Snapshot {
             &request.columns,
             &projection,
             &fields,
+            declared,
             lookups,
             &mut work,
         )?;
@@ -438,12 +439,14 @@ impl Snapshot {
 
     /// The hits `ranked` names, in its order, each carrying its document row
     /// where the request names a column.
+    #[allow(clippy::too_many_arguments)] // What a hit's row is hydrated under is named by each of these, and none of them groups with another.
     fn hits(
         &self,
         ranked: &[RankedKey],
         columns: &[Column],
         projection: &Projection<'_>,
         fields: &[&str],
+        declared: &ContentModel,
         lookups: &mut Lookups,
         work: &mut SearchWork,
     ) -> Result<Vec<Hit>, StoreError> {
@@ -455,7 +458,8 @@ impl Snapshot {
                 .map(|key| FoundKey::unsorted(key.document, key.path.clone()))
                 .collect();
             let mut hydration = FindWork::default();
-            let rows = self.hydrate_rows(&keys, projection, fields, lookups, &mut hydration)?;
+            let rows =
+                self.hydrate_rows(&keys, projection, fields, declared, lookups, &mut hydration)?;
             work.documents_hydrated = hydration.documents_hydrated;
             work.nested_rows = hydration.nested_rows;
             work.finding_rows = hydration.finding_rows;

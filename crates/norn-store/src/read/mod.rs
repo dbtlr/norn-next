@@ -25,6 +25,7 @@ mod filter;
 mod finding;
 mod glob;
 mod keys;
+mod naming;
 mod page;
 mod reading;
 mod run;
@@ -50,6 +51,7 @@ pub use filter::{READ_FILTERS, ReadFilter};
 pub(crate) use finding::{FINDING_ROW_COLUMNS, FindingBase, finding_base};
 pub(crate) use glob::register_functions;
 pub(crate) use keys::key_walk;
+pub(crate) use naming::{Naming, wire_path};
 pub(crate) use run::{Lookups, Ran, Stepped};
 
 /// How many rows a page holds when a request names no bound.
@@ -239,22 +241,6 @@ impl std::fmt::Display for RequestPart {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum PageRefusal {
-    /// The request filters by a fact the store keeps no index of.
-    ///
-    /// A **dormant carrier** for the Layer 3 link index unit: `links` stores
-    /// a link's target raw and unindexed, so no seek answers a `links_to` part,
-    /// and nothing reaches the part's filter until that index stands. Until
-    /// then no request naming one can be answered, and saying so is the answer.
-    NotIndexed { fact: &'static str },
-    /// The request names a document's links — the links column on a find's
-    /// row, or the links collection a get pages — which no read projects yet.
-    ///
-    /// A **dormant carrier** for the Layer 3 link index unit: the store holds
-    /// a document's link rows with each target raw and unresolved, so a link
-    /// row would name no document its target resolves to and read as broken
-    /// whatever the vault holds. No answer carries a link row until that unit
-    /// resolves what a link names.
-    NotProjected { part: &'static str },
     /// A value a comparing part names — an equality, an inequality, a
     /// membership or a `before`/`after` bound — on a key declared with a typed
     /// order does not read as that type, so it names no place in the key's
@@ -335,13 +321,6 @@ pub enum PageRefusal {
 impl std::fmt::Display for PageRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PageRefusal::NotIndexed { fact } => {
-                write!(formatter, "the store keeps no index of {fact}")
-            }
-            PageRefusal::NotProjected { part } => write!(
-                formatter,
-                "{part} is not projected until the link index resolves what a link names"
-            ),
             PageRefusal::UnreadableBound { key, value } => write!(
                 formatter,
                 "`{value}` does not read as the type `{key}` is declared with"

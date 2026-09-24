@@ -34,7 +34,7 @@
 use norn_wire::link_names_a_document;
 
 use crate::facts::{LinkFact, LinkFamily};
-use crate::path::{DocumentPath, fold_ascii_case, suffix_probe};
+use crate::path::{DocumentPath, SuffixKey, fold_ascii_case, suffix_probe};
 
 /// The separator between segments, in a target and in a path alike.
 const SEPARATOR: char = '/';
@@ -105,6 +105,33 @@ pub(crate) fn link_keys(link: &LinkFact, holder: &DocumentPath) -> Vec<LinkKey> 
                 .collect()
         }
     }
+}
+
+/// The keys, in the key space `key` selects, a link that could name
+/// `document` is held under: each segment-aligned prefix of the document's
+/// suffix key, which a suffix address naming it opens, and the document's
+/// path, which a path naming it is.
+///
+/// Every link whose resolution holds the document is held under one of these,
+/// so a seek of them reaches every such link; which of the links it reaches
+/// resolve to the document alone is the seek's own question.
+pub(crate) fn keys_naming(document: &DocumentPath, key: SuffixKey) -> Vec<String> {
+    let (suffix, path) = match key {
+        SuffixKey::Raw => (
+            document.suffix_key().to_string(),
+            document.as_str().to_string(),
+        ),
+        SuffixKey::Folded => (
+            document.folded_suffix_key().to_string(),
+            fold_ascii_case(document.as_str()),
+        ),
+    };
+    let mut keys: Vec<String> = suffix
+        .match_indices(SEPARATOR)
+        .map(|(at, _)| suffix[..=at].to_string())
+        .collect();
+    keys.push(path);
+    keys
 }
 
 /// The vault path a Markdown target names from the document at `holder`, or
@@ -206,6 +233,31 @@ mod tests {
         }
         assert_eq!(joined(&at("top.md"), "../x.md"), None);
         assert_eq!(joined(&at("top.md"), "x.md").as_deref(), Some("x.md"));
+    }
+
+    /// A document is named by each segment-aligned prefix of its suffix key
+    /// and by its path, in the key space the root probes.
+    #[test]
+    fn a_document_is_named_by_its_suffix_prefixes_and_its_path() {
+        let document = at("Docs/Norn/Glossary.md");
+        assert_eq!(
+            keys_naming(&document, SuffixKey::Raw),
+            [
+                "Glossary/",
+                "Glossary/Norn/",
+                "Glossary/Norn/Docs/",
+                "Docs/Norn/Glossary.md"
+            ]
+        );
+        assert_eq!(
+            keys_naming(&document, SuffixKey::Folded),
+            [
+                "glossary/",
+                "glossary/norn/",
+                "glossary/norn/docs/",
+                "docs/norn/glossary.md"
+            ]
+        );
     }
 
     /// A `%` that spells no byte is itself, and a spelled byte may be any
