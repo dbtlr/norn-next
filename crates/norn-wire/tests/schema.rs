@@ -1383,7 +1383,17 @@ fn an_unsatisfied_part_advertises_its_part_tag() {
             "missing_block",
             "resolves_not_applicable",
             "query_names_no_word",
+            "links_to_ambiguous",
+            "links_to_unknown",
         ])
+    );
+    let ambiguous = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "part") == Some("links_to_ambiguous"))
+        .expect("the ambiguous links-to branch");
+    assert_eq!(
+        ambiguous["properties"]["candidates"]["$ref"].as_str(),
+        Some("#/$defs/CandidateHead")
     );
     let resolves = branches(&schema)
         .iter()
@@ -1629,7 +1639,7 @@ fn a_link_row_advertises_the_targets_and_the_health_read_off_them() {
             string_constant(branch)
                 .unwrap_or_else(|| panic!("a health branch is not a pinned string: {branch}"))
         })),
-        sorted(["healthy", "broken", "ambiguous"])
+        sorted(["healthy", "broken", "ambiguous", "not_judged"])
     );
     assert_eq!(
         sorted(branches(&schema_of::<LinkFamily>()).iter().map(|branch| {

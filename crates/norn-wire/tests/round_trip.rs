@@ -489,6 +489,14 @@ fn unsatisfied_parts() -> Vec<Unsatisfied> {
         Unsatisfied::missing_block("a1"),
         Unsatisfied::resolves_not_applicable(target("norn/glossary")),
         Unsatisfied::query_names_no_word("-- !!"),
+        Unsatisfied::links_to_ambiguous(
+            target("glossary"),
+            head(
+                [candidate("notes/glossary"), candidate("archive/glossary")],
+                2,
+            ),
+        ),
+        Unsatisfied::links_to_unknown(target("nowhere")),
     ]
 }
 
@@ -518,12 +526,13 @@ fn columns() -> Vec<Column> {
     ]
 }
 
-/// Every reading a resolved link's health takes.
+/// Every reading a link's health takes.
 fn link_healths() -> Vec<LinkHealth> {
     vec![
         LinkHealth::Healthy,
         LinkHealth::Broken,
         LinkHealth::Ambiguous,
+        LinkHealth::NotJudged,
     ]
 }
 
@@ -569,16 +578,37 @@ fn nested_field_value() -> FieldValue {
 }
 
 /// One link row per health, built through the constructor that derives it
-/// from the total of the bounded head beside it.
+/// from the link's addressing and the total of the bounded head beside it.
 fn link_rows() -> Vec<LinkRow> {
-    [
+    let mut rows: Vec<LinkRow> = [
         head([], 0),
         head([candidate("notes/a")], 1),
         head([candidate("notes/a"), candidate("archive/a")], 2),
     ]
     .into_iter()
     .map(link_row)
-    .collect()
+    .collect();
+    rows.push(addressed_row(
+        Some("https"),
+        "example.com/page",
+        head([], 0),
+    ));
+    rows
+}
+
+/// A link row written with `protocol` and `target`, resolving to `targets`,
+/// built through the constructor that derives its health.
+fn addressed_row(protocol: Option<&str>, target: &str, targets: CandidateHead) -> LinkRow {
+    LinkRow::new(
+        LinkFamily::Markdown,
+        false,
+        protocol.map(str::to_string),
+        target,
+        Some(String::new()),
+        None,
+        span(),
+        targets,
+    )
 }
 
 /// A link row resolving to `targets`, built through the constructor that
@@ -607,11 +637,22 @@ fn candidate_values(paths: &[&str]) -> Vec<serde_json::Value> {
 /// A link row as bytes, with the head and the health named apart so a test can
 /// hand the reader halves that disagree.
 fn link_row_json(health: &str, candidates: &[serde_json::Value], total: u64) -> String {
+    addressed_row_json(None, "a", health, candidates, total)
+}
+
+/// A link row as bytes, written with `protocol` and `target`.
+fn addressed_row_json(
+    protocol: Option<&str>,
+    target: &str,
+    health: &str,
+    candidates: &[serde_json::Value],
+    total: u64,
+) -> String {
     serde_json::json!({
         "family": "wikilink",
         "embed": false,
-        "protocol": null,
-        "target": "a",
+        "protocol": protocol,
+        "target": target,
         "title": null,
         "anchor": null,
         "span": {"line": 1, "column": 1, "byte_offset": 0},
@@ -2960,6 +3001,21 @@ fn an_unsatisfied_part_is_an_object_tagged_part() {
         wire(&Unsatisfied::query_names_no_word("-- !!")),
         r#"{"part":"query_names_no_word","query":"-- !!"}"#
     );
+    assert_eq!(
+        wire(&Unsatisfied::links_to_unknown(target("nowhere"))),
+        r#"{"part":"links_to_unknown","target":"nowhere"}"#
+    );
+    assert_eq!(
+        wire(&Unsatisfied::links_to_ambiguous(
+            target("glossary"),
+            head([candidate("notes/glossary")], 3),
+        )),
+        r#"{"part":"links_to_ambiguous","target":"glossary","candidates":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"}],"total":3}}"#
+    );
+    assert!(
+        serde_json::from_str::<Unsatisfied>(r#"{"part":"links_to_unknown","target":""}"#).is_err(),
+        "a links-to part carrying an addressless target read back as one"
+    );
 }
 
 /// The two answering exits are one type: a complete answer is one with no
@@ -3310,9 +3366,86 @@ fn a_links_health_is_the_count_of_what_it_resolves_to() {
     assert_eq!(rows[0].health(), LinkHealth::Broken);
     assert_eq!(rows[1].health(), LinkHealth::Healthy);
     assert_eq!(rows[2].health(), LinkHealth::Ambiguous);
+    assert_eq!(rows[3].health(), LinkHealth::NotJudged);
     assert_eq!(LinkHealth::of_targets(0), LinkHealth::Broken);
     assert_eq!(LinkHealth::of_targets(1), LinkHealth::Healthy);
     assert_eq!(LinkHealth::of_targets(400), LinkHealth::Ambiguous);
+}
+
+/// **Only a link to a document is judged.** A link written with a protocol
+/// addresses whatever the protocol addresses, and a target whose last segment
+/// carries an extension other than the document extension names an
+/// attachment: neither is judged, whatever its head. A target whose last
+/// segment carries no extension, or the document extension in any ASCII case,
+/// names a document, and a dot in a directory segment or leading a name is no
+/// extension.
+#[test]
+fn a_link_that_names_no_document_is_not_judged() {
+    for (protocol, target) in [
+        (Some("https"), "example.com/page"),
+        (Some("vault"), "Notes"),
+        (None, "picture.png"),
+        (None, "assets/pic.png"),
+        (None, "archive.tar.gz"),
+        (None, "v1.2"),
+    ] {
+        assert!(
+            !norn_wire::link_names_a_document(protocol, target),
+            "{protocol:?} {target} named a document"
+        );
+        assert_eq!(
+            addressed_row(protocol, target, head([], 0)).health(),
+            LinkHealth::NotJudged,
+            "{protocol:?} {target}"
+        );
+    }
+    for target in [
+        "notes",
+        "notes.md",
+        "Notes.MD",
+        "a.b/c",
+        ".hidden",
+        "../x/my%20note.md",
+        "",
+    ] {
+        assert!(
+            norn_wire::link_names_a_document(None, target),
+            "{target} named no document"
+        );
+        assert_eq!(
+            addressed_row(None, target, head([], 0)).health(),
+            LinkHealth::Broken,
+            "{target}"
+        );
+    }
+}
+
+/// A link that is not judged reads back only as not judged and only with no
+/// document beside it; a document link reads back only with the health its
+/// targets give it.
+#[test]
+fn a_links_judgement_is_read_back_off_its_addressing() {
+    let json = addressed_row_json(Some("https"), "example.com", "not_judged", &[], 0);
+    let read: LinkRow =
+        serde_json::from_str(&json).unwrap_or_else(|error| panic!("reading {json}: {error}"));
+    assert_eq!(read.health(), LinkHealth::NotJudged);
+    for json in [
+        addressed_row_json(Some("https"), "example.com", "broken", &[], 0),
+        addressed_row_json(None, "pic.png", "broken", &[], 0),
+        addressed_row_json(None, "notes", "not_judged", &[], 0),
+        addressed_row_json(
+            None,
+            "pic.png",
+            "not_judged",
+            &candidate_values(&["pic.png"]),
+            1,
+        ),
+    ] {
+        assert!(
+            serde_json::from_str::<LinkRow>(&json).is_err(),
+            "reading {json} produced a row whose judgement is not its addressing's"
+        );
+    }
 }
 
 /// The count the health is read off is the head's total, not the candidates
@@ -4267,7 +4400,7 @@ fn every_document_row_setter_lands_in_the_bytes() {
     assert_eq!(
         wire(&request),
         [
-            r##"{"path":"notes/a.md","fields":{"type":{"kind":"scalar","raw":"note"}},"body":{"text":"Design\n","byte_length":4096},"links":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"}],"total":1},"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"},{"path":"archive/a.md","suffix":"archive/a"}],"total":2},"health":"ambiguous"}],"total":9},"headings":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"blocks":{"items":[{"id":"a1","span":null}],"total":1},"tags":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12}],"total":1}}"##,
+            r##"{"path":"notes/a.md","fields":{"type":{"kind":"scalar","raw":"note"}},"body":{"text":"Design\n","byte_length":4096},"links":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"}],"total":1},"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"},{"path":"archive/a.md","suffix":"archive/a"}],"total":2},"health":"ambiguous"},{"family":"markdown","embed":false,"protocol":"https","target":"example.com/page","title":"","anchor":null,"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"not_judged"}],"total":9},"headings":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"blocks":{"items":[{"id":"a1","span":null}],"total":1},"tags":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12}],"total":1}}"##,
         ]
         .concat()
     );

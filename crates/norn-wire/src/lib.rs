@@ -371,8 +371,9 @@ pub use doctor::{
     RegistrySanity,
 };
 pub use document::{
-    BlockRow, BodyText, Collection, Column, DocumentPath, DocumentRow, FieldValue, HeadingRow,
-    LinkFamily, LinkHealth, LinkRow, Span, TagRow, TagSource, TotalBelowHead,
+    BlockRow, BodyText, Collection, Column, DOCUMENT_EXTENSION, DocumentPath, DocumentRow,
+    FieldValue, HeadingRow, LinkFamily, LinkHealth, LinkRow, Span, TagRow, TagSource,
+    TotalBelowHead, link_names_a_document,
 };
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReasonCode, TooFewNames};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};

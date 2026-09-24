@@ -28,13 +28,16 @@
 //! **Link health is computed, never stored.** Resolution runs at read time
 //! over syntactic link facts, so the health of a link is a fact about the
 //! vault at the instant of the read: one target is healthy, none is broken,
-//! and more than one is ambiguous. What the target resolved to crosses as a
-//! [`CandidateHead`] — the same bounded head of paths and total that a
-//! finding and the ambiguous-target refusal carry — so a short link a large
-//! vault resolves many ways puts a bounded head and a count on the row rather
-//! than the whole ambiguity class. [`LinkRow`] derives its health in its
-//! constructor from that total, and reads it back the same way, so the two
-//! halves of one fact cannot arrive disagreeing.
+//! and more than one is ambiguous. **Only a link to a document is judged**
+//! ([`link_names_a_document`]): a link written with a protocol, or whose
+//! target names an attachment, is not judged, and names no document. What the
+//! target resolved to crosses as a [`CandidateHead`] — the same bounded head
+//! of paths and total that a finding and the ambiguous-target refusal carry —
+//! so a short link a large vault resolves many ways puts a bounded head and a
+//! count on the row rather than the whole ambiguity class. [`LinkRow`] derives
+//! its health in its constructor from the link's addressing and that total,
+//! and reads it back the same way, so the two halves of one fact cannot
+//! arrive disagreeing.
 //!
 //! **A frontmatter value crosses as the tree it is written as.** The content
 //! model — which fields are numbers, which are dates, how two of them compare
@@ -441,10 +444,33 @@ impl<'de> Deserialize<'de> for BodyText {
     }
 }
 
+/// The extension a document's file carries, compared with ASCII case folded.
+pub const DOCUMENT_EXTENSION: &str = "md";
+
+/// Whether a link written with `protocol` and `target` names a document, which
+/// is what makes its health a judgement.
+///
+/// A link written with a protocol addresses whatever the protocol addresses,
+/// so it names no document. A target whose last segment carries an extension
+/// other than [`DOCUMENT_EXTENSION`] names an attachment. Every other target
+/// names a document, the empty target of a same-document anchor among them.
+/// An extension is what follows the last dot inside the last segment: a dot
+/// leading the segment starts a name rather than an extension.
+pub fn link_names_a_document(protocol: Option<&str>, target: &str) -> bool {
+    if protocol.is_some() {
+        return false;
+    }
+    let leaf = target.rsplit('/').next().unwrap_or(target);
+    match leaf.rfind('.') {
+        Some(dot) if dot > 0 => leaf[dot + 1..].eq_ignore_ascii_case(DOCUMENT_EXTENSION),
+        _ => true,
+    }
+}
+
 /// What resolving a link's target found.
 ///
 /// On the wire a health is the flat string itself: `"healthy"`, `"broken"`,
-/// `"ambiguous"`.
+/// `"ambiguous"`, `"not_judged"`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -455,20 +481,37 @@ pub enum LinkHealth {
     Broken,
     /// The target resolves to more than one document.
     Ambiguous,
+    /// The link names no document — it was written with a protocol, or its
+    /// target names an attachment — so no resolution judges it.
+    NotJudged,
 }
 
 impl LinkHealth {
-    /// The health of a link whose target resolved to `targets` documents.
+    /// The health of a document link whose target resolved to `targets`
+    /// documents.
     ///
-    /// This is the whole of the derivation, so a producer cannot file one
-    /// reading of a count and a consumer another. The count is the head's
-    /// total rather than the candidates it carries, so a head cut at its bound
-    /// reports the health of the whole class.
+    /// The count is the head's total rather than the candidates it carries, so
+    /// a head cut at its bound reports the health of the whole class.
     pub const fn of_targets(targets: u64) -> Self {
         match targets {
             0 => LinkHealth::Broken,
             1 => LinkHealth::Healthy,
             _ => LinkHealth::Ambiguous,
+        }
+    }
+
+    /// The health of a link written with `protocol` and `target` whose target
+    /// resolved to `targets` documents: not judged where the link names no
+    /// document ([`link_names_a_document`]), and read off the count where it
+    /// does.
+    ///
+    /// This is the whole of the derivation, so a producer cannot file one
+    /// reading of a link and a consumer another.
+    pub fn of_link(protocol: Option<&str>, target: &str, targets: u64) -> Self {
+        if link_names_a_document(protocol, target) {
+            LinkHealth::of_targets(targets)
+        } else {
+            LinkHealth::NotJudged
         }
     }
 }
@@ -491,11 +534,11 @@ pub enum LinkFamily {
 /// The syntactic half is what the document says; the resolved half is what the
 /// vault held at the instant of the read. `targets` is a bounded head and a
 /// total, so a link a vault resolves many ways crosses as the first few of
-/// those documents and how many there were. `health` is derived from that
-/// total
-/// rather than carried beside it: the constructor computes it and the read
-/// path recomputes it, so a row whose health disagrees with the documents it
-/// names has no representation on either side of the seam.
+/// those documents and how many there were, and a link that names no document
+/// crosses with no document. `health` is derived from the link's addressing
+/// and that total rather than carried beside them: the constructor computes it
+/// and the read path recomputes it, so a row whose health disagrees with the
+/// documents it names has no representation on either side of the seam.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct LinkRow {
@@ -526,8 +569,10 @@ impl LinkRow {
     /// A link of `family` at `span`, written as `target`, resolving to the
     /// documents `targets` heads.
     ///
-    /// The health is computed from the total `targets` carries rather than
-    /// passed in, so the two name one reading of the vault.
+    /// The health is computed from the link's addressing and the total
+    /// `targets` carries rather than passed in, so the two name one reading of
+    /// the vault. A link that names no document resolves to none, so its
+    /// `targets` is the empty head.
     #[allow(clippy::too_many_arguments)] // A link row is the link's own facts; grouping them would mint a shape nothing else holds.
     pub fn new(
         family: LinkFamily,
@@ -539,12 +584,13 @@ impl LinkRow {
         span: Span,
         targets: CandidateHead,
     ) -> Self {
-        let health = LinkHealth::of_targets(targets.total());
+        let target = target.into();
+        let health = LinkHealth::of_link(protocol.as_deref(), &target, targets.total());
         LinkRow {
             family,
             embed,
             protocol,
-            target: target.into(),
+            target,
             title,
             anchor,
             span,
@@ -578,14 +624,25 @@ struct LinkRowFields {
 impl<'de> Deserialize<'de> for LinkRow {
     /// A row arrives with both halves of one fact and is read back by
     /// recomputing the derived half: a row whose `health` is not the health of
-    /// the `targets` beside it is refused rather than read into a value whose
-    /// two fields say different things about one link.
+    /// its addressing and the `targets` beside it, or a link naming no
+    /// document that names documents, is refused rather than read into a value
+    /// whose fields say different things about one link.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let fields = LinkRowFields::deserialize(deserializer)?;
-        let derived = LinkHealth::of_targets(fields.targets.total());
+        let derived = LinkHealth::of_link(
+            fields.protocol.as_deref(),
+            &fields.target,
+            fields.targets.total(),
+        );
+        if derived == LinkHealth::NotJudged && fields.targets.total() != 0 {
+            return Err(D::Error::custom(format!(
+                "the link names no document, and it resolves to {} of them",
+                fields.targets.total(),
+            )));
+        }
         if fields.health != derived {
             return Err(D::Error::custom(format!(
                 "the link's health {:?} is not the health of the {} documents it resolves to, {derived:?}",
