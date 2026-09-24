@@ -299,6 +299,11 @@ impl StoreProjection {
     /// so a pillar that comes back empty is an empty pillar and never a read
     /// that asked about nothing.
     pub fn read(store: &mut Store) -> Result<Self, StoreError> {
+        Self::read_in(store, FindingOrder::Content)
+    }
+
+    /// [`StoreProjection::read`], holding the findings in `order`.
+    fn read_in(store: &mut Store, order: FindingOrder) -> Result<Self, StoreError> {
         let mut projection = StoreProjection {
             documents: Vec::new(),
             findings: Vec::new(),
@@ -394,7 +399,9 @@ impl StoreProjection {
         // store, so the order two stores hand them back in is the order each
         // wrote them. Sorting by the finding's own content is what makes the
         // two comparable at all.
-        projection.findings.sort();
+        if order == FindingOrder::Content {
+            projection.findings.sort();
+        }
 
         let mut term: Option<String> = None;
         loop {
@@ -415,6 +422,8 @@ impl StoreProjection {
         &self.documents
     }
 
+    /// The findings, in content order for a projection [`StoreProjection::read`]
+    /// took and in row-key order for one [`DerivedRows`] holds.
     pub fn findings(&self) -> &[ProjectedFinding] {
         &self.findings
     }
@@ -637,6 +646,18 @@ impl StoreProjection {
     }
 }
 
+/// The order a projection holds its findings in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FindingOrder {
+    /// Sorted by each finding's own content: what two stores that wrote their
+    /// findings in different orders are compared in.
+    Content,
+    /// The order the rows are keyed in, which is the order they were written
+    /// in. A reader that pages a subject's findings reads them in this order
+    /// among themselves, so one derivation's output includes it.
+    Stored,
+}
+
 /// Every derived row one store holds, rendered field by field in field order.
 ///
 /// Read it with [`DerivedRows::read`]. It carries what [`StoreProjection`]
@@ -645,6 +666,17 @@ impl StoreProjection {
 /// row's stored suffix keys, raw and folded. Tombstones stay out for the
 /// projection's reason: a death is one store's history, and a store derived
 /// from zero records none.
+///
+/// **Every ordered read is rendered in the order a reader observes.** The
+/// links, headings, blocks and tags carry their stored ordinal, the field rows
+/// their key and ordinal, a finding's candidates their rank and its classes
+/// their key, and every one of those is a column the row holds. A finding
+/// carries no such column: validate pages a subject's findings by row key, and
+/// find's head reads them by kind and then row key, so the order one subject's
+/// findings were written in reaches an answer. Each subject's findings are
+/// therefore rendered in row-key order, by their rank among that subject's
+/// findings; the absolute keys, and the interleaving of two subjects, reach no
+/// answer and stay out.
 #[derive(Clone, Debug)]
 pub struct DerivedRows {
     projection: StoreProjection,
@@ -654,7 +686,7 @@ pub struct DerivedRows {
 impl DerivedRows {
     /// Read every derived row `store` holds.
     pub fn read(store: &mut Store) -> Result<Self, StoreError> {
-        let projection = StoreProjection::read(store)?;
+        let projection = StoreProjection::read_in(store, FindingOrder::Stored)?;
         let mut fields = projection.entries();
         let mut suffix_keys = Vec::new();
         for_each_stored_suffix_key(store, |stored| {
