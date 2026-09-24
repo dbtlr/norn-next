@@ -57,8 +57,8 @@ use norn_wire::FindingKind;
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(1),
-    "8ad4d8cdceed99c97941d797d048ccf0122b1efc3e643241744616d6eca47ef9",
+    DerivationVersion::new(2),
+    "04a1bd26635139b523a918810e0aa1e149062391e8e8e4d48c2fdaf9aa19a0f5",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
