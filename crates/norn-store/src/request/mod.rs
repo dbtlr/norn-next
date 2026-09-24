@@ -1705,9 +1705,12 @@ const DOCUMENT_TAGS_SQL: &str = "SELECT name, source, span_line, span_column, sp
 ///
 /// The same shape as the four above, over the field pillar's primary key: the
 /// document leads it, so the key and the ordinal the rows are stated in are the
-/// order the seek reaches them in.
+/// order the seek reaches them in. `path` is selected beside the rest: it is
+/// the document's own path, copied onto every row so a field sort can order
+/// and page by it without a join to `documents`, and a copy that drifted from
+/// the document it names would be caught nowhere else.
 const DOCUMENT_FIELDS_SQL: &str =
-    "SELECT key, ordinal, container, raw, typed, least_raw, least_typed
+    "SELECT key, ordinal, path, container, raw, typed, least_raw, least_typed
                  FROM document_fields WHERE document = ?1 ORDER BY key, ordinal";
 
 /// The statement [`Request::pin_vault_schema`] clears the typed field values
@@ -2465,21 +2468,27 @@ pub(crate) fn stored_block(row: &Row<'_>) -> Reading<BlockFact> {
 fn stored_field(row: &Row<'_>) -> Reading<FieldRow> {
     let key: String = row.get(0)?;
     let ordinal: u32 = row.get(1)?;
-    let container: Option<String> = row.get(2)?;
+    let path: String = row.get(2)?;
+    let container: Option<String> = row.get(3)?;
     if ordinal == 0 {
         let written = container.unwrap_or_default();
         let Some(container) = FieldContainer::parse(&written) else {
             return Ok(Err(unreadable("document_fields.container", &written)));
         };
-        return Ok(Ok(FieldRow::Presence { key, container }));
+        return Ok(Ok(FieldRow::Presence {
+            key,
+            container,
+            path,
+        }));
     }
     Ok(Ok(FieldRow::Value {
         key,
         ordinal,
-        raw: row.get(3)?,
-        typed: row.get(4)?,
-        least_raw: row.get(5)?,
-        least_typed: row.get(6)?,
+        raw: row.get(4)?,
+        typed: row.get(5)?,
+        least_raw: row.get(6)?,
+        least_typed: row.get(7)?,
+        path,
     }))
 }
 
@@ -2541,9 +2550,12 @@ mod tests {
     #[test]
     fn findings_reassemble_correctly_across_a_chunk_boundary() {
         let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk");
-        let mut store =
-            Store::open_throwaway(root.join("store.sqlite3"), StoredPathOrder::Sensitive)
-                .expect("opening a store");
+        let mut store = Store::open_throwaway(
+            root.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .expect("opening a store");
         let subject = DocumentPath::new("notes.md").expect("a document path");
 
         let mut request = store.begin_request();
@@ -2598,9 +2610,12 @@ mod tests {
     #[test]
     fn a_findings_read_runs_each_detail_statement_once_per_chunk_of_ids() {
         let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk-count");
-        let mut store =
-            Store::open_throwaway(root.join("store.sqlite3"), StoredPathOrder::Sensitive)
-                .expect("opening a store");
+        let mut store = Store::open_throwaway(
+            root.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .expect("opening a store");
         let subject = DocumentPath::new("notes.md").expect("a document path");
         let findings = 10;
 

@@ -768,7 +768,8 @@ fn a_class_read_seeks_the_suffix_key_its_root_probes() {
     ] {
         let scratch = Scratch::new(&format!("class-read-plans-{}", order.as_str()));
         let mut store =
-            norn_store::Store::open(scratch.database(), order).expect("opening a store");
+            norn_store::Store::open(scratch.database(), order, crate::common::DERIVATION)
+                .expect("opening a store");
         write_documents(
             &mut store.begin_request(),
             &[

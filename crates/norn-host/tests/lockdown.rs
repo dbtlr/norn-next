@@ -2373,7 +2373,8 @@ impl Vault {
     }
 
     fn store(&self) -> Store {
-        Store::open(self.database(), self.order).expect("opening the derived store")
+        Store::open(self.database(), self.order, norn_host::DERIVATION_VERSION)
+            .expect("opening the derived store")
     }
 
     /// A host serving this vault, holding the real-watcher lease while it does.

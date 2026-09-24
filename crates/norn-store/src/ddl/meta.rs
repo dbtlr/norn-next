@@ -23,8 +23,9 @@
 //! own: `vault_schema_bytes`, `vault_schema_fingerprint` and
 //! `vault_schema_generation` — the pinned vault-schema projection —
 //! `store_mode`, which is a fact about this crate's own two ways of opening
-//! rather than about running a database, and `path_order`, the case behaviour
-//! every row was derived under.
+//! rather than about running a database, `path_order`, the case behaviour
+//! every row was derived under, and `derivation_version`, the derivation every
+//! row was written by.
 //!
 //! # The vault-schema projection is derived state
 //!
@@ -64,3 +65,15 @@ pub(crate) const STORE_MODE: &str = "store_mode";
 /// [`crate::Store`] records it at create and judges it at every other open; a
 /// store that records none is rebuilt as one that records another.
 pub(crate) const PATH_ORDER: &str = "path_order";
+
+/// The derivation this store's rows were written by, spelled as its decimal
+/// digits.
+///
+/// It is a rebuild input beside the store fingerprint and the path order: what
+/// derivation writes for unchanged input can move between builds while the DDL
+/// does not, and an increment derives a file again only when its bytes move, so
+/// rows an earlier derivation wrote would stand until each file was edited.
+/// [`crate::Store`] records it at create and judges it at every other open; a
+/// store that records none, or a value no build writes, is rebuilt as one that
+/// records another.
+pub(crate) const DERIVATION_VERSION: &str = "derivation_version";

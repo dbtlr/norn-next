@@ -64,7 +64,8 @@ impl LinkFamily {
     /// The whole vocabulary, which is what `links.family` is checked against.
     pub(crate) const ALL: &'static [LinkFamily] = &[LinkFamily::Wikilink, LinkFamily::Markdown];
 
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// The family as `links.family` holds it.
+    pub const fn as_str(self) -> &'static str {
         match self {
             LinkFamily::Wikilink => "wikilink",
             LinkFamily::Markdown => "markdown",
@@ -96,7 +97,8 @@ impl TagSource {
     /// against.
     pub(crate) const ALL: &'static [TagSource] = &[TagSource::Body, TagSource::Frontmatter];
 
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// The source as `document_tags.source` holds it.
+    pub const fn as_str(self) -> &'static str {
         match self {
             TagSource::Body => "body",
             TagSource::Frontmatter => "frontmatter",
@@ -296,7 +298,7 @@ impl DocumentFacts {
         frontmatter: Option<FrontmatterValue>,
         declared: &ContentModel,
     ) -> Self {
-        self.fields = FieldRows::derive(frontmatter.as_ref(), declared);
+        self.fields = FieldRows::derive(&self.path, frontmatter.as_ref(), declared);
         self.fields_schema = declared.schema().map(str::to_string);
         self.frontmatter = frontmatter;
         self
@@ -411,6 +413,42 @@ impl StoredPathOrder {
         ]
         .into_iter()
         .find(|order| order.as_str() == recorded)
+    }
+}
+
+/// The derivation a store's rows were written by, as the deriver names it.
+///
+/// **It is a rebuild input beside the DDL fingerprint and the path order.** A
+/// store records the version it was created under, and an open under another
+/// one rebuilds from zero ([`crate::Store::derivation_version`]): rows another
+/// derivation wrote for the same input are not rows this one would write, and
+/// no increment converges them, because an increment derives a file again only
+/// when its bytes move.
+///
+/// The number is the deriver's and it is opaque here: this crate records it
+/// and compares it, and knows nothing of what changed between two of them.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DerivationVersion(u32);
+
+impl DerivationVersion {
+    pub const fn new(version: u32) -> Self {
+        DerivationVersion(version)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The spelling a store records the version by: its decimal digits, with no
+    /// leading zero.
+    pub(crate) fn recorded(self) -> String {
+        self.0.to_string()
+    }
+}
+
+impl std::fmt::Display for DerivationVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
     }
 }
 

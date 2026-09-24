@@ -71,14 +71,26 @@
 //! part of the verdict rather than something a reader has to go and check. And
 //! [`StoreProjection::assert_holds`] states concrete rows a projection must hold,
 //! so a case pairs its relative claim with an absolute one.
+//!
+//! # One store's rows, as one number
+//!
+//! [`DerivedRows`] is the same projection taken for one store on its own, with
+//! each row's stored suffix keys beside it, and digested: the number a pinned
+//! corpus derived from zero is held to, so a change to what derivation writes
+//! for unchanged input cannot land without being seen. The suffix keys are in
+//! it and not in the projection because the projection compares two stores
+//! over one tree, where a key is a pure function of a path both hold; the
+//! digest compares one build's derivation with another's, where the function
+//! itself is what may have moved.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use norn_fixtures::digest::{Sha256, hex};
 use norn_store::{
-    BlockFact, DocumentPath, FieldRows, FindingCursor, HeadingFact, IndexedTerm, LinkFact,
-    PillarReport, Store, StoreError, StoredFinding, StoredPathOrder, StoredSuffixKeys,
-    StoredTombstone, TagFact, ddl,
+    BlockFact, DocumentPath, FieldRow, FieldRows, FindingCursor, HeadingFact, IndexedTerm,
+    LinkFact, PillarReport, Span, Store, StoreError, StoredFinding, StoredPathOrder,
+    StoredSuffixKeys, StoredTombstone, TagFact, ddl,
 };
 use norn_wire::{FindingKind, FindingScope};
 
@@ -287,6 +299,11 @@ impl StoreProjection {
     /// so a pillar that comes back empty is an empty pillar and never a read
     /// that asked about nothing.
     pub fn read(store: &mut Store) -> Result<Self, StoreError> {
+        Self::read_in(store, FindingOrder::Content)
+    }
+
+    /// [`StoreProjection::read`], holding the findings in `order`.
+    fn read_in(store: &mut Store, order: FindingOrder) -> Result<Self, StoreError> {
         let mut projection = StoreProjection {
             documents: Vec::new(),
             findings: Vec::new(),
@@ -382,7 +399,9 @@ impl StoreProjection {
         // store, so the order two stores hand them back in is the order each
         // wrote them. Sorting by the finding's own content is what makes the
         // two comparable at all.
-        projection.findings.sort();
+        if order == FindingOrder::Content {
+            projection.findings.sort();
+        }
 
         let mut term: Option<String> = None;
         loop {
@@ -403,6 +422,8 @@ impl StoreProjection {
         &self.documents
     }
 
+    /// The findings, in content order for a projection [`StoreProjection::read`]
+    /// took and in row-key order for one [`DerivedRows`] holds.
     pub fn findings(&self) -> &[ProjectedFinding] {
         &self.findings
     }
@@ -517,6 +538,14 @@ impl StoreProjection {
     /// term's carry the term. So a fact one store holds and the other does not
     /// is a field with nothing opposite it, rather than a shift that renames
     /// every field after it.
+    ///
+    /// **A row is rendered column by column, as the database holds it**: each
+    /// field ends in the name of the column it reads, and holds that column's
+    /// value — text quoted, an integer or a flag as its digits, a closed
+    /// vocabulary as the word the column stores, and [`NULL`] where the column
+    /// holds none. So the rendering is a function of the stored rows alone:
+    /// renaming a Rust field or variant that carries a column moves nothing
+    /// here, and a changed stored value moves exactly the field that holds it.
     fn entries(&self) -> BTreeMap<String, String> {
         let mut entries = Vec::new();
         for document in &self.documents {
@@ -525,10 +554,7 @@ impl StoreProjection {
             entries.push((format!("{at}.body_hash"), quoted(&document.body_hash)));
             entries.push((
                 format!("{at}.frontmatter_projection_hash"),
-                document
-                    .frontmatter_projection_hash
-                    .as_deref()
-                    .map_or_else(|| "(none)".to_string(), quoted),
+                optional_text(document.frontmatter_projection_hash.as_deref()),
             ));
             entries.push((
                 format!("{at}.byte_length"),
@@ -540,10 +566,7 @@ impl StoreProjection {
             ));
             entries.push((
                 format!("{at}.frontmatter"),
-                document
-                    .frontmatter
-                    .as_deref()
-                    .map_or_else(|| "(none)".to_string(), quoted),
+                optional_text(document.frontmatter.as_deref()),
             ));
             entries.push((
                 format!("{at}.frontmatter_diagnostic_count"),
@@ -558,26 +581,38 @@ impl StoreProjection {
         }
         // A finding has no key of its own that survives being written to a
         // second store, so its field is its subject and its position among the
-        // findings about that subject. Two findings that differ only in where
-        // they sort therefore report as two fields rather than as one shifted
-        // list.
+        // findings about that subject, in the order this projection holds
+        // them. Two findings that differ only in where they sort therefore
+        // report as two fields rather than as one shifted list.
         let mut at_subject: BTreeMap<&str, usize> = BTreeMap::new();
         for finding in &self.findings {
             let ordinal = at_subject.entry(finding.path.as_str()).or_default();
+            let at = format!("finding[{}][{ordinal}]", finding.path);
+            push_columns(&mut entries, &at, finding);
+            // The candidate head by the rank each row is stored at, and the
+            // class memberships in the key order they are read in.
             entries.push((
-                format!("finding[{}][{ordinal}]", finding.path),
-                format!("{finding:?}"),
+                format!("{at}.candidate count"),
+                finding.candidates.len().to_string(),
             ));
+            for (rank, (path, suffix)) in finding.candidates.iter().enumerate() {
+                entries.push((format!("{at}.candidate[{rank}].path"), quoted(path)));
+                entries.push((format!("{at}.candidate[{rank}].suffix"), quoted(suffix)));
+            }
+            entries.push((
+                format!("{at}.class_key count"),
+                finding.class_keys.len().to_string(),
+            ));
+            for (index, key) in finding.class_keys.iter().enumerate() {
+                entries.push((format!("{at}.class_key[{index}]"), quoted(key)));
+            }
             *ordinal += 1;
         }
         for term in &self.terms {
-            entries.push((
-                format!("indexed term[{}]", term.term),
-                format!(
-                    "{} documents, {} occurrences",
-                    term.documents, term.occurrences
-                ),
-            ));
+            // The columns the full-text vocabulary reports a term's counts in.
+            let at = format!("indexed term[{}]", term.term);
+            entries.push((format!("{at}.doc"), term.documents.to_string()));
+            entries.push((format!("{at}.cnt"), term.occurrences.to_string()));
         }
         // The schema's bytes are rendered as their own escaped content, so the
         // comparison reads the bytes themselves. A length summarises them and a
@@ -589,9 +624,8 @@ impl StoreProjection {
         // schema apart from an absent one: a rendering left bare could spell the
         // absent marker with content, and quoting puts the marker outside the
         // range every present value renders into.
-        const NONE: &str = "(none)";
         let (bytes, fingerprint) = self.vault_schema.as_ref().map_or_else(
-            || (NONE.to_string(), NONE.to_string()),
+            || (NULL.to_string(), NULL.to_string()),
             |schema| {
                 (
                     quoted(&schema.bytes.escape_ascii().to_string()),
@@ -609,6 +643,102 @@ impl StoreProjection {
              report nothing about the other"
         );
         rendered
+    }
+}
+
+/// The order a projection holds its findings in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FindingOrder {
+    /// Sorted by each finding's own content: what two stores that wrote their
+    /// findings in different orders are compared in.
+    Content,
+    /// The order the rows are keyed in, which is the order they were written
+    /// in. A reader that pages a subject's findings reads them in this order
+    /// among themselves, so one derivation's output includes it.
+    Stored,
+}
+
+/// Every derived row one store holds, rendered field by field in field order.
+///
+/// Read it with [`DerivedRows::read`]. It carries what [`StoreProjection`]
+/// carries and drops what it drops — row identifiers, write generations and
+/// timestamps, none of which is a function of the vault — plus each document
+/// row's stored suffix keys, raw and folded. Tombstones stay out for the
+/// projection's reason: a death is one store's history, and a store derived
+/// from zero records none.
+///
+/// **Every ordered read is rendered in the order a reader observes.** The
+/// links, headings, blocks and tags carry their stored ordinal, the field rows
+/// their key and ordinal, a finding's candidates their rank and its classes
+/// their key, and every one of those is a column the row holds. A finding
+/// carries no such column: validate pages a subject's findings by row key, and
+/// find's head reads them by kind and then row key, so the order one subject's
+/// findings were written in reaches an answer. Each subject's findings are
+/// therefore rendered in row-key order, by their rank among that subject's
+/// findings; the absolute keys, and the interleaving of two subjects, reach no
+/// answer and stay out.
+#[derive(Clone, Debug)]
+pub struct DerivedRows {
+    projection: StoreProjection,
+    fields: BTreeMap<String, String>,
+}
+
+impl DerivedRows {
+    /// Read every derived row `store` holds.
+    pub fn read(store: &mut Store) -> Result<Self, StoreError> {
+        let projection = StoreProjection::read_in(store, FindingOrder::Stored)?;
+        let mut fields = projection.entries();
+        let mut suffix_keys = Vec::new();
+        for_each_stored_suffix_key(store, |stored| {
+            let at = format!("document[{}]", stored.path.as_str());
+            suffix_keys.push((format!("{at}.suffix_key"), quoted(&stored.raw)));
+            suffix_keys.push((format!("{at}.folded_suffix_key"), quoted(&stored.folded)));
+        })?;
+        for (field, value) in suffix_keys {
+            let collided = fields.insert(field, value);
+            assert!(
+                collided.is_none(),
+                "a suffix key rendered as a field the projection already carries"
+            );
+        }
+        Ok(DerivedRows { projection, fields })
+    }
+
+    /// The projection the rows were read through, for the claims a case makes
+    /// about what the rows hold.
+    pub fn projection(&self) -> &StoreProjection {
+        &self.projection
+    }
+
+    /// The rows, one field to a value, in field order.
+    pub fn fields(&self) -> &BTreeMap<String, String> {
+        &self.fields
+    }
+
+    /// SHA-256 over the rows of every vault in `vaults`, in name order, as 64
+    /// lowercase hex digits.
+    ///
+    /// A corpus spans more than one vault where what it exercises is a
+    /// declaration a vault makes once — its stance on an undeclared tag — so
+    /// the digest is taken over them together and each is named in it. The
+    /// count of vaults leads, then each vault's name, the count of its fields,
+    /// and every field and value; every one of them is absorbed behind its own
+    /// length, so no two different sets of rows run together into the same
+    /// bytes whatever their text holds. Nothing in it depends on where a store
+    /// sits on disk: the fields are vault-relative and sorted, and every value
+    /// is text.
+    pub fn digest(vaults: &BTreeMap<&str, DerivedRows>) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update_framed(&(vaults.len() as u64).to_be_bytes());
+        for (name, rows) in vaults {
+            hasher.update_framed(name.as_bytes());
+            hasher.update_framed(&(rows.fields.len() as u64).to_be_bytes());
+            for (field, value) in &rows.fields {
+                hasher.update_framed(field.as_bytes());
+                hasher.update_framed(value.as_bytes());
+            }
+        }
+        hex(&hasher.finish())
     }
 }
 
@@ -874,7 +1004,7 @@ fn project_finding(finding: StoredFinding) -> ProjectedFinding {
 
 /// Render a document's ordered fact rows, ordinal included: the order is what
 /// the text layer emitted and is itself a derived fact.
-fn push_indexed<T: std::fmt::Debug>(
+fn push_indexed<T: StoredColumns>(
     entries: &mut Vec<(String, String)>,
     at: &str,
     name: &str,
@@ -882,8 +1012,191 @@ fn push_indexed<T: std::fmt::Debug>(
 ) {
     entries.push((format!("{at}.{name} count"), rows.len().to_string()));
     for (ordinal, row) in rows.iter().enumerate() {
-        entries.push((format!("{at}.{name}[{ordinal}]"), format!("{row:?}")));
+        push_columns(entries, &format!("{at}.{name}[{ordinal}]"), row);
     }
+}
+
+/// Render one stored row at `at`, one field to a column.
+fn push_columns(entries: &mut Vec<(String, String)>, at: &str, row: &impl StoredColumns) {
+    for (column, value) in row.columns() {
+        entries.push((format!("{at}.{column}"), value));
+    }
+}
+
+/// What a column holding SQL `NULL` renders as. Every present text value is
+/// quoted and every present integer is bare digits, so nothing present
+/// renders as this.
+const NULL: &str = "(none)";
+
+/// One stored row, as the names of its columns and the values the database
+/// holds in them.
+///
+/// **Every column the row's table carries a derived value in is here**,
+/// checked against every derived table's DDL. What is left out, and why:
+///
+/// - **The row identifier** — `id` on every table that has one, and the
+///   `(document, key, ordinal)` primary key `document_fields` uses instead.
+///   Where a row landed, never a fact about the vault.
+/// - **The owning row's foreign key** — `document` on `links`, `headings`,
+///   `blocks`, `document_tags` and `document_fields`; `finding` on
+///   `finding_classes` and `finding_candidates`. [`StoreProjection::entries`]
+///   already names the row this one stands under in its `at`.
+/// - **`ordinal`** on `links`, `headings`, `blocks` and `document_tags`, and
+///   **`rank`** on `finding_candidates`. These are read in that order and
+///   rendered at their position within their owning row ([`push_indexed`] and
+///   the candidates' own enumeration), so the value is carried by where a row
+///   stands rather than repeated as a named column. `document_fields` renders
+///   its `ordinal` from the stored column instead, because its rows interleave
+///   more than one key under one document, where position alone would not say
+///   which.
+/// - **`generation`** on `findings` and on `documents`, and on the vault-schema
+///   pin — write generations, dropped for [`ProjectedFinding`]'s own reason.
+/// - **`derived_at`** on `documents` and every other timestamp — when a row was
+///   written, never a fact about the vault.
+///
+/// Every other column is rendered, `document_fields.path` included: the
+/// document's own path, copied onto every field row so a field sort can page
+/// by it without a join, and [`FieldRow`] renders it so a copy that drifted
+/// from the document it names is caught here rather than nowhere.
+trait StoredColumns {
+    fn columns(&self) -> Vec<(&'static str, String)>;
+}
+
+impl StoredColumns for LinkFact {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        let mut columns = vec![
+            ("family", quoted(self.family.as_str())),
+            ("embed", flag(self.embed)),
+            ("protocol", optional_text(self.protocol.as_deref())),
+            ("target", quoted(&self.target)),
+            ("title", optional_text(self.title.as_deref())),
+            ("anchor", optional_text(self.anchor.as_deref())),
+            ("block_ref", optional_text(self.block_ref.as_deref())),
+        ];
+        columns.extend(span_columns(Some(self.span)));
+        columns
+    }
+}
+
+impl StoredColumns for HeadingFact {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        let mut columns = vec![
+            ("text", quoted(&self.text)),
+            ("slug", quoted(&self.slug)),
+            ("level", self.level.to_string()),
+        ];
+        columns.extend(span_columns(Some(self.span)));
+        columns.push(("body_offset", self.body_offset.to_string()));
+        columns.push(("inside_container", flag(self.inside_container)));
+        columns
+    }
+}
+
+impl StoredColumns for BlockFact {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        let mut columns = vec![("block_id", quoted(&self.block_id))];
+        columns.extend(span_columns(self.span));
+        columns
+    }
+}
+
+impl StoredColumns for TagFact {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        let mut columns = vec![
+            ("name", quoted(&self.name)),
+            ("source", quoted(self.source.as_str())),
+        ];
+        columns.extend(span_columns(self.span));
+        columns
+    }
+}
+
+/// A presence row stores its container and no value; a value row stores its
+/// value and no container. Both store both least-value flags, a presence row's
+/// as zero. Both carry `path`, the document's own path copied onto the row: a
+/// copy that drifted from the document it names would otherwise be caught
+/// nowhere, since no reader joins it back to `documents` to check.
+impl StoredColumns for FieldRow {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        let (container, raw, typed, least_raw, least_typed) = match self {
+            FieldRow::Presence { container, .. } => {
+                (Some(container.as_str()), None, None, false, false)
+            }
+            FieldRow::Value {
+                raw,
+                typed,
+                least_raw,
+                least_typed,
+                ..
+            } => (
+                None,
+                raw.as_deref(),
+                typed.as_deref(),
+                *least_raw,
+                *least_typed,
+            ),
+        };
+        vec![
+            ("key", quoted(self.key())),
+            ("ordinal", self.ordinal().to_string()),
+            ("path", quoted(self.path())),
+            ("container", optional_text(container)),
+            ("raw", optional_text(raw)),
+            ("typed", optional_text(typed)),
+            ("least_raw", flag(least_raw)),
+            ("least_typed", flag(least_typed)),
+        ]
+    }
+}
+
+/// A finding's own columns. Its candidates and class memberships are rows of
+/// their own tables, rendered beside it by [`StoreProjection::entries`].
+impl StoredColumns for ProjectedFinding {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        let mut columns = vec![
+            ("kind", quoted(&self.kind)),
+            ("severity", quoted(&self.severity)),
+            ("target", optional_text(self.target.as_deref())),
+        ];
+        columns.extend(span_columns(self.span.map(
+            |(line, column, byte_offset)| Span {
+                line,
+                column,
+                byte_offset,
+            },
+        )));
+        columns.extend([
+            ("candidates_total", self.candidates_total.to_string()),
+            ("message", quoted(&self.message)),
+            ("detail", optional_text(self.detail.as_deref())),
+            (
+                "vault_schema_fingerprint",
+                quoted(&self.vault_schema_fingerprint),
+            ),
+        ]);
+        columns
+    }
+}
+
+/// The three columns a span is stored in, each [`NULL`] where there is no
+/// span.
+fn span_columns(span: Option<Span>) -> [(&'static str, String); 3] {
+    let column = |value: Option<u64>| value.map_or_else(|| NULL.to_string(), |v| v.to_string());
+    [
+        ("span_line", column(span.map(|span| span.line))),
+        ("span_column", column(span.map(|span| span.column))),
+        ("span_offset", column(span.map(|span| span.byte_offset))),
+    ]
+}
+
+/// A flag as the integer column holding it.
+fn flag(value: bool) -> String {
+    u8::from(value).to_string()
+}
+
+/// A text column that may hold `NULL`.
+fn optional_text(value: Option<&str>) -> String {
+    value.map_or_else(|| NULL.to_string(), quoted)
 }
 
 /// The first field the two disagree about, reading every field either of them
@@ -986,6 +1299,48 @@ mod tests {
             divergence.field.starts_with("document[docs/a.md]"),
             "{divergence}"
         );
+    }
+
+    /// A row renders as the columns its table stores and the values the
+    /// columns hold, so what names a field is the column and not the Rust
+    /// field or variant carrying it.
+    #[test]
+    fn a_row_renders_by_its_column_names_and_stored_values() {
+        let mut linked = projection();
+        linked.documents[0].links.push(LinkFact {
+            family: norn_store::LinkFamily::Wikilink,
+            embed: true,
+            protocol: None,
+            target: "Notes".to_string(),
+            title: None,
+            anchor: None,
+            block_ref: Some("para".to_string()),
+            span: Span {
+                line: 1,
+                column: 2,
+                byte_offset: 1,
+            },
+        });
+        let entries = linked.entries();
+        let at = |column: &str| {
+            entries
+                .get(&format!("document[docs/a.md].link[0].{column}"))
+                .unwrap_or_else(|| panic!("no `{column}` column in {entries:#?}"))
+                .as_str()
+        };
+        assert_eq!(at("family"), "\"wikilink\"");
+        assert_eq!(at("embed"), "1");
+        assert_eq!(at("protocol"), NULL);
+        assert_eq!(at("block_ref"), "\"para\"");
+        assert_eq!(at("span_offset"), "1");
+
+        let mut moved = linked.clone();
+        moved.documents[0].links[0].block_ref = Some("other".to_string());
+        let divergence = linked
+            .compare(&moved)
+            .divergence
+            .expect("a changed stored value diverges");
+        assert_eq!(divergence.field, "document[docs/a.md].link[0].block_ref");
     }
 
     #[test]

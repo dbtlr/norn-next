@@ -43,12 +43,29 @@ use std::path::Path;
 
 use norn_config::schema::{FieldType, UndeclaredTags, VaultSchema};
 use norn_store::{
-    BlockFact, Change, ContentModel, DiscardScope, DocumentFacts, DocumentPath, FieldDeclaration,
-    FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Provenance, Span, TagFact, TagSource,
-    TypedOrder,
+    BlockFact, Change, ContentModel, DerivationVersion, DiscardScope, DocumentFacts, DocumentPath,
+    FieldDeclaration, FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Provenance, Span,
+    TagFact, TagSource, TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, FindingScope, Severity, TagStance};
+
+/// The derivation this build writes a store's rows by, recorded in every store
+/// it creates and judged at every open: a store another version wrote is
+/// rebuilt from zero.
+///
+/// **It names the whole derivation**, not this module alone: every crate's
+/// contribution to the rows a store holds, as [ADR 0026] states the scope. It
+/// moves whenever any of that writes different rows for the same vault bytes,
+/// and only then; a refactor that writes the same rows leaves it where it is.
+///
+/// [ADR 0026]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0026-a-derived-store-records-the-derivation-that-wrote-it.md
+///
+/// **The digest in `tests/derivation.rs` forces it.** That suite derives a
+/// pinned corpus from zero and digests every derived row, pinned beside the
+/// version it was taken under, and it fails when the digest moves while this
+/// does not.
+pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(1);
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -1898,6 +1915,7 @@ paths:
             let mut store = norn_store::Store::open(
                 scratch.join("store.sqlite3"),
                 norn_store::StoredPathOrder::Sensitive,
+                crate::DERIVATION_VERSION,
             )
             .expect("a store");
             store

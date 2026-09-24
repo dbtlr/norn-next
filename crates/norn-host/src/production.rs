@@ -784,10 +784,17 @@ impl EntryOps for ProductionEntryOps {
             let _ = norn_fs::sweep_fallback_tree(root);
         }
         // The store is opened under the case behaviour the coverage just
-        // proved, which the open judges against the order its rows were
-        // derived under: a store derived under the other one is rebuilt from
-        // zero here, before anything derives into it or reads from it.
-        let store = Store::open(derived.join("store.sqlite3"), path_order).map_err(store_effect)?;
+        // proved and the derivation this build writes rows by, which the open
+        // judges against the order its rows were derived under and the
+        // derivation that wrote them: a store derived under another of either
+        // is rebuilt from zero here, before anything derives into it or reads
+        // from it.
+        let store = Store::open(
+            derived.join("store.sqlite3"),
+            path_order,
+            crate::DERIVATION_VERSION,
+        )
+        .map_err(store_effect)?;
         subscription
             .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
             .map_err(watcher)?;
@@ -3877,7 +3884,12 @@ mod tests {
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
 
-        let mut store = Store::open(dirs_store(&f, &name), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            dirs_store(&f, &name),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         assert_eq!(stored_paths(&mut store), ["note.md"]);
         let findings = findings_at(&mut store, "note.md");
         assert_eq!(findings.len(), 1, "{findings:?}");
@@ -3909,7 +3921,12 @@ mod tests {
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
 
-        let mut store = Store::open(dirs_store(&f, &name), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            dirs_store(&f, &name),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         assert_eq!(stored_paths(&mut store), ["note.md"]);
     }
 
@@ -4079,7 +4096,12 @@ mod tests {
         drop(lease);
         drop(host);
 
-        let mut store = Store::open(derived.join("store.sqlite3"), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            derived.join("store.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         let findings = findings_at(&mut store, "note.md");
         assert_eq!(findings.len(), 1);
         assert_eq!(
@@ -6511,6 +6533,7 @@ mod tests {
         let mut store = Store::open(
             f.root.join("folded-vanished-root.sqlite3"),
             proven_order(&f),
+            crate::DERIVATION_VERSION,
         )
         .unwrap();
         let progress = ProgressReporter::disconnected();
@@ -6890,7 +6913,12 @@ mod tests {
         let f = Fixture::watcherless("heal-open-window");
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         fs::write(f.vault().join("vanishing.md"), "here for now").unwrap();
-        let mut store = Store::open(f.root.join("window.sqlite3"), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            f.root.join("window.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -6938,7 +6966,12 @@ mod tests {
         let f = Fixture::watcherless("heal-open-window-replace");
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         fs::write(f.vault().join("swapped.md"), "a document for now").unwrap();
-        let mut store = Store::open(f.root.join("replace.sqlite3"), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            f.root.join("replace.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -7001,7 +7034,12 @@ mod tests {
         let f = Fixture::watcherless("heal-open-window-churn");
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         fs::write(f.vault().join("swapped.md"), "# the bytes before\n").unwrap();
-        let mut store = Store::open(f.root.join("window-churn.sqlite3"), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            f.root.join("window-churn.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -7075,8 +7113,12 @@ mod tests {
         let f = Fixture::watcherless("heal-open-window-finding");
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
-        let mut store =
-            Store::open(f.root.join("window-finding.sqlite3"), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            f.root.join("window-finding.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -7136,8 +7178,12 @@ mod tests {
             return;
         }
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
-        let mut store =
-            Store::open(f.root.join("refused-window.sqlite3"), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            f.root.join("refused-window.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -7226,7 +7272,12 @@ mod tests {
         // run when it goes.
         fs::create_dir_all(f.vault().join("zhidden\\dir")).unwrap();
         fs::write(f.vault().join("zhidden\\dir/note.md"), "note").unwrap();
-        let mut store = Store::open(f.root.join("refused-root.sqlite3"), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            f.root.join("refused-root.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -7310,6 +7361,7 @@ mod tests {
         let mut store = Store::open(
             f.root.join("refused-root-findings.sqlite3"),
             proven_order(&f),
+            crate::DERIVATION_VERSION,
         )
         .unwrap();
         let progress = ProgressReporter::disconnected();
@@ -7500,8 +7552,12 @@ mod tests {
             return;
         }
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
-        let mut store =
-            Store::open(f.root.join("unaddressable-root.sqlite3"), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            f.root.join("unaddressable-root.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -7705,8 +7761,12 @@ mod tests {
         fs::write(f.vault().join("notes/sub/kept.md"), "kept").unwrap();
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
 
-        let mut store =
-            Store::open(f.root.join("descent-window.sqlite3"), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            f.root.join("descent-window.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         let progress = ProgressReporter::disconnected();
         let policy = ProductionPolicy::new(8, 2).unwrap();
         ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
@@ -7950,7 +8010,12 @@ mod tests {
         let proven = proven_order(&f);
         let derived_under = other_order(proven);
 
-        let mut stale = Store::open(dirs_store(&f, &name), derived_under).unwrap();
+        let mut stale = Store::open(
+            dirs_store(&f, &name),
+            derived_under,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         derive_stale_rows(&mut stale);
         let stale_epoch = stale.epoch().to_string();
         drop(stale);
@@ -7991,6 +8056,78 @@ mod tests {
         assert_eq!(
             foo_resolves_through(&mut attachment),
             foo_resolves_under(proven)
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A store an earlier derivation wrote is rebuilt from zero at the
+    /// attach that opens it, and the reason names both versions.** The stale
+    /// row stands under the content hash of the bytes the vault holds, which is
+    /// the state an earlier build leaves: a heal derives a file again only when
+    /// its hash moves, so without the rebuild the row the earlier derivation
+    /// wrote would be served until the file was edited. An attach under the
+    /// same version afterwards reuses the store.
+    #[test]
+    fn a_store_an_earlier_derivation_wrote_is_rebuilt_at_attach() {
+        const NOTE: &str = "# Title\n\nA body.\n";
+        let f = Fixture::new("attach-derivation-moved");
+        fs::write(f.vault().join("note.md"), NOTE).unwrap();
+        let (ops, name) = f.ops(64);
+        let policy = ProductionPolicy::new(64, 2).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let earlier = norn_store::DerivationVersion::new(crate::DERIVATION_VERSION.get() - 1);
+
+        let mut stale = Store::open(dirs_store(&f, &name), proven_order(&f), earlier).unwrap();
+        // What the earlier derivation wrote for these bytes: the row, and no
+        // heading.
+        stale
+            .begin_request()
+            .apply_increment(
+                norn_store::IncrementProvenance::Derived,
+                [norn_store::Change::Upsert(norn_store::DocumentFacts::new(
+                    DocumentPath::new("note.md").unwrap(),
+                    norn_fs::ContentHash::of(NOTE.as_bytes()).to_string(),
+                    NOTE,
+                    NOTE.len() as u64,
+                ))],
+                &[],
+            )
+            .unwrap();
+        let stale_epoch = stale.epoch().to_string();
+        drop(stale);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let OpenOutcome::RebuiltFromZero(RebuildReason::Client { detail }) =
+            attachment.store.open_outcome()
+        else {
+            panic!(
+                "a store derivation version {earlier} wrote opened under {} as {:?}",
+                crate::DERIVATION_VERSION,
+                attachment.store.open_outcome()
+            );
+        };
+        assert!(
+            detail.contains(&format!("`{earlier}`"))
+                && detail.contains(&format!("`{}`", crate::DERIVATION_VERSION)),
+            "the reason does not name both derivation versions: {detail}"
+        );
+        assert_ne!(attachment.store.epoch(), stale_epoch);
+        assert_eq!(
+            attachment.store.derivation_version(),
+            crate::DERIVATION_VERSION
+        );
+        assert_eq!(
+            derived_vault(&mut attachment.store, f.vault().as_path()),
+            from_scratch(&f, "attach-derivation-moved-oracle", policy),
+            "the rebuild derived something a from-scratch build does not"
+        );
+        ops.detach(&name, attachment);
+
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            *attachment.store.open_outcome(),
+            OpenOutcome::Reused,
+            "an attach under the derivation version the store was written by rebuilt it"
         );
         ops.detach(&name, attachment);
     }
@@ -8853,8 +8990,12 @@ mod tests {
     /// stopped agreeing with a from-scratch derivation would have to disagree
     /// with this.
     fn from_scratch(f: &Fixture, label: &str, policy: ProductionPolicy) -> DerivedVault {
-        let mut store =
-            Store::open(f.root.join(format!("{label}.sqlite3")), proven_order(f)).unwrap();
+        let mut store = Store::open(
+            f.root.join(format!("{label}.sqlite3")),
+            proven_order(f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         let registration = f.registration();
         let progress = ProgressReporter::disconnected();
         ProductionEntryOps::pin_schema(&mut store, &registration).unwrap();
@@ -8893,7 +9034,7 @@ mod tests {
     /// finished file names the same boundary only until the schema next grows.
     fn corrupt_the_document_pages(f: &Fixture, database: &Path) {
         let measured = f.root.join("created-length.sqlite3");
-        Store::open(&measured, proven_order(f))
+        Store::open(&measured, proven_order(f), crate::DERIVATION_VERSION)
             .expect("creating a store to measure a create by")
             .close()
             .expect("closing the measured store");
@@ -10548,7 +10689,12 @@ mod tests {
         assert_eq!(attaches.load(std::sync::atomic::Ordering::SeqCst), 1);
         drop(host);
 
-        let mut store = Store::open(derived.join("store.sqlite3"), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            derived.join("store.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         assert_eq!(
             stored_paths(&mut store),
             ["ok-0.md", "ok-1.md", "ok-2.md"],
@@ -11622,7 +11768,12 @@ mod tests {
         released.store(true, std::sync::atomic::Ordering::SeqCst);
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         drop(host);
-        let mut store = Store::open(derived.join("store.sqlite3"), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            derived.join("store.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         let row = store
             .begin_request()
             .stored_document(&DocumentPath::new("note.md").unwrap())
@@ -12062,7 +12213,12 @@ mod tests {
 
         drop(demand);
         drop(host);
-        let mut store = Store::open(derived.join("store.sqlite3"), proven_order(&f)).unwrap();
+        let mut store = Store::open(
+            derived.join("store.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
         let row = store
             .begin_request()
             .stored_document(&DocumentPath::new("note.md").unwrap())

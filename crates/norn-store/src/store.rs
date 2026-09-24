@@ -60,8 +60,13 @@
 //! store records, or over a store that records none, is a rebuild from zero,
 //! reported as the store's own [`RebuildReason::Client`] detail naming what the
 //! store records and the order its root proves: see
-//! [`Store::path_order`]. What it takes back is [`OpenOutcome`]: the rung the
-//! state was at, with a typed [`RebuildReason`] where the answer was a rebuild.
+//! [`Store::path_order`]. The derivation version is the same kind of key: the
+//! deriver names the derivation that writes the rows, an open under another
+//! version, or over a store that records none, is a rebuild from zero, and the
+//! detail names what the store records and the version the open is under: see
+//! [`Store::derivation_version`]. Where both keys moved, the one detail names
+//! both. What it takes back is [`OpenOutcome`]: the rung the state was at, with
+//! a typed [`RebuildReason`] where the answer was a rebuild.
 //!
 //! **Rung 3 is for damaged state, never for a hostile environment.** A full
 //! disk, a revoked permission, a parent directory that cannot be created, a
@@ -84,7 +89,7 @@ use norn_wire::{FindingKind, Severity};
 use crate::counters::SnapshotCounters;
 use crate::ddl;
 use crate::error::{self, StoreError};
-use crate::facts::{LinkFamily, Provenance, StoredPathOrder, TagSource};
+use crate::facts::{DerivationVersion, LinkFamily, Provenance, StoredPathOrder, TagSource};
 use crate::hash;
 use crate::request::Request;
 
@@ -585,20 +590,25 @@ pub struct Store {
     pub(crate) database: Database,
     mode: StoreMode,
     order: StoredPathOrder,
+    derivation: DerivationVersion,
     outcome: OpenOutcome,
     torn_down: bool,
 }
 
 impl Store {
     /// Open, or create, the durable store at `path` for a vault root proven to
-    /// have `order`'s case behaviour.
+    /// have `order`'s case behaviour, whose rows `derivation` writes.
     ///
     /// The parent directory is prepared if it is missing. A database that is not
-    /// the shape this build writes, or whose rows were derived under another
-    /// order, is rebuilt from zero, and [`Store::open_outcome`] says whether
-    /// that happened and why.
-    pub fn open(path: impl AsRef<Path>, order: StoredPathOrder) -> Result<Self, StoreError> {
-        Self::open_in_mode(path.as_ref(), StoreMode::Durable, order)
+    /// the shape this build writes, whose rows were derived under another
+    /// order, or whose rows another derivation wrote, is rebuilt from zero, and
+    /// [`Store::open_outcome`] says whether that happened and why.
+    pub fn open(
+        path: impl AsRef<Path>,
+        order: StoredPathOrder,
+        derivation: DerivationVersion,
+    ) -> Result<Self, StoreError> {
+        Self::open_in_mode(path.as_ref(), StoreMode::Durable, order, derivation)
     }
 
     /// Open, or create, a throwaway store at `path`.
@@ -615,23 +625,33 @@ impl Store {
     pub fn open_throwaway(
         path: impl AsRef<Path>,
         order: StoredPathOrder,
+        derivation: DerivationVersion,
     ) -> Result<Self, StoreError> {
-        Self::open_in_mode(path.as_ref(), StoreMode::Throwaway, order)
+        Self::open_in_mode(path.as_ref(), StoreMode::Throwaway, order, derivation)
     }
 
     fn open_in_mode(
         path: &Path,
         mode: StoreMode,
         order: StoredPathOrder,
+        derivation: DerivationVersion,
     ) -> Result<Self, StoreError> {
-        let (connection, outcome) =
-            norn_db::open(path, &store_schema(), &StoreClient { mode, order })?;
+        let (connection, outcome) = norn_db::open(
+            path,
+            &store_schema(),
+            &StoreClient {
+                mode,
+                order,
+                derivation,
+            },
+        )?;
         let database = Database::adopt(connection, path)?;
         crate::resolve::register_functions(database.connection())?;
         Ok(Store {
             database,
             mode,
             order,
+            derivation,
             outcome,
             torn_down: false,
         })
@@ -678,6 +698,20 @@ impl Store {
     /// order is rebuilt the same way, since nothing vouches for its rows.
     pub fn path_order(&self) -> StoredPathOrder {
         self.order
+    }
+
+    /// The derivation every row this store holds was written by: the version
+    /// the store was opened under.
+    ///
+    /// **It is a rebuild input**, and it is the one no other input sees: a
+    /// derivation that writes different rows for the same bytes leaves the DDL
+    /// fingerprint and the path order where they were, and an increment derives
+    /// a file again only when its bytes move. So the store records the version
+    /// and an open under another one rebuilds from zero, and a store that
+    /// records none, or records a value no build writes, is rebuilt the same way.
+    /// The version is the deriver's; the store knows nothing of what changed.
+    pub fn derivation_version(&self) -> DerivationVersion {
+        self.derivation
     }
 
     /// The rebuild a vault root proven to have `proven`'s case behaviour owes
@@ -1070,12 +1104,15 @@ impl Store {
     /// The store handed back is opened under `order`, which is the case
     /// behaviour its root is proven to have now: a store rebuilt because that
     /// behaviour moved is handed the new one, and one rebuilt for damage is
-    /// handed the order it already had.
+    /// handed the order it already had. It is opened under the derivation
+    /// version this store was, because the deriver's version does not move
+    /// while the build that names it runs.
     pub fn discard_and_reopen(self, order: StoredPathOrder) -> Result<Self, StoreError> {
         let path = self.database.path().to_path_buf();
         let mode = self.mode;
+        let derivation = self.derivation;
         self.discard()?;
-        Self::open_in_mode(&path, mode, order)
+        Self::open_in_mode(&path, mode, order, derivation)
     }
 }
 
@@ -1118,14 +1155,16 @@ fn store_schema() -> norn_db::Schema {
 
 /// What the open ceremony asks this crate, once it has judged the mechanics.
 ///
-/// Three keys are the store's own: the mode, which decides whether the file
-/// outlives the handle, the path order every row was derived under, and the
-/// write generation every derivation draws its stamp from. The ceremony writes
-/// none of them and reads none of them — it hands the create transaction over
-/// for them, and hands the database over to be judged by them.
+/// Four keys are the store's own: the mode, which decides whether the file
+/// outlives the handle, the path order every row was derived under, the
+/// derivation version every row was written by, and the write generation every
+/// derivation draws its stamp from. The ceremony writes none of them and reads
+/// none of them — it hands the create transaction over for them, and hands the
+/// database over to be judged by them.
 struct StoreClient {
     mode: StoreMode,
     order: StoredPathOrder,
+    derivation: DerivationVersion,
 }
 
 /// A value one of the store's own `meta` keys holds, as an open reads it back:
@@ -1198,25 +1237,75 @@ fn path_order_rebuild(recorded: Option<&Recorded>, proven: StoredPathOrder) -> O
     }
 }
 
+/// Judge the derivation version a store records against the one it is opened
+/// under: the reason the store owes a rebuild from zero, naming what it records
+/// and the version the open is under, or `None` where the same derivation wrote
+/// its rows.
+///
+/// A store that records no version owes the rebuild too: nothing says which
+/// derivation wrote its rows. So does a recorded spelling no build writes —
+/// which is every text but the version's own decimal digits — and a recorded
+/// value that is not text.
+fn derivation_rebuild(
+    recorded: Option<&Recorded>,
+    opened_under: DerivationVersion,
+) -> Option<String> {
+    match recorded {
+        Some(Recorded::Text(recorded)) if *recorded == opened_under.recorded() => None,
+        Some(Recorded::Text(recorded)) => Some(format!(
+            "the store's rows were written by derivation version `{recorded}` and this build \
+             derives under `{opened_under}`"
+        )),
+        Some(Recorded::OtherType(kind)) => Some(format!(
+            "the store records its derivation version as a value of type `{kind}`, which no \
+             build writes, and this build derives under `{opened_under}`"
+        )),
+        None => Some(format!(
+            "the store records no derivation version its rows were written by, and this build \
+             derives under `{opened_under}`"
+        )),
+    }
+}
+
 impl norn_db::Client for StoreClient {
     type Error = StoreError;
 
     fn record(&self, transaction: &Connection) -> Result<(), StoreError> {
         norn_db::meta::put_meta(transaction, ddl::meta::STORE_MODE, self.mode.as_str())?;
         norn_db::meta::put_meta(transaction, ddl::meta::PATH_ORDER, self.order.as_str())?;
+        norn_db::meta::put_meta(
+            transaction,
+            ddl::meta::DERIVATION_VERSION,
+            self.derivation.recorded().as_str(),
+        )?;
         norn_db::meta::put_meta(transaction, meta::WRITE_GENERATION, 0_i64)?;
         Ok(())
     }
 
     /// Take the verdict over the store's own keys: the mode, then the path
-    /// order.
+    /// order and the derivation version.
     ///
     /// The mode goes first because it is the one reading an open refuses over,
     /// and a refusal discards nothing: a throwaway open over a durable store
-    /// derived under another order is refused, not rebuilt.
+    /// derived under another order is refused, not rebuilt. The two rebuild
+    /// inputs are both read, and a store where both moved is rebuilt once for a
+    /// reason that names both.
     fn adopt(&self, connection: &Connection, path: &Path) -> Result<Adoption, StoreError> {
         self.adopt_mode(connection, path)?;
-        self.adopt_path_order(connection)
+        let details: Vec<String> = [
+            self.path_order_moved(connection)?,
+            self.derivation_moved(connection)?,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        Ok(if details.is_empty() {
+            Adoption::Keep
+        } else {
+            Adoption::Rebuild {
+                detail: details.join("; "),
+            }
+        })
     }
 
     /// The condition an arrangement armed for this database's creation, which
@@ -1299,12 +1388,22 @@ impl StoreClient {
     /// that is not text, and a database that records no order at all are the
     /// same rebuild: nothing vouches for the order their rows were derived
     /// under.
-    fn adopt_path_order(&self, connection: &Connection) -> Result<Adoption, StoreError> {
+    fn path_order_moved(&self, connection: &Connection) -> Result<Option<String>, StoreError> {
         let recorded = Recorded::read(connection, ddl::meta::PATH_ORDER)?;
-        Ok(match path_order_rebuild(recorded.as_ref(), self.order) {
-            None => Adoption::Keep,
-            Some(detail) => Adoption::Rebuild { detail },
-        })
+        Ok(path_order_rebuild(recorded.as_ref(), self.order))
+    }
+
+    /// Reconcile the derivation a database's rows were written by with the one
+    /// this build derives under.
+    ///
+    /// **A moved derivation is a rebuild, never a refusal**, for the reason a
+    /// moved order is: every row is a projection of the vault, and rows another
+    /// derivation wrote would answer differently from rows this one writes for
+    /// the same bytes, until each file was edited. An absent row, a spelling no
+    /// build writes and a value that is not text are the same rebuild.
+    fn derivation_moved(&self, connection: &Connection) -> Result<Option<String>, StoreError> {
+        let recorded = Recorded::read(connection, ddl::meta::DERIVATION_VERSION)?;
+        Ok(derivation_rebuild(recorded.as_ref(), self.derivation))
     }
 }
 
@@ -1332,6 +1431,7 @@ mod tests {
         let mut store = Store::open(
             scratch.join("derived").join("store.sqlite3"),
             StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
         )
         .expect("a store opens");
 
@@ -1378,6 +1478,7 @@ mod tests {
         let store = Store::open(
             scratch.join("derived").join("store.sqlite3"),
             StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
         )
         .expect("a store opens");
         let reader = Arc::new(
@@ -1420,6 +1521,7 @@ mod tests {
         let store = Store::open(
             scratch.join("derived").join("store.sqlite3"),
             StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
         )
         .expect("a store opens");
         let reader = Arc::new(
@@ -1460,6 +1562,7 @@ mod tests {
         let store = Store::open(
             scratch.join("derived").join("store.sqlite3"),
             StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
         )
         .expect("a store opens");
         let reader = Arc::new(
@@ -1528,6 +1631,7 @@ mod tests {
         let mut store = Store::open(
             scratch.join("derived").join("store.sqlite3"),
             StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
         )
         .expect("a store opens");
         write_one_document(&mut store, "notes/first.md", "the interloper walked in");
@@ -1600,6 +1704,7 @@ mod tests {
         let mut store = Store::open(
             scratch.join("derived").join("store.sqlite3"),
             StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
         )
         .expect("a store opens");
         write_one_document(&mut store, "notes/first.md", "the interloper walked in");

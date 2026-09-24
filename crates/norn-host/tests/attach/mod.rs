@@ -263,7 +263,8 @@ impl Vault {
 
     /// The derived store, opened directly.
     pub fn store(&self) -> Store {
-        Store::open(self.database(), self.order).expect("open the derived store")
+        Store::open(self.database(), self.order, norn_host::DERIVATION_VERSION)
+            .expect("open the derived store")
     }
 
     /// A host serving this vault, holding the real-watcher lease for as long

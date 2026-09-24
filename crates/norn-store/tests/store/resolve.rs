@@ -32,7 +32,8 @@ struct Vault {
 impl Vault {
     fn holding(label: &str, order: StoredPathOrder, paths: &[&str]) -> Self {
         let scratch = Scratch::new(label);
-        let mut store = Store::open(scratch.database(), order).expect("opening a store");
+        let mut store = Store::open(scratch.database(), order, crate::common::DERIVATION)
+            .expect("opening a store");
         store
             .begin_request()
             .pin_vault_schema(SCHEMA.as_bytes(), SCHEMA)

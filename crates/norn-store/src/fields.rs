@@ -53,6 +53,7 @@ use std::sync::Arc;
 use norn_wire::{Facet, FacetKind, FieldType, PathRuleKind, Pattern, TagStance};
 
 use crate::json::{FrontmatterValue, float_text};
+use crate::path::DocumentPath;
 use crate::resolve::AmbiguityIgnore;
 
 /// The container a key's value sits in, as its presence row records it.
@@ -102,6 +103,11 @@ pub enum FieldRow {
     Presence {
         key: String,
         container: FieldContainer,
+        /// The document's own path, copied onto the row so it can be ordered
+        /// and compared by path without a join to `documents` — see
+        /// `document_fields`'s DDL comment. A pure function of the document
+        /// the row belongs to, never of the key or the value.
+        path: String,
     },
     /// One scalar the document carries under `key`.
     Value {
@@ -119,6 +125,9 @@ pub enum FieldRow {
         least_raw: bool,
         /// Whether this is the key's least value under the typed order.
         least_typed: bool,
+        /// The document's own path, copied for the reason [`FieldRow::Presence`]'s
+        /// carries it.
+        path: String,
     },
 }
 
@@ -138,6 +147,13 @@ impl FieldRow {
             FieldRow::Value { ordinal, .. } => *ordinal,
         }
     }
+
+    /// The document's own path, as this row's copy of it reads.
+    pub fn path(&self) -> &str {
+        match self {
+            FieldRow::Presence { path, .. } | FieldRow::Value { path, .. } => path,
+        }
+    }
 }
 
 /// Every field row one document derives, in key order and, under a key, in
@@ -153,8 +169,12 @@ pub struct FieldRows {
 
 impl FieldRows {
     /// The rows `frontmatter` derives, with the typed values `declared` gives
-    /// them.
-    pub fn derive(frontmatter: Option<&FrontmatterValue>, declared: &ContentModel) -> Self {
+    /// them, each row carrying `path` as its copy of the document's own path.
+    pub fn derive(
+        path: &DocumentPath,
+        frontmatter: Option<&FrontmatterValue>,
+        declared: &ContentModel,
+    ) -> Self {
         let Some(FrontmatterValue::Map(entries)) = frontmatter else {
             return FieldRows::default();
         };
@@ -180,6 +200,7 @@ impl FieldRows {
             rows.push(FieldRow::Presence {
                 key: key.to_string(),
                 container,
+                path: path.as_str().to_string(),
             });
             let order = declared.typed_order(key);
             let typed: Vec<Option<String>> = scalars
@@ -198,6 +219,7 @@ impl FieldRows {
                     typed,
                     least_raw: least_raw == Some(index),
                     least_typed: least_typed == Some(index),
+                    path: path.as_str().to_string(),
                 });
             }
         }
