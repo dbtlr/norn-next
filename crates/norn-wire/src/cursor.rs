@@ -90,7 +90,7 @@ pub enum FacetKind {
     ObservedField,
     /// A tag the vault's schema declares.
     DeclaredTag,
-    /// A folder in the vault.
+    /// A folder the vault's schema declares.
     Folder,
     /// A path rule the vault's schema states.
     PathRule,

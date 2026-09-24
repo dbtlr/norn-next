@@ -86,7 +86,8 @@ impl Snapshot {
 
     /// Refuse `declared` where it was read from another schema than the
     /// snapshot pins, so every typed order a request compiles under is the
-    /// one the typed column holds.
+    /// one the typed column holds, and every declared facet a describe answers
+    /// is the pinned schema's.
     pub(crate) fn declaration_pinned(
         &self,
         declared: &ContentModel,

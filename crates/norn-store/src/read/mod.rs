@@ -180,7 +180,8 @@ pub enum PageRefusal {
     UnreadableBound { key: String, value: String },
     /// The declaration the request was compiled under was read from a schema
     /// other than the one the snapshot pins, so its typed orders are not the
-    /// ones the typed column holds. Each fingerprint is `None` for no schema.
+    /// ones the typed column holds, and the facets it declares are not the
+    /// pinned schema's. Each fingerprint is `None` for no schema.
     DeclarationNotPinned {
         declared_under: Option<String>,
         pinned: Option<String>,
