@@ -53,6 +53,9 @@
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
+//! - [`Resolution`] — the one resolver: a target compiled for its root, over
+//!   the suffix key the root's proven case behaviour selects and less the
+//!   places its schema's ambiguity-ignore set names.
 //!
 //! # The shapes the API is built out of
 //!

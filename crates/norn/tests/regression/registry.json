@@ -370,9 +370,10 @@
       "sources": ["NRN-a63", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "the indexed half of the shape exists: crates/norn-store/src/path.rs reverses a path into the suffix key the resolution ladder is indexed by, so a candidate lookup is a range over that key rather than a fold over the vault. The resolver this control is about does not exist — nothing answers a target string, because crates/norn-serve is not in the workspace and no verb carries a target — so there is nothing to hold to the shape or to prove equivalent to the whole-vault fold it replaces.",
+        "reason": "the indexed half of the shape exists: crates/norn-store/src/path.rs reverses a path into the suffix key the resolution ladder is indexed by, raw and folded by ASCII case, and crates/norn-store/src/resolve.rs compiles a target into one range seek per reduction over the key its root probes, so a candidate lookup is a range rather than a fold over the vault. What the control holds a resolver to has no subject: no verb resolves a target string to its document, because crates/norn-serve is not in the workspace, so there is no per-target cost to bound and no answer to prove equivalent to the whole-vault fold it replaces.",
         "grounds": [
           { "present": "crates/norn-store/src/path.rs" },
+          { "present": "crates/norn-store/src/resolve.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -719,7 +720,7 @@
       "sources": ["NRN-266", "NRN-524"],
       "binding": {
         "status": "dormant",
-        "reason": "the relation exists and is stated once: crates/norn-fs/src/path.rs folds ASCII case only where a directory entry proves the root treats two spellings as one, and crates/norn-store/src/path.rs carries that same folding into the order derived rows are paged in. The sites the property is about are the ones that do not exist: selection, verification, subtree and collision checks all belong to a move, and no move exists because crates/norn-serve is not in the workspace — so there is no second comparison site to fold asymmetrically and no deduplicated survivor to carry a directory entry's spelling.",
+        "reason": "the relation exists and is stated once: crates/norn-fs/src/path.rs folds ASCII case only where a directory entry proves the root treats two spellings as one, and crates/norn-store/src/path.rs carries that same folding into the order derived rows are paged in and into the folded suffix key a folding root resolves targets by. The sites the property is about are the ones that do not exist: selection, verification, subtree and collision checks all belong to a move, and no move exists because crates/norn-serve is not in the workspace — so there is no second comparison site to fold asymmetrically and no deduplicated survivor to carry a directory entry's spelling.",
         "grounds": [
           { "present": "crates/norn-fs/src/path.rs" },
           { "present": "crates/norn-store/src/path.rs" },
@@ -735,10 +736,11 @@
       "sources": ["NRN-122", "NRN-123", "NRN-124", "NRN-57", "NRN-216", "NRN-167", "NRN-168", "NRN-440", "NRN-510"],
       "binding": {
         "status": "dormant",
-        "reason": "the indexed half of a resolver exists: crates/norn-store/src/path.rs reduces a suffix target to the prefix its candidates share, crates/norn-store/src/ddl/documents.rs indexes the key it probes, crates/norn-store/src/read/conjunction.rs enumerates a target's ambiguity class through that same probe as a find's resolves part, and crates/norn-wire/src/finding.rs already spells what an ambiguous answer looks like — a bounded head of candidates with its total. Nothing resolves a target to one document: crates/norn-serve is not in the workspace, so no verb resolves, no candidate set is refused with its candidates named, and no plan is built from a resolved path.",
+        "reason": "the indexed half of a resolver exists and is one: crates/norn-store/src/path.rs reduces a suffix target to the prefix its candidates share, crates/norn-store/src/ddl/documents.rs indexes the raw and folded keys it probes, crates/norn-store/src/resolve.rs compiles a target for its root — the key its proven case behaviour selects, less the places its schema ignores — and crates/norn-store/src/read/conjunction.rs enumerates a target's ambiguity class through that resolver as a find's resolves part, and crates/norn-wire/src/finding.rs already spells what an ambiguous answer looks like — a bounded head of candidates with its total. Nothing resolves a target to one document: crates/norn-serve is not in the workspace, so no verb resolves, no candidate set is refused with its candidates named, and no plan is built from a resolved path.",
         "grounds": [
           { "present": "crates/norn-store/src/path.rs" },
           { "present": "crates/norn-store/src/ddl/documents.rs" },
+          { "present": "crates/norn-store/src/resolve.rs" },
           { "present": "crates/norn-store/src/read/conjunction.rs" },
           { "present": "crates/norn-wire/src/finding.rs" },
           { "absent": "crates/norn-serve" }

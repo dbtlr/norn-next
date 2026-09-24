@@ -52,12 +52,12 @@
 //! one other lookup index here is `document_tags_name`, which a find's tag
 //! part seeks and its bar judges.
 //!
-//! Raw also means **unfolded**: `links.target` is compared under `BINARY`, and
-//! `documents` folds nothing either, so the two sides agree about what a name
-//! is by both leaving it alone. If case or normalization folding ever enters
-//! the resolution grammar, the shape is a derived `target_key` beside `target`
-//! and a folded `suffix_key` beside the raw one — a DDL edit, which pre-release
-//! costs a rebuild and nothing else.
+//! Raw also means **unfolded**: `links.target` is compared under `BINARY`.
+//! Case folding is in the resolution grammar on a root that folds ASCII case,
+//! and `documents` carries it as a folded suffix key beside the raw one; the
+//! link side's counterpart, when the link index lands, is a derived
+//! `target_key` beside `target` — a DDL edit, which pre-release costs a rebuild
+//! and nothing else.
 //!
 //! # `headings` is addressed two ways
 //!

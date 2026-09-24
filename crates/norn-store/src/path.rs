@@ -36,7 +36,10 @@
 //!   lets one index answer both.
 //! - **Bytes are compared as bytes.** Case, dot-prefix and separator
 //!   normalization belong to the filesystem seam, which is the workspace's one
-//!   path-spelling normalization point. The store therefore requires a
+//!   path-spelling normalization point. Where the root proves it folds ASCII
+//!   case, a probe ranges over the **folded** suffix key instead — the same
+//!   encoding with `A`-`Z` folded onto `a`-`z`, stored beside the raw one — and
+//!   compares those bytes as bytes ([`SuffixKey`], [`SuffixProbe::folded`]). The store therefore requires a
 //!   normalized path and refuses one that is obviously not — but it spells no
 //!   path differently from the way it arrived, so nothing here can disagree
 //!   with the seam about what two paths are. Where a read has to compare
@@ -272,8 +275,9 @@ impl DocumentPath {
         &self.suffix_key
     }
 
-    /// The suffix key with ASCII case folded: the key a probe ranges over on a
-    /// root that proves it folds case. See [`fold_ascii_case`].
+    /// The suffix key with ASCII case folded — `A`-`Z` onto `a`-`z`, every
+    /// other character as itself — which is the key a probe ranges over on a
+    /// root that proves it folds case.
     pub fn folded_suffix_key(&self) -> &str {
         &self.folded_suffix_key
     }

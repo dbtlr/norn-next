@@ -73,9 +73,16 @@
 //! # Full candidate enumeration is a query, and it is indexed
 //!
 //! The head is a head *because* the full list stays reachable. It is not a
-//! table: it is a range scan over `documents(suffix_key)` keyed by a class the
-//! finding is in, which costs the class rather than the vault and returns the
-//! class as it stands rather than as it stood.
+//! table: it is a range scan over the suffix key the root probes — raw, or
+//! folded by ASCII case — keyed by a class the finding is in, which costs the
+//! class rather than the vault and returns the class as it stands rather than
+//! as it stood. The scan is the one resolver's ([`crate::Resolution`]), so a
+//! finding's class is the class a find's `resolves` part reads on that root.
+//!
+//! A finding's class keys are spelled in the key space its root probes, and a
+//! changed path names its class in both — see
+//! [`crate::IncrementOutcome::affected_classes`] — so maintenance reaches a
+//! finding whichever space it was filed in.
 //!
 //! # Ambiguity classes, and why maintenance is scoped by class
 //!

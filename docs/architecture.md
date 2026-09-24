@@ -659,8 +659,8 @@ and subject-scoped findings discards — the subject discard in both the whole f
 form narrowed to the kinds a producer re-derives — the clear a schema pin runs over the
 field projection's typed values, the page a walk reads its scope's unaccounted finding
 subjects through, the ordered document page a heal merges its walk against, the four enumerations a caller drains
-a whole pillar through — the findings table, the tombstones, every row's stored suffix key
-beside the path that has to produce it, and the vocabulary the full-text index holds — and
+a whole pillar through — the findings table, the tombstones, every row's stored suffix keys,
+raw and folded, beside the path that has to produce them, and the vocabulary the full-text index holds — and
 the two drains a lane-2 consumer ([ADR
 0021](decisions/0021-derived-indexes-split-into-two-lanes.md)) reads change through: the
 live document rows, and the recorded deaths — and the ten keyed point reads: the document
@@ -771,7 +771,8 @@ on the rows its own subquery reads: equality, inequality and membership on `(key
 on `(key, typed)` where the key carries a typed order; presence and absence on the presence
 rows; a `before` or `after` bound on the order's value column; full text through the index's
 own `MATCH` selection; a path glob on the range its literal prefix opens in the path index;
-a resolution target on each suffix range its class opens; a tag by name; and a finding by
+a resolution target on each suffix range its class opens, over the raw suffix key where the
+root tells spellings apart and the folded one where it folds ASCII case; a tag by name; and a finding by
 kind under the active fingerprint. The full-text match shape is barred as that filter, and
 suffix/stem resolve and findings-for-path are read through statements the seam above bars;
 findings-for-path is also a validate narrowed by a path part, below.
@@ -1576,6 +1577,19 @@ grammar across every target surface: CLI, MCP, wikilinks, filters. It is express
 builder with its own `EXPLAIN` bar and index support. Candidates emit as minimal
 disambiguating suffixes, and the findings pillar indexes full candidate enumeration so the
 wire's bounded head stays a head rather than becoming the query surface.
+
+**One resolver compiles a target for its root**, and every surface that reads a class reads
+it through that one: a find's `resolves` part, a class read, and the class a finding is filed
+under. Case is the root's: the coverage proves the root's case behaviour when it is installed,
+the entry retains the proof, and a read's hold hands it to the snapshot, so no read detects it.
+Every store holds each document's suffix key twice — as written, and with ASCII case folded —
+each under its own index; a root that tells spellings apart probes the raw key and never the
+folded one, and a root that folds ASCII case probes the folded key, where every spelling of a
+target is one class and an exact-case match takes no precedence. The vault schema's
+ambiguity-ignore globs keep the places under them out of a class unless the target names the
+ignored place: a one-segment target never does, and a longer target does where its segments
+reach that place. Class-scoped findings maintenance names a changed path's class in both key
+spaces, so a finding filed under either is re-decided when a document joins or leaves it.
 
 The links table stores **syntactic facts only** — raw target, family, protocol, title, span —
 and resolution runs at query time through this one grammar; resolved edges are never stored,
