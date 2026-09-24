@@ -2673,9 +2673,7 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
         // The class the document is in is one of the finding's, which is what
         // makes a change to that document reach it.
         assert!(
-            probe
-                .class_keys()
-                .contains(&subject.class_key_in(norn_store::SuffixKey::Raw)),
+            probe.class_keys().contains(&request.class_key_of(&subject)),
             "a finding about `{target}` is not in the class `{at}` is in"
         );
         let stored = request
@@ -2794,10 +2792,7 @@ fn a_deleted_paths_class_is_still_computable_from_its_tombstone() {
         .stored_tombstone(&subject)
         .expect("reading a tombstone")
         .expect("a tombstone");
-    assert_eq!(
-        tombstone.path.class_key_in(norn_store::SuffixKey::Raw),
-        class("glossary/")
-    );
+    assert_eq!(request.class_key_of(&tombstone.path), class("glossary/"));
     assert_eq!(tombstone.path.suffix_key(), "glossary/norn/docs/");
 
     // And that class reaches the findings a deletion has to revisit.

@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use norn_store::{
-    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, StoreError, SuffixKey, suffix_probe,
+    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, StoreError, suffix_probe,
 };
 
 /// The one range a single-reduction probe opens.
@@ -31,6 +31,15 @@ fn prefixes(target: &str) -> Vec<String> {
         .ranges()
         .map(|(lower, _)| lower.to_string())
         .collect()
+}
+
+/// The raw class key a document's own stem opens: its stem with the
+/// terminating separator, unfolded. This is the form `class_key_in` builds
+/// for `SuffixKey::Raw` — crate-private, because a store mints one under its
+/// own path order through `Request::class_key_of` — so a test that wants the
+/// raw form on its own reconstructs it from the stem, which is public.
+fn raw_class_key(stem: &str) -> ClassKey {
+    ClassKey::new(&format!("{stem}/")).expect("a class key")
 }
 
 /// Every ambiguity class a probe names, in the set's own order.
@@ -383,7 +392,7 @@ fn a_target_that_is_not_a_suffix_address_is_refused() {
 #[test]
 fn a_class_key_is_the_stem_with_the_separator() {
     let document = DocumentPath::new("docs/norn/glossary.md").expect("a document path");
-    assert_eq!(document.class_key_in(SuffixKey::Raw).as_str(), "glossary/");
+    assert_eq!(raw_class_key(document.stem()).as_str(), "glossary/");
 
     let class = suffix_probe("glossary").expect("a class stem");
     assert_eq!(class.range_count(), 1);
@@ -398,7 +407,7 @@ fn a_class_key_is_the_stem_with_the_separator() {
         let probe = suffix_probe(target).expect("a suffix target");
         for (lower, _) in probe.ranges() {
             assert!(
-                lower.starts_with(document.class_key_in(SuffixKey::Raw).as_str()),
+                lower.starts_with(raw_class_key(document.stem()).as_str()),
                 "`{target}` is outside the class of `{}`",
                 document.as_str()
             );
@@ -429,7 +438,7 @@ fn a_class_key_is_the_stem_with_the_separator() {
             suffix_probe(target)
                 .expect("a suffix target")
                 .class_keys()
-                .contains(&document.class_key_in(SuffixKey::Raw)),
+                .contains(&raw_class_key(document.stem())),
             "`{target}` does not name the class `{at}` is in"
         );
     }

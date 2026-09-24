@@ -318,7 +318,12 @@ impl DocumentPath {
     /// Class-scoped maintenance reaches a finding through the class key its
     /// producer recorded, which is spelled in the key space the root probes,
     /// so a change to this document names its class in that space.
-    pub fn class_key_in(&self, key: SuffixKey) -> ClassKey {
+    ///
+    /// Crate-private: the key space a class key is spelled in is the store's
+    /// to choose, never a caller's, so the only door out of `norn-store` is
+    /// [`crate::Request::class_key_of`], which reads the store's own path
+    /// order rather than taking one.
+    pub(crate) fn class_key_in(&self, key: SuffixKey) -> ClassKey {
         let stem = match key {
             SuffixKey::Raw => self.stem.clone(),
             SuffixKey::Folded => fold_ascii_case(&self.stem),
@@ -386,7 +391,8 @@ impl DirectoryPrefix {
 /// range covers, so a finding stored under one is at rest and permanently
 /// invisible to the maintenance that owns its lifecycle.
 ///
-/// It is produced by [`DocumentPath::class_key_in`] and
+/// It is produced by `DocumentPath::class_key_in` (crate-private; a store
+/// mints one through [`crate::Request::class_key_of`]) and
 /// [`SuffixProbe::class_keys`], which is where the two sides of resolution mint
 /// the same form.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

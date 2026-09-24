@@ -493,7 +493,7 @@ fn a_document_leaving_a_class_takes_the_findings_filed_under_it() {
         );
         assert_eq!(
             left.affected_classes,
-            BTreeSet::from([path(leaving).class_key_in(SuffixKey::under(order))]),
+            BTreeSet::from([request.class_key_of(&path(leaving))]),
             "the classes a change names under {order:?}"
         );
     }

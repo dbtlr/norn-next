@@ -1151,6 +1151,18 @@ impl<'a> Request<'a> {
         Ok(crate::path::class_probe(stem)?.in_space(SuffixKey::under(self.store.path_order())))
     }
 
+    /// The key of the ambiguity class `path` belongs to, in the key space the
+    /// store's path order selects.
+    ///
+    /// The order is the store's, the same one [`Request::class_probe`] and
+    /// [`Request::target_class`] read it under: minting a class key in a space
+    /// the store's root does not probe would name a class no finding here is
+    /// ever filed under, so this is the one door a document's own class key
+    /// leaves the crate through.
+    pub fn class_key_of(&self, path: &DocumentPath) -> ClassKey {
+        path.class_key_in(SuffixKey::under(self.store.path_order()))
+    }
+
     /// Every document in the class a target names, in suffix-key order.
     ///
     /// The full candidate enumeration behind a finding's bounded head, and the
