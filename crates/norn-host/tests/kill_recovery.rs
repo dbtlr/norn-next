@@ -125,7 +125,12 @@ fn tear_increment() -> ! {
     let database =
         PathBuf::from(std::env::var_os(DATABASE_ENV).expect("database passed to child process"));
     let vault = PathBuf::from(std::env::var_os(VAULT_ENV).expect("vault passed to child process"));
-    let mut store = Store::open(database, proven_order(&vault)).expect("open seeded derived store");
+    let mut store = Store::open(
+        database,
+        proven_order(&vault),
+        norn_host::DERIVATION_VERSION,
+    )
+    .expect("open seeded derived store");
     norn_store::induced_failure::abort_after_changeset_entries(2);
     let changes = ["a.md", "b.md", "c.md"].map(|path| {
         Change::Upsert(DocumentFacts::new(
@@ -184,7 +189,8 @@ fn proven_order(vault: &Path) -> StoredPathOrder {
 }
 
 fn read_rows(database: &Path, vault: &Path) -> Vec<norn_store::StoredDocument> {
-    let mut store = Store::open(database, proven_order(vault)).expect("open derived store");
+    let mut store = Store::open(database, proven_order(vault), norn_host::DERIVATION_VERSION)
+        .expect("open derived store");
     store
         .begin_request()
         .stored_documents_after_ordered(None, 16, StoredPathOrder::Sensitive)

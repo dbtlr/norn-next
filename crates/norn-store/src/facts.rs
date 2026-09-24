@@ -414,6 +414,42 @@ impl StoredPathOrder {
     }
 }
 
+/// The derivation a store's rows were written by, as the deriver names it.
+///
+/// **It is a rebuild input beside the DDL fingerprint and the path order.** A
+/// store records the version it was created under, and an open under another
+/// one rebuilds from zero ([`crate::Store::derivation_version`]): rows another
+/// derivation wrote for the same input are not rows this one would write, and
+/// no increment converges them, because an increment derives a file again only
+/// when its bytes move.
+///
+/// The number is the deriver's and it is opaque here: this crate records it
+/// and compares it, and knows nothing of what changed between two of them.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DerivationVersion(u32);
+
+impl DerivationVersion {
+    pub const fn new(version: u32) -> Self {
+        DerivationVersion(version)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The spelling a store records the version by: its decimal digits, with no
+    /// leading zero.
+    pub(crate) fn recorded(self) -> String {
+        self.0.to_string()
+    }
+}
+
+impl std::fmt::Display for DerivationVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
 /// A document's row and every fact row derived from it, in ordinal order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredFacts {

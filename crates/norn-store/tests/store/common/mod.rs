@@ -52,6 +52,11 @@ pub fn snapshot(counters: &DerivationCounters) -> CounterSnapshot {
     counters.readings().collect()
 }
 
+/// The derivation version every store this suite opens is opened under. The
+/// store records and compares it and reads nothing else into it, so one value
+/// serves every case that is not about the version itself.
+pub const DERIVATION: norn_store::DerivationVersion = norn_store::DerivationVersion::new(1);
+
 /// A store's database under a directory that lasts one test.
 ///
 /// The naming and the removal are [`norn_testkit::scratch::Scratch`]'s; what
@@ -75,8 +80,12 @@ impl Scratch {
     }
 
     pub fn open(&self) -> Store {
-        Store::open(self.database(), norn_store::StoredPathOrder::Sensitive)
-            .expect("opening a store")
+        Store::open(
+            self.database(),
+            norn_store::StoredPathOrder::Sensitive,
+            crate::common::DERIVATION,
+        )
+        .expect("opening a store")
     }
 }
 

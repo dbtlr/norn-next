@@ -483,6 +483,7 @@ mod tests {
             let store = Store::open_throwaway(
                 scratch.join("derived").join("store.sqlite3"),
                 StoredPathOrder::Sensitive,
+                crate::DerivationVersion::new(1),
             )
             .expect("a store opens");
             store

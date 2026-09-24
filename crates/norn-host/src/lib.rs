@@ -15,6 +15,7 @@ mod registry;
 mod reload;
 mod semantic;
 
+pub use derivation::DERIVATION_VERSION;
 /// **The harness-reachable readers of a host's own account.** Every job writes
 /// the account whatever features are on; reading it is what this feature opens,
 /// beside [`ProductionEntryOps::account`], [`Host::classifications`] and

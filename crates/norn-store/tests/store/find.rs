@@ -177,7 +177,8 @@ impl Seeded {
 
     fn with_bulk_under(label: &str, bulk: usize, order: StoredPathOrder) -> Self {
         let scratch = Scratch::new(label);
-        let mut store = Store::open(scratch.database(), order).expect("opening a store");
+        let mut store = Store::open(scratch.database(), order, crate::common::DERIVATION)
+            .expect("opening a store");
         seed(&mut store);
         let declared = declared();
         let documents: Vec<_> = (0..bulk)
