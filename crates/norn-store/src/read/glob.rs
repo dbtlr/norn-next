@@ -19,7 +19,7 @@ use crate::path::prefix_successor;
 /// The name a statement calls the glob match by: `norn_glob(pattern, path)`.
 pub(crate) const GLOB_FUNCTION: &str = "norn_glob";
 
-/// Register the functions the find builder's statements call on a read
+/// Register the functions a read builder's statements call on a read
 /// connection.
 ///
 /// The glob match is **deterministic** — its answer is a function of its two

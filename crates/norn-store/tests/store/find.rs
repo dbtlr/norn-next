@@ -15,10 +15,10 @@ use std::sync::Arc;
 
 use crate::common::{Scratch, document, violation, write_documents};
 use norn_store::{
-    BlockFact, DEFAULT_PAGE, DeclaredFields, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindBound,
-    FindFilter, FindPlan, FindRefusal, FindStatement, Found, FrontmatterValue, HeadingFact,
-    IN_VALUES_CEILING, MAX_PAGE, NESTED_ROW_CEILING, Nested, PageDirection, Snapshot,
-    SnapshotReader, Span, Store, StoreError, TagFact, TagSource, TypedOrder, induced_failure,
+    BlockFact, DEFAULT_PAGE, DeclaredFields, FIND_STATEMENTS, FieldOrder, FindPlan, FindStatement,
+    Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, MAX_PAGE, NESTED_ROW_CEILING, Nested,
+    PageDirection, PageRefusal, READ_FILTERS, ReadBound, ReadFilter, Snapshot, SnapshotReader,
+    Span, Store, StoreError, TagFact, TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -316,7 +316,7 @@ fn plan_of(plans: &[FindPlan], statement: FindStatement) -> QueryPlan {
 /// subquery and the page itself both search `documents`. A bar about the
 /// filter is judged on the filter's rows alone, and the alias is what binds
 /// them.
-fn rows_of(plan: &QueryPlan, alias: &str) -> QueryPlan {
+pub(crate) fn rows_of(plan: &QueryPlan, alias: &str) -> QueryPlan {
     QueryPlan::new(
         plan.sql(),
         plan.rows()
@@ -329,7 +329,7 @@ fn rows_of(plan: &QueryPlan, alias: &str) -> QueryPlan {
 
 /// The panic `bar` raises, which a negative control requires it to raise. The
 /// message is printed, so a run shows what the bar says when it fails.
-fn failure_of(control: &str, bar: impl FnOnce()) -> String {
+pub(crate) fn failure_of(control: &str, bar: impl FnOnce()) -> String {
     let failure = catch_unwind(AssertUnwindSafe(bar)).expect_err(&format!(
         "the bar held under its negative control: {control}"
     ));
@@ -371,41 +371,41 @@ fn statement_barred_by(statement: FindStatement) -> &'static str {
 
 /// Which test bars each filter the builder names. Exhaustive for the reason
 /// [`statement_barred_by`] is.
-fn filter_barred_by(filter: FindFilter) -> &'static str {
+fn filter_barred_by(filter: ReadFilter) -> &'static str {
     match filter {
-        FindFilter::Equal(_)
-        | FindFilter::NotEqual(_)
-        | FindFilter::Member(_)
-        | FindFilter::Present
-        | FindFilter::Absent
-        | FindFilter::Before(_)
-        | FindFilter::After(_)
-        | FindFilter::FullText
-        | FindFilter::PathGlob
-        | FindFilter::Resolves
-        | FindFilter::Tag
-        | FindFilter::Finding => "every_filter_seeks_the_index_its_values_are_bounds_for",
+        ReadFilter::Equal(_)
+        | ReadFilter::NotEqual(_)
+        | ReadFilter::Member(_)
+        | ReadFilter::Present
+        | ReadFilter::Absent
+        | ReadFilter::Before(_)
+        | ReadFilter::After(_)
+        | ReadFilter::FullText
+        | ReadFilter::PathGlob
+        | ReadFilter::Resolves
+        | ReadFilter::Tag
+        | ReadFilter::Finding => "every_filter_seeks_the_index_its_values_are_bounds_for",
     }
 }
 
 /// Every form a filter slot takes: a filter that compares values compares
 /// under either order, and each order is a form its bar has to probe.
-/// Exhaustive, so a filter added to [`FindFilter`] names its forms here.
-fn forms_of(filter: FindFilter) -> Vec<FindFilter> {
+/// Exhaustive, so a filter added to [`ReadFilter`] names its forms here.
+fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
     let orders = [FieldOrder::Raw, FieldOrder::Typed];
     match filter {
-        FindFilter::Equal(_) => orders.map(FindFilter::Equal).to_vec(),
-        FindFilter::NotEqual(_) => orders.map(FindFilter::NotEqual).to_vec(),
-        FindFilter::Member(_) => orders.map(FindFilter::Member).to_vec(),
-        FindFilter::Before(_) => orders.map(FindFilter::Before).to_vec(),
-        FindFilter::After(_) => orders.map(FindFilter::After).to_vec(),
-        FindFilter::Present
-        | FindFilter::Absent
-        | FindFilter::FullText
-        | FindFilter::PathGlob
-        | FindFilter::Resolves
-        | FindFilter::Tag
-        | FindFilter::Finding => vec![filter],
+        ReadFilter::Equal(_) => orders.map(ReadFilter::Equal).to_vec(),
+        ReadFilter::NotEqual(_) => orders.map(ReadFilter::NotEqual).to_vec(),
+        ReadFilter::Member(_) => orders.map(ReadFilter::Member).to_vec(),
+        ReadFilter::Before(_) => orders.map(ReadFilter::Before).to_vec(),
+        ReadFilter::After(_) => orders.map(ReadFilter::After).to_vec(),
+        ReadFilter::Present
+        | ReadFilter::Absent
+        | ReadFilter::FullText
+        | ReadFilter::PathGlob
+        | ReadFilter::Resolves
+        | ReadFilter::Tag
+        | ReadFilter::Finding => vec![filter],
     }
 }
 
@@ -459,19 +459,19 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
         assert_eq!(statement.slot(), slot, "{statement:?} claims another slot");
     }
 
-    let filters: Vec<FindFilter> = filter_bars().iter().map(|bar| bar.shape).collect();
+    let filters: Vec<ReadFilter> = filter_bars().iter().map(|bar| bar.shape).collect();
     let mut filter_slots: Vec<usize> = filters.iter().map(|filter| filter.slot()).collect();
     filter_slots.sort_unstable();
     assert_eq!(
         filter_slots,
-        (0..FIND_FILTERS).collect::<Vec<usize>>(),
+        (0..READ_FILTERS).collect::<Vec<usize>>(),
         "the filter bar does not judge every filter slot exactly once: {filters:?}"
     );
-    for (slot, filter) in FindFilter::all().into_iter().enumerate() {
+    for (slot, filter) in ReadFilter::all().into_iter().enumerate() {
         assert_eq!(filter.slot(), slot, "{filter:?} claims another slot");
     }
     for bar in filter_bars() {
-        let mut probed: Vec<FindFilter> = Vec::new();
+        let mut probed: Vec<ReadFilter> = Vec::new();
         for (_, form, _) in &bar.probes {
             if !probed.contains(form) {
                 probed.push(*form);
@@ -1032,8 +1032,8 @@ enum Seek {
 
 /// One filter slot, and the parts of a request that spell it.
 struct FilterBar {
-    shape: FindFilter,
-    probes: Vec<(Predicate, FindFilter, Seek)>,
+    shape: ReadFilter,
+    probes: Vec<(Predicate, ReadFilter, Seek)>,
 }
 
 /// A seek of `document_fields` under `alias`.
@@ -1053,109 +1053,109 @@ fn filter_bars() -> Vec<FilterBar> {
     let target = |text: &str| ResolutionTarget::new(text).expect("a target");
     vec![
         FilterBar {
-            shape: FindFilter::Equal(FieldOrder::Raw),
+            shape: ReadFilter::Equal(FieldOrder::Raw),
             probes: vec![
                 (
                     Predicate::equal_to("status", "open"),
-                    FindFilter::Equal(FieldOrder::Raw),
+                    ReadFilter::Equal(FieldOrder::Raw),
                     field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
                 ),
                 (
                     Predicate::equal_to("count", "9"),
-                    FindFilter::Equal(FieldOrder::Typed),
+                    ReadFilter::Equal(FieldOrder::Typed),
                     field_seek("fv", "document_fields_typed", "(key=? AND typed=?)"),
                 ),
             ],
         },
         FilterBar {
-            shape: FindFilter::NotEqual(FieldOrder::Raw),
+            shape: ReadFilter::NotEqual(FieldOrder::Raw),
             probes: vec![
                 (
                     Predicate::not_equal_to("status", "open"),
-                    FindFilter::NotEqual(FieldOrder::Raw),
+                    ReadFilter::NotEqual(FieldOrder::Raw),
                     field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
                 ),
                 (
                     Predicate::not_equal_to("count", "9"),
-                    FindFilter::NotEqual(FieldOrder::Typed),
+                    ReadFilter::NotEqual(FieldOrder::Typed),
                     field_seek("fv", "document_fields_typed", "(key=? AND typed=?)"),
                 ),
             ],
         },
         FilterBar {
-            shape: FindFilter::Member(FieldOrder::Raw),
+            shape: ReadFilter::Member(FieldOrder::Raw),
             probes: vec![
                 (
                     Predicate::in_any("status", ["open".to_string(), "done".to_string()]),
-                    FindFilter::Member(FieldOrder::Raw),
+                    ReadFilter::Member(FieldOrder::Raw),
                     field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
                 ),
                 (
                     Predicate::in_any("count", ["3".to_string(), "9".to_string()]),
-                    FindFilter::Member(FieldOrder::Typed),
+                    ReadFilter::Member(FieldOrder::Typed),
                     field_seek("fv", "document_fields_typed", "(key=? AND typed=?)"),
                 ),
             ],
         },
         FilterBar {
-            shape: FindFilter::Present,
+            shape: ReadFilter::Present,
             probes: vec![(
                 Predicate::has("status"),
-                FindFilter::Present,
+                ReadFilter::Present,
                 field_seek("fp", "document_fields_presence", "(key=?)"),
             )],
         },
         FilterBar {
-            shape: FindFilter::Absent,
+            shape: ReadFilter::Absent,
             probes: vec![(
                 Predicate::missing("status"),
-                FindFilter::Absent,
+                ReadFilter::Absent,
                 field_seek("fp", "document_fields_presence", "(key=?)"),
             )],
         },
         FilterBar {
-            shape: FindFilter::Before(FieldOrder::Raw),
+            shape: ReadFilter::Before(FieldOrder::Raw),
             probes: vec![
                 (
                     Predicate::before("status", "open"),
-                    FindFilter::Before(FieldOrder::Raw),
+                    ReadFilter::Before(FieldOrder::Raw),
                     field_seek("fb", "document_fields_raw", "(key=? AND raw<?)"),
                 ),
                 (
                     Predicate::before("count", "5"),
-                    FindFilter::Before(FieldOrder::Typed),
+                    ReadFilter::Before(FieldOrder::Typed),
                     field_seek("fb", "document_fields_typed", "(key=? AND typed<?)"),
                 ),
             ],
         },
         FilterBar {
-            shape: FindFilter::After(FieldOrder::Raw),
+            shape: ReadFilter::After(FieldOrder::Raw),
             probes: vec![
                 (
                     Predicate::after("status", "done"),
-                    FindFilter::After(FieldOrder::Raw),
+                    ReadFilter::After(FieldOrder::Raw),
                     field_seek("fb", "document_fields_raw", "(key=? AND raw>?)"),
                 ),
                 (
                     Predicate::after("count", "5"),
-                    FindFilter::After(FieldOrder::Typed),
+                    ReadFilter::After(FieldOrder::Typed),
                     field_seek("fb", "document_fields_typed", "(key=? AND typed>?)"),
                 ),
             ],
         },
         FilterBar {
-            shape: FindFilter::FullText,
+            shape: ReadFilter::FullText,
             probes: vec![(
                 Predicate::matches("interloper"),
-                FindFilter::FullText,
+                ReadFilter::FullText,
                 Seek::FullText,
             )],
         },
         FilterBar {
-            shape: FindFilter::PathGlob,
+            shape: ReadFilter::PathGlob,
             probes: vec![(
                 Predicate::path("notes/*.md"),
-                FindFilter::PathGlob,
+                ReadFilter::PathGlob,
                 Seek::Index {
                     alias: "dg",
                     table: "documents",
@@ -1166,13 +1166,13 @@ fn filter_bars() -> Vec<FilterBar> {
             )],
         },
         FilterBar {
-            shape: FindFilter::Resolves,
+            shape: ReadFilter::Resolves,
             probes: [target("glossary"), target("v1.2#Heading")]
                 .into_iter()
                 .map(|target| {
                     (
                         Predicate::resolves(target),
-                        FindFilter::Resolves,
+                        ReadFilter::Resolves,
                         Seek::Index {
                             alias: "dr",
                             table: "documents",
@@ -1185,10 +1185,10 @@ fn filter_bars() -> Vec<FilterBar> {
                 .collect(),
         },
         FilterBar {
-            shape: FindFilter::Tag,
+            shape: ReadFilter::Tag,
             probes: vec![(
                 Predicate::tag("draft"),
-                FindFilter::Tag,
+                ReadFilter::Tag,
                 Seek::Index {
                     alias: "tg",
                     table: "document_tags",
@@ -1199,10 +1199,10 @@ fn filter_bars() -> Vec<FilterBar> {
             )],
         },
         FilterBar {
-            shape: FindFilter::Finding,
+            shape: ReadFilter::Finding,
             probes: vec![(
                 Predicate::has_finding(FindingKind::BodyBytesNotUtf8),
-                FindFilter::Finding,
+                ReadFilter::Finding,
                 Seek::Index {
                     alias: "fg",
                     table: "findings",
@@ -1960,7 +1960,7 @@ fn a_full_text_index_that_does_not_prepare_refuses_the_find() {
         &request().with_predicates([Predicate::matches("interloper")]),
         &declared(),
     );
-    let Err(FindRefusal::Store(StoreError::Sql { operation, message })) = answered else {
+    let Err(PageRefusal::Store(StoreError::Sql { operation, message })) = answered else {
         panic!(
             "a find over a missing full-text index was not refused as the store's: {answered:?}"
         );
@@ -1986,7 +1986,7 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
         .expect_err("a links_to part is refused");
     assert_eq!(
         refusal,
-        FindRefusal::NotIndexed {
+        PageRefusal::NotIndexed {
             fact: "a link's target",
         }
     );
@@ -2003,7 +2003,7 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
         .expect_err("a bound that reads as no number is refused");
     assert_eq!(
         refusal,
-        FindRefusal::UnreadableBound {
+        PageRefusal::UnreadableBound {
             key: "count".to_string(),
             value: "many".to_string(),
         }
@@ -2019,7 +2019,7 @@ fn a_part_the_store_cannot_answer_is_refused_by_name() {
             .expect_err("a compared value that reads as no number is refused");
         assert_eq!(
             refusal,
-            FindRefusal::UnreadableBound {
+            PageRefusal::UnreadableBound {
                 key: "count".to_string(),
                 value: "many".to_string(),
             },
@@ -2054,8 +2054,8 @@ fn a_count_outside_its_bound_is_refused_rather_than_clamped() {
     for limit in [0, MAX_PAGE as u32 + 1, u32::MAX] {
         assert_eq!(
             refused(&request().with_limit(limit)),
-            FindRefusal::OutOfBound {
-                bound: FindBound::PageRows,
+            PageRefusal::OutOfBound {
+                bound: ReadBound::PageRows,
                 given: limit as usize,
             },
             "a page bound of {limit}"
@@ -2070,7 +2070,7 @@ fn a_count_outside_its_bound_is_refused_rather_than_clamped() {
     for key in ["status", "nothing"] {
         assert_eq!(
             refused(&request().with_predicates([Predicate::in_any(key, Vec::new())])),
-            FindRefusal::EmptyMembership {
+            PageRefusal::EmptyMembership {
                 key: key.to_string()
             }
         );
@@ -2081,8 +2081,8 @@ fn a_count_outside_its_bound_is_refused_rather_than_clamped() {
             &request()
                 .with_predicates([Predicate::in_any("status", values(IN_VALUES_CEILING + 1))])
         ),
-        FindRefusal::OutOfBound {
-            bound: FindBound::MembershipValues,
+        PageRefusal::OutOfBound {
+            bound: ReadBound::MembershipValues,
             given: IN_VALUES_CEILING + 1,
         }
     );

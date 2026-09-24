@@ -40,6 +40,11 @@
 //!   find and hands out the plan of every statement it ran, taken of the text
 //!   and values it ran with, which is what its `EXPLAIN` bars are asserted
 //!   through.
+//! - [`Snapshot::count`] — the count builder: a request's conjunction,
+//!   compiled as a find compiles it, and its grouping, answering a page of
+//!   tallies, the cursor the next page continues, and the parts it could not
+//!   apply. [`Snapshot::count_plans`] explains what it ran, as
+//!   [`Snapshot::find_plans`] does for a find.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -67,8 +72,7 @@
 //!   recorded to survive is a policy over generations, and nothing here decides
 //!   it: a tombstone is kept until something says otherwise.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
-//! - **The read shapes no builder emits.** The find builder is the one read
-//!   builder: nothing here counts by field. Nothing indexes a link's target,
+//! - **The read shape no builder emits.** Nothing indexes a link's target,
 //!   so a find refuses a `links_to` part by name, and a find's row projects no
 //!   link or finding column, so it refuses those columns by name. Both
 //!   refusals are dormant carriers whose consumer is NORN-229, the task that
@@ -76,6 +80,7 @@
 
 pub mod ddl;
 
+mod count;
 mod counters;
 mod error;
 mod facts;
@@ -88,9 +93,11 @@ mod hash;
 mod increment;
 mod json;
 mod path;
+mod read;
 mod request;
 mod store;
 
+pub use count::{COUNT_STATEMENTS, CountPlan, CountStatement, CountWork, Counted, GroupMember};
 pub use counters::{DerivationCounters, SnapshotCounters};
 pub use error::StoreError;
 pub use facts::{
@@ -104,12 +111,15 @@ pub use faults::induced_failure;
 pub use feed::FeedRead;
 pub use fields::{DeclaredFields, FieldContainer, FieldRow, FieldRows, TypedOrder};
 pub use find::{
-    BODY_ROW_CEILING, DEFAULT_PAGE, FIND_FILTERS, FIND_STATEMENTS, FieldOrder, FindBound,
-    FindFilter, FindPlan, FindRefusal, FindStatement, FindWork, Found, IN_VALUES_CEILING,
+    BODY_ROW_CEILING, FIND_STATEMENTS, FindPlan, FindStatement, FindWork, Found,
     NESTED_ROW_CEILING, Nested, NestedRows, PageDirection,
 };
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
+pub use read::{
+    DEFAULT_PAGE, FieldOrder, IN_VALUES_CEILING, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
+    ReadStatement,
+};
 // The open ceremony's own vocabulary, which is this crate's too: a store is
 // one client of that ceremony, and the rung a disagreement names is the same
 // rung whichever database met it.

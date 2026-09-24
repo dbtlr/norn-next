@@ -1307,6 +1307,7 @@ fn an_unsatisfied_part_advertises_its_part_tag() {
             "unknown_sort_key",
             "unknown_projection_key",
             "unknown_predicate_key",
+            "unknown_group_key",
             "bare_directory",
             "malformed_glob",
             "malformed_query",

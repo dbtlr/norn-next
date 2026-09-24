@@ -409,12 +409,12 @@
       "sources": ["NRN-a61", "NRN-a62", "NRN-a60", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the two lifetimes the property is stated over exist: crates/norn-store/src/increment.rs stamps one generation across every row a changeset writes, and crates/norn-host/src/lifecycle.rs holds an attachment across the work that reaches it. A query is compiled now, by the find builder: crates/norn-store/src/find/glob.rs parses a path glob once per statement and keeps it as the match function's auxiliary data for every row after the first, and crates/norn-store/src/find/mod.rs decides whether a key is in the field universe by a declaration lookup or one indexed existence seek. What has no subject is a request to carry a compile across and the counters the property reads: nothing dispatches a query, because crates/norn-serve is not in the workspace, and crates/norn-store/src/counters.rs counts derivation and statements, not a compile, an open or a parse.",
+        "reason": "the two lifetimes the property is stated over exist: crates/norn-store/src/increment.rs stamps one generation across every row a changeset writes, and crates/norn-host/src/lifecycle.rs holds an attachment across the work that reaches it. A query is compiled now, by the read builders: crates/norn-store/src/read/glob.rs parses a path glob once per statement and keeps it as the match function's auxiliary data for every row after the first, and crates/norn-store/src/read/conjunction.rs decides whether a key is in the field universe by a declaration lookup or one indexed existence seek. What has no subject is a request to carry a compile across and the counters the property reads: nothing dispatches a query, because crates/norn-serve is not in the workspace, and crates/norn-store/src/counters.rs counts derivation and statements, not a compile, an open or a parse.",
         "grounds": [
           { "present": "crates/norn-store/src/increment.rs" },
           { "present": "crates/norn-host/src/lifecycle.rs" },
-          { "present": "crates/norn-store/src/find/glob.rs" },
-          { "present": "crates/norn-store/src/find/mod.rs" },
+          { "present": "crates/norn-store/src/read/glob.rs" },
+          { "present": "crates/norn-store/src/read/conjunction.rs" },
           { "present": "crates/norn-store/src/counters.rs" },
           { "absent": "crates/norn-serve" }
         ]
@@ -734,11 +734,11 @@
       "sources": ["NRN-122", "NRN-123", "NRN-124", "NRN-57", "NRN-216", "NRN-167", "NRN-168", "NRN-440", "NRN-510"],
       "binding": {
         "status": "dormant",
-        "reason": "the indexed half of a resolver exists: crates/norn-store/src/path.rs reduces a suffix target to the prefix its candidates share, crates/norn-store/src/ddl/documents.rs indexes the key it probes, crates/norn-store/src/find/mod.rs enumerates a target's ambiguity class through that same probe as a find's resolves part, and crates/norn-wire/src/finding.rs already spells what an ambiguous answer looks like — a bounded head of candidates with its total. Nothing resolves a target to one document: crates/norn-serve is not in the workspace, so no verb resolves, no candidate set is refused with its candidates named, and no plan is built from a resolved path.",
+        "reason": "the indexed half of a resolver exists: crates/norn-store/src/path.rs reduces a suffix target to the prefix its candidates share, crates/norn-store/src/ddl/documents.rs indexes the key it probes, crates/norn-store/src/read/conjunction.rs enumerates a target's ambiguity class through that same probe as a find's resolves part, and crates/norn-wire/src/finding.rs already spells what an ambiguous answer looks like — a bounded head of candidates with its total. Nothing resolves a target to one document: crates/norn-serve is not in the workspace, so no verb resolves, no candidate set is refused with its candidates named, and no plan is built from a resolved path.",
         "grounds": [
           { "present": "crates/norn-store/src/path.rs" },
           { "present": "crates/norn-store/src/ddl/documents.rs" },
-          { "present": "crates/norn-store/src/find/mod.rs" },
+          { "present": "crates/norn-store/src/read/conjunction.rs" },
           { "present": "crates/norn-wire/src/finding.rs" },
           { "absent": "crates/norn-serve" }
         ]
@@ -1263,9 +1263,9 @@
       "sources": ["NORN-a1", "NRN-a60", "NRN-a61", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "a find's parts narrow its work rather than its output: crates/norn-store/src/find/mod.rs compiles each part into a membership test one index seek answers, inside the page statement it narrows. The property is stated over every verb — validate over one path, repair over the requested paths — and no verb takes a narrowing argument, because crates/norn-serve is not in the workspace.",
+        "reason": "a find's parts narrow its work rather than its output: crates/norn-store/src/read/conjunction.rs compiles each part into a membership test one index seek answers, inside the page statement it narrows. The property is stated over every verb — validate over one path, repair over the requested paths — and no verb takes a narrowing argument, because crates/norn-serve is not in the workspace.",
         "grounds": [
-          { "present": "crates/norn-store/src/find/mod.rs" },
+          { "present": "crates/norn-store/src/read/conjunction.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -1278,9 +1278,10 @@
       "sources": ["NRN-a59", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the one read builder answers in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others. The property is stated over each read verb, and no read verb exists: search, get, count, validate and describe have no builder, and nothing dispatches a verb, because crates/norn-serve is not in the workspace.",
+        "reason": "the landed read builders, find and count, answer in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others, and crates/norn-store/src/count/mod.rs answers a count's tallies as aggregate SQL and hydrates no document row. The property is stated over each read verb, and no read verb exists: search, get, validate and describe have no builder, and nothing dispatches a verb, because crates/norn-serve is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-store/src/find/mod.rs" },
+          { "present": "crates/norn-store/src/count/mod.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -1309,10 +1310,10 @@
       "sources": ["NRN-a59", "NRN-a60", "NRN-a62", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the one read builder, crates/norn-store/src/find, answers a page of documents rather than a cardinality: nothing counts, groups or answers distinct values. The aggregate builder a count answers from is not built, and its home is pre-committed as crates/norn-store/src/count, beside the find builder.",
+        "reason": "the count builder, crates/norn-store/src/count, answers cardinality and grouping as aggregate SQL and hydrates no document row: its store suite bars the plan of every statement it runs, and bars that a narrowing part narrows its work. The property is wider than that builder. Its cost clause, a function of the distinct groups rather than of body bytes, is held by no bar yet, because the count work bar varies how many documents a vault holds and never their bodies; and its distinct-value answers, the folders and values describe reports, have no builder. The read builders live in norn-store, so that builder's home is pre-committed as crates/norn-store/src/describe, beside the find and count builders.",
         "grounds": [
-          { "present": "crates/norn-store/src/find" },
-          { "absent": "crates/norn-store/src/count" }
+          { "present": "crates/norn-store/src/count" },
+          { "absent": "crates/norn-store/src/describe" }
         ]
       }
     },
@@ -1325,10 +1326,10 @@
       "sources": ["NRN-s14", "NRN-367", "NRN-374", "NRN-428", "NRN-427", "NRN-44", "NRN-392", "NRN-452", "NRN-399", "norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "the find builder carries the request-side half: crates/norn-store/tests/store/find_rows.rs::every_unknown_key_is_reported_with_the_keys_near_it holds an unknown sort, projection and predicate key reported with the keys near it rather than applied in silence, drawn from the field universe by the one rule crates/norn-store/src/find/suggest.rs::nearest_first_then_by_key_and_three_at_most holds; crates/norn-store/tests/store/find_rows.rs::a_path_part_that_cannot_match_is_reported_and_one_matching_nothing_is_not holds a bare directory and a glob no path can spell reported, and a literal path matching nothing answered empty with no report; crates/norn-store/tests/store/find.rs::a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault holds a glob that does not parse reported rather than swallowed into an empty page, and crates/norn-store/tests/store/find.rs::a_malformed_full_text_query_is_reported_and_empties_the_page holds the same of a full-text query the engine cannot parse; crates/norn-store/tests/store/find.rs::a_known_key_and_the_field_universe_read_the_presence_rows_alone holds the universe read off the keys the documents carry, and crates/norn-store/tests/store/find_rows.rs::every_unknown_key_is_reported_with_the_keys_near_it draws suggestions from a key only the declaration names. Three clauses have no carrier. The diagnostic reaching every surface, and an exit code that tells a request not fully satisfiable from one satisfiable with zero matches, are properties of a surface rendering an answer, and neither crates/norn-serve, which dispatches a read verb, nor crates/norn-client, which renders one and exits, is in the workspace. A missing named section is spelled by crates/norn-wire/src/product.rs::MissingSection and produced by nothing: no read in the workspace names a section, because the verb that would take one is dispatched by crates/norn-serve.",
+        "reason": "the find builder carries the request-side half: crates/norn-store/tests/store/find_rows.rs::every_unknown_key_is_reported_with_the_keys_near_it holds an unknown sort, projection and predicate key reported with the keys near it rather than applied in silence, drawn from the field universe by the one rule crates/norn-store/src/read/suggest.rs::nearest_first_then_by_key_and_three_at_most holds; crates/norn-store/tests/store/find_rows.rs::a_path_part_that_cannot_match_is_reported_and_one_matching_nothing_is_not holds a bare directory and a glob no path can spell reported, and a literal path matching nothing answered empty with no report; crates/norn-store/tests/store/find.rs::a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault holds a glob that does not parse reported rather than swallowed into an empty page, and crates/norn-store/tests/store/find.rs::a_malformed_full_text_query_is_reported_and_empties_the_page holds the same of a full-text query the engine cannot parse; crates/norn-store/tests/store/find.rs::a_known_key_and_the_field_universe_read_the_presence_rows_alone holds the universe read off the keys the documents carry, and crates/norn-store/tests/store/find_rows.rs::every_unknown_key_is_reported_with_the_keys_near_it draws suggestions from a key only the declaration names. Three clauses have no carrier. The diagnostic reaching every surface, and an exit code that tells a request not fully satisfiable from one satisfiable with zero matches, are properties of a surface rendering an answer, and neither crates/norn-serve, which dispatches a read verb, nor crates/norn-client, which renders one and exits, is in the workspace. A missing named section is spelled by crates/norn-wire/src/product.rs::MissingSection and produced by nothing: no read in the workspace names a section, because the verb that would take one is dispatched by crates/norn-serve.",
         "grounds": [
           { "symbol-present": "crates/norn-store/tests/store/find_rows.rs::every_unknown_key_is_reported_with_the_keys_near_it" },
-          { "symbol-present": "crates/norn-store/src/find/suggest.rs::nearest_first_then_by_key_and_three_at_most" },
+          { "symbol-present": "crates/norn-store/src/read/suggest.rs::nearest_first_then_by_key_and_three_at_most" },
           { "symbol-present": "crates/norn-store/tests/store/find_rows.rs::a_path_part_that_cannot_match_is_reported_and_one_matching_nothing_is_not" },
           { "symbol-present": "crates/norn-store/tests/store/find.rs::a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault" },
           { "symbol-present": "crates/norn-store/tests/store/find.rs::a_malformed_full_text_query_is_reported_and_empties_the_page" },

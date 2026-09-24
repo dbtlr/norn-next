@@ -6,8 +6,8 @@
 //! and typed orders.
 
 use norn_store::{
-    BODY_ROW_CEILING, BlockFact, DeclaredFields, FindRefusal, FindStatement, FindWork, Found,
-    HeadingFact, NESTED_ROW_CEILING, Nested, NestedRows, SnapshotReader, Span, Store, TagFact,
+    BODY_ROW_CEILING, BlockFact, DeclaredFields, FindStatement, FindWork, Found, HeadingFact,
+    NESTED_ROW_CEILING, Nested, NestedRows, PageRefusal, SnapshotReader, Span, Store, TagFact,
     TagSource,
 };
 use norn_wire::{
@@ -238,14 +238,14 @@ fn a_typed_cursor_refuses_after_a_re_pin_and_a_raw_one_survives_it() {
     };
     assert_eq!(
         refused(&typed_cursor, &declared_under("schema-2")),
-        FindRefusal::OrderChanged(CursorOrderChanged::new(
+        PageRefusal::OrderChanged(CursorOrderChanged::new(
             "schema-1",
             Some("schema-2".to_string())
         ))
     );
     assert_eq!(
         refused(&raw_cursor, &declared_under("schema-2")),
-        FindRefusal::OrderChanged(CursorOrderChanged::minted_raw(Some("schema-2".to_string())))
+        PageRefusal::OrderChanged(CursorOrderChanged::minted_raw(Some("schema-2".to_string())))
     );
 
     let survived = seeded.found_under(
@@ -326,7 +326,7 @@ fn a_cursor_minted_in_another_order_than_the_requests_is_refused() {
     ] {
         assert_eq!(
             refusal(params, cursor),
-            FindRefusal::OrderChanged(changed),
+            PageRefusal::OrderChanged(changed),
             "{params:?} continuing {cursor:?}"
         );
     }
@@ -352,7 +352,7 @@ fn a_declaration_read_from_another_schema_than_the_pinned_one_is_refused() {
     };
     assert_eq!(
         refusal(&seeded, &DeclaredFields::none()),
-        FindRefusal::DeclarationNotPinned {
+        PageRefusal::DeclarationNotPinned {
             declared_under: None,
             pinned: Some(SEED_SCHEMA.to_string()),
         }
@@ -360,7 +360,7 @@ fn a_declaration_read_from_another_schema_than_the_pinned_one_is_refused() {
     seeded.pin("schema-1");
     assert_eq!(
         refusal(&seeded, &declared()),
-        FindRefusal::DeclarationNotPinned {
+        PageRefusal::DeclarationNotPinned {
             declared_under: Some(SEED_SCHEMA.to_string()),
             pinned: Some("schema-1".to_string()),
         }
@@ -372,7 +372,7 @@ fn a_declaration_read_from_another_schema_than_the_pinned_one_is_refused() {
             .snapshot()
             .find(&request(), &declared())
             .expect_err("a declaration where no schema is pinned"),
-        FindRefusal::DeclarationNotPinned {
+        PageRefusal::DeclarationNotPinned {
             declared_under: Some(SEED_SCHEMA.to_string()),
             pinned: None,
         }
@@ -426,7 +426,7 @@ fn a_cursor_among_other_rows_is_refused() {
             .snapshot()
             .find(&request().with_after(cursor), &declared())
             .expect_err("an ordinal cursor"),
-        FindRefusal::NotADocumentCursor
+        PageRefusal::NotADocumentCursor
     );
 }
 
@@ -705,7 +705,7 @@ fn a_link_or_finding_column_is_refused_by_name() {
                 &declared(),
             )
             .expect_err("a dormant column");
-        assert_eq!(refusal, FindRefusal::NotProjected { column: named });
+        assert_eq!(refusal, PageRefusal::NotProjected { column: named });
         assert_eq!(refusal.to_string(), reads);
     }
 }

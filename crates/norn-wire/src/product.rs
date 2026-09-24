@@ -62,6 +62,15 @@ pub enum Unsatisfied {
         /// Keys from the vault's field universe that are near it.
         did_you_mean: Vec<String>,
     },
+    /// A count grouped by a field key the vault's field universe does not
+    /// hold, so every document's member for that key is `null`.
+    #[non_exhaustive]
+    UnknownGroupKey {
+        /// The key the request named.
+        key: String,
+        /// Keys from the vault's field universe that are near it.
+        did_you_mean: Vec<String>,
+    },
     /// A path part named a directory rather than a pattern. The grammar
     /// matches globs, so a bare directory matches the directory alone.
     #[non_exhaustive]
@@ -134,6 +143,14 @@ impl Unsatisfied {
     /// A predicate named `key`, which the field universe does not hold.
     pub fn unknown_predicate_key(key: impl Into<String>, did_you_mean: Vec<String>) -> Self {
         Unsatisfied::UnknownPredicateKey {
+            key: key.into(),
+            did_you_mean,
+        }
+    }
+
+    /// A count grouped by `key`, which the field universe does not hold.
+    pub fn unknown_group_key(key: impl Into<String>, did_you_mean: Vec<String>) -> Self {
+        Unsatisfied::UnknownGroupKey {
             key: key.into(),
             did_you_mean,
         }

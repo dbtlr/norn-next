@@ -109,7 +109,7 @@ const BELOW_EVERY_FINDING_KEY: i64 = 0;
 /// The lowest generation a stamped row can carry, minus one, which is the floor
 /// an unset feed cursor coalesces to.
 ///
-/// [`store::next_generation`] moves the counter before it reports it and the
+/// [`norn_db::meta::next_generation`] moves the counter before it reports it and the
 /// counter is created at zero, so the first generation a row is ever stamped
 /// with is 1. Zero is therefore below every stamped row and above nothing.
 const BELOW_EVERY_GENERATION: i64 = 0;
