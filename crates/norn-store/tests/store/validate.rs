@@ -1044,10 +1044,12 @@ fn judge_narrow(small: &Validating, large: &Validating, params: &ValidateParams)
 /// **A narrowing part narrows a validate's work to the findings it matches.**
 /// Over the fixture and 50, then 500, more documents each with an
 /// undeclared-tag warning standing over it, a validate narrowed to the
-/// fixture's own findings — by kind, by severity, by a path part, by a tag and
-/// by a field's value on the finding's document — runs the same statements
-/// and the same VM steps at both sizes, as a page and as a summary, and steps
-/// through no full scan.
+/// fixture's own findings — by kind, by severity, by a path part, by two path
+/// parts whose ranges overlap only at the paths both admit, by a tag and by a
+/// field's value on the finding's document — runs the same statements and the
+/// same VM steps at both sizes, as a page and as a summary, and steps through
+/// no full scan. **A warning floor admits every severity**, so it reads
+/// exactly what a validate with no floor reads.
 ///
 /// Control: `findings_fingerprint_kind_severity` dropped on the larger vault,
 /// a severity floor reaches the warnings it does not admit, and the bar
@@ -1060,12 +1062,23 @@ fn a_narrowing_part_narrows_a_validates_work_to_the_findings_it_matches() {
         validating().with_kinds([FindingKind::PathNamesNoDocument]),
         validating().with_severity(Severity::Error),
         validating().with_predicates([Predicate::path("notes/**")]),
+        // `b*.md` ranges over `bulk/`, and `broken.md` does not.
+        validating().with_predicates([Predicate::path("b*.md"), Predicate::path("broken.md")]),
         validating().with_predicates([Predicate::tag("draft")]),
         validating().with_predicates([Predicate::equal_to("status", "open")]),
     ];
     for params in &narrowing {
         judge_narrow(&small, &large, params);
         judge_narrow(&small, &large, &params.clone().summarized());
+    }
+    for whole in [validating(), validating().summarized()] {
+        assert_eq!(
+            large
+                .validate(&whole.clone().with_severity(Severity::Warning))
+                .work,
+            large.validate(&whole).work,
+            "a warning floor read other than no floor does: {whole:?}"
+        );
     }
     let whole = validating();
     assert!(
