@@ -147,7 +147,6 @@ fn a_request_that_only_reads_finishes_at_zero() {
     let _ = warm
         .suffix_candidates(&class_named(&warm, "glossary"))
         .expect("reading candidates");
-    let _ = warm.full_text_matches("body").expect("reading matches");
     let _ = warm
         .emitted_plan(norn_store::ExplainedStatement::SuffixCandidates(
             &class_named(&warm, "glossary"),

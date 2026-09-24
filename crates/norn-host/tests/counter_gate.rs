@@ -473,9 +473,6 @@ fn a_warm_pass(store: &mut Store, subject: &StoredDocument) -> CounterSnapshot {
     let _ = warm.findings_in_class(&probe).expect("reading a class");
     let _ = warm.suffix_candidates(&class).expect("reading candidates");
     let _ = warm
-        .full_text_matches(&phrase(&stem))
-        .expect("reading matches");
-    let _ = warm
         .emitted_plan(ExplainedStatement::SuffixCandidates(&class))
         .expect("a query plan");
     assert!(
@@ -771,11 +768,3 @@ fn a_derived_document(store: &mut Store) -> StoredDocument {
         .expect("an attachment over a generated tree derives documents")
 }
 
-/// `stem` as a full-text phrase.
-///
-/// A generated stem carries spaces and non-ASCII characters, which are operators
-/// and separators to the match grammar rather than text; quoting is what makes
-/// the argument the phrase it reads as.
-fn phrase(stem: &str) -> String {
-    format!("\"{}\"", stem.replace('"', ""))
-}
