@@ -19,8 +19,8 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan, ScanTarget};
 use norn_wire::{
-    Column, Cursor, CursorKey, FieldValue, FindingKind, Moved, Predicate, ResolutionTarget, Score,
-    Unsatisfied,
+    Column, Cursor, CursorKey, FieldValue, FindParams, FindingKind, Moved, Predicate,
+    ResolutionTarget, Score, Unsatisfied, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -415,6 +415,50 @@ fn a_term_holding_no_word_is_dropped_and_every_other_term_counts() {
     assert_eq!(
         hit_paths(&searching_store.search(&searching("lantern \u{1F642}"))),
         Vec::<&str>::new()
+    );
+}
+
+/// **A word is compared by its first 32768 bytes, in the index and in a query
+/// alike.** FTS5 keeps at most 32768 bytes of a token, so a query of `a` 32769
+/// times answers the document holding `a` 32768 times and then `z`: to the
+/// index both are the same 32768 bytes of `a`. It is no prefix match: `a`
+/// 32767 times answers nothing. A `matches` part reads words the same way.
+#[test]
+fn a_word_is_compared_by_its_first_32768_bytes() {
+    let searching_store = Searching::with_documents(
+        "search-long-word",
+        vec![document(
+            "notes/long.md",
+            "hash-long",
+            &format!("{}z\n", "a".repeat(32_768)),
+        )],
+    );
+    let longer = "a".repeat(32_769);
+    assert_eq!(
+        hit_paths(&searching_store.search(&searching(&longer))),
+        ["notes/long.md"]
+    );
+    assert_eq!(
+        hit_paths(&searching_store.search(&searching(&"a".repeat(32_767)))),
+        Vec::<&str>::new()
+    );
+    let found = searching_store
+        .snapshot()
+        .find(
+            &FindParams::new(VaultAddress::name(
+                VaultName::new("notes").expect("a vault name"),
+            ))
+            .with_predicates([Predicate::matches(longer)]),
+            &declared(),
+        )
+        .expect("a find matching the longer word");
+    assert_eq!(
+        found
+            .rows
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<&str>>(),
+        ["notes/long.md"]
     );
 }
 

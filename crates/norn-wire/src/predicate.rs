@@ -94,7 +94,9 @@ pub enum Predicate {
         value: String,
     },
     /// The document matches `query` in full text. This filters; it does not
-    /// order.
+    /// order. The full-text index compares a word by its first 32768 bytes,
+    /// in the index and in the query alike, so two words that share those
+    /// bytes match each other.
     #[non_exhaustive]
     Matches {
         /// The full-text query, carried as written.

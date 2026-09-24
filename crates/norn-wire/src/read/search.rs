@@ -190,7 +190,9 @@ pub struct SearchParams {
     /// punctuation alone, is dropped. A hit is a
     /// document holding every other term, and a term holding several words,
     /// such as `foo-bar`, matches them adjacent and in order. Matching folds
-    /// case and diacritics as the tokenizer does. A query holding no word
+    /// case and diacritics as the tokenizer does, and compares a word by its
+    /// first 32768 bytes, in the index and in the query alike, so two words
+    /// that share those bytes match each other. A query holding no word
     /// answers no hit and is reported as the unsatisfied part
     /// `query_names_no_word`.
     pub query: String,

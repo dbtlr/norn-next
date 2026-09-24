@@ -23,7 +23,8 @@
 //! adjacent and in order — [`statement`] states the reading whole. So `AND`,
 //! `NEAR`, `body:foo`, a quote, a hyphen or a star in a query are words or
 //! separators, never syntax, and every string is a query the engine parses.
-//! Matching folds case and diacritics as the tokenizer does.
+//! Matching folds case and diacritics as the tokenizer does, and FTS5 compares
+//! a word by its first 32768 bytes, in the index and in a query alike.
 //!
 //! **A query holding no word answers no hit, and is reported**: an empty one,
 //! whitespace, or terms of punctuation alone run no lexical page, and the

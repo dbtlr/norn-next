@@ -882,7 +882,10 @@ split into terms at whitespace, every character Unicode reads as whitespace, and
 A term holding no word, as the index's tokenizer reads words, is dropped; each other term
 is quoted so that no character of it is match syntax, and a hit is a document holding
 every such term, a term holding several words matching them adjacent and in order.
-Matching folds case and diacritics as the tokenizer does (`remove_diacritics 2`). The word
+Matching folds case and diacritics as the tokenizer does (`remove_diacritics 2`), and
+FTS5 compares a word by its first 32768 bytes, in the index and in a query alike, so two
+words sharing those bytes match each other through a search's query and a `matches` part
+alike. The word
 rule is one function over a table of the code points the tokenizer begins a word at — the
 bundled FTS5's Unicode tables, which class letters, numbers, private use and every code
 point they hold no category for as word characters — and a contract test reads that
