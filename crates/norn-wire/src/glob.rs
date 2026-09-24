@@ -45,8 +45,9 @@
 //!
 //! The store's ambiguity-ignore set matches under [`CaseFold::Ascii`] where
 //! the store's recorded path order folds ASCII case, and under
-//! [`CaseFold::Exact`] where it does not. A find's path part and a tag facet's
-//! patterns match under [`CaseFold::Exact`] on every root.
+//! [`CaseFold::Exact`] where it does not. The path parts of a find, a count
+//! and a validate, and a tag facet's patterns, match under [`CaseFold::Exact`]
+//! on every root.
 //!
 //! # What matching costs
 //!

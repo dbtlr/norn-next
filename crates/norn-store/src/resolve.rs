@@ -45,8 +45,9 @@
 //! case folded, so `archive/**` ignores `Archive/notes.md` there as the root
 //! itself does not tell the two apart; where it tells spellings apart a glob
 //! matches bytes. The fold is [`CaseFold::Ascii`], so a letter outside ASCII
-//! keeps its case in a glob as it does in a key. A find's path part matches
-//! the same grammar bytewise on every root.
+//! keeps its case in a glob as it does in a key. The path parts of a find, a
+//! count and a validate, and a tag facet's patterns, match the same grammar
+//! bytewise on every root.
 
 use std::collections::BTreeSet;
 
