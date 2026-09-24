@@ -700,6 +700,10 @@ fn a_part_a_count_cannot_apply_is_reported_as_a_find_reports_it() {
         counting_store.count(&counting(Vec::new()).with_predicates([Predicate::path("")]));
     assert_eq!(ungrouped_unapplied.tallies, vec![tally(&[], 0)]);
     assert_eq!(ungrouped_unapplied.next, None);
+    assert_eq!(
+        ungrouped_unapplied.work.tallies_read, 0,
+        "no tally statement ran to hand the empty match's tally back"
+    );
     assert!(
         matches!(
             ungrouped_unapplied.unsatisfied.as_slice(),

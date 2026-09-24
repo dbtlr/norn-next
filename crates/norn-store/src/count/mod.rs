@@ -332,10 +332,13 @@ impl Snapshot {
         let mut tallies: Vec<Tally> = Vec::new();
         if conjunction.matches_nothing {
             // A match a part emptied is still one tally where the count groups
-            // by nothing: no document is in it. A grouped count has no group.
+            // by nothing: no document is in it, and no statement is run to say
+            // so. A grouped count has no group.
+            work.tallies_read = 0;
             if sections(members, at).contains(&(CountStatement::Total, None)) {
                 tallies.push(Tally::new(Vec::new(), 0));
             }
+            return Ok((tallies, None));
         } else {
             let shapes: Vec<FindFilter> = conjunction
                 .filters
