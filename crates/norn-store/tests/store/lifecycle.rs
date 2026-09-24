@@ -918,6 +918,87 @@ fn a_path_order_no_build_records_is_rebuilt_from_zero() {
     assert!(detail.contains("`sideways`"), "{detail}");
 }
 
+/// **A recorded order that is not text is rebuilt from zero**, exactly as a
+/// spelling no build writes is: no build records one, and the open that reads
+/// it rebuilds rather than failing, so the rebuild the order promises is
+/// reachable from every value the row can hold.
+#[test]
+fn a_path_order_recorded_as_another_type_is_rebuilt_from_zero() {
+    let scratch = Scratch::new("order-not-text");
+    let database = scratch.database();
+
+    let mut store = Store::open(&database, StoredPathOrder::Sensitive).expect("creating a store");
+    write_document(
+        &mut store.begin_request(),
+        &document("a/Foo.md", "hash-1", "a body\n"),
+    );
+    induced_failure::execute_out_of_band(
+        &mut store,
+        "UPDATE meta SET value = 1 WHERE key = 'path_order'",
+    )
+    .expect("recording an order as an integer");
+    drop(store);
+
+    let mut rebuilt =
+        Store::open(&database, StoredPathOrder::Sensitive).expect("reopening a store");
+    let OpenOutcome::RebuiltFromZero(RebuildReason::Client { detail }) = rebuilt.open_outcome()
+    else {
+        panic!("an integer order opened as {:?}", rebuilt.open_outcome());
+    };
+    assert!(
+        detail.contains("`integer`")
+            && detail.contains(&format!("`{}`", StoredPathOrder::Sensitive.as_str())),
+        "the reason does not name the recorded type and the proven order: {detail}"
+    );
+    assert!(
+        stored_paths(&mut rebuilt).is_empty(),
+        "the rebuild kept rows no recorded order vouches for"
+    );
+    drop(rebuilt);
+
+    let reopened = Store::open(&database, StoredPathOrder::Sensitive).expect("reopening a store");
+    assert_eq!(*reopened.open_outcome(), OpenOutcome::Reused);
+}
+
+/// **A recorded mode that is not text reads as an unrecognized mode**: a
+/// throwaway open refuses it, and a durable open adopts the database and
+/// records itself, so neither open fails on the value's type.
+#[test]
+fn a_store_mode_recorded_as_another_type_reads_as_unrecognized() {
+    let scratch = Scratch::new("mode-not-text");
+    let database = scratch.database();
+    let subject = path("docs/norn/glossary.md");
+
+    let mut store = Store::open(&database, StoredPathOrder::Sensitive).expect("creating a store");
+    write_document(
+        &mut store.begin_request(),
+        &document(subject.as_str(), "hash-1", "a body\n"),
+    );
+    induced_failure::execute_out_of_band(
+        &mut store,
+        "UPDATE meta SET value = 1 WHERE key = 'store_mode'",
+    )
+    .expect("recording a mode as an integer");
+    drop(store);
+
+    let error = Store::open_throwaway(&database, StoredPathOrder::Sensitive)
+        .expect_err("a throwaway over a mode recorded as an integer");
+    let StoreError::Lifecycle { message, .. } = &error else {
+        panic!("it was refused as {error:?} rather than as a lifecycle refusal");
+    };
+    assert!(message.contains("does not record itself"), "{message}");
+
+    let mut adopted =
+        Store::open(&database, StoredPathOrder::Sensitive).expect("a durable open adopts it");
+    assert_eq!(*adopted.open_outcome(), OpenOutcome::Reused);
+    assert_eq!(adopted.mode(), StoreMode::Durable);
+    assert_eq!(stored_paths(&mut adopted), [subject.as_str()]);
+    drop(adopted);
+
+    Store::open_throwaway(&database, StoredPathOrder::Sensitive)
+        .expect_err("a throwaway open over what the durable open recorded");
+}
+
 /// **The mode is judged before the order**, so a throwaway open over a durable
 /// store derived under the other order is the refusal it always is, and the
 /// durable store's rows survive it.

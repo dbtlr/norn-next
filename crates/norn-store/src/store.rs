@@ -76,6 +76,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 
+use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{self, Connection};
 use norn_db::{Adoption, Database, OpenOutcome, RebuildReason, meta};
 use norn_wire::{FindingKind, Severity};
@@ -677,8 +678,11 @@ impl Store {
     /// already open when its root's case behaviour is proven again, which is
     /// what a recovery that installs coverage anew does.
     pub fn path_order_moved(&self, proven: StoredPathOrder) -> Option<RebuildReason> {
-        path_order_rebuild(Some(self.order.as_str()), proven)
-            .map(|detail| RebuildReason::Client { detail })
+        path_order_rebuild(
+            Some(&Recorded::Text(self.order.as_str().to_string())),
+            proven,
+        )
+        .map(|detail| RebuildReason::Client { detail })
     }
 
     /// The identity this database carries from creation to discard.
@@ -1114,29 +1118,72 @@ struct StoreClient {
     order: StoredPathOrder,
 }
 
+/// A value one of the store's own `meta` keys holds, as an open reads it back:
+/// the text every build writes there, or the SQLite type of a value no build
+/// writes.
+///
+/// A key's reconciliation reads a value of another type the way it reads a
+/// spelling it does not recognize, so a row holding one is judged rather than
+/// failing the open that reads it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Recorded {
+    Text(String),
+    OtherType(&'static str),
+}
+
+impl Recorded {
+    /// The value `key` holds, or `None` where the row is absent.
+    fn read(connection: &Connection, key: &str) -> Result<Option<Recorded>, StoreError> {
+        let value = norn_db::meta::get_meta::<Value>(connection, key)?;
+        Ok(value.map(|value| match value {
+            Value::Text(text) => Recorded::Text(text),
+            Value::Null => Recorded::OtherType("null"),
+            Value::Integer(_) => Recorded::OtherType("integer"),
+            Value::Real(_) => Recorded::OtherType("real"),
+            Value::Blob(_) => Recorded::OtherType("blob"),
+        }))
+    }
+
+    /// The text, where the value is text.
+    fn text(&self) -> Option<&str> {
+        match self {
+            Recorded::Text(text) => Some(text),
+            Recorded::OtherType(_) => None,
+        }
+    }
+}
+
 /// Judge the order a store records against the one its root proves: the
 /// reason the store owes a rebuild from zero, naming what it records and what
 /// the root proves, or `None` where its rows were derived under that order.
 ///
 /// A store that records no order owes the rebuild too: nothing says which
 /// order its rows were derived under, so nothing says they are rows the root
-/// could have produced. So does a recorded spelling no build writes.
+/// could have produced. So does a recorded spelling no build writes, and a
+/// recorded value that is not text.
 ///
 /// One judgment for both occasions it is taken on: an open over a database
 /// the mechanics call usable, and a store already open whose root's case
 /// behaviour is proven again.
-fn path_order_rebuild(recorded: Option<&str>, proven: StoredPathOrder) -> Option<String> {
+fn path_order_rebuild(recorded: Option<&Recorded>, proven: StoredPathOrder) -> Option<String> {
+    let proven_spelling = proven.as_str();
     match recorded {
-        Some(recorded) if StoredPathOrder::from_recorded(recorded) == Some(proven) => None,
-        Some(recorded) => Some(format!(
+        Some(Recorded::Text(recorded))
+            if StoredPathOrder::from_recorded(recorded) == Some(proven) =>
+        {
+            None
+        }
+        Some(Recorded::Text(recorded)) => Some(format!(
             "the store's rows were derived under the `{recorded}` path order and its root proves \
-             `{}`",
-            proven.as_str()
+             `{proven_spelling}`"
+        )),
+        Some(Recorded::OtherType(kind)) => Some(format!(
+            "the store records its path order as a value of type `{kind}`, which no build writes, \
+             and its root proves `{proven_spelling}`"
         )),
         None => Some(format!(
             "the store records no path order its rows were derived under, and its root proves \
-             `{}`",
-            proven.as_str()
+             `{proven_spelling}`"
         )),
     }
 }
@@ -1180,9 +1227,10 @@ impl StoreClient {
     /// A throwaway open over a durable store is refused: adopting it would arm
     /// a teardown that deletes a registered vault's whole derived state when
     /// the store drops. **A throwaway open over a `store_mode` row that is
-    /// absent or unreadable is refused the same way.** Create always records
-    /// the mode, so a missing or unrecognized row is out-of-band tampering
-    /// rather than a database this crate ever produces, and the conservative
+    /// absent or unreadable is refused the same way**, and a value that is not
+    /// text is unreadable. Create always records the mode as text, so a
+    /// missing or unrecognized row is out-of-band tampering rather than a
+    /// database this crate ever produces, and the conservative
     /// reading is the refusal: the alternative is arming delete-on-drop over a
     /// database whose own record does not say it is disposable.
     ///
@@ -1200,8 +1248,9 @@ impl StoreClient {
     /// behind a wildcard, so every combination of asked-for and recorded mode
     /// is a decision this code states.
     fn adopt_mode(&self, connection: &Connection, path: &Path) -> Result<(), StoreError> {
-        let recorded = norn_db::meta::get_meta::<String>(connection, ddl::meta::STORE_MODE)?
-            .as_deref()
+        let recorded = Recorded::read(connection, ddl::meta::STORE_MODE)?
+            .as_ref()
+            .and_then(Recorded::text)
             .and_then(StoreMode::from_str);
         match (self.mode, recorded) {
             (StoreMode::Throwaway, Some(StoreMode::Durable)) => Err(StoreError::Lifecycle {
@@ -1236,12 +1285,13 @@ impl StoreClient {
     /// projection of the vault, so rows derived under an order the root no
     /// longer proves cost a derivation to replace — and serving them would
     /// answer with spellings merged or split the way this root does not merge
-    /// or split them. A recorded spelling no build writes, and a database that
-    /// records no order at all, are the same rebuild: nothing vouches for the
-    /// order their rows were derived under.
+    /// or split them. A recorded spelling no build writes, a recorded value
+    /// that is not text, and a database that records no order at all are the
+    /// same rebuild: nothing vouches for the order their rows were derived
+    /// under.
     fn adopt_path_order(&self, connection: &Connection) -> Result<Adoption, StoreError> {
-        let recorded = norn_db::meta::get_meta::<String>(connection, ddl::meta::PATH_ORDER)?;
-        Ok(match path_order_rebuild(recorded.as_deref(), self.order) {
+        let recorded = Recorded::read(connection, ddl::meta::PATH_ORDER)?;
+        Ok(match path_order_rebuild(recorded.as_ref(), self.order) {
             None => Adoption::Keep,
             Some(detail) => Adoption::Rebuild { detail },
         })
