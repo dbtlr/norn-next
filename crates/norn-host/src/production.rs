@@ -784,9 +784,11 @@ impl EntryOps for ProductionEntryOps {
             let _ = norn_fs::sweep_fallback_tree(root);
         }
         // The store is opened under the case behaviour the coverage just
-        // proved, which the open judges against the order its rows were
-        // derived under: a store derived under the other one is rebuilt from
-        // zero here, before anything derives into it or reads from it.
+        // proved and the derivation this build writes rows by, which the open
+        // judges against the order its rows were derived under and the
+        // derivation that wrote them: a store derived under another of either
+        // is rebuilt from zero here, before anything derives into it or reads
+        // from it.
         let store = Store::open(
             derived.join("store.sqlite3"),
             path_order,
