@@ -100,6 +100,34 @@ pub enum FacetKind {
     UndeclaredTags,
 }
 
+impl FacetKind {
+    /// Every kind the vocabulary holds, in declaration order, which is the
+    /// order a page of facets reads the kinds in: every facet of one kind
+    /// before any of the next.
+    pub const ALL: [FacetKind; 7] = [
+        FacetKind::DeclaredField,
+        FacetKind::ObservedField,
+        FacetKind::DeclaredTag,
+        FacetKind::Folder,
+        FacetKind::PathRule,
+        FacetKind::TagPattern,
+        FacetKind::UndeclaredTags,
+    ];
+
+    /// The kind as the string it is on the wire.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            FacetKind::DeclaredField => "declared_field",
+            FacetKind::ObservedField => "observed_field",
+            FacetKind::DeclaredTag => "declared_tag",
+            FacetKind::Folder => "folder",
+            FacetKind::PathRule => "path_rule",
+            FacetKind::TagPattern => "tag_pattern",
+            FacetKind::UndeclaredTags => "undeclared_tags",
+        }
+    }
+}
+
 /// A number that is no relevance score.
 ///
 /// A score orders the ranked rows a cursor continues, so every value one holds

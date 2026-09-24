@@ -359,15 +359,7 @@ fn predicates() -> Vec<Predicate> {
 
 /// Every kind a facet row is a facet of.
 fn facet_kinds() -> Vec<FacetKind> {
-    vec![
-        FacetKind::DeclaredField,
-        FacetKind::ObservedField,
-        FacetKind::DeclaredTag,
-        FacetKind::Folder,
-        FacetKind::PathRule,
-        FacetKind::TagPattern,
-        FacetKind::UndeclaredTags,
-    ]
+    FacetKind::ALL.to_vec()
 }
 
 /// Every movement a continuation reports.
@@ -781,11 +773,7 @@ fn field_types() -> Vec<FieldType> {
 
 /// Every container an observed field's values sit in.
 fn container_kinds() -> Vec<ContainerKind> {
-    vec![
-        ContainerKind::Scalar,
-        ContainerKind::Sequence,
-        ContainerKind::Map,
-    ]
+    ContainerKind::ALL.to_vec()
 }
 
 /// Every rule a path rule states.
@@ -808,8 +796,9 @@ fn facets() -> Vec<Facet> {
     facets.extend(
         container_kinds()
             .into_iter()
-            .map(|container| Facet::observed_field("due", container)),
+            .map(|container| Facet::observed_field("due", [container])),
     );
+    facets.push(Facet::observed_field("aliases", container_kinds()));
     facets.push(Facet::declared_tag("area"));
     facets.push(Facet::tag_pattern("person/**"));
     facets.push(Facet::folder("journal", Some("One per day".to_string())));
@@ -3922,6 +3911,21 @@ fn every_facet_names_the_kind_a_cursor_orders_it_under() {
         wire(&Facet::undeclared_tags(TagStance::Report)),
         r#"{"facet":"undeclared_tags","stance":"report"}"#
     );
+    assert_eq!(
+        wire(&Facet::observed_field(
+            "aliases",
+            [
+                ContainerKind::Sequence,
+                ContainerKind::Scalar,
+                ContainerKind::Sequence
+            ]
+        )),
+        r#"{"facet":"observed_field","key":"aliases","containers":["scalar","sequence"]}"#,
+        "an observed field lists each container once, in the vocabulary's order"
+    );
+    for kind in facet_kinds() {
+        assert_eq!(kind.as_str(), flat_string(&kind));
+    }
 }
 
 /// The map from a facet to its kind is injective: one kind per shape, so
@@ -3966,7 +3970,7 @@ fn every_facet_says_where_a_page_of_facets_stops_at_it() {
             "due",
         ),
         (
-            Facet::observed_field("author", ContainerKind::Sequence),
+            Facet::observed_field("author", [ContainerKind::Sequence]),
             FacetKind::ObservedField,
             "author",
         ),
