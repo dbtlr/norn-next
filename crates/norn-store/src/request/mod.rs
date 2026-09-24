@@ -1042,10 +1042,11 @@ impl<'a> Request<'a> {
     /// This reads the index rather than the column it indexes, and it does so
     /// without a match expression: a match answers about terms a caller already
     /// named — a find's `matches` part, a search's query — so a term the index
-    /// holds that no caller thinks to ask for is invisible to it. What comes back is the index's own
-    /// vocabulary — the term, how many documents hold it, how many times it
-    /// occurs — which is what makes a disagreement between the index and
-    /// `documents.body` readable rather than only detectable.
+    /// holds that no caller thinks to ask for is invisible to it. What comes
+    /// back is the index's own vocabulary — the term, how many documents hold
+    /// it, how many times it occurs — which is what makes a disagreement
+    /// between the index and `documents.body` readable rather than only
+    /// detectable.
     ///
     /// `after` is exclusive.
     pub fn indexed_terms_after(
