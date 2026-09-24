@@ -45,9 +45,11 @@
 //! anything is written, so a sort over a set-valued field can read one row per
 //! document — its least value — rather than every value it holds.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
+
+use norn_wire::{Facet, FacetKind, FieldType, PathRuleKind, Pattern, TagStance};
 
 use crate::json::{FrontmatterValue, float_text};
 use crate::resolve::AmbiguityIgnore;
@@ -242,89 +244,155 @@ fn least(values: &[Option<String>]) -> Option<usize> {
         .map(|(_, index)| index)
 }
 
-/// The fields a vault schema declares, the typed order each typed one
-/// carries, the places it keeps out of ambiguity classes, and the fingerprint
-/// of the schema they were read from.
+/// What a vault schema declares, as the store reads it: the declared fields,
+/// the typed order each typed one carries, the places it keeps out of
+/// ambiguity classes, the rest of the content model `describe` reports, and
+/// the fingerprint of the schema it was all read from.
 ///
 /// The store reads no schema: the host derives this value from the schema it
-/// pinned and hands it over, and [`FieldRows::derive`] reads it to fill the
-/// typed column. A key declared without a typed order is ordered by its raw
-/// text, which is what a field declared as text is.
+/// pinned and hands it over. [`FieldRows::derive`] reads the typed orders to
+/// fill the typed column, a read compiles its keys under them, and `describe`
+/// reports every declaration here as a facet — the declared fields with their
+/// type, whether they are required and their closed set of values, the
+/// declared tags, the tag patterns, the stance on an undeclared tag, the
+/// declared folders and the path rules. A key declared without a typed order
+/// is ordered by its raw text, which is what a field declared as text is.
+///
+/// **The ambiguity-ignore set is held once.** The one path rule a schema
+/// states is ambiguity-ignore, and its globs are held as the
+/// [`AmbiguityIgnore`] set the resolver applies to every class a target opens;
+/// `describe` reports each glob of that same set as a path rule, so what a
+/// resolution ignores and what `describe` says it ignores cannot disagree.
+///
+/// **The vocabulary a declaration is spelled in is `norn-wire`'s**: the type a
+/// field is declared as, the stance on an undeclared tag and the rule a path
+/// rule states are the enums a facet reports, so the store carries them rather
+/// than defining a third spelling of each.
 ///
 /// **The declaration names the schema it came from.** [`DeclaredFields::none`]
 /// is the declaration of a store with no schema pinned, which declares nothing;
-/// every declared key is declared [`DeclaredFields::under`] a schema
+/// everything declared is declared [`DeclaredFields::under`] a schema
 /// fingerprint. A typed value is therefore always derived under a named
 /// schema, and the store compares that name with the one it pins: an
-/// increment refuses typed rows derived under another, and a find refuses a
+/// increment refuses typed rows derived under another, and a read refuses a
 /// declaration that is not the snapshot's.
+///
+/// **Every declaration is held once, by the text that names it**: a field by
+/// its key, a tag by its name, a tag pattern and a path rule by the pattern, a
+/// folder by its path. A name declared twice is one declaration, and the last
+/// one stands, as a repeated frontmatter key's last value does.
 #[derive(Clone, Debug, Default)]
 pub struct DeclaredFields {
     schema: Option<String>,
-    keys: BTreeMap<String, Option<TypedOrder>>,
+    keys: BTreeMap<String, DeclaredKey>,
+    tags: BTreeSet<String>,
+    tag_patterns: BTreeSet<String>,
+    undeclared_tags: Option<TagStance>,
+    folders: BTreeMap<String, Option<String>>,
     ambiguity_ignore: AmbiguityIgnore,
+}
+
+/// One declared field: what the schema declares it as, and the typed order
+/// its type reads a raw value into, where it has one.
+#[derive(Clone, Debug)]
+struct DeclaredKey {
+    declaration: FieldDeclaration,
+    order: Option<TypedOrder>,
 }
 
 impl DeclaredFields {
     /// The declaration of a store with no schema pinned: no schema, and no
-    /// declared field.
+    /// declaration.
     pub fn none() -> Self {
         Self::default()
     }
 
     /// A declaration read from the schema pinned under `fingerprint`, declaring
-    /// no field yet.
+    /// nothing yet.
     pub fn under(fingerprint: impl Into<String>) -> Self {
         DeclaredFields {
             schema: Some(fingerprint.into()),
-            keys: BTreeMap::new(),
-            ambiguity_ignore: AmbiguityIgnore::none(),
+            ..Self::default()
         }
     }
 
-    /// The same declaration, keeping the places `ignore` names out of every
-    /// ambiguity class a resolution reads under it.
-    ///
-    /// # Panics
-    ///
-    /// On a declaration with no schema, as [`DeclaredFields::declare`] does: the
-    /// set is a schema's, and a store with no schema pinned ignores nothing.
-    pub fn ignoring_ambiguity(mut self, ignore: AmbiguityIgnore) -> Self {
-        assert!(
-            self.schema.is_some(),
-            "an ambiguity-ignore set is declared on a declaration no schema makes"
-        );
-        self.ambiguity_ignore = ignore;
-        self
-    }
-
-    /// The same declaration with `key` declared and ordered by its raw text.
+    /// The same declaration with `key` declared as text: not required, not
+    /// closed, and ordered by its raw text.
     ///
     /// # Panics
     ///
     /// On a declaration with no schema: [`DeclaredFields::none`] declares
-    /// nothing, and a key is declared [`DeclaredFields::under`] the schema that
-    /// declares it.
+    /// nothing, and everything is declared [`DeclaredFields::under`] the
+    /// schema that declares it. Every method that declares something panics
+    /// alike.
     pub fn declare(self, key: impl Into<String>) -> Self {
-        self.with(key.into(), None)
+        self.declare_field(key, FieldDeclaration::new(FieldType::Text), None)
     }
 
-    /// The same declaration with `key` declared and ordered by `order`.
-    ///
-    /// # Panics
-    ///
-    /// On a declaration with no schema, as [`DeclaredFields::declare`] does.
-    pub fn declare_typed(self, key: impl Into<String>, order: TypedOrder) -> Self {
-        self.with(key.into(), Some(order))
+    /// The same declaration with `key` declared as `declaration`, ordered by
+    /// `order` where its type reads a raw value into a typed sort key, and by
+    /// its raw text where `order` is `None`.
+    pub fn declare_field(
+        mut self,
+        key: impl Into<String>,
+        declaration: FieldDeclaration,
+        order: Option<TypedOrder>,
+    ) -> Self {
+        let key = key.into();
+        self.schema_declares(&key);
+        self.keys.insert(key, DeclaredKey { declaration, order });
+        self
     }
 
-    fn with(mut self, key: String, order: Option<TypedOrder>) -> Self {
+    /// The same declaration with the tag `name` declared.
+    pub fn declare_tag(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        self.schema_declares(&name);
+        self.tags.insert(name);
+        self
+    }
+
+    /// The same declaration with the tag facet admitting `pattern` beyond its
+    /// literal names.
+    pub fn declare_tag_pattern(mut self, pattern: impl Into<String>) -> Self {
+        let pattern = pattern.into();
+        self.schema_declares(&pattern);
+        self.tag_patterns.insert(pattern);
+        self
+    }
+
+    /// The same declaration with `stance` as what the schema says about a tag
+    /// its facet does not admit.
+    pub fn declare_undeclared_tags(mut self, stance: TagStance) -> Self {
+        self.schema_declares(stance.as_str());
+        self.undeclared_tags = Some(stance);
+        self
+    }
+
+    /// The same declaration with the folder at `path` declared, for what
+    /// `description` says.
+    pub fn declare_folder(mut self, path: impl Into<String>, description: Option<String>) -> Self {
+        let path = path.into();
+        self.schema_declares(&path);
+        self.folders.insert(path, description);
+        self
+    }
+
+    /// The same declaration with the places `pattern` names kept out of every
+    /// ambiguity class a resolution reads under it: the ambiguity-ignore path
+    /// rule, stated over `pattern`. A glob declared again is the declaration
+    /// already held.
+    pub fn declare_ambiguity_ignore(mut self, pattern: Pattern) -> Self {
+        self.schema_declares(pattern.as_str());
+        self.ambiguity_ignore = self.ambiguity_ignore.with(pattern);
+        self
+    }
+
+    fn schema_declares(&self, named: &str) {
         assert!(
             self.schema.is_some(),
-            "`{key}` is declared on a declaration no schema makes"
+            "`{named}` is declared on a declaration no schema makes"
         );
-        self.keys.insert(key, order);
-        self
     }
 
     /// The fingerprint of the schema this declaration was read from, or `None`
@@ -340,7 +408,9 @@ impl DeclaredFields {
 
     /// The typed order `key` carries, where it is declared with one.
     pub fn typed_order(&self, key: &str) -> Option<&TypedOrder> {
-        self.keys.get(key).and_then(Option::as_ref)
+        self.keys
+            .get(key)
+            .and_then(|declared| declared.order.as_ref())
     }
 
     /// The places the schema keeps out of ambiguity classes.
@@ -351,6 +421,87 @@ impl DeclaredFields {
     /// The declared keys, in key order.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.keys.keys().map(String::as_str)
+    }
+
+    /// Every facet of `kind` this declaration reports, in the order of the
+    /// text that keys it — the byte order of a field's key, a tag's name, a
+    /// pattern or a folder's path — each once.
+    ///
+    /// A pure read of the declaration: it runs no statement. Observed fields
+    /// are what documents carry rather than what the schema declares, so this
+    /// reports none; and a declaration no schema makes reports nothing of any
+    /// kind.
+    pub fn facets_of(&self, kind: FacetKind) -> Vec<Facet> {
+        match kind {
+            FacetKind::DeclaredField => self
+                .keys
+                .iter()
+                .map(|(key, declared)| {
+                    let declaration = &declared.declaration;
+                    Facet::declared_field(
+                        key.clone(),
+                        declaration.field_type,
+                        declaration.required,
+                        declaration.one_of.clone(),
+                    )
+                })
+                .collect(),
+            FacetKind::DeclaredTag => self.tags.iter().map(Facet::declared_tag).collect(),
+            FacetKind::TagPattern => self.tag_patterns.iter().map(Facet::tag_pattern).collect(),
+            FacetKind::Folder => self
+                .folders
+                .iter()
+                .map(|(path, description)| Facet::folder(path.clone(), description.clone()))
+                .collect(),
+            FacetKind::PathRule => self
+                .ambiguity_ignore
+                .patterns()
+                .iter()
+                .map(|pattern| Facet::path_rule(PathRuleKind::AmbiguityIgnore, pattern.as_str()))
+                .collect(),
+            FacetKind::UndeclaredTags => self
+                .undeclared_tags
+                .into_iter()
+                .map(Facet::undeclared_tags)
+                .collect(),
+            FacetKind::ObservedField => Vec::new(),
+            // A kind this build does not know has nothing declared under it.
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// What a schema declares one field as: its type, whether every document is
+/// declared to carry it, and the closed set of values it is declared to hold.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FieldDeclaration {
+    field_type: FieldType,
+    required: bool,
+    one_of: Option<Vec<String>>,
+}
+
+impl FieldDeclaration {
+    /// A field declared as `field_type`: not required, and not closed.
+    pub const fn new(field_type: FieldType) -> Self {
+        FieldDeclaration {
+            field_type,
+            required: false,
+            one_of: None,
+        }
+    }
+
+    /// The same declaration, with every document declared to carry the field.
+    #[must_use]
+    pub fn required(mut self) -> Self {
+        self.required = true;
+        self
+    }
+
+    /// The same declaration, closed over `values`.
+    #[must_use]
+    pub fn one_of(mut self, values: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.one_of = Some(values.into_iter().map(Into::into).collect());
+        self
     }
 }
 

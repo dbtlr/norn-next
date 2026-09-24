@@ -13,7 +13,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use crate::common::{Scratch, ambiguity, document, violation, write_documents};
+use crate::common::{Scratch, ambiguity, document, number, violation, write_documents};
 use norn_store::{
     BlockFact, DEFAULT_PAGE, DeclaredFields, FIND_STATEMENTS, FieldOrder, FindPlan, FindStatement,
     Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, MAX_PAGE, NESTED_ROW_CEILING, Nested,
@@ -58,7 +58,7 @@ pub(crate) const SEED_SCHEMA: &str = "seed-schema";
 pub(crate) fn declared() -> DeclaredFields {
     DeclaredFields::under(SEED_SCHEMA)
         .declare("status")
-        .declare_typed("count", integer_order())
+        .declare_field("count", number(), Some(integer_order()))
 }
 
 /// `status` and `count` both declared as text, under the fixture's schema.

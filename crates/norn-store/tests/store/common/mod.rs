@@ -10,13 +10,19 @@ use std::path::PathBuf;
 
 use norn_store::{
     BlockFact, CandidateFact, Change, ClassKey, DeclaredFields, DerivationCounters, DocumentFacts,
-    DocumentPath, FindingFacts, FrontmatterValue, HeadingFact, IncrementOutcome,
+    DocumentPath, FieldDeclaration, FindingFacts, FrontmatterValue, HeadingFact, IncrementOutcome,
     IncrementProvenance, LinkFact, LinkFamily, Provenance, Request, Span, Store, TagFact,
     TagSource, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::scratch::Scratch as TestkitScratch;
 use norn_wire::{FindingKind, Severity};
+
+/// A field declared as a number, which a typed order a test hands beside it
+/// sorts by.
+pub fn number() -> FieldDeclaration {
+    FieldDeclaration::new(norn_wire::FieldType::Number)
+}
 
 /// A snapshot of a request's reading, in the shape the harness compares.
 pub fn snapshot(counters: &DerivationCounters) -> CounterSnapshot {

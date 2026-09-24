@@ -41,14 +41,14 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use norn_config::schema::VaultSchema;
+use norn_config::schema::{FieldType, UndeclaredTags, VaultSchema};
 use norn_store::{
-    AmbiguityIgnore, BlockFact, Change, DeclaredFields, DiscardScope, DocumentFacts, DocumentPath,
+    BlockFact, Change, DeclaredFields, DiscardScope, DocumentFacts, DocumentPath, FieldDeclaration,
     FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Provenance, Span, TagFact, TagSource,
     TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
-use norn_wire::{FindingKind, FindingScope, Severity};
+use norn_wire::{FindingKind, FindingScope, Severity, TagStance};
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -846,30 +846,69 @@ impl Declared {
     }
 }
 
-/// The declared fields of `schema`, pinned under `fingerprint`, as the store
-/// reads them: every declared key, for each whose type does not order as text
-/// the typed order that type reads a raw value into, and the places the schema
-/// keeps out of ambiguity classes.
+/// What `schema` declares, pinned under `fingerprint`, as the store reads it:
+/// every declared field with its type, whether it is required and its closed
+/// set, and for each whose type does not order as text, the typed order that
+/// type reads a raw value into; the declared tags, the tag patterns and the
+/// stance on an undeclared tag; the declared folders; and the ambiguity-ignore
+/// patterns, the places the schema keeps out of ambiguity classes, which
+/// the resolver applies and `describe` reports as path rules.
 ///
 /// A raw value that does not read as its declared type has no sort key, which
 /// is the store's `NULL`: the document still carries the value, and a typed
 /// order has nothing to place it by.
 fn declared_fields(schema: &VaultSchema, fingerprint: String) -> DeclaredFields {
-    let ignore = AmbiguityIgnore::new(schema.ambiguity_ignore().iter().cloned());
-    schema.fields().fold(
-        DeclaredFields::under(fingerprint).ignoring_ambiguity(ignore),
+    let declared = schema.fields().fold(
+        DeclaredFields::under(fingerprint),
         |declared, (key, field)| {
             let kind = field.kind();
-            if kind.orders_as_text() {
-                declared.declare(key)
-            } else {
-                declared.declare_typed(
-                    key,
-                    TypedOrder::new(move |raw| kind.read(raw).ok().map(|value| value.sort_key())),
-                )
+            let mut declaration = FieldDeclaration::new(wire_field_type(kind));
+            if field.required() {
+                declaration = declaration.required();
             }
+            if let Some(values) = field.one_of() {
+                declaration = declaration.one_of(values);
+            }
+            let order = (!kind.orders_as_text()).then(|| {
+                TypedOrder::new(move |raw| kind.read(raw).ok().map(|value| value.sort_key()))
+            });
+            declared.declare_field(key, declaration, order)
         },
-    )
+    );
+    let tags = schema.tags();
+    let declared = tags.declared().fold(declared, DeclaredFields::declare_tag);
+    let declared = tags
+        .patterns()
+        .iter()
+        .fold(declared, |declared, pattern| {
+            declared.declare_tag_pattern(pattern.as_str())
+        })
+        .declare_undeclared_tags(match tags.undeclared() {
+            UndeclaredTags::Allow => TagStance::Allow,
+            UndeclaredTags::Report => TagStance::Report,
+        });
+    let declared = schema.folders().iter().fold(declared, |declared, folder| {
+        declared.declare_folder(folder.path(), folder.description().map(str::to_string))
+    });
+    schema
+        .ambiguity_ignore()
+        .iter()
+        .fold(declared, |declared, pattern| {
+            declared.declare_ambiguity_ignore(pattern.clone())
+        })
+}
+
+/// The wire's spelling of a declared field type, which is the type a
+/// `describe` facet reports: the two enums are one vocabulary, held equal by
+/// spelling in `norn-config`'s suite.
+fn wire_field_type(kind: FieldType) -> norn_wire::FieldType {
+    match kind {
+        FieldType::Text => norn_wire::FieldType::Text,
+        FieldType::Number => norn_wire::FieldType::Number,
+        FieldType::Boolean => norn_wire::FieldType::Boolean,
+        FieldType::Date => norn_wire::FieldType::Date,
+        FieldType::Tags => norn_wire::FieldType::Tags,
+    }
 }
 
 /// Judge a document's tags against the vault's declared tag facet.
@@ -1020,6 +1059,99 @@ mod tests {
                 .patterns()
                 .is_empty()
         );
+    }
+
+    /// **A pinned schema's declaration reports every declaration the schema
+    /// makes**, each as the facet `describe` answers with, in the order of the
+    /// text that keys it: each field with its type, whether it is required and
+    /// its closed set, the tags, the patterns, the stance, the folders and the
+    /// ambiguity-ignore patterns. A vault with no schema pinned declares
+    /// nothing, and a schema silent on tags states the default stance.
+    #[test]
+    fn a_pinned_declaration_reports_every_declaration_its_schema_makes() {
+        use norn_wire::{Facet, FacetKind, FieldType as Wire, PathRuleKind};
+
+        let declared = Declared::pinned(
+            VaultSchema::parse(
+                b"version: 1
+fields:
+  title: {type: text, required: true}
+  due: {type: date}
+  status: {type: text, one_of: [live, draft]}
+tags:
+  declared: [project, area]
+  patterns: [\"person/**\", \"area/**\"]
+  undeclared: report
+folders:
+  - path: journal
+    description: One document per day
+  - path: archive
+paths:
+  ambiguity_ignore: [\"archive/**\"]
+",
+            )
+            .expect("a schema declaring every shape"),
+            "every-shape",
+        );
+        let facets = |kind| declared.fields().facets_of(kind);
+        assert_eq!(
+            facets(FacetKind::DeclaredField),
+            vec![
+                Facet::declared_field("due", Wire::Date, false, None),
+                Facet::declared_field(
+                    "status",
+                    Wire::Text,
+                    false,
+                    Some(vec!["draft".to_string(), "live".to_string()])
+                ),
+                Facet::declared_field("title", Wire::Text, true, None),
+            ]
+        );
+        assert!(declared.fields().typed_order("due").is_some());
+        assert!(declared.fields().typed_order("title").is_none());
+        assert_eq!(
+            facets(FacetKind::DeclaredTag),
+            vec![Facet::declared_tag("area"), Facet::declared_tag("project")]
+        );
+        assert_eq!(
+            facets(FacetKind::TagPattern),
+            vec![
+                Facet::tag_pattern("area/**"),
+                Facet::tag_pattern("person/**")
+            ]
+        );
+        assert_eq!(
+            facets(FacetKind::UndeclaredTags),
+            vec![Facet::undeclared_tags(TagStance::Report)]
+        );
+        assert_eq!(
+            facets(FacetKind::Folder),
+            vec![
+                Facet::folder("archive", None),
+                Facet::folder("journal", Some("One document per day".to_string())),
+            ]
+        );
+        assert_eq!(
+            facets(FacetKind::PathRule),
+            vec![Facet::path_rule(
+                PathRuleKind::AmbiguityIgnore,
+                "archive/**"
+            )]
+        );
+        assert_eq!(facets(FacetKind::ObservedField), Vec::new());
+
+        let silent = Declared::pinned(
+            VaultSchema::parse(b"version: 1\n").expect("a schema declaring nothing"),
+            "silent",
+        );
+        assert_eq!(
+            silent.fields().facets_of(FacetKind::UndeclaredTags),
+            vec![Facet::undeclared_tags(TagStance::Allow)]
+        );
+        let unpinned = undeclaring();
+        for kind in FacetKind::ALL {
+            assert_eq!(unpinned.fields().facets_of(kind), Vec::new(), "{kind:?}");
+        }
     }
 
     /// **The two discard sides partition the causes.** The sides are read off

@@ -54,7 +54,11 @@ impl Vault {
     /// The paths a find's `resolves` part keeps on this vault's root, the
     /// schema ignoring `ignored`, in path order.
     fn resolves(&self, target: &str, ignored: &[&str]) -> Vec<String> {
-        let declared = DeclaredFields::under(SCHEMA).ignoring_ambiguity(ignoring(ignored));
+        let declared = ignored
+            .iter()
+            .fold(DeclaredFields::under(SCHEMA), |declared, glob| {
+                declared.declare_ambiguity_ignore(Pattern::parse(glob).expect("a glob"))
+            });
         let params = FindParams::new(address()).with_predicates([Predicate::resolves(
             ResolutionTarget::new(target).expect("a target"),
         )]);

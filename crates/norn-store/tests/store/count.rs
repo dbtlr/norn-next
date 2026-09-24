@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::common::{Scratch, document, write_documents};
+use crate::common::{Scratch, document, number, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
     COUNT_STATEMENTS, CountPlan, CountStatement, Counted, DeclaredFields, FieldOrder, Found,
@@ -51,7 +51,7 @@ fn declared() -> DeclaredFields {
     DeclaredFields::under(COUNT_SCHEMA)
         .declare("status")
         .declare("aliases")
-        .declare_typed("n", decimal_order())
+        .declare_field("n", number(), Some(decimal_order()))
 }
 
 fn texts(values: &[&str]) -> FrontmatterValue {
@@ -817,7 +817,11 @@ fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
         .snapshot()
         .count(
             &typed.clone().with_after(cursor),
-            &DeclaredFields::under("another-schema").declare_typed("n", decimal_order()),
+            &DeclaredFields::under("another-schema").declare_field(
+                "n",
+                number(),
+                Some(decimal_order()),
+            ),
         )
         .expect_err("a typed cursor under another schema");
     assert!(

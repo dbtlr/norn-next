@@ -16,14 +16,16 @@ use norn_wire::{
     ValidateParams, VaultAddress, VaultName,
 };
 
-use crate::common::{Scratch, ambiguity, document, unread_block, violation, write_documents};
+use crate::common::{
+    Scratch, ambiguity, document, number, unread_block, violation, write_documents,
+};
 use crate::find::{SEED_SCHEMA, Seeded, declared, integer_order, map, request, sorted, string};
 
 /// The fixture's declaration, read from the schema pinned under `schema`.
 fn declared_under(schema: &str) -> DeclaredFields {
     DeclaredFields::under(schema)
         .declare("status")
-        .declare_typed("count", integer_order())
+        .declare_field("count", number(), Some(integer_order()))
 }
 
 /// The fixture's keys, both ordered by their text, under `schema`.
