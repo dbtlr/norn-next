@@ -145,12 +145,18 @@ fn a_request_that_only_reads_finishes_at_zero() {
         .findings_in_class(&norn_store::class_probe("glossary").expect("a class stem"))
         .expect("reading findings");
     let _ = warm
-        .suffix_candidates(&norn_store::class_probe("glossary").expect("a class stem"))
+        .suffix_candidates(
+            &norn_store::class_probe("glossary")
+                .expect("a class stem")
+                .into(),
+        )
         .expect("reading candidates");
     let _ = warm.full_text_matches("body").expect("reading matches");
     let _ = warm
         .emitted_plan(norn_store::ExplainedStatement::SuffixCandidates(
-            &norn_store::class_probe("glossary").expect("a class stem"),
+            &norn_store::class_probe("glossary")
+                .expect("a class stem")
+                .into(),
         ))
         .expect("a query plan");
     let _ = warm.vault_schema_pin().expect("reading the pin");

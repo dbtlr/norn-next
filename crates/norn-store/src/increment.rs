@@ -17,7 +17,7 @@ use crate::facts::{DocumentFacts, FindingFacts, Invalidation, Provenance};
 use crate::fields::FieldRow;
 use crate::hash;
 use crate::json;
-use crate::path::{ClassKey, DocumentPath};
+use crate::path::{ClassKey, DocumentPath, SuffixKey};
 use crate::request::{self, DiscardScope};
 use crate::store::Store;
 
@@ -140,9 +140,11 @@ pub struct IncrementOutcome {
     /// derives the same path counts the death here and leaves no tombstone,
     /// because the document insert's trigger clears it.
     pub tombstones_recorded: u64,
-    /// Every ambiguity class the changed paths are in — the resolution axis of
-    /// the findings maintenance this changeset implies, and what a caller
-    /// re-records against.
+    /// Every ambiguity class the changed paths are in, each spelled in both key
+    /// spaces — raw, and folded by ASCII case — because a finding's classes are
+    /// spelled in the space its root probes. This is the resolution axis of the
+    /// findings maintenance this changeset implies, and what a caller re-records
+    /// against.
     ///
     /// The subject axis carries no field beside it: the paths whose findings
     /// went are the changeset's own entries, which the caller processed one by
@@ -614,7 +616,7 @@ fn upsert(
     if projection.is_some() {
         tally.projections += 1;
     }
-    tally.affected_classes.insert(facts.path.class_key());
+    tally.affected_classes.extend(class_keys_of(&facts.path));
     Ok(())
 }
 
@@ -653,7 +655,7 @@ fn record_death(
         .map_err(|error| error::sql("recording a tombstone", error))?;
 
     tally.tombstones_recorded += 1;
-    tally.affected_classes.insert(path.class_key());
+    tally.affected_classes.extend(class_keys_of(path));
     Ok(())
 }
 
@@ -748,6 +750,21 @@ fn discard_the_subject(
     Ok(statement
         .execute(params![path.as_str()])
         .map_err(|error| error::sql("discarding a path's findings", error))? as u64)
+}
+
+/// The class keys a change to `path` affects: its class in both key spaces.
+///
+/// A finding's classes are spelled in the key space its root probes, raw on a
+/// root that tells spellings apart and folded on one that folds ASCII case, and
+/// the increment does not ask which root this is. Naming both reaches a finding
+/// recorded in either — on a stem with no ASCII capital the two are one key —
+/// and a finding the other space names is re-decided rather than missed, which
+/// is the direction class maintenance errs in.
+fn class_keys_of(path: &DocumentPath) -> [ClassKey; 2] {
+    [
+        path.class_key_in(SuffixKey::Raw),
+        path.class_key_in(SuffixKey::Folded),
+    ]
 }
 
 /// Discard the findings in every class the changeset's paths affect, and report

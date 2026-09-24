@@ -633,7 +633,7 @@ fn an_ambiguity_classs_membership_change_converges_on_a_build_from_zero() {
         let probe = class_probe("shared").expect("a class probe over a stem");
         let members: Vec<String> = store
             .begin_request()
-            .suffix_candidates(&probe)
+            .suffix_candidates(&probe.clone().into())
             .expect("reading the class")
             .into_iter()
             .map(|path| path.as_str().to_string())

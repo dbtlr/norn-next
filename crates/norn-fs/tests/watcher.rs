@@ -658,3 +658,19 @@ fn a_collector_holds_the_watcher_lease_until_its_subscription_is_dropped() {
     drop(collector);
     drop(Lease::hold(isolation::REAL_WATCHER, lease_budget()));
 }
+
+/// **Coverage carries the case behaviour it proved for the root it covers.**
+/// The detection a subscription makes over the canonical root is the one a
+/// consumer retains, so nothing downstream detects it again.
+#[test]
+fn a_subscription_reports_the_case_behaviour_its_root_proved() {
+    let scratch = Scratch::new("case-behaviour");
+    let vault = scratch.vault();
+    let _lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    let (subscription, _own_writes) =
+        watch(&vault, &scratch.schema()).expect("watch coverage is active");
+    let proven = PathNormalizer::detect(subscription.covered_root())
+        .expect("the covered root's case behaviour")
+        .case_sensitivity();
+    assert_eq!(subscription.case_sensitivity(), proven);
+}

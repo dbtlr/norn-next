@@ -4,7 +4,7 @@
 use norn_db::rusqlite::types::Value;
 
 use super::FieldOrder;
-use crate::request::range_predicate_from;
+use crate::path::SuffixKey;
 
 /// Every filter shape a page statement narrows by, named.
 ///
@@ -37,9 +37,11 @@ pub enum ReadFilter {
     /// The path matches a glob: the glob's literal-prefix range on
     /// `documents_path`, and the glob function over the paths it reaches.
     PathGlob,
-    /// The document is in the class a resolution target opens: the target's
-    /// suffix ranges on `documents_suffix_key`.
-    Resolves,
+    /// The document is in the class a resolution target opens on the root:
+    /// the target's suffix ranges on `documents_suffix_key` where the root
+    /// tells spellings apart, and on `documents_folded_suffix_key` where it
+    /// folds ASCII case, less the places the schema ignores.
+    Resolves(SuffixKey),
     /// The document carries the tag, on `document_tags_name`.
     Tag,
     /// A finding of the kind stands over the document under the active
@@ -68,7 +70,7 @@ impl ReadFilter {
             Self::After(FieldOrder::Raw),
             Self::FullText,
             Self::PathGlob,
-            Self::Resolves,
+            Self::Resolves(SuffixKey::Raw),
             Self::Tag,
             Self::Finding,
         ]
@@ -95,7 +97,7 @@ impl ReadFilter {
             Self::After(_) => 6,
             Self::FullText => 7,
             Self::PathGlob => 8,
-            Self::Resolves => 9,
+            Self::Resolves(_) => 9,
             Self::Tag => 10,
             Self::Finding => 11,
         };
@@ -114,8 +116,8 @@ impl ReadFilter {
 pub(crate) struct Filter {
     pub(crate) shape: ReadFilter,
     /// The values the fragment binds, in the order [`Filter::spell`] writes
-    /// their placeholders. A resolution filter binds two per suffix range, so
-    /// the count is also how many ranges it opens.
+    /// their placeholders. A resolution filter binds two per suffix range and
+    /// two more, so the count also says how many ranges it opens.
     pub(crate) values: Vec<Value>,
 }
 
@@ -204,14 +206,19 @@ impl Filter {
                     glob_test(&pattern, "dg.path")
                 )
             }
-            ReadFilter::Resolves => {
-                // Each bound takes its number in turn, and the range predicate
-                // spells the ranges over those numbers from `first`.
+            ReadFilter::Resolves(key) => {
+                // Each value takes its number in turn, and the resolution's
+                // predicate spells its ranges and its exclusion over those
+                // numbers from `first`: two bounds per range, then the ignore
+                // set and the target's segment count.
                 for _ in &self.values {
                     next();
                 }
-                let ranges = range_predicate_from("dr.suffix_key", self.values.len() / 2, first);
-                format!("{id} IN (SELECT dr.id FROM documents AS dr WHERE {ranges})")
+                let ranges = (self.values.len() - 2) / 2;
+                format!(
+                    "{id} IN (SELECT dr.id FROM documents AS dr WHERE {})",
+                    crate::resolve::predicate("dr", key, ranges, first)
+                )
             }
             ReadFilter::Tag => {
                 let name = next();

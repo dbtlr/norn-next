@@ -99,6 +99,7 @@ mod json;
 mod path;
 mod read;
 mod request;
+mod resolve;
 mod store;
 mod validate;
 
@@ -130,13 +131,14 @@ pub use read::{
 // rung whichever database met it.
 pub use norn_db::{EmittedPlan, OpenOutcome, PlanStep, RebuildReason};
 pub use path::{
-    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, SuffixProbe, class_probe,
+    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, SuffixKey, SuffixProbe, class_probe,
     suffix_probe,
 };
 pub use request::{
     DiscardScope, ExplainedStatement, FINDING_ID_CHUNK, FeedCursor, FindingCursor, MAX_PAGE,
     POINT_READS, Request, STATEMENTS, SubjectScope,
 };
+pub use resolve::{AmbiguityIgnore, Resolution};
 pub use store::{
     ConnectionTurn, ReaderMint, RecordedStoreSchema, Snapshot, SnapshotAttempt, SnapshotReader,
     Store, StoreMode, StoreReading,

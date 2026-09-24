@@ -21,7 +21,7 @@ use notify::{Config, Event, PollWatcher, RecursiveMode};
 
 use crate::exclusion::Exclusions;
 use crate::hash::hashed_from;
-use crate::path::{NormalizedPath, PathError, PathNormalizer};
+use crate::path::{CaseSensitivity, NormalizedPath, PathError, PathNormalizer};
 use crate::write::{Landed, Moved, Vacated};
 use crate::{Identity, PostState, path_identity};
 
@@ -504,6 +504,10 @@ pub struct Subscription {
     /// is the first one after a heal has taken up the coverage.
     first_heal: HealWindow,
     root_anchor: RootAnchor,
+    /// The case behaviour detected for the covered root when this coverage was
+    /// installed: the same detection every path this subscription reports is
+    /// normalized under.
+    sensitivity: CaseSensitivity,
 }
 
 /// The registered root name and the directory coverage was installed over.
@@ -531,6 +535,13 @@ impl Subscription {
     /// The canonical directory this subscription covers.
     pub fn covered_root(&self) -> &Path {
         &self.root_anchor.covered
+    }
+
+    /// The case behaviour this coverage proved for its root when it was
+    /// installed, which is the behaviour every path it reports is normalized
+    /// under. A consumer retains it rather than detecting it again.
+    pub fn case_sensitivity(&self) -> CaseSensitivity {
+        self.sensitivity
     }
 
     /// Wait until every coverage edge is live, or until coverage fails.
@@ -947,6 +958,7 @@ fn establish(
 
     let worker_state = shared.clone();
     let worker = thread::spawn(move || run_coalescer(worker_state, wake_rx, batch_tx));
+    let sensitivity = normalizer.case_sensitivity();
     let owns = OwnWrites {
         ledger: Arc::downgrade(&ledger),
         root: root.clone(),
@@ -967,6 +979,7 @@ fn establish(
                 covered: root.clone(),
                 identity: root_identity,
             },
+            sensitivity,
         },
         owns,
     ))

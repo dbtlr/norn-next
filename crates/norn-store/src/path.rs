@@ -82,6 +82,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::error::StoreError;
+use crate::facts::StoredPathOrder;
 
 /// The separator between segments, in a path and in a reversed key alike.
 const SEPARATOR: char = '/';
@@ -308,11 +309,26 @@ impl DocumentPath {
     /// ambiguity is the written target's, and it is [`SuffixProbe::class_keys`]
     /// that carries it.
     pub fn class_key(&self) -> ClassKey {
+        self.class_key_in(SuffixKey::Raw)
+    }
+
+    /// The key of the ambiguity class this document belongs to among probes of
+    /// `key`: its stem as stored, or folded by ASCII case.
+    ///
+    /// Class-scoped maintenance reaches a finding through the class key its
+    /// producer recorded, which is spelled in the key space the root probes. A
+    /// change to this document names both, so a finding is reached whichever
+    /// space it was recorded in.
+    pub fn class_key_in(&self, key: SuffixKey) -> ClassKey {
+        let stem = match key {
+            SuffixKey::Raw => self.stem.clone(),
+            SuffixKey::Folded => fold_ascii_case(&self.stem),
+        };
         // A document's own stem already passed every refusal `class_probe`
         // applies — it came from a leaf segment `DocumentPath::new` already
         // checked for a `.`/`..` reduction and a control byte, and a leaf
         // segment carries no separator by construction.
-        let probe = class_probe(&self.stem).expect("a document's own stem is a valid class probe");
+        let probe = class_probe(&stem).expect("a document's own stem is a valid class probe");
         ClassKey::of_prefix(&probe.ranges[0].lower)
     }
 }
@@ -435,6 +451,7 @@ impl ClassKey {
     /// discarded the same bytes.
     pub(crate) fn probe(&self) -> SuffixProbe {
         SuffixProbe {
+            key: SuffixKey::Raw,
             ranges: vec![bounded(self.0.clone())],
         }
     }
@@ -455,14 +472,48 @@ impl ClassKey {
     }
 }
 
+/// Which of a document's two stored suffix keys a probe ranges over.
+///
+/// The choice is the vault root's, proven at the filesystem seam and carried to
+/// the store as a [`StoredPathOrder`]: a root that tells spellings apart probes
+/// the raw key and never consults the folded one, and a root that folds ASCII
+/// case probes the folded key, so every spelling it resolves to one entry
+/// opens one class there.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum SuffixKey {
+    /// `documents.suffix_key`, compared bytewise.
+    Raw,
+    /// `documents.folded_suffix_key`: the raw key with ASCII case folded.
+    Folded,
+}
+
+impl SuffixKey {
+    /// The key a root with this proven case behaviour probes.
+    pub fn under(order: StoredPathOrder) -> Self {
+        match order {
+            StoredPathOrder::Sensitive => SuffixKey::Raw,
+            StoredPathOrder::AsciiCaseInsensitive => SuffixKey::Folded,
+        }
+    }
+
+    /// The `documents` column this key is stored in.
+    pub(crate) fn column(self) -> &'static str {
+        match self {
+            SuffixKey::Raw => "suffix_key",
+            SuffixKey::Folded => "folded_suffix_key",
+        }
+    }
+}
+
 /// The bounds of the prefix ranges over a segment-reversed key that one probe
-/// opens.
+/// opens, and which of the two stored keys they bound.
 ///
 /// Ranges rather than patterns, because a range over an index is what SQLite
 /// answers without a scan. A probe carries one range or two: a target whose leaf
 /// carries a dot has two reductions and opens both.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SuffixProbe {
+    key: SuffixKey,
     ranges: Vec<Range>,
 }
 
@@ -475,6 +526,27 @@ struct Range {
 }
 
 impl SuffixProbe {
+    /// Which stored suffix key this probe's ranges bound.
+    pub fn key(&self) -> SuffixKey {
+        self.key
+    }
+
+    /// The same probe over the folded key: each prefix with ASCII case folded,
+    /// and bounded again.
+    ///
+    /// Folding a prefix that is already folded changes nothing, so a folded
+    /// probe folds to itself.
+    pub fn folded(&self) -> SuffixProbe {
+        SuffixProbe {
+            key: SuffixKey::Folded,
+            ranges: self
+                .ranges
+                .iter()
+                .map(|range| bounded(fold_ascii_case(&range.lower)))
+                .collect(),
+        }
+    }
+
     /// Every range this probe opens, as `(lower, upper)` pairs: `lower`
     /// inclusive, `upper` exclusive.
     ///
@@ -493,7 +565,8 @@ impl SuffixProbe {
     }
 
     /// Every ambiguity class this probe reads: one per reduction, so one key or
-    /// two.
+    /// two, spelled in the key space the probe ranges over — folded where it
+    /// ranges over the folded key.
     ///
     /// A finding recorded from a probe belongs to **all** of them, because the
     /// reductions are disjoint rather than nested. `notes.tar` opens `notes.tar/`
@@ -568,7 +641,10 @@ pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
     if stem != *leaf {
         ranges.push(bounded(reversed(leaf)));
     }
-    Ok(SuffixProbe { ranges })
+    Ok(SuffixProbe {
+        key: SuffixKey::Raw,
+        ranges,
+    })
 }
 
 /// The probe over the ambiguity class a stem names.
@@ -603,6 +679,7 @@ pub fn class_probe(stem: &str) -> Result<SuffixProbe, StoreError> {
         return refuse(problem);
     }
     Ok(SuffixProbe {
+        key: SuffixKey::Raw,
         ranges: vec![bounded(format!("{stem}{SEPARATOR}"))],
     })
 }

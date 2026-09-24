@@ -140,6 +140,11 @@ pub struct ProductionAttachment {
     /// The canonical directory shared by this attachment's watcher, walks,
     /// control reads, write normalization, and shadow placement.
     covered_root: PathBuf,
+    /// The case behaviour the coverage proved for `covered_root` when it was
+    /// installed, retained so a read resolves under it rather than detecting
+    /// it. It moves with the coverage: a recovery that installs coverage again
+    /// takes the proof that coverage made.
+    path_order: StoredPathOrder,
     controls: ReloadCandidate,
     subscription: Option<Subscription>,
     store: Store,
@@ -205,6 +210,11 @@ impl SnapshotSource for ProductionAttachment {
             statements: minted.statements,
         }
     }
+
+    /// The proof the coverage made when it was installed.
+    fn path_order(&self) -> StoredPathOrder {
+        self.path_order
+    }
 }
 
 impl ReadSource for norn_store::SnapshotReader {
@@ -226,8 +236,8 @@ impl ReadSource for norn_store::SnapshotReader {
     /// The statements come from the attempt's own counters rather than the
     /// snapshot's, because an attempt that refused has no snapshot to read
     /// them off and ran the statement all the same.
-    fn establish(turn: Self::Turn) -> Establishment<Self::Snapshot> {
-        let attempt = turn.establish();
+    fn establish(turn: Self::Turn, order: StoredPathOrder) -> Establishment<Self::Snapshot> {
+        let attempt = turn.establish(order);
         Establishment {
             established: attempt
                 .snapshot
@@ -668,6 +678,7 @@ impl EntryOps for ProductionEntryOps {
         let (subscription, own_writes) =
             Self::start_watch(registration, &schema).map_err(watcher)?;
         let covered_root = subscription.covered_root().to_owned();
+        let path_order = store_order(subscription.case_sensitivity());
         let root = covered_root.as_path();
         let shadows = ShadowHome::resolve(root, &derived.join("tmp"), &key).map_err(effect)?;
         shadows.sweep(Duration::ZERO).map_err(effect)?;
@@ -691,6 +702,7 @@ impl EntryOps for ProductionEntryOps {
         let mut attachment = ProductionAttachment {
             registration: registration.clone(),
             covered_root,
+            path_order,
             controls: candidate.clone(),
             maintainership,
             store,
@@ -783,6 +795,7 @@ impl EntryOps for ProductionEntryOps {
             .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
             .map_err(watcher)?;
         let covered_root = subscription.covered_root().to_owned();
+        let path_order = store_order(subscription.case_sensitivity());
         let candidate = ReloadCandidate::read_at(&attachment.registration, &covered_root)
             .map_err(JobFailure::Reload)?;
         let derived = self.derived(&attachment.registration.name);
@@ -794,6 +807,7 @@ impl EntryOps for ProductionEntryOps {
         attachment._own_writes = own_writes;
         attachment._shadows = shadows;
         attachment.covered_root = covered_root;
+        attachment.path_order = path_order;
         if candidate.undeclarable().is_some() {
             // The same stance the attach takes: coverage is re-installed, the
             // schema is re-read, and a declaration this build still cannot read

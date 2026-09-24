@@ -83,6 +83,7 @@ use crate::facts::{
 use crate::fields::{FieldContainer, FieldRow, FieldRows};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
+use crate::resolve::{self, Resolution};
 use crate::store::Store;
 
 mod instrument;
@@ -1107,20 +1108,25 @@ impl<'a> Request<'a> {
 
     // ---- probe reads ----
 
-    /// Every document in the class a probe opens, in suffix-key order.
+    /// Every document in the class a resolution names, in suffix-key order.
     ///
     /// The full candidate enumeration behind a finding's bounded head, and the
-    /// membership of an ambiguity class: ranges over `documents(suffix_key)`,
-    /// costing the class rather than the vault.
+    /// membership of an ambiguity class: ranges over the suffix key the
+    /// resolution's root probes, costing the class rather than the vault, with
+    /// the places its schema ignores left out. A probe converts into the
+    /// resolution that ignores nothing, which is the whole class it opens.
     ///
-    /// The order is total — `suffix_key` then `path` — because equal suffix keys
-    /// are exactly what an ambiguity class is made of, and a ladder whose ties
-    /// fall out in row-insertion order is a ladder that reorders itself when a
-    /// document is re-derived.
-    pub fn suffix_candidates(&self, probe: &SuffixProbe) -> Result<Vec<DocumentPath>, StoreError> {
+    /// The order is total — the probed key, then `path` — because equal suffix
+    /// keys are exactly what an ambiguity class is made of, and a ladder whose
+    /// ties fall out in row-insertion order is a ladder that reorders itself
+    /// when a document is re-derived.
+    pub fn suffix_candidates(
+        &self,
+        resolution: &Resolution,
+    ) -> Result<Vec<DocumentPath>, StoreError> {
         self.read_all(
-            &suffix_candidates_sql(probe.range_count()),
-            probe_parameters(probe),
+            &suffix_candidates_sql(resolution),
+            params_from_iter(resolution.parameters()),
             |row| Ok(DocumentPath::new(&row.get::<_, String>(0)?)),
             "reading suffix candidates",
         )
@@ -1681,12 +1687,14 @@ fn finding_id_parameters(chunk: &[i64]) -> impl Params + '_ {
     params_from_iter(chunk.iter())
 }
 
-/// The statement [`Request::suffix_candidates`] emits for a probe of
-/// `ranges` ranges.
-fn suffix_candidates_sql(ranges: usize) -> String {
+/// The statement [`Request::suffix_candidates`] emits for `resolution`: its
+/// ranges over the key it probes, its exclusion, and the ladder's order.
+fn suffix_candidates_sql(resolution: &Resolution) -> String {
+    let key = resolution.probe().key();
     format!(
-        "SELECT path FROM documents WHERE {} ORDER BY suffix_key, path",
-        range_predicate("suffix_key", ranges)
+        "SELECT dr.path FROM documents AS dr WHERE {} ORDER BY dr.{}, dr.path",
+        resolve::predicate("dr", key, resolution.probe().range_count(), 1),
+        key.column()
     )
 }
 

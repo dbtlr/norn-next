@@ -80,7 +80,7 @@ impl Unpinned {
         self.reader
             .try_take()
             .expect("a handle nothing is reading holds its connection")
-            .establish()
+            .establish(norn_store::StoredPathOrder::Sensitive)
             .snapshot
             .expect("a snapshot")
     }

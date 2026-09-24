@@ -15,7 +15,7 @@ use crate::find::{
     FindStatement, compose_bare_directory, compose_known_key, compose_match_probe, compose_universe,
 };
 use crate::json::{FrontmatterValue, canonical_json};
-use crate::path::{DirectoryPrefix, DocumentPath, suffix_probe};
+use crate::path::{DirectoryPrefix, DocumentPath};
 use crate::store::Snapshot;
 
 /// Where a request named a key.
@@ -294,16 +294,17 @@ impl Snapshot {
             Predicate::LinksTo { .. } => Err(PageRefusal::NotIndexed {
                 fact: "a link's target",
             }),
-            Predicate::Resolves { target, .. } => match suffix_probe(target.address()) {
+            Predicate::Resolves { target, .. } => match crate::resolve::Resolution::new(
+                target.address(),
+                self.path_order(),
+                declared.ambiguity_ignore(),
+            ) {
                 Err(_) => Ok(Part::MatchesNothing(Unsatisfied::impossible_path(
                     target.address(),
                 ))),
-                Ok(probe) => filter(
-                    ReadFilter::Resolves,
-                    probe
-                        .ranges()
-                        .flat_map(|(lower, upper)| [text(lower), text(upper)])
-                        .collect(),
+                Ok(resolution) => filter(
+                    ReadFilter::Resolves(resolution.probe().key()),
+                    resolution.parameters(),
                 ),
             },
             Predicate::Tag { name, .. } => filter(ReadFilter::Tag, vec![text(name)]),

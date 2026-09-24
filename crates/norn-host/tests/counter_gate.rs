@@ -467,12 +467,14 @@ fn a_warm_pass(store: &mut Store, subject: &StoredDocument) -> CounterSnapshot {
         .stored_findings(&subject.path)
         .expect("reading findings");
     let _ = warm.findings_in_class(&probe).expect("reading a class");
-    let _ = warm.suffix_candidates(&probe).expect("reading candidates");
+    let _ = warm
+        .suffix_candidates(&probe.clone().into())
+        .expect("reading candidates");
     let _ = warm
         .full_text_matches(&phrase(&stem))
         .expect("reading matches");
     let _ = warm
-        .emitted_plan(ExplainedStatement::SuffixCandidates(&probe))
+        .emitted_plan(ExplainedStatement::SuffixCandidates(&probe.clone().into()))
         .expect("a query plan");
     assert!(
         warm.vault_schema_pin().expect("reading the pin").is_some(),

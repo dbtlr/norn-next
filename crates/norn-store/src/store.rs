@@ -78,7 +78,7 @@ use norn_wire::{FindingKind, Severity};
 use crate::counters::SnapshotCounters;
 use crate::ddl;
 use crate::error::{self, StoreError};
-use crate::facts::{LinkFamily, Provenance, TagSource};
+use crate::facts::{LinkFamily, Provenance, StoredPathOrder, TagSource};
 use crate::hash;
 use crate::request::Request;
 
@@ -281,11 +281,16 @@ impl ConnectionTurn {
     /// The connection goes back to the handle when the [`Snapshot`] is
     /// dropped, or here where the establishment refuses.
     ///
+    /// `order` is the case behaviour the vault root was proven to have, which
+    /// the caller retained when the proof was made and hands over here: the
+    /// snapshot carries it to every read builder that runs on it, so no read
+    /// detects it. It costs no statement.
+    ///
     /// **It reports what it ran whichever way it ended.** An establishment
     /// that refused ran the statement that refused it, rolled the transaction
     /// back and gave the connection up, and a caller holding a lock across all
     /// of that waited for every part of it.
-    pub fn establish(mut self) -> SnapshotAttempt {
+    pub fn establish(mut self, order: StoredPathOrder) -> SnapshotAttempt {
         let mut database = self
             .database
             .take()
@@ -297,6 +302,7 @@ impl ConnectionTurn {
                 reader,
                 database: Some(database),
                 reading,
+                order,
                 counters: Cell::new(counters),
             }),
             Err(error) => {
@@ -397,6 +403,9 @@ pub struct Snapshot {
     /// the reader at the drop that ends the snapshot.
     database: Option<Database>,
     reading: StoreReading,
+    /// The case behaviour the vault root was proven to have, handed over by the
+    /// read that established this snapshot.
+    order: StoredPathOrder,
     /// What this snapshot cost, counted through `&self`: a read builder runs
     /// on a shared borrow, so nothing that holds the snapshot lends it out
     /// mutably. The connection already makes a snapshot `!Sync`, so a `Cell`
@@ -418,6 +427,13 @@ impl Snapshot {
     /// how far its writes had got.
     pub fn reading(&self) -> &StoreReading {
         &self.reading
+    }
+
+    /// The case behaviour the vault root was proven to have, as the read that
+    /// established this snapshot handed it over: which suffix key a resolution
+    /// probes, and how paths compare.
+    pub fn path_order(&self) -> StoredPathOrder {
+        self.order
     }
 
     /// What this read's snapshot cost: the snapshot itself, and the statements
@@ -578,8 +594,10 @@ impl Store {
 
     fn open_in_mode(path: &Path, mode: StoreMode) -> Result<Self, StoreError> {
         let (connection, outcome) = norn_db::open(path, &store_schema(), &StoreClient { mode })?;
+        let database = Database::adopt(connection, path)?;
+        crate::resolve::register_functions(database.connection())?;
         Ok(Store {
-            database: Database::adopt(connection, path)?,
+            database,
             mode,
             outcome,
             torn_down: false,
@@ -656,8 +674,11 @@ impl Store {
     /// is not using.
     ///
     /// The application-defined functions the find builder's statements call —
-    /// the path-glob match — are registered on the connection here, before any
-    /// statement runs on it, so every snapshot the handle establishes has them.
+    /// the path-glob match and the ambiguity-ignore test — are registered on the
+    /// connection here, before any statement runs on it, so every snapshot the
+    /// handle establishes has them. The writer's connection carries the
+    /// ambiguity-ignore test too, registered where the store opens, because a
+    /// class read runs there as well.
     ///
     /// It is taken from a **live** store, and that is what binds the handle:
     /// the writer holds the file open, so the `-shm` a read-only write-ahead
@@ -677,6 +698,7 @@ impl Store {
             .map_err(StoreError::from)
             .and_then(|database| {
                 crate::read::register_functions(database.connection())?;
+                crate::resolve::register_functions(database.connection())?;
                 Ok(database)
             })
             .map(|database| SnapshotReader {
@@ -1143,7 +1165,7 @@ mod tests {
         let snapshot = reader
             .try_take()
             .expect("a handle nothing is reading holds its connection")
-            .establish()
+            .establish(StoredPathOrder::Sensitive)
             .snapshot
             .expect("a snapshot");
         assert!(
@@ -1193,7 +1215,7 @@ mod tests {
         let snapshot = reader
             .try_take()
             .expect("the dropped turn kept the connection")
-            .establish()
+            .establish(StoredPathOrder::Sensitive)
             .snapshot
             .expect("a snapshot");
         assert!(
@@ -1225,7 +1247,7 @@ mod tests {
         let snapshot = reader
             .try_take()
             .expect("a free handle hands out its turn")
-            .establish()
+            .establish(StoredPathOrder::Sensitive)
             .snapshot
             .expect("a snapshot");
         assert_eq!(snapshot.counters().snapshots_opened(), 1);
@@ -1271,7 +1293,7 @@ mod tests {
         let snapshot = reader
             .try_take()
             .expect("the unwound turn kept the handle's connection")
-            .establish()
+            .establish(StoredPathOrder::Sensitive)
             .snapshot
             .expect("a snapshot");
         assert_eq!(
@@ -1328,7 +1350,7 @@ mod tests {
         let snapshot = reader
             .try_take()
             .expect("a handle nothing is reading holds its connection")
-            .establish()
+            .establish(StoredPathOrder::Sensitive)
             .snapshot
             .expect("a snapshot");
         let connection = snapshot.connection();
@@ -1395,7 +1417,7 @@ mod tests {
         let snapshot = reader
             .try_take()
             .expect("a handle nothing is reading holds its connection")
-            .establish()
+            .establish(StoredPathOrder::Sensitive)
             .snapshot
             .expect("a snapshot");
         let connection = snapshot.connection();

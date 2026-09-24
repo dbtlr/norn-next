@@ -83,8 +83,9 @@
 //! field universe, and reads
 //! [`FieldType`] to give one comparison rule to sorts, ranges and comparison
 //! operators alike — see [`typed`]. The ambiguity-ignore patterns name the
-//! paths the resolution ladder does not count as candidates, which is the
-//! read surface's to apply.
+//! paths the resolution ladder does not count as candidates: derivation hands
+//! them to the store with the declared fields, and the store's resolver applies
+//! them wherever a target's class is read.
 
 pub mod typed;
 
@@ -194,10 +195,10 @@ impl VaultSchema {
     /// The paths the resolution ladder does not count as candidates.
     ///
     /// **Read by the resolution ladder, and backlinks and findings apply the
-    /// same exclusion.** The current call graph does not reach it: no
-    /// resolution ladder is built — a find's `resolves` part enumerates a
-    /// target's suffix class and does not read this set — and no derivation
-    /// reads a path rule.
+    /// same exclusion.** Derivation hands the set to the store beside the
+    /// declared fields, and the store's one resolver applies it to every class
+    /// a target opens: a find's `resolves` part, and the class a finding's
+    /// producer reads.
     pub fn ambiguity_ignore(&self) -> &[Pattern] {
         &self.ambiguity_ignore
     }

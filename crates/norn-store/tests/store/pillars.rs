@@ -487,9 +487,9 @@ fn the_full_candidate_enumeration_is_a_range_over_the_suffix_key() {
         );
     }
 
-    let paths = |probe| {
+    let paths = |probe: norn_store::SuffixProbe| {
         request
-            .suffix_candidates(&probe)
+            .suffix_candidates(&probe.into())
             .expect("reading candidates")
             .iter()
             .map(|path| path.as_str().to_string())
@@ -567,7 +567,7 @@ fn a_target_whose_leaf_carries_a_dot_reaches_both_readings_of_it() {
     let paths = |target: &str| {
         let probe = suffix_probe(target).expect("a suffix target");
         let mut found = request
-            .suffix_candidates(&probe)
+            .suffix_candidates(&probe.into())
             .expect("reading candidates")
             .iter()
             .map(|path| path.as_str().to_string())
@@ -606,7 +606,7 @@ fn the_candidate_order_is_total_and_survives_a_re_derivation() {
     }
     let ladder = |request: &norn_store::Request<'_>| {
         request
-            .suffix_candidates(&class_probe("tie").expect("a class stem"))
+            .suffix_candidates(&class_probe("tie").expect("a class stem").into())
             .expect("reading candidates")
             .iter()
             .map(|path| path.as_str().to_string())
@@ -638,8 +638,10 @@ fn the_candidate_order_is_total_and_survives_a_re_derivation() {
 /// say which test covers it, and the only answers are the tests below.
 fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
     match statement {
-        ExplainedStatement::SuffixCandidates(_)
-        | ExplainedStatement::FindingsInClass(_)
+        ExplainedStatement::SuffixCandidates(_) => {
+            "a_class_read_seeks_the_suffix_key_its_root_probes"
+        }
+        ExplainedStatement::FindingsInClass(_)
         | ExplainedStatement::ClassDiscard(_)
         | ExplainedStatement::SubjectDiscard(..)
         | ExplainedStatement::FindingSubjectsWithoutRows(..) => {
@@ -729,6 +731,117 @@ fn assert_cascade_seeks_the_primary_key(plan: &QueryPlan, table: &str) {
     );
 }
 
+/// **A class read seeks the suffix key its root probes, and no other.** A root
+/// that tells spellings apart ranges over `documents_suffix_key`, and a root
+/// that folds ASCII case over `documents_folded_suffix_key`; either way a
+/// target opens one seek per reduction, bound to the key column, and the
+/// ignore set tests the rows those seeks reached rather than widening what is
+/// read. The bar is judged on the row that searches `documents`: its index and
+/// its range constraint.
+///
+/// **The candidates direction sorts through one temporary B-tree, and that is
+/// the stated baseline.** Its order is total — the probed key, then `path` —
+/// and each key's index leads with the key alone, so the index answers the
+/// range and not the tie-break.
+///
+/// Control: each key's index dropped, and the same bar fails under every
+/// resolution that probes it.
+#[test]
+fn a_class_read_seeks_the_suffix_key_its_root_probes() {
+    use norn_store::{AmbiguityIgnore, Resolution, StoredPathOrder};
+
+    let scratch = Scratch::new("class-read-plans");
+    let mut store = scratch.open();
+    write_documents(
+        &mut store.begin_request(),
+        &[
+            document("one/glossary.md", "hash-1", "a body\n"),
+            document("Two/Glossary.md", "hash-1", "a body\n"),
+            document("archive/glossary.md", "hash-1", "a body\n"),
+        ],
+    );
+    let archive = AmbiguityIgnore::new([norn_wire::Pattern::parse("archive/**").expect("a glob")]);
+    let resolutions: Vec<(Resolution, &'static str, &'static str)> = [
+        (
+            StoredPathOrder::Sensitive,
+            "documents_suffix_key",
+            "suffix_key",
+        ),
+        (
+            StoredPathOrder::AsciiCaseInsensitive,
+            "documents_folded_suffix_key",
+            "folded_suffix_key",
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(order, index, column)| {
+        let archive = archive.clone();
+        ["glossary", "Glossary.md", "one/glossary"]
+            .into_iter()
+            .flat_map(move |target| {
+                [AmbiguityIgnore::none(), archive.clone()]
+                    .into_iter()
+                    .map(move |ignore| {
+                        (
+                            Resolution::new(target, order, &ignore).expect("a suffix target"),
+                            index,
+                            column,
+                        )
+                    })
+            })
+    })
+    .collect();
+    let judge =
+        |store: &mut norn_store::Store, resolution: &Resolution, index: &str, column: &str| {
+            let read = plan(
+                store
+                    .begin_request()
+                    .emitted_plan(ExplainedStatement::SuffixCandidates(resolution))
+                    .expect("a query plan"),
+            );
+            read.assert_no_full_scan_of("documents");
+            read.assert_searches_through("documents", Access::Index(index));
+            read.assert_search_constraint("documents", &format!("({column}>? AND {column}<?)"));
+            assert_eq!(
+                read.searches_of("documents").len(),
+                resolution.probe().range_count(),
+                "a resolution does not open one seek per reduction: {:?}\nemitted SQL: {}",
+                read.rows(),
+                read.sql()
+            );
+            let sorters: Vec<&PlanRow> = read
+                .rows()
+                .iter()
+                .filter(|row| row.detail.contains("TEMP B-TREE"))
+                .collect();
+            assert!(
+                sorters.len() == 1 && sorters[0].detail.contains("ORDER BY"),
+                "the candidates direction no longer sorts through exactly one temporary B-tree for \
+             its own order, so the baseline this bar states has moved: {:?}",
+                read.rows()
+            );
+        };
+    for (resolution, index, column) in &resolutions {
+        judge(&mut store, resolution, index, column);
+    }
+
+    for dropped in ["documents_suffix_key", "documents_folded_suffix_key"] {
+        induced_failure::execute_out_of_band(&mut store, &format!("DROP INDEX {dropped}"))
+            .unwrap_or_else(|problem| panic!("dropping {dropped}: {problem}"));
+        for (resolution, index, column) in
+            resolutions.iter().filter(|(_, index, _)| *index == dropped)
+        {
+            let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                judge(&mut store, resolution, index, column)
+            }));
+            assert!(
+                failed.is_err(),
+                "the bar held with {dropped} dropped under {resolution:?}"
+            );
+        }
+    }
+}
+
 /// **Every statement findings maintenance runs reaches its rows through an
 /// index.** The bar is asserted against the statement the store actually
 /// emitted, which is why the store hands the pair out rather than the caller
@@ -753,17 +866,6 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             .record_finding(&ambiguity(at, "glossary", "glossary/", &[], 2))
             .expect("recording a finding");
     }
-
-    let candidates = plan(
-        request
-            .emitted_plan(ExplainedStatement::SuffixCandidates(
-                &class_probe("glossary").expect("a class stem"),
-            ))
-            .expect("a query plan"),
-    );
-    candidates.assert_no_full_scan_of("documents");
-    candidates.assert_searches("documents");
-    candidates.assert_searches_through("documents", Access::Index("documents_suffix_key"));
 
     let findings = plan(
         request
@@ -837,49 +939,6 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     assert_cascade_seeks_the_primary_key(&kind_discard, "finding_candidates");
     assert_cascade_seeks_the_primary_key(&kind_discard, "finding_classes");
 
-    // A two-reduction probe is two seeks rather than one wider read.
-    let two = plan(
-        request
-            .emitted_plan(ExplainedStatement::SuffixCandidates(
-                &suffix_probe("glossary.md").expect("a suffix target"),
-            ))
-            .expect("a query plan"),
-    );
-    two.assert_no_full_scan_of("documents");
-    assert_eq!(
-        two.searches_of("documents")
-            .iter()
-            .filter(|row| row.access() == Some(Access::Index("documents_suffix_key")))
-            .count(),
-        2,
-        "a two-reduction probe did not open two ranges: {:?}",
-        two.rows()
-    );
-
-    // **The candidates direction sorts through a temporary B-tree, and that is
-    // the stated baseline.** Its order is total — `suffix_key` then `path` — and
-    // `documents_suffix_key` leads with `suffix_key` alone, so the index answers
-    // the range and not the tie-break. Widening the index is the only way to
-    // retire the sorter, and the reader that would justify the wider index is the
-    // read builders' rather than this crate's.
-    let sorters: Vec<&PlanRow> = candidates
-        .rows()
-        .iter()
-        .filter(|row| row.detail.contains("TEMP B-TREE"))
-        .collect();
-    assert_eq!(
-        sorters.len(),
-        1,
-        "the candidates direction no longer sorts through exactly one temporary B-tree, so \
-         the baseline this bar states has moved: {:?}",
-        candidates.rows()
-    );
-    assert!(
-        sorters[0].detail.contains("ORDER BY"),
-        "the sorter is not the ladder's own order: {:?}",
-        sorters[0]
-    );
-
     // **The walked-scope prune's page is one ordered pass over `findings_path`,
     // and the bar it carries is the findings table's rather than the vault's.**
     // A page is a cursor into that index — the rows come off it in the order the
@@ -946,10 +1005,11 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     // dropped from a list its bar iterates leaves a slot empty here rather
     // than leaving the bar one statement narrower without a word.
     let probe = class_probe("glossary").expect("a class stem");
+    let resolution = norn_store::Resolution::from(probe.clone());
     let subject = path("one/glossary.md");
     let width = NonZeroUsize::MIN;
     let judged: Vec<ExplainedStatement<'_>> = [
-        ExplainedStatement::SuffixCandidates(&probe),
+        ExplainedStatement::SuffixCandidates(&resolution),
         ExplainedStatement::FindingsInClass(&probe),
         ExplainedStatement::ClassDiscard(&probe),
         ExplainedStatement::SubjectDiscard(&subject, DiscardScope::EveryKind),
@@ -982,6 +1042,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     assert_eq!(
         bars,
         [
+            "a_class_read_seeks_the_suffix_key_its_root_probes",
             "a_feed_page_walks_its_covering_index_and_reads_no_row",
             "a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead",
             "a_heal_page_seeks_the_index_that_holds_its_order",
@@ -1089,7 +1150,8 @@ fn the_point_read_census_holds_every_statement_that_says_it_is_one() {
     let probe = class_probe("glossary").expect("a class stem");
     let kinds = [FindingKind::PathNamesNoDocument];
 
-    let every = ExplainedStatement::all(&subject, &probe, &kinds, NonZeroUsize::MIN);
+    let resolution = norn_store::Resolution::from(probe.clone());
+    let every = ExplainedStatement::all(&subject, &resolution, &probe, &kinds, NonZeroUsize::MIN);
     assert_eq!(every.len(), norn_store::STATEMENTS);
     for (position, statement) in every.iter().enumerate() {
         assert_eq!(
@@ -2602,7 +2664,7 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
         );
         assert!(
             request
-                .suffix_candidates(&probe)
+                .suffix_candidates(&probe.clone().into())
                 .expect("reading candidates")
                 .contains(&subject),
             "`{target}` does not resolve to `{at}`"

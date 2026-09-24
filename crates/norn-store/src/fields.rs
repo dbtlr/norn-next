@@ -50,6 +50,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::json::{FrontmatterValue, float_text};
+use crate::resolve::AmbiguityIgnore;
 
 /// The container a key's value sits in, as its presence row records it.
 ///
@@ -242,7 +243,8 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 }
 
 /// The fields a vault schema declares, the typed order each typed one
-/// carries, and the fingerprint of the schema they were read from.
+/// carries, the places it keeps out of ambiguity classes, and the fingerprint
+/// of the schema they were read from.
 ///
 /// The store reads no schema: the host derives this value from the schema it
 /// pinned and hands it over, and [`FieldRows::derive`] reads it to fill the
@@ -260,6 +262,7 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 pub struct DeclaredFields {
     schema: Option<String>,
     keys: BTreeMap<String, Option<TypedOrder>>,
+    ambiguity_ignore: AmbiguityIgnore,
 }
 
 impl DeclaredFields {
@@ -275,7 +278,24 @@ impl DeclaredFields {
         DeclaredFields {
             schema: Some(fingerprint.into()),
             keys: BTreeMap::new(),
+            ambiguity_ignore: AmbiguityIgnore::none(),
         }
+    }
+
+    /// The same declaration, keeping the places `ignore` names out of every
+    /// ambiguity class a resolution reads under it.
+    ///
+    /// # Panics
+    ///
+    /// On a declaration with no schema, as [`DeclaredFields::declare`] does: the
+    /// set is a schema's, and a store with no schema pinned ignores nothing.
+    pub fn ignoring_ambiguity(mut self, ignore: AmbiguityIgnore) -> Self {
+        assert!(
+            self.schema.is_some(),
+            "an ambiguity-ignore set is declared on a declaration no schema makes"
+        );
+        self.ambiguity_ignore = ignore;
+        self
     }
 
     /// The same declaration with `key` declared and ordered by its raw text.
@@ -321,6 +341,11 @@ impl DeclaredFields {
     /// The typed order `key` carries, where it is declared with one.
     pub fn typed_order(&self, key: &str) -> Option<&TypedOrder> {
         self.keys.get(key).and_then(Option::as_ref)
+    }
+
+    /// The places the schema keeps out of ambiguity classes.
+    pub fn ambiguity_ignore(&self) -> &AmbiguityIgnore {
+        &self.ambiguity_ignore
     }
 
     /// The declared keys, in key order.

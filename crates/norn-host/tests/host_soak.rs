@@ -1584,9 +1584,11 @@ fn assert_warm_reads_derive_nothing(store: &mut Store, subject: &DocumentPath) {
     let _ = warm.stored_tombstone(subject).expect("reading a tombstone");
     let _ = warm.stored_findings(subject).expect("reading findings");
     let _ = warm.findings_in_class(&probe).expect("reading a class");
-    let _ = warm.suffix_candidates(&probe).expect("reading candidates");
     let _ = warm
-        .emitted_plan(ExplainedStatement::SuffixCandidates(&probe))
+        .suffix_candidates(&probe.clone().into())
+        .expect("reading candidates");
+    let _ = warm
+        .emitted_plan(ExplainedStatement::SuffixCandidates(&probe.clone().into()))
         .expect("a query plan");
     let _ = warm.vault_schema_pin().expect("reading the pin");
 
