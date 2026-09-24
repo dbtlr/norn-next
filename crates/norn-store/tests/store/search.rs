@@ -926,8 +926,9 @@ fn the_search_bars_cover_every_statement_once() {
 
 /// Judge a lexical page's plan.
 ///
-/// An FTS5 read plans as `SCAN <table> VIRTUAL TABLE INDEX <idxNum>:<idxStr>`:
-/// the module's index choice, where `idxStr` spells the constraints SQLite
+/// The bundled FTS5 plans a read as
+/// `SCAN <table> VIRTUAL TABLE INDEX <idxNum>:<idxStr>`: the module's index
+/// choice, where `idxStr` spells the constraints SQLite
 /// handed it — `M` and a column number for a `MATCH` — and `idxNum` is a bit
 /// set whose order bits say the module hands its rows back sorted. So the
 /// searching row is the page's read of the index, aliased `ft`: one scan with
@@ -954,6 +955,8 @@ fn judge_lexical(plan: &QueryPlan) {
                 if specification.starts_with('M')
         ),
         "the page does not read `documents_fts` through its MATCH selection alone: {row}\n\
+         the bar reads the bundled FTS5's `INDEX <idxNum>:<idxStr>` spelling of its index \
+         choice, so a SQLite version bump that respelled it is a likely cause\n\
          emitted SQL: {}",
         plan.sql()
     );

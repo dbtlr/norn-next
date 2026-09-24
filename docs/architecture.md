@@ -899,8 +899,9 @@ with a `resolves` part reported as not applicable, and a hit's document row is h
 through the hydration a find's rows are read through, only where the request names a
 column. It names one statement under the same discipline, carrying a plan bar with
 negative controls and held by a census to exactly one bar: the lexical page, whose
-searching row is the read of `documents_fts` through its `MATCH` selection — an FTS5 read
-plans as `SCAN <table> VIRTUAL TABLE INDEX <idxNum>:<idxStr>`, and the bar holds `idxStr`
+searching row is the read of `documents_fts` through its `MATCH` selection — the bundled
+FTS5 plans a read as `SCAN <table> VIRTUAL TABLE INDEX <idxNum>:<idxStr>`, a spelling a
+SQLite upgrade may change, and the bar holds `idxStr`
 to a `MATCH` and `idxNum` to zero, so the module hands back no order of its own — as the
 outer loop, each match reaching its document by row id, and one temporary B-tree for the
 page's order. Each filter tests a match before it is scored. **Ranking costs the matched
