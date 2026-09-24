@@ -53,7 +53,7 @@
 
 use std::ops::Range;
 
-use pulldown_cmark::{Event, HeadingLevel, LinkType, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Parser, Tag, TagEnd};
 
 use crate::heading::{Heading, SlugCounter};
 use crate::link::{
@@ -76,6 +76,12 @@ pub struct BodyScan<'a> {
     markdown_links: Vec<MarkdownToken>,
     code_ranges: Vec<Range<usize>>,
     construct_ranges: Vec<Range<usize>>,
+    /// The leaf blocks a block-id definition can name: each paragraph,
+    /// heading and code block, and each list item's own text where the item
+    /// holds no paragraph, in document order.
+    leaves: Vec<Range<usize>>,
+    /// The fenced code blocks, fences included, in document order.
+    fenced: Vec<Range<usize>>,
 }
 
 impl<'a> BodyScan<'a> {
@@ -85,6 +91,13 @@ impl<'a> BodyScan<'a> {
         let mut markdown_links = Vec::new();
         let mut code_ranges: Vec<Range<usize>> = Vec::new();
         let mut construct_ranges: Vec<Range<usize>> = Vec::new();
+        let mut leaves: Vec<Range<usize>> = Vec::new();
+        let mut fenced: Vec<Range<usize>> = Vec::new();
+        // How many leaf blocks are open around the event being read, and, for
+        // each open list item, the run of its own text read so far outside
+        // any leaf: a tight item holds its text directly, with no paragraph.
+        let mut open_leaves: usize = 0;
+        let mut item_runs: Vec<Option<Range<usize>>> = Vec::new();
         let mut active_heading: Option<ActiveHeading> = None;
         let mut active_link: Option<ActiveLink> = None;
         let mut active_code_block: Option<usize> = None;
@@ -145,6 +158,38 @@ impl<'a> BodyScan<'a> {
                 && !matches!(event, Event::End(TagEnd::Link))
             {
                 active.text_end = active.text_end.max(range.end.min(active.range.end));
+            }
+
+            match &event {
+                Event::Start(Tag::Paragraph | Tag::Heading { .. } | Tag::CodeBlock(_)) => {
+                    open_leaves += 1;
+                    leaves.push(range.clone());
+                    if matches!(
+                        event,
+                        Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_)))
+                    ) {
+                        fenced.push(range.clone());
+                    }
+                }
+                Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock) => {
+                    open_leaves = open_leaves.saturating_sub(1);
+                }
+                Event::Start(Tag::Item) => item_runs.push(None),
+                Event::End(TagEnd::Item) => leaves.extend(item_runs.pop().flatten()),
+                // A nested list ends the text its item holds before it.
+                Event::Start(Tag::List(_)) => {
+                    leaves.extend(item_runs.last_mut().and_then(Option::take));
+                }
+                Event::End(_) | Event::Start(_) if open_leaves == 0 => {}
+                _ if open_leaves == 0 => {
+                    if let Some(run) = item_runs.last_mut() {
+                        *run = Some(match run.take() {
+                            Some(held) => held.start..range.end.max(held.end),
+                            None => range.clone(),
+                        });
+                    }
+                }
+                _ => {}
             }
 
             match event {
@@ -242,12 +287,15 @@ impl<'a> BodyScan<'a> {
             }
         }
 
+        leaves.sort_by_key(|leaf| leaf.start);
         BodyScan {
             body,
             headings,
             markdown_links,
             code_ranges,
             construct_ranges,
+            leaves,
+            fenced,
         }
     }
 
@@ -322,6 +370,40 @@ impl<'a> BodyScan<'a> {
         parse_block_ids_in(self.body, &self.code_ranges)
     }
 
+    /// The block a block-id definition names, given where its `^` marker
+    /// stands: the byte range of the leaf block the marker trails, its
+    /// trailing break left out.
+    ///
+    /// That is the paragraph it ends, every line of it; the heading it ends;
+    /// or, in a list item, the item's own text — never its list marker, a
+    /// sibling, or a nested list. A marker opening the line after a closing
+    /// fence names the fenced block, fences included. A marker no leaf block
+    /// holds — a table row — names the line it stands on.
+    pub fn block_extent(&self, marker: usize) -> Range<usize> {
+        let marker = marker.min(self.body.len());
+        let holding = self
+            .leaves
+            .iter()
+            .filter(|leaf| leaf.start <= marker && marker < leaf.end)
+            .min_by_key(|leaf| leaf.len());
+        let Some(leaf) = holding else {
+            return line_around(self.body, marker);
+        };
+        let opens_its_block = self.body[leaf.start..marker].trim().is_empty();
+        let after_a_fence = self.fenced.iter().find(|fence| {
+            fence.end <= leaf.start
+                && matches!(&self.body[fence.end..leaf.start], "" | "\n" | "\r\n" | "\r")
+        });
+        let range = match after_a_fence {
+            Some(fence) if opens_its_block => fence.clone(),
+            _ => leaf.clone(),
+        };
+        let kept = self.body[range.clone()]
+            .trim_end_matches(['\n', '\r'])
+            .len();
+        range.start..range.start + kept
+    }
+
     /// Resolve a heading-addressed section to the byte ranges it owns,
     /// through [`crate::resolve_section`] over this scan's headings.
     pub fn resolve_section(
@@ -359,6 +441,21 @@ impl<'a> BodyScan<'a> {
         ranges.extend(definition_lines(self.body, &self.code_ranges));
         merge_ranges(ranges)
     }
+}
+
+/// The line holding `at`, its break left out: from the break before it, or
+/// the start of the body, to the break after it, or the end of the body.
+fn line_around(body: &str, at: usize) -> Range<usize> {
+    let is_break = |byte: &u8| matches!(byte, b'\n' | b'\r');
+    let start = body.as_bytes()[..at]
+        .iter()
+        .rposition(is_break)
+        .map_or(0, |found| found + 1);
+    let end = body.as_bytes()[at..]
+        .iter()
+        .position(is_break)
+        .map_or(body.len(), |found| at + found);
+    start..end
 }
 
 /// The byte range of every link reference definition line (`[label]: target`),
