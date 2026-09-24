@@ -101,7 +101,8 @@ use crate::find::{
     wire_block, wire_heading, wire_span,
 };
 use crate::read::{
-    Lookups, PageRefusal, ReadFilter, ReadStatement, TargetAmbiguity, finding_base, page_limit,
+    Lookups, PageRefusal, ReadFilter, ReadStatement, RequestPart, TargetAmbiguity, finding_base,
+    page_limit,
 };
 use crate::request::{Reading, stored_block, stored_heading, stored_link, unreadable};
 use crate::resolve::TargetClass;
@@ -217,18 +218,18 @@ impl<'a> Shape<'a> {
         let not_taken = |part, answer| Err(PageRefusal::PartNotTaken { part, answer });
         if let Some(selector) = params.collection {
             if params.target.anchor().is_some() {
-                return not_taken("an anchor", "a collection page");
+                return not_taken(RequestPart::Anchor, "a collection page");
             }
             if !params.columns.is_empty() {
-                return not_taken("a column", "a collection page");
+                return not_taken(RequestPart::Column, "a collection page");
             }
             return Ok(Shape::Collection(selector));
         }
         if params.after.is_some() {
-            return not_taken("a cursor", "a record, a section or a block");
+            return not_taken(RequestPart::Cursor, "a record, a section or a block");
         }
         if params.limit.is_some() {
-            return not_taken("a limit", "a record, a section or a block");
+            return not_taken(RequestPart::Limit, "a record, a section or a block");
         }
         let anchored = match params.target.anchor() {
             None => {
@@ -244,7 +245,7 @@ impl<'a> Shape<'a> {
         };
         if !params.columns.is_empty() {
             return not_taken(
-                "a column",
+                RequestPart::Column,
                 match anchored {
                     Shape::Section(_) => "a section",
                     _ => "a block",

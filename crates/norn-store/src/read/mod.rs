@@ -177,7 +177,12 @@ impl From<CountStatement> for ReadStatement {
 /// A target that names more than one document, as a refusal carries it.
 ///
 /// The same bounded head and the same hint a finding over the class carries,
-/// so a refusal and a finding say one thing.
+/// so a refusal and a finding say one thing. It maps one-to-one, field for
+/// field, onto the wire's `vault/ambiguous-target` detail
+/// ([`norn_wire::ErrorDetail::AmbiguousTarget`]); the store keeps its own
+/// type because a refusal is typed by what it refuses and the wire detail is
+/// one variant of every detail an error carries. The mapping lives in the
+/// host's get handler (NORN-230), which turns a refusal into a wire error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetAmbiguity {
     /// The target as the request named it, anchor included.
@@ -189,6 +194,45 @@ pub struct TargetAmbiguity {
     /// The target whose `find` resolves every one of them: the target's
     /// address, anchor left off.
     pub hint: Hint,
+}
+
+/// A part of a get request an answer may not take, as a refusal names it.
+///
+/// On its own it reads with its article, `an anchor`; a refusal that
+/// negates it names the noun alone, `a section takes no anchor`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RequestPart {
+    Anchor,
+    Column,
+    Cursor,
+    Limit,
+}
+
+impl RequestPart {
+    /// The part's noun.
+    pub const fn noun(self) -> &'static str {
+        match self {
+            RequestPart::Anchor => "anchor",
+            RequestPart::Column => "column",
+            RequestPart::Cursor => "cursor",
+            RequestPart::Limit => "limit",
+        }
+    }
+
+    /// The indefinite article the noun takes.
+    pub const fn article(self) -> &'static str {
+        match self {
+            RequestPart::Anchor => "an",
+            RequestPart::Column | RequestPart::Cursor | RequestPart::Limit => "a",
+        }
+    }
+}
+
+impl std::fmt::Display for RequestPart {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} {}", self.article(), self.noun())
+    }
 }
 
 /// Why a read builder answered no page.
@@ -275,7 +319,7 @@ pub enum PageRefusal {
     /// a section or a block, or a cursor or a limit on anything but a
     /// collection page.
     PartNotTaken {
-        part: &'static str,
+        part: RequestPart,
         answer: &'static str,
     },
     /// The store refused a statement.
@@ -366,11 +410,7 @@ impl std::fmt::Display for PageRefusal {
                 collection_named(*paged)
             ),
             PageRefusal::PartNotTaken { part, answer } => {
-                write!(
-                    formatter,
-                    "{answer} takes no {}",
-                    part.trim_start_matches("a ").trim_start_matches("an ")
-                )
+                write!(formatter, "{answer} takes no {}", part.noun())
             }
             PageRefusal::Store(problem) => problem.fmt(formatter),
         }

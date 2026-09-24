@@ -12,8 +12,8 @@ use std::sync::Arc;
 use norn_store::{
     BODY_ROW_CEILING, BlockFact, Collection, ContentModel, DocumentFacts, DocumentText,
     FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, Gotten, HeadingFact, LinkFact, LinkFamily,
-    NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, SectionAt, Snapshot, SnapshotReader,
-    Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity, induced_failure,
+    NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, RequestPart, SectionAt, Snapshot,
+    SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
@@ -1061,53 +1061,64 @@ fn a_part_the_answer_does_not_take_is_refused() {
     for (params, part, answer) in [
         (
             getting("paged#Heading 0").with_collection(CollectionSelector::Tags),
-            "an anchor",
+            RequestPart::Anchor,
             "a collection page",
         ),
         (
             getting("paged")
                 .with_collection(CollectionSelector::Tags)
                 .with_columns([Column::body()]),
-            "a column",
+            RequestPart::Column,
             "a collection page",
         ),
         (
             getting("paged#Heading 0").with_columns([Column::body()]),
-            "a column",
+            RequestPart::Column,
             "a section",
         ),
         (
             getting("paged#^b0").with_columns([Column::body()]),
-            "a column",
+            RequestPart::Column,
             "a block",
         ),
         (
             getting("paged").with_after(cursor),
-            "a cursor",
+            RequestPart::Cursor,
             "a record, a section or a block",
         ),
         (
             getting("paged").with_limit(2),
-            "a limit",
+            RequestPart::Limit,
             "a record, a section or a block",
         ),
         (
             getting("paged#Heading 0").with_limit(1),
-            "a limit",
+            RequestPart::Limit,
             "a record, a section or a block",
         ),
         (
             getting("paged#^b0").with_limit(1),
-            "a limit",
+            RequestPart::Limit,
             "a record, a section or a block",
         ),
     ] {
+        let refusal = vault.refusal(&params);
         assert_eq!(
-            vault.refusal(&params),
+            refusal,
             PageRefusal::PartNotTaken { part, answer },
             "{params:?}"
         );
+        assert_eq!(
+            refusal.to_string(),
+            format!("{answer} takes no {}", part.noun())
+        );
     }
+    assert_eq!(RequestPart::Anchor.to_string(), "an anchor");
+    assert_eq!(RequestPart::Limit.to_string(), "a limit");
+    assert_eq!(
+        vault.refusal(&getting("paged").with_limit(1)).to_string(),
+        "a record, a section or a block takes no limit"
+    );
 }
 
 // ---- the work bar ----
