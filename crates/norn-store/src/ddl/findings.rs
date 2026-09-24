@@ -20,9 +20,31 @@
 //! The same index carries the kind and the path after the fingerprint, which
 //! is the direction a find's finding part reads: the paths a kind of finding
 //! stands over under the active fingerprint, one seek on the pair and the paths
-//! off the index. The fingerprint leads rather than the kind so that a
-//! statement naming kinds alone — a subject's discard, a walk's page of
-//! subjects — is not offered a kind-led index in place of the path it seeks.
+//! off the index — or off `findings_fingerprint_kind_severity`, which leads
+//! with the same pair and carries the path too. The fingerprint leads rather
+//! than the kind so that a statement naming kinds alone — a subject's
+//! discard, a walk's page of subjects — is not offered a kind-led index in
+//! place of the path it seeks.
+//!
+//! # A validate reads the findings in `(kind, path, id)` order, off three indexes
+//!
+//! `validate` pages the findings standing under the active fingerprint in
+//! `(kind, path, id)` order, one kind at a time, and every index here carries
+//! the row id as its last column, so each order below continues by the id
+//! with nothing sorted:
+//!
+//! - `findings_vault_schema_fingerprint` is `(fingerprint, kind, path)`: one
+//!   kind's findings in `(path, id)` order, sought from a page's position.
+//! - `findings_fingerprint_kind_severity` is `(fingerprint, kind, severity,
+//!   path)`. A request narrowed to one severity seeks it in `(path, id)` order
+//!   within that severity, so the findings of another severity cost nothing;
+//!   and it covers a summary, whose tallies group by `(kind, severity)` in the
+//!   index's own order.
+//! - `findings_path` is `(path, fingerprint, kind)`: the findings standing at
+//!   one path, in `(kind, id)` order, which is how a find's findings column
+//!   reads a document's head and stops at its ceiling, and how a validate a
+//!   document part narrows reaches the findings at the documents it matched.
+//!   Its leading `path` is also every subject read and discard's seek.
 //!
 //! # `generation` is what a repair plan cites
 //!
@@ -180,8 +202,10 @@ const STATEMENTS: &[&str] = &[
     CHECK ((span_line IS NULL) = (span_column IS NULL)
        AND (span_line IS NULL) = (span_offset IS NULL))
 )",
-    "CREATE INDEX findings_path ON findings(path)",
+    "CREATE INDEX findings_path ON findings(path, vault_schema_fingerprint, kind)",
     "CREATE INDEX findings_vault_schema_fingerprint ON findings(vault_schema_fingerprint, kind, path)",
+    "CREATE INDEX findings_fingerprint_kind_severity
+    ON findings(vault_schema_fingerprint, kind, severity, path)",
     "CREATE TABLE finding_classes (
     finding   INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
     class_key TEXT    NOT NULL,

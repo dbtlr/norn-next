@@ -485,7 +485,9 @@ fn a_class_key_reads_back_as_the_address_whose_probe_opens_it() {
             .class_keys();
         assert!(opened.contains(&class), "`{address}` does not open `{key}`");
     }
-    let dotted = suffix_probe("a/v1.2").expect("a suffix target").class_keys();
+    let dotted = suffix_probe("a/v1.2")
+        .expect("a suffix target")
+        .class_keys();
     let longest = dotted
         .iter()
         .max_by_key(|class| class.as_str().len())

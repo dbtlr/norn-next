@@ -64,7 +64,7 @@ impl Snapshot {
 
     /// The active fingerprint, read once per request; `None` where no schema
     /// is pinned.
-    pub(super) fn fingerprint(&self, lookups: &mut Lookups) -> Result<Option<String>, StoreError> {
+    pub(crate) fn fingerprint(&self, lookups: &mut Lookups) -> Result<Option<String>, StoreError> {
         if let Some(fingerprint) = &lookups.fingerprint {
             return Ok(fingerprint.clone());
         }

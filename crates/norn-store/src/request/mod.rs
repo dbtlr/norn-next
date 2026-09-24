@@ -2416,7 +2416,7 @@ fn optional_span(row: &Row<'_>, first: usize) -> rusqlite::Result<Option<Span>> 
 /// A stored value outside the vocabulary its column holds. Damaged rather than
 /// merely unexpected: the writer is this crate, so a value nothing here writes
 /// means the row was not written by it.
-fn unreadable(column: &str, written: &str) -> StoreError {
+pub(crate) fn unreadable(column: &str, written: &str) -> StoreError {
     StoreError::Damaged {
         what: format!("`{column}` holds `{written}`, which is not a value this schema writes"),
     }

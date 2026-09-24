@@ -21,6 +21,7 @@
 
 mod conjunction;
 mod filter;
+mod finding;
 mod glob;
 mod page;
 mod reading;
@@ -35,10 +36,13 @@ use crate::find::FindStatement;
 use crate::request::MAX_PAGE;
 #[cfg(doc)]
 use crate::store::Snapshot;
+use crate::validate::ValidateStatement;
 
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, Resolution};
+pub(crate) use filter::glob_test;
 pub(crate) use filter::{Binder, Filter};
 pub use filter::{READ_FILTERS, ReadFilter};
+pub(crate) use finding::{FINDING_ROW_COLUMNS, FindingBase, finding_base};
 pub(crate) use glob::register_functions;
 pub(crate) use run::{Lookups, Ran, Stepped};
 
@@ -106,15 +110,24 @@ impl FieldOrder {
 
 /// A statement a read builder ran, named by the builder that names it.
 ///
-/// A read compiles its conjunction through probes the find builder names, so a
-/// count runs find's statements beside its own; the record of what a read ran
-/// holds either, and each builder's enumeration stays its own.
+/// A read compiles its conjunction through probes the find builder names, and
+/// reads finding rows through statements the find builder names, so a count
+/// and a validate run find's statements beside their own; the record of what
+/// a read ran holds any of them, and each builder's enumeration stays its own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadStatement {
     /// A statement [`FindStatement`] names.
     Find(FindStatement),
     /// A statement [`CountStatement`] names.
     Count(CountStatement),
+    /// A statement [`ValidateStatement`] names.
+    Validate(ValidateStatement),
+}
+
+impl From<ValidateStatement> for ReadStatement {
+    fn from(statement: ValidateStatement) -> Self {
+        ReadStatement::Validate(statement)
+    }
 }
 
 impl From<FindStatement> for ReadStatement {
@@ -142,10 +155,10 @@ pub enum PageRefusal {
     NotIndexed { fact: &'static str },
     /// The request names a row column a find does not project yet.
     ///
-    /// A **dormant carrier** for the resolved link and finding columns NORN-229
-    /// builds: the store holds a document's link and finding rows, but a find's
-    /// row carries neither column until the link index resolves what a link
-    /// names, so no row composition reads them yet.
+    /// A **dormant carrier** for the resolved link column NORN-229 builds: the
+    /// store holds a document's link rows, but a find's row carries no link
+    /// column until the link index resolves what a link names, so no row
+    /// composition reads them yet.
     NotProjected { column: &'static str },
     /// A value a comparing part names — an equality, an inequality, a
     /// membership or a `before`/`after` bound — on a key declared with a typed
@@ -169,6 +182,9 @@ pub enum PageRefusal {
     /// tally's, its grouping tuple is another width than the request's, or a
     /// member names no place in its key's order.
     NotATallyCursor,
+    /// The cursor names no position among a validate's findings: it is not a
+    /// finding's, or the request answers a summary, which is not paged.
+    NotAFindingCursor,
     /// A membership part on `key` names no value, so no document can satisfy
     /// it. The wire refuses one on read; this is the refusal of one built
     /// in-process.
@@ -215,6 +231,9 @@ impl std::fmt::Display for PageRefusal {
             }
             PageRefusal::NotATallyCursor => {
                 formatter.write_str("the cursor names no position among this count's tallies")
+            }
+            PageRefusal::NotAFindingCursor => {
+                formatter.write_str("the cursor names no position among this validate's findings")
             }
             PageRefusal::EmptyMembership { key } => {
                 write!(formatter, "the membership part on `{key}` names no value")

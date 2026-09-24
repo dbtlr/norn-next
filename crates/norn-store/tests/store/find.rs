@@ -13,7 +13,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use crate::common::{Scratch, document, violation, write_documents};
+use crate::common::{Scratch, ambiguity, document, violation, write_documents};
 use norn_store::{
     BlockFact, DEFAULT_PAGE, DeclaredFields, FIND_STATEMENTS, FieldOrder, FindPlan, FindStatement,
     Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, MAX_PAGE, NESTED_ROW_CEILING, Nested,
@@ -363,7 +363,11 @@ fn statement_barred_by(statement: FindStatement) -> &'static str {
         }
         FindStatement::HydrateDocuments
         | FindStatement::NestedHead(_)
-        | FindStatement::NestedTotal(_) => {
+        | FindStatement::NestedTotal(_)
+        | FindStatement::FindingHead
+        | FindStatement::FindingTotal
+        | FindStatement::FindingCandidates
+        | FindStatement::FindingClasses => {
             "hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index"
         }
     }
@@ -884,8 +888,9 @@ fn a_match_probe_reads_the_full_text_index_through_its_selection() {
     });
 }
 
-/// Every hydration statement: the document rows, and each collection's head
-/// and total.
+/// Every hydration statement: the document rows, each collection's head and
+/// total, and the findings column's head and total and the candidate heads
+/// and classes of the findings it read.
 fn hydration_statements() -> Vec<FindStatement> {
     std::iter::once(FindStatement::HydrateDocuments)
         .chain(Nested::ALL.into_iter().flat_map(|nested| {
@@ -894,6 +899,12 @@ fn hydration_statements() -> Vec<FindStatement> {
                 FindStatement::NestedTotal(nested),
             ]
         }))
+        .chain([
+            FindStatement::FindingHead,
+            FindStatement::FindingTotal,
+            FindStatement::FindingCandidates,
+            FindStatement::FindingClasses,
+        ])
         .collect()
 }
 
@@ -908,10 +919,16 @@ fn ordinal_index(nested: Nested) -> String {
 /// as the ordinal's bound, so a document's rows past it are never reached; its
 /// total counts the same index, and never the table. A total is counted only
 /// for a document whose head the ceiling filled, so the page holds one whose
-/// every collection fills it, and each total runs.
+/// every collection fills it, and each total runs. **The findings column is
+/// read by path**: its head seeks `findings_path` at each page path and the
+/// active fingerprint, stopping at the ceiling, and reaches each finding it
+/// kept by row id; its total counts the same index; and the candidate heads
+/// and classes of the findings it read are primary-key seeks of their ids.
 ///
 /// Controls: the document plan rebuilt with its row-id seek as a scan; each
-/// ordinal index dropped, its head and total read something else.
+/// ordinal index dropped, its head and total read something else;
+/// `findings_path` dropped, the findings head and total read something else;
+/// the candidate and class reads rebuilt as scans.
 #[test]
 fn hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index() {
     let mut seeded = Seeded::new("find-hydration");
@@ -943,13 +960,26 @@ fn hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index(
             span: None,
         })
         .collect();
-    write_documents(&mut seeded.store.begin_request(), &[full]);
+    let mut writing = seeded.store.begin_request();
+    write_documents(&mut writing, &[full]);
+    for _ in 0..NESTED_ROW_CEILING {
+        writing
+            .record_finding(&ambiguity(
+                "long/full.md",
+                "glossary",
+                "glossary/",
+                &["other/glossary.md"],
+                1,
+            ))
+            .expect("recording a finding");
+    }
     let params = request().with_columns([
         Column::fields(),
         Column::body(),
         Column::tags(),
         Column::headings(),
         Column::blocks(),
+        Column::findings(),
     ]);
     let judge_documents = |plan: &QueryPlan| {
         plan.assert_no_full_scan();
@@ -970,12 +1000,69 @@ fn hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index(
         total.assert_searches_through(nested.table(), Access::Index(&index));
         total.assert_search_constraint(nested.table(), "(document=?)");
     };
+    let judge_finding_head = |plans: &[FindPlan]| {
+        let head = plan_of(plans, FindStatement::FindingHead);
+        head.assert_no_full_scan();
+        let seek = rows_of(&head, "h");
+        seek.assert_searches_through("findings", Access::Index("findings_path"));
+        seek.assert_search_constraint("findings", "(path=? AND vault_schema_fingerprint=?)");
+        assert!(
+            head.rows()
+                .iter()
+                .all(|row| !row.detail.contains("TEMP B-TREE")),
+            "a findings head sorted: {:?}\nemitted SQL: {}",
+            head.rows(),
+            head.sql()
+        );
+        rows_of(&head, "f").assert_searches_through("findings", Access::RowId);
+    };
+    let judge_finding_total = |plans: &[FindPlan]| {
+        let total = plan_of(plans, FindStatement::FindingTotal);
+        total.assert_no_full_scan();
+        total.assert_searches_through("findings", Access::Index("findings_path"));
+        total.assert_search_constraint("findings", "(path=? AND vault_schema_fingerprint=?)");
+    };
+    let judge_by_finding = |plan: &QueryPlan, table: &str| {
+        plan.assert_no_full_scan();
+        plan.assert_searches_through(table, Access::PrimaryKey);
+        plan.assert_search_constraint(table, "(finding=?)");
+    };
     let plans = seeded.plans(&params);
     let documents = plan_of(&plans, FindStatement::HydrateDocuments);
     judge_documents(&documents);
     for nested in Nested::ALL {
         judge_head(&plans, nested);
         judge_total(&plans, nested);
+    }
+    judge_finding_head(&plans);
+    judge_finding_total(&plans);
+    let candidates = plan_of(&plans, FindStatement::FindingCandidates);
+    judge_by_finding(&candidates, "finding_candidates");
+    let classes = plan_of(&plans, FindStatement::FindingClasses);
+    judge_by_finding(&classes, "finding_classes");
+
+    // Control: the candidate and class reads, each rebuilt as a scan.
+    for (plan, alias, table) in [
+        (&candidates, "c", "finding_candidates"),
+        (&classes, "k", "finding_classes"),
+    ] {
+        let scanned = QueryPlan::new(
+            plan.sql(),
+            plan.rows()
+                .iter()
+                .map(|row| {
+                    let detail = if row.detail.starts_with(&format!("SEARCH {alias} ")) {
+                        format!("SCAN {alias}")
+                    } else {
+                        row.detail.clone()
+                    };
+                    PlanRow::new(row.id, row.parent, detail)
+                })
+                .collect(),
+        );
+        failure_of(&format!("a {table} read that scans"), || {
+            judge_by_finding(&scanned, table)
+        });
     }
 
     // Control: the row-id seek taken out of the document plan.
@@ -996,6 +1083,16 @@ fn hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index(
     );
     failure_of("a document hydration that scans", || {
         judge_documents(&scanned)
+    });
+
+    // Control: the findings path index, dropped.
+    seeded.drop_index("findings_path");
+    let plans = seeded.plans(&params);
+    failure_of("findings_path dropped, the findings head", || {
+        judge_finding_head(&plans)
+    });
+    failure_of("findings_path dropped, the findings total", || {
+        judge_finding_total(&plans)
     });
 
     // Control: each ordinal index, dropped.
@@ -1206,9 +1303,9 @@ fn filter_bars() -> Vec<FilterBar> {
                 Seek::Index {
                     alias: "fg",
                     table: "findings",
-                    access: Access::Index("findings_vault_schema_fingerprint"),
+                    access: Access::Index("findings_fingerprint_kind_severity"),
                     constraint: "(vault_schema_fingerprint=? AND kind=?)",
-                    dropped: "findings_vault_schema_fingerprint",
+                    dropped: "findings_fingerprint_kind_severity",
                 },
             )],
         },

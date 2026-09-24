@@ -8,14 +8,15 @@
 use norn_store::{
     BODY_ROW_CEILING, BlockFact, DeclaredFields, FindStatement, FindWork, Found, HeadingFact,
     NESTED_ROW_CEILING, Nested, NestedRows, PageRefusal, SnapshotReader, Span, Store, TagFact,
-    TagSource,
+    TagSource, Validation,
 };
 use norn_wire::{
     BlockRow, Column, Cursor, CursorKey, CursorOrderChanged, Direction, FieldValue, FindParams,
     FindingKind, Moved, Predicate, Snapshot as WireSnapshot, Sort, SortKey, TagRow, Unsatisfied,
+    ValidateParams, VaultAddress, VaultName,
 };
 
-use crate::common::{Scratch, document, violation, write_documents};
+use crate::common::{Scratch, ambiguity, document, unread_block, violation, write_documents};
 use crate::find::{SEED_SCHEMA, Seeded, declared, integer_order, map, request, sorted, string};
 
 /// The fixture's declaration, read from the schema pinned under `schema`.
@@ -479,6 +480,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
                 page_vm_steps: 0,
                 documents_hydrated: 0,
                 nested_rows: nested(0, 0, 0),
+                finding_rows: 0,
             }
         )
     );
@@ -494,6 +496,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
                 page_vm_steps: 0,
                 documents_hydrated: 2,
                 nested_rows: nested(0, 0, 0),
+                finding_rows: 0,
             }
         )
     );
@@ -515,6 +518,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
                 page_vm_steps: 0,
                 documents_hydrated: 2,
                 nested_rows: nested(0, 0, 0),
+                finding_rows: 0,
             }
         )
     );
@@ -534,6 +538,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
                 page_vm_steps: 0,
                 documents_hydrated: 3,
                 nested_rows: nested(0, 0, 0),
+                finding_rows: 0,
             }
         )
     );
@@ -550,6 +555,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
                 page_vm_steps: 0,
                 documents_hydrated: 0,
                 nested_rows: nested(1, 0, 0),
+                finding_rows: 0,
             }
         )
     );
@@ -598,6 +604,7 @@ fn a_finds_work_reads_out_every_count_by_name() {
             headings: 0,
             blocks: 9,
         },
+        finding_rows: 10,
     };
     assert_eq!(
         work.readings().collect::<Vec<_>>(),
@@ -611,6 +618,7 @@ fn a_finds_work_reads_out_every_count_by_name() {
             ("find_tag_rows", 7),
             ("find_heading_rows", 0),
             ("find_block_rows", 9),
+            ("find_finding_rows", 10),
         ]
     );
 }
@@ -681,33 +689,159 @@ fn a_row_carries_the_columns_it_names_read_off_the_projection() {
     );
 }
 
-/// **A link or finding column is refused by name** as a column a find does not
-/// project yet, and its refusal reads as that fact.
+/// **A link column is refused by name** as a column a find does not project
+/// yet, and its refusal reads as that fact.
 #[test]
-fn a_link_or_finding_column_is_refused_by_name() {
+fn a_link_column_is_refused_by_name() {
     let seeded = Seeded::new("find-dormant-columns");
-    for (column, named, reads) in [
-        (
-            Column::links(),
-            "the links column",
-            "the links column is not yet projected onto a find's row",
+    let refusal = seeded
+        .snapshot()
+        .find(
+            &request().with_columns([Column::body(), Column::links()]),
+            &declared(),
+        )
+        .expect_err("a dormant column");
+    assert_eq!(
+        refusal,
+        PageRefusal::NotProjected {
+            column: "the links column"
+        }
+    );
+    assert_eq!(
+        refusal.to_string(),
+        "the links column is not yet projected onto a find's row"
+    );
+}
+
+/// **A row's findings column carries the findings standing at its path, each
+/// the row `validate` answers for it**: the same head, total and hint, in the
+/// `(kind, id)` order a validate narrowed to that path answers. A document
+/// with no finding carries an empty collection of none. **The column is
+/// bounded by the per-row ceiling and says how many stood**: a document with
+/// more findings than [`NESTED_ROW_CEILING`] carries the first that-many and
+/// the whole count, and the head statement read no more than it kept. Under
+/// no schema pinned, a row carries the findings recorded under none.
+#[test]
+fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
+    let mut seeded = Seeded::new("find-findings-column");
+    seeded.write(&[document("long/doc.md", "hash-long", "a body\n")]);
+    let mut writing = seeded.store.begin_request();
+    for finding in [
+        ambiguity(
+            "notes/a.md",
+            "glossary",
+            "glossary/",
+            &["other/glossary.md"],
+            3,
         ),
-        (
-            Column::findings(),
-            "the findings column",
-            "the findings column is not yet projected onto a find's row",
-        ),
+        unread_block("notes/a.md"),
     ] {
-        let refusal = seeded
+        writing
+            .record_finding(&finding)
+            .expect("recording a finding");
+    }
+    for _ in 0..NESTED_ROW_CEILING + 3 {
+        writing
+            .record_finding(&violation("long/doc.md"))
+            .expect("recording a finding");
+    }
+
+    let found = seeded.found(&request().with_columns([Column::findings()]));
+    let vault = VaultAddress::name(VaultName::new("notes").expect("a vault name"));
+    let mut kept = 0;
+    for row in &found.rows {
+        let findings = row.findings.clone().expect("the findings column");
+        let validated = match seeded
             .snapshot()
-            .find(
-                &request().with_columns([Column::body(), column]),
+            .validate(
+                &ValidateParams::new(vault.clone())
+                    .with_predicates([Predicate::path(row.path.as_str())])
+                    .with_limit(1000),
                 &declared(),
             )
-            .expect_err("a dormant column");
-        assert_eq!(refusal, PageRefusal::NotProjected { column: named });
-        assert_eq!(refusal.to_string(), reads);
+            .expect("a validate")
+            .answer
+        {
+            Validation::Findings { rows, .. } => rows,
+            Validation::Summary { .. } => panic!("a page answered a summary"),
+        };
+        assert_eq!(
+            findings.total,
+            validated.len() as u64,
+            "{}",
+            row.path.as_str()
+        );
+        assert_eq!(
+            findings.items,
+            validated
+                .into_iter()
+                .take(NESTED_ROW_CEILING)
+                .collect::<Vec<_>>(),
+            "{}",
+            row.path.as_str()
+        );
+        kept += findings.items.len() as u64;
     }
+    let by_path = |at: &str| {
+        found
+            .rows
+            .iter()
+            .find(|row| row.path.as_str() == at)
+            .and_then(|row| row.findings.clone())
+            .expect("a row")
+    };
+    let long = by_path("long/doc.md");
+    assert_eq!(
+        (long.items.len(), long.total),
+        (NESTED_ROW_CEILING, NESTED_ROW_CEILING as u64 + 3)
+    );
+    assert!(long.is_truncated());
+    let a = by_path("notes/a.md");
+    assert_eq!(
+        a.items.iter().map(|item| item.kind).collect::<Vec<_>>(),
+        vec![
+            FindingKind::FrontmatterUnreadable,
+            FindingKind::PathNamesNoDocument
+        ]
+    );
+    assert_eq!(a.items[1].head.total(), 3);
+    assert!(a.items[1].hint.is_some());
+    assert_eq!(by_path("notes/B.md").items, Vec::new());
+    assert_eq!(by_path("notes/B.md").total, 0);
+    assert_eq!(
+        found.work.finding_rows, kept,
+        "the head read past the ceiling"
+    );
+
+    let unpinned = Unpinned::new("find-findings-column-unpinned");
+    let bare = unpinned
+        .snapshot()
+        .find(
+            &FindParams::new(VaultAddress::name(
+                VaultName::new("notes").expect("a vault name"),
+            ))
+            .with_columns([Column::findings()]),
+            &DeclaredFields::none(),
+        )
+        .expect("a find under no schema");
+    let carried: Vec<(String, u64)> = bare
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.path.as_str().to_string(),
+                row.findings.as_ref().expect("the findings column").total,
+            )
+        })
+        .collect();
+    assert_eq!(
+        carried,
+        vec![
+            ("notes/a.md".to_string(), 1),
+            ("notes/b.md".to_string(), 0),
+            ("notes/c.md".to_string(), 0),
+        ]
+    );
 }
 
 /// **A row cut by a ceiling says how much the whole held.** A collection

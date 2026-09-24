@@ -172,7 +172,8 @@ pub use hydrate::{BODY_ROW_CEILING, FindWork, NESTED_ROW_CEILING, NestedRows};
 pub use statement::{FIND_STATEMENTS, FindStatement, Nested, PageDirection};
 use statement::{Section, SectionStart, compose_page};
 pub(crate) use statement::{
-    compose_bare_directory, compose_known_key, compose_match_probe, compose_universe,
+    compose_bare_directory, compose_finding_candidates, compose_finding_classes, compose_known_key,
+    compose_match_probe, compose_universe,
 };
 
 /// Where a page stopped, or where a continuation resumes: the value the row
@@ -312,6 +313,8 @@ pub(crate) struct Projection<'a> {
     pub(crate) body: bool,
     /// The nested collections named, each once, in [`Nested::ALL`]'s order.
     pub(crate) nested: Vec<Nested>,
+    /// The findings standing over the document.
+    pub(crate) findings: bool,
 }
 
 impl<'a> Projection<'a> {
@@ -323,6 +326,7 @@ impl<'a> Projection<'a> {
             keys: Vec::new(),
             body: false,
             nested: Vec::new(),
+            findings: false,
         };
         let mut nested = BTreeSet::new();
         for column in columns {
@@ -349,11 +353,7 @@ impl<'a> Projection<'a> {
                         column: "the links column",
                     });
                 }
-                Column::Findings {} => {
-                    return Err(PageRefusal::NotProjected {
-                        column: "the findings column",
-                    });
-                }
+                Column::Findings {} => projection.findings = true,
                 _ => return Err(PageRefusal::UnknownPart { part: "a column" }),
             }
         }
@@ -449,7 +449,21 @@ impl Snapshot {
         let next =
             next.map(|at| Cursor::new(snapshot.clone(), CursorKey::document(at.sort, at.path)));
         let unsatisfied = self.resolve(compiled.reports, declared, lookups)?;
-        let rows = self.hydrate(&keys, &projection, &fields, &mut work, &mut lookups.ran)?;
+        // A finding recorded under no schema is stamped with the empty
+        // fingerprint.
+        let findings_under = if projection.findings {
+            Some(self.fingerprint(lookups)?.unwrap_or_default())
+        } else {
+            None
+        };
+        let rows = self.hydrate(
+            &keys,
+            &projection,
+            &fields,
+            findings_under.as_deref(),
+            &mut work,
+            &mut lookups.ran,
+        )?;
         work.statements = self.counters().statements_executed() - started;
         Ok(Found {
             rows,
