@@ -141,6 +141,17 @@ pub struct ProductionAttachment {
     /// The canonical directory shared by this attachment's watcher, walks,
     /// control reads, write normalization, and shadow placement.
     covered_root: PathBuf,
+    /// The control files this attachment acts under, and, through
+    /// `undeclarable`, why this build cannot act on the vault's schema
+    /// declaration where it cannot.
+    ///
+    /// **An attachment standing over an unreadable declaration derives
+    /// nothing.** The leg that established it read the schema, could not read
+    /// what it declares, and pinned nothing: deriving under a default empty
+    /// model would answer confidently wrong questions about every document in
+    /// the vault, and refusing the attach would hide the vault instead of
+    /// saying why. So the coverage, the store and the maintainer lock are all
+    /// held, and the reason is what the entry publishes over them.
     controls: ReloadCandidate,
     /// Whether the engines are owed the config `controls` carries.
     ///
@@ -170,16 +181,6 @@ pub struct ProductionAttachment {
     /// reading says both whether the question is due and, once it is answered,
     /// when it is due again.
     store_verification_due: Instant,
-    /// Why this build cannot act on the vault's schema declaration, where it
-    /// cannot.
-    ///
-    /// **An attachment standing over an unreadable declaration derives
-    /// nothing.** The leg that established it read the schema, could not read
-    /// what it declares, and pinned nothing: deriving under a default empty
-    /// model would answer confidently wrong questions about every document in
-    /// the vault, and refusing the attach would hide the vault instead of
-    /// saying why. So the coverage, the store and the maintainer lock are all
-    /// held, and this is what the entry publishes over them.
     /// The maintainer lock, declared last because fields drop in declaration
     /// order: an attachment dropped rather than released gives its resources
     /// back in the order [`release`] gives them back, so the lock never ends
