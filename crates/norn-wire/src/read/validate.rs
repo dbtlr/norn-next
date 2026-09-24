@@ -105,10 +105,12 @@ pub struct ValidateParams {
     /// Whether to answer the tally instead of the findings. `false` answers
     /// the findings.
     pub summary: bool,
-    /// How many finding rows at most. `null` leaves the ceiling to the host,
-    /// and a summary is not paged.
+    /// How many finding rows a page holds at most. `null` leaves the ceiling
+    /// to the host. A summary is not paged, and ignores it.
     pub limit: Option<u32>,
-    /// Where to continue from. `null` starts at the first finding.
+    /// Where a page continues from. `null` starts at the first finding. A
+    /// summary is not paged, and a request for one carrying a cursor is
+    /// refused.
     pub after: Option<Cursor>,
 }
 

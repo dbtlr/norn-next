@@ -684,35 +684,65 @@ fn a_part_on_an_unknown_key_admits_no_finding_without_a_document() {
 }
 
 /// **A cursor that names no position among a validate's findings is
-/// refused**: a document's, and any cursor on a summary, which is not paged.
+/// refused**: a document's.
 #[test]
 fn a_cursor_that_is_no_position_among_the_findings_is_refused() {
     let validating_store = Validating::new("validate-cursor");
     let reading = validating_store.validate(&validating()).snapshot;
-    let refused = |params: &ValidateParams| {
+    assert_eq!(
         validating_store
             .snapshot()
-            .validate(params, &declared())
-            .expect_err("the cursor is refused")
-    };
-    assert_eq!(
-        refused(&validating().with_after(Cursor::new(
-            reading.clone(),
-            CursorKey::document(None, "a.md")
-        ))),
-        PageRefusal::NotAFindingCursor
-    );
-    assert_eq!(
-        refused(&validating().summarized().with_after(Cursor::new(
-            reading,
-            CursorKey::finding(FindingKind::UndeclaredTag, "a.md", 1)
-        ))),
+            .validate(
+                &validating().with_after(Cursor::new(reading, CursorKey::document(None, "a.md"))),
+                &declared()
+            )
+            .expect_err("the cursor is refused"),
         PageRefusal::NotAFindingCursor
     );
     assert_eq!(
         PageRefusal::NotAFindingCursor.to_string(),
         "the cursor names no position among this validate's findings"
     );
+}
+
+/// **A summary is not paged**: it refuses a cursor — even one a page of the
+/// same request minted, which a page continues — and it answers the same
+/// tallies whatever page bound the request names, one a page refuses
+/// included.
+#[test]
+fn a_summary_is_not_paged_so_it_refuses_a_cursor_and_ignores_the_bound() {
+    let validating_store = Validating::new("validate-summary-paging");
+    let minted = validating_store
+        .page(&validating().with_limit(2))
+        .1
+        .expect("a next page");
+    assert!(
+        !validating_store
+            .rows(&validating().with_after(minted.clone()))
+            .is_empty(),
+        "a page continues the cursor"
+    );
+    assert_eq!(
+        validating_store
+            .snapshot()
+            .validate(&validating().summarized().with_after(minted), &declared())
+            .expect_err("a summary continues no cursor"),
+        PageRefusal::SummaryNotPaged
+    );
+    assert_eq!(
+        PageRefusal::SummaryNotPaged.to_string(),
+        "a summary is not paged, so it continues no cursor"
+    );
+
+    let unbounded = validating_store.summary(&validating());
+    assert!(!unbounded.is_empty());
+    for limit in [0, 1, u32::MAX] {
+        assert_eq!(
+            validating_store.summary(&validating().with_limit(limit)),
+            unbounded,
+            "a summary bounded at {limit}"
+        );
+    }
 }
 
 // ---- the plan bars ----

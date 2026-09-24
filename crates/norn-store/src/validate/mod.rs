@@ -194,8 +194,8 @@ impl Snapshot {
     /// from another schema than the snapshot pins, a part the store keeps no
     /// index of, and a bound that does not read as its key's declared type.
     /// And refused as a cursor that names no position among a validate's
-    /// findings ([`PageRefusal::NotAFindingCursor`]), a summary's cursor among
-    /// them.
+    /// findings ([`PageRefusal::NotAFindingCursor`]), and as any cursor on a
+    /// summary, which is not paged ([`PageRefusal::SummaryNotPaged`]).
     pub fn validate(
         &self,
         params: &ValidateParams,
@@ -239,7 +239,7 @@ impl Snapshot {
         let started = self.counters().statements_executed();
         let limit = if params.summary {
             if params.after.is_some() {
-                return Err(PageRefusal::NotAFindingCursor);
+                return Err(PageRefusal::SummaryNotPaged);
             }
             0
         } else {

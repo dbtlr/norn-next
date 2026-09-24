@@ -183,8 +183,12 @@ pub enum PageRefusal {
     /// member names no place in its key's order.
     NotATallyCursor,
     /// The cursor names no position among a validate's findings: it is not a
-    /// finding's, or the request answers a summary, which is not paged.
+    /// finding's.
     NotAFindingCursor,
+    /// The request answers a summary and carries a cursor. A summary answers
+    /// every tally at once and is not paged, so no cursor names a position it
+    /// continues from.
+    SummaryNotPaged,
     /// A membership part on `key` names no value, so no document can satisfy
     /// it. The wire refuses one on read; this is the refusal of one built
     /// in-process.
@@ -234,6 +238,9 @@ impl std::fmt::Display for PageRefusal {
             }
             PageRefusal::NotAFindingCursor => {
                 formatter.write_str("the cursor names no position among this validate's findings")
+            }
+            PageRefusal::SummaryNotPaged => {
+                formatter.write_str("a summary is not paged, so it continues no cursor")
             }
             PageRefusal::EmptyMembership { key } => {
                 write!(formatter, "the membership part on `{key}` names no value")
