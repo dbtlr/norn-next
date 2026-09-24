@@ -174,6 +174,11 @@ pub struct Vault {
     /// what a comparison of two stores is a comparison of.
     machine: PathBuf,
     name: VaultName,
+    /// The case behaviour the tree's root proved when this view was taken,
+    /// which is the order an attach opens the derived store under. It is
+    /// retained rather than detected at each open, because a suite reads the
+    /// store while the root is gone too.
+    order: norn_store::StoredPathOrder,
 }
 
 impl Vault {
@@ -195,11 +200,18 @@ impl Vault {
     /// This is the child harness's way in: generation happens in the parent, so
     /// what the child costs is attachment alone.
     pub fn adopt(root: &Path) -> Vault {
+        let vault = root.join("vault");
+        let order = norn_host::stored_path_order(
+            norn_fs::PathNormalizer::detect(&vault)
+                .expect("detect the vault's case behaviour")
+                .case_sensitivity(),
+        );
         Vault {
             root: root.to_path_buf(),
-            vault: root.join("vault"),
+            vault,
             machine: root.to_path_buf(),
             name: VaultName::new(VAULT_NAME).expect("vault name"),
+            order,
         }
     }
 
@@ -223,6 +235,7 @@ impl Vault {
             vault: self.vault.clone(),
             machine: machine.to_path_buf(),
             name: self.name.clone(),
+            order: self.order,
         }
     }
 
@@ -250,15 +263,7 @@ impl Vault {
 
     /// The derived store, opened directly.
     pub fn store(&self) -> Store {
-        Store::open(
-            self.database(),
-            norn_host::stored_path_order(
-                norn_fs::PathNormalizer::detect(self.path())
-                    .expect("detect the vault's case behaviour")
-                    .case_sensitivity(),
-            ),
-        )
-        .expect("open the derived store")
+        Store::open(self.database(), self.order).expect("open the derived store")
     }
 
     /// A host serving this vault, holding the real-watcher lease for as long
