@@ -28,9 +28,8 @@ use crate::target::ResolutionTarget;
 ///
 /// Links, headings, block identifiers and tags are paged in document order by
 /// each row's position in its collection, and their cursor names the
-/// collection and the position ([`CursorKey::Ordinal`](crate::CursorKey)).
-/// Findings are paged in `(kind, id)` order, and their cursor is a finding's
-/// ([`CursorKey::Finding`](crate::CursorKey)).
+/// collection and the position. Findings are paged in `(kind, id)` order, and
+/// their cursor is a finding's.
 ///
 /// On the wire a selector is the flat string itself: `"links"`,
 /// `"headings"`.
