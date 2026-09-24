@@ -817,14 +817,14 @@ of `(fingerprint, kind, severity)` where a severity floor admits one severity â€
 part's range bounds, and that a document part keeping what it seeks drives instead from the
 documents it matched; and the summary, a covering seek of `(fingerprint, kind, severity)` per
 cell it admits grouped in the index's order, or, where a document part keeping what it seeks
-drives it, one covering seek per matched document and cell, its groups sorted. A work bar reads their SQLite counters over two vault sizes: a validate
-narrowed by kind, severity, a path part or a document part costs the same at both and steps
-through no full scan.
+drives it, one covering seek per matched document and cell, its groups sorted. A work bar
+reads their SQLite counters over two vault sizes: a validate narrowed by kind, severity, a
+path part or a document part costs the same at both and steps through no full scan.
 
 **Links-to carries no bar**: no builder emits it, and a find refuses a links-to part by
 name, because the link index it would filter by does not exist. The count shape carries
-no counter-lane, memory or timing bar yet, and neither does the validate shape. The warm-zero counter bar gates per PR, and
-the find shape carries four bars of its own. In the
+no counter-lane, memory or timing bar yet, and neither does the validate shape. The
+warm-zero counter bar gates per PR, and the find shape carries four bars of its own. In the
 counter lane, a find through a live read hold reads nothing through `norn-fs` on its own
 thread and lands nothing in the host's account of its jobs, at a pinned number of statements
 a page; and an unfiltered find, paged newest first, counts the same work at 300 documents as

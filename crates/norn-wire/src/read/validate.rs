@@ -87,9 +87,9 @@ impl ValidateReport {
 /// What a `validate` request carries.
 ///
 /// A validate answers the findings standing over a vault, as rows or as one
-/// tally per kind and severity. A `resolves` predicate is answered with the findings the
-/// rest of the request earned and reported back as the unsatisfied part
-/// `resolves_not_applicable`.
+/// tally per kind and severity. A `resolves` predicate is answered with the
+/// findings the rest of the request earned and reported back as the
+/// unsatisfied part `resolves_not_applicable`.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct ValidateParams {
