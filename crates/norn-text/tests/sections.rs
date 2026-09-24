@@ -319,6 +319,29 @@ fn a_slug_matches_only_where_no_heading_text_does() {
     assert_eq!(&body[span.content_start..span.content_end], "texted\n");
 }
 
+/// **A resolved section names the heading it matched** by its index among the
+/// headings resolved over, whichever reading matched it, so a caller holding
+/// those headings reads the matched one without finding it again.
+#[test]
+fn a_resolved_section_names_the_heading_it_matched_by_index() {
+    let body = "intro\n## Dup\nfirst\n### Deep\nd\n## dup\nsecond\n";
+    let scan = BodyScan::new(body);
+    for (address, index) in [
+        (SectionAddress::first("dup"), 0),
+        (SectionAddress::occurrence("DUP", 2), 2),
+        (SectionAddress::from("## Deep"), 1),
+        (SectionAddress::from("dup-1"), 2),
+    ] {
+        let span = scan.resolve_section(address).expect("a section");
+        assert_eq!(span.heading, index, "for {address:?}");
+        assert_eq!(
+            scan.headings()[span.heading].span.byte_offset,
+            span.heading_start,
+            "for {address:?}"
+        );
+    }
+}
+
 /// **A read takes the first matching heading in document order; a write
 /// refuses several.** The duplicate policy is the caller's, and it is the only
 /// thing a read and a write resolve differently.

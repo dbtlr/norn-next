@@ -54,11 +54,8 @@ impl DocumentText for Text {
         let headings: Vec<Heading> = headings.iter().map(text_heading).collect();
         let span =
             norn_text::resolve_section(&headings, body, SectionAddress::first(anchor)).ok()?;
-        let heading = headings
-            .iter()
-            .position(|heading| heading.span.byte_offset == span.heading_start)?;
         Some(SectionAt {
-            heading,
+            heading: span.heading,
             body: span.body_start..span.end,
         })
     }

@@ -102,6 +102,9 @@ impl<'a> From<&'a str> for SectionAddress<'a> {
 /// against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SectionSpan {
+    /// The index of the heading the address matched among the headings it
+    /// was resolved over, in document order.
+    pub heading: usize,
     /// Start of the heading construct.
     pub heading_start: usize,
     /// Start of everything below the heading, blank separators included.
@@ -211,6 +214,7 @@ pub fn resolve_section(
     let (content_start, content_end) = content_bounds(body, body_start, end);
 
     Ok(SectionSpan {
+        heading: index,
         heading_start,
         body_start,
         content_start,

@@ -636,9 +636,7 @@ impl<'a> Document<'a> {
         let address = address.into();
         let scan = self.scan_body();
         let span = scan.resolve_section(address)?;
-        if scan.headings().iter().any(|heading| {
-            heading.span.byte_offset == span.heading_start && heading.inside_container
-        }) {
+        if scan.headings()[span.heading].inside_container {
             return Err(EditError::SectionInContainer {
                 heading: address.heading.to_string(),
             });
@@ -696,6 +694,7 @@ impl<'a> Document<'a> {
         let span = self.scan_body().resolve_section(address.into())?;
         let shift = self.body_start;
         Ok(SectionSpan {
+            heading: span.heading,
             heading_start: span.heading_start + shift,
             body_start: span.body_start + shift,
             content_start: span.content_start + shift,
