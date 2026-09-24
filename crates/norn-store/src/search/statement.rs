@@ -111,7 +111,10 @@ pub(crate) struct LexicalPage<'a> {
 ///
 /// It selects each hit's document id, its path and its score, `-bm25()` over
 /// the match: FTS5's BM25 is lower for the more relevant match, and a score is
-/// higher for it. The hits are ordered by score descending, then by path in
+/// higher for it. The index is read as `ft`, and FTS5 names the column a
+/// `MATCH` and `bm25()` take after its table, so both name it `ft.documents_fts`:
+/// the alias is what keeps the page's read of the index apart from a `matches`
+/// filter's read of the same table in a plan. The hits are ordered by score descending, then by path in
 /// byte order, which makes the order total.
 ///
 /// **Where the page resumes is a bound on `(score, path)`**, compared against
@@ -152,9 +155,9 @@ pub(crate) fn compose_lexical_page(page: &LexicalPage<'_>) -> (String, Vec<Value
     ));
     (
         format!(
-            "SELECT d.id, d.path, -bm25(documents_fts) AS score
-             FROM documents_fts CROSS JOIN documents AS d ON d.id = documents_fts.rowid
-             WHERE documents_fts MATCH {expression}
+            "SELECT d.id, d.path, -bm25(ft.documents_fts) AS score
+             FROM documents_fts AS ft CROSS JOIN documents AS d ON d.id = ft.rowid
+             WHERE ft.documents_fts MATCH {expression}
                AND (score < {after_score} OR (score = {after_score} AND d.path > {after_path}))
                AND score >= {floor}{filters}
              ORDER BY score DESC, d.path

@@ -694,3 +694,284 @@ fn a_hit_carries_the_row_its_columns_name() {
         PageRefusal::NotProjected { .. }
     ));
 }
+
+// ---- the plan bars ----
+
+/// The plan the store reported for one statement, in the harness's shape.
+fn plan(emitted: &SearchPlan) -> QueryPlan {
+    QueryPlan::new(
+        emitted.plan.sql.clone(),
+        emitted
+            .plan
+            .steps
+            .iter()
+            .map(|step| PlanRow::new(step.id, step.parent, step.detail.clone()))
+            .collect(),
+    )
+}
+
+/// The one plan `plans` holds for `statement`, with the filters it recorded.
+fn plan_of(plans: &[SearchPlan], statement: SearchStatement) -> (QueryPlan, Vec<ReadFilter>) {
+    let matching: Vec<&SearchPlan> = plans
+        .iter()
+        .filter(|plan| plan.statement == ReadStatement::Search(statement))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "the search runs {statement:?} {} times: {plans:?}",
+        matching.len()
+    );
+    (plan(matching[0]), matching[0].filters.clone())
+}
+
+/// `plan` with every row's detail rewritten by `edit`: a plan a control
+/// judges in place of the one SQLite reported.
+fn rewritten(plan: &QueryPlan, edit: impl Fn(&str) -> String) -> QueryPlan {
+    QueryPlan::new(
+        plan.sql(),
+        plan.rows()
+            .iter()
+            .map(|row| PlanRow::new(row.id, row.parent, edit(&row.detail)))
+            .collect(),
+    )
+}
+
+/// `plan` with its rows in another order: a plan a control judges in place of
+/// the one SQLite reported.
+fn reordered(plan: &QueryPlan, order: impl Fn(&[PlanRow]) -> Vec<PlanRow>) -> QueryPlan {
+    QueryPlan::new(plan.sql(), order(plan.rows()))
+}
+
+/// Which test bars each statement the builder names. Exhaustive, so a
+/// statement added to [`SearchStatement`] does not compile until its author
+/// names the bar.
+fn statement_barred_by(statement: SearchStatement) -> &'static str {
+    match statement {
+        SearchStatement::LexicalPage => {
+            "a_lexical_page_is_driven_by_the_full_text_index_and_sorts_what_it_matched"
+        }
+    }
+}
+
+/// **Every statement the search builder names carries a bar, and one bar
+/// judges each**: the statements the bars judge cover the enumeration's slots
+/// exactly once.
+#[test]
+fn the_search_bars_cover_every_statement_once() {
+    let judged = [SearchStatement::LexicalPage];
+    let mut slots: Vec<usize> = judged.iter().map(|statement| statement.slot()).collect();
+    slots.sort_unstable();
+    assert_eq!(slots, (0..SEARCH_STATEMENTS).collect::<Vec<usize>>());
+    for (slot, statement) in SearchStatement::all().into_iter().enumerate() {
+        assert_eq!(statement.slot(), slot, "{statement:?} claims another slot");
+    }
+    let bars: std::collections::BTreeSet<&str> =
+        judged.into_iter().map(statement_barred_by).collect();
+    assert_eq!(
+        bars,
+        ["a_lexical_page_is_driven_by_the_full_text_index_and_sorts_what_it_matched"]
+            .into_iter()
+            .collect()
+    );
+}
+
+/// Judge a lexical page's plan.
+///
+/// An FTS5 read plans as `SCAN <table> VIRTUAL TABLE INDEX <idxNum>:<idxStr>`:
+/// the module's index choice, where `idxStr` spells the constraints SQLite
+/// handed it — `M` and a column number for a `MATCH` — and `idxNum` is a bit
+/// set whose order bits say the module hands its rows back sorted. So the
+/// searching row is the page's read of the index, aliased `ft`: one scan with
+/// a `MATCH` selection and `idxNum` zero, sorted by nothing. It is the outer
+/// loop — it stands before every other read of the page — and each match
+/// reaches its document by row id. The page sorts once: one temporary B-tree
+/// for its `ORDER BY`, which every match past the page's position fills. And
+/// nothing is read end to end.
+fn judge_lexical(plan: &QueryPlan) {
+    plan.assert_no_full_scan();
+    let searching = rows_of(plan, "ft");
+    let [row] = searching.rows() else {
+        panic!(
+            "the page does not read the full-text index once: {:?}\nemitted SQL: {}",
+            plan.rows(),
+            plan.sql()
+        );
+    };
+    assert_eq!(plan.table_of("ft"), "documents_fts");
+    assert!(
+        matches!(
+            row.scan_target(),
+            Some(ScanTarget::VirtualTable { index_number: "0", specification, .. })
+                if specification.starts_with('M')
+        ),
+        "the page does not read `documents_fts` through its MATCH selection alone: {row}\n\
+         emitted SQL: {}",
+        plan.sql()
+    );
+    let documents = rows_of(plan, "d");
+    documents.assert_searches_through("documents", Access::RowId);
+    documents.assert_search_constraint("documents", "(rowid=?)");
+    let at = |wanted: &PlanRow| {
+        plan.rows()
+            .iter()
+            .position(|row| row == wanted)
+            .expect("a row of the plan")
+    };
+    assert!(
+        plan.rows()
+            .iter()
+            .filter(|other| other.parent == row.parent)
+            .all(|other| at(other) >= at(row)),
+        "the full-text index is not the page's outer loop: {:?}\nemitted SQL: {}",
+        plan.rows(),
+        plan.sql()
+    );
+    let sorts: Vec<&PlanRow> = plan
+        .rows()
+        .iter()
+        .filter(|row| row.detail.contains("TEMP B-TREE"))
+        .collect();
+    assert!(
+        sorts.len() == 1 && sorts[0].detail == "USE TEMP B-TREE FOR ORDER BY",
+        "the page does not sort once, for its order: {sorts:?}\nemitted SQL: {}",
+        plan.sql()
+    );
+}
+
+/// One request per filter slot a search applies — every slot but a
+/// resolution, which a search reports and never filters by — each with the
+/// filter it spells.
+fn filtered() -> Vec<(Predicate, ReadFilter)> {
+    vec![
+        (
+            Predicate::equal_to("status", "open"),
+            ReadFilter::Equal(norn_store::FieldOrder::Raw),
+        ),
+        (
+            Predicate::not_equal_to("status", "open"),
+            ReadFilter::NotEqual(norn_store::FieldOrder::Raw),
+        ),
+        (
+            Predicate::in_any("status", ["open".to_string(), "closed".to_string()]),
+            ReadFilter::Member(norn_store::FieldOrder::Raw),
+        ),
+        (Predicate::has("status"), ReadFilter::Present),
+        (Predicate::missing("status"), ReadFilter::Absent),
+        (
+            Predicate::before("status", "open"),
+            ReadFilter::Before(norn_store::FieldOrder::Raw),
+        ),
+        (
+            Predicate::after("status", "closed"),
+            ReadFilter::After(norn_store::FieldOrder::Raw),
+        ),
+        (Predicate::matches("harbor"), ReadFilter::FullText),
+        (Predicate::path("notes/*"), ReadFilter::PathGlob),
+        (Predicate::tag("draft"), ReadFilter::Tag),
+        (
+            Predicate::has_finding(FindingKind::BodyBytesNotUtf8),
+            ReadFilter::Finding,
+        ),
+    ]
+}
+
+/// **A lexical page is driven by the full-text index, and sorts what it
+/// matched.** The page reads `documents_fts` through its `MATCH` selection as
+/// its outer loop and reaches each match's document by row id; it sorts once,
+/// for its order, since the index hands matches back in row-id order and a
+/// ranking is known only once every match is scored. So it holds on a first
+/// page, a continuation, a floored page, and a page narrowed by every filter a
+/// search applies: a filter is a test of the match's document, and never the
+/// loop the page is driven from.
+///
+/// Controls: the page's read of the index rebuilt with no `MATCH` selection;
+/// rebuilt so that the module hands matches back in its rank order and the
+/// page sorts nothing — a plan that would order by BM25 alone, with no path to
+/// break a tie; the documents reached by a scan rather than by row id; and the
+/// documents read before the index, the plan a filter's seek would drive. Each
+/// fails.
+#[test]
+fn a_lexical_page_is_driven_by_the_full_text_index_and_sorts_what_it_matched() {
+    let searching_store = Searching::new("search-plan");
+    let statement = SearchStatement::LexicalPage;
+    let first = searching("lantern harbor");
+    let (plan, filters) = plan_of(&searching_store.plans(&first), statement);
+    judge_lexical(&plan);
+    assert!(filters.is_empty());
+
+    let next = searching_store
+        .search(&first.clone().with_limit(1))
+        .next
+        .expect("a next page");
+    let floor = Score::new(0.0).expect("a floor");
+    for params in [
+        first.clone().with_after(next.clone()),
+        first.clone().with_min_score(floor),
+        first.clone().with_after(next).with_min_score(floor),
+    ] {
+        judge_lexical(&plan_of(&searching_store.plans(&params), statement).0);
+    }
+    for (predicate, shape) in filtered() {
+        let (narrowed, recorded) = plan_of(
+            &searching_store.plans(&first.clone().with_predicates([predicate.clone()])),
+            statement,
+        );
+        assert_eq!(recorded, vec![shape], "{predicate:?}");
+        judge_lexical(&narrowed);
+    }
+    let two = plan_of(
+        &searching_store.plans(
+            &first
+                .clone()
+                .with_predicates([Predicate::tag("draft"), Predicate::matches("walk")]),
+        ),
+        statement,
+    )
+    .0;
+    judge_lexical(&two);
+
+    let unselected = rewritten(&plan, |detail| {
+        detail.replace("VIRTUAL TABLE INDEX 0:M1", "VIRTUAL TABLE INDEX 0:")
+    });
+    failure_of("a page reading the index with no MATCH selection", || {
+        judge_lexical(&unselected)
+    });
+    let ranked_by_module = QueryPlan::new(
+        plan.sql(),
+        plan.rows()
+            .iter()
+            .filter(|row| !row.detail.contains("TEMP B-TREE"))
+            .map(|row| {
+                PlanRow::new(
+                    row.id,
+                    row.parent,
+                    row.detail.replace("INDEX 0:M1", "INDEX 32:M1"),
+                )
+            })
+            .collect(),
+    );
+    failure_of("a page the module hands back in rank order", || {
+        judge_lexical(&ranked_by_module)
+    });
+    let scanned = rewritten(&plan, |detail| {
+        detail.replace("SEARCH d USING INTEGER PRIMARY KEY (rowid=?)", "SCAN d")
+    });
+    failure_of("a page scanning the documents", || judge_lexical(&scanned));
+    let documents_first = reordered(&plan, |rows| {
+        let mut rows = rows.to_vec();
+        let ft = rows
+            .iter()
+            .position(|row| row.detail.starts_with("SCAN ft "))
+            .expect("the index's row");
+        let d = rows
+            .iter()
+            .position(|row| row.detail.starts_with("SEARCH d "))
+            .expect("the documents' row");
+        rows.swap(ft, d);
+        rows
+    });
+    failure_of("a page driven from the documents", || {
+        judge_lexical(&documents_first)
+    });
+}
