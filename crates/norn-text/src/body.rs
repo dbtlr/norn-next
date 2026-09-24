@@ -59,7 +59,7 @@ use crate::heading::{Heading, SlugCounter};
 use crate::link::{
     BlockId, Link, markdown_link, parse_block_ids_in, parse_tokens, splice_tokens, wikilink_ranges,
 };
-use crate::section::{SectionAddress, SectionError, SectionSpan, resolve_section};
+use crate::section::{SectionAddress, SectionError, SectionSpan, is_ascii_space, resolve_section};
 use crate::span::{LineCursor, lf_normalized, split_lines_inclusive};
 use crate::tag::{Tag as TagFact, scan_tags};
 
@@ -209,7 +209,7 @@ impl<'a> BodyScan<'a> {
                 }
                 Event::End(TagEnd::Heading(_)) => {
                     if let Some(active) = active_heading.take() {
-                        let text = active.text.trim().to_string();
+                        let text = active.text.trim_matches(is_ascii_space).to_string();
                         headings.push(Heading {
                             level: active.level,
                             slug: slugs.issue(&text),

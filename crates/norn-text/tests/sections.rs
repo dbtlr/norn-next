@@ -225,6 +225,33 @@ fn the_case_fold_is_ascii_alone() {
     );
 }
 
+/// The whitespace fold is ASCII's alone, as the case fold is: a no-break space
+/// or an ideographic space is text, so a heading carrying one and a heading
+/// spelled without it are two headings, and a write reaches the exact one.
+#[test]
+fn the_whitespace_fold_is_ascii_alone() {
+    let body = "## Intro\u{a0}\nspaced\n## Intro\nplain\n";
+    let plain = resolve_section(body, "Intro").expect("the plain heading alone");
+    assert_eq!(&body[plain.content_start..plain.content_end], "plain\n");
+    let spaced = resolve_section(body, "Intro\u{a0}").expect("the spaced heading alone");
+    assert_eq!(&body[spaced.content_start..spaced.content_end], "spaced\n");
+    assert_eq!(
+        resolve_section(body, " \tINTRO\u{b}\u{c}\r"),
+        Ok(plain),
+        "every ASCII space folds"
+    );
+    assert_eq!(
+        Document::parse(body).replace_section("Intro", "new\n"),
+        Ok("## Intro\u{a0}\nspaced\n## Intro\nnew\n".to_string())
+    );
+
+    let body = "## a\u{3000}b\nwide\n## a b\nnarrow\n";
+    let narrow = resolve_section(body, "a  b").expect("the narrow heading alone");
+    assert_eq!(&body[narrow.content_start..narrow.content_end], "narrow\n");
+    let wide = resolve_section(body, "a\u{3000}b").expect("the wide heading alone");
+    assert_eq!(&body[wide.content_start..wide.content_end], "wide\n");
+}
+
 /// A Markdown `#fragment` names a heading's slug, dedupe suffix included, and
 /// it is matched exactly, only where no heading's text matches the anchor.
 #[test]

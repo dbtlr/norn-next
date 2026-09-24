@@ -14,9 +14,11 @@
 //!
 //! Three readings, each tried only where the one before matched no heading:
 //!
-//! 1. **The heading's text**, both sides trimmed, each whitespace run
-//!    collapsed to one space, and ASCII case folded. This is what a wikilink
-//!    `#anchor` addresses, and what a person types.
+//! 1. **The heading's text**, both sides trimmed, each run of ASCII
+//!    whitespace collapsed to one space, and ASCII case folded. This is what
+//!    a wikilink `#anchor` addresses, and what a person types. The fold is
+//!    ASCII's alone, case and whitespace alike: a no-break space or an
+//!    ideographic space is text, as a letter outside ASCII keeps its case.
 //! 2. **The text of an ATX-shaped anchor** (`## State`), read by the same
 //!    CommonMark pass that produced the document's headings, then matched as
 //!    the first reading matches.
@@ -273,13 +275,23 @@ fn indices(headings: &[Heading], matches: impl Fn(&Heading) -> bool) -> Vec<usiz
         .collect()
 }
 
-/// Heading text as an anchor compares it: trimmed, each whitespace run one
-/// space, and ASCII case folded. A letter outside ASCII keeps its case.
+/// Heading text as an anchor compares it: trimmed, each run of ASCII space one
+/// space, and ASCII case folded. A letter outside ASCII keeps its case, and a
+/// space outside ASCII — a no-break space, an ideographic space — is text.
 fn normalized(text: &str) -> String {
-    text.split_whitespace()
+    text.split(is_ascii_space)
+        .filter(|word| !word.is_empty())
         .map(str::to_ascii_lowercase)
         .collect::<Vec<String>>()
         .join(" ")
+}
+
+/// Whether `ch` is one of the six ASCII whitespace characters CommonMark
+/// names: space, tab, line feed, carriage return, form feed and line
+/// tabulation. The whitespace a heading's text is trimmed of and an anchor
+/// folds.
+pub(crate) fn is_ascii_space(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{c}' | '\u{b}')
 }
 
 /// The heading text of an ATX-shaped anchor, or `None` when the anchor is not
