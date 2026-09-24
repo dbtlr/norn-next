@@ -669,24 +669,25 @@ The contract is stated whole and filled shape by shape, as each builder lands. T
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
 a statement it emitted, because a plan cannot be taken by a crate that may not reach the
 database, and beside the plan every column the statement reads, which SQLite's authorizer
-reports while the explain is prepared and a plan never names — and, beside the statements the read builders below name, twenty-five named
-statements carry a plan bar through it: suffix candidates, findings in a class, the class-
-and subject-scoped findings discards — the subject discard in both the whole form and the
-form narrowed to the kinds a producer re-derives — the clear a schema pin runs over the
-field projection's typed values, the page a walk reads its scope's unaccounted finding
-subjects through, the ordered document page a heal merges its walk against, the four enumerations a caller drains
-a whole pillar through — the findings table, the tombstones, every row's stored suffix keys,
-raw and folded, beside the path that has to produce them, and the vocabulary the full-text index holds — and
-the two drains a lane-2 consumer ([ADR
-0021](decisions/0021-derived-indexes-split-into-two-lanes.md)) reads change through: the
-live document rows, and the recorded deaths — and the ten keyed point reads: the document
-row a path stands at, the row a facts snapshot opens on and the five fact reads keyed by
-the row id it found, the death recorded for a path, the findings recorded about one, and
-the pinned vault-schema projection — and the two chunked reads every findings read collects
-each finding's candidate head and class memberships through, a chunk of finding ids at a
-time. Each chunked read is barred at every chunk width a read emits, as an equality seek of
-its table's primary key on the finding id, with no full scan and no sorter, taken of the
-statement that binds exactly that many ids.
+reports while the explain is prepared and a plan never names — and, beside the statements
+the read builders below name, twenty-five named statements carry a plan bar through it:
+suffix candidates, findings in a class, the class- and subject-scoped findings discards —
+the subject discard in both the whole form and the form narrowed to the kinds a producer
+re-derives — the clear a schema pin runs over the field projection's typed values, the page
+a walk reads its scope's unaccounted finding subjects through, the ordered document page a
+heal merges its walk against, the four enumerations a caller drains a whole pillar through —
+the findings table, the tombstones, every row's stored suffix keys, raw and folded, beside
+the path that has to produce them, and the vocabulary the full-text index holds — and the
+two drains a lane-2 consumer
+([ADR 0021](decisions/0021-derived-indexes-split-into-two-lanes.md)) reads change through:
+the live document rows, and the recorded deaths — and the ten keyed point reads: the
+document row a path stands at, the row a facts snapshot opens on and the five fact reads
+keyed by the row id it found, the death recorded for a path, the findings recorded about
+one, and the pinned vault-schema projection — and the two chunked reads every findings read
+collects each finding's candidate head and class memberships through, a chunk of finding ids
+at a time. Each chunked read is barred at every chunk width a read emits, as an equality
+seek of its table's primary key on the finding id, with no full scan and no sorter, taken of
+the statement that binds exactly that many ids.
 
 A point read is barred harder than a page, because a search is not a point read on its
 own: a range over the same index reports the same step, so each of the ten is judged on
