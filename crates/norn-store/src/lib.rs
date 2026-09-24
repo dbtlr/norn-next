@@ -107,6 +107,7 @@ mod faults;
 mod feed;
 mod fields;
 mod find;
+mod get;
 mod hash;
 mod increment;
 mod json;
@@ -136,11 +137,14 @@ pub use find::{
     BODY_ROW_CEILING, FIND_STATEMENTS, FindPlan, FindStatement, FindWork, Found,
     NESTED_ROW_CEILING, Nested, NestedRows, PageDirection,
 };
+pub use get::{
+    Collection, DocumentText, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, SectionAt,
+};
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use read::{
     DEFAULT_PAGE, FieldOrder, IN_VALUES_CEILING, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
-    ReadStatement,
+    ReadStatement, TargetAmbiguity,
 };
 // The open ceremony's own vocabulary, which is this crate's too: a store is
 // one client of that ceremony, and the rung a disagreement names is the same

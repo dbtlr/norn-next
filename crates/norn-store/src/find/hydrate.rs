@@ -36,7 +36,7 @@ use super::statement::{
 };
 use super::{FoundKey, Projection};
 use crate::error::{self, StoreError};
-use crate::facts::{Span, TagSource};
+use crate::facts::{BlockFact, HeadingFact, Span, TagSource};
 use crate::json::projected_fields;
 use crate::read::{Ran, Stepped, finding_base};
 use crate::request::{Reading, stored_block, stored_heading, stored_tag};
@@ -477,6 +477,17 @@ fn body_text(head: Option<Vec<u8>>, length: Option<u64>) -> Result<BodyText, Sto
     BodyText::new(text, length.unwrap_or_default()).map_err(cut_below_head)
 }
 
+/// `text` as a row carries it: cut to the last whole character at or before
+/// [`BODY_ROW_CEILING`] bytes, beside its whole length in bytes. The one bound a
+/// body is held to, whichever part of a document the text is.
+pub(crate) fn bounded_body(text: &str) -> BodyText {
+    let mut cut = text.len().min(BODY_ROW_CEILING);
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    BodyText::new(&text[..cut], text.len() as u64).expect("a head is never longer than its whole")
+}
+
 /// A head longer than the whole it heads, which one snapshot's two reads of
 /// one document cannot produce.
 fn cut_below_head(problem: TotalBelowHead) -> StoreError {
@@ -485,11 +496,11 @@ fn cut_below_head(problem: TotalBelowHead) -> StoreError {
     }
 }
 
-fn wire_span(span: Span) -> norn_wire::Span {
+pub(crate) fn wire_span(span: Span) -> norn_wire::Span {
     norn_wire::Span::new(span.line, span.column, span.byte_offset)
 }
 
-fn tag_row(row: &Row<'_>) -> Reading<TagRow> {
+pub(crate) fn tag_row(row: &Row<'_>) -> Reading<TagRow> {
     Ok(stored_tag(row)?.map(|tag| {
         let source = match tag.source {
             TagSource::Body => norn_wire::TagSource::Body,
@@ -499,17 +510,25 @@ fn tag_row(row: &Row<'_>) -> Reading<TagRow> {
     }))
 }
 
-fn heading_row(row: &Row<'_>) -> Reading<HeadingRow> {
-    Ok(stored_heading(row)?.map(|heading| {
-        HeadingRow::new(
-            heading.level,
-            heading.text,
-            heading.slug,
-            wire_span(heading.span),
-        )
-    }))
+pub(crate) fn heading_row(row: &Row<'_>) -> Reading<HeadingRow> {
+    Ok(stored_heading(row)?.map(wire_heading))
 }
 
-fn block_row(row: &Row<'_>) -> Reading<BlockRow> {
-    Ok(stored_block(row)?.map(|block| BlockRow::new(block.block_id, block.span.map(wire_span))))
+/// A stored heading as the wire's row carries it.
+pub(crate) fn wire_heading(heading: HeadingFact) -> HeadingRow {
+    HeadingRow::new(
+        heading.level,
+        heading.text,
+        heading.slug,
+        wire_span(heading.span),
+    )
+}
+
+pub(crate) fn block_row(row: &Row<'_>) -> Reading<BlockRow> {
+    Ok(stored_block(row)?.map(wire_block))
+}
+
+/// A stored block definition as the wire's row carries it.
+pub(crate) fn wire_block(block: BlockFact) -> BlockRow {
+    BlockRow::new(block.block_id, block.span.map(wire_span))
 }

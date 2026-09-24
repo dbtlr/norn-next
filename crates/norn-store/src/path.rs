@@ -297,6 +297,33 @@ impl DocumentPath {
         self.depth
     }
 
+    /// The suffix addresses that could name this document, shortest first:
+    /// for each count of trailing segments from one to the whole path, the
+    /// leaf spelled by its stem, then — where the leaf has an extension — by
+    /// the leaf as written.
+    ///
+    /// The *minimal disambiguating suffix* of a candidate is the first of
+    /// these whose class holds the candidate alone. The stem spelling comes
+    /// first because it is the shorter; the written leaf follows because a
+    /// dotted stem reduces two ways, and only the written leaf's reductions
+    /// leave out a document whose stem is the dotted stem's own reduction.
+    pub fn suffix_spellings(&self) -> impl Iterator<Item = String> + '_ {
+        let segments: Vec<&str> = self.path.split(SEPARATOR).collect();
+        let leaf = *segments.last().expect("a path has a leaf");
+        let with_extension = (leaf != self.stem).then_some(leaf);
+        (1..=segments.len()).flat_map(move |count| {
+            let ancestors = segments[segments.len() - count..segments.len() - 1].join("/");
+            let spelled = move |leaf: &str| {
+                if ancestors.is_empty() {
+                    leaf.to_string()
+                } else {
+                    format!("{ancestors}{SEPARATOR}{leaf}")
+                }
+            };
+            std::iter::once(spelled(&self.stem)).chain(with_extension.map(spelled))
+        })
+    }
+
     /// The indexed bounds containing this path's segment-aligned descendants.
     ///
     /// The path itself is not inside these bounds; a subtree query includes it

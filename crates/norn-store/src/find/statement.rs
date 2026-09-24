@@ -173,7 +173,7 @@ impl Nested {
 
     /// The columns an item is read from, in the order the stored-fact reader
     /// of the same table reads them.
-    const fn columns(self) -> &'static str {
+    pub(crate) const fn columns(self) -> &'static str {
         match self {
             Nested::Tags => "n.name, n.source, n.span_line, n.span_column, n.span_offset",
             Nested::Headings => {

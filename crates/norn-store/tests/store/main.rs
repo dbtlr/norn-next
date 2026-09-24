@@ -22,6 +22,7 @@ mod facts;
 mod fields;
 mod find;
 mod find_rows;
+mod get;
 mod increments;
 mod lifecycle;
 mod pillars;

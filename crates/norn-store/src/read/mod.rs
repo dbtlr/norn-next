@@ -30,12 +30,13 @@ mod reading;
 mod run;
 mod suggest;
 
-use norn_wire::CursorOrderChanged;
+use norn_wire::{CandidateHead, CursorOrderChanged, Hint, ResolutionTarget};
 
 use crate::count::CountStatement;
 use crate::describe::DescribeStatement;
 use crate::error::StoreError;
 use crate::find::FindStatement;
+use crate::get::GetStatement;
 use crate::request::MAX_PAGE;
 use crate::search::SearchStatement;
 #[cfg(doc)]
@@ -117,8 +118,8 @@ impl FieldOrder {
 ///
 /// A read compiles its conjunction through probes the find builder names, and
 /// reads finding rows, document rows and the active fingerprint through
-/// statements the find builder names, so a count, a validate, a describe and a
-/// search run find's statements beside their own; the record of what
+/// statements the find builder names, so a count, a validate, a describe, a
+/// search and a get run find's statements beside their own; the record of what
 /// a read ran holds any of them, and each builder's enumeration stays its own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadStatement {
@@ -132,6 +133,8 @@ pub enum ReadStatement {
     Describe(DescribeStatement),
     /// A statement [`SearchStatement`] names.
     Search(SearchStatement),
+    /// A statement [`GetStatement`] names.
+    Get(GetStatement),
 }
 
 impl From<SearchStatement> for ReadStatement {
@@ -143,6 +146,12 @@ impl From<SearchStatement> for ReadStatement {
 impl From<DescribeStatement> for ReadStatement {
     fn from(statement: DescribeStatement) -> Self {
         ReadStatement::Describe(statement)
+    }
+}
+
+impl From<GetStatement> for ReadStatement {
+    fn from(statement: GetStatement) -> Self {
+        ReadStatement::Get(statement)
     }
 }
 
@@ -162,6 +171,23 @@ impl From<CountStatement> for ReadStatement {
     fn from(statement: CountStatement) -> Self {
         ReadStatement::Count(statement)
     }
+}
+
+/// A target that names more than one document, as a refusal carries it.
+///
+/// The same bounded head and the same hint a finding over the class carries,
+/// so a refusal and a finding say one thing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TargetAmbiguity {
+    /// The target as the request named it, anchor included.
+    pub target: ResolutionTarget,
+    /// The first of the documents it names in the resolution ladder's order,
+    /// at most [`crate::CANDIDATE_HEAD`], each named by its minimal
+    /// disambiguating suffix, with how many there were.
+    pub head: CandidateHead,
+    /// The target whose `find` resolves every one of them: the target's
+    /// address, anchor left off.
+    pub hint: Hint,
 }
 
 /// Why a read builder answered no page.
@@ -226,6 +252,20 @@ pub enum PageRefusal {
     OutOfBound { bound: ReadBound, given: usize },
     /// The request carries a part this build of the store does not know.
     UnknownPart { part: &'static str },
+    /// The target names more than one document.
+    AmbiguousTarget(Box<TargetAmbiguity>),
+    /// The target names no document.
+    UnknownTarget { target: ResolutionTarget },
+    /// The cursor names no position in the collection a get pages: it is not
+    /// an ordinal, or not a finding's at the document's path.
+    NotACollectionCursor,
+    /// The request carries `part`, which the answer it asks for — `answer` —
+    /// does not take: an anchor or a column on a collection page, a column on
+    /// a section or a block, or a cursor on anything but a collection page.
+    PartNotTaken {
+        part: &'static str,
+        answer: &'static str,
+    },
     /// The store refused a statement.
     Store(StoreError),
 }
@@ -293,6 +333,25 @@ impl std::fmt::Display for PageRefusal {
             },
             PageRefusal::UnknownPart { part } => {
                 write!(formatter, "this store does not know {part}")
+            }
+            PageRefusal::AmbiguousTarget(ambiguity) => write!(
+                formatter,
+                "`{}` names {} documents, and a get answers about one",
+                ambiguity.target,
+                ambiguity.head.total()
+            ),
+            PageRefusal::UnknownTarget { target } => {
+                write!(formatter, "`{target}` names no document")
+            }
+            PageRefusal::NotACollectionCursor => {
+                formatter.write_str("the cursor names no position in the collection paged")
+            }
+            PageRefusal::PartNotTaken { part, answer } => {
+                write!(
+                    formatter,
+                    "{answer} takes no {}",
+                    part.trim_start_matches("a ").trim_start_matches("an ")
+                )
             }
             PageRefusal::Store(problem) => problem.fmt(formatter),
         }
