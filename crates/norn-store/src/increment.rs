@@ -600,13 +600,18 @@ fn upsert(
                 *least_typed,
             ),
         };
+        debug_assert_eq!(
+            row.path(),
+            facts.path.as_str(),
+            "a field row carries the path of the document it was derived for"
+        );
         statements
             .insert_field
             .execute(params![
                 document,
                 row.key(),
                 row.ordinal(),
-                row.path(),
+                facts.path.as_str(),
                 container,
                 raw,
                 typed,
