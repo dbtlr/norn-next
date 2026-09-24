@@ -285,20 +285,12 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 #[derive(Clone, Debug, Default)]
 pub struct ContentModel {
     schema: Option<String>,
-    keys: BTreeMap<String, DeclaredKey>,
+    keys: BTreeMap<String, FieldDeclaration>,
     tags: BTreeSet<String>,
     tag_patterns: BTreeSet<String>,
     undeclared_tags: Option<TagStance>,
     folders: BTreeMap<String, Option<String>>,
     ambiguity_ignore: AmbiguityIgnore,
-}
-
-/// One declared field: what the schema declares it as, and the typed order
-/// its type reads a raw value into, where it has one.
-#[derive(Clone, Debug)]
-struct DeclaredKey {
-    declaration: FieldDeclaration,
-    order: Option<TypedOrder>,
 }
 
 impl ContentModel {
@@ -327,21 +319,16 @@ impl ContentModel {
     /// schema that declares it. Every method that declares something panics
     /// alike.
     pub fn declare(self, key: impl Into<String>) -> Self {
-        self.declare_field(key, FieldDeclaration::new(FieldType::Text), None)
+        self.declare_field(key, FieldDeclaration::text())
     }
 
     /// The same declaration with `key` declared as `declaration`, ordered by
-    /// `order` where its type reads a raw value into a typed sort key, and by
-    /// its raw text where `order` is `None`.
-    pub fn declare_field(
-        mut self,
-        key: impl Into<String>,
-        declaration: FieldDeclaration,
-        order: Option<TypedOrder>,
-    ) -> Self {
+    /// the typed order its type carries, or by its raw text where it carries
+    /// none.
+    pub fn declare_field(mut self, key: impl Into<String>, declaration: FieldDeclaration) -> Self {
         let key = key.into();
         self.schema_declares(&key);
-        self.keys.insert(key, DeclaredKey { declaration, order });
+        self.keys.insert(key, declaration);
         self
     }
 
@@ -411,7 +398,7 @@ impl ContentModel {
     pub fn typed_order(&self, key: &str) -> Option<&TypedOrder> {
         self.keys
             .get(key)
-            .and_then(|declared| declared.order.as_ref())
+            .and_then(|declaration| declaration.order.as_ref())
     }
 
     /// The places the schema keeps out of ambiguity classes.
@@ -441,8 +428,7 @@ impl ContentModel {
     ) -> Box<dyn Iterator<Item = Facet> + 'a> {
         match kind {
             FacetKind::DeclaredField => {
-                Box::new(keyed_after(&self.keys, after).map(|(key, declared)| {
-                    let declaration = &declared.declaration;
+                Box::new(keyed_after(&self.keys, after).map(|(key, declaration)| {
                     Facet::declared_field(
                         key.clone(),
                         declaration.field_type,
@@ -503,23 +489,60 @@ fn named_after<'a>(
     ))
 }
 
-/// What a schema declares one field as: its type, whether every document is
-/// declared to carry it, and the closed set of values it is declared to hold.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// What a schema declares one field as: its type, the typed order that type
+/// reads a raw value into where it does not order as text, whether every
+/// document is declared to carry it, and the closed set of values it is
+/// declared to hold.
+///
+/// **A type and its order are made together.** There is one constructor per
+/// type: `text` and `tags` order by their raw text and take no order, and
+/// `number`, `boolean` and `date` each take the [`TypedOrder`] their type reads
+/// a raw value into, so a declaration whose type and order disagree on whether
+/// it is typed has no spelling. What an order computes is the host's: it builds
+/// each one from the schema's own reading of the type.
+#[derive(Clone, Debug)]
 pub struct FieldDeclaration {
     field_type: FieldType,
+    order: Option<TypedOrder>,
     required: bool,
     one_of: Option<Vec<String>>,
 }
 
 impl FieldDeclaration {
-    /// A field declared as `field_type`: not required, and not closed.
-    pub const fn new(field_type: FieldType) -> Self {
+    /// A field declared as `field_type` and ordered by `order`: not required,
+    /// and not closed.
+    const fn of(field_type: FieldType, order: Option<TypedOrder>) -> Self {
         FieldDeclaration {
             field_type,
+            order,
             required: false,
             one_of: None,
         }
+    }
+
+    /// A field declared as text, ordered by its raw text.
+    pub const fn text() -> Self {
+        Self::of(FieldType::Text, None)
+    }
+
+    /// A field declared as a set of tag names, ordered by their raw text.
+    pub const fn tags() -> Self {
+        Self::of(FieldType::Tags, None)
+    }
+
+    /// A field declared as a number, ordered by `order`.
+    pub const fn number(order: TypedOrder) -> Self {
+        Self::of(FieldType::Number, Some(order))
+    }
+
+    /// A field declared as a boolean, ordered by `order`.
+    pub const fn boolean(order: TypedOrder) -> Self {
+        Self::of(FieldType::Boolean, Some(order))
+    }
+
+    /// A field declared as a date, ordered by `order`.
+    pub const fn date(order: TypedOrder) -> Self {
+        Self::of(FieldType::Date, Some(order))
     }
 
     /// The same declaration, with every document declared to carry the field.

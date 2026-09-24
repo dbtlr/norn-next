@@ -21,7 +21,7 @@ use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
     ContentModel, DESCRIBE_STATEMENTS, DescribePlan, DescribeStatement, Described,
     FieldDeclaration, FrontmatterValue, PageRefusal, ReadStatement, Snapshot, SnapshotReader,
-    Store, induced_failure,
+    Store, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -39,12 +39,16 @@ fn declared() -> ContentModel {
     ContentModel::under(DESCRIBE_SCHEMA)
         .declare_field(
             "status",
-            FieldDeclaration::new(FieldType::Text)
+            FieldDeclaration::text()
                 .required()
                 .one_of(["draft", "live"]),
-            None,
         )
-        .declare_field("due", FieldDeclaration::new(FieldType::Date), None)
+        // An ISO day sorts as its own text, which is the order this date reads
+        // into.
+        .declare_field(
+            "due",
+            FieldDeclaration::date(TypedOrder::new(|raw| Some(raw.to_string()))),
+        )
         .declare("reviewer")
         .declare_tag("project")
         .declare_tag("area")

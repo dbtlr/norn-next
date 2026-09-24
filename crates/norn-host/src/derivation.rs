@@ -864,18 +864,14 @@ fn content_model(schema: &VaultSchema, fingerprint: String) -> ContentModel {
     let declared = schema.fields().fold(
         ContentModel::under(fingerprint),
         |declared, (key, field)| {
-            let kind = field.kind();
-            let mut declaration = FieldDeclaration::new(wire_field_type(kind));
+            let mut declaration = field_declaration(field.kind());
             if field.required() {
                 declaration = declaration.required();
             }
             if let Some(values) = field.one_of() {
                 declaration = declaration.one_of(values);
             }
-            let order = (!kind.orders_as_text()).then(|| {
-                TypedOrder::new(move |raw| kind.read(raw).ok().map(|value| value.sort_key()))
-            });
-            declared.declare_field(key, declaration, order)
+            declared.declare_field(key, declaration)
         },
     );
     let tags = schema.tags();
@@ -901,16 +897,19 @@ fn content_model(schema: &VaultSchema, fingerprint: String) -> ContentModel {
         })
 }
 
-/// The wire's spelling of a declared field type, which is the type a
-/// `describe` facet reports: the two enums are one vocabulary, held equal by
-/// spelling in `norn-config`'s suite.
-fn wire_field_type(kind: FieldType) -> norn_wire::FieldType {
+/// A field declared as `kind`, as the store reads it: under the wire type a
+/// `describe` facet reports, which is spelled as `kind` is — the two enums are
+/// one vocabulary, held equal by spelling in `norn-config`'s suite — and, for a
+/// type that does not order as text, with the typed order `kind` reads a raw
+/// value into.
+fn field_declaration(kind: FieldType) -> FieldDeclaration {
+    let order = || TypedOrder::new(move |raw| kind.read(raw).ok().map(|value| value.sort_key()));
     match kind {
-        FieldType::Text => norn_wire::FieldType::Text,
-        FieldType::Number => norn_wire::FieldType::Number,
-        FieldType::Boolean => norn_wire::FieldType::Boolean,
-        FieldType::Date => norn_wire::FieldType::Date,
-        FieldType::Tags => norn_wire::FieldType::Tags,
+        FieldType::Text => FieldDeclaration::text(),
+        FieldType::Number => FieldDeclaration::number(order()),
+        FieldType::Boolean => FieldDeclaration::boolean(order()),
+        FieldType::Date => FieldDeclaration::date(order()),
+        FieldType::Tags => FieldDeclaration::tags(),
     }
 }
 

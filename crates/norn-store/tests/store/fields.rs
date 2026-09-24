@@ -5,10 +5,10 @@
 //! [`norn_store::Request::stored_facts`], so what is asserted is the rows at
 //! rest rather than the value the derivation handed over.
 
-use crate::common::{Scratch, document, number, path, record_death, write_document};
+use crate::common::{Scratch, document, path, record_death, write_document};
 use norn_store::{
-    Change, ContentModel, DocumentFacts, FieldContainer, FieldRow, FieldRows, FrontmatterValue,
-    IncrementProvenance, Provenance, StoreError, TypedOrder, induced_failure,
+    Change, ContentModel, DocumentFacts, FieldContainer, FieldDeclaration, FieldRow, FieldRows,
+    FrontmatterValue, IncrementProvenance, Provenance, StoreError, TypedOrder, induced_failure,
 };
 
 /// A presence row, as the rows are compared.
@@ -164,7 +164,7 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
 #[test]
 fn the_raw_and_the_typed_order_mark_their_own_least_value() {
     let declared = ContentModel::under("schema-1")
-        .declare_field("rank", number(), Some(integer_order()))
+        .declare_field("rank", FieldDeclaration::number(integer_order()))
         .declare("title");
     let value = map(vec![
         (
@@ -226,8 +226,8 @@ fn the_raw_and_the_typed_order_mark_their_own_least_value() {
 /// order and the typed order alike.
 #[test]
 fn a_tie_for_the_least_value_marks_the_earliest_element() {
-    let declared =
-        ContentModel::under("schema-1").declare_field("rank", number(), Some(integer_order()));
+    let declared = ContentModel::under("schema-1")
+        .declare_field("rank", FieldDeclaration::number(integer_order()));
     let value = map(vec![(
         "rank",
         FrontmatterValue::Sequence(vec![string("3"), string("5"), string("3")]),
@@ -355,7 +355,7 @@ fn typed_values_derived_under_a_schema_the_store_does_not_pin_are_refused() {
         )
     };
     let typed_under = |schema: &str| {
-        ContentModel::under(schema).declare_field("rank", number(), Some(integer_order()))
+        ContentModel::under(schema).declare_field("rank", FieldDeclaration::number(integer_order()))
     };
     let refusal = |request: &mut norn_store::Request<'_>, declared: &ContentModel| {
         let refused = request
@@ -426,8 +426,8 @@ fn a_documents_field_rows_die_with_it() {
     request
         .pin_vault_schema(b"version: 1\n", "schema-1")
         .expect("pinning a schema");
-    let declared =
-        ContentModel::under("schema-1").declare_field("rank", number(), Some(integer_order()));
+    let declared = ContentModel::under("schema-1")
+        .declare_field("rank", FieldDeclaration::number(integer_order()));
     write_document(
         &mut request,
         &fielded(
@@ -469,8 +469,8 @@ fn a_moved_pin_clears_every_typed_value_and_nothing_else() {
     let scratch = Scratch::new("field-pin");
     let mut store = scratch.open();
     let mut request = store.begin_request();
-    let declared =
-        ContentModel::under("schema-1").declare_field("rank", number(), Some(integer_order()));
+    let declared = ContentModel::under("schema-1")
+        .declare_field("rank", FieldDeclaration::number(integer_order()));
     request
         .pin_vault_schema(b"version: 1\n", "schema-1")
         .expect("pinning a schema");
@@ -520,8 +520,8 @@ fn a_moved_pin_clears_every_typed_value_and_nothing_else() {
 /// taking the value away takes the rows with it.
 #[test]
 fn a_documents_rows_are_the_rows_its_frontmatter_derives() {
-    let typed =
-        ContentModel::under("schema-1").declare_field("rank", number(), Some(integer_order()));
+    let typed = ContentModel::under("schema-1")
+        .declare_field("rank", FieldDeclaration::number(integer_order()));
     let one = map(vec![("title", string("one")), ("rank", string("4"))]);
     let another = map(vec![("title", string("another"))]);
 

@@ -9,12 +9,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::common::{Scratch, document, number, write_documents};
+use crate::common::{Scratch, document, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    COUNT_STATEMENTS, ContentModel, CountPlan, CountStatement, Counted, FieldOrder, Found,
-    FrontmatterValue, GroupMember, PageRefusal, ReadStatement, Snapshot, SnapshotReader, Store,
-    TagFact, TagSource, TypedOrder, induced_failure,
+    COUNT_STATEMENTS, ContentModel, CountPlan, CountStatement, Counted, FieldDeclaration,
+    FieldOrder, Found, FrontmatterValue, GroupMember, PageRefusal, ReadStatement, Snapshot,
+    SnapshotReader, Store, TagFact, TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -51,7 +51,7 @@ fn declared() -> ContentModel {
     ContentModel::under(COUNT_SCHEMA)
         .declare("status")
         .declare("aliases")
-        .declare_field("n", number(), Some(decimal_order()))
+        .declare_field("n", FieldDeclaration::number(decimal_order()))
 }
 
 fn texts(values: &[&str]) -> FrontmatterValue {
@@ -817,11 +817,8 @@ fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
         .snapshot()
         .count(
             &typed.clone().with_after(cursor),
-            &ContentModel::under("another-schema").declare_field(
-                "n",
-                number(),
-                Some(decimal_order()),
-            ),
+            &ContentModel::under("another-schema")
+                .declare_field("n", FieldDeclaration::number(decimal_order())),
         )
         .expect_err("a typed cursor under another schema");
     assert!(

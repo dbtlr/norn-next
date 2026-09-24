@@ -242,8 +242,7 @@ fn a_changed_typed_field_value_is_a_divergence() {
         let facts = document_with_every_fact("one/glossary.md", "hash-1");
         let typed = norn_store::ContentModel::under("schema-fingerprint").declare_field(
             "draft",
-            crate::common::number(),
-            Some(norn_store::TypedOrder::new(|raw| {
+            norn_store::FieldDeclaration::number(norn_store::TypedOrder::new(|raw| {
                 Some(format!("typed {raw}"))
             })),
         );

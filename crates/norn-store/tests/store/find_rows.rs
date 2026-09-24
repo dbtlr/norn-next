@@ -6,9 +6,9 @@
 //! and typed orders.
 
 use norn_store::{
-    BODY_ROW_CEILING, BlockFact, ContentModel, FindStatement, FindWork, Found, HeadingFact,
-    NESTED_ROW_CEILING, Nested, NestedRows, PageRefusal, SnapshotReader, Span, Store, TagFact,
-    TagSource, Validation,
+    BODY_ROW_CEILING, BlockFact, ContentModel, FieldDeclaration, FindStatement, FindWork, Found,
+    HeadingFact, NESTED_ROW_CEILING, Nested, NestedRows, PageRefusal, SnapshotReader, Span, Store,
+    TagFact, TagSource, Validation,
 };
 use norn_wire::{
     BlockRow, Column, Cursor, CursorKey, CursorOrderChanged, Direction, FieldValue, FindParams,
@@ -16,18 +16,14 @@ use norn_wire::{
     ValidateParams, VaultAddress, VaultName,
 };
 
-use crate::common::{
-    Scratch, ambiguity, document, number, unread_block, violation, write_documents,
-};
+use crate::common::{Scratch, ambiguity, document, unread_block, violation, write_documents};
 use crate::find::{SEED_SCHEMA, Seeded, declared, integer_order, map, request, sorted, string};
 
 /// The fixture's declaration, read from the schema pinned under `schema`.
 fn declared_under(schema: &str) -> ContentModel {
-    ContentModel::under(schema).declare("status").declare_field(
-        "count",
-        number(),
-        Some(integer_order()),
-    )
+    ContentModel::under(schema)
+        .declare("status")
+        .declare_field("count", FieldDeclaration::number(integer_order()))
 }
 
 /// The fixture's keys, both ordered by their text, under `schema`.

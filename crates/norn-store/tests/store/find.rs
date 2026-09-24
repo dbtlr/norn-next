@@ -13,13 +13,13 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use crate::common::{Scratch, ambiguity, document, number, violation, write_documents};
+use crate::common::{Scratch, ambiguity, document, violation, write_documents};
 use norn_store::{
-    BlockFact, ContentModel, DEFAULT_PAGE, FIND_STATEMENTS, FieldOrder, FindPlan, FindStatement,
-    Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, MAX_PAGE, NESTED_ROW_CEILING, Nested,
-    PageDirection, PageRefusal, READ_FILTERS, ReadBound, ReadFilter, Snapshot, SnapshotReader,
-    Span, Store, StoreError, StoredPathOrder, SuffixKey, TagFact, TagSource, TypedOrder,
-    induced_failure,
+    BlockFact, ContentModel, DEFAULT_PAGE, FIND_STATEMENTS, FieldDeclaration, FieldOrder, FindPlan,
+    FindStatement, Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, MAX_PAGE,
+    NESTED_ROW_CEILING, Nested, PageDirection, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
+    Snapshot, SnapshotReader, Span, Store, StoreError, StoredPathOrder, SuffixKey, TagFact,
+    TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -58,7 +58,7 @@ pub(crate) const SEED_SCHEMA: &str = "seed-schema";
 pub(crate) fn declared() -> ContentModel {
     ContentModel::under(SEED_SCHEMA)
         .declare("status")
-        .declare_field("count", number(), Some(integer_order()))
+        .declare_field("count", FieldDeclaration::number(integer_order()))
 }
 
 /// `status` and `count` both declared as text, under the fixture's schema.
