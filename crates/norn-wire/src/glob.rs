@@ -32,10 +32,19 @@
 //! so the grammar states it once rather than special-casing the trailing
 //! segment.
 //!
-//! Matching is byte-oriented over `char`s and folds no case. Whether a vault
-//! folds case is a filesystem fact that the store and the walk carry as a
-//! parameter, and a pattern that decided it here would answer differently from
-//! every other path comparison in the system.
+//! # Case
+//!
+//! Whether a vault folds case is a filesystem fact, so a pattern never decides
+//! it: the caller names a [`CaseFold`] at every match. Under
+//! [`CaseFold::Exact`] every character compares as itself. Under
+//! [`CaseFold::Ascii`] a literal ASCII letter matches either case of itself —
+//! `A`–`Z` with `a`–`z` — and every other character, a letter outside ASCII
+//! included, still compares as itself; `?`, `*` and `**` mean the same under
+//! both, because none of them compares a character. The pattern stays the text
+//! it was written as, so one grammar and one matcher answer both.
+//!
+//! The store's ambiguity-ignore set, a find's path part and a tag facet's
+//! patterns match under [`CaseFold::Exact`] on every root.
 //!
 //! # What matching costs
 //!
@@ -107,7 +116,10 @@ impl Pattern {
     /// accident. The segment walk and the walk inside one segment are the same
     /// linear match over two alphabets, so the whole answer costs at most this
     /// pattern's length times the subject's.
-    pub fn matches(&self, subject: &str) -> bool {
+    ///
+    /// `case` says how a literal letter compares with a subject's — see
+    /// [`CaseFold`].
+    pub fn matches(&self, subject: &str, case: CaseFold) -> bool {
         let subject: Vec<&str> = subject.split('/').collect();
         matches_units(
             &self.segments,
@@ -116,7 +128,7 @@ impl Pattern {
             |segment, subject| match segment {
                 // Taken by the predicate above, which is read first.
                 Segment::AnyDepth => false,
-                Segment::Within(shape) => matches_within(shape, subject),
+                Segment::Within(shape) => matches_within(shape, subject, case),
             },
         )
     }
@@ -171,16 +183,42 @@ fn matches_units<P, S>(
 /// Whether one subject segment matches one pattern segment.
 ///
 /// `*` matches any run of characters and `?` exactly one, and neither crosses a
-/// separator because neither side holds one at this level.
-fn matches_within(shape: &str, subject: &str) -> bool {
+/// separator because neither side holds one at this level. Every other pattern
+/// character is a literal, compared under `case`.
+fn matches_within(shape: &str, subject: &str, case: CaseFold) -> bool {
     let shape: Vec<char> = shape.chars().collect();
     let subject: Vec<char> = subject.chars().collect();
     matches_units(
         &shape,
         &subject,
         |character| *character == '*',
-        |shape, subject| *shape == '?' || shape == subject,
+        |shape, subject| *shape == '?' || case.equal(*shape, *subject),
     )
+}
+
+/// How a pattern's literal characters compare with a subject's.
+///
+/// The caller names it at every match, because whether two spellings are one
+/// name is the vault root's fact, not the pattern's.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CaseFold {
+    /// Every character compares as itself.
+    Exact,
+    /// An ASCII letter compares with its other ASCII case — `A`–`Z` with
+    /// `a`–`z` — and every other character, a letter outside ASCII included,
+    /// compares as itself.
+    Ascii,
+}
+
+impl CaseFold {
+    /// Whether a literal pattern character and a subject character are one
+    /// under this case.
+    fn equal(self, literal: char, subject: char) -> bool {
+        match self {
+            CaseFold::Exact => literal == subject,
+            CaseFold::Ascii => literal.eq_ignore_ascii_case(&subject),
+        }
+    }
 }
 
 /// Why a string is not a pattern.
@@ -203,3 +241,105 @@ impl fmt::Display for PatternError {
 }
 
 impl std::error::Error for PatternError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn matches(pattern: &str, subject: &str, case: CaseFold) -> bool {
+        Pattern::parse(pattern)
+            .expect("a pattern")
+            .matches(subject, case)
+    }
+
+    /// **Under the fold, a literal letter matches either ASCII case of
+    /// itself; without it, only itself.** Every other literal — a digit, a
+    /// dot, a separator — compares as itself either way.
+    #[test]
+    fn a_literal_letter_matches_its_other_ascii_case_only_under_the_fold() {
+        for (pattern, subject) in [
+            ("archive/**", "Archive/norn/glossary.md"),
+            ("Archive/**", "archive/deep/term.md"),
+            ("NOTES.MD", "notes.md"),
+            ("v1.md", "V1.MD"),
+        ] {
+            assert!(
+                matches(pattern, subject, CaseFold::Ascii),
+                "{pattern} vs {subject}"
+            );
+            assert!(
+                !matches(pattern, subject, CaseFold::Exact),
+                "{pattern} vs {subject}"
+            );
+        }
+        // The fold is a case fold and nothing wider: a different letter, digit
+        // or separator still refuses.
+        assert!(!matches("v1.md", "v2.md", CaseFold::Ascii));
+        assert!(!matches("a-b", "a_b", CaseFold::Ascii));
+        assert!(!matches("a/b", "a\\b", CaseFold::Ascii));
+        // `@` and `` ` `` sit one byte beside `A` and `a`, and are not letters.
+        assert!(!matches("@", "`", CaseFold::Ascii));
+        assert!(!matches("[", "{", CaseFold::Ascii));
+    }
+
+    /// **A letter outside ASCII keeps its case under the fold.** `É` and `é`
+    /// are two characters to a glob on every root.
+    #[test]
+    fn a_letter_outside_ascii_never_folds() {
+        for case in [CaseFold::Exact, CaseFold::Ascii] {
+            assert!(!matches("Été/**", "été/x.md", case), "{case:?}");
+            assert!(!matches("ÉTÉ", "été", case), "{case:?}");
+            assert!(matches("Été/**", "Été/x.md", case), "{case:?}");
+        }
+        // The ASCII letters beside them still fold.
+        assert!(matches("Été/**", "ÉTé/x.md", CaseFold::Ascii));
+        assert!(!matches("Été/**", "ÉTé/x.md", CaseFold::Exact));
+    }
+
+    /// **The wildcards mean the same under either case.** `?` takes one
+    /// character that is not `/`, `*` a run within a segment, and `**` a run
+    /// of segments; the fold changes only how the literals around them
+    /// compare.
+    #[test]
+    fn the_wildcards_mean_the_same_under_either_case() {
+        let cases: &[(&str, &str, bool, bool)] = &[
+            // (pattern, subject, exact, folded)
+            ("note?.md", "NoteX.MD", false, true),
+            ("note?.md", "note/.md", false, false),
+            ("note?.md", "Note.md", false, false),
+            ("*.md", "Notes.MD", false, true),
+            ("*.md", "a/Notes.md", false, false),
+            ("A*Z", "abcz", false, true),
+            ("A*Z", "abc/z", false, false),
+            ("**/Drafts/**", "notes/drafts/x.md", false, true),
+            ("**/Drafts/**", "Drafts", true, true),
+            ("**/drafts/**", "notes/draftsx/x.md", false, false),
+            ("Archive/*", "ARCHIVE/x.md", false, true),
+            ("Archive/*", "ARCHIVE/deep/x.md", false, false),
+        ];
+        for (pattern, subject, exact, folded) in cases {
+            assert_eq!(
+                matches(pattern, subject, CaseFold::Exact),
+                *exact,
+                "{pattern} vs {subject}, exact"
+            );
+            assert_eq!(
+                matches(pattern, subject, CaseFold::Ascii),
+                *folded,
+                "{pattern} vs {subject}, folded"
+            );
+        }
+    }
+
+    /// **The fold keeps the matching bound.** A pattern whose stars would each
+    /// be an independent choice answers at once under the fold as without it.
+    #[test]
+    fn the_fold_keeps_the_matching_bound() {
+        let pattern = Pattern::parse(&format!("{}B", "A*".repeat(12))).expect("a pattern");
+        let subject = "a".repeat(64);
+        let started = std::time::Instant::now();
+        assert!(!pattern.matches(&subject, CaseFold::Ascii));
+        assert!(pattern.matches(&format!("{subject}b"), CaseFold::Ascii));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+}

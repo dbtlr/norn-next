@@ -48,7 +48,7 @@ use std::collections::BTreeSet;
 use norn_db::rusqlite::functions::FunctionFlags;
 use norn_db::rusqlite::types::{Value, ValueRef};
 use norn_db::rusqlite::{self, Connection};
-use norn_wire::Pattern;
+use norn_wire::{CaseFold, Pattern};
 
 use crate::error::{self, StoreError};
 use crate::facts::StoredPathOrder;
@@ -123,7 +123,9 @@ impl AmbiguityIgnore {
         ends.enumerate()
             .find(|(_, end)| {
                 let place = &path[..*end];
-                self.patterns.iter().any(|pattern| pattern.matches(place))
+                self.patterns
+                    .iter()
+                    .any(|pattern| pattern.matches(place, CaseFold::Exact))
             })
             .map(|(index, _)| index + 1)
     }

@@ -94,7 +94,7 @@ use std::fmt;
 
 use serde_yaml::Value;
 
-pub use norn_wire::{Pattern, PatternError};
+pub use norn_wire::{CaseFold, Pattern, PatternError};
 pub use typed::{Comparison, ComparisonSignal, FieldType, TypedValue};
 
 /// The schema version this build reads.
@@ -349,7 +349,11 @@ impl TagFacet {
     /// are one tag is a matching policy the syntax layer deliberately leaves
     /// open and a schema that wants both declares both.
     pub fn admits(&self, name: &str) -> bool {
-        self.declared.contains(name) || self.patterns.iter().any(|pattern| pattern.matches(name))
+        self.declared.contains(name)
+            || self
+                .patterns
+                .iter()
+                .any(|pattern| pattern.matches(name, CaseFold::Exact))
     }
 
     /// Whether a tag outside the vocabulary is a finding.

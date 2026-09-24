@@ -2366,7 +2366,7 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
         let mut expected: Vec<&str> = paths
             .iter()
             .map(String::as_str)
-            .filter(|path| pattern.matches(path))
+            .filter(|path| pattern.matches(path, norn_wire::CaseFold::Exact))
             .collect();
         expected.sort_unstable();
         let page = snapshot
