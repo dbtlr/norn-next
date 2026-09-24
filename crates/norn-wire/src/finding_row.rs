@@ -27,14 +27,16 @@
 //! readable way to ask for all of them: the `find` that resolves the same
 //! target. A client renders it as an offer rather than deriving a request of
 //! its own, so the enumeration a person is pointed at is the one the answer
-//! meant. A hint is minted from the finding's class key — an anchor-free
-//! address that always parses — so building one from a stored row asks nothing
-//! that can fail.
+//! meant. A hint is minted from the finding's class key, read back as the
+//! suffix address that opens it, so building one from a stored row resolves
+//! nothing. An address holding `#` would read back as a target with an
+//! anchor, which names another address, so a class spelled with one carries
+//! no hint.
 //!
 //! **The row's identity and its subject are two fields.** `id` is the
-//! finding's identity in the findings pillar, minted vault-wide, and the store
-//! exposes it with the `validate` builder (NORN-229), which is what pages
-//! these rows. `target` is the finding's subject as written, which is not the
+//! finding's identity in the findings pillar, minted vault-wide, and it is
+//! what a `validate` page continues by after the kind and the path. `target`
+//! is the finding's subject as written, which is not the
 //! hint: the hint is a request a client can send, and the subject is the text
 //! the document holds.
 
