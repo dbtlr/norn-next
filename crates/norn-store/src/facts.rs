@@ -452,12 +452,32 @@ impl std::fmt::Display for DerivationVersion {
     }
 }
 
+/// One key the link index holds a stored link under, as it reads back.
+///
+/// Derived at the write from the link and the path of the document holding
+/// it, so it is not a fact a caller hands over: see [`crate::ddl::facts`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredLinkKey {
+    /// The position of the link this is a key of among the document's links.
+    pub link: u64,
+    /// The key as the target spells it: a suffix address's segment-reversed
+    /// prefix, or a vault path.
+    pub key: String,
+    /// The key with ASCII case folded.
+    pub folded_key: String,
+    /// How many segments a suffix address spells, and `None` beside a path.
+    pub segments: Option<u64>,
+}
+
 /// A document's row and every fact row derived from it, in ordinal order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredFacts {
     pub document: StoredDocument,
     pub body: String,
     pub links: Vec<LinkFact>,
+    /// The keys the link index holds the links under, in link order and then
+    /// in key order.
+    pub link_keys: Vec<StoredLinkKey>,
     pub headings: Vec<HeadingFact>,
     pub blocks: Vec<BlockFact>,
     pub tags: Vec<TagFact>,

@@ -13,7 +13,8 @@
 //! through the heal every attach runs — the main vault, and a second one for
 //! the tag stance the main vault does not take, since a stance is a vault's own
 //! declaration — and every derived row each store holds is digested: the document rows with their sub-fingerprints and their raw and
-//! folded suffix keys, the links, headings, blocks and tags, the field rows
+//! folded suffix keys, the links and the keys the link index holds them
+//! under, the headings, blocks and tags, the field rows
 //! with their typed halves, every finding with its candidates and classes, the
 //! terms the full-text index holds, and the pinned vault schema. Row
 //! identifiers, write generations and timestamps are left out, because none of
@@ -57,8 +58,8 @@ use norn_wire::FindingKind;
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(2),
-    "04a1bd26635139b523a918810e0aa1e149062391e8e8e4d48c2fdaf9aa19a0f5",
+    DerivationVersion::new(3),
+    "c218ce1f93da9468a8c4bac2c064b8c384d89b36f87c72026c9ae0fbd5dd1f66",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -121,7 +122,7 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         // the file holds.
         (
             "notes/Deep Note.md",
-            b"---\r\ntags: solo\r\ntitle: Deep\r\n---\r\n# Deep Note\r\n\r\nBody #deep\r\n"
+            b"---\r\ntags: solo\r\ntitle: Deep\r\n---\r\n# Deep Note\r\n\r\nBody #deep and [up](../Notes.md).\r\n"
                 .to_vec(),
         ),
         (
@@ -216,7 +217,8 @@ setext title
 /// undeclared, both setext levels, every ATX level, containers, repeated and
 /// marked-up headings, a heading ending in a non-breaking space, both link
 /// families with and without protocol, title, anchor, block reference and
-/// embed, body and frontmatter tags, declared and not, block ids, a
+/// embed, a percent-encoded Markdown target, one climbing out of the vault
+/// and one naming an attachment, body and frontmatter tags, declared and not, block ids, a
 /// frontmatter wikilink carrying an alias and an anchor, and a tag whose name
 /// carries a combining mark.
 const GLOSSARY: &str = "---
@@ -268,6 +270,7 @@ See [[Notes]] and [[notes/Deep Note|shown title]] and [[Glossary#Repeated]] and 
 Embed ![[picture.png]] and ![[Notes#Setext|embedded]].
 Markdown [shown](notes/Deep%20Note.md) and [anchor](Glossary.md#use-norn-bold \"a title\") and [web](https://example.com/page) and ![image](assets/pic.png) and [block](Notes.md#^para-block) and [vault](vault://Notes).
 A wikilink with a protocol: [[https://example.com/wiki|external]].
+A Markdown link climbing out of the vault: [outside](../outside.md), and one to an attachment: [the picture](assets/pic.png).
 
 A paragraph closing on a block id. ^glossary-block
 
@@ -421,6 +424,48 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         glossary.links.iter().any(|link| link.title.is_some()),
         "no link title is exercised"
     );
+    // The link index: the keys a links-to seek reads, derived from each link
+    // and the path of the document holding it.
+    let keys_of = |document: &norn_testkit::equivalence::ProjectedDocument, target: &str| {
+        let at = document
+            .links
+            .iter()
+            .position(|link| link.target == target)
+            .unwrap_or_else(|| panic!("`{}` holds no link to `{target}`", document.path))
+            as u64;
+        document
+            .link_keys
+            .iter()
+            .filter(|key| key.link == at)
+            .map(|key| key.key.clone())
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(
+        keys_of(glossary, "notes/Deep%20Note.md"),
+        ["notes/Deep Note.md"],
+        "no percent-encoded Markdown link is keyed by the path it decodes to"
+    );
+    assert_eq!(
+        keys_of(document("notes/Deep Note.md"), "../Notes.md"),
+        ["Notes.md"],
+        "no Markdown link climbing a directory is keyed by the path it joins to"
+    );
+    assert_eq!(
+        keys_of(glossary, "notes/Deep Note"),
+        ["Deep Note/notes/"],
+        "no wikilink is keyed by its suffix address"
+    );
+    for unkeyed in [
+        "../outside.md",
+        "picture.png",
+        "assets/pic.png",
+        "example.com/page",
+    ] {
+        assert!(
+            keys_of(glossary, unkeyed).is_empty(),
+            "`{unkeyed}` names no document and is keyed"
+        );
+    }
     // A wikilink embed is the one embed the text layer records; the Markdown
     // image beside it is not a link, and the digest pins that it is not.
     assert!(

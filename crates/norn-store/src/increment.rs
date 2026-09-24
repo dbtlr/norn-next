@@ -17,6 +17,7 @@ use crate::facts::{DocumentFacts, FindingFacts, Invalidation, Provenance};
 use crate::fields::FieldRow;
 use crate::hash;
 use crate::json;
+use crate::link::link_keys;
 use crate::path::{ClassKey, DocumentPath, SuffixKey};
 use crate::request::{self, DiscardScope};
 use crate::store::Store;
@@ -338,6 +339,7 @@ struct Statements<'t> {
     /// One per fact table, in the order [`FACT_DISCARDS`] names them.
     discard_facts: Vec<CachedStatement<'t>>,
     insert_link: CachedStatement<'t>,
+    insert_link_key: CachedStatement<'t>,
     insert_heading: CachedStatement<'t>,
     insert_block: CachedStatement<'t>,
     insert_tag: CachedStatement<'t>,
@@ -404,8 +406,14 @@ impl<'t> Statements<'t> {
                 "INSERT INTO links (
                      document, ordinal, family, embed, protocol, target, title, anchor,
                      block_ref, span_line, span_column, span_offset
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 RETURNING id",
                 "preparing a link write",
+            )?,
+            insert_link_key: prepared(
+                "INSERT INTO link_keys (link, document, key, folded_key, segments)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "preparing a link key write",
             )?,
             insert_heading: prepared(
                 "INSERT INTO headings (
@@ -515,23 +523,38 @@ fn upsert(
     }
 
     for (ordinal, link) in facts.links.iter().enumerate() {
-        statements
+        let row: i64 = statements
             .insert_link
-            .execute(params![
-                document,
-                ordinal as i64,
-                link.family.as_str(),
-                link.embed,
-                link.protocol,
-                link.target,
-                link.title,
-                link.anchor,
-                link.block_ref,
-                link.span.line,
-                link.span.column,
-                link.span.byte_offset,
-            ])
+            .query_row(
+                params![
+                    document,
+                    ordinal as i64,
+                    link.family.as_str(),
+                    link.embed,
+                    link.protocol,
+                    link.target,
+                    link.title,
+                    link.anchor,
+                    link.block_ref,
+                    link.span.line,
+                    link.span.column,
+                    link.span.byte_offset,
+                ],
+                |row| row.get(0),
+            )
             .map_err(|error| error::sql("writing a link row", error))?;
+        for key in link_keys(link, &facts.path) {
+            statements
+                .insert_link_key
+                .execute(params![
+                    row,
+                    document,
+                    key.key,
+                    key.folded_key,
+                    key.segments
+                ])
+                .map_err(|error| error::sql("writing a link key", error))?;
+        }
     }
 
     for (ordinal, heading) in facts.headings.iter().enumerate() {

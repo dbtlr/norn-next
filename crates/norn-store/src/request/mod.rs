@@ -77,8 +77,8 @@ use crate::error::{self, StoreError};
 use crate::facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, FeedDocument, FeedTombstone, FindingFacts,
     HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport, Provenance,
-    SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredSuffixKeys,
-    StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredLinkKey, StoredPathOrder,
+    StoredSuffixKeys, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 use crate::fields::{FieldContainer, FieldRow, FieldRows};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
@@ -699,6 +699,21 @@ impl<'a> Request<'a> {
                 params![id],
                 stored_link,
                 "reading a document's links",
+            )?,
+            link_keys: Self::read_all_on(
+                &transaction,
+                &self.read_work,
+                DOCUMENT_LINK_KEYS_SQL,
+                params![id],
+                |row| {
+                    Ok(Ok(StoredLinkKey {
+                        link: row.get(0)?,
+                        key: row.get(1)?,
+                        folded_key: row.get(2)?,
+                        segments: row.get(3)?,
+                    }))
+                },
+                "reading a document's link keys",
             )?,
             headings: Self::read_all_on(
                 &transaction,
@@ -1686,6 +1701,12 @@ fn stored_facts_document_sql() -> String {
 const DOCUMENT_LINKS_SQL: &str = "SELECT family, embed, protocol, target, title, anchor, block_ref,
                         span_line, span_column, span_offset
                  FROM links WHERE document = ?1 ORDER BY ordinal";
+
+/// The statement [`Request::stored_facts`] reads a document's link keys with:
+/// each link row's keys by the link, in link order and then in key order.
+const DOCUMENT_LINK_KEYS_SQL: &str = "SELECT l.ordinal, k.key, k.folded_key, k.segments
+                 FROM links AS l JOIN link_keys AS k ON k.link = l.id
+                 WHERE l.document = ?1 ORDER BY l.ordinal, k.key";
 
 /// The statement [`Request::stored_facts`] reads a document's headings with.
 pub(crate) const DOCUMENT_HEADINGS_SQL: &str =

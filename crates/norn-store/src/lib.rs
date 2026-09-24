@@ -118,6 +118,7 @@ mod get;
 mod hash;
 mod increment;
 mod json;
+mod link;
 mod path;
 mod read;
 mod request;
@@ -134,7 +135,8 @@ pub use facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, DerivationVersion, DocumentFacts, FeedDocument,
     FeedTombstone, FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily,
     PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding,
-    StoredPathOrder, StoredSuffixKeys, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTombstone, TagFact, TagSource,
+    VaultSchemaPin,
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
