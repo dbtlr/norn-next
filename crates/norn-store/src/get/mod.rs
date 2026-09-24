@@ -67,14 +67,18 @@
 //! ordinal the page stopped at as its cursor
 //! ([`norn_wire::CursorKey::Ordinal`]). Each collection is its own row type,
 //! so a cursor minted paging one refuses on another
-//! ([`PageRefusal::CursorOfAnotherCollection`]); within one, the order is
-//! total, so a cursor continues the same collection of any document from its
-//! position, and one past the last row answers an empty page. The findings
-//! standing over the document are paged in `(kind, id)` order at its path, the
-//! order a find's findings column and a validate read them in at one path,
-//! with a finding's cursor ([`norn_wire::CursorKey::Finding`]). Either reads
-//! one row past its bound to learn a next page exists, through the keyset
-//! page every read builder reads ([`Snapshot::read_page`]).
+//! ([`PageRefusal::CursorOfAnotherCollection`]). An ordinal cursor names its
+//! collection and a position in it, and no document, so it continues the same
+//! collection of any document from that position, and one past the last row
+//! answers an empty page. The findings standing over the document are paged
+//! in `(kind, id)` order at its path, the order a find's findings column and a
+//! validate read them in at one path, with a finding's cursor
+//! ([`norn_wire::CursorKey::Finding`]). That cursor names the path it was
+//! minted at, so at another document's path it names no position
+//! ([`PageRefusal::NotACollectionCursor`]), as an ordinal cursor naming the
+//! findings does. Either reads one row past its bound to learn a next page
+//! exists, through the keyset page every read builder reads
+//! ([`Snapshot::read_page`]).
 //!
 //! The links collection is refused ([`PageRefusal::NotProjected`]) until the
 //! Layer 3 link index unit resolves what a link names: a stored link's target
@@ -799,6 +803,12 @@ impl Snapshot {
             Some(cursor) => {
                 let (kind, path, id) = match cursor.key() {
                     CursorKey::Finding { kind, path, id, .. } => (kind, path, id),
+                    // The findings are paged by a finding's cursor, so an
+                    // ordinal naming them was minted by no page.
+                    CursorKey::Ordinal {
+                        of: CollectionSelector::Findings,
+                        ..
+                    } => return Err(PageRefusal::NotACollectionCursor),
                     CursorKey::Ordinal { of, .. } => {
                         return Err(PageRefusal::CursorOfAnotherCollection {
                             minted: *of,

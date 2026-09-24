@@ -304,8 +304,14 @@ pub enum PageRefusal {
     /// The target names no document.
     UnknownTarget { target: ResolutionTarget },
     /// The cursor names no position in the collection a get pages: it is no
-    /// collection's cursor, or a finding's at another path than the
+    /// collection's cursor, an ordinal cursor naming the findings, which are
+    /// paged by a finding's cursor, or a finding's at another path than the
     /// document's.
+    ///
+    /// What sets the two cursors apart is what each carries. A finding's
+    /// cursor names the path it was minted at, so at another document's path
+    /// it names no position; an ordinal cursor names no document, so it
+    /// continues its collection at any document.
     NotACollectionCursor,
     /// The cursor was minted paging the collection `minted`, and the request
     /// pages `paged`: each collection is its own row type, so a position in

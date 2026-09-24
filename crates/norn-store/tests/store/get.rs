@@ -928,7 +928,8 @@ fn the_links_collection_is_refused_until_the_link_index_lands() {
 /// ordinal continues the collection it names, and a finding's cursor
 /// continues the findings at the document's own path. A cursor minted paging
 /// one collection refuses on another, naming both; anything else is refused
-/// as no position in the collection paged.
+/// as no position in the collection paged, an ordinal naming the findings
+/// among it, since the findings are paged by a finding's cursor.
 #[test]
 fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
     let vault = paged_vault("get-cursors", 0);
@@ -987,6 +988,13 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
             Cursor::new(
                 snapshot.clone(),
                 CursorKey::finding(FindingKind::UndeclaredTag, "other.md", 1),
+            ),
+        ),
+        (
+            CollectionSelector::Findings,
+            Cursor::new(
+                snapshot.clone(),
+                CursorKey::ordinal(CollectionSelector::Findings, 1),
             ),
         ),
         (
