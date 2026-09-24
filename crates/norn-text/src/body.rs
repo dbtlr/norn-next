@@ -59,7 +59,7 @@ use crate::heading::{Heading, SlugCounter};
 use crate::link::{
     BlockId, Link, markdown_link, parse_block_ids_in, parse_tokens, splice_tokens, wikilink_ranges,
 };
-use crate::section::{SectionAddress, SectionError, SectionSpan, resolve_section_in};
+use crate::section::{SectionAddress, SectionError, SectionSpan, resolve_section};
 use crate::span::{LineCursor, lf_normalized, split_lines_inclusive};
 use crate::tag::{Tag as TagFact, scan_tags};
 
@@ -322,12 +322,13 @@ impl<'a> BodyScan<'a> {
         parse_block_ids_in(self.body, &self.code_ranges)
     }
 
-    /// Resolve a heading-addressed section to the byte ranges it owns.
+    /// Resolve a heading-addressed section to the byte ranges it owns,
+    /// through [`crate::resolve_section`] over this scan's headings.
     pub fn resolve_section(
         &self,
         address: SectionAddress<'_>,
     ) -> Result<SectionSpan, SectionError> {
-        resolve_section_in(&self.headings, self.body, address)
+        resolve_section(&self.headings, self.body, address)
     }
 
     /// The inline Markdown links as facts, positions counted once across the

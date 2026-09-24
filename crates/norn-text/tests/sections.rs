@@ -2,7 +2,8 @@
 //! stops, how it is addressed, and what a replace leaves alone.
 
 use norn_text::{
-    BodyScan, Document, EditError, SectionAddress, SectionError, SectionSpan, Value, slugify,
+    BodyScan, Document, EditError, Heading, SectionAddress, SectionError, SectionSpan, Value,
+    resolve_section as resolve_section_over, slugify,
 };
 
 /// A section resolved against a bare body, through the one public entry point
@@ -49,8 +50,8 @@ fn a_hash_inside_a_fence_is_not_a_heading() {
 
 /// The slug is GFM's: letters and digits survive whatever alphabet they are
 /// written in, punctuation is dropped rather than collapsed, and a space is a
-/// hyphen. A section is addressed by heading text rather than by slug, so this
-/// is a property of the slug alone.
+/// hyphen. A section anchor matches a slug only where no heading's text
+/// matches it, so this is a property of the slug alone.
 #[test]
 fn the_slug_is_the_gfm_anchor_form() {
     assert_eq!(slugify("Hello World"), "hello-world");
@@ -190,6 +191,111 @@ fn a_heading_inside_a_fence_addresses_nothing_and_belongs_to_its_owner() {
         })
     );
     assert_eq!(resolve_section(body, "Real").expect("Real").end, body.len());
+}
+
+// ── How an anchor matches a heading ──────────────────────────────────────
+
+/// A heading anchor matches the heading's text with surrounding whitespace
+/// trimmed, each whitespace run collapsed to one space, and ASCII case folded,
+/// on both sides, so an anchor typed from memory reaches the heading it names.
+#[test]
+fn an_anchor_matches_heading_text_with_case_and_whitespace_folded() {
+    let body = "## Design  Notes\nd\n## Other\no\n";
+    let named = resolve_section(body, "Design  Notes").expect("the heading as written");
+    assert_eq!(&body[named.content_start..named.content_end], "d\n");
+    for anchor in ["design notes", "  DESIGN   notes ", "Design\tNotes"] {
+        assert_eq!(resolve_section(body, anchor), Ok(named), "for {anchor:?}");
+    }
+}
+
+/// The case fold is ASCII's alone: a letter outside ASCII keeps its case.
+/// The heading's slug is lowercase whatever alphabet it is written in, so the
+/// all-lowercase spelling still reaches it, as a fragment.
+#[test]
+fn the_case_fold_is_ascii_alone() {
+    let body = "## Émile\ne\n";
+    for anchor in ["Émile", "ÉMILE", "  émile  ".trim()] {
+        assert!(resolve_section(body, anchor).is_ok(), "for {anchor:?}");
+    }
+    assert_eq!(
+        resolve_section(body, "éMILE"),
+        Err(SectionError::HeadingNotFound {
+            heading: "éMILE".into()
+        })
+    );
+}
+
+/// A Markdown `#fragment` names a heading's slug, dedupe suffix included, and
+/// it is matched exactly, only where no heading's text matches the anchor.
+#[test]
+fn a_slug_matches_only_where_no_heading_text_does() {
+    let body = "## What? Really!\nw\n## Dup\nfirst\n## Dup\nsecond\n";
+    let by_text = resolve_section(body, "What? Really!").expect("the heading by its text");
+    assert_eq!(resolve_section(body, "what-really"), Ok(by_text));
+    let second = resolve_section(body, "dup-1").expect("the second heading by its slug");
+    assert_eq!(&body[second.content_start..second.content_end], "second\n");
+    assert_eq!(
+        resolve_section(body, "What-Really"),
+        Err(SectionError::HeadingNotFound {
+            heading: "What-Really".into()
+        }),
+        "a slug is matched exactly"
+    );
+
+    // One heading's text is another's slug: the text answers.
+    let body = "## Foo Bar\nslugged\n## foo-bar\ntexted\n";
+    let span = resolve_section(body, "foo-bar").expect("the heading whose text it is");
+    assert_eq!(&body[span.content_start..span.content_end], "texted\n");
+}
+
+/// **A read takes the first matching heading in document order; a write
+/// refuses several.** The duplicate policy is the caller's, and it is the only
+/// thing a read and a write resolve differently.
+#[test]
+fn a_read_takes_the_first_matching_heading_and_a_write_refuses_several() {
+    let body = "## Dup\nfirst\n## dup\nsecond\n";
+    assert_eq!(
+        resolve_section(body, "DUP"),
+        Err(SectionError::HeadingAmbiguous {
+            heading: "DUP".into(),
+            count: 2
+        })
+    );
+    let first = resolve_section(body, SectionAddress::first("DUP")).expect("the first");
+    assert_eq!(&body[first.content_start..first.content_end], "first\n");
+    assert_eq!(
+        resolve_section(DOC, SectionAddress::first("Alpha")),
+        resolve_section(DOC, "Alpha")
+    );
+    assert_eq!(
+        resolve_section(DOC, SectionAddress::first("Gamma")),
+        Err(SectionError::HeadingNotFound {
+            heading: "Gamma".into()
+        })
+    );
+    assert!(
+        Document::parse(body).replace_section("dup", "x").is_err(),
+        "a write refuses headings its anchor matches twice"
+    );
+}
+
+/// **A section resolves over heading facts exactly as it resolves over a
+/// scan**, so a caller holding a document's headings as rows resolves through
+/// the one resolver rather than growing a second.
+#[test]
+fn a_section_resolves_over_heading_facts_as_over_a_scan() {
+    let body = "intro\n## Alpha\na\n### Deep\nd\n## Beta\nb\n## beta\nc\n";
+    let scan = BodyScan::new(body);
+    let facts: Vec<Heading> = scan.headings().to_vec();
+    for anchor in ["Alpha", "deep", "BETA", "## Alpha", "beta-1", "Gamma"] {
+        for address in [SectionAddress::from(anchor), SectionAddress::first(anchor)] {
+            assert_eq!(
+                resolve_section_over(&facts, body, address),
+                scan.resolve_section(address),
+                "for {address:?}"
+            );
+        }
+    }
 }
 
 // ── Setext, and a heading at end of file (NRN-437) ───────────────────────

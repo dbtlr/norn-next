@@ -1,9 +1,30 @@
 //! Heading-delimited sections — the byte ranges a heading owns.
 //!
-//! A section is addressed by heading text and runs from its heading line to
+//! A section is addressed by a heading anchor and runs from its heading line to
 //! the next same-or-higher-level heading, or to the end of the body. This is
-//! the single section resolver: a read and a write consume the same span and
-//! the same failure modes, so they cannot disagree about where a section is.
+//! the single section resolver: a read and a write consume the same span, the
+//! same matching rule and the same failure modes, so they cannot disagree
+//! about where a section is. What a caller chooses is only what several
+//! matching headings mean ([`Duplicates`]): a read takes the first, and a write
+//! refuses unless it names an occurrence. [`resolve_section`] resolves over
+//! heading facts a caller already holds — a store's rows as well as a scan's
+//! headings — so a caller that never parses the body resolves through it too.
+//!
+//! # How an anchor matches a heading
+//!
+//! Three readings, each tried only where the one before matched no heading:
+//!
+//! 1. **The heading's text**, both sides trimmed, each whitespace run
+//!    collapsed to one space, and ASCII case folded. This is what a wikilink
+//!    `#anchor` addresses, and what a person types.
+//! 2. **The text of an ATX-shaped anchor** (`## State`), read by the same
+//!    CommonMark pass that produced the document's headings, then matched as
+//!    the first reading matches.
+//! 3. **The heading's slug, exactly**, dedupe suffix included. This is what an
+//!    inline Markdown `#fragment` addresses.
+//!
+//! The text readings come first, so an anchor that names a heading by its
+//! text is never reinterpreted as another heading's slug.
 //!
 //! # Separator-aware ranges
 //!
@@ -23,35 +44,52 @@ use crate::body::BodyScan;
 use crate::heading::Heading;
 use crate::span::split_lines_inclusive;
 
-/// Which section a caller means.
-///
-/// The default requires the heading text to be unique and refuses otherwise:
-/// an ambiguous address is a question, not an edit. `occurrence` is the escape
-/// hatch — a document that has already grown two headings with the same text
-/// can still be repaired by the same tool that reads it.
+/// What several headings an anchor matches mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Duplicates {
+    /// Refuse: an ambiguous address is a question, not an edit. What a write
+    /// takes by default.
+    Refuse,
+    /// The first matching heading in document order. What a read takes.
+    First,
+    /// The 1-based nth matching heading in document order — the escape hatch
+    /// that lets a document which has grown two headings with the same text
+    /// be repaired by the same tool that reads it.
+    Occurrence(usize),
+}
+
+/// Which section a caller means: the anchor, and what several headings it
+/// matches mean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SectionAddress<'a> {
     pub heading: &'a str,
-    /// `None` requires a unique heading. `Some(n)` selects the 1-based nth
-    /// heading whose text matches.
-    pub occurrence: Option<usize>,
+    pub duplicates: Duplicates,
 }
 
 impl<'a> SectionAddress<'a> {
-    /// The 1-based nth heading whose text matches.
+    /// The 1-based nth heading the anchor matches.
     pub fn occurrence(heading: &'a str, occurrence: usize) -> Self {
         SectionAddress {
             heading,
-            occurrence: Some(occurrence),
+            duplicates: Duplicates::Occurrence(occurrence),
+        }
+    }
+
+    /// The first heading the anchor matches, in document order.
+    pub fn first(heading: &'a str) -> Self {
+        SectionAddress {
+            heading,
+            duplicates: Duplicates::First,
         }
     }
 }
 
 impl<'a> From<&'a str> for SectionAddress<'a> {
+    /// The anchor, refusing where it matches several headings.
     fn from(heading: &'a str) -> Self {
         SectionAddress {
             heading,
-            occurrence: None,
+            duplicates: Duplicates::Refuse,
         }
     }
 }
@@ -115,31 +153,27 @@ impl fmt::Display for SectionError {
 
 impl std::error::Error for SectionError {}
 
-/// The resolution core, over headings already parsed.
-pub(crate) fn resolve_section_in(
+/// The section `address` names among `headings`, in `body`: the one section
+/// resolver.
+///
+/// `headings` are the body's headings in document order, as
+/// [`BodyScan::headings`] reads them or as a caller holding them as facts
+/// recorded them: each one's level, text, slug, where it starts and where its
+/// construct ends, as offsets into `body`.
+pub fn resolve_section(
     headings: &[Heading],
     body: &str,
     address: SectionAddress<'_>,
 ) -> Result<SectionSpan, SectionError> {
-    // Exact text first, so a heading whose text legitimately begins with `#`
-    // is addressed verbatim and no working anchor is ever reinterpreted.
-    let mut matches = matching_indices(headings, address.heading);
-    // Only on a total miss, and only for an ATX-shaped anchor (`## State`,
-    // `### X ##`), retry on the heading text with the marker stripped. Level
-    // is syntax noise: a `## X` anchor resolves a `### X` heading.
-    if matches.is_empty()
-        && let Some(text) = atx_anchor_text(address.heading)
-    {
-        matches = matching_indices(headings, &text);
-    }
-
-    let index = match (matches.len(), address.occurrence) {
+    let matches = matching_indices(headings, address.heading);
+    let index = match (matches.len(), address.duplicates) {
         (0, _) => {
             return Err(SectionError::HeadingNotFound {
                 heading: address.heading.to_string(),
             });
         }
-        (_, Some(occurrence)) => {
+        (_, Duplicates::First) => matches[0],
+        (_, Duplicates::Occurrence(occurrence)) => {
             let count = matches.len();
             if occurrence == 0 || occurrence > count {
                 return Err(SectionError::OccurrenceOutOfRange {
@@ -150,8 +184,8 @@ pub(crate) fn resolve_section_in(
             }
             matches[occurrence - 1]
         }
-        (1, None) => matches[0],
-        (count, None) => {
+        (1, Duplicates::Refuse) => matches[0],
+        (count, Duplicates::Refuse) => {
             return Err(SectionError::HeadingAmbiguous {
                 heading: address.heading.to_string(),
                 count,
@@ -210,13 +244,42 @@ fn content_bounds(body: &str, body_start: usize, end: usize) -> (usize, usize) {
     (start, stop.max(start))
 }
 
-fn matching_indices(headings: &[Heading], text: &str) -> Vec<usize> {
+/// Every heading `anchor` matches, in document order, under the first of the
+/// three readings the module states that matches any.
+fn matching_indices(headings: &[Heading], anchor: &str) -> Vec<usize> {
+    let by_text = |text: &str| {
+        let wanted = normalized(text);
+        indices(headings, |heading| normalized(&heading.text) == wanted)
+    };
+    let mut matches = by_text(anchor);
+    if matches.is_empty()
+        && let Some(text) = atx_anchor_text(anchor)
+    {
+        matches = by_text(&text);
+    }
+    if matches.is_empty() {
+        matches = indices(headings, |heading| heading.slug == anchor);
+    }
+    matches
+}
+
+/// The headings `matches` holds, by index, in document order.
+fn indices(headings: &[Heading], matches: impl Fn(&Heading) -> bool) -> Vec<usize> {
     headings
         .iter()
         .enumerate()
-        .filter(|(_, heading)| heading.text == text)
+        .filter(|(_, heading)| matches(heading))
         .map(|(index, _)| index)
         .collect()
+}
+
+/// Heading text as an anchor compares it: trimmed, each whitespace run one
+/// space, and ASCII case folded. A letter outside ASCII keeps its case.
+fn normalized(text: &str) -> String {
+    text.split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<String>>()
+        .join(" ")
 }
 
 /// The heading text of an ATX-shaped anchor, or `None` when the anchor is not
