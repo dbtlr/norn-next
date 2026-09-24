@@ -54,13 +54,12 @@ use norn_wire::{FindingKind, FindingScope, Severity, TagStance};
 /// it creates and judged at every open: a store another version wrote is
 /// rebuilt from zero.
 ///
-/// **It names the whole derivation**, not this module alone: the text layer's
-/// parse, the facts and field rows a plan carries, the findings a heal
-/// records, and what the store computes from them as it writes — suffix keys,
-/// the frontmatter projection, the sub-fingerprints and the full-text index.
-/// It moves whenever any of that writes different rows for the same vault
-/// bytes, and only then; a refactor that writes the same rows leaves it where
-/// it is.
+/// **It names the whole derivation**, not this module alone: every crate's
+/// contribution to the rows a store holds, as [ADR 0026] states the scope. It
+/// moves whenever any of that writes different rows for the same vault bytes,
+/// and only then; a refactor that writes the same rows leaves it where it is.
+///
+/// [ADR 0026]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0026-a-derived-store-records-the-derivation-that-wrote-it.md
 ///
 /// **The digest in `tests/derivation.rs` forces it.** That suite derives a
 /// pinned corpus from zero and digests every derived row, pinned beside the
