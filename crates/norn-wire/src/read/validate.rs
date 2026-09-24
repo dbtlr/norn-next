@@ -25,13 +25,13 @@ use crate::finding::{FindingKind, Severity};
 use crate::finding_row::FindingRow;
 use crate::predicate::Predicate;
 
-/// How many findings of one kind stand.
+/// How many findings of one kind stand at one severity.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct KindTally {
     /// The kind the findings are filed under.
     pub kind: FindingKind,
-    /// How urgently that kind is reported.
+    /// The severity those findings are reported at.
     pub severity: Severity,
     /// How many of them stand.
     pub count: u64,
@@ -51,7 +51,7 @@ impl KindTally {
 /// What `validate` answers with.
 ///
 /// On the wire a report is an object tagged `shape`: the findings themselves,
-/// or the tally of them one kind at a time.
+/// or the tally of them one kind and severity at a time.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "shape", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -62,10 +62,10 @@ pub enum ValidateReport {
         /// The page of finding rows.
         page: Page<FindingRow>,
     },
-    /// How many findings stand, one tally per kind.
+    /// How many findings stand, one tally per kind and severity.
     #[non_exhaustive]
     Summary {
-        /// The tallies, one per kind that has findings standing.
+        /// The tallies, one per kind and severity some finding stands under.
         by_kind: Vec<KindTally>,
     },
 }
@@ -87,9 +87,9 @@ impl ValidateReport {
 /// What a `validate` request carries.
 ///
 /// A validate answers the findings standing over a vault, as rows or as one
-/// tally per kind. A `resolves` predicate is answered with the findings the
-/// rest of the request earned and reported back as the unsatisfied part
-/// `resolves_not_applicable`.
+/// tally per kind and severity. A `resolves` predicate is answered with the
+/// findings the rest of the request earned and reported back as the
+/// unsatisfied part `resolves_not_applicable`.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct ValidateParams {
@@ -105,10 +105,12 @@ pub struct ValidateParams {
     /// Whether to answer the tally instead of the findings. `false` answers
     /// the findings.
     pub summary: bool,
-    /// How many finding rows at most. `null` leaves the ceiling to the host,
-    /// and a summary is not paged.
+    /// How many finding rows a page holds at most. `null` leaves the ceiling
+    /// to the host. A summary is not paged, and ignores it.
     pub limit: Option<u32>,
-    /// Where to continue from. `null` starts at the first finding.
+    /// Where a page continues from. `null` starts at the first finding. A
+    /// summary is not paged, and a request for one carrying a cursor is
+    /// refused.
     pub after: Option<Cursor>,
 }
 

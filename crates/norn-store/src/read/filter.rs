@@ -43,8 +43,11 @@ pub enum ReadFilter {
     /// The document carries the tag, on `document_tags_name`.
     Tag,
     /// A finding of the kind stands over the document under the active
-    /// fingerprint, on `findings_vault_schema_fingerprint`, each finding's
-    /// path read back to its document on `documents_path`.
+    /// fingerprint: one covering seek of the findings at `(fingerprint,
+    /// kind)`, which `findings_fingerprint_kind_severity` and
+    /// `findings_vault_schema_fingerprint` both lead with and both carry the
+    /// path in, each finding's path read back to its document on
+    /// `documents_path`.
     Finding,
 }
 
@@ -117,6 +120,16 @@ pub(crate) struct Filter {
 }
 
 impl Filter {
+    /// A path part's range and glob, as the values it binds — the range's
+    /// lower bound, its upper bound, and the pattern — and `None` for any
+    /// other part.
+    pub(crate) fn path_glob(&self) -> Option<(&Value, &Value, &Value)> {
+        match (self.shape, self.values.as_slice()) {
+            (ReadFilter::PathGlob, [lower, upper, pattern]) => Some((lower, upper, pattern)),
+            _ => None,
+        }
+    }
+
     /// This filter's fragment: a membership test of `id`, the column holding
     /// the page's document id, its placeholders numbered by `binder`.
     pub(crate) fn spell(&self, id: &str, binder: &mut Binder) -> String {
@@ -187,8 +200,8 @@ impl Filter {
                 format!(
                     "{id} IN (SELECT dg.id FROM documents AS dg
                      WHERE dg.path >= {lower} AND dg.path < {upper}
-                       AND {function}({pattern}, dg.path))",
-                    function = super::glob::GLOB_FUNCTION
+                       AND {})",
+                    glob_test(&pattern, "dg.path")
                 )
             }
             ReadFilter::Resolves => {
@@ -217,6 +230,12 @@ impl Filter {
             }
         }
     }
+}
+
+/// The test that `path`, a column holding a path, matches the glob bound at
+/// `pattern`: the one spelling of a glob match every statement runs.
+pub(crate) fn glob_test(pattern: &str, path: &str) -> String {
+    format!("{}({pattern}, {path})", super::glob::GLOB_FUNCTION)
 }
 
 /// Numbers placeholders as they are written, holding the values in that order.

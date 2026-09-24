@@ -45,6 +45,11 @@
 //!   tallies, the cursor the next page continues, and the parts it could not
 //!   apply. [`Snapshot::count_plans`] explains what it ran, as
 //!   [`Snapshot::find_plans`] does for a find.
+//! - [`Snapshot::validate`] — the validate builder: the findings standing
+//!   under the active fingerprint, narrowed by kind, severity and a
+//!   conjunction compiled as a find compiles it, answering a page of finding
+//!   rows in `(kind, path, id)` order or one tally per kind and severity.
+//!   [`Snapshot::validate_plans`] explains what it ran.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -74,9 +79,8 @@
 //! - **Anything that reads a document.** One parser, and it is not this crate.
 //! - **The read shape no builder emits.** Nothing indexes a link's target,
 //!   so a find refuses a `links_to` part by name, and a find's row projects no
-//!   link or finding column, so it refuses those columns by name. Both
-//!   refusals are dormant carriers whose consumer is NORN-229, the task that
-//!   builds the link index.
+//!   link column, so it refuses that column by name. Both refusals are dormant
+//!   carriers whose consumer is NORN-229, the task that builds the link index.
 
 pub mod ddl;
 
@@ -96,6 +100,7 @@ mod path;
 mod read;
 mod request;
 mod store;
+mod validate;
 
 pub use count::{COUNT_STATEMENTS, CountPlan, CountStatement, CountWork, Counted, GroupMember};
 pub use counters::{DerivationCounters, SnapshotCounters};
@@ -135,4 +140,7 @@ pub use request::{
 pub use store::{
     ConnectionTurn, ReaderMint, RecordedStoreSchema, Snapshot, SnapshotAttempt, SnapshotReader,
     Store, StoreMode, StoreReading,
+};
+pub use validate::{
+    VALIDATE_STATEMENTS, ValidatePlan, ValidateStatement, ValidateWork, Validated, Validation,
 };

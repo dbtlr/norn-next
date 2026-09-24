@@ -201,7 +201,8 @@ pub enum CursorKey {
         /// as that type.
         group: Vec<Option<String>>,
     },
-    /// A finding row: the kind, then the path, then the finding's identifier.
+    /// A finding row: the kind, in the byte order of its code, then the path,
+    /// then the finding's identifier.
     #[non_exhaustive]
     Finding {
         /// The kind the finding is filed under.

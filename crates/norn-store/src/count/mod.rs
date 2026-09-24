@@ -381,7 +381,9 @@ impl Snapshot {
         let (lead_null, selected) = match section.statement {
             ReadStatement::Count(CountStatement::NullLead(_)) => (true, width - 1),
             ReadStatement::Count(CountStatement::ValuedLead(_)) => (false, width),
-            ReadStatement::Count(CountStatement::Total) | ReadStatement::Find(_) => (false, 0),
+            ReadStatement::Count(CountStatement::Total)
+            | ReadStatement::Find(_)
+            | ReadStatement::Validate(_) => (false, 0),
         };
         self.run_statement(record, section, |row| {
             let mut group: Vec<Option<String>> = Vec::with_capacity(width);

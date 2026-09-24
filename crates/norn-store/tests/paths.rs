@@ -467,6 +467,40 @@ fn a_class_key_that_no_probe_opens_is_refused() {
     }
 }
 
+/// **A class key reads back as the suffix address that opens it**, and that
+/// address's probe opens every class the target's reductions name: a dotted
+/// leaf's key reads back as the leaf as written, whose probe opens its stem's
+/// class too.
+#[test]
+fn a_class_key_reads_back_as_the_address_whose_probe_opens_it() {
+    for (key, address) in [
+        ("glossary/", "glossary"),
+        ("glossary/norn/", "norn/glossary"),
+        ("v1.2/a/", "a/v1.2"),
+    ] {
+        let class = ClassKey::new(key).expect("a class key");
+        assert_eq!(class.address(), address);
+        let opened = suffix_probe(&class.address())
+            .expect("a suffix target")
+            .class_keys();
+        assert!(opened.contains(&class), "`{address}` does not open `{key}`");
+    }
+    let dotted = suffix_probe("a/v1.2")
+        .expect("a suffix target")
+        .class_keys();
+    let longest = dotted
+        .iter()
+        .max_by_key(|class| class.as_str().len())
+        .expect("a class");
+    assert_eq!(
+        suffix_probe(&longest.address())
+            .expect("a suffix target")
+            .class_keys(),
+        dotted,
+        "the leaf as written reads back to the probe that opened both reductions"
+    );
+}
+
 /// **`class_probe` validates like every other public constructor here.** A
 /// stem handed over unvalidated would format into a lower bound
 /// [`ClassKey::of_prefix`] trusts, tripping its debug assertion downstream

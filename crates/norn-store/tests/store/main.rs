@@ -25,3 +25,4 @@ mod increments;
 mod lifecycle;
 mod pillars;
 mod readers;
+mod validate;

@@ -9,7 +9,9 @@
 
 use norn_db::rusqlite::types::Value;
 
-use crate::read::{Binder, FieldOrder, Filter};
+use crate::error::StoreError;
+use crate::json::{FrontmatterValue, canonical_json};
+use crate::read::{Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter};
 
 /// Every statement shape the find builder runs, named.
 ///
@@ -65,10 +67,26 @@ pub enum FindStatement {
     /// How many rows one nested collection holds for each document whose head
     /// the ceiling cut: an index-only count over the same index.
     NestedTotal(Nested),
+    /// The head of the findings standing at each path a page found, under the
+    /// active fingerprint: the findings below the per-row ceiling, in `(kind,
+    /// id)` order, one seek of `findings_path` per path, each finding then
+    /// reached by its row id.
+    FindingHead,
+    /// How many findings stand at each path whose head the ceiling cut: an
+    /// index-only count over `findings_path`.
+    FindingTotal,
+    /// The candidate heads of a set of findings: one seek of
+    /// `finding_candidates`' primary key per finding. Run by every read that
+    /// answers finding rows.
+    FindingCandidates,
+    /// The ambiguity classes of a set of findings: one seek of
+    /// `finding_classes`' primary key per finding. Run by every read that
+    /// answers finding rows.
+    FindingClasses,
 }
 
 /// How many statement shapes [`FindStatement::all`] holds.
-pub const FIND_STATEMENTS: usize = 11;
+pub const FIND_STATEMENTS: usize = 15;
 
 impl FindStatement {
     /// Every statement shape, in slot order.
@@ -89,6 +107,10 @@ impl FindStatement {
             Self::HydrateDocuments,
             Self::NestedHead(Nested::Tags),
             Self::NestedTotal(Nested::Tags),
+            Self::FindingHead,
+            Self::FindingTotal,
+            Self::FindingCandidates,
+            Self::FindingClasses,
         ]
     }
 
@@ -107,6 +129,10 @@ impl FindStatement {
             Self::HydrateDocuments => 8,
             Self::NestedHead(_) => 9,
             Self::NestedTotal(_) => 10,
+            Self::FindingHead => 11,
+            Self::FindingTotal => 12,
+            Self::FindingCandidates => 13,
+            Self::FindingClasses => 14,
         };
         assert!(
             slot < FIND_STATEMENTS,
@@ -239,7 +265,11 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
         | FindStatement::MatchProbe
         | FindStatement::HydrateDocuments
         | FindStatement::NestedHead(_)
-        | FindStatement::NestedTotal(_) => {
+        | FindStatement::NestedTotal(_)
+        | FindStatement::FindingHead
+        | FindStatement::FindingTotal
+        | FindStatement::FindingCandidates
+        | FindStatement::FindingClasses => {
             unreachable!("{:?} is not a page section", section.statement)
         }
         FindStatement::PathPage(direction) => {
@@ -470,6 +500,84 @@ pub(crate) fn compose_nested_total(nested: Nested, ids: &[i64]) -> (String, Vec<
              FROM json_each(?1) AS j",
             table = nested.table(),
         ),
+        vec![id_list(ids)],
+    )
+}
+
+/// The paths a finding statement reads, as the JSON array `json_each` walks.
+fn path_list(paths: &[&str]) -> Result<Value, StoreError> {
+    canonical_json(&FrontmatterValue::Sequence(
+        paths
+            .iter()
+            .map(|path| FrontmatterValue::String((*path).to_string()))
+            .collect(),
+    ))
+    .map(Value::Text)
+}
+
+/// [`FindStatement::FindingHead`]: the findings standing at each of `paths`
+/// under `fingerprint`, at most `ceiling` of them per path in `(kind, id)`
+/// order, each as [`FINDING_ROW_COLUMNS`].
+///
+/// The paths drive the statement — `CROSS JOIN` keeps them the outer loop —
+/// and each path's head is a seek of `findings_path` at `(path, fingerprint)`
+/// that stops at the ceiling, so a document with more findings than the
+/// ceiling costs its row the ceiling. A head is handed back by row id.
+pub(crate) fn compose_finding_head(
+    paths: &[&str],
+    fingerprint: &str,
+    ceiling: usize,
+) -> Result<(String, Vec<Value>), StoreError> {
+    Ok((
+        format!(
+            "SELECT {FINDING_ROW_COLUMNS} FROM json_each(?1) AS j
+             CROSS JOIN findings AS f
+             WHERE f.id IN (SELECT h.id FROM findings AS h
+                 WHERE h.path = j.value AND h.vault_schema_fingerprint = ?2
+                 ORDER BY h.kind, h.id
+                 LIMIT ?3)"
+        ),
+        vec![
+            path_list(paths)?,
+            Value::Text(fingerprint.to_string()),
+            Value::Integer(i64::try_from(ceiling).expect("a row ceiling fits i64")),
+        ],
+    ))
+}
+
+/// [`FindStatement::FindingTotal`]: how many findings stand at each of
+/// `paths` under `fingerprint`, as the path and the count.
+pub(crate) fn compose_finding_total(
+    paths: &[&str],
+    fingerprint: &str,
+) -> Result<(String, Vec<Value>), StoreError> {
+    Ok((
+        "SELECT j.value, (SELECT COUNT(*) FROM findings AS h
+                 WHERE h.path = j.value AND h.vault_schema_fingerprint = ?2)
+             FROM json_each(?1) AS j"
+            .to_string(),
+        vec![path_list(paths)?, Value::Text(fingerprint.to_string())],
+    ))
+}
+
+/// [`FindStatement::FindingCandidates`]: the candidate rows of each finding
+/// `ids` names, as the finding, the rank, the path and the suffix.
+pub(crate) fn compose_finding_candidates(ids: &[i64]) -> (String, Vec<Value>) {
+    (
+        "SELECT c.finding, c.rank, c.path, c.suffix FROM finding_candidates AS c
+             WHERE c.finding IN (SELECT value FROM json_each(?1))"
+            .to_string(),
+        vec![id_list(ids)],
+    )
+}
+
+/// [`FindStatement::FindingClasses`]: the class keys of each finding `ids`
+/// names, as the finding and the key.
+pub(crate) fn compose_finding_classes(ids: &[i64]) -> (String, Vec<Value>) {
+    (
+        "SELECT k.finding, k.class_key FROM finding_classes AS k
+             WHERE k.finding IN (SELECT value FROM json_each(?1))"
+            .to_string(),
         vec![id_list(ids)],
     )
 }

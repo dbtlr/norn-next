@@ -7,6 +7,12 @@
 //! only the columns named; each nested collection is one statement over its
 //! own table, and a collection nobody named is a table nobody reads.
 //!
+//! **The findings column is a nested collection too.** It carries the findings
+//! standing at the document's path under the active fingerprint, in `(kind,
+//! id)` order — the order `validate` pages them in at one path — each a
+//! finding row read through the accessor `validate` reads its rows through,
+//! so a finding carries the same head and hint on either verb.
+//!
 //! **A row is bounded, and says where it was cut.** A nested collection
 //! carries at most [`NESTED_ROW_CEILING`] items and a body at most
 //! [`BODY_ROW_CEILING`] bytes, and the bound is applied in the statement, so
@@ -20,18 +26,19 @@ use std::collections::{BTreeMap, HashMap};
 
 use norn_db::rusqlite::Row;
 use norn_wire::{
-    BlockRow, BodyText, Collection, DocumentRow, FieldValue, HeadingRow, TagRow, TotalBelowHead,
+    BlockRow, BodyText, Collection, DocumentRow, FieldValue, FindingRow, HeadingRow, TagRow,
+    TotalBelowHead,
 };
 
 use super::statement::{
-    DocumentColumns, FindStatement, Nested, compose_documents, compose_nested_head,
-    compose_nested_total,
+    DocumentColumns, FindStatement, Nested, compose_documents, compose_finding_head,
+    compose_finding_total, compose_nested_head, compose_nested_total,
 };
 use super::{FoundKey, Projection};
 use crate::error::{self, StoreError};
 use crate::facts::{Span, TagSource};
 use crate::json::projected_fields;
-use crate::read::{Ran, Stepped};
+use crate::read::{Ran, Stepped, finding_base};
 use crate::request::{Reading, stored_block, stored_heading, stored_tag};
 use crate::store::Snapshot;
 
@@ -81,6 +88,9 @@ pub struct FindWork {
     pub documents_hydrated: u64,
     /// The nested-table rows the hydration read, by table.
     pub nested_rows: NestedRows,
+    /// The finding rows the findings column read: at most the ceiling per
+    /// document.
+    pub finding_rows: u64,
 }
 
 impl FindWork {
@@ -103,6 +113,7 @@ impl FindWork {
             ("find_tag_rows", self.nested_rows.tags),
             ("find_heading_rows", self.nested_rows.headings),
             ("find_block_rows", self.nested_rows.blocks),
+            ("find_finding_rows", self.finding_rows),
         ]
         .into_iter()
     }
@@ -161,13 +172,15 @@ type Heads<T> = HashMap<i64, Vec<(i64, T)>>;
 impl Snapshot {
     /// The rows of the documents `keys` name, in their order, carrying the
     /// columns `projection` names; `fields` is the field keys it names that
-    /// the vault's field universe holds. Each statement it runs is recorded in
-    /// `record`.
+    /// the vault's field universe holds, and `findings_under` the fingerprint
+    /// the findings column reads under where the projection names it. Each
+    /// statement it runs is recorded in `record`.
     pub(super) fn hydrate(
         &self,
         keys: &[FoundKey],
         projection: &Projection<'_>,
         fields: &[&str],
+        findings_under: Option<&str>,
         work: &mut FindWork,
         record: &mut Vec<Ran>,
     ) -> Result<Vec<DocumentRow>, StoreError> {
@@ -229,7 +242,88 @@ impl Snapshot {
                 }
             }
         }
+
+        if let Some(fingerprint) = findings_under {
+            let paths: Vec<&str> = keys.iter().map(FoundKey::path).collect();
+            let mut heads = self.read_findings(&paths, fingerprint, work, record)?;
+            for (row, path) in rows.iter_mut().zip(&paths) {
+                let (items, total) = heads.remove(*path).unwrap_or_default();
+                row.findings = Some(Collection::new(items, total).map_err(cut_below_head)?);
+            }
+        }
         Ok(rows)
+    }
+
+    /// The head of the findings standing at each of `paths` under
+    /// `fingerprint`, with each head's total: counted where the ceiling
+    /// filled the head, and the head's own length where it did not.
+    fn read_findings(
+        &self,
+        paths: &[&str],
+        fingerprint: &str,
+        work: &mut FindWork,
+        record: &mut Vec<Ran>,
+    ) -> Result<HashMap<String, (Vec<FindingRow>, u64)>, StoreError> {
+        const OPERATION: &str = "reading the findings a page projected";
+        if paths.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let head = Ran::new(
+            FindStatement::FindingHead,
+            compose_finding_head(paths, fingerprint, NESTED_ROW_CEILING)?,
+        );
+        let mut bases = self
+            .run_statement(record, head, finding_base)
+            .map_err(|problem| error::sql(OPERATION, problem))?;
+        work.finding_rows += bases.len() as u64;
+        // The index hands each path's findings back in `(kind, id)` order and
+        // the paths in the order they were named; the statement states
+        // neither, so the order is taken here, over heads the ceiling bounded.
+        let order: HashMap<&str, usize> = paths
+            .iter()
+            .enumerate()
+            .map(|(at, path)| (*path, at))
+            .collect();
+        bases.sort_by(|one, other| {
+            (order.get(one.path.as_str()), &one.kind, one.id).cmp(&(
+                order.get(other.path.as_str()),
+                &other.kind,
+                other.id,
+            ))
+        });
+        let mut filled: HashMap<String, usize> = HashMap::new();
+        for base in &bases {
+            *filled.entry(base.path.clone()).or_default() += 1;
+        }
+        let cut: Vec<&str> = filled
+            .iter()
+            .filter(|(_, held)| **held >= NESTED_ROW_CEILING)
+            .map(|(path, _)| path.as_str())
+            .collect();
+        let totals: HashMap<String, u64> = if cut.is_empty() {
+            HashMap::new()
+        } else {
+            let total = Ran::new(
+                FindStatement::FindingTotal,
+                compose_finding_total(&cut, fingerprint)?,
+            );
+            self.run_statement(record, total, |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })
+            .map_err(|problem| error::sql(OPERATION, problem))?
+            .into_iter()
+            .collect()
+        };
+
+        let at: Vec<String> = bases.iter().map(|base| base.path.clone()).collect();
+        let mut heads: HashMap<String, (Vec<FindingRow>, u64)> = HashMap::new();
+        for (path, row) in at.into_iter().zip(self.finding_rows(record, bases)?) {
+            heads.entry(path).or_default().0.push(row);
+        }
+        for (path, (items, total)) in &mut heads {
+            *total = totals.get(path).copied().unwrap_or(items.len() as u64);
+        }
+        Ok(heads)
     }
 
     /// The document rows `ids` name, reading `columns` of each.

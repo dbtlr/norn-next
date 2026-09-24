@@ -476,9 +476,10 @@
       "sources": ["NRN-a61", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "findings are stored state and maintained over the affected set: crates/norn-store/src/ddl/findings.rs holds the rows, and a changeset discards and re-records them by subject and by ambiguity class rather than re-deriving the vault. The rule engine has no subject — the vault schema crates/norn-store/src/facts.rs pins is bytes and a fingerprint rather than a rule set — so the warm-validate clause has neither a validate to run nor a rules-evaluated counter to read at zero. The residue is the absent vault-rule vocabulary: no file is settled to declare a rule set, so there is no `file::Symbol` this case can pre-commit as the carrier's name.",
+        "reason": "findings are stored state and maintained over the affected set: crates/norn-store/src/ddl/findings.rs holds the rows, and a changeset discards and re-records them by subject and by ambiguity class rather than re-deriving the vault. A validate reads them and derives nothing: crates/norn-store/src/validate/mod.rs answers the findings standing under the active fingerprint from the pillar and runs no rule. The rule engine has no subject — the vault schema crates/norn-store/src/facts.rs pins is bytes and a fingerprint rather than a rule set — so the warm-validate clause has no rules-evaluated counter to read at zero. The residue is the absent vault-rule vocabulary: no file is settled to declare a rule set, so there is no `file::Symbol` this case can pre-commit as the carrier's name.",
         "grounds": [
           { "present": "crates/norn-store/src/ddl/findings.rs" },
+          { "present": "crates/norn-store/src/validate/mod.rs" },
           { "present": "crates/norn-store/src/facts.rs" }
         ]
       }
@@ -752,7 +753,7 @@
       "sources": ["NRN-42"],
       "binding": {
         "status": "dormant",
-        "reason": "the failure is a distinct state and one consumer already holds it as one: crates/norn-text/src/diagnostic.rs is the state, and crates/norn-host/src/production.rs carries it into derived state rather than dropping the document, so an illegible document is derived and legible as illegible. A query result exists now, and it does not drop the document: crates/norn-store/src/find/mod.rs pages every document a part admits. It does collapse the state, and that is a known violation carried to the filed task NORN-247: a document whose frontmatter did not read holds no field, so a field part or a field sort judges it as missing the key, and the diagnostic that says why is reachable only through a separate has_finding part, because a row's findings column is not yet projected. The consumers that could collapse the state have no verb to do it through, and no second mutation arm exists to disagree with a first, because crates/norn-serve is not in the workspace. Carve-out: a frontmatter tag string the grammar does not describe yields no tag AND no diagnostic, by ruling — judging such a string is validation's venue, so its silence is a decision rather than a collapsed failure.",
+        "reason": "the failure is a distinct state and one consumer already holds it as one: crates/norn-text/src/diagnostic.rs is the state, and crates/norn-host/src/production.rs carries it into derived state rather than dropping the document, so an illegible document is derived and legible as illegible. A query result exists now, and it does not drop the document: crates/norn-store/src/find/mod.rs pages every document a part admits. It does collapse the state, and that is a known violation carried to the filed task NORN-247: a document whose frontmatter did not read holds no field, so a field part or a field sort judges it as missing the key, and the diagnostic that says why is carried beside it only in the row's findings column, or reached through a separate has_finding part. The consumers that could collapse the state have no verb to do it through, and no second mutation arm exists to disagree with a first, because crates/norn-serve is not in the workspace. Carve-out: a frontmatter tag string the grammar does not describe yields no tag AND no diagnostic, by ruling — judging such a string is validation's venue, so its silence is a decision rather than a collapsed failure.",
         "grounds": [
           { "present": "crates/norn-text/src/diagnostic.rs" },
           { "present": "crates/norn-host/src/production.rs" },
@@ -1017,7 +1018,7 @@
       "sources": ["NRN-a61"],
       "binding": {
         "status": "dormant",
-        "reason": "a finding is produced and stored today: crates/norn-host/src/derivation.rs plans one for every document it could not read whole. What has no subject is the payload. This property is stated over what a caller is handed and how that answer grows with the vault at a fixed defect density, and nothing hands a finding to a caller — crates/norn-serve is not in the workspace — so there is no answer to measure at two scales, and no ambiguity class whose own payload could be shown not to square.",
+        "reason": "a finding is produced and stored today: crates/norn-host/src/derivation.rs plans one for every document it could not read whole, and the store's validate builder answers each as a row carrying the bounded candidate head the pillar holds. What has no subject is the payload. This property is stated over what a caller is handed and how that answer grows with the vault at a fixed defect density, and nothing hands a finding to a caller — crates/norn-serve is not in the workspace — so there is no answer to measure at two scales, and no ambiguity class whose own payload could be shown not to square.",
         "grounds": [
           { "present": "crates/norn-host/src/derivation.rs" },
           { "absent": "crates/norn-serve" }
@@ -1263,9 +1264,10 @@
       "sources": ["NORN-a1", "NRN-a60", "NRN-a61", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "a find's parts narrow its work rather than its output: crates/norn-store/src/read/conjunction.rs compiles each part into a membership test one index seek answers, inside the page statement it narrows. The property is stated over every verb — validate over one path, repair over the requested paths — and no verb takes a narrowing argument, because crates/norn-serve is not in the workspace.",
+        "reason": "a find's parts narrow its work rather than its output: crates/norn-store/src/read/conjunction.rs compiles each part into a membership test one index seek answers, inside the page statement it narrows. The validate builder, crates/norn-store/src/validate/mod.rs, is narrowed the same way: a path part bounds the seek of the findings' own path, a kind or a severity is a seek of its own, and a document part drives the statement from the documents it matched. The property is stated over every verb — validate over one path, repair over the requested paths — and no verb takes a narrowing argument, because crates/norn-serve is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-store/src/read/conjunction.rs" },
+          { "present": "crates/norn-store/src/validate/mod.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -1278,10 +1280,11 @@
       "sources": ["NRN-a59", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the landed read builders, find and count, answer in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others, and crates/norn-store/src/count/mod.rs answers a count's tallies as aggregate SQL and hydrates no document row. The property is stated over each read verb, and no read verb exists: search, get, validate and describe have no builder, and nothing dispatches a verb, because crates/norn-serve is not in the workspace.",
+        "reason": "the landed read builders, find, count and validate, answer in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others; crates/norn-store/src/count/mod.rs answers a count's tallies as aggregate SQL and hydrates no document row; and crates/norn-store/src/validate/mod.rs pages the findings standing under the active fingerprint in SQL, one kind's seek at a time, reading one finding past the bound and the candidate heads of the findings it returns and no others, and answers its summary as one aggregate statement. The property is stated over each read verb, and no read verb exists: search, get and describe have no builder, and nothing dispatches a verb, because crates/norn-serve is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-store/src/find/mod.rs" },
           { "present": "crates/norn-store/src/count/mod.rs" },
+          { "present": "crates/norn-store/src/validate/mod.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -1310,9 +1313,10 @@
       "sources": ["NRN-a59", "NRN-a60", "NRN-a62", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the count builder, crates/norn-store/src/count, answers cardinality and grouping as aggregate SQL and hydrates no document row: its store suite bars the plan of every statement it runs, and bars that a narrowing part narrows its work. The property is wider than that builder. Its cost clause, a function of the distinct groups rather than of body bytes, is held by no bar yet, because the count work bar varies how many documents a vault holds and never their bodies; and its distinct-value answers, the folders and values describe reports, have no builder. The read builders live in norn-store, so that builder's home is pre-committed as crates/norn-store/src/describe, beside the find and count builders.",
+        "reason": "the count builder, crates/norn-store/src/count, answers cardinality and grouping as aggregate SQL and hydrates no document row: its store suite bars the plan of every statement it runs, and bars that a narrowing part narrows its work. The validate builder's summary, crates/norn-store/src/validate, is the same shape over findings: one aggregate statement over the index that holds them by kind and severity, reading no finding row. The property is wider than those builders. Its cost clause, a function of the distinct groups rather than of body bytes, is held by no bar yet, because the count work bar varies how many documents a vault holds and never their bodies; and its distinct-value answers, the folders and values describe reports, have no builder. The read builders live in norn-store, so that builder's home is pre-committed as crates/norn-store/src/describe, beside the find and count builders.",
         "grounds": [
           { "present": "crates/norn-store/src/count" },
+          { "present": "crates/norn-store/src/validate" },
           { "absent": "crates/norn-store/src/describe" }
         ]
       }

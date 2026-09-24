@@ -403,6 +403,20 @@ impl ClassKey {
         &self.0
     }
 
+    /// The suffix address this class key is the reversal of: its segments in
+    /// the opposite order, joined by the separator. `glossary/norn/` is the
+    /// key `norn/glossary` opens first, so that is the address it reads back
+    /// as.
+    ///
+    /// The address's own probe opens this class, and where its leaf carries a
+    /// dot, the class of the leaf's stem as well: `v1.2/` reads back as
+    /// `v1.2`, which opens `v1.2/` and `v1/`.
+    pub fn address(&self) -> String {
+        let segments = self.0.strip_suffix(SEPARATOR).unwrap_or(&self.0);
+        let reversed: Vec<&str> = segments.split(SEPARATOR).rev().collect();
+        reversed.join(&SEPARATOR.to_string())
+    }
+
     /// The probe over exactly this class: one range, this key as its lower
     /// bound.
     ///
