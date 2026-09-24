@@ -8325,6 +8325,81 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **An unreadable declaration held for rung 3 delivers nothing.** The
+    /// recovery holds the candidate it read because its store owes rung 3,
+    /// and the declaration is one this build cannot read: the rebuild that
+    /// pins the order the coverage proves owes the engines nothing for it, so
+    /// the one delivery on record stays the attach's.
+    #[test]
+    fn an_unreadable_declaration_held_for_rung_three_delivers_nothing() {
+        let f = Fixture::new("recover-order-moved-unreadable-config");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name, receiver) = ops_recording_sample_config(&f);
+        let progress = ProgressReporter::disconnected();
+        let schema = f.vault().join(".norn/schema.yaml");
+
+        let mut attachment =
+            derive_under_the_other_order(&f, ops.attach(&f.registration(), &progress).unwrap());
+        fs::write(&schema, "version: 9\n").unwrap();
+
+        let failure = ops
+            .recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over a store derived under the other order");
+        assert!(
+            matches!(failure, JobFailure::StoreDamaged(_)),
+            "{failure:?}"
+        );
+
+        let attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 under the order the coverage proved");
+        assert_eq!(
+            delivered_sample_values(&receiver),
+            [Some(1)],
+            "the rebuild delivered config held under a declaration this build cannot read"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **Owed config is delivered once.** The rebuild that pins the order a
+    /// recovery held controls for delivers their config exactly once: a
+    /// second rebuild over those same pinned controls owes the engines
+    /// nothing more, so no later rung repeats the delivery.
+    #[test]
+    fn owed_config_is_delivered_once() {
+        let f = Fixture::new("recover-order-moved-config-delivered-once");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name, receiver) = ops_recording_sample_config(&f);
+        let progress = ProgressReporter::disconnected();
+
+        let mut attachment =
+            derive_under_the_other_order(&f, ops.attach(&f.registration(), &progress).unwrap());
+        write_sample_config(&f, 2);
+
+        let failure = ops
+            .recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over a store derived under the other order");
+        assert!(
+            matches!(failure, JobFailure::StoreDamaged(_)),
+            "{failure:?}"
+        );
+
+        let attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 under the order the coverage proved");
+        assert_eq!(delivered_sample_values(&receiver), [Some(1), Some(2)]);
+
+        let attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("a second rung 3 over controls already pinned and delivered");
+        assert_eq!(
+            delivered_sample_values(&receiver),
+            [Some(1), Some(2)],
+            "a second rebuild delivered config it had already delivered"
+        );
+        ops.detach(&name, attachment);
+    }
+
     /// **Logical damage is silent, so the scheduled verification is what meets
     /// it — and the verdict is not swallowed the way a failed sweep is.**
     ///
