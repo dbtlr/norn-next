@@ -6480,6 +6480,45 @@ mod tests {
             );
         }
 
+        /// **A drain that unwinds leaves its slot's report truthful**: the
+        /// hold writes the report as it ends, on the unwind too, so the report
+        /// carries the watermarks the drain reached rather than the ones it
+        /// started from.
+        #[test]
+        fn a_drain_that_unwinds_leaves_its_report_truthful() {
+            let f = Fixture::new("semantic-drain-unwinds");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            let before = engines.standing(&name).expect("an engine stands");
+
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+            engines.run_as_next_drain_ends(|| panic!("the drain unwound"));
+            let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ops.reconcile(
+                    &name,
+                    &mut attachment,
+                    ReconcileWork {
+                        batch: norn_fs::Batch::rescan(RescanScope::Vault),
+                    },
+                    &progress,
+                )
+            }));
+
+            assert!(unwound.is_err(), "the drain did not unwind");
+            let reached = engines.standing(&name).expect("the engine stands");
+            assert_ne!(reached, before, "the drain reached nothing");
+            let SemanticStatus::On { watermarks, .. } = engines.status(&name) else {
+                panic!("the engine is not on: {:?}", engines.status(&name));
+            };
+            assert_eq!(watermarks, reached);
+            ops.detach(&name, attachment);
+        }
+
         /// **A reload's config delivery is reported in the instant that
         /// publishes its fingerprints**: a status taken after the reload
         /// delivered its section, and before the leg published, reports the

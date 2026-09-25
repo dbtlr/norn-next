@@ -717,6 +717,8 @@ impl SemanticEngines {
             }
             Err(error) => *last_drain_error = Some(engine_refusal_told(&error)),
         }
+        #[cfg(test)]
+        self.hooks.run_as_drain_ends();
     }
 
     /// Give the vault's engine back with the rest of its entry's resources.
@@ -836,12 +838,20 @@ pub(crate) mod tests {
     #[derive(Default)]
     pub(crate) struct Hooks {
         drain: Mutex<Option<Arranged>>,
+        drain_end: Mutex<Option<Arranged>>,
         delivery: Mutex<Option<Arranged>>,
     }
 
     impl Hooks {
         pub(super) fn run_inside_drain(&self) {
             let arranged = tolerant(&self.drain).take();
+            if let Some(arranged) = arranged {
+                arranged();
+            }
+        }
+
+        pub(super) fn run_as_drain_ends(&self) {
+            let arranged = tolerant(&self.drain_end).take();
             if let Some(arranged) = arranged {
                 arranged();
             }
@@ -860,6 +870,13 @@ pub(crate) mod tests {
         /// while that drain holds its slot and before it reads the feed.
         pub(crate) fn run_inside_next_drain(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.drain) = Some(Box::new(arranged));
+        }
+
+        /// Run `arranged` once, as the next drain of any vault's engine that
+        /// ran its engine ends: once the drain has recorded its outcome on the
+        /// slot, and while it still holds the slot.
+        pub(crate) fn run_as_next_drain_ends(&self, arranged: impl FnOnce() + Send + 'static) {
+            *tolerant(&self.hooks.drain_end) = Some(Box::new(arranged));
         }
 
         /// Run `arranged` once, as the next delivery to any vault returns,
