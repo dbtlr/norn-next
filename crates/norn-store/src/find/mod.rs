@@ -535,7 +535,7 @@ impl Snapshot {
         lookups: &mut Lookups,
     ) -> Result<(Option<FindPosition>, Vec<Moved>), PageRefusal> {
         let CursorKey::Document {
-            order: minted_in,
+            order: cursor_order,
             sort,
             path,
             ..
@@ -543,14 +543,16 @@ impl Snapshot {
         else {
             return Err(PageRefusal::NotADocumentCursor);
         };
-        let current_in = order.wire();
-        let misplaced =
-            *minted_in != current_in || (matches!(order, PageOrder::Path(_)) && sort.is_some());
+        let request_order = order.wire();
+        // A path order's position carries no sort value, so a cursor naming
+        // the path order and carrying one is no position in its own order.
+        let off_its_order = matches!(cursor_order.key, SortKey::Path { .. }) && sort.is_some();
+        let misplaced = *cursor_order != request_order || off_its_order;
         let moved = self
             .judge_reading(cursor, order.field_order(), misplaced, lookups)
             .map_err(|refusal| match refusal {
                 PageRefusal::OrderChanged(changed) => PageRefusal::OrderChanged(
-                    changed.in_orders(minted_in.clone(), current_in.clone()),
+                    changed.in_orders(cursor_order.clone(), request_order.clone()),
                 ),
                 refusal => refusal,
             })?;
