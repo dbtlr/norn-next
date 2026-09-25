@@ -1790,8 +1790,8 @@ wire's bounded head stays a head rather than becoming the query surface.
 
 **One resolver compiles a target for its root**, and every surface that reads a class reads
 it through that one: a find's `resolves` part, a get's target, a links-to part's target and
-the backlinks it confirms, and the suffix keys of the links a page carries; the link-health findings
-Layer 3's link-health unit files will file under the class keys it compiles. Case
+the backlinks it confirms, and the suffix keys of the links a page carries; and Layer 3's
+link-health unit, when it lands, files its findings under the class keys it compiles. Case
 is the root's: the coverage proves the root's case behaviour when it is installed, and the
 store records the order its rows were derived under. A read answers under the store's order,
 which its snapshot takes from the handle the store minted, so no read detects one. An attach
