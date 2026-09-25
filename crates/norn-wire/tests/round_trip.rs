@@ -603,6 +603,7 @@ fn answer_advisories() -> Vec<AnswerAdvisory> {
             RungSkipReason::unavailable("the engine slot is empty"),
         ),
         AnswerAdvisory::rung_depth_reached(Rung::Vector),
+        AnswerAdvisory::rung_short_of_depth(Rung::Vector, 1000),
     ]
 }
 
@@ -3509,7 +3510,8 @@ fn an_unsatisfied_part_is_an_object_tagged_part() {
 /// and the reason carries, as its `code`, the refusal code a search naming the
 /// rung exactly meets. A rung that reached its depth is advised with the rung
 /// alone: the depth is every rung's one `RUNG_DEPTH`, which the advisory does
-/// not repeat.
+/// not repeat. A rung that fell short of it is advised with the rung and how
+/// many candidates it delivered.
 #[test]
 fn a_rung_advisory_names_the_rung_and_why() {
     let reason = RungSkipReason::unavailable("the engine slot is empty");
@@ -3530,6 +3532,10 @@ fn a_rung_advisory_names_the_rung_and_why() {
     assert_eq!(
         wire(&AnswerAdvisory::rung_depth_reached(Rung::Vector)),
         r#"{"advisory":"rung_depth_reached","rung":"vector"}"#
+    );
+    assert_eq!(
+        wire(&AnswerAdvisory::rung_short_of_depth(Rung::Vector, 1000)),
+        r#"{"advisory":"rung_short_of_depth","rung":"vector","delivered":1000}"#
     );
 }
 

@@ -311,6 +311,22 @@ pub enum AnswerAdvisory {
         /// The rung whose candidates reached its depth.
         rung: Rung,
     },
+    /// A rung handed the ranking fewer candidates than its depth though more
+    /// stood beyond what it read: it held as many rows as its bound allows,
+    /// some of those rows named documents the answer's snapshot does not
+    /// hold and were dropped, and the rows past its bound were never read. So
+    /// the ladder ranked the `delivered` candidates that rung found, fewer
+    /// than `RUNG_DEPTH`, and none beyond them. The vector rung raises it
+    /// where its derived state trails the snapshot by more rows than its
+    /// bound absorbs; a later answer, once the engine has drained, delivers
+    /// the depth again.
+    #[non_exhaustive]
+    RungShortOfDepth {
+        /// The rung whose candidates fell short of its depth.
+        rung: Rung,
+        /// How many candidates it delivered: fewer than `RUNG_DEPTH`.
+        delivered: u32,
+    },
 }
 
 impl AnswerAdvisory {
@@ -331,6 +347,12 @@ impl AnswerAdvisory {
     /// `rung`'s candidates reached its depth.
     pub const fn rung_depth_reached(rung: Rung) -> Self {
         AnswerAdvisory::RungDepthReached { rung }
+    }
+
+    /// `rung` delivered `delivered` candidates, short of its depth, with more
+    /// beyond what it read.
+    pub const fn rung_short_of_depth(rung: Rung, delivered: u32) -> Self {
+        AnswerAdvisory::RungShortOfDepth { rung, delivered }
     }
 }
 
