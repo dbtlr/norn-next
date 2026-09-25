@@ -9,6 +9,11 @@
 //!   false`) closes it, and a section the engine refuses — or an engine that
 //!   cannot open — leaves a typed self-disabled state a status read reports.
 //!   What the section *means* is the engine's own ([`norn_semantic::Settings`]).
+//!   The reading of the section itself — absent, disabled, malformed with the
+//!   engine's refusal, or enabled — is retained beside the slot at the same
+//!   delivery ([`SemanticEngines::section`]), because "no engine stands" is
+//!   answered differently for a vault that asked for none and one whose
+//!   section could not be read.
 //! - **The nudge is a post-leg pull.** Every leg that ends holding a
 //!   consistent lane-1 store relays the vault's feed handle here and the
 //!   engine drains on that same worker leg — the increments, every heal
@@ -27,6 +32,12 @@
 //!   the vault's trust label does not gate it. Composing trust over semantic
 //!   answers is the serving surface's judgment, made where that surface is
 //!   built.
+//! - **An answer carries its own reading.** A nearest answer is sampled under
+//!   the slot's lock together with the model it ran, the sidecar revision it
+//!   was taken from and the engine's watermarks, so no drain lands between
+//!   the rows and the reading that describes them. Freshness is those
+//!   watermarks judged against the store reading the caller's own hold
+//!   established ([`freshness`]).
 //!
 //! # Locking, and the guarantee it leans on
 //!
@@ -50,10 +61,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use norn_config::ConfigDirs;
 use norn_config::vault::EngineConfig;
-use norn_embed::StubEmbedder;
-use norn_semantic::{Engine, Neighbor, Settings};
-use norn_store::FeedRead;
-use norn_wire::{EngineSection, ErrorDetail, ErrorEnvelope, Rung, VaultName};
+use norn_embed::{Model, StubEmbedder};
+use norn_semantic::{Engine, Neighbor, Settings, SidecarRevision, Watermark, Watermarks};
+use norn_store::{FeedRead, StoreReading};
+use norn_wire::{EngineSection, ErrorDetail, ErrorEnvelope, Freshness, Rung, VaultName};
 
 use crate::reload::EngineConfigReceiver;
 
@@ -98,10 +109,58 @@ pub enum SemanticStatus {
     Off,
     On {
         last_drain_error: Option<String>,
+        /// The sidecar state the engine answers from now.
+        sidecar: SidecarRevision,
+        /// How far each feed was drained; judged against a store reading by
+        /// [`freshness`].
+        watermarks: Watermarks,
     },
     SelfDisabled {
         detail: String,
     },
+}
+
+/// One nearest answer and the reading it was taken under, sampled together
+/// under the slot's lock.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticAnswer {
+    /// The nearest paths, nearest first.
+    pub neighbors: Vec<Neighbor>,
+    /// The model the vectors were derived under and the query embedded with.
+    pub model: Model,
+    /// The sidecar state the rows came from.
+    pub sidecar: SidecarRevision,
+    /// How far each feed had been drained when the rows were read.
+    pub watermarks: Watermarks,
+}
+
+/// How far an engine's derived state trails `store`, the reading the caller's
+/// own hold was established at.
+///
+/// Each feed's lag is the store's generation less the generation its watermark
+/// recorded, and the answer is the worse of the two: an answer is as stale as
+/// its stalest input. A feed whose watermark was taken in another store
+/// lifetime — or that has not completed a drain in any — is rescanning, because
+/// a generation compared across two databases compares nothing, and rescanning
+/// is worse than any count. A watermark past the reading, recorded by a drain
+/// that completed after the hold was established, trails by nothing.
+///
+/// Nothing calls it yet: the `search` and `status` handlers are its callers,
+/// and they compose it with the hold reading each answer is taken under.
+pub fn freshness(watermarks: &Watermarks, store: &StoreReading) -> Freshness {
+    let lag = |watermark: &Option<Watermark>| match watermark {
+        Some(watermark) if watermark.store_epoch == store.epoch() => {
+            let behind = store
+                .write_generation()
+                .saturating_sub(watermark.generation);
+            Some(u64::try_from(behind).unwrap_or(0))
+        }
+        Some(_) | None => None,
+    };
+    match (lag(&watermarks.documents), lag(&watermarks.tombstones)) {
+        (Some(documents), Some(tombstones)) => Freshness::trailing(documents.max(tombstones)),
+        _ => Freshness::rescanning(),
+    }
 }
 
 /// Why a nearest answer was refused.
@@ -155,9 +214,9 @@ impl std::error::Error for SemanticRefusal {}
 /// refuses on its answer reading long before a rung is dispatched.
 ///
 /// Nothing calls it yet. The `search` handler is the one caller this
-/// composition has, and it lands in this crate with the engine seams that
-/// retain a delivered section beside the slot it was delivered to (NORN-230),
-/// so no call graph reaches this until that handler arrives.
+/// composition has: it pairs the refusal [`SemanticEngines::nearest`] answered
+/// with the section [`SemanticEngines::section`] retained at the same
+/// delivery, and no call graph reaches this until that handler arrives.
 ///
 /// Both matches carry no wildcard, so a refusal or a section minted without a
 /// row here does not compile.
@@ -204,10 +263,21 @@ pub fn compose_vector_refusal(section: &EngineSection, refusal: SemanticRefusal)
     }
 }
 
-/// The host's set of semantic engines, one slot per enabled vault.
+/// What the last config delivery left for one vault: the section reading it
+/// was delivered, and the slot that reading opened, where it opened one.
+///
+/// One entry under one lock, so a reader looking both up sees a pair one
+/// delivery produced.
+struct Delivery {
+    section: EngineSection,
+    slot: Option<Arc<Mutex<Slot>>>,
+}
+
+/// The host's set of semantic engines, one delivery per attached vault and a
+/// slot per vault whose delivery asked for an engine.
 pub struct SemanticEngines {
     dirs: ConfigDirs,
-    vaults: Mutex<BTreeMap<VaultName, Arc<Mutex<Slot>>>>,
+    vaults: Mutex<BTreeMap<VaultName, Delivery>>,
 }
 
 /// A lock that outlives the panic that poisoned it: the state under it is
@@ -231,10 +301,12 @@ impl SemanticEngines {
         };
         match &*tolerant(&slot) {
             Slot::Running {
-                engine: Some(_),
+                engine: Some(engine),
                 last_drain_error,
             } => SemanticStatus::On {
                 last_drain_error: last_drain_error.clone(),
+                sidecar: engine.revision(),
+                watermarks: engine.watermarks().clone(),
             },
             Slot::Running { engine: None, .. } => SemanticStatus::SelfDisabled {
                 detail: ABANDONED.to_string(),
@@ -245,18 +317,29 @@ impl SemanticEngines {
         }
     }
 
-    /// The `limit` nearest paths to `text` in `vault`, or the typed refusal.
+    /// The section reading the last config delivery handed `vault`, or `None`
+    /// where no delivery stands for it — the vault is not attached, or was
+    /// detached since.
+    pub fn section(&self, vault: &VaultName) -> Option<EngineSection> {
+        tolerant(&self.vaults)
+            .get(vault)
+            .map(|delivery| delivery.section.clone())
+    }
+
+    /// The `limit` nearest paths to `text` in `vault` with the reading they
+    /// were taken under, or the typed refusal.
     ///
     /// Answers whenever a slot stands: the slot, not the vault's trust
     /// label, is the gate. Runs on the caller's thread against the engine
     /// and its sidecar alone — never the vault's store — and serializes with
-    /// the same vault's drains on the slot's lock.
+    /// the same vault's drains on the slot's lock, which is held across the
+    /// rows and the reading alike.
     pub fn nearest(
         &self,
         vault: &VaultName,
         text: &str,
         limit: usize,
-    ) -> Result<Vec<Neighbor>, SemanticRefusal> {
+    ) -> Result<SemanticAnswer, SemanticRefusal> {
         let Some(slot) = self.slot(vault) else {
             return Err(SemanticRefusal::NoEngine);
         };
@@ -265,11 +348,20 @@ impl SemanticEngines {
             Slot::Running {
                 engine: Some(engine),
                 ..
-            } => engine
-                .nearest(text, limit)
-                .map_err(|error| SemanticRefusal::Failed {
-                    detail: error.to_string(),
-                }),
+            } => {
+                let neighbors =
+                    engine
+                        .nearest(text, limit)
+                        .map_err(|error| SemanticRefusal::Failed {
+                            detail: error.to_string(),
+                        })?;
+                Ok(SemanticAnswer {
+                    neighbors,
+                    model: engine.model().clone(),
+                    sidecar: engine.revision(),
+                    watermarks: engine.watermarks().clone(),
+                })
+            }
             Slot::Running { engine: None, .. } => Err(SemanticRefusal::SelfDisabled {
                 detail: ABANDONED.to_string(),
             }),
@@ -345,7 +437,20 @@ impl SemanticEngines {
     }
 
     fn slot(&self, vault: &VaultName) -> Option<Arc<Mutex<Slot>>> {
-        tolerant(&self.vaults).get(vault).cloned()
+        tolerant(&self.vaults)
+            .get(vault)
+            .and_then(|delivery| delivery.slot.clone())
+    }
+
+    /// Record what a delivery left for `vault`.
+    fn deliver(&self, vault: &VaultName, section: EngineSection, slot: Option<Slot>) {
+        tolerant(&self.vaults).insert(
+            vault.clone(),
+            Delivery {
+                section,
+                slot: slot.map(|slot| Arc::new(Mutex::new(slot))),
+            },
+        );
     }
 }
 
@@ -369,23 +474,23 @@ impl EngineConfigReceiver for SemanticEngines {
     /// vault's answers to this one's enable.
     fn receive(&self, vault: &VaultName, config: Option<&EngineConfig>) {
         let Some(section) = config else {
-            tolerant(&self.vaults).remove(vault);
+            self.deliver(vault, EngineSection::absent(), None);
             return;
         };
         let settings = match Settings::from_section(section.table()) {
             Ok(settings) => settings,
             Err(refused) => {
-                tolerant(&self.vaults).insert(
-                    vault.clone(),
-                    Arc::new(Mutex::new(Slot::SelfDisabled {
-                        detail: refused.to_string(),
-                    })),
+                let detail = refused.to_string();
+                self.deliver(
+                    vault,
+                    EngineSection::malformed(detail.clone()),
+                    Some(Slot::SelfDisabled { detail }),
                 );
                 return;
             }
         };
         if !settings.enabled {
-            tolerant(&self.vaults).remove(vault);
+            self.deliver(vault, EngineSection::disabled(), None);
             return;
         }
         if let Some(slot) = self.slot(vault)
@@ -409,7 +514,7 @@ impl EngineConfigReceiver for SemanticEngines {
                 detail: format!("the sidecar did not open: {error}"),
             },
         };
-        tolerant(&self.vaults).insert(vault.clone(), Arc::new(Mutex::new(slot)));
+        self.deliver(vault, EngineSection::enabled(), Some(slot));
     }
 }
 
@@ -528,5 +633,79 @@ mod composition_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use norn_semantic::{Watermark, Watermarks};
+    use norn_store::StoreReading;
+    use norn_wire::Freshness;
+
+    use super::freshness;
+
+    fn at(store_epoch: &str, generation: i64) -> Option<Watermark> {
+        Some(Watermark {
+            store_epoch: store_epoch.to_string(),
+            generation,
+        })
+    }
+
+    fn marks(documents: Option<Watermark>, tombstones: Option<Watermark>) -> Watermarks {
+        Watermarks {
+            documents,
+            tombstones,
+        }
+    }
+
+    /// The answer is as stale as its stalest feed, whichever feed that is.
+    #[test]
+    fn freshness_is_the_worse_of_the_two_feeds() {
+        let store = StoreReading::of("store", 10);
+        assert_eq!(
+            freshness(&marks(at("store", 7), at("store", 9)), &store),
+            Freshness::trailing(3),
+            "the document feed is the stalest"
+        );
+        assert_eq!(
+            freshness(&marks(at("store", 9), at("store", 6)), &store),
+            Freshness::trailing(4),
+            "the tombstone feed is the stalest"
+        );
+        assert_eq!(
+            freshness(&marks(at("store", 10), at("store", 10)), &store),
+            Freshness::trailing(0)
+        );
+    }
+
+    /// A feed whose watermark names another store lifetime, or none, is
+    /// rescanning, and rescanning outranks any count on the other feed.
+    #[test]
+    fn a_feed_in_another_lifetime_or_none_reads_rescanning() {
+        let store = StoreReading::of("store", 10);
+        for watermarks in [
+            marks(at("old", 10), at("store", 10)),
+            marks(at("store", 10), at("old", 10)),
+            marks(None, at("store", 10)),
+            marks(at("store", 10), None),
+            Watermarks::default(),
+        ] {
+            assert_eq!(
+                freshness(&watermarks, &store),
+                Freshness::rescanning(),
+                "{watermarks:?}"
+            );
+        }
+    }
+
+    /// A watermark a later drain recorded past the reading trails it by
+    /// nothing, rather than by a count that wrapped.
+    #[test]
+    fn a_watermark_past_the_reading_trails_by_nothing() {
+        let store = StoreReading::of("store", 10);
+        assert_eq!(
+            freshness(&marks(at("store", 12), at("store", 11)), &store),
+            Freshness::trailing(0)
+        );
     }
 }

@@ -4566,7 +4566,8 @@ mod tests {
         //! answers, and engine trouble never blocks lane 1.
 
         use super::*;
-        use crate::semantic::{SemanticEngines, SemanticRefusal, SemanticStatus};
+        use crate::semantic::{SemanticEngines, SemanticRefusal, SemanticStatus, freshness};
+        use norn_wire::{EngineSection, Freshness};
 
         fn engines_and_ops(f: &Fixture) -> (Arc<SemanticEngines>, ProductionEntryOps) {
             let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
@@ -4587,23 +4588,45 @@ mod tests {
             let (engines, ops) = engines_and_ops(&f);
             let name = f.registration().name;
 
-            let _attachment = ops
+            let mut attachment = ops
                 .attach(&f.registration(), &ProgressReporter::disconnected())
                 .expect("an attach with an enabled engine");
-            assert_eq!(
-                engines.status(&name),
-                SemanticStatus::On {
-                    last_drain_error: None
-                }
-            );
+            let SemanticStatus::On {
+                last_drain_error: None,
+                sidecar,
+                watermarks,
+            } = engines.status(&name)
+            else {
+                panic!("the engine is not on: {:?}", engines.status(&name));
+            };
+            assert_eq!(engines.section(&name), Some(EngineSection::enabled()));
             let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
             assert!(
                 fs::metadata(dirs.derived_dir(&name).join("semantic.sqlite3")).is_ok(),
                 "the sidecar stands beside the store"
             );
             let answer = engines.nearest(&name, "alpha", 5).expect("an answer");
-            assert_eq!(answer.len(), 1);
-            assert_eq!(answer[0].path, "docs/alpha.md");
+            assert_eq!(answer.neighbors.len(), 1);
+            assert_eq!(answer.neighbors[0].path, "docs/alpha.md");
+            assert_eq!(
+                &answer.model,
+                norn_embed::Embedder::model(&norn_embed::StubEmbedder::new())
+            );
+            assert_eq!(
+                answer.sidecar, sidecar,
+                "the answer names the state status reads"
+            );
+            assert_eq!(answer.watermarks, watermarks);
+
+            // The attach's own drain caught the engine up to the store it
+            // derived, so the answer trails a reading of that store by nothing.
+            let mut feed = attachment.store.feed_read();
+            let generation = feed.write_generation().expect("the store's generation");
+            let store = norn_store::StoreReading::of(feed.epoch(), generation);
+            assert_eq!(
+                freshness(&answer.watermarks, &store),
+                Freshness::trailing(0)
+            );
         }
 
         /// No section, no engine: the status is off and the refusal says so.
@@ -4617,6 +4640,7 @@ mod tests {
                 .attach(&f.registration(), &ProgressReporter::disconnected())
                 .expect("an attach with no engine section");
             assert_eq!(engines.status(&name), SemanticStatus::Off);
+            assert_eq!(engines.section(&name), Some(EngineSection::absent()));
             assert_eq!(
                 engines.nearest(&name, "anything", 5),
                 Err(SemanticRefusal::NoEngine)
@@ -4646,6 +4670,11 @@ mod tests {
                 );
             };
             assert!(detail.contains("boolean"), "{detail}");
+            assert_eq!(
+                engines.section(&name),
+                Some(EngineSection::malformed(detail.clone())),
+                "the retained section is not the refusal the engine gave"
+            );
             assert!(matches!(
                 engines.nearest(&name, "anything", 5),
                 Err(SemanticRefusal::SelfDisabled { .. })
@@ -4668,6 +4697,7 @@ mod tests {
                 .attach(&f.registration(), &ProgressReporter::disconnected())
                 .expect("a deliberate disable attaches");
             assert_eq!(engines.status(&name), SemanticStatus::Off);
+            assert_eq!(engines.section(&name), Some(EngineSection::disabled()));
         }
 
         /// A reload's delivery is the same enable act, in both directions —
@@ -4691,15 +4721,17 @@ mod tests {
                 .reload(&name, &mut attachment, &ProgressReporter::disconnected())
                 .expect("the enabling reload");
             assert_eq!(outcome, ReloadOutcome::ConfigOnly);
-            assert_eq!(
+            assert!(matches!(
                 engines.status(&name),
                 SemanticStatus::On {
-                    last_drain_error: None
+                    last_drain_error: None,
+                    ..
                 }
-            );
+            ));
+            assert_eq!(engines.section(&name), Some(EngineSection::enabled()));
             let answer = engines.nearest(&name, "alpha", 5).expect("an answer");
             assert_eq!(
-                answer.len(),
+                answer.neighbors.len(),
                 1,
                 "the reload's drain caught the standing corpus"
             );
@@ -4712,6 +4744,7 @@ mod tests {
             ops.reload(&name, &mut attachment, &ProgressReporter::disconnected())
                 .expect("the disabling reload");
             assert_eq!(engines.status(&name), SemanticStatus::Off);
+            assert_eq!(engines.section(&name), Some(EngineSection::disabled()));
             assert_eq!(
                 engines.nearest(&name, "alpha", 5),
                 Err(SemanticRefusal::NoEngine)
@@ -4723,7 +4756,7 @@ mod tests {
             ops.reload(&name, &mut attachment, &ProgressReporter::disconnected())
                 .expect("the re-enabling reload");
             let answer = engines.nearest(&name, "alpha", 5).expect("an answer");
-            assert_eq!(answer.len(), 1);
+            assert_eq!(answer.neighbors.len(), 1);
         }
 
         /// A detach gives the engine back with the entry's other resources:
@@ -4743,6 +4776,7 @@ mod tests {
 
             ops.detach(&name, attachment);
             assert_eq!(engines.status(&name), SemanticStatus::Off);
+            assert_eq!(engines.section(&name), None, "a detach keeps no delivery");
             assert_eq!(
                 engines.nearest(&name, "anything", 5),
                 Err(SemanticRefusal::NoEngine)
@@ -4782,6 +4816,7 @@ mod tests {
 
             ops.discard(&name);
             assert_eq!(engines.status(&name), SemanticStatus::Off);
+            assert_eq!(engines.section(&name), None, "a discard keeps no delivery");
             assert_eq!(
                 engines.nearest(&name, "anything", 5),
                 Err(SemanticRefusal::NoEngine)
@@ -4810,21 +4845,30 @@ mod tests {
                 .attach(&f.registration(), &ProgressReporter::disconnected())
                 .expect("an attach with an enabled engine");
             assert_eq!(
-                engines.nearest(&name, "alpha", 5).expect("an answer").len(),
+                engines
+                    .nearest(&name, "alpha", 5)
+                    .expect("an answer")
+                    .neighbors
+                    .len(),
                 1
             );
 
             let _rebuilt = ops
                 .rebuild(&name, attachment, &ProgressReporter::disconnected())
                 .expect("the rung-3 rebuild");
-            assert_eq!(
+            assert!(matches!(
                 engines.status(&name),
                 SemanticStatus::On {
-                    last_drain_error: None
+                    last_drain_error: None,
+                    ..
                 }
-            );
+            ));
             assert_eq!(
-                engines.nearest(&name, "alpha", 5).expect("an answer").len(),
+                engines
+                    .nearest(&name, "alpha", 5)
+                    .expect("an answer")
+                    .neighbors
+                    .len(),
                 1,
                 "the drain reconciled against the rebuilt store's epoch"
             );
@@ -4858,7 +4902,11 @@ mod tests {
             )
             .expect("the scoped increment");
             assert_eq!(
-                engines.nearest(&name, "beta", 5).expect("an answer").len(),
+                engines
+                    .nearest(&name, "beta", 5)
+                    .expect("an answer")
+                    .neighbors
+                    .len(),
                 2,
                 "the increment's drain carried the new document"
             );
@@ -4915,15 +4963,22 @@ mod tests {
                 &ProgressReporter::disconnected(),
             )
             .expect("engine damage never fails the leg");
-            assert_eq!(
-                engines.status(&name),
-                SemanticStatus::On {
-                    last_drain_error: None
-                },
+            assert!(
+                matches!(
+                    engines.status(&name),
+                    SemanticStatus::On {
+                        last_drain_error: None,
+                        ..
+                    }
+                ),
                 "the rebuild resolved the damage and the diagnostic cleared"
             );
             assert_eq!(
-                engines.nearest(&name, "beta", 5).expect("an answer").len(),
+                engines
+                    .nearest(&name, "beta", 5)
+                    .expect("an answer")
+                    .neighbors
+                    .len(),
                 2,
                 "the rebuilt sidecar converged on the same leg"
             );
@@ -4954,7 +5009,11 @@ mod tests {
             )
             .expect("the rescan reconcile");
             assert_eq!(
-                engines.nearest(&name, "beta", 5).expect("an answer").len(),
+                engines
+                    .nearest(&name, "beta", 5)
+                    .expect("an answer")
+                    .neighbors
+                    .len(),
                 2,
                 "the rescan's drain carried the new document"
             );
@@ -4976,7 +5035,11 @@ mod tests {
                 .attach(&f.registration(), &ProgressReporter::disconnected())
                 .expect("an attach with an enabled engine");
             assert_eq!(
-                engines.nearest(&name, "beta", 5).expect("an answer").len(),
+                engines
+                    .nearest(&name, "beta", 5)
+                    .expect("an answer")
+                    .neighbors
+                    .len(),
                 1
             );
 
@@ -4991,8 +5054,8 @@ mod tests {
                 .expect("the schema reload");
             assert_eq!(outcome, ReloadOutcome::SchemaChanged);
             let answer = engines.nearest(&name, "beta", 5).expect("an answer");
-            assert_eq!(answer.len(), 2, "{answer:?}");
-            assert_eq!(answer[0].path, "docs/beta.md");
+            assert_eq!(answer.neighbors.len(), 2, "{answer:?}");
+            assert_eq!(answer.neighbors[0].path, "docs/beta.md");
         }
     }
 

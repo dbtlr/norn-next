@@ -43,11 +43,9 @@
 //! composer that has not decided what a new reading means should fail to
 //! compile rather than fall into a default arm.
 //!
-//! Nothing produces a section today. The host retains the reading at config
-//! dispatch once the `search` handler's engine seams land there (NORN-230),
-//! beside the engine slot the dispatch delivered to; until those seams land,
-//! the host composes a vector refusal from a section a caller supplies and no
-//! call graph reaches one it retained.
+//! The host retains the reading at config dispatch, beside the engine slot the
+//! dispatch delivered to. No serving surface renders one yet: the `search` and
+//! `status` handlers are what carry a retained section onto the wire.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
