@@ -20,8 +20,8 @@ use norn_store::{
 use norn_testkit::explain::{Access, PlanRow, QueryPlan, ScanTarget};
 use norn_wire::{
     Column, Cursor, CursorKey, CursorOrderChanged, Direction, FieldValue, FindParams, FindingKind,
-    Moved, PagedRows, Predicate, ResolutionTarget, Rung, RungSet, Score, Sort, SortKey,
-    Unsatisfied, VaultAddress, VaultName,
+    LadderDeclaration, Moved, PagedRows, Predicate, ResolutionTarget, Rung, RungSet, Score, Sort,
+    SortKey, Unsatisfied, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -640,6 +640,23 @@ fn a_hit_cursor_ranked_by_another_ladder_is_refused_naming_both() {
             CursorOrderChanged::minted_raw(None).in_ladders(fused, RungSet::lexical())
         )
     );
+}
+
+/// **A lexical page declares the lexical floor as its ladder, and the cursor
+/// it mints names the rung set that declaration names**, so the ladder a
+/// report declares and the ladder its continuation is judged by are one fact.
+#[test]
+fn a_page_declares_the_lexical_ladder_its_cursor_names() {
+    let searching_store = Searching::new("search-ladder-declared");
+    let searched = searching_store.search(&searching("lantern").with_limit(1));
+    let next = searched.next.clone().expect("a next page");
+    let (_, _, report) = searched.into_report();
+    assert_eq!(report.ladder, LadderDeclaration::lexical());
+    assert_eq!(report.page.next.as_ref(), Some(&next));
+    let CursorKey::Hit { ladder, .. } = next.key() else {
+        panic!("a search minted a cursor that is no hit's: {next:?}");
+    };
+    assert_eq!(ladder, &report.ladder.rung_set());
 }
 
 /// **A document edited is searched as it now reads, on a snapshot established

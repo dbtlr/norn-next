@@ -58,7 +58,7 @@ _Avoid_: Candidate (unqualified)
 The set of vault documents satisfying the same resolution target when that target does not identify exactly one document.
 
 **Answer reading**:
-The trust state and store generation a vault report was answered under, carried on the report so a consumer judges the answer without a second request. When a model contributed, it also names each model and, for a model that holds derived state, how far that state trailed the store; a model applied at request time holds none and reports no lag.
+The trust state and store generation a vault report was answered under, carried on the report so a consumer judges the answer without a second request. Every search answer also declares the search ladder it ran, the lexical floor alone included, so no consumer infers a ladder from an absence: each rung that ran, each model and, for a model that holds derived state, how far that state trailed the store; a model applied at request time holds none and reports no lag.
 _Avoid_: Reading (unqualified; a walk refusal that stands is also a reading)
 
 **Search ladder**:

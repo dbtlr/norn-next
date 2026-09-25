@@ -4,19 +4,24 @@
 //! without a second request: where the entry stood, which database the rows
 //! came from, how far that database's writes had got, and — where the answer
 //! is a ranking — which rungs ranked it, which models ran, and how far each
-//! one's derived state trailed. A reading that had to be asked for separately would be a reading
-//! taken at another instant from the answer it describes.
+//! one's derived state trailed. A reading that had to be asked for separately
+//! would be a reading taken at another instant from the answer it describes.
+//! The first three are every answer's [`AnswerReading`]; the ladder is a
+//! search's alone, so it is the [`SearchReport`](crate::SearchReport)'s
+//! required [`LadderDeclaration`] and has that one home.
 //!
 //! **A ladder is declared, not inferred.** Which rungs ran is a fact about the
 //! answer, and a rung that was enabled and did not run is not in the
 //! declaration. Every search answer declares its ladder, the lexical floor
 //! alone included — as `[lexical]`, repeatable — so a consumer never infers
-//! the floor from an absence; an answer of a verb that ranks nothing declares
-//! none. A score is on the scale of the ladder that ranked it, and no ladder's
-//! scale is normalized into another's. `repeatable` is what says the same request against the same
-//! reading produces the same rows: a rung that ranks by a request-time model
-//! is still repeatable, and one whose order depends on state that drains
-//! underneath it is not.
+//! the floor from an absence, and a verb that ranks nothing has no ladder to
+//! declare. A declaration names its rungs in ladder order, each once, and
+//! holds a retrieval rung, so the rung set it names is always a ladder. A
+//! score is on the scale of the ladder that ranked it, and no ladder's scale
+//! is normalized into another's. `repeatable` is what says the same request
+//! against the same reading produces the same rows: a rung that ranks by a
+//! request-time model is still repeatable, and one whose order depends on
+//! state that drains underneath it is not.
 //!
 //! **Freshness belongs to a rung that holds state, and to no other.** The
 //! lexical floor runs no model and has nothing to trail. A request-time rung
@@ -51,9 +56,13 @@
 //! dispatch delivered to. No serving surface renders one yet: the `search` and
 //! `status` handlers are what carry a retained section onto the wire.
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::fmt;
 
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+
+use crate::read::search::RungSet;
 use crate::trust::TrustState;
 
 /// A rung of a vault's search ladder, in the order the ladder runs them.
@@ -90,6 +99,18 @@ impl Rung {
             Rung::Expansion | Rung::Rerank => false,
         }
     }
+}
+
+/// Every rung, in ladder order.
+const EVERY_RUNG: [Rung; 4] = [Rung::Lexical, Rung::Vector, Rung::Expansion, Rung::Rerank];
+
+/// The retrieval rungs, in ladder order: what a schema advertises a ladder
+/// holds one of.
+pub(crate) fn retrieval_rungs() -> Vec<Rung> {
+    EVERY_RUNG
+        .into_iter()
+        .filter(|rung| rung.retrieves())
+        .collect()
 }
 
 /// Which model ran, and which build of it.
@@ -217,7 +238,33 @@ impl RungReport {
     }
 }
 
-/// The ladder this answer ran.
+/// Why a list of rung reports declares no ladder.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MalformedLadder {
+    /// No rung it declares retrieves, so there was nothing to rank: the
+    /// empty list, or enhancers alone.
+    NoRetrievalRung,
+    /// A rung is declared twice, or before a rung the ladder runs ahead of it.
+    OutOfLadderOrder,
+}
+
+impl fmt::Display for MalformedLadder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            MalformedLadder::NoRetrievalRung => {
+                "a ladder declares at least one retrieval rung: lexical or vector"
+            }
+            MalformedLadder::OutOfLadderOrder => {
+                "a ladder declares each rung once, in ladder order"
+            }
+        })
+    }
+}
+
+impl std::error::Error for MalformedLadder {}
+
+/// The ladder a search answer ran.
 ///
 /// Every search answer declares one, the lexical floor alone included:
 /// `{"rungs":[{"rung":"lexical"}],"repeatable":true}`. A hit's score, and a
@@ -226,27 +273,121 @@ impl RungReport {
 ///
 /// The rungs are reports rather than a repeated flat shape: each one carries
 /// what that rung has and nothing it does not, so a request-time rung cannot
-/// be spelled with a lag it never held.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+/// be spelled with a lag it never held. They are in ladder order, each rung
+/// once, and at least one of them retrieves: a list that is not is refused
+/// where a declaration is built and where one is read alike, so the rung set
+/// a declaration names ([`LadderDeclaration::rung_set`]) is always a ladder.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct LadderDeclaration {
     /// The rungs that ran, in the order they ran, each carrying what that
     /// rung contributed.
-    pub rungs: Vec<RungReport>,
+    rungs: Vec<RungReport>,
     /// Whether the same request against the same reading produces the same
     /// rows in the same order.
-    pub repeatable: bool,
+    repeatable: bool,
 }
 
 impl LadderDeclaration {
-    /// A ladder that ran `rungs`, repeatable or not.
-    pub fn new(rungs: Vec<RungReport>, repeatable: bool) -> Self {
-        LadderDeclaration { rungs, repeatable }
+    /// A ladder that ran `rungs`, repeatable or not, or why `rungs` is no
+    /// ladder.
+    pub fn new(rungs: Vec<RungReport>, repeatable: bool) -> Result<Self, MalformedLadder> {
+        if !rungs.iter().any(|report| report.rung().retrieves()) {
+            return Err(MalformedLadder::NoRetrievalRung);
+        }
+        if !rungs.windows(2).all(|pair| pair[0].rung() < pair[1].rung()) {
+            return Err(MalformedLadder::OutOfLadderOrder);
+        }
+        Ok(LadderDeclaration { rungs, repeatable })
     }
 
     /// The lexical floor alone, which runs no model and is repeatable.
     pub fn lexical() -> Self {
-        LadderDeclaration::new(vec![RungReport::lexical()], true)
+        LadderDeclaration {
+            rungs: vec![RungReport::lexical()],
+            repeatable: true,
+        }
+    }
+
+    /// The rungs that ran, in ladder order.
+    pub fn rungs(&self) -> &[RungReport] {
+        &self.rungs
+    }
+
+    /// Whether the same request against the same reading produces the same
+    /// rows in the same order.
+    pub const fn repeatable(&self) -> bool {
+        self.repeatable
+    }
+
+    /// The set of rungs this ladder ran: what a hit cursor minted from this
+    /// answer names its ranking by.
+    pub fn rung_set(&self) -> RungSet {
+        RungSet::of(self.rungs.iter().map(RungReport::rung))
+            .expect("a declared ladder holds a retrieval rung")
+    }
+}
+
+/// A declaration as it arrives, before it is held to the ladder's grammar.
+/// The field names are the declaration's, so the bytes a reader accepts are
+/// the bytes a writer produces.
+#[derive(Deserialize)]
+struct LadderFields {
+    rungs: Vec<RungReport>,
+    repeatable: bool,
+}
+
+impl<'de> Deserialize<'de> for LadderDeclaration {
+    /// A declaration is read back through the grammar the constructor holds:
+    /// a list out of ladder order, or holding no retrieval rung, refuses the
+    /// read.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = LadderFields::deserialize(deserializer)?;
+        LadderDeclaration::new(fields.rungs, fields.repeatable).map_err(D::Error::custom)
+    }
+}
+
+impl JsonSchema for LadderDeclaration {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("LadderDeclaration")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed("norn_wire::LadderDeclaration")
+    }
+
+    /// The object a derive would describe, with the rule the reader keeps
+    /// advertised on its rungs: `contains` a report of a retrieval rung,
+    /// which implies at least one. Ladder order is the reader's alone, since
+    /// no JSON Schema keyword states an order over a tag.
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let report = generator.subschema_for::<RungReport>();
+        let retrieval = retrieval_rungs();
+        json_schema!({
+            "type": "object",
+            "description": "The ladder a search answer ran.",
+            "properties": {
+                "rungs": {
+                    "type": "array",
+                    "description": "The rungs that ran, in ladder order, each once, each carrying what that rung contributed. At least one is a retrieval rung: the lexical floor or vectors.",
+                    "items": report,
+                    "minItems": 1,
+                    "contains": {
+                        "type": "object",
+                        "properties": { "rung": { "enum": retrieval } },
+                        "required": ["rung"],
+                    },
+                },
+                "repeatable": {
+                    "type": "boolean",
+                    "description": "Whether the same request against the same reading produces the same rows in the same order.",
+                },
+            },
+            "required": ["rungs", "repeatable"],
+        })
     }
 }
 
@@ -261,27 +402,16 @@ pub struct AnswerReading {
     /// The last write generation committed to that database when the answer
     /// was established.
     pub generation: u64,
-    /// The ladder a search ran, and `null` for a verb that ranks nothing.
-    /// Every search answer carries one, the lexical floor alone included.
-    pub ladder: Option<LadderDeclaration>,
 }
 
 impl AnswerReading {
-    /// The reading an answer that ranks nothing was taken under.
+    /// The reading an answer was taken under.
     pub fn new(trust: TrustState, epoch: impl Into<String>, generation: u64) -> Self {
         AnswerReading {
             trust,
             epoch: epoch.into(),
             generation,
-            ladder: None,
         }
-    }
-
-    /// The same reading, of a search that ran `ladder`.
-    #[must_use]
-    pub fn with_ladder(mut self, ladder: LadderDeclaration) -> Self {
-        self.ladder = Some(ladder);
-        self
     }
 }
 

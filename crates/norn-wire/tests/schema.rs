@@ -19,16 +19,17 @@ use norn_wire::{
     EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind,
     FieldType, FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
     Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally,
-    LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, Moved, NameSet,
-    NotReady, Page, PagedRows, PathRuleKind, PollBackend, Predicate, Published, ReadFailure,
-    ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
-    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace, RequestBound, RequestPart,
-    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport,
-    RungSelection, RungSet, RungSkipReason, SchemaSource, Score, SearchParams, SearchReport,
-    SetParams, SetReport, Severity, SidecarRevision, Snapshot, Sort, SortKey, Span, StatusParams,
-    StatusReport, TagRow, TagSource, TagStance, Tally, TrustState, UnregisterParams,
-    UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
-    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    LadderDeclaration, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity,
+    Moved, NameSet, NotReady, Page, PagedRows, PathRuleKind, PollBackend, Predicate, Published,
+    ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem,
+    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace,
+    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
+    RollUp, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource, Score,
+    SearchParams, SearchReport, SetParams, SetReport, Severity, SidecarRevision, Snapshot, Sort,
+    SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TrustState,
+    UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams,
+    ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb,
+    WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -147,6 +148,7 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<AnswerReading>(),
         schema_of::<Rung>(),
         schema_of::<RungReport>(),
+        schema_of::<LadderDeclaration>(),
         schema_of::<Freshness>(),
         schema_of::<Score>(),
         schema_of::<SidecarRevision>(),
@@ -1293,24 +1295,74 @@ fn a_snapshot_advertises_the_parts_a_continuation_is_judged_against() {
 
 // ── The answer reading and the read product ──────────────────────────────
 
-/// A reading advertises the four parts a consumer judges an answer by, and
-/// refers to the trust vocabulary rather than restating it.
+/// A reading advertises the three parts every answer is judged by, and refers
+/// to the trust vocabulary rather than restating it.
 #[test]
 fn a_reading_advertises_the_parts_an_answer_is_judged_by() {
     let schema = schema_of::<AnswerReading>();
     assert_eq!(
         property_names(&schema),
-        ["trust", "epoch", "generation", "ladder"]
-            .into_iter()
-            .collect()
+        ["trust", "epoch", "generation"].into_iter().collect()
     );
     assert_eq!(
         schema["properties"]["trust"]["$ref"].as_str(),
         Some("#/$defs/TrustState")
     );
+}
+
+/// A search report advertises the ladder that ranked it and the page of hits,
+/// both required, so a surface validating a search answer refuses one that
+/// declares no ladder.
+#[test]
+fn a_search_report_advertises_its_ladder_and_its_page() {
+    let schema = schema_of::<SearchReport>();
+    assert_eq!(
+        property_names(&schema),
+        ["ladder", "page"].into_iter().collect()
+    );
+    let required: BTreeSet<&str> = schema["required"]
+        .as_array()
+        .expect("the report's required list")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(required, ["ladder", "page"].into_iter().collect());
+    assert_eq!(
+        schema["properties"]["ladder"]["$ref"].as_str(),
+        Some("#/$defs/LadderDeclaration")
+    );
+    let page = &schema["properties"]["page"]["$ref"];
+    let page = page
+        .as_str()
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        .unwrap_or_else(|| panic!("the report's page is no definition: {schema}"));
+    assert_eq!(
+        property_names(&schema["$defs"][page]),
+        ["rows", "next", "moved"].into_iter().collect()
+    );
     assert!(
-        schema["$defs"]["RungReport"].is_object(),
-        "the reading carries no definition of a rung report: {schema}"
+        schema["$defs"]["Hit"].is_object(),
+        "the report carries no definition of a hit: {schema}"
+    );
+}
+
+/// A ladder declaration advertises its rungs as reports holding a retrieval
+/// rung, which implies at least one, so a surface validating a search answer
+/// refuses a ladder of enhancers alone.
+#[test]
+fn a_ladder_declaration_advertises_a_retrieval_rung() {
+    let schema = schema_of::<LadderDeclaration>();
+    assert_eq!(
+        property_names(&schema),
+        ["rungs", "repeatable"].into_iter().collect()
+    );
+    let rungs = &schema["properties"]["rungs"];
+    assert_eq!(rungs["minItems"].as_u64(), Some(1));
+    assert_eq!(rungs["items"]["$ref"].as_str(), Some("#/$defs/RungReport"));
+    assert_eq!(
+        rungs["contains"]["properties"]["rung"]["enum"].as_array(),
+        Some(&retrieval_rung_spellings()),
+        "the declaration advertises a ladder holding no retrieval rung: {schema}"
     );
 }
 
@@ -2365,13 +2417,13 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
     );
 }
 
-/// Every paged read report is a page of its own row type, so a surface
-/// publishing a verb publishes the continuation with the rows.
+/// Every paged read report but search's is a page of its own row type, so a
+/// surface publishing a verb publishes the continuation with the rows. A
+/// search report holds its page beside the ladder that ranked it.
 #[test]
 fn every_paged_read_report_is_a_page_of_its_row() {
     for (report, row) in [
         (schema_of::<FindReport>(), "DocumentRow"),
-        (schema_of::<SearchReport>(), "Hit"),
         (schema_of::<CountReport>(), "Tally"),
         (schema_of::<DescribeReport>(), "Facet"),
     ] {

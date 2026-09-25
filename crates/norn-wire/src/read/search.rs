@@ -61,7 +61,7 @@ use crate::address::VaultAddress;
 use crate::cursor::{Cursor, Page, Score};
 use crate::document::{Column, DocumentPath, DocumentRow};
 use crate::predicate::Predicate;
-use crate::reading::Rung;
+use crate::reading::{LadderDeclaration, Rung, retrieval_rungs};
 
 /// The most candidates one rung hands the ranking an answer is fused from:
 /// its depth.
@@ -89,18 +89,6 @@ impl fmt::Display for NoRetrievalRung {
 }
 
 impl std::error::Error for NoRetrievalRung {}
-
-/// Every rung, in ladder order.
-const EVERY_RUNG: [Rung; 4] = [Rung::Lexical, Rung::Vector, Rung::Expansion, Rung::Rerank];
-
-/// The retrieval rungs, in ladder order: what a schema advertises a ladder
-/// holds one of.
-fn retrieval_rungs() -> Vec<Rung> {
-    EVERY_RUNG
-        .into_iter()
-        .filter(|rung| rung.retrieves())
-        .collect()
-}
 
 /// Rungs as they arrive, each named once. A set naming a rung twice is refused
 /// rather than folded, which is what the schema's `uniqueItems` says.
@@ -398,8 +386,32 @@ impl Hit {
     }
 }
 
-/// What `search` answers with: one page of ranked hits.
-pub type SearchReport = Page<Hit>;
+/// What `search` answers with: the ladder that ranked it, and one page of
+/// ranked hits.
+///
+/// On the wire an object of the two:
+/// `{"ladder":{"rungs":[{"rung":"lexical"}],"repeatable":true},"page":{"rows":[],"next":null,"moved":[]}}`.
+/// The ladder is required, so a search answer always declares it, the lexical
+/// floor alone included, and a consumer never infers a ladder from an absence.
+/// The page is a field of its own rather than flattened beside the ladder, as
+/// every report holding a page holds it, so the page's shape is the one every
+/// paged verb answers with.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct SearchReport {
+    /// The ladder the answer ran. A hit's score is on its scale, and a hit
+    /// cursor this page mints names its rung set.
+    pub ladder: LadderDeclaration,
+    /// The hits, most relevant first, and where the next page begins.
+    pub page: Page<Hit>,
+}
+
+impl SearchReport {
+    /// The page `page`, ranked by `ladder`.
+    pub const fn new(ladder: LadderDeclaration, page: Page<Hit>) -> Self {
+        SearchReport { ladder, page }
+    }
+}
 
 /// What a `search` request carries.
 ///

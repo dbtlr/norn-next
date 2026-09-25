@@ -23,18 +23,18 @@ use norn_wire::{
     ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind, FindingRow,
     FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
     KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams,
-    ListReport, MaintainerIdentity, ModelIdentity, Moved, NameSet, NoProblems, NoRetrievalRung,
-    NonFiniteScore, NotReady, Page, PagedRows, PathRuleKind, PollBackend, Predicate, Published,
-    RUNG_DEPTH, ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration,
-    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
-    ReloadStage, Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
-    ResolveReport, RollUp, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
-    Score, SearchParams, SetParams, SetReport, Severity, SidecarRevision, Snapshot, Sort, SortKey,
-    Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead,
-    TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
-    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
-    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
-    Verb, WarmingPhase, WatcherLossCause,
+    ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet, NoProblems,
+    NoRetrievalRung, NonFiniteScore, NotReady, Page, PagedRows, PathRuleKind, PollBackend,
+    Predicate, Published, RUNG_DEPTH, ReadFailure, ReasonCode, RegisterParams, RegisterReport,
+    Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams,
+    ReloadReport, ReloadStage, Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget,
+    ResolveParams, ResolveReport, RollUp, Rung, RungReport, RungSelection, RungSet, RungSkipReason,
+    SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity,
+    SidecarRevision, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind,
+    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
+    UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
+    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -535,14 +535,34 @@ fn rung_reports() -> Vec<RungReport> {
     reports
 }
 
-/// Every reading an answer is taken under, with and without a ladder.
+/// Every reading an answer is taken under.
 fn answer_readings() -> Vec<AnswerReading> {
+    vec![AnswerReading::new(TrustState::Ready, "epoch-1", 12)]
+}
+
+/// A ladder a search declares: the floor alone, every rung at once, and a
+/// ladder of vectors without the floor.
+fn ladder_declarations() -> Vec<LadderDeclaration> {
     vec![
-        AnswerReading::new(TrustState::Ready, "epoch-1", 12),
-        AnswerReading::new(TrustState::Ready, "epoch-1", 12)
-            .with_ladder(LadderDeclaration::new(rung_reports(), false)),
-        AnswerReading::new(TrustState::Ready, "epoch-1", 12)
-            .with_ladder(LadderDeclaration::lexical()),
+        LadderDeclaration::lexical(),
+        LadderDeclaration::new(
+            vec![
+                RungReport::lexical(),
+                RungReport::vector(ModelIdentity::new("stub", "1"), Freshness::trailing(3)),
+                RungReport::expansion(ModelIdentity::new("stub", "1")),
+                RungReport::rerank(ModelIdentity::new("stub", "1")),
+            ],
+            false,
+        )
+        .expect("a ladder in ladder order holding a retrieval rung"),
+        LadderDeclaration::new(
+            vec![RungReport::vector(
+                ModelIdentity::new("stub", "1"),
+                Freshness::rescanning(),
+            )],
+            false,
+        )
+        .expect("a ladder in ladder order holding a retrieval rung"),
     ]
 }
 
@@ -3225,32 +3245,105 @@ fn every_answer_reading_survives_the_round_trip() {
     }
 }
 
-/// A reading is the trust state, the database, how far its writes had got, and
-/// the ladder a search ran. A `null` ladder is an answer that ranks nothing;
-/// a search over the lexical floor alone declares that floor, repeatable.
+/// A reading is the trust state, the database, and how far its writes had
+/// got. The ladder a search ran is the search report's, not the reading's, so
+/// it has one home.
 #[test]
-fn a_reading_carries_the_trust_state_the_database_and_the_ladder() {
+fn a_reading_carries_the_trust_state_and_the_database() {
     assert_eq!(
         wire(&AnswerReading::new(TrustState::Ready, "epoch-1", 12)),
-        concat!(
-            r#"{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12,"#,
-            r#""ladder":null}"#
-        )
+        r#"{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12}"#
+    );
+}
+
+/// A search report is the ladder that ranked it and the page of hits, each in
+/// a field of its own. There is no search report without a ladder: the lexical
+/// floor alone is declared as `[lexical]`, repeatable, and a report arriving
+/// without one does not parse.
+#[test]
+fn a_search_report_declares_its_ladder_beside_its_page() {
+    let report = SearchReport::new(
+        LadderDeclaration::lexical(),
+        Page::new(vec![Hit::new(path("notes/a.md"), score(0.5))], None, vec![]),
     );
     assert_eq!(
-        wire(
-            &AnswerReading::new(TrustState::Ready, "epoch-1", 12)
-                .with_ladder(LadderDeclaration::lexical())
-        ),
+        wire(&report),
         concat!(
-            r#"{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12,"#,
-            r#""ladder":{"rungs":[{"rung":"lexical"}],"repeatable":true}}"#
+            r#"{"ladder":{"rungs":[{"rung":"lexical"}],"repeatable":true},"#,
+            r#""page":{"rows":[{"path":"notes/a.md","score":0.5}],"next":null,"moved":[]}}"#
         )
+    );
+    for ladder in ladder_declarations() {
+        round_trip(&SearchReport::new(ladder, Page::new(vec![], None, vec![])));
+    }
+    assert!(
+        serde_json::from_str::<SearchReport>(r#"{"page":{"rows":[],"next":null,"moved":[]}}"#)
+            .is_err(),
+        "a search report declaring no ladder parsed"
     );
     assert_eq!(
         LadderDeclaration::lexical(),
-        LadderDeclaration::new(vec![RungReport::lexical()], true)
+        LadderDeclaration::new(vec![RungReport::lexical()], true).expect("the floor alone")
     );
+}
+
+/// A declaration names the rungs that ran in ladder order, each once, and
+/// holds a retrieval rung; one that does not is refused where it is built and
+/// where it is read alike. The rung set a hit cursor names is derived from the
+/// declaration, never built beside it.
+#[test]
+fn a_ladder_declaration_is_a_ladder_in_ladder_order() {
+    let model = || ModelIdentity::new("stub", "1");
+    let vector = || RungReport::vector(model(), Freshness::trailing(0));
+    for (rungs, refusal) in [
+        (vec![], MalformedLadder::NoRetrievalRung),
+        (
+            vec![RungReport::rerank(model())],
+            MalformedLadder::NoRetrievalRung,
+        ),
+        (
+            vec![RungReport::expansion(model()), RungReport::rerank(model())],
+            MalformedLadder::NoRetrievalRung,
+        ),
+        (
+            vec![RungReport::lexical(), RungReport::lexical()],
+            MalformedLadder::OutOfLadderOrder,
+        ),
+        (
+            vec![vector(), RungReport::lexical()],
+            MalformedLadder::OutOfLadderOrder,
+        ),
+        (
+            vec![RungReport::lexical(), vector(), vector()],
+            MalformedLadder::OutOfLadderOrder,
+        ),
+    ] {
+        let named: Vec<Rung> = rungs.iter().map(RungReport::rung).collect();
+        assert_eq!(
+            LadderDeclaration::new(rungs.clone(), true),
+            Err(refusal),
+            "{named:?} declared as a ladder"
+        );
+    }
+    for malformed in [
+        r#"{"rungs":[],"repeatable":true}"#,
+        r#"{"rungs":[{"rung":"rerank","model":{"id":"stub","version":"1"}}],"repeatable":true}"#,
+        r#"{"rungs":[{"rung":"lexical"},{"rung":"lexical"}],"repeatable":true}"#,
+        r#"{"rungs":[{"rung":"vector","model":{"id":"stub","version":"1"},"freshness":{"state":"rescanning"}},{"rung":"lexical"}],"repeatable":true}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<LadderDeclaration>(malformed).is_err(),
+            "`{malformed}` read back as a ladder"
+        );
+    }
+    assert_eq!(LadderDeclaration::lexical().rung_set(), RungSet::lexical());
+    for ladder in ladder_declarations() {
+        let declared: Vec<Rung> = ladder.rungs().iter().map(RungReport::rung).collect();
+        assert_eq!(
+            ladder.rung_set(),
+            RungSet::of(declared).expect("a declared ladder holds a retrieval rung")
+        );
+    }
 }
 
 /// A report carries what its rung has and nothing it does not: the floor
@@ -3455,7 +3548,7 @@ fn a_vault_answer_is_complete_exactly_when_nothing_was_left_unapplied() {
     round_trip(&whole);
     assert_eq!(
         wire(&whole),
-        r#"{"reading":{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12,"ladder":null},"unsatisfied":[],"advisories":[],"report":3}"#
+        r#"{"reading":{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12},"unsatisfied":[],"advisories":[],"report":3}"#
     );
 
     let advised: VaultAnswer<u64> =

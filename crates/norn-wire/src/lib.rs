@@ -32,9 +32,8 @@
 //! [`Pattern`] grammar a schema's path and tag sets are written in too, and
 //! the [`ResolutionTarget`] one
 //! document is addressed by. What a read answers with is spelled here as
-//! well: the [`AnswerReading`] every answer carries — its [`TrustState`], its
-//! establishment, and the [`LadderDeclaration`] of [`RungReport`]s a search
-//! ran — the [`Unsatisfied`] parts of a request that could not be applied, the
+//! well: the [`AnswerReading`] every answer carries — its [`TrustState`] and
+//! its establishment — the [`Unsatisfied`] parts of a request that could not be applied, the
 //! [`AnswerAdvisory`] saying what an applied part assumed or where it stopped,
 //! with the [`ComparedBy`] place a comparison compared in, the
 //! [`RungSkipReason`] a rung was left out for, and the [`RUNG_DEPTH`] a rung
@@ -45,8 +44,9 @@
 //!
 //! The six read verbs are spelled here as one params type and one report type
 //! each: [`FindParams`] answering [`FindReport`], [`SearchParams`] answering
-//! [`SearchReport`] over the [`RungSelection`] it asks for and the [`Hit`]s
-//! it ranked,
+//! [`SearchReport`] over the [`RungSelection`] it asks for, declaring the
+//! [`LadderDeclaration`] of [`RungReport`]s it ran beside the [`Hit`]s it
+//! ranked,
 //! [`GetParams`] answering [`GetReport`], [`CountParams`] answering
 //! [`CountReport`] of [`Tally`]s, [`ValidateParams`] answering
 //! [`ValidateReport`], and [`DescribeParams`] answering [`DescribeReport`] of
@@ -215,8 +215,8 @@
 //! [`CursorOrderChanged::new`], [`DocumentOrders::new`], [`HitLadders::new`],
 //! [`Score::new`],
 //! [`RungSkipReason::unavailable`],
-//! [`AnswerReading::new`], [`AnswerReading::with_ladder`],
-//! [`LadderDeclaration::new`], [`LadderDeclaration::lexical`],
+//! [`AnswerReading::new`],
+//! [`LadderDeclaration::new`], [`LadderDeclaration::lexical`], [`SearchReport::new`],
 //! [`ModelIdentity::new`], [`Freshness::trailing`], [`Freshness::rescanning`],
 //! [`VaultAnswer::new`], [`VaultAnswer::with_advisories`],
 //! [`MaintainerIdentity::named`] and
@@ -412,7 +412,8 @@ pub use read::search::{
 };
 pub use read::validate::{KindTally, ValidateParams, ValidateReport};
 pub use reading::{
-    AnswerReading, EngineSection, Freshness, LadderDeclaration, ModelIdentity, Rung, RungReport,
+    AnswerReading, EngineSection, Freshness, LadderDeclaration, MalformedLadder, ModelIdentity,
+    Rung, RungReport,
 };
 pub use reload::{ControlFile, ControlFileFailure, ReloadFailure, ReloadStage};
 pub use status::{

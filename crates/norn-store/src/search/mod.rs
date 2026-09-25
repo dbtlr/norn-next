@@ -83,8 +83,8 @@ mod words;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    AnswerAdvisory, Column, Cursor, CursorKey, Hit, Moved, Page, PagedRows, Predicate, RungSet,
-    Score, SearchReport, Unsatisfied,
+    AnswerAdvisory, Column, Cursor, CursorKey, Hit, LadderDeclaration, Moved, Page, PagedRows,
+    Predicate, RungSet, Score, SearchReport, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -195,6 +195,9 @@ pub struct Searched {
     /// What the parts that were applied assumed: a mixed-offset comparison,
     /// once per key, in the order the request names the parts.
     pub advisories: Vec<AnswerAdvisory>,
+    /// The ladder the page was ranked by: the lexical floor alone. The
+    /// cursor the page mints names the rung set this declaration names.
+    pub ladder: LadderDeclaration,
     /// The reading the page was answered from, as a cursor carries it. The
     /// ranking is no schema's order, so it names no fingerprint.
     pub snapshot: norn_wire::Snapshot,
@@ -209,7 +212,7 @@ impl Searched {
         (
             self.unsatisfied,
             self.advisories,
-            Page::new(self.hits, self.next, self.moved),
+            SearchReport::new(self.ladder, Page::new(self.hits, self.next, self.moved)),
         )
     }
 }
@@ -336,10 +339,12 @@ impl Snapshot {
             declared,
             lookups,
         )?;
+        let ladder = LadderDeclaration::lexical();
+        let ranked_by = ladder.rung_set();
         let (resume, moved) = match &request.after {
             None => (None, Vec::new()),
             Some(cursor) => {
-                let (at, moved) = self.judge_hit(cursor, lookups)?;
+                let (at, moved) = self.judge_hit(cursor, &ranked_by, lookups)?;
                 (Some(at), moved)
             }
         };
@@ -371,7 +376,7 @@ impl Snapshot {
         let next = next
             .map(|last| {
                 Ok::<_, StoreError>(CursorKey::hit(
-                    RungSet::lexical(),
+                    ranked_by.clone(),
                     score_of(last.score)?,
                     last.path,
                 ))
@@ -406,6 +411,7 @@ impl Snapshot {
             moved,
             unsatisfied,
             advisories,
+            ladder,
             snapshot,
             work,
         })
@@ -422,12 +428,13 @@ impl Snapshot {
     fn judge_hit(
         &self,
         cursor: &Cursor,
+        ranked_by: &RungSet,
         lookups: &mut Lookups,
     ) -> Result<((f64, String), Vec<Moved>), PageRefusal> {
         let CursorKey::Hit { score, path, .. } = cursor.key() else {
             return Err(PageRefusal::cursor_not_taken(cursor, PagedRows::Hit));
         };
-        let moved = self.judge_ranked_reading(cursor, &RungSet::lexical(), lookups)?;
+        let moved = self.judge_ranked_reading(cursor, ranked_by, lookups)?;
         Ok(((score.get(), path.clone()), moved))
     }
 
