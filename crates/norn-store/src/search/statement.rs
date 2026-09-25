@@ -10,6 +10,8 @@
 
 use norn_db::rusqlite::types::Value;
 
+use crate::error::StoreError;
+use crate::find::path_list;
 use crate::read::{Binder, Filter};
 
 use super::words::holds_word;
@@ -39,15 +41,25 @@ pub enum SearchStatement {
     /// whether the page is a first page or a continuation. A filter narrows
     /// what is scored and sorted, and never the matches the index hands back.
     LexicalPage,
+    /// Which of a set of paths the snapshot holds as documents, each with its
+    /// row id: the paths drive it — `CROSS JOIN` keeps their list the outer
+    /// loop — and each reaches its document by one seek of `documents_path`,
+    /// so it costs the paths it is handed and never the vault.
+    HeldPaths,
+    /// How many rows each change feed holds past a generation, counted to a
+    /// bound: one range of `documents_change_feed` and one of
+    /// `tombstones_change_feed` past each feed's generation, each stopped at
+    /// the bound, so it costs at most twice the bound whatever the feeds hold.
+    FeedRowsAfter,
 }
 
 /// How many statement shapes [`SearchStatement::all`] holds.
-pub const SEARCH_STATEMENTS: usize = 1;
+pub const SEARCH_STATEMENTS: usize = 3;
 
 impl SearchStatement {
     /// Every statement shape, in slot order.
     pub fn all() -> [Self; SEARCH_STATEMENTS] {
-        [Self::LexicalPage]
+        [Self::LexicalPage, Self::HeldPaths, Self::FeedRowsAfter]
     }
 
     /// Where this statement stands in [`Self::all`]. Exhaustive, so a shape
@@ -55,6 +67,8 @@ impl SearchStatement {
     pub fn slot(self) -> usize {
         let slot = match self {
             Self::LexicalPage => 0,
+            Self::HeldPaths => 1,
+            Self::FeedRowsAfter => 2,
         };
         assert!(
             slot < SEARCH_STATEMENTS,
@@ -172,5 +186,39 @@ pub(crate) fn compose_lexical_page(page: &LexicalPage<'_>) -> (String, Vec<Value
              LIMIT {limit}"
         ),
         binder.into_values(),
+    )
+}
+
+/// [`SearchStatement::HeldPaths`]: each of `paths` the snapshot holds as a
+/// document, as its row id and its path.
+pub(crate) fn compose_held_paths(paths: &[&str]) -> Result<(String, Vec<Value>), StoreError> {
+    Ok((
+        "SELECT d.id, d.path FROM json_each(?1) AS j
+             CROSS JOIN documents AS d ON d.path = j.value"
+            .to_string(),
+        vec![path_list(paths)?],
+    ))
+}
+
+/// [`SearchStatement::FeedRowsAfter`]: how many document rows stand at a
+/// generation past `documents_after`, and how many deaths at one past
+/// `tombstones_after`, each counted to at most `bound`.
+pub(crate) fn compose_feed_rows_after(
+    documents_after: i64,
+    tombstones_after: i64,
+    bound: u64,
+) -> (String, Vec<Value>) {
+    (
+        "SELECT
+               (SELECT COUNT(*) FROM (SELECT 1 FROM documents AS d
+                    WHERE d.generation > ?1 LIMIT ?3)),
+               (SELECT COUNT(*) FROM (SELECT 1 FROM tombstones AS t
+                    WHERE t.generation > ?2 LIMIT ?3))"
+            .to_string(),
+        vec![
+            Value::Integer(documents_after),
+            Value::Integer(tombstones_after),
+            Value::Integer(i64::try_from(bound).unwrap_or(i64::MAX)),
+        ],
     )
 }

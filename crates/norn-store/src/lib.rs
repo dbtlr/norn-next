@@ -163,8 +163,8 @@ pub use request::{
 };
 pub use resolve::{AmbiguityIgnore, TargetClass};
 pub use search::{
-    Candidate, Candidates, HitRows, LexicalQuery, SEARCH_STATEMENTS, SearchPlan, SearchStatement,
-    SearchWork, Searched,
+    Candidate, Candidates, FeedRows, Held, HitRows, LexicalQuery, SEARCH_STATEMENTS, SearchPlan,
+    SearchStatement, SearchWork, Searched,
 };
 pub use store::{
     ConnectionTurn, ReaderMint, RecordedStoreSchema, Snapshot, SnapshotAttempt, SnapshotReader,

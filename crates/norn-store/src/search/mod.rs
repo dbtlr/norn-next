@@ -82,7 +82,7 @@ mod candidates;
 mod statement;
 mod words;
 
-pub use candidates::{Candidate, Candidates, HitRows};
+pub use candidates::{Candidate, Candidates, FeedRows, Held, HitRows};
 
 use norn_db::EmittedPlan;
 use norn_wire::{

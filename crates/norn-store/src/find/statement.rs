@@ -578,8 +578,8 @@ pub(crate) fn compose_nested_total(nested: Nested, ids: &[i64]) -> (String, Vec<
     )
 }
 
-/// The paths a finding statement reads, as the JSON array `json_each` walks.
-fn path_list(paths: &[&str]) -> Result<Value, StoreError> {
+/// The paths a statement reads, as the JSON array `json_each` walks.
+pub(crate) fn path_list(paths: &[&str]) -> Result<Value, StoreError> {
     canonical_json(&FrontmatterValue::Sequence(
         paths
             .iter()
