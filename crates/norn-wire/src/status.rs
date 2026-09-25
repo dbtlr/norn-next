@@ -146,16 +146,6 @@ impl Published {
     pub const fn parked(refusal: ErrorEnvelope) -> Self {
         Published::Parked { refusal }
     }
-
-    /// The published demand as an answer for the entry renders it: a trust
-    /// state where the entry answers with one, and the park's own refusal
-    /// where it does not.
-    pub fn of(answer: Result<TrustState, ErrorEnvelope>) -> Self {
-        match answer {
-            Ok(state) => Published::state(state),
-            Err(refusal) => Published::parked(refusal),
-        }
-    }
 }
 
 /// The control-file fingerprints a vault is serving under.

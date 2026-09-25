@@ -5670,12 +5670,7 @@ fn a_published_answer_is_the_demand_an_entry_answers_with() {
         r#"{"answer":"state","state":{"state":"ready"}}"#
     );
     assert_eq!(
-        Published::of(Ok(TrustState::Ready)),
-        Published::state(TrustState::Ready)
-    );
-    assert_eq!(Published::of(Err(park())), Published::parked(park()));
-    assert_eq!(
-        tag_string(&Published::of(Err(park())), "answer"),
+        tag_string(&Published::parked(park()), "answer"),
         "parked",
         "a parked entry published a state"
     );

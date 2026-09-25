@@ -235,7 +235,7 @@
 //! [`Tally::new`], [`KindTally::new`], and the `new` on each of the six read
 //! params types;
 //! [`Registration::new`], [`Published::state`], [`Published::parked`],
-//! [`Published::of`], [`Fingerprints::new`], [`Drift::inactive`],
+//! [`Fingerprints::new`], [`Drift::inactive`],
 //! [`Drift::current`], [`Drift::reload_pending`], [`Drift::unreadable`],
 //! [`EngineStatus::off`], [`EngineStatus::on`], [`EngineStatus::self_disabled`],
 //! [`ControlFileFailure::new`],

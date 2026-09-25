@@ -74,23 +74,9 @@ impl Demand {
     /// is the mapping that entry point renders, taking the name as a parameter
     /// because a demand carries none of its own.
     pub fn answer(self, name: &VaultName) -> Result<TrustState, ErrorEnvelope> {
-        match self {
-            Demand::State(state) => answer_state(state),
-            Demand::MaintainerContended(incumbent) => Err(maintainer_contended(incumbent)),
-            Demand::DuplicateRoot(conflict) => Err(ErrorEnvelope::new(
-                "more than one registered name resolves to this vault's root, so none of them \
-                 is served",
-                ErrorDetail::duplicate_root(conflict.aliases().clone()),
-            )),
-            Demand::IdentityRefused(refusal) => Err(root_refused(refusal)),
-            Demand::UnknownVault => Err(Unserved::UnknownVault.answer(name)),
-            Demand::EntryHeld => Err(Unserved::EntryHeld.answer(name)),
-            Demand::UnsupportedMode(mode) => Err(unsupported_attach_mode(mode)),
-        }
+        self.state_or_park(name).and_then(answer_state)
     }
-}
 
-impl Demand {
     /// This demand as what the entry publishes, for the vault `name` it was
     /// read for: the trust state where it is one, and the refusal it is
     /// otherwise.
@@ -104,17 +90,32 @@ impl Demand {
     /// published as the envelope [`Demand::answer`] renders it as.
     ///
     /// `vault status`, the roll-up it computes and `vault register`'s report
-    /// publish through this. The match carries no wildcard, so a demand
-    /// minted without a stance here does not compile.
+    /// publish through this.
     pub(crate) fn published(self, name: &VaultName) -> Published {
+        match self.state_or_park(name) {
+            Ok(state) => Published::state(state),
+            Err(refusal) => Published::parked(refusal),
+        }
+    }
+
+    /// The trust state this demand is, or the refusal every other demand
+    /// renders as: the one mapping [`Demand::answer`] and
+    /// [`Demand::published`] both read, which differ only in what they make
+    /// of an untrusted state. The match carries no wildcard, so a demand
+    /// minted without a refusal here does not compile.
+    fn state_or_park(self, name: &VaultName) -> Result<TrustState, ErrorEnvelope> {
         match self {
-            Demand::State(state) => Published::state(state),
-            refused @ (Demand::MaintainerContended(_)
-            | Demand::DuplicateRoot(_)
-            | Demand::IdentityRefused(_)
-            | Demand::UnknownVault
-            | Demand::EntryHeld
-            | Demand::UnsupportedMode(_)) => Published::of(refused.answer(name)),
+            Demand::State(state) => Ok(state),
+            Demand::MaintainerContended(incumbent) => Err(maintainer_contended(incumbent)),
+            Demand::DuplicateRoot(conflict) => Err(ErrorEnvelope::new(
+                "more than one registered name resolves to this vault's root, so none of them \
+                 is served",
+                ErrorDetail::duplicate_root(conflict.aliases().clone()),
+            )),
+            Demand::IdentityRefused(refusal) => Err(root_refused(refusal)),
+            Demand::UnknownVault => Err(Unserved::UnknownVault.answer(name)),
+            Demand::EntryHeld => Err(Unserved::EntryHeld.answer(name)),
+            Demand::UnsupportedMode(mode) => Err(unsupported_attach_mode(mode)),
         }
     }
 }
