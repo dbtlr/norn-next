@@ -210,7 +210,15 @@ impl std::fmt::Display for SemanticRefusal {
 impl std::error::Error for SemanticRefusal {}
 
 /// The refusal a vector rung answers with, composed from a nearest refusal:
-/// [`VectorRefusal::of`] rendered as its envelope.
+/// the one composition every vector refusal a search meets goes through,
+/// rendered as its envelope.
+///
+/// That no engine stands is answered by the delivered section it was found
+/// beside: a vault whose section is absent or disabled is told what to enable
+/// (`engine/not-enabled`), and every other reading, and an engine that took
+/// itself out of service, is `engine/unavailable` carrying the section's own
+/// error or the engine's retained diagnostic. An engine that stands and
+/// failed its answer is `engine/failed`.
 pub fn compose_vector_refusal(refusal: SemanticRefusal) -> ErrorEnvelope {
     VectorRefusal::of(refusal).envelope()
 }
