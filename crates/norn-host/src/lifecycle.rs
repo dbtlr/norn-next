@@ -1631,9 +1631,10 @@ fn schedule_demanded_work<A: SnapshotSource>(
     Some(schedule_demand(state, name))
 }
 
-/// A lease answering `outcome` that holds no entry: the answer to a name the
-/// serving set does not serve, and to an entry out of service. It holds
-/// nothing, so nothing is withdrawn when it is dropped.
+/// A lease answering `outcome` that holds no entry: the answer to a mode this
+/// host holds no lifecycle for, to a name the serving set does not serve, and
+/// to an entry out of service. It holds nothing, so nothing is withdrawn when
+/// it is dropped.
 fn unheld_lease<O: EntryOps>(name: &VaultName, outcome: Demand) -> DemandLease<O> {
     DemandLease {
         outcome,
@@ -3631,12 +3632,7 @@ impl<O: EntryOps> Host<O> {
     /// is withdrawn when the lease is dropped.
     pub fn demand(&self, name: &VaultName, mode: AttachMode) -> Result<DemandLease<O>, HostError> {
         if !matches!(mode, AttachMode::Durable) {
-            return Ok(DemandLease {
-                outcome: Demand::UnsupportedMode(mode),
-                name: name.clone(),
-                held: None,
-                recovery_demand: None,
-            });
+            return Ok(unheld_lease(name, Demand::UnsupportedMode(mode)));
         }
         let Some(entry) = self.shared.entries.get(name) else {
             return Ok(unheld_lease(name, Demand::UnknownVault));
@@ -3740,12 +3736,7 @@ impl<O: EntryOps> Host<O> {
     /// a retry the mode refuses retires nothing.
     pub fn retry(&self, name: &VaultName, mode: AttachMode) -> Result<DemandLease<O>, HostError> {
         if !matches!(mode, AttachMode::Durable) {
-            return Ok(DemandLease {
-                outcome: Demand::UnsupportedMode(mode),
-                name: name.clone(),
-                held: None,
-                recovery_demand: None,
-            });
+            return Ok(unheld_lease(name, Demand::UnsupportedMode(mode)));
         }
         if let Some(entry) = self.shared.entries.get(name) {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
