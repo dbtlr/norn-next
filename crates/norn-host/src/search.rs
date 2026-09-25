@@ -332,7 +332,10 @@ fn vector_scale(neighbors: &[Neighbor]) -> Vec<Ranked> {
         .iter()
         .map(|neighbor| Ranked {
             path: neighbor.path.clone(),
-            score: f64::from(neighbor.score),
+            // Adding zero turns a negative zero into zero, so the order,
+            // the page a cursor resumes and the score a cursor carries
+            // agree on one zero.
+            score: f64::from(neighbor.score) + 0.0,
         })
         .collect();
     order(&mut ranked);
@@ -371,9 +374,10 @@ fn page_of(
         .filter(|hit| floor.is_none_or(|floor| hit.score >= floor.get()))
         .filter(|hit| match resume {
             None => true,
-            Some((score, path)) => {
-                hit.score < score || (hit.score == score && hit.path.as_str() > path)
-            }
+            Some((score, path)) => score
+                .total_cmp(&hit.score)
+                .then_with(|| hit.path.as_str().cmp(path))
+                .is_gt(),
         });
     let page: Vec<Ranked> = kept.by_ref().take(limit).collect();
     let more = kept.next().is_some();
@@ -849,6 +853,52 @@ fn ranked_answer(
 
 #[cfg(test)]
 mod tests {
+
+    /// **A page resumes by the comparison that ordered it**: a ranking holding
+    /// both zeros, ordered by `total_cmp`, drains a page at a time to the
+    /// ranking whole, and the vector rung reads a negative zero as zero.
+    #[test]
+    fn a_page_resumes_by_the_order_that_ranked_it() {
+        let mut ranked = vec![
+            Ranked {
+                path: "a".to_string(),
+                score: -0.0,
+            },
+            Ranked {
+                path: "b".to_string(),
+                score: 0.0,
+            },
+            Ranked {
+                path: "c".to_string(),
+                score: -1.0,
+            },
+        ];
+        order(&mut ranked);
+        let whole: Vec<String> = ranked.iter().map(|hit| hit.path.clone()).collect();
+        let mut drained = Vec::new();
+        let mut resume: Option<(f64, String)> = None;
+        loop {
+            let (page, more) = page_of(
+                ranked.clone(),
+                None,
+                resume.as_ref().map(|(score, path)| (*score, path.as_str())),
+                1,
+            );
+            let last = page.last().expect("a page before the end");
+            resume = Some((last.score, last.path.clone()));
+            drained.extend(page.iter().map(|hit| hit.path.clone()));
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(drained, whole);
+
+        let scaled = vector_scale(&[Neighbor {
+            path: "z".to_string(),
+            score: -0.0,
+        }]);
+        assert!(scaled[0].score.is_sign_positive());
+    }
     use norn_wire::{EngineSection, ReasonCode, RungSkipReason};
 
     use super::*;
