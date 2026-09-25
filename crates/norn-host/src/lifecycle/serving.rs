@@ -17,16 +17,15 @@
 //! Joining while the host runs carries a classification with it, and that is
 //! the lifecycle's own move rather than this module's: a set knows which roots
 //! it holds, and whether two of them are one root is a filesystem reading taken
-//! against the entries a refusal then acts on. The registration verbs Layer
-//! 3's product surface offers land on that move; these two are what it is
-//! built from.
-//!
-//! The pair is dormant until those verbs exist. Startup and the lifecycle's
-//! own join are what reach [`ServingSet::insert`], [`ServingSet::remove`] has
-//! no caller outside this crate's own cases, and nothing above this crate
-//! reaches either.
+//! against the entries a refusal then acts on. The registration verbs —
+//! [`Host::vault_register`] and [`Host::vault_unregister`] — land on that
+//! move and on [`ServingSet::remove`], each under the one lock every
+//! registration change holds, so no insertion or removal but startup's runs
+//! outside it.
 //!
 //! [`Host::new`]: crate::Host::new
+//! [`Host::vault_register`]: crate::Host::vault_register
+//! [`Host::vault_unregister`]: crate::Host::vault_unregister
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -37,8 +36,12 @@ use norn_config::registry::Entry as Registration;
 use norn_fs::Refusal;
 use norn_wire::VaultName;
 
+use std::collections::BTreeSet;
+
+use norn_fs::Identity;
+
 use super::{Entry, SnapshotSource};
-use crate::registry::{ResolveRefusal, RootReading, containing, recheck};
+use crate::registry::{ResolveRefusal, RootReading, containing, reaching, recheck};
 
 /// Why the serving set stands unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,6 +240,33 @@ impl<A: SnapshotSource> ServingSet<A> {
         )
     }
 
+    /// Every name the set serves whose root reaches `identity` at this
+    /// instant.
+    ///
+    /// The name and root of every entry are copied out under the read guard,
+    /// and the stats run after it goes back, as [`ServingSet::recheck`]'s do.
+    /// They reach every served root, so the pass is counted as a
+    /// classification.
+    pub(crate) fn reaching(&self, identity: Identity) -> BTreeSet<VaultName> {
+        let roots = self
+            .entries
+            .read()
+            .expect("serving set poisoned")
+            .values()
+            .map(|entry| {
+                (
+                    entry.registration.name.clone(),
+                    entry.registration.root.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.classifications.fetch_add(1, Ordering::SeqCst);
+        reaching(
+            roots.iter().map(|(name, root)| (name, root.as_path())),
+            identity,
+        )
+    }
+
     /// Serve one more vault, from now.
     ///
     /// The entry appears exactly as an entry read at startup does — Unattached,
@@ -265,30 +295,31 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// not one this removes: a demand reaches the entry through the set, and
     /// the set is not readable while this decides.
     ///
+    /// **The entry is retired under that same gate hold.** A caller that read
+    /// the entry out of the set before this took it out still holds it, and
+    /// every door such a caller asks through reads the retirement first — so
+    /// what it is answered is the name being unknown, never work scheduled
+    /// against an entry the set no longer serves.
+    ///
     /// A name the set does not serve is already not served, and removing it
-    /// changes nothing.
+    /// changes nothing. Whether the name was served is the caller's to ask
+    /// first where it answers differently for the two.
     ///
     /// The entry the set gives up is dropped after the write lock goes back.
     /// The last handle to an entry runs its state's drop glue — the reader the
     /// caller's coverage minted among it — which is work no holder of this
     /// lock does.
-    // Insertion is on the startup path and removal has no caller in this crate
-    // outside its own cases, so the allow is what says the seam is built and
-    // waiting for the registration verb Layer 3's product surface offers to
-    // call it rather than unfinished.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn remove(&self, name: &VaultName) -> Result<(), ServingRefusal> {
         let mut entries = self.entries.write().expect("serving set poisoned");
         let Some(entry) = entries.get(name) else {
             return Ok(());
         };
-        if entry
-            .gate
-            .lock()
-            .expect("entry gate poisoned")
-            .held_by_anything()
         {
-            return Err(ServingRefusal::Held);
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            if state.held_by_anything() {
+                return Err(ServingRefusal::Held);
+            }
+            state.retired = true;
         }
         let removed = entries.remove(name);
         drop(entries);

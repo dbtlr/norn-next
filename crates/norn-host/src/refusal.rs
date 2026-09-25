@@ -51,11 +51,12 @@ use norn_semantic::EngineError;
 use norn_store::{PageRefusal, ReadBound, StoreError};
 use norn_wire::{
     AnswerShape, AttachMode, ControlFile, ControlFileFailure, ErrorDetail, ErrorEnvelope,
-    ReadFailure, ReloadFailure, RequestBound, RequestPart, TrustState, UntrustedReason, VaultName,
+    MaintainerIdentity, ReadFailure, ReloadFailure, RequestBound, RequestPart, TrustState,
+    UntrustedReason, VaultName,
 };
 
 use crate::lifecycle::{Demand, HostError, JobFailure, ReadRefusal, ServingRefusal};
-use crate::registry::ResolveRefusal;
+use crate::registry::{AliasConflict, RegistrationRefusal, ResolveRefusal};
 use crate::reload::{ReloadError, ReloadFile, ReloadRefusal, ReloadStage};
 
 impl Demand {
@@ -74,26 +75,44 @@ impl Demand {
     pub fn answer(self, name: &VaultName) -> Result<TrustState, ErrorEnvelope> {
         match self {
             Demand::State(state) => answer_state(state),
-            Demand::MaintainerContended(incumbent) => Err(ErrorEnvelope::new(
-                "another process maintains this vault's derived state",
-                ErrorDetail::maintainer_contended(incumbent),
-            )),
+            Demand::MaintainerContended(incumbent) => Err(maintainer_contended(incumbent)),
             Demand::DuplicateRoot(conflict) => Err(ErrorEnvelope::new(
                 "more than one registered name resolves to this vault's root, so none of them \
                  is served",
                 ErrorDetail::duplicate_root(conflict.aliases().clone()),
             )),
-            Demand::IdentityRefused(refusal) => Err(ErrorEnvelope::new(
-                "the registry cannot read this vault's root",
-                ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(refusal)),
-            )),
-            Demand::UnknownVault => Err(ErrorEnvelope::new(
-                format!("no vault is registered under the name `{name}`"),
-                ErrorDetail::unknown_vault(name.clone()),
-            )),
+            Demand::IdentityRefused(refusal) => Err(root_refused(refusal)),
+            Demand::UnknownVault => Err(unknown_vault(name)),
             Demand::UnsupportedMode(mode) => Err(unsupported_attach_mode(mode)),
         }
     }
+}
+
+/// The envelope another process holding a vault's maintainer lock is refused
+/// with, naming that process as far as its lock body does.
+fn maintainer_contended(incumbent: MaintainerIdentity) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        "another process maintains this vault's derived state",
+        ErrorDetail::maintainer_contended(incumbent),
+    )
+}
+
+/// The envelope a root the registry cannot read is refused with: the
+/// registry's account of it, as the environment refusing the work.
+fn root_refused(refusal: String) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        "the registry cannot read this vault's root",
+        ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(refusal)),
+    )
+}
+
+/// The envelope a name the host serves no entry under is refused with,
+/// echoing the name that was asked for.
+fn unknown_vault(name: &VaultName) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        format!("no vault is registered under the name `{name}`"),
+        ErrorDetail::unknown_vault(name.clone()),
+    )
 }
 
 /// The envelope a request for an attach mode this host has no lifecycle for is
@@ -115,17 +134,8 @@ impl ServingRefusal {
     /// are `host/…` and both echo the name: what a caller does about either
     /// one is addressed to that name.
     ///
-    /// A dormant carrier for the vault namespace handlers. The serving set is
-    /// changed by the registry verbs — `vault register` and `vault
-    /// unregister` — and this is the rendering those verbs refuse through;
-    /// their handlers are not built, so nothing calls it yet. They land in
-    /// this crate, which is why the visibility is `pub(crate)`: the mapping
-    /// waits for the handler beside it rather than for a surface above it.
-    #[allow(
-        dead_code,
-        reason = "a dormant carrier: the vault namespace's registry verbs, not yet built, \
-                  refuse through this mapping"
-    )]
+    /// The registry verbs — `vault register` and `vault unregister` — refuse
+    /// through this, by way of [`RegistrationRefusal::answer`].
     pub(crate) fn answer(self, name: &VaultName) -> ErrorEnvelope {
         match self {
             ServingRefusal::AlreadyServed => ErrorEnvelope::new(
@@ -141,6 +151,59 @@ impl ServingRefusal {
             ),
         }
     }
+}
+
+impl RegistrationRefusal {
+    /// This refusal in the wire vocabulary, for the vault `name` the change
+    /// was asked for under.
+    ///
+    /// Every member is a fact about the host's serving of a registration, so
+    /// every one is `host/…`. The serving set's own two render through
+    /// [`ServingRefusal::answer`], a park renders as the park it is, and the
+    /// three facts a registration change shares with a demand — another
+    /// maintainer, a root the registry cannot read, a name nothing is served
+    /// under — render as a demand renders them. The data directory refusing
+    /// the retirement is the environment refusing the work, which is the
+    /// reason `host/entry-untrusted` already names.
+    pub(crate) fn answer(self, name: &VaultName) -> ErrorEnvelope {
+        match self {
+            RegistrationRefusal::Serving(refusal) => refusal.answer(name),
+            RegistrationRefusal::UnknownVault => unknown_vault(name),
+            RegistrationRefusal::Parked(refusal) => refusal,
+            RegistrationRefusal::DuplicateRoot(conflict) => duplicate_registration(name, &conflict),
+            RegistrationRefusal::RootRefused(refusal) => root_refused(refusal),
+            RegistrationRefusal::MaintainerContended(incumbent) => maintainer_contended(incumbent),
+            RegistrationRefusal::StateRefused(refusal) => ErrorEnvelope::new(
+                format!(
+                    "the derived state of `{name}` could not be retired, so its registration \
+                     stands"
+                ),
+                ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(refusal)),
+            ),
+            RegistrationRefusal::RegistryUnwritable(refusal) => ErrorEnvelope::new(
+                "the registry file could not be written, so the registration that stood before \
+                 still stands",
+                ErrorDetail::registry_unwritable(refusal.detail()),
+            ),
+        }
+    }
+}
+
+/// The envelope a registration over a root other registrations already reach
+/// is refused with, naming every one of them beside `name`.
+fn duplicate_registration(name: &VaultName, conflict: &AliasConflict) -> ErrorEnvelope {
+    let incumbents = conflict
+        .aliases()
+        .names()
+        .iter()
+        .filter(|alias| *alias != name)
+        .map(|alias| format!("`{alias}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ErrorEnvelope::new(
+        format!("{incumbents} already reaches this root, so `{name}` is not registered over it"),
+        ErrorDetail::duplicate_root(conflict.aliases().clone()),
+    )
 }
 
 impl ResolveRefusal {
@@ -200,10 +263,7 @@ impl ReloadRefusal {
     /// not a surface's to choose.
     pub fn answer(self, name: &VaultName) -> Result<ErrorEnvelope, HostError> {
         Ok(match self {
-            ReloadRefusal::UnknownVault => ErrorEnvelope::new(
-                format!("no vault is registered under the name `{name}`"),
-                ErrorDetail::unknown_vault(name.clone()),
-            ),
+            ReloadRefusal::UnknownVault => unknown_vault(name),
             ReloadRefusal::Unavailable(demand) => match demand.answer(name) {
                 Err(envelope) => envelope,
                 Ok(state) => unavailable(state),
