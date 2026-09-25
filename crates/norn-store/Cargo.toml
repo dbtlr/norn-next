@@ -40,8 +40,8 @@ sha2 = { workspace = true }
 # `norn-db`'s feature of the same name, because two of the arrangements are met
 # at the driver seam rather than here. Off by default, so a shipped build
 # carries none of the hooks: the out-of-band SQL executor, the busy-injection
-# thread-local read on every pinned scalar, and the tear the increment checks
-# between two entries.
+# thread-local read on every pinned scalar, the tear the increment checks
+# between two entries, and the write a feed page read checks for.
 [features]
 induced-failure = ["norn-db/induced-failure"]
 

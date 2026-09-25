@@ -3,6 +3,7 @@
 
 use norn_semantic::{Engine, RebuildReason, SidecarOutcome, SidecarRevision, Watermark};
 use norn_store::Store;
+use norn_store::induced_failure;
 
 use crate::common::{
     CountingEmbedder, InterferingEmbedder, RefusingEmbedder, Scratch, document, record_death,
@@ -155,14 +156,11 @@ fn a_completed_drain_catches_both_watermarks_up_to_the_store() {
     assert_eq!(engine.watermarks().tombstones, expected);
 }
 
-/// **A watermark is read before the page that completes the feed, so a write
-/// the drain did not cover reads as lag.** A writer lands a newer body for the
-/// page being embedded: the completed document feed records the generation it
-/// read before that page, one short of the store, while the tombstone feed —
-/// completing after the write — records the store's.
-///
-/// A watermark read after the completing page would record the store's
-/// generation for the document feed too, and claim a write it never presented.
+/// **A write landing while the completing page is embedded reads as lag.** A
+/// writer lands a newer body for the page being embedded: the completed
+/// document feed records a generation one short of the store, while the
+/// tombstone feed — completing after the write — records the store's, and the
+/// next drain presents the write and catches up.
 #[test]
 fn a_write_landing_during_the_drain_reads_as_lag() {
     let scratch = Scratch::new("watermark-race");
@@ -195,6 +193,62 @@ fn a_write_landing_during_the_drain_reads_as_lag() {
         Some(caught_up(&mut store)),
         "the next drain presents the write and catches up"
     );
+}
+
+/// **A watermark is read before the page that completes its feed.** A write
+/// committed right after that page is read is one the page never presented, so
+/// the watermark must stand below it and the write read as lag. A watermark
+/// read after the page would record the write's generation and claim it
+/// covered. The write takes a generation without presenting a feed row — a
+/// schema pin — so the next drain's completion is what covers it.
+#[test]
+fn a_write_after_the_completing_page_is_read_reads_as_lag() {
+    // A drain over a store holding one document reads two pages: the
+    // document feed's completing page, then the tombstone feed's.
+    for (label, page) in [("documents", 1), ("tombstones", 2)] {
+        let scratch = Scratch::new(&format!("watermark-order-{label}"));
+        let mut store = scratch.store();
+        write_document(&mut store, &document("docs/a.md", "hash-1", "alpha\n"));
+        let before = store_generation(&mut store);
+        let mut engine = scratch.engine(CountingEmbedder::new());
+
+        induced_failure::write_after_feed_pages(page, |store| {
+            store
+                .begin_request()
+                .pin_vault_schema(b"schema", "fingerprint")
+                .expect("a schema pin");
+        });
+        engine.drain(&mut store.feed_read()).expect("a drain");
+
+        // The arm is one-shot, so a generation that moved says it fired and
+        // left nothing standing on this thread.
+        let after = store_generation(&mut store);
+        assert!(
+            after > before,
+            "{label}: the armed write took no generation"
+        );
+        let watermarks = engine.watermarks().clone();
+        let (landed, other) = match label {
+            "documents" => (watermarks.documents, watermarks.tombstones),
+            _ => (watermarks.tombstones, watermarks.documents),
+        };
+        assert_eq!(
+            landed.expect("a watermark").generation,
+            before,
+            "{label}: the watermark claims a write its completing page never presented"
+        );
+        let other = other.expect("a watermark").generation;
+        match label {
+            "documents" => assert_eq!(other, after, "the later feed read after the write"),
+            _ => assert_eq!(other, before, "the earlier feed read before the write"),
+        }
+
+        engine
+            .drain(&mut store.feed_read())
+            .expect("the next drain");
+        assert_eq!(engine.watermarks().documents, Some(caught_up(&mut store)));
+        assert_eq!(engine.watermarks().tombstones, Some(caught_up(&mut store)));
+    }
 }
 
 /// **A watermark names the store lifetime it was taken in.** Across a store

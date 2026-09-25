@@ -59,9 +59,13 @@ impl FeedRead<'_> {
         after: Option<&FeedCursor>,
         limit: usize,
     ) -> Result<Vec<(FeedCursor, FeedDocument)>, StoreError> {
-        self.store
+        let page = self
+            .store
             .begin_request()
-            .changed_documents_after(after, limit)
+            .changed_documents_after(after, limit);
+        #[cfg(feature = "induced-failure")]
+        crate::faults::write_if_the_feed_page_is_armed(self.store);
+        page
     }
 
     /// The next page of recorded deaths in feed order — see
@@ -71,9 +75,13 @@ impl FeedRead<'_> {
         after: Option<&FeedCursor>,
         limit: usize,
     ) -> Result<Vec<(FeedCursor, FeedTombstone)>, StoreError> {
-        self.store
+        let page = self
+            .store
             .begin_request()
-            .changed_tombstones_after(after, limit)
+            .changed_tombstones_after(after, limit);
+        #[cfg(feature = "induced-failure")]
+        crate::faults::write_if_the_feed_page_is_armed(self.store);
+        page
     }
 
     /// One document's row — see [`crate::Request::stored_document`].
