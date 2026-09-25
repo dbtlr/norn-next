@@ -1,16 +1,35 @@
 //! `search`: ranked hits for a query, answered from the vault's ladder.
 //!
-//! **The wire carries the resolved rung set, never a preset.** The spellings a
-//! person types — `lexical`, `semantic`, `hybrid` — and the `--no-<rung>`
-//! subtraction that trims them are Layer 6 renderings: a surface expands them
-//! into the rungs they name before it builds a request, so two surfaces cannot
-//! expand one preset two ways and a preset arriving here would be a second
-//! vocabulary for the one the ladder already has.
+//! **The wire carries a selection, never a preset and never a resolved set.**
+//! A request selects its rungs one of two ways: the vault's enabled set less
+//! the rungs it names, or exactly the rungs it names. A search naming nothing
+//! selects the enabled set whole. The host resolves a selection against the
+//! vault's configuration when it answers, so a request is not a claim about a
+//! configuration it cannot see. The spellings a person types — `lexical`,
+//! `semantic`, `hybrid` — and the `--no-<rung>` subtraction that trims them are
+//! surface renderings: `hybrid` is the enabled set whole, a named preset is an
+//! exact set, and a subtraction is the enabled set less the rungs it names.
+//! **A preset combined with a subtraction has no spelling here**: an exact
+//! selection holds no subtraction and the enabled selection holds no set, and
+//! each refuses a field it does not hold, so that combination is a surface's
+//! argument error and never a request.
 //!
-//! **A search runs at least the lexical floor.** There is nothing an empty set
-//! could mean short of answering nothing at all, so it is refused where a set
-//! is built, where one is read, and in the schema a surface validates against
-//! alike.
+//! [`RungSelection`] is plain rather than `#[non_exhaustive]`: the host
+//! resolves every selection to the ladder it runs, and a resolver that has not
+//! decided what a new selection resolves to should fail to compile rather than
+//! fall into a default arm.
+//!
+//! **A search runs at least one rung.** There is nothing an empty set could
+//! mean short of answering nothing at all, so an exact selection naming no rung
+//! is refused where a set is built, where one is read, and in the schema a
+//! surface validates against alike. Any set that names a rung is a ladder,
+//! whether it holds the lexical floor or not.
+//!
+//! **A score is on the scale of the ladder that ran.** A hit's `score` and a
+//! request's `min_score` are read on the scale the answer's ladder ranks on,
+//! and no scale is normalized into another: a floor that suits one ladder says
+//! nothing about another, which is why a hit cursor names its ladder and a
+//! continuation under another ladder is refused.
 //!
 //! **`PartialEq` alone on [`Hit`].** A hit carries a relevance score, and a
 //! score is a number two of which may be near without being one value.
@@ -24,7 +43,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
-use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::address::VaultAddress;
 use crate::cursor::{Cursor, Page, Score};
@@ -34,26 +53,27 @@ use crate::reading::Rung;
 
 /// A ladder that runs no rung.
 ///
-/// Every search runs at least the lexical floor, so a request naming no rung
-/// names no search: there is nothing for the empty set to mean short of
-/// answering nothing at all.
+/// Every search runs at least one rung, so a set naming no rung names no
+/// search: there is nothing for the empty set to mean short of answering
+/// nothing at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EmptyLadder;
 
 impl fmt::Display for EmptyLadder {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a search runs at least the lexical floor")
+        formatter.write_str("a search runs at least one rung")
     }
 }
 
 impl std::error::Error for EmptyLadder {}
 
-/// The rungs a search is asked to run.
+/// A set of rungs a search runs: one an exact selection names, or the one a
+/// selection resolved to and a hit cursor names.
 ///
-/// On the wire a rung set is a plain object holding the rungs themselves:
-/// `{"rungs":["lexical","vector"]}`. The set is not empty: a set naming no
-/// rung is refused rather than read.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+/// On the wire a rung set is the array of its rungs, in ladder order:
+/// `["lexical","vector"]`. The set is not empty: a set naming no rung is
+/// refused rather than read.
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct RungSet {
     /// The rungs to run, in ladder order.
@@ -61,7 +81,7 @@ pub struct RungSet {
 }
 
 impl RungSet {
-    /// The model-free floor alone, which is what every search runs at least.
+    /// The model-free floor alone.
     pub fn lexical() -> Self {
         RungSet {
             rungs: BTreeSet::from([Rung::Lexical]),
@@ -78,44 +98,14 @@ impl RungSet {
     }
 }
 
-impl JsonSchema for RungSet {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("RungSet")
+impl Serialize for RungSet {
+    /// The rungs themselves, in ladder order.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.rungs.serialize(serializer)
     }
-
-    fn schema_id() -> Cow<'static, str> {
-        Cow::Borrowed("norn_wire::RungSet")
-    }
-
-    /// The object a derive would describe, with the floor the reader keeps
-    /// advertised as `minItems`. A derive over a `BTreeSet` says an array of
-    /// rungs with no members at all, so a surface validating against it would
-    /// pass a request this crate refuses to read.
-    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
-        let rung = generator.subschema_for::<Rung>();
-        json_schema!({
-            "type": "object",
-            "description": "The rungs a search is asked to run.",
-            "properties": {
-                "rungs": {
-                    "type": "array",
-                    "description": "The rungs to run, in ladder order. At least one: every search runs at least the lexical floor.",
-                    "items": rung,
-                    "minItems": 1,
-                    "uniqueItems": true,
-                },
-            },
-            "required": ["rungs"],
-        })
-    }
-}
-
-/// The rung set as it arrives, before it is checked for naming a search at
-/// all. The field name is the set's, so the bytes a reader accepts are the
-/// bytes a writer produces.
-#[derive(Deserialize)]
-struct RungSetFields {
-    rungs: BTreeSet<Rung>,
 }
 
 impl<'de> Deserialize<'de> for RungSet {
@@ -126,8 +116,84 @@ impl<'de> Deserialize<'de> for RungSet {
     where
         D: Deserializer<'de>,
     {
-        let fields = RungSetFields::deserialize(deserializer)?;
-        RungSet::of(fields.rungs).map_err(D::Error::custom)
+        let rungs = BTreeSet::<Rung>::deserialize(deserializer)?;
+        RungSet::of(rungs).map_err(D::Error::custom)
+    }
+}
+
+impl JsonSchema for RungSet {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("RungSet")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed("norn_wire::RungSet")
+    }
+
+    /// The array a derive over a `BTreeSet` would describe, with the floor
+    /// the reader keeps advertised as `minItems`. A derive says an array of
+    /// rungs with no members at all, so a surface validating against it would
+    /// pass a set this crate refuses to read.
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let rung = generator.subschema_for::<Rung>();
+        json_schema!({
+            "type": "array",
+            "description": "A set of rungs, in ladder order. At least one: every search runs at least one rung.",
+            "items": rung,
+            "minItems": 1,
+            "uniqueItems": true,
+        })
+    }
+}
+
+/// Which rungs a search asks for, which the host resolves against the vault's
+/// configuration when it answers.
+///
+/// On the wire a selection is an object tagged `select`:
+/// `{"select":"enabled","without":["vector"]}`,
+/// `{"select":"exactly","rungs":["lexical"]}`. Each refuses a field the other
+/// holds, so a selection that both names a set and subtracts from one has no
+/// spelling.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "select", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RungSelection {
+    /// The vault's enabled set less the rungs named. Naming none is the
+    /// enabled set whole, which is what a search that selects nothing runs.
+    /// A rung the default set holds and no engine stands for is left out and
+    /// advised, not refused.
+    #[non_exhaustive]
+    Enabled {
+        /// The rungs to leave out. A rung the vault has not enabled is left
+        /// out already, and naming it changes nothing.
+        without: BTreeSet<Rung>,
+    },
+    /// Exactly the rungs named, whatever the vault enables. A rung the vault
+    /// has not enabled, or that no engine stands for, is refused.
+    #[non_exhaustive]
+    Exactly {
+        /// The rungs to run.
+        rungs: RungSet,
+    },
+}
+
+impl RungSelection {
+    /// The vault's enabled set, whole.
+    pub const fn enabled() -> Self {
+        RungSelection::Enabled {
+            without: BTreeSet::new(),
+        }
+    }
+
+    /// The vault's enabled set, less `without`.
+    pub fn enabled_without(without: impl IntoIterator<Item = Rung>) -> Self {
+        RungSelection::Enabled {
+            without: without.into_iter().collect(),
+        }
+    }
+
+    /// Exactly `rungs`.
+    pub const fn exactly(rungs: RungSet) -> Self {
+        RungSelection::Exactly { rungs }
     }
 }
 
@@ -200,8 +266,10 @@ pub struct SearchParams {
     /// `resolves` part answers which documents a target names, which is a
     /// `find`, so a search reports it as not applicable.
     pub predicates: Vec<Predicate>,
-    /// The rungs to run. The lexical floor alone unless more are asked for.
-    pub rungs: RungSet,
+    /// Which rungs to run: the vault's enabled set less the rungs named, or
+    /// exactly the rungs named. The enabled set whole unless the request
+    /// selects otherwise.
+    pub rungs: RungSelection,
     /// The relevance a hit must reach, on the scale a hit's `score` is: a hit
     /// scored at or above it is answered. `null` returns every hit the ladder
     /// ranked.
@@ -215,14 +283,14 @@ pub struct SearchParams {
 }
 
 impl SearchParams {
-    /// A `search` of `vault` for `query`, over the lexical floor, hydrating no
-    /// document row.
+    /// A `search` of `vault` for `query`, over the vault's enabled set whole,
+    /// hydrating no document row.
     pub fn new(vault: VaultAddress, query: impl Into<String>) -> Self {
         SearchParams {
             vault,
             query: query.into(),
             predicates: Vec::new(),
-            rungs: RungSet::lexical(),
+            rungs: RungSelection::enabled(),
             min_score: None,
             columns: Vec::new(),
             limit: None,
@@ -237,9 +305,9 @@ impl SearchParams {
         self
     }
 
-    /// The request running `rungs`.
+    /// The request selecting `rungs`.
     #[must_use]
-    pub fn with_rungs(mut self, rungs: RungSet) -> Self {
+    pub fn with_rungs(mut self, rungs: RungSelection) -> Self {
         self.rungs = rungs;
         self
     }

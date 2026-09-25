@@ -28,9 +28,9 @@ use norn_wire::{
     ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem,
     RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace,
     RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
-    RollUp, Rung, RungReport, RungSet, SchemaSource, Score, SearchParams, SetParams, SetReport,
-    Severity, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind,
+    RollUp, Rung, RungReport, RungSelection, RungSet, SchemaSource, Score, SearchParams, SetParams,
+    SetReport, Severity, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow,
+    TagSource, TagStance, Tally, TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind,
     UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
     UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
     VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
@@ -474,6 +474,16 @@ fn cursors() -> Vec<Cursor> {
 /// Every rung a ladder declares.
 fn rungs() -> Vec<Rung> {
     vec![Rung::Lexical, Rung::Vector, Rung::Expansion, Rung::Rerank]
+}
+
+/// Every selection a search asks for its rungs by: the enabled set whole, the
+/// enabled set less a rung, and an exact set.
+fn rung_selections() -> Vec<RungSelection> {
+    vec![
+        RungSelection::enabled(),
+        RungSelection::enabled_without([Rung::Vector]),
+        RungSelection::exactly(RungSet::of(rungs()).expect("a ladder that runs a rung")),
+    ]
 }
 
 /// Every freshness a stateful rung reports.
@@ -1108,6 +1118,14 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<Unsatisfied>(Some("part")),
         "the parts built here are not the parts the vocabulary holds"
+    );
+    assert_eq!(
+        rung_selections()
+            .iter()
+            .map(|selection| tag_string(selection, "select"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<RungSelection>(Some("select")),
+        "the selections built here are not the selections the vocabulary holds"
     );
     assert_eq!(
         answer_advisories()
@@ -4310,10 +4328,15 @@ fn every_read_params_shape_survives_the_round_trip() {
             .with_after(cursors().remove(0)),
     );
     round_trip(&SearchParams::new(vault.clone(), "norn"));
+    for selection in rung_selections() {
+        round_trip(&SearchParams::new(vault.clone(), "norn").with_rungs(selection));
+    }
     round_trip(
         &SearchParams::new(vault.clone(), "norn")
             .with_predicates(predicates())
-            .with_rungs(RungSet::of(rungs()).expect("a ladder that runs a rung"))
+            .with_rungs(RungSelection::exactly(
+                RungSet::of(rungs()).expect("a ladder that runs a rung"),
+            ))
             .with_min_score(score(0.25))
             .with_columns(columns())
             .with_limit(20)
@@ -4357,7 +4380,8 @@ fn every_read_params_shape_survives_the_round_trip() {
 /// Each params type is built by naming what a request cannot be built without,
 /// and every other part has a stated default. A `find` that named only its
 /// vault is every document, ordered by path, projecting the path alone; a
-/// `search` that named only its vault and its query runs the lexical floor.
+/// `search` that named only its vault and its query selects the vault's
+/// enabled set whole.
 #[test]
 fn a_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
     let vault = VaultAddress::name(name("notes"));
@@ -4371,7 +4395,7 @@ fn a_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
 
     let search = SearchParams::new(vault.clone(), "norn");
     assert_eq!(search.query, "norn");
-    assert_eq!(search.rungs, RungSet::lexical());
+    assert_eq!(search.rungs, RungSelection::enabled());
     assert_eq!(search.min_score, None);
 
     let validate = ValidateParams::new(vault.clone());
@@ -4385,26 +4409,77 @@ fn a_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
     assert!(DescribeParams::new(vault).facets.is_empty());
 }
 
-/// A search runs at least the lexical floor, so a set naming no rung is no
-/// ladder: it refuses where one is built and where one is read alike. The
-/// preset spellings are a surface's and never cross.
+/// A search runs at least one rung, so a set naming no rung is no ladder: it
+/// refuses where one is built and where one is read alike. Any set naming a
+/// rung is a ladder, the floor or no. The preset spellings are a surface's and
+/// never cross.
 #[test]
 fn a_rung_set_that_names_no_rung_is_no_ladder() {
     assert_eq!(RungSet::of([]).expect_err("an empty ladder"), EmptyLadder);
     assert_eq!(
         EmptyLadder::to_string(&EmptyLadder),
-        "a search runs at least the lexical floor"
+        "a search runs at least one rung"
     );
     assert!(
-        serde_json::from_str::<RungSet>(r#"{"rungs":[]}"#).is_err(),
+        serde_json::from_str::<RungSet>("[]").is_err(),
         "a set naming no rung read back as a ladder"
     );
-    assert_eq!(wire(&RungSet::lexical()), r#"{"rungs":["lexical"]}"#);
+    assert_eq!(wire(&RungSet::lexical()), r#"["lexical"]"#);
+    assert_eq!(
+        serde_json::from_str::<RungSet>(r#"["vector"]"#).expect("a ladder without the floor"),
+        RungSet::of([Rung::Vector]).expect("a ladder that runs a rung")
+    );
     assert!(
-        serde_json::from_str::<RungSet>(r#"{"rungs":["hybrid"]}"#).is_err(),
+        serde_json::from_str::<RungSet>(r#"["hybrid"]"#).is_err(),
         "a preset spelling read back as a rung"
     );
     round_trip(&RungSet::of(rungs()).expect("a ladder that runs a rung"));
+}
+
+/// A selection is the enabled set less the rungs it names, or exactly the
+/// rungs it names, each an object tagged `select`. A request that both names a
+/// set and subtracts from one has no spelling: each selection refuses the
+/// other's field rather than dropping it, and an exact set naming no rung is
+/// no ladder.
+#[test]
+fn a_rung_selection_subtracts_from_the_enabled_set_or_names_one_exactly() {
+    for selection in rung_selections() {
+        round_trip(&selection);
+    }
+    assert_eq!(
+        wire(&RungSelection::enabled()),
+        r#"{"select":"enabled","without":[]}"#
+    );
+    assert_eq!(
+        wire(&RungSelection::enabled_without([
+            Rung::Rerank,
+            Rung::Vector
+        ])),
+        r#"{"select":"enabled","without":["vector","rerank"]}"#
+    );
+    assert_eq!(
+        wire(&RungSelection::exactly(RungSet::lexical())),
+        r#"{"select":"exactly","rungs":["lexical"]}"#
+    );
+    for combined in [
+        r#"{"select":"exactly","rungs":["lexical"],"without":["vector"]}"#,
+        r#"{"select":"enabled","without":["vector"],"rungs":["lexical"]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RungSelection>(combined).is_err(),
+            "`{combined}` read back as a selection"
+        );
+    }
+    for lax in [
+        r#"{"select":"exactly","rungs":[]}"#,
+        r#"{"select":"hybrid"}"#,
+        r#"{"select":"enabled"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RungSelection>(lax).is_err(),
+            "`{lax}` read back as a selection"
+        );
+    }
 }
 
 /// The set carries the rungs in ladder order whatever order a caller named
@@ -4413,7 +4488,7 @@ fn a_rung_set_that_names_no_rung_is_no_ladder() {
 fn a_rung_set_is_the_resolved_set_in_ladder_order() {
     let named = RungSet::of([Rung::Rerank, Rung::Lexical, Rung::Rerank, Rung::Vector])
         .expect("a ladder that runs a rung");
-    assert_eq!(wire(&named), r#"{"rungs":["lexical","vector","rerank"]}"#);
+    assert_eq!(wire(&named), r#"["lexical","vector","rerank"]"#);
 }
 
 /// A get report is an object tagged `shape`, and the collection shape names
@@ -4737,7 +4812,9 @@ fn every_find_setter_lands_in_the_bytes() {
 fn every_search_setter_lands_in_the_bytes() {
     let request = SearchParams::new(VaultAddress::name(name("notes")), "norn")
         .with_predicates(predicates())
-        .with_rungs(RungSet::of(rungs()).expect("a ladder that runs a rung"))
+        .with_rungs(RungSelection::exactly(
+            RungSet::of(rungs()).expect("a ladder that runs a rung"),
+        ))
         .with_min_score(score(0.25))
         .with_columns(columns())
         .with_limit(20)
@@ -4749,7 +4826,7 @@ fn every_search_setter_lands_in_the_bytes() {
             PINNED_VAULT,
             r##","query":"norn","predicates":"##,
             PINNED_PREDICATES,
-            r##","rungs":{"rungs":["lexical","vector","expansion","rerank"]},"min_score":0.25,"columns":"##,
+            r##","rungs":{"select":"exactly","rungs":["lexical","vector","expansion","rerank"]},"min_score":0.25,"columns":"##,
             PINNED_COLUMNS,
             r##","limit":20,"after":""##,
             PINNED_AFTER,

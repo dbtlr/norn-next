@@ -7,8 +7,8 @@
 //! lexical rung and no other**: the full-text index is maintained inside the
 //! write that derives a document, so a lexical answer is transactional with
 //! derivation and runs no model. The rungs above it are answered by engines
-//! over their own state, and whatever else a request's rung set names is the
-//! host's to run and fuse. So the builder reads a [`LexicalQuery`], which names
+//! over their own state, and whatever else the ladder a request's selection
+//! resolves to holds is the host's to run and fuse. So the builder reads a [`LexicalQuery`], which names
 //! no rung set: the host builds one for the lexical rung, and the floor, the
 //! bound and the cursor it carries are that rung's own.
 //!
@@ -98,10 +98,11 @@ pub use statement::{SEARCH_STATEMENTS, SearchStatement};
 /// reads.
 ///
 /// **It names the lexical rung and no other.** A `search` on the wire,
-/// [`norn_wire::SearchParams`], names a rung set, and its floor, its bound and
-/// its cursor are over the answer that set makes: where the set is the lexical
-/// floor alone that answer is this rung's page, and where it names a rung above
-/// the floor it is the host's fusion of every rung's hits. So the host builds
+/// [`norn_wire::SearchParams`], selects its rungs, the host resolves that
+/// selection to a ladder, and the request's floor, bound and cursor are over
+/// the answer that ladder makes: where the ladder is the lexical floor alone
+/// that answer is this rung's page, and where it holds another rung it is the
+/// host's fusion of every rung's hits. So the host builds
 /// this request for the lexical rung itself, and **its floor, its cursor and its
 /// bound are the lexical rung's own**: a floor on the BM25 scale this rung
 /// scores on, a cursor this rung minted, and a bound on this rung's page — never

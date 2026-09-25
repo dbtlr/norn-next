@@ -43,7 +43,8 @@
 //!
 //! The six read verbs are spelled here as one params type and one report type
 //! each: [`FindParams`] answering [`FindReport`], [`SearchParams`] answering
-//! [`SearchReport`] over the [`RungSet`] it ran and the [`Hit`]s it ranked,
+//! [`SearchReport`] over the [`RungSelection`] it asks for and the [`Hit`]s
+//! it ranked,
 //! [`GetParams`] answering [`GetReport`], [`CountParams`] answering
 //! [`CountReport`] of [`Tally`]s, [`ValidateParams`] answering
 //! [`ValidateReport`], and [`DescribeParams`] answering [`DescribeReport`] of
@@ -205,8 +206,9 @@
 //! [`VaultAddress::name`], [`VaultAddress::root`],
 //! the constructor on each [`Predicate`], [`Anchor`], [`CursorKey`],
 //! [`Unsatisfied`], [`AnswerAdvisory`], [`ReloadFailure`] and [`RungReport`] variant,
-//! [`EngineSection::malformed`], whose variant is the one part of a plain enum
-//! that extends by gaining a field,
+//! [`EngineSection::malformed`] and the constructors on each
+//! [`RungSelection`] variant, whose variants are the parts of a plain enum
+//! that extend by gaining a field,
 //! [`Cursor::new`], [`Page::new`], [`Snapshot::new`],
 //! [`CursorOrderChanged::new`], [`DocumentOrders::new`], [`Score::new`],
 //! [`AnswerReading::new`], [`LadderDeclaration::new`],
@@ -242,13 +244,14 @@
 //! different questions. `#[non_exhaustive]` keeps a member's arrival from
 //! breaking a caller that only reads; a plain enum makes that arrival break
 //! every caller that *composes*, which is what a vocabulary wants when no
-//! reader can carry on without deciding. [`EngineSection`] and
-//! [`FindingScope`] are the two members of that class: a section composes with
-//! an engine's own refusal to say what a client should do, and a scope decides
-//! whether a finding is withheld from a document row. A composer of either
-//! that has not made the decision should fail to compile rather than fall into
-//! a default arm, so neither carries the attribute and a new member is a
-//! deliberate break at every composition site. The two rules compose rather
+//! reader can carry on without deciding. [`EngineSection`],
+//! [`FindingScope`] and [`RungSelection`] are the three members of that
+//! class: a section composes with an engine's own refusal to say what a client
+//! should do, a scope decides whether a finding is withheld from a document
+//! row, and a selection is resolved to the ladder a search runs. A composer of
+//! any of them that has not made the decision should fail to compile rather
+//! than fall into a default arm, so none carries the attribute and a new
+//! member is a deliberate break at every composition site. The two rules compose rather
 //! than exclude: [`EngineSection::Malformed`] carries a payload, so the
 //! variant is `#[non_exhaustive]` in its own right and grows by gaining a
 //! field, while the enum around it stays plain and grows by breaking every
@@ -268,7 +271,10 @@
 //! string it does not know fails the read instead: there is no
 //! `#[serde(other)]` catch-all anywhere in the vocabulary, because a variant
 //! nobody can interpret is a refusal to parse rather than a value to pass on
-//! degraded.
+//! degraded. [`RungSelection`] is the one request shape that refuses a field
+//! it does not know: its two selections hold disjoint fields, and a field of
+//! the other one dropped on the way in would read a request that both names a
+//! set and subtracts from one as a request that does only one of them.
 //!
 //! # The code grammar, and what is not a code
 //!
@@ -394,7 +400,7 @@ pub use read::describe::{
 };
 pub use read::find::{Direction, FindParams, FindReport, Sort, SortKey};
 pub use read::get::{CollectionPage, CollectionSelector, GetParams, GetReport};
-pub use read::search::{EmptyLadder, Hit, RungSet, SearchParams, SearchReport};
+pub use read::search::{EmptyLadder, Hit, RungSelection, RungSet, SearchParams, SearchReport};
 pub use read::validate::{KindTally, ValidateParams, ValidateReport};
 pub use reading::{
     AnswerReading, EngineSection, Freshness, LadderDeclaration, ModelIdentity, Rung, RungReport,

@@ -24,11 +24,11 @@ use norn_wire::{
     ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
     ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace, RequestBound, RequestPart,
     RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport,
-    RungSet, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity,
-    Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
-    TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams,
-    ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb,
-    WarmingPhase, WatcherLossCause,
+    RungSelection, RungSet, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport,
+    Severity, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
+    Verb, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -179,6 +179,7 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<SortKey>(),
         schema_of::<Sort>(),
         schema_of::<RungSet>(),
+        schema_of::<RungSelection>(),
         schema_of::<Hit>(),
         schema_of::<CollectionSelector>(),
         schema_of::<CollectionPage>(),
@@ -2034,22 +2035,19 @@ fn an_order_advertises_its_key_and_its_direction() {
     );
 }
 
-/// The rung set advertises the resolved set and refers to the rung vocabulary
-/// rather than restating it. The preset spellings are a surface's rendering
-/// and are advertised nowhere here.
+/// The rung set advertises an array of rungs holding at least one, and refers
+/// to the rung vocabulary rather than restating it. The preset spellings are a
+/// surface's rendering and are advertised nowhere here.
 #[test]
 fn a_rung_set_advertises_the_resolved_set_and_no_preset() {
     let schema = schema_of::<RungSet>();
-    assert_eq!(property_names(&schema), ["rungs"].into_iter().collect());
+    assert_eq!(schema["type"].as_str(), Some("array"));
     assert_eq!(
-        schema["properties"]["rungs"]["type"].as_str(),
-        Some("array")
-    );
-    assert_eq!(
-        schema["properties"]["rungs"]["minItems"].as_u64(),
+        schema["minItems"].as_u64(),
         Some(1),
         "the set advertises a ladder that runs no rung: {schema}"
     );
+    assert_eq!(schema["uniqueItems"].as_bool(), Some(true));
     assert!(
         schema["$defs"]["Rung"].is_object(),
         "a rung set carries no definition of a rung: {schema}"
@@ -2058,6 +2056,39 @@ fn a_rung_set_advertises_the_resolved_set_and_no_preset() {
         assert!(
             !schema.to_string().contains(preset),
             "the set advertises the preset spelling `{preset}`"
+        );
+    }
+}
+
+/// A selection advertises its two members under the `select` tag, each holding
+/// its own field and refusing every other, so a surface validating a request
+/// refuses one that both names a set and subtracts from one. No preset is
+/// advertised.
+#[test]
+fn a_rung_selection_advertises_two_disjoint_members_and_no_preset() {
+    let schema = schema_of::<RungSelection>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "select")),
+        sorted(["enabled", "exactly"])
+    );
+    for branch in branches(&schema) {
+        let fields: BTreeSet<&str> = property_names(branch);
+        let expected: BTreeSet<&str> = match tag_constant(branch, "select") {
+            Some("enabled") => ["select", "without"].into_iter().collect(),
+            Some("exactly") => ["select", "rungs"].into_iter().collect(),
+            other => panic!("a selection advertises the member {other:?}"),
+        };
+        assert_eq!(fields, expected, "a selection holds another's field");
+        assert_eq!(
+            branch["additionalProperties"].as_bool(),
+            Some(false),
+            "a selection advertises that it drops a field it does not hold: {branch}"
+        );
+    }
+    for preset in ["hybrid", "semantic"] {
+        assert!(
+            !schema.to_string().contains(preset),
+            "the selection advertises the preset spelling `{preset}`"
         );
     }
 }
