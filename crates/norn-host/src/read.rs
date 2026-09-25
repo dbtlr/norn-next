@@ -72,11 +72,7 @@ impl HoldReading {
                 ),
             )
         })?;
-        Ok(AnswerReading::new(
-            trust,
-            self.store().epoch(),
-            generation,
-        ))
+        Ok(AnswerReading::new(trust, self.store().epoch(), generation))
     }
 }
 
