@@ -38,11 +38,13 @@
 //! page at that depth, unfloored. The vector rung is scored over the documents
 //! the request's conjunction admits on the snapshot — drawn by paging the
 //! store's candidates, a find's pages — so a document the conjunction does not
-//! admit is never scored, and the engine's scan holds at most the depth's rows
-//! at any vault size. The candidates are also what reconciles the sidecar with
-//! the snapshot: a vector row whose path the snapshot does not hold — the
-//! sidecar ahead of the snapshot or behind it — is never scored, so no answer
-//! names a document its snapshot lacks.
+//! admit is never scored. The engine's scan holds at most the depth's scored
+//! rows at any vault size; the admitted set it is tested against is held
+//! whole, so it is proportional to the documents the conjunction admits. The
+//! candidates are also what reconciles the sidecar with the snapshot: a
+//! vector row whose path the snapshot does not hold — the sidecar ahead of the
+//! snapshot or behind it — is never scored, so no answer names a document its
+//! snapshot lacks.
 //!
 //! A two-rung ladder is fused by reciprocal rank: a document's score is the
 //! sum over the rungs that ranked it of `1 / (RRF_K + rank)`, its rank in
@@ -93,9 +95,11 @@ pub const RRF_K: u32 = 60;
 pub struct SearchCost {
     /// What the lexical rung's page read, where the ladder held it.
     pub lexical: Option<SearchWork>,
-    /// The candidate pages the vector rung was restricted by, and the
-    /// candidates they held, where the rung was sampled.
+    /// The candidate pages the vector rung was restricted by, where the rung
+    /// was sampled, and zero where it was not.
     pub candidate_pages: u64,
+    /// The candidates those pages held: the documents the conjunction admits,
+    /// where the rung was sampled, and zero where it was not.
     pub candidates: u64,
     /// What the vector rung's scan read, scored and held, where it answered.
     pub vector: Option<NearestWork>,
