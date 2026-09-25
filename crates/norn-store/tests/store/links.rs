@@ -473,6 +473,136 @@ fn a_link_is_judged_by_resolving_it_first() {
     }
 }
 
+/// A `vault://` link of `family` to `target`.
+fn vault(family: LinkFamily, target: &str) -> LinkFact {
+    link(family, Some("vault"), target, None)
+}
+
+/// A vault whose `h/` documents each hold one `vault://` link, beside the
+/// documents they may name: `sub/Deep.md` a suffix of no root path, and
+/// `my note.md` the path a percent-encoded space decodes to.
+fn rooted() -> Vec<DocumentFacts> {
+    use LinkFamily::{Markdown, Wikilink};
+    let mut all = vec![
+        holding("Notes.md", Vec::new()),
+        holding("v1.2.md", Vec::new()),
+        holding("sub/Deep.md", Vec::new()),
+        holding("my note.md", Vec::new()),
+    ];
+    all.extend(
+        [
+            ("h/w-notes.md", Wikilink, "Notes"),
+            ("h/w-notes-md.md", Wikilink, "Notes.md"),
+            ("h/w-v12.md", Wikilink, "v1.2"),
+            ("h/w-deep.md", Wikilink, "Deep"),
+            ("h/w-encoded.md", Wikilink, "my%20note"),
+            ("h/w-query.md", Wikilink, "Notes?x"),
+            ("h/w-lower.md", Wikilink, "notes"),
+            ("h/m-notes.md", Markdown, "Notes"),
+            ("h/m-notes-md.md", Markdown, "Notes.md"),
+            ("h/m-encoded.md", Markdown, "my%20note.md"),
+            ("h/m-query.md", Markdown, "Notes.md?x=1"),
+            ("h/m-lower.md", Markdown, "notes.md"),
+        ]
+        .into_iter()
+        .map(|(at, family, target)| holding(at, vec![vault(family, target)])),
+    );
+    all
+}
+
+/// **A `vault://` link is rooted at the vault root, and its family keeps its
+/// own rules**, on either root. A wikilink names the root path each of its
+/// reductions spells: `[[vault://Notes]]` and `[[vault://Notes.md]]` name
+/// `Notes.md`, and `[[vault://v1.2]]` names `v1.2.md`; it is never a suffix
+/// address, so `[[vault://Deep]]` does not reach `sub/Deep.md`; and nothing in
+/// it is decoded or cut off, so `[[vault://my%20note]]` and
+/// `[[vault://Notes?x]]` name nothing. A Markdown link names the one path it
+/// spells, percent-decoded and its query cut off and never reduced:
+/// `[t](vault://Notes)` names the path `Notes`, where no document stands. A
+/// path is matched under the root's order, so a lowercase spelling names
+/// `Notes.md` only where the root folds case. A links-to part reaches each
+/// link that names its document.
+#[test]
+fn a_vault_link_is_rooted_and_its_family_keeps_its_rules() {
+    for order in [Sensitive, Folding] {
+        let linked = Linked::holding(&format!("links-rooted-{order:?}"), order, &rooted());
+        let folded = if order == Folding {
+            names(LinkHealth::Healthy, &["Notes.md"])
+        } else {
+            names(LinkHealth::Broken, &[])
+        };
+        for (at, expected) in [
+            ("h/w-notes.md", names(LinkHealth::Healthy, &["Notes.md"])),
+            ("h/w-notes-md.md", names(LinkHealth::Healthy, &["Notes.md"])),
+            ("h/w-v12.md", names(LinkHealth::Healthy, &["v1.2.md"])),
+            ("h/w-deep.md", names(LinkHealth::Broken, &[])),
+            ("h/w-encoded.md", names(LinkHealth::Broken, &[])),
+            ("h/w-query.md", names(LinkHealth::Broken, &[])),
+            ("h/w-lower.md", folded.clone()),
+            ("h/m-notes.md", names(LinkHealth::Broken, &[])),
+            ("h/m-notes-md.md", names(LinkHealth::Healthy, &["Notes.md"])),
+            (
+                "h/m-encoded.md",
+                names(LinkHealth::Healthy, &["my note.md"]),
+            ),
+            ("h/m-query.md", names(LinkHealth::Healthy, &["Notes.md"])),
+            ("h/m-lower.md", folded.clone()),
+        ] {
+            assert_eq!(reading(&linked.links(at)[0]), expected, "{order:?} `{at}`");
+        }
+        let mut notes = vec![
+            "h/m-notes-md.md",
+            "h/m-query.md",
+            "h/w-notes-md.md",
+            "h/w-notes.md",
+        ];
+        if order == Folding {
+            notes.extend(["h/m-lower.md", "h/w-lower.md"]);
+            notes.sort_unstable();
+        }
+        assert_eq!(linked.backlinks("Notes"), notes, "{order:?}");
+        assert_eq!(linked.backlinks("v1.2"), ["h/w-v12.md"], "{order:?}");
+        assert_eq!(linked.backlinks("my note"), ["h/m-encoded.md"], "{order:?}");
+        assert_eq!(
+            linked.backlinks("sub/Deep"),
+            Vec::<String>::new(),
+            "{order:?}"
+        );
+    }
+}
+
+/// **A rooted wikilink naming two documents is a backlink of neither**: with
+/// `Notes.md` and `Notes.md.md` both standing, `[[vault://Notes.md]]` names
+/// each by one of its reductions, so it is ambiguous, and a links-to part
+/// naming either document alone confirms the link's other path and drops it.
+/// The Markdown link beside it names `Notes.md` alone and is its backlink.
+#[test]
+fn a_rooted_wikilink_naming_two_documents_is_a_backlink_of_neither() {
+    for order in [Sensitive, Folding] {
+        let linked = Linked::holding(
+            &format!("links-rooted-ambiguous-{order:?}"),
+            order,
+            &[
+                holding("Notes.md", Vec::new()),
+                holding("Notes.md.md", Vec::new()),
+                holding("h/a.md", vec![vault(LinkFamily::Wikilink, "Notes.md")]),
+                holding("h/b.md", vec![vault(LinkFamily::Markdown, "Notes.md")]),
+            ],
+        );
+        assert_eq!(
+            reading(&linked.links("h/a.md")[0]),
+            names(LinkHealth::Ambiguous, &["Notes.md", "Notes.md.md"]),
+            "{order:?}"
+        );
+        assert_eq!(linked.backlinks("Notes"), ["h/b.md"], "{order:?}");
+        assert_eq!(
+            linked.backlinks("Notes.md.md"),
+            Vec::<String>::new(),
+            "{order:?}"
+        );
+    }
+}
+
 /// **A `%` spells a byte only before two hexadecimal digits**: `%+1` is no
 /// escape, so `[t](100%+1.md)` names the document whose name holds those
 /// three characters as written.

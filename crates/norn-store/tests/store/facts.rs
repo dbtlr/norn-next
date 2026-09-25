@@ -233,10 +233,11 @@ fn link(family: LinkFamily, protocol: Option<&str>, target: &str) -> LinkFact {
 /// link and the path of the document holding it. A wikilink's are its suffix
 /// address's segment-reversed prefixes, one per reduction of a dotted leaf,
 /// beside the segments the target spells, an attachment's name among them; a
-/// path's — a Markdown target's or a `vault://` stem's — is the vault path it
+/// path's — a Markdown target's, `vault://` or not — is the vault path it
 /// names, split before each segment is percent-decoded, its query cut off and
-/// nothing reduced; a same-document anchor's is the holding document's own
-/// path. A link addressed elsewhere — a protocol other than `vault`, a
+/// nothing reduced; a `vault://` wikilink's are the root paths its reductions
+/// spell, nothing decoded; a same-document anchor's is the holding document's
+/// own path. A link addressed elsewhere — a protocol other than `vault`, a
 /// Markdown target opening with a URI scheme — and a target that names no
 /// vault path or no suffix address are held under no key. Each key is held
 /// raw and folded.
@@ -260,6 +261,7 @@ fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
         link(LinkFamily::Markdown, None, "mailto:someone@example.com"),
         link(LinkFamily::Markdown, None, "sub%2Fc.md"),
         link(LinkFamily::Markdown, None, "q.md?x=1"),
+        link(LinkFamily::Wikilink, Some("vault"), "Notes/v1.2"),
     ];
     let mut request = store.begin_request();
     write_document(&mut request, &facts);
@@ -287,6 +289,8 @@ fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
             key(8, "picture/", "picture/", Some(1)),
             key(10, "notes/X.md", "notes/x.md", None),
             key(13, "a/b/q.md", "a/b/q.md", None),
+            key(14, "Notes/v1.2", "notes/v1.2", None),
+            key(14, "Notes/v1.2.md", "notes/v1.2.md", None),
         ]
     );
 

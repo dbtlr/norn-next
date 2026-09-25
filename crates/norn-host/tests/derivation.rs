@@ -59,7 +59,7 @@ use norn_wire::FindingKind;
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(3),
-    "64bfe508c5a084173e61564648e74fce47149263e30c597ff515b179a39eb9a8",
+    "4251b116d10feb9dfe282d3bb5f11e38f32fd4de5e56fcde7fd1247a0b1b8a93",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -514,14 +514,15 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             Some("vault"),
             "Notes",
             &["Notes"],
-            "a vault Markdown link is keyed by the path from the vault root",
+            "a vault Markdown link is keyed by the one path from the vault root it spells, \
+             never reduced",
         ),
         (
             glossary,
             Some("vault"),
             "notes/Deep Note.md",
-            &["notes/Deep Note.md"],
-            "a vault wikilink is keyed by the path from the vault root",
+            &["notes/Deep Note.md", "notes/Deep Note.md.md"],
+            "a vault wikilink is keyed by the root path each of its reductions spells",
         ),
         (
             glossary,

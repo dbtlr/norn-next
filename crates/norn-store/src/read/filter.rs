@@ -52,7 +52,9 @@ pub enum ReadFilter {
     /// for each link reached, a seek of `link_keys_link` for the link's keys
     /// and of the documents each of them reaches — a range of the suffix key
     /// the root probes, or the path — to confirm no other document is in the
-    /// link's resolution.
+    /// link's resolution. A path key is confirmed as a suffix key is: a
+    /// rooted wikilink holds a path key per reduction, so a link reached at
+    /// the named document's path may name another document at its other one.
     LinksTo(SuffixKey),
     /// A finding of the kind stands over the document under the active
     /// fingerprint: one covering seek of the findings at `(fingerprint,

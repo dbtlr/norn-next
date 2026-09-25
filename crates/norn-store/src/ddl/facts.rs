@@ -64,10 +64,12 @@
 //!   key, or two for a leaf carrying a dot, which reduces both ways — beside
 //!   the number of segments the target spells, which the ambiguity-ignore test
 //!   reads.
-//! - A path — a Markdown target, or a `vault://` stem — has one key: the vault
+//! - A path — a Markdown target, `vault://` or not — has one key: the vault
 //!   path it names, read from the holding document's directory or from the
 //!   vault root by URL rules; a same-document anchor's key is the holding
-//!   document's own path. `segments` is `NULL` beside a path's key.
+//!   document's own path. A `vault://` wikilink is a rooted name, and its keys
+//!   are the root paths its reductions spell — one, or two for a leaf
+//!   carrying an extension. `segments` is `NULL` beside a path's key.
 //!
 //! A target naming an attachment is keyed like any other, since a document
 //! may carry the attachment's name. A link addressed elsewhere — a protocol

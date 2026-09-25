@@ -451,7 +451,7 @@ impl<'de> Deserialize<'de> for BodyText {
 pub const DOCUMENT_EXTENSION: &str = "md";
 
 /// The one protocol a link's address is read under rather than set aside: a
-/// `vault://` stem is a path from the vault root.
+/// `vault://` stem is read from the vault root.
 pub const VAULT_PROTOCOL: &str = "vault";
 
 /// The separator between a path's segments.
@@ -461,17 +461,20 @@ const SEPARATOR: char = '/';
 /// reading of a link — the store's keys, a row's health — reads.
 ///
 /// **Protocol first, family second.** A link written with a protocol other
-/// than [`VAULT_PROTOCOL`] addresses whatever that protocol addresses, and a
-/// `vault://` stem is a path from the vault root, in either family. A link
-/// written with no protocol falls to its family: an empty target names the
-/// document holding the link, a wikilink's target is a suffix address, and a
-/// Markdown target is a path — unless it opens with a URI scheme, `mailto:`
-/// and `tel:` among them, which addresses no document.
+/// than [`VAULT_PROTOCOL`] addresses whatever that protocol addresses. A
+/// `vault://` stem is read from the vault root, and its family keeps its own
+/// rules: a wikilink's stem is a rooted name, and a Markdown link's a path
+/// from the root. A link written with no protocol falls to its family: an
+/// empty target names the document holding the link, a wikilink's target is
+/// a suffix address, and a Markdown target is a path — unless it opens with a
+/// URI scheme, `mailto:` and `tel:` among them, which addresses no document.
 ///
 /// **A path is read by URL rules.** Its query — from the first `?` — is not
 /// part of it and is cut off here; the fragment was split off when the link
 /// was recognized. Splitting it into segments, percent-decoding each, and
-/// joining it to where it is read from is the reader's.
+/// joining it to where it is read from is the reader's. A wikilink's target,
+/// rooted or not, is read by no URL rule: nothing in it is cut off or
+/// decoded.
 ///
 /// Plain rather than `#[non_exhaustive]`: a reader matches every address, and
 /// an address nobody chose a reading for should fail to compile.
@@ -484,6 +487,11 @@ pub enum LinkAddress<'a> {
     HoldingDocument,
     /// A suffix address, resolved through the one resolver.
     Suffix(&'a str),
+    /// A wikilink's name read from the vault root: it names the document at
+    /// exactly the root path one of its reductions spells — the name with
+    /// [`DOCUMENT_EXTENSION`] appended, and, where its leaf carries an
+    /// extension, the name as written — and never a suffix of a deeper path.
+    RootedName(&'a str),
     /// A path read from the directory of the document holding the link.
     Relative(&'a str),
     /// A path read from the vault root, its leading separator cut off.
@@ -495,7 +503,10 @@ impl<'a> LinkAddress<'a> {
     /// documents.
     pub fn of(family: LinkFamily, protocol: Option<&str>, target: &'a str) -> Self {
         match protocol {
-            Some(VAULT_PROTOCOL) => LinkAddress::Rooted(without_query(target)),
+            Some(VAULT_PROTOCOL) => match family {
+                LinkFamily::Wikilink => LinkAddress::RootedName(target),
+                LinkFamily::Markdown => LinkAddress::Rooted(without_query(target)),
+            },
             Some(_) => LinkAddress::Elsewhere,
             None if target.is_empty() => LinkAddress::HoldingDocument,
             None => match family {
@@ -518,6 +529,7 @@ impl<'a> LinkAddress<'a> {
     /// segment starts a name rather than an extension.
     pub fn names_an_attachment(&self) -> bool {
         let (LinkAddress::Suffix(address)
+        | LinkAddress::RootedName(address)
         | LinkAddress::Relative(address)
         | LinkAddress::Rooted(address)) = *self
         else {

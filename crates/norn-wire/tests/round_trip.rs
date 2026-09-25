@@ -3371,10 +3371,11 @@ fn a_links_health_is_the_count_of_what_it_resolves_to() {
 
 /// **A link's address is selected protocol first and family second.** A
 /// protocol other than `vault` addresses no document, and a `vault://` stem is
-/// a path from the vault root. With no protocol, an empty target names the
-/// document holding the link, a wikilink's target is a suffix address — a
-/// colon in it is a character like any other — and a Markdown target is a
-/// path: from the vault root where it opens with the separator, and from the
+/// read from the vault root under its family's rules: a wikilink's as a name,
+/// kept as written, and a Markdown link's as a path, its query cut off. With
+/// no protocol, an empty target names the document holding the link, a
+/// wikilink's target is a suffix address — a colon in it is a character like
+/// any other — and a Markdown target is a path: from the vault root where it opens with the separator, and from the
 /// holding document's directory otherwise, its query cut off. A Markdown
 /// target opening with a URI scheme, `://` or not, addresses no document; a
 /// scheme opens with a letter and ends at the first colon, before any
@@ -3399,7 +3400,13 @@ fn a_links_address_is_selected_protocol_first_and_family_second() {
             Wikilink,
             Some("vault"),
             "notes/x",
-            LinkAddress::Rooted("notes/x"),
+            LinkAddress::RootedName("notes/x"),
+        ),
+        (
+            Wikilink,
+            Some("vault"),
+            "notes/my%20x.md?raw=1",
+            LinkAddress::RootedName("notes/my%20x.md?raw=1"),
         ),
         (
             Markdown,

@@ -1056,7 +1056,8 @@ mod tests {
     /// **The text layer's reading of a link and the wire's address agree.**
     /// `norn-text` states the syntax-only rule — protocol first, family
     /// second — and the wire's selector refines it: the reserved `vault`
-    /// protocol is a path from the vault root, every other protocol addresses
+    /// protocol is read from the vault root, a wikilink's as a rooted name and
+    /// a Markdown link's as a path, every other protocol addresses
     /// no document, a wikilink written without one is a suffix address, and a
     /// Markdown target written without one is a path, or addresses no
     /// document where it opens with a URI scheme. An empty target names the
@@ -1072,7 +1073,7 @@ mod tests {
                     [t](mailto:someone@example.com) [t](#frag)\n";
         let expected = [
             LinkAddress::Suffix("notes/x"),
-            LinkAddress::Rooted("notes/x.md"),
+            LinkAddress::RootedName("notes/x.md"),
             LinkAddress::Elsewhere,
             LinkAddress::HoldingDocument,
             LinkAddress::Suffix("mailto:x"),
@@ -1094,7 +1095,10 @@ mod tests {
             let address = LinkAddress::of(family, stored.protocol.as_deref(), &stored.target);
             assert_eq!(address, expected, "{}", link.raw);
             let agrees = match (link.resolution(), address) {
-                (Resolution::Protocol(VAULT_PROTOCOL), LinkAddress::Rooted(_)) => true,
+                (
+                    Resolution::Protocol(VAULT_PROTOCOL),
+                    LinkAddress::Rooted(_) | LinkAddress::RootedName(_),
+                ) => true,
                 (Resolution::Protocol(scheme), LinkAddress::Elsewhere) => scheme != VAULT_PROTOCOL,
                 (Resolution::Suffix, LinkAddress::Suffix(_) | LinkAddress::HoldingDocument) => true,
                 (
