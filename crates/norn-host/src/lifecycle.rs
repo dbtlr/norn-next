@@ -6677,6 +6677,13 @@ mod tests {
         /// [`EntryOps::advisories`] with, read at the publication the way an
         /// implementation reads what its attachment met.
         advisories: Mutex<Vec<AttachmentAdvisory>>,
+        /// The store reading the next attach records through its progress
+        /// reporter, the way a leg that commits lane-1 work records one.
+        /// Taken by that attach, so the attaches after it record none.
+        store_reading_at_attach: Mutex<Option<StoreReading>>,
+        /// What every coverage this fake hands out answers
+        /// [`EntryOps::control_root`] with.
+        control_root: Mutex<Option<std::path::PathBuf>>,
     }
 
     /// A rendezvous two registry writes meet at, where both reach the write.
@@ -6813,6 +6820,13 @@ mod tests {
             self.advisories.lock().expect("advisories poisoned").clone()
         }
 
+        fn control_root(&self, _: &FakeCoverage) -> Option<std::path::PathBuf> {
+            self.control_root
+                .lock()
+                .expect("control root poisoned")
+                .clone()
+        }
+
         fn attach(
             &self,
             registration: &Registration,
@@ -6826,6 +6840,14 @@ mod tests {
                 .insert(registration.name.clone(), registration.root.clone());
             if self.heal_in_attach.load(Ordering::SeqCst) {
                 progress.healing().report(1, Some(2));
+            }
+            let reading = self
+                .store_reading_at_attach
+                .lock()
+                .expect("store reading poisoned")
+                .take();
+            if let Some(reading) = reading {
+                progress.record_store_reading(Some(reading));
             }
             if self.block_attach.load(Ordering::SeqCst) {
                 self.attach_started.store(true, Ordering::SeqCst);
@@ -8719,6 +8741,36 @@ mod tests {
         );
     }
 
+    /// **The fallback's ignore answer is read at the root the entry's active
+    /// controls were read from**, which is where its coverage stands, and
+    /// not at the root its registration spells where the two differ.
+    #[test]
+    fn the_fallback_ignore_answer_is_read_at_the_control_root() {
+        let scratch = temp_base("status-fallback-control-root");
+        let name = VaultName::new("notes").unwrap();
+        let (registered, covered) = (
+            scratch.root().join("registered"),
+            scratch.root().join("covered"),
+        );
+        let ops = Arc::new(FakeOps::default());
+        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, &registered)]);
+        std::fs::create_dir_all(&covered).unwrap();
+        std::fs::write(registered.join(".gitignore"), "notes/\n").unwrap();
+        std::fs::write(covered.join(".gitignore"), "/.norn/\n").unwrap();
+        *ops.advisories.lock().unwrap() = vec![falling_back()];
+        *ops.control_root.lock().unwrap() = Some(covered);
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert_eq!(
+            status_of(&host, &name).advisories,
+            [norn_wire::Advisory::tmp_fallback_in_use(
+                ".norn/tmp/key",
+                true
+            )]
+        );
+    }
+
     /// **`doctor` names every registration whose root is missing or reached
     /// by another registration too**, in name order, from the one pass over
     /// the served roots.
@@ -9027,6 +9079,66 @@ mod tests {
             assert_eq!(ops.detaches.load(Ordering::SeqCst), released);
             assert_eq!(ops.attaches.load(Ordering::SeqCst), released + 1);
         }
+    }
+
+    /// The store reading `name`'s entry holds.
+    fn recorded_store_reading<O: EntryOps>(
+        host: &Host<O>,
+        name: &VaultName,
+    ) -> Option<StoreReading> {
+        host.shared
+            .entries
+            .get(name)
+            .expect("the vault is registered")
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .store_reading
+            .clone()
+    }
+
+    /// **A store reading goes back with the coverage it was taken over**: an
+    /// entry released and attached again by a leg that records no reading
+    /// holds none, rather than the reading of the store it gave back.
+    #[test]
+    fn a_store_reading_goes_back_with_the_coverage_it_was_taken_over() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        *ops.store_reading_at_attach.lock().unwrap() = Some(fake_reading(3));
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(recorded_store_reading(&host, &name), Some(fake_reading(3)));
+
+        ops.lost_reload.store(true, Ordering::SeqCst);
+        assert_eq!(
+            reload_refused(&host, &reload_params(&name, false)),
+            ErrorDetail::reload_failed(norn_wire::ReloadFailure::lost_maintainership())
+        );
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        assert_eq!(recorded_store_reading(&host, &name), None);
+    }
+
+    /// **Only a leg the entry stands at records a store reading**: a reporter
+    /// carrying an epoch the entry has moved on from, or not reached,
+    /// records nothing, and one at the entry's own epoch records.
+    #[test]
+    fn only_a_leg_the_entry_stands_at_records_a_store_reading() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).expect("the vault is served");
+        let epoch = entry.gate.lock().unwrap().claim.epoch();
+
+        for moved in [epoch - 1, epoch + 1] {
+            reporter(&entry, moved).record_store_reading(Some(fake_reading(7)));
+            assert_eq!(recorded_store_reading(&host, &name), None, "epoch {moved}");
+        }
+        reporter(&entry, epoch).record_store_reading(Some(fake_reading(7)));
+        assert_eq!(recorded_store_reading(&host, &name), Some(fake_reading(7)));
     }
 
     /// **A reload whose leg unwinds answers the reading the unwind published**,
