@@ -394,7 +394,10 @@ impl Hash for NormalizedPath {
 /// loops, a name beneath a file, or a spelling longer than the platform's
 /// `PATH_MAX` — is kept as spelled beneath what did resolve, and so is every
 /// component under it. A dangling link is therefore spelled as the link, its
-/// target not followed. Past what resolves the filesystem gives no answer to
+/// target not followed. A `..` after a component that resolved, a file
+/// included, steps to the directory holding what that component resolved to,
+/// where the filesystem itself refuses a `..` after a file. Past what resolves
+/// the filesystem gives no answer to
 /// take a `..` by, so a `..` there is taken over the spelling: it steps back
 /// over the component before it. Once that brings the spelling back to what
 /// resolved, each later component is resolved again from there, links taken.
