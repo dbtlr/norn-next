@@ -463,6 +463,8 @@ dependencies = [
  "norn-testkit",
  "norn-text",
  "norn-wire",
+ "schemars",
+ "serde",
 ]
 
 [[package]]

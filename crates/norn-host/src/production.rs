@@ -314,26 +314,13 @@ impl ReadSource for norn_store::SnapshotReader {
     }
 }
 
-/// Render a store refusal as the reason a read is refused with.
-///
-/// **The inspection surface names no file.** The reason a mint or an
-/// establishment left behind is retained beside the entry's published demand
-/// and is rendered into the vault inspection and into a read's refusal detail,
-/// both of which answer a caller holding no hold — while `StoreError` renders
-/// its file-lifecycle refusals with the derived database's path in them. A
-/// caller reading that path opens its own connection over the same database
-/// and answers from it under no adjudication, which is the escape the reader
-/// type carries no route to. So the path is dropped here and the refusal keeps
-/// what a caller can act on: what was being done, and what the driver said.
-/// The path stays on the `StoreError` itself, where a log line that needs it
-/// reads it.
+/// Render a store refusal as the reason a read is refused with, told through
+/// [`crate::refusal::store_refusal_told`] so it names no file: the reason is
+/// retained beside the entry's published demand and rendered into the vault
+/// inspection and into a read's refusal detail, both of which answer a caller
+/// holding no hold.
 fn reader_unavailable(error: &StoreError) -> ReaderUnavailable {
-    match error {
-        StoreError::Lifecycle {
-            operation, message, ..
-        } => ReaderUnavailable::new(format!("{operation} failed: {message}")),
-        named => ReaderUnavailable::new(named.to_string()),
-    }
+    ReaderUnavailable::new(crate::refusal::store_refusal_told(error))
 }
 
 impl ProductionEntryOps {

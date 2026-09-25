@@ -21,7 +21,10 @@ use std::path::Path;
 use norn_host::{Demand, ReadRefusal, ReloadRefusal};
 use norn_testkit::process::Sandbox;
 use norn_testkit::wait::{Observed, wait_until};
-use norn_wire::{CountParams, GroupKey, TrustState, VaultAddress};
+use norn_wire::{
+    AttachMode, CountParams, ErrorDetail, GroupKey, NotReady, ReasonCode, TrustState, VaultAddress,
+    VaultName, VaultRoot,
+};
 
 /// The generated profile every case here attaches.
 const PROFILE: &str = "tiny";
@@ -254,4 +257,144 @@ fn a_hold_carries_the_declaration_its_snapshot_pins_across_a_schema_reload() {
             hold.content_model(),
         )
         .expect("a count grouping by a typed key compiled against the hold's declaration");
+}
+
+/// A count over `name`, every document in one tally.
+fn a_count(name: &VaultName) -> CountParams {
+    CountParams::new(VaultAddress::name(name.clone()))
+}
+
+/// **A count answers under the reading of the snapshot it was read from.** The
+/// trust is the `Ready` the entry published, the epoch is the database the
+/// attachment derived, and the generation is the one its writes had reached —
+/// nothing writes to the vault here, so the store's generation after the
+/// answer is the one its snapshot was established at.
+#[test]
+fn a_count_answers_under_the_reading_of_its_snapshot() {
+    let (_sandbox, vault) = a_vault("host-reads-count");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let answered = host
+        .count(&a_count(vault.name()))
+        .expect("an attached vault answers a count");
+
+    let mut store = vault.store();
+    let generation = store
+        .begin_request()
+        .write_generation()
+        .expect("the store's generation");
+    assert_eq!(answered.answer.reading.trust, TrustState::Ready);
+    assert_eq!(answered.answer.reading.epoch, store.epoch());
+    assert_eq!(
+        answered.answer.reading.generation,
+        u64::try_from(generation).expect("a generation at or above zero"),
+        "the answer names another generation than its snapshot read"
+    );
+    assert_eq!(answered.answer.reading.ladder, None);
+    assert!(answered.answer.is_complete());
+    let [tally] = answered.answer.report.rows.as_slice() else {
+        panic!(
+            "an ungrouped count answered {} tallies",
+            answered.answer.report.rows.len()
+        );
+    };
+    assert!(tally.count > 0, "the count found no document in the vault");
+    assert_eq!(
+        answered.snapshot.snapshots_opened(),
+        1,
+        "the answer was read from other than the one snapshot its hold established"
+    );
+    assert_eq!(
+        answered.snapshot.statements_executed(),
+        1 + answered.work.statements,
+        "the snapshot ran statements the count does not account for"
+    );
+}
+
+/// **A count over an entry that holds nothing yet is refused with the warming
+/// state of the attach it asked for**, filed under `host/entry-not-ready`
+/// rather than answered as a state.
+#[test]
+fn a_count_over_an_unattached_vault_is_not_ready() {
+    let (_sandbox, vault) = a_vault("host-reads-count-warming");
+    let host = vault.host();
+
+    let refused = host
+        .count(&a_count(vault.name()))
+        .expect_err("an unattached vault answered a count");
+    assert_eq!(refused.code(), &ReasonCode::HostEntryNotReady);
+    let ErrorDetail::EntryNotReady { state, .. } = refused.detail() else {
+        panic!("a count over an unattached vault refused with {refused:?}");
+    };
+    assert!(
+        matches!(state, NotReady::Warming { .. }),
+        "the count did not ask for the attach it was refused for: {state:?}"
+    );
+}
+
+/// **A count over a parked entry is refused with the park's own code.** Two
+/// names over one root are a registry in conflict: the attach the first count
+/// asks for classifies the root and parks the entry, and every count after it
+/// is refused as that park rather than restated as a state — a read withdraws
+/// no park.
+#[test]
+fn a_count_over_a_parked_vault_is_refused_with_the_parks_code() {
+    let (_sandbox, vault) = a_vault("host-reads-count-parked");
+    let alias = VaultName::new("alias").expect("a legal vault name");
+    let host = vault.host_under([vault.name().clone(), alias]);
+
+    let refused = wait_until(
+        "the attach a count asked for to park the conflicting entry",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.count(&a_count(vault.name())) {
+            Err(refused) if refused.code() == &ReasonCode::HostEntryNotReady => {
+                Observed::pending(format!("the count was refused with {refused:?}"))
+            }
+            Err(refused) => Observed::Met(refused),
+            Ok(answered) => panic!("a vault registered twice answered a count: {answered:?}"),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        refused.code(),
+        &ReasonCode::HostDuplicateRoot,
+        "{refused:?}"
+    );
+    assert!(
+        host.count(&a_count(vault.name()))
+            .is_err_and(|again| again == refused),
+        "a count withdrew the park it was refused with"
+    );
+}
+
+/// A count naming a vault the registry does not hold is refused under the name
+/// it asked for.
+#[test]
+fn a_count_over_an_unknown_name_is_an_unknown_vault() {
+    let (_sandbox, vault) = a_vault("host-reads-count-unknown");
+    let host = vault.host();
+    let ledger = VaultName::new("ledger").expect("a legal vault name");
+
+    let refused = host
+        .count(&a_count(&ledger))
+        .expect_err("an unknown name answered a count");
+    assert_eq!(refused.detail(), &ErrorDetail::unknown_vault(ledger));
+}
+
+/// A count addressing its vault by root asks for a throwaway attach, which
+/// the host refuses — even over the root of a vault it serves by name.
+#[test]
+fn a_count_by_root_is_an_unsupported_attach() {
+    let (_sandbox, vault) = a_vault("host-reads-count-root");
+    let host = vault.host();
+    let root = VaultRoot::new(vault.path()).expect("an absolute root");
+
+    let refused = host
+        .count(&CountParams::new(VaultAddress::root(root)))
+        .expect_err("a root answered a count");
+    assert_eq!(
+        refused.detail(),
+        &ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
+    );
 }

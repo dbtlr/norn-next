@@ -31,6 +31,12 @@ norn-semantic = { path = "../norn-semantic" }
 norn-store = { path = "../norn-store" }
 norn-text = { path = "../norn-text" }
 norn-wire = { path = "../norn-wire" }
+# A read verb's answer is `norn-wire`'s `VaultAnswer`, generic over the verb's
+# report and bounded by the traits every wire type carries; the read seam that
+# wraps each verb's report names those bounds, and nothing here derives or
+# serializes through them.
+schemars = { workspace = true }
+serde = { workspace = true }
 
 # The measurement suites attach a real host over a generated vault tree, so the
 # generator is a development edge of this crate. It is a dev edge and cycles

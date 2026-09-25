@@ -6,10 +6,12 @@
 //! host decides *when* attach, reconciliation and detach happen, while the
 //! filesystem and store crates remain the only owners of those effects.
 
+mod address;
 mod derivation;
 mod evidence;
 mod lifecycle;
 mod production;
+mod read;
 mod refusal;
 mod registry;
 mod reload;
@@ -61,6 +63,7 @@ pub use production::{
     MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy, ProductionPolicyError,
     WATCH_SYNCHRONIZATION_DEADLINE, stored_path_order,
 };
+pub use read::Answered;
 pub use registry::{AliasConflict, RegistryRead};
 pub use reload::{
     ActiveFingerprints, AuthoredDrift, ConfigFingerprint, EngineConfigReceiver, ReloadError,
