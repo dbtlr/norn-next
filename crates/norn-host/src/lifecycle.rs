@@ -354,6 +354,13 @@ pub trait EntryOps: Send + Sync + 'static {
     /// attachment rather than about coverage it holds now; `vault status` and
     /// `doctor` read it there.
     ///
+    /// **The links are refreshed only by a walk of the whole vault**: the
+    /// heal an attach, a recovery, a rebuild or a schema reload runs, and a
+    /// reconcile's rescan of the whole vault. A reconcile scoped to the paths
+    /// the watcher reported walks part of the vault and leaves them as the
+    /// last whole walk found them, so a link made or removed since then is
+    /// reported as that walk found it until the next whole walk.
+    ///
     /// The default carries none.
     fn advisories(&self, _: &Self::Attachment) -> Vec<AttachmentAdvisory> {
         Vec::new()

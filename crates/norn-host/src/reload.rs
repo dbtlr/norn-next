@@ -238,6 +238,14 @@ impl AuthoredDrift {
     /// No active fingerprints is an entry serving no controls yet, which
     /// reads nothing. Otherwise both files are fingerprinted without being
     /// parsed, outside any lock.
+    ///
+    /// **Both are read whole, with no bound.** No size contract binds a
+    /// control file: an attach, a recovery and a reload read the same two
+    /// files whole to serve under them. So a status reads no more than the
+    /// read that put the active fingerprints into service, and a bound here
+    /// would report as unreadable a file the entry serves under. What a
+    /// status pays for the drift is linear in the two files' size, which is
+    /// the vault author's.
     pub(crate) fn of(
         registration: &Registration,
         active: Option<ActiveFingerprints>,
