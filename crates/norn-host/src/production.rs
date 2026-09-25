@@ -6150,8 +6150,8 @@ mod tests {
         }
 
         /// A `vault status` of `name`'s own standing.
-        fn engine_reported(
-            host: &crate::Host<ProductionEntryOps>,
+        fn engine_reported<O: EntryOps>(
+            host: &crate::Host<O>,
             name: &VaultName,
         ) -> (EngineSection, norn_wire::EngineStatus) {
             let status = super::status::status_of(host, name);
@@ -6362,6 +6362,246 @@ mod tests {
             assert_eq!(
                 engine,
                 norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
+            );
+        }
+
+        /// Production ops whose poll reports a watcher overflow once the case
+        /// arms it, and reports nothing before then, so the reconcile the
+        /// case drives is one whole-vault rescan over the tree the case built.
+        /// Each recovery that returns is counted.
+        struct OverflowOnArm {
+            inner: ProductionEntryOps,
+            armed: Arc<std::sync::atomic::AtomicBool>,
+            recoveries: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl EntryOps for OverflowOnArm {
+            type Attachment = ProductionAttachment;
+
+            fn attach(
+                &self,
+                registration: &Registration,
+                progress: &ProgressReporter<Self::Attachment>,
+            ) -> Result<Self::Attachment, JobFailure> {
+                self.inner.attach(registration, progress)
+            }
+
+            fn reconcile(
+                &self,
+                name: &VaultName,
+                attachment: &mut Self::Attachment,
+                work: ReconcileWork,
+                progress: &ProgressReporter<Self::Attachment>,
+            ) -> Result<(), JobFailure> {
+                self.inner.reconcile(name, attachment, work, progress)
+            }
+
+            fn recover(
+                &self,
+                name: &VaultName,
+                attachment: &mut Self::Attachment,
+                progress: &ProgressReporter<Self::Attachment>,
+            ) -> Result<(), JobFailure> {
+                let recovered = self.inner.recover(name, attachment, progress);
+                self.recoveries
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                recovered
+            }
+
+            fn active_fingerprints(
+                &self,
+                attachment: &Self::Attachment,
+            ) -> Option<crate::reload::ActiveFingerprints> {
+                self.inner.active_fingerprints(attachment)
+            }
+
+            fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf> {
+                self.inner.control_root(attachment)
+            }
+
+            fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+                self.inner.active_content_model(attachment)
+            }
+
+            fn withheld_trust(&self, attachment: &Self::Attachment) -> Option<UntrustedReason> {
+                self.inner.withheld_trust(attachment)
+            }
+
+            fn semantic(&self) -> Option<&SemanticEngines> {
+                self.inner.semantic()
+            }
+
+            fn rebuild(
+                &self,
+                name: &VaultName,
+                attachment: Self::Attachment,
+                progress: &ProgressReporter<Self::Attachment>,
+            ) -> Result<Self::Attachment, JobFailure> {
+                self.inner.rebuild(name, attachment, progress)
+            }
+
+            fn poll(
+                &self,
+                name: &VaultName,
+                attachment: &mut Self::Attachment,
+            ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+                self.inner.poll(name, attachment)?;
+                Ok(self
+                    .armed
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                    .then(|| norn_fs::Batch::rescan(RescanScope::Vault)))
+            }
+
+            fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+                self.inner.detach(name, attachment);
+            }
+        }
+
+        /// A ready host over [`OverflowOnArm`] whose dispatcher polls every
+        /// few milliseconds, with the case's handles on the ops.
+        fn overflowing_ready_host(
+            f: &Fixture,
+        ) -> (
+            crate::Host<OverflowOnArm>,
+            VaultName,
+            crate::DemandLease<OverflowOnArm>,
+            Arc<std::sync::atomic::AtomicBool>,
+            Arc<std::sync::atomic::AtomicUsize>,
+        ) {
+            let (_engines, inner) = engines_and_ops(f);
+            let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let recoveries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let registration = f.registration();
+            let name = registration.name.clone();
+            let host = crate::Host::new(
+                crate::RegistryRead::from_entries([registration]),
+                OverflowOnArm {
+                    inner,
+                    armed: Arc::clone(&armed),
+                    recoveries: Arc::clone(&recoveries),
+                },
+                crate::LifecyclePolicy {
+                    idle_after: Duration::from_secs(60),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_millis(5),
+                },
+            )
+            .unwrap();
+            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_state(&host, &name, norn_wire::TrustState::Ready);
+            (host, name, lease, armed, recoveries)
+        }
+
+        /// Make `path` a directory this account cannot list, or answer
+        /// `false` where the account lists it anyway.
+        #[cfg(unix)]
+        fn unlistable_directory(path: &Path) -> bool {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+            if fs::read_dir(path).is_ok() {
+                eprintln!("skipped: this account reads a mode-000 directory");
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+                return false;
+            }
+            true
+        }
+
+        #[cfg(unix)]
+        fn listable_again(path: &Path) {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        /// **A reconcile whose whole-vault rescan commits lane-1 work and
+        /// then fails leaves the engine reported trailing that work**: the
+        /// reconcile leg records where the store stands at its end.
+        #[cfg(unix)]
+        #[test]
+        fn a_reconcile_that_fails_after_committing_reports_the_engine_trailing_its_work() {
+            let f = Fixture::new("status-engine-failed-reconcile");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
+            let (host, name, _lease, armed, _) = overflowing_ready_host(&f);
+            assert_eq!(
+                engine_reported(&host, &name).1,
+                norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            );
+
+            fs::write(f.vault().join("a.md"), "beta beta\n").unwrap();
+            fs::write(f.vault().join("b.md"), "gamma gamma\n").unwrap();
+            let denied = f.vault().join("zz");
+            if !unlistable_directory(&denied) {
+                return;
+            }
+            armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            let reason = wait_untrusted(&host, &name);
+            let (_, engine) = engine_reported(&host, &name);
+            listable_again(&denied);
+
+            assert!(
+                matches!(reason, UntrustedReason::EnvironmentalRefusal { .. }),
+                "{reason:?}"
+            );
+            // The rescan committed the rewritten `a.md` and the new `b.md` as
+            // one full changeset before it met the directory it cannot list.
+            assert_eq!(
+                engine,
+                norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
+            );
+        }
+
+        /// **A recovery whose heal commits lane-1 work and then fails leaves
+        /// the engine reported trailing that work**: the recovery leg records
+        /// where the store stands at its end.
+        #[cfg(unix)]
+        #[test]
+        fn a_recovery_that_fails_after_committing_reports_the_engine_trailing_its_work() {
+            let f = Fixture::new("status-engine-failed-recovery");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
+            let (host, name, _lease, armed, recoveries) = overflowing_ready_host(&f);
+
+            fs::write(f.vault().join("a.md"), "beta beta\n").unwrap();
+            fs::write(f.vault().join("b.md"), "gamma gamma\n").unwrap();
+            let denied = f.vault().join("zz");
+            if !unlistable_directory(&denied) {
+                return;
+            }
+            armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            wait_untrusted(&host, &name);
+            assert_eq!(
+                engine_reported(&host, &name).1,
+                norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
+            );
+
+            fs::write(f.vault().join("c.md"), "delta delta\n").unwrap();
+            fs::write(f.vault().join("d.md"), "epsilon epsilon\n").unwrap();
+            let _recovering = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_until(
+                "the demanded recovery to return",
+                lifecycle_budget(),
+                || match recoveries.load(std::sync::atomic::Ordering::SeqCst) {
+                    0 => Observed::Pending("no recovery has returned".to_owned()),
+                    _ => Observed::Met(()),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let reason = wait_untrusted(&host, &name);
+            let (_, engine) = engine_reported(&host, &name);
+            listable_again(&denied);
+
+            assert!(
+                matches!(reason, UntrustedReason::EnvironmentalRefusal { .. }),
+                "{reason:?}"
+            );
+            // The recovery's heal committed the new `c.md` and `d.md` as one
+            // more full changeset before it met the directory it cannot list.
+            assert_eq!(
+                engine,
+                norn_wire::EngineStatus::on(None, Some(Freshness::trailing(2)))
             );
         }
 
@@ -6602,8 +6842,8 @@ mod tests {
         use super::*;
 
         /// Where `name` stands, as `vault status` reports it.
-        pub(super) fn status_of(
-            host: &crate::Host<ProductionEntryOps>,
+        pub(super) fn status_of<O: EntryOps>(
+            host: &crate::Host<O>,
             name: &VaultName,
         ) -> norn_wire::VaultStatus {
             let params = norn_wire::StatusParams::new()
