@@ -25,10 +25,10 @@ use norn_wire::{
     ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace, RequestBound, RequestPart,
     RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport,
     RungSelection, RungSet, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport,
-    Severity, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
-    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
-    Verb, WarmingPhase, WatcherLossCause,
+    Severity, SidecarRevision, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow,
+    TagSource, TagStance, Tally, TrustState, UnregisterParams, UnregisterReport, Unsatisfied,
+    UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName,
+    VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -149,6 +149,7 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<RungReport>(),
         schema_of::<Freshness>(),
         schema_of::<Score>(),
+        schema_of::<SidecarRevision>(),
         schema_of::<EngineSection>(),
         schema_of::<Unsatisfied>(),
         schema_of::<ComparedBy>(),
@@ -1258,7 +1259,8 @@ fn a_page_advertises_its_rows_its_continuation_and_what_moved() {
 }
 
 /// The snapshot advertises the four parts a continuation is judged against,
-/// under the snake_case names the wire uses.
+/// under the snake_case names the wire uses, and the sidecar part is the pair
+/// of the sidecar's own epoch and its revision within it.
 #[test]
 fn a_snapshot_advertises_the_parts_a_continuation_is_judged_against() {
     let schema = schema_of::<Snapshot>();
@@ -1272,6 +1274,14 @@ fn a_snapshot_advertises_the_parts_a_continuation_is_judged_against() {
         ]
         .into_iter()
         .collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<SidecarRevision>()),
+        ["epoch", "revision"].into_iter().collect()
+    );
+    assert!(
+        schema.to_string().contains("#/$defs/SidecarRevision"),
+        "the snapshot's sidecar part is not the epoch-qualified pair: {schema}"
     );
 }
 

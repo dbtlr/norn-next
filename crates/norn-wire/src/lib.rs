@@ -209,7 +209,7 @@
 //! [`EngineSection::malformed`] and the constructors on each
 //! [`RungSelection`] variant, whose variants are the parts of a plain enum
 //! that extend by gaining a field,
-//! [`Cursor::new`], [`Page::new`], [`Snapshot::new`],
+//! [`Cursor::new`], [`Page::new`], [`Snapshot::new`], [`SidecarRevision::new`],
 //! [`CursorOrderChanged::new`], [`DocumentOrders::new`], [`Score::new`],
 //! [`AnswerReading::new`], [`LadderDeclaration::new`],
 //! [`ModelIdentity::new`], [`Freshness::trailing`], [`Freshness::rescanning`],
@@ -372,7 +372,7 @@ pub use address::{
 };
 pub use cursor::{
     Cursor, CursorKey, CursorOrderChanged, DocumentOrders, FacetKind, Moved, NonFiniteScore, Page,
-    PagedRows, Score, Snapshot,
+    PagedRows, Score, SidecarRevision, Snapshot,
 };
 pub use demand::AttachMode;
 pub use doctor::{

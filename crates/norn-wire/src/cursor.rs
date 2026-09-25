@@ -41,10 +41,13 @@
 //!   it forward; a generation that moved backwards inside one epoch is a
 //!   database that is not the one the cursor named, and hiding that is worse
 //!   than reporting it.
-//! - The cursor carries a sidecar revision, and either the epoch differs or
-//!   the snapshot's revision differs: `sidecar_revision` is reported. The
-//!   revision is epoch-qualified, so it compares nothing across two epochs and
-//!   is reported moved wherever the epoch moved.
+//! - The cursor carries a sidecar revision, and the snapshot's is absent or
+//!   differs in the sidecar's epoch or in the revision within it:
+//!   `sidecar_revision` is reported. The pair is the identity, because a
+//!   sidecar rebuilt under a new epoch counts its revisions again from the
+//!   start, so an equal revision under another sidecar epoch is another state.
+//!   The sidecar's epoch is its own and not the store's: a store rebuilt under
+//!   a sidecar that has not moved reports `epoch` alone.
 //! - The cursor carries a schema fingerprint and the snapshot's is absent or
 //!   different: the continuation is refused as an order that changed.
 //!
@@ -377,6 +380,32 @@ pub enum PagedRows {
     },
 }
 
+/// Which sidecar state an answer read: the sidecar's own epoch, and how far
+/// its committed mutations had got within that epoch.
+///
+/// On the wire an object of the two: `{"epoch":"sidecar-1","revision":4}`.
+/// The pair, never the bare revision, is the identity: a sidecar rebuilt under
+/// a new epoch counts its revisions again from the start, so a revision
+/// compared across two epochs compares nothing.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct SidecarRevision {
+    /// The sidecar's own epoch, which is not the store's.
+    pub epoch: String,
+    /// How many committed mutations the sidecar had seen within that epoch.
+    pub revision: u64,
+}
+
+impl SidecarRevision {
+    /// The sidecar state at `revision` within the sidecar epoch `epoch`.
+    pub fn new(epoch: impl Into<String>, revision: u64) -> Self {
+        SidecarRevision {
+            epoch: epoch.into(),
+            revision,
+        }
+    }
+}
+
 /// What a cursor was minted under, and what an establishment reads now.
 ///
 /// On the wire a snapshot is a plain object: the database the answer came
@@ -394,9 +423,9 @@ pub struct Snapshot {
     /// The fingerprint of the schema the order was taken under, and `null`
     /// where the order was raw.
     pub schema_fingerprint: Option<String>,
-    /// The sidecar's epoch-qualified revision, and `null` where the answer
-    /// read no sidecar.
-    pub sidecar_revision: Option<u64>,
+    /// The sidecar state the answer read, and `null` where the answer read no
+    /// sidecar.
+    pub sidecar_revision: Option<SidecarRevision>,
 }
 
 impl Snapshot {
@@ -405,7 +434,7 @@ impl Snapshot {
         epoch: impl Into<String>,
         generation: u64,
         schema_fingerprint: Option<String>,
-        sidecar_revision: Option<u64>,
+        sidecar_revision: Option<SidecarRevision>,
     ) -> Self {
         Snapshot {
             epoch: epoch.into(),
@@ -431,8 +460,8 @@ pub enum Moved {
     /// Writes landed in the same database after the cursor was minted, or the
     /// count they landed under is behind the one the cursor named.
     Generation,
-    /// The sidecar the answer reads is at another revision, or at a revision
-    /// another database qualifies.
+    /// The sidecar the answer reads is at another revision, or under another
+    /// sidecar epoch.
     SidecarRevision,
 }
 
@@ -566,8 +595,8 @@ impl Cursor {
         } else if self.snapshot.generation != now.generation {
             moved.push(Moved::Generation);
         }
-        if self.snapshot.sidecar_revision.is_some()
-            && (epoch_moved || self.snapshot.sidecar_revision != now.sidecar_revision)
+        if let Some(minted) = &self.snapshot.sidecar_revision
+            && now.sidecar_revision.as_ref() != Some(minted)
         {
             moved.push(Moved::SidecarRevision);
         }

@@ -29,11 +29,12 @@ use norn_wire::{
     RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace,
     RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
     RollUp, Rung, RungReport, RungSelection, RungSet, SchemaSource, Score, SearchParams, SetParams,
-    SetReport, Severity, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow,
-    TagSource, TagStance, Tally, TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind,
-    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
-    UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
-    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    SetReport, Severity, SidecarRevision, Snapshot, Sort, SortKey, Span, StatusParams,
+    StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead, TrustState,
+    UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
+    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
+    Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -418,6 +419,11 @@ fn score(value: f64) -> Score {
     Score::new(value).expect("a finite relevance score")
 }
 
+/// The sidecar state at `revision` within the sidecar epoch `sidecar-1`.
+fn sidecar(revision: u64) -> SidecarRevision {
+    SidecarRevision::new("sidecar-1", revision)
+}
+
 /// Every paged row type, with one key per shape its order takes.
 fn cursor_keys() -> Vec<CursorKey> {
     let mut keys = vec![
@@ -459,7 +465,7 @@ fn cursors() -> Vec<Cursor> {
         .into_iter()
         .map(|key| {
             Cursor::new(
-                Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4)),
+                Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(4))),
                 key,
             )
         })
@@ -2896,7 +2902,7 @@ fn norn_wire_test_base64(bytes: &[u8]) -> String {
 /// The cursor every continuation rule below is read against.
 fn minted() -> Cursor {
     Cursor::new(
-        Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4)),
+        Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(4))),
         CursorKey::ordinal(CollectionSelector::Headings, 1),
     )
 }
@@ -2904,20 +2910,19 @@ fn minted() -> Cursor {
 /// An establishment that has not moved at all reports nothing.
 #[test]
 fn an_unmoved_establishment_reports_nothing() {
-    let exact = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4));
+    let exact = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(4)));
     assert_eq!(minted().continuation(&exact), Ok(vec![]));
 }
 
 /// A database that is not the one the cursor was minted from reports `epoch`,
 /// and the generation beside it is not reported: a rebuild restarts the write
-/// count, so a count read against another database compares nothing.
+/// count, so a count read against another database compares nothing. A
+/// sidecar whose own epoch and revision have not moved is not reported: its
+/// epoch is its own, not the store's.
 #[test]
 fn a_rebuilt_database_reports_the_epoch_and_not_the_generation() {
-    let rebuilt = Snapshot::new("epoch-2", 3, Some("fp-1".to_string()), Some(4));
-    assert_eq!(
-        minted().continuation(&rebuilt),
-        Ok(vec![Moved::Epoch, Moved::SidecarRevision])
-    );
+    let rebuilt = Snapshot::new("epoch-2", 3, Some("fp-1".to_string()), Some(sidecar(4)));
+    assert_eq!(minted().continuation(&rebuilt), Ok(vec![Moved::Epoch]));
 }
 
 /// A generation that differs inside one epoch reports `generation` whichever
@@ -2927,7 +2932,12 @@ fn a_rebuilt_database_reports_the_epoch_and_not_the_generation() {
 #[test]
 fn a_generation_that_differs_in_either_direction_reports_the_generation() {
     for generation in [13, 11] {
-        let written = Snapshot::new("epoch-1", generation, Some("fp-1".to_string()), Some(4));
+        let written = Snapshot::new(
+            "epoch-1",
+            generation,
+            Some("fp-1".to_string()),
+            Some(sidecar(4)),
+        );
         assert_eq!(
             minted().continuation(&written),
             Ok(vec![Moved::Generation]),
@@ -2937,20 +2947,32 @@ fn a_generation_that_differs_in_either_direction_reports_the_generation() {
 }
 
 /// A sidecar at another revision reports `sidecar_revision`, and so does one
-/// at the same number under another epoch: the revision is epoch-qualified, so
-/// two epochs share no scale for it to be compared on.
+/// at the same revision under another sidecar epoch: a rebuilt sidecar counts
+/// its revisions again from the start, so two sidecar epochs share no scale
+/// for a revision to be compared on. A sidecar gone from the answer has moved
+/// too.
 #[test]
 fn a_sidecar_moves_with_its_revision_and_with_its_epoch() {
-    let drained = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(5));
+    let drained = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(5)));
     assert_eq!(
         minted().continuation(&drained),
         Ok(vec![Moved::SidecarRevision])
     );
-    let requalified = Snapshot::new("epoch-2", 12, Some("fp-1".to_string()), Some(4));
+    let rebuilt = Snapshot::new(
+        "epoch-1",
+        12,
+        Some("fp-1".to_string()),
+        Some(SidecarRevision::new("sidecar-2", 4)),
+    );
     assert_eq!(
-        minted().continuation(&requalified),
-        Ok(vec![Moved::Epoch, Moved::SidecarRevision]),
-        "a revision another database qualifies was read as the same revision"
+        minted().continuation(&rebuilt),
+        Ok(vec![Moved::SidecarRevision]),
+        "an equal revision under another sidecar epoch was read as the same state"
+    );
+    let gone = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), None);
+    assert_eq!(
+        minted().continuation(&gone),
+        Ok(vec![Moved::SidecarRevision])
     );
 }
 
@@ -2963,13 +2985,13 @@ fn a_cursor_that_read_no_sidecar_reports_nothing_about_one() {
         Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), None),
         CursorKey::ordinal(CollectionSelector::Headings, 1),
     );
-    for revision in [None, Some(4)] {
+    for revision in [None, Some(sidecar(4))] {
         assert_eq!(
             without.continuation(&Snapshot::new(
                 "epoch-1",
                 12,
                 Some("fp-1".to_string()),
-                revision
+                revision.clone()
             )),
             Ok(vec![]),
             "a cursor that read no sidecar reported one at {revision:?}"
@@ -2980,12 +3002,17 @@ fn a_cursor_that_read_no_sidecar_reports_nothing_about_one() {
 /// Everything at once, in the fixed order the list promises.
 #[test]
 fn a_continuation_reports_every_part_in_one_fixed_order() {
-    let inside = Snapshot::new("epoch-1", 99, Some("fp-1".to_string()), Some(5));
+    let inside = Snapshot::new("epoch-1", 99, Some("fp-1".to_string()), Some(sidecar(5)));
     assert_eq!(
         minted().continuation(&inside),
         Ok(vec![Moved::Generation, Moved::SidecarRevision])
     );
-    let rebuilt = Snapshot::new("epoch-2", 99, Some("fp-1".to_string()), Some(5));
+    let rebuilt = Snapshot::new(
+        "epoch-2",
+        99,
+        Some("fp-1".to_string()),
+        Some(SidecarRevision::new("sidecar-2", 4)),
+    );
     assert_eq!(
         minted().continuation(&rebuilt),
         Ok(vec![Moved::Epoch, Moved::SidecarRevision])
@@ -3082,12 +3109,12 @@ fn a_page_carries_its_rows_its_continuation_and_what_moved() {
 /// the snake_case names the rest of the vocabulary uses.
 #[test]
 fn a_snapshot_is_the_reading_an_answer_was_established_under() {
-    let snapshot = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4));
+    let snapshot = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(4)));
     assert_eq!(
         wire(&snapshot),
         concat!(
             r#"{"epoch":"epoch-1","generation":12,"#,
-            r#""schema_fingerprint":"fp-1","sidecar_revision":4}"#
+            r#""schema_fingerprint":"fp-1","sidecar_revision":{"epoch":"sidecar-1","revision":4}}"#
         )
     );
     round_trip(&snapshot);
@@ -4773,7 +4800,7 @@ const PINNED_PREDICATES: &str = r##"[{"op":"eq","key":"type","value":"note"},{"o
 const PINNED_COLUMNS: &str = r##"[{"col":"path"},{"col":"field","key":"due"},{"col":"body"},{"col":"links"},{"col":"headings"},{"col":"blocks"},{"col":"tags"},{"col":"findings"},{"col":"fields"}]"##;
 
 /// The opaque cursor every pinned request continues from.
-const PINNED_AFTER: &str = r##"eyJzbmFwc2hvdCI6eyJlcG9jaCI6ImVwb2NoLTEiLCJnZW5lcmF0aW9uIjoxMiwic2NoZW1hX2ZpbmdlcnByaW50IjoiZnAtMSIsInNpZGVjYXJfcmV2aXNpb24iOjR9LCJrZXkiOnsicm93IjoiZG9jdW1lbnQiLCJvcmRlciI6eyJrZXkiOnsiYnkiOiJmaWVsZCIsImtleSI6ImR1ZSJ9LCJkaXJlY3Rpb24iOiJkZXNjZW5kaW5nIn0sInNvcnQiOiIyMDI2LTAxLTAxIiwicGF0aCI6Im5vdGVzL2EubWQifX0"##;
+const PINNED_AFTER: &str = r##"eyJzbmFwc2hvdCI6eyJlcG9jaCI6ImVwb2NoLTEiLCJnZW5lcmF0aW9uIjoxMiwic2NoZW1hX2ZpbmdlcnByaW50IjoiZnAtMSIsInNpZGVjYXJfcmV2aXNpb24iOnsiZXBvY2giOiJzaWRlY2FyLTEiLCJyZXZpc2lvbiI6NH19LCJrZXkiOnsicm93IjoiZG9jdW1lbnQiLCJvcmRlciI6eyJrZXkiOnsiYnkiOiJmaWVsZCIsImtleSI6ImR1ZSJ9LCJkaXJlY3Rpb24iOiJkZXNjZW5kaW5nIn0sInNvcnQiOiIyMDI2LTAxLTAxIiwicGF0aCI6Im5vdGVzL2EubWQifX0"##;
 
 /// **A setter that does nothing is a setter nothing else catches.** A `with_`
 /// method that dropped its argument still type-checks, still hands back a
