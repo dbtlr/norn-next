@@ -1746,9 +1746,12 @@ and its blocking open is the priced cost of a hold every other holder of the ent
 behind. A mint that fails changes no trust label and publishes no refusal of its own: the
 reason is retained beside the entry's published demand, the way a reload's diagnostic and an
 engine's are, and a read refuses with it as reader-unavailable's detail. Every store refusal
-the host tells a caller is told from the refusal's typed facts and never from the driver's
-words, which can name the database file, so no refusal hands a caller a path to open its own
-connection by. The vault status
+the host tells a caller — a read's refusal, a job leg's failure as the entry's untrusted reason
+or a reload's failure, and the semantic engine's sidecar refusals — is told from the
+refusal's typed facts and never from the driver's words, which can name the database file;
+and a refusal met in the host's data directory, where the maintainer lock and the shadow home
+sit beside the database, is told without its path. So no refusal hands a caller a path to
+open its own connection by. The vault status
 verb reports it beside trust and engine state; that verb is not built, and what the host
 retains for it today is the trust label, the active fingerprints and the last reload error.
 A mint may fail at a publication that is not serving, and then the read renders that demand

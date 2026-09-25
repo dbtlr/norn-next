@@ -47,6 +47,7 @@
 //! reads inside the host and one fact to a client: the derived state cannot be
 //! trusted, because the environment refused.
 
+use norn_semantic::EngineError;
 use norn_store::{PageRefusal, ReadBound, StoreError};
 use norn_wire::{
     AnswerShape, AttachMode, ControlFile, ControlFileFailure, ErrorDetail, ErrorEnvelope,
@@ -424,6 +425,56 @@ pub(crate) fn store_refusal_told(error: &StoreError) -> String {
         StoreError::UnpinnedDeclaration { .. } | StoreError::KeySpace { .. } => error.to_string(),
         StoreError::Entry { index, problem, .. } => {
             format!("changeset entry {index}: {}", store_refusal_told(problem))
+        }
+    }
+}
+
+/// A semantic engine refusal in words, naming no file.
+///
+/// The engine's sidecar is a database beside the store, and its substrate
+/// refusals carry the sidecar's path and the driver's words the way a store's
+/// do, so they are told through [`store_refusal_told`] on the store's reading
+/// of the same substrate refusal. The embedder's refusals name the vault
+/// document an input came from and the model, which a caller already reads.
+///
+/// The match carries no wildcard, so a variant minted in the engine takes its
+/// stance on what it tells here.
+pub(crate) fn engine_refusal_told(error: &EngineError) -> String {
+    match error {
+        EngineError::Db(refused) => store_refusal_told(&StoreError::from(refused.clone())),
+        EngineError::Store(refused) => {
+            format!("the lane-1 store refused: {}", store_refusal_told(refused))
+        }
+        EngineError::Embed { .. } | EngineError::WrongWidth { .. } => error.to_string(),
+        EngineError::SidecarDamaged { .. } => "the sidecar is damaged".to_string(),
+    }
+}
+
+/// A refusal met in the host's own data directory in words, naming no file.
+///
+/// The maintainer lock and the shadow home sit beside the derived database,
+/// so a path any of them names is a path to the directory that database is
+/// in. The account keeps the act that failed and what the operating system
+/// said, and drops every path.
+///
+/// The match carries no wildcard, so a variant minted in the filesystem crate
+/// takes its stance on what it tells here.
+pub(crate) fn data_dir_refusal_told(error: &norn_fs::Refusal) -> String {
+    match error {
+        norn_fs::Refusal::Environment {
+            operation, kind, ..
+        } => format!("{operation} in the data directory failed: {kind}"),
+        norn_fs::Refusal::LockFileReplaced { attempts, .. } => {
+            format!("the lock file was replaced on each of {attempts} attempts to lock it")
+        }
+        norn_fs::Refusal::Drifted { .. } | norn_fs::Refusal::Republished { .. } => {
+            "a file in the data directory changed under the host".to_string()
+        }
+        norn_fs::Refusal::DestinationExists { .. } => {
+            "a file in the data directory already exists".to_string()
+        }
+        norn_fs::Refusal::SymlinkDestination { .. } => {
+            "a file in the data directory is a symbolic link".to_string()
         }
     }
 }
@@ -1416,6 +1467,31 @@ mod page_refusal_tests {
             assert!(
                 !detail.contains("store.db") && !detail.contains("/data"),
                 "the damage names the database file: {detail}"
+            );
+        }
+    }
+
+    /// A semantic engine refusal is told without the sidecar's path or the
+    /// driver's words, whichever seam it came from.
+    #[test]
+    fn an_engine_refusal_names_no_file() {
+        let lifecycle = || norn_db::DbError::Lifecycle {
+            operation: "preparing the sidecar's directory",
+            path: std::path::PathBuf::from("/data/notes/semantic.sqlite3"),
+            message: "denied: /data/notes".to_string(),
+        };
+        for refused in [
+            norn_semantic::EngineError::Db(lifecycle()),
+            norn_semantic::EngineError::Store(StoreError::from(lifecycle())),
+            norn_semantic::EngineError::SidecarDamaged {
+                what: "reading /data/notes/semantic.sqlite3 met a file that is not a database"
+                    .to_string(),
+            },
+        ] {
+            let told = super::engine_refusal_told(&refused);
+            assert!(
+                !told.contains("/data") && !told.contains("semantic.sqlite3"),
+                "the refusal names the sidecar: {told}"
             );
         }
     }

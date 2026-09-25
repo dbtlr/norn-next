@@ -501,7 +501,11 @@ impl ProductionEntryOps {
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
     ) -> Result<(), JobFailure> {
-        if !attachment.maintainership.still_current().map_err(effect)? {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
             return Err(JobFailure::LostMaintainership);
         }
         // Coverage is established by the time a heal runs, and what follows is
@@ -768,12 +772,13 @@ impl EntryOps for ProductionEntryOps {
         let _job = self.evidence.attributing();
         progress.installing_coverage();
         let derived = self.derived(&registration.name);
-        let maintainership = match try_acquire(&derived.join("maintainer.lock")).map_err(effect)? {
-            Acquisition::Acquired(guard) => guard,
-            Acquisition::Contended { incumbent } => {
-                return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
-            }
-        };
+        let maintainership =
+            match try_acquire(&derived.join("maintainer.lock")).map_err(data_dir_effect)? {
+                Acquisition::Acquired(guard) => guard,
+                Acquisition::Contended { incumbent } => {
+                    return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
+                }
+            };
         // The lock and the shadow home are two mechanisms of one maintainership,
         // so both are keyed by the coordinates the derived directory is keyed
         // by: the lock by sitting in that directory, the home by carrying the
@@ -785,8 +790,9 @@ impl EntryOps for ProductionEntryOps {
         let covered_root = subscription.covered_root().to_owned();
         let path_order = stored_path_order(subscription.case_sensitivity());
         let root = covered_root.as_path();
-        let shadows = ShadowHome::resolve(root, &derived.join("tmp"), &key).map_err(effect)?;
-        shadows.sweep(Duration::ZERO).map_err(effect)?;
+        let shadows =
+            ShadowHome::resolve(root, &derived.join("tmp"), &key).map_err(data_dir_effect)?;
+        shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
         if shadows.placement() == Placement::VaultFallback {
             // Residue no key's own sweep will ever open again: what a build that
             // staged before homes were keyed left directly under the fallback
@@ -865,7 +871,11 @@ impl EntryOps for ProductionEntryOps {
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
         let _job = self.evidence.attributing();
-        if !attachment.maintainership.still_current().map_err(effect)? {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
             return Err(JobFailure::LostMaintainership);
         }
         // A reconcile derives document changes under the active schema. Schema
@@ -902,7 +912,11 @@ impl EntryOps for ProductionEntryOps {
         attachment.drop_controls_held_for_rung_three();
         let _job = self.evidence.attributing();
         self.evidence.count_recovery();
-        if !attachment.maintainership.still_current().map_err(effect)? {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
             return Err(JobFailure::LostMaintainership);
         }
         // Recovery re-installs coverage before it re-heals, so it enters the
@@ -919,9 +933,9 @@ impl EntryOps for ProductionEntryOps {
             .map_err(JobFailure::Reload)?;
         let derived = self.derived(&attachment.registration.name);
         let key = maintainership_key(&self.dirs, &attachment.registration.name);
-        let shadows =
-            ShadowHome::resolve(&covered_root, &derived.join("tmp"), &key).map_err(effect)?;
-        shadows.sweep(Duration::ZERO).map_err(effect)?;
+        let shadows = ShadowHome::resolve(&covered_root, &derived.join("tmp"), &key)
+            .map_err(data_dir_effect)?;
+        shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
         attachment.subscription = Some(subscription);
         attachment._own_writes = own_writes;
         attachment._shadows = shadows;
@@ -964,7 +978,11 @@ impl EntryOps for ProductionEntryOps {
     ) -> Result<ReloadOutcome, crate::EntryReloadFailure> {
         attachment.drop_controls_held_for_rung_three();
         let _job = self.evidence.attributing();
-        if !attachment.maintainership.still_current().map_err(effect)? {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
             return Err(JobFailure::LostMaintainership.into());
         }
         let candidate =
@@ -1051,7 +1069,11 @@ impl EntryOps for ProductionEntryOps {
         // this reading answers is whether the dispatcher kept scanning this
         // attachment at all, and a pass that refuses below is one it took.
         self.evidence.count_watcher_poll();
-        if !attachment.maintainership.still_current().map_err(effect)? {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
             return Err(JobFailure::LostMaintainership);
         }
         let drained = if attachment.heal_observed.is_empty() {
@@ -1139,7 +1161,11 @@ impl EntryOps for ProductionEntryOps {
 
     fn maintain(&self, _: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure> {
         let _job = self.evidence.attributing();
-        if !attachment.maintainership.still_current().map_err(effect)? {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
             return Err(JobFailure::LostMaintainership);
         }
         // Shadow residue is inert, and a sweep is only bounded cleanup. Losing
@@ -3171,6 +3197,14 @@ fn effect(error: impl EnvironmentalFailure) -> JobFailure {
     environmental(error.to_string())
 }
 
+/// A refusal met in the host's own data directory — the maintainer lock or
+/// the shadow home — as the environmental failure it is, told without the
+/// directory's path: that directory holds the derived database, and a caller
+/// told where it is opens its own connection over it.
+fn data_dir_effect(error: norn_fs::Refusal) -> JobFailure {
+    environmental(crate::refusal::data_dir_refusal_told(&error))
+}
+
 /// The failure class a store refusal belongs to.
 ///
 /// Damaged derived state and a refused operation are two failures with two
@@ -3179,10 +3213,16 @@ fn effect(error: impl EnvironmentalFailure) -> JobFailure {
 /// environment refusing, which the entry answers by staying untrusted and
 /// saying so. Flattening the first onto the second is a loop: a corrupt page
 /// answers a retry exactly as it answered the operation before it.
+///
+/// Either failure reaches a caller — as the entry's untrusted reason and as a
+/// reload's failure — so both are told through
+/// [`store_refusal_told`](crate::refusal::store_refusal_told), from the
+/// refusal's typed facts, and name no file.
 fn store_effect(error: StoreError) -> JobFailure {
+    let told = crate::refusal::store_refusal_told(&error);
     match error.damage() {
-        Some(damage) => JobFailure::StoreDamaged(damage.to_string()),
-        None => environmental(error.to_string()),
+        Some(_) => JobFailure::StoreDamaged(told),
+        None => environmental(told),
     }
 }
 fn watcher(error: WatchError) -> JobFailure {
@@ -3330,6 +3370,117 @@ mod tests {
                     "the refusal names `{named}`: {told}"
                 );
             }
+        }
+    }
+
+    /// Every spelling of the scratch root and the unusually named component
+    /// under it that a refusal could carry the path by.
+    fn path_spellings(scratch: &Scratch, unusual: &str) -> [String; 5] {
+        [
+            scratch.root().to_string_lossy().into_owned(),
+            unusual.to_string(),
+            "odd `name`".to_string(),
+            "🌲".to_string(),
+            "store.sqlite3".to_string(),
+        ]
+    }
+
+    /// **A store refusal a job leg meets reaches a caller naming no file.** A
+    /// store opened under an unusually spelled path whose parent is a regular
+    /// file is refused with that path in the store's own account; the job
+    /// failure it becomes, told as a reload's failure and as the untrusted
+    /// state the entry publishes, names neither the directory nor the file.
+    #[test]
+    fn a_store_refusal_on_the_job_route_names_no_file() {
+        let scratch = Scratch::new("norn-host-job-refusal-names-no-file");
+        let unusual = "odd `name` \"quoted\" and 🌲 spaced";
+        fs::write(scratch.join(unusual), b"a regular file").unwrap();
+        let database = scratch.join(unusual).join("store.sqlite3");
+        let Err(refused) = Store::open(
+            &database,
+            StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        ) else {
+            panic!("a store opened under a regular file");
+        };
+        assert!(
+            refused.to_string().contains(unusual),
+            "the store's own account names no path, so this case proves nothing: {refused}"
+        );
+
+        let failure = store_effect(refused);
+        let JobFailure::Environmental(detail) = &failure else {
+            panic!("a refused open is not the environment refusing: {failure:?}");
+        };
+        let name = VaultName::new("notes").unwrap();
+        let told = [
+            format!(
+                "{:?}",
+                crate::ReloadRefusal::Runtime(failure.clone()).answer(&name)
+            ),
+            format!(
+                "{:?}",
+                answered(norn_wire::TrustState::untrusted(
+                    UntrustedReason::environmental_refusal(detail.clone())
+                ))
+            ),
+        ];
+        for told in told {
+            for named in path_spellings(&scratch, unusual) {
+                assert!(
+                    !told.contains(named.as_str()),
+                    "the refusal names `{named}`: {told}"
+                );
+            }
+        }
+    }
+
+    /// **An attach refused in the host's own data directory reaches a caller
+    /// naming no file.** The data directory is an unusually spelled regular
+    /// file, so the maintainer lock cannot be taken beneath it: the untrusted
+    /// state the entry publishes says the environment refused and names
+    /// neither the directory nor anything under it.
+    #[test]
+    fn an_attach_refused_in_the_data_directory_names_no_file() {
+        let f = Fixture::watcherless("attach-data-dir-names-no-file");
+        let unusual = "odd `name` \"quoted\" and 🌲 spaced";
+        fs::write(f.root.join(unusual), b"a regular file").unwrap();
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join(unusual)).unwrap();
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+
+        let refused = wait_until(
+            "the attach to be refused",
+            lifecycle_budget(),
+            || match host.state(&name) {
+                Err(refused) => Observed::Met(refused),
+                Ok(state) => Observed::Pending(format!("the state is {state:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            refused.code(),
+            &norn_wire::ReasonCode::HostEntryUntrusted,
+            "{refused:?}"
+        );
+        let told = format!("{refused:?}");
+        for named in path_spellings(&f.root, unusual) {
+            assert!(
+                !told.contains(named.as_str()),
+                "the refusal names `{named}`: {told}"
+            );
         }
     }
 
@@ -12237,7 +12388,11 @@ mod tests {
             attachment: &mut Self::Attachment,
             progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<(), JobFailure> {
-            if !attachment.maintainership.still_current().map_err(effect)? {
+            if !attachment
+                .maintainership
+                .still_current()
+                .map_err(data_dir_effect)?
+            {
                 return Err(JobFailure::LostMaintainership);
             }
             let schema = ProductionEntryOps::schema_path(&attachment.registration);
