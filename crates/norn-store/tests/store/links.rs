@@ -119,6 +119,10 @@ fn source_links() -> Vec<LinkFact> {
         markdown("./a.md"),
         // 12: both reductions of a dotted leaf.
         wikilink("report.md"),
+        // 13: a same-document anchor, which names its own document.
+        link(LinkFamily::Wikilink, None, "", Some("Heading")),
+        // 14: the same, in the Markdown family.
+        link(LinkFamily::Markdown, None, "", Some("frag")),
     ]
 }
 
@@ -366,10 +370,13 @@ fn a_markdown_link_names_the_one_path_it_joins_to() {
         );
         assert_eq!(reading(&links[7]), names(LinkHealth::Broken, &[]));
         assert_eq!(reading(&links[8]), names(LinkHealth::Broken, &[]));
-        assert_eq!(
-            reading(&links[11]),
-            names(LinkHealth::Healthy, &["src/a.md"])
-        );
+        for at in [11, 13, 14] {
+            assert_eq!(
+                reading(&links[at]),
+                names(LinkHealth::Healthy, &["src/a.md"]),
+                "{order:?} link {at}"
+            );
+        }
         let linked_c = linked.links("src/c.md");
         assert_eq!(
             reading(&linked_c[0]),
@@ -633,6 +640,62 @@ fn links_to_matches_a_link_that_resolves_to_exactly_its_document() {
         assert_eq!(linked.backlinks("r/report"), Vec::<String>::new());
         assert_eq!(linked.backlinks("report.md.md"), Vec::<String>::new());
         assert_eq!(linked.backlinks("archive/glossary"), Vec::<String>::new());
+    }
+}
+
+/// **A links-to part keeps a link only where the named document is in the
+/// link's class and no other document is**, each bound of that class read as
+/// a resolution reads it, on either root:
+///
+/// - with `archive/**` ignored, `[[glossary]]` does not reach
+///   `archive/glossary.md` — the one document the vault holds — so it is no
+///   backlink of it, while `[[archive/glossary]]` is;
+/// - a class holds the keys its prefix opens and no key past them, so `foo0.md`
+///   is outside `[[foo]]`'s class and the link is a backlink of `n/foo.md`;
+/// - a class holds the key its prefix is, so `glossary.md` is inside
+///   `[[glossary]]`'s class beside `notes/glossary.md`, and the link is a
+///   backlink of neither.
+#[test]
+fn links_to_keeps_a_link_whose_class_holds_the_named_document_alone() {
+    for order in [Sensitive, Folding] {
+        let archived = Linked::holding(
+            &format!("links-to-admitted-{order:?}"),
+            order,
+            &[
+                holding("archive/glossary.md", Vec::new()),
+                holding("src/a.md", vec![wikilink("glossary")]),
+                holding("src/b.md", vec![wikilink("archive/glossary")]),
+            ],
+        );
+        assert_eq!(
+            archived.backlinks("archive/glossary"),
+            ["src/b.md"],
+            "{order:?}"
+        );
+        let beside = Linked::holding(
+            &format!("links-to-upper-{order:?}"),
+            order,
+            &[
+                holding("n/foo.md", Vec::new()),
+                holding("foo0.md", Vec::new()),
+                holding("src/a.md", vec![wikilink("foo")]),
+            ],
+        );
+        assert_eq!(beside.backlinks("n/foo"), ["src/a.md"], "{order:?}");
+        let ambiguous = Linked::holding(
+            &format!("links-to-lower-{order:?}"),
+            order,
+            &[
+                holding("glossary.md", Vec::new()),
+                holding("notes/glossary.md", Vec::new()),
+                holding("src/a.md", vec![wikilink("glossary")]),
+            ],
+        );
+        assert_eq!(
+            ambiguous.backlinks("notes/glossary"),
+            Vec::<String>::new(),
+            "{order:?}"
+        );
     }
 }
 
