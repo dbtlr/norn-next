@@ -636,7 +636,8 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::DocumentFields
         | ExplainedStatement::StoredTombstone(_)
         | ExplainedStatement::StoredFindings(_)
-        | ExplainedStatement::VaultSchemaPin => {
+        | ExplainedStatement::VaultSchemaPin
+        | ExplainedStatement::WriteGeneration => {
             "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for"
         }
         ExplainedStatement::FindingCandidates(_) | ExplainedStatement::FindingClasses(_) => {
@@ -1220,12 +1221,16 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
             constraint: "(path=?)",
             sorts: true,
         }),
-        ExplainedStatement::VaultSchemaPin => Some(PointReadBar {
-            table: "meta",
-            access: Access::PrimaryKey,
-            constraint: "(key=?)",
-            sorts: false,
-        }),
+        // Both pinned-scalar reads seek `meta`'s primary key, which is the
+        // table itself: `meta` is `WITHOUT ROWID`.
+        ExplainedStatement::VaultSchemaPin | ExplainedStatement::WriteGeneration => {
+            Some(PointReadBar {
+                table: "meta",
+                access: Access::PrimaryKey,
+                constraint: "(key=?)",
+                sorts: false,
+            })
+        }
         ExplainedStatement::SuffixCandidates(_)
         | ExplainedStatement::FindingsInClass(_)
         | ExplainedStatement::ClassDiscard(_)
@@ -1250,7 +1255,7 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
 /// that found its rows by stepping over the rows ahead of them would cost the
 /// whole table for every question about one place.
 ///
-/// Four assertions hold every statement, and a fifth holds ten of the eleven:
+/// Four assertions hold every statement, and a fifth holds eleven of the twelve:
 ///
 /// - It does not read its table end to end, and it searches that table.
 /// - The step that searches the table runs through [`PointReadBar::access`]
@@ -3489,4 +3494,59 @@ fn a_verification_that_cannot_write_is_refused_rather_than_called_damage() {
     store
         .verify_integrity()
         .expect("the same store, once it can be written to");
+}
+
+/// **The feed reports how far the store's writes had got, not how far its rows
+/// reach.** A write that takes a generation without presenting a feed row — a
+/// schema pin — still moves the reading, so a consumer that records it at the
+/// end of a drain is told it caught up to that write too. A write that takes no
+/// generation — a pin of the schema already pinned — leaves it where it was.
+#[test]
+fn the_feed_reads_the_last_write_generation_whichever_write_took_it() {
+    let scratch = Scratch::new("feed-write-generation");
+    let mut store = scratch.open();
+    assert_eq!(
+        store.feed_read().write_generation().expect("a reading"),
+        0,
+        "a created store has committed no write"
+    );
+
+    write_document(
+        &mut store.begin_request(),
+        &document("docs/a.md", "hash-a", "alpha\n"),
+    );
+    let (last_row, _) = store
+        .begin_request()
+        .changed_documents_after(None, norn_store::MAX_PAGE)
+        .expect("the document feed")
+        .pop()
+        .expect("the row just written");
+    assert_eq!(
+        store.feed_read().write_generation().expect("a reading"),
+        last_row.generation(),
+        "the reading is not the generation the last write stamped"
+    );
+
+    let pin = store
+        .begin_request()
+        .pin_vault_schema(b"schema", "fingerprint")
+        .expect("a schema pin");
+    assert!(pin.repinned);
+    assert_eq!(
+        store.feed_read().write_generation().expect("a reading"),
+        pin.generation,
+        "a write no feed row presents did not move the reading"
+    );
+    assert!(pin.generation > last_row.generation());
+
+    let again = store
+        .begin_request()
+        .pin_vault_schema(b"schema", "fingerprint")
+        .expect("the same pin again");
+    assert!(!again.repinned);
+    assert_eq!(
+        store.feed_read().write_generation().expect("a reading"),
+        pin.generation,
+        "a write that took no generation moved the reading"
+    );
 }

@@ -2,7 +2,8 @@
 //!
 //! [`FeedRead`] is the whole of what a lane-2 engine may ask the store — the
 //! two feed drains, the two targeted fetches a fed row is resolved through,
-//! and the epoch its cursors are valid within. **No write verb crosses this
+//! the epoch its cursors are valid within, and the write generation a drain
+//! records how far it had caught up to. **No write verb crosses this
 //! seam.** That is the partition boundary invariant 12 leans on: an engine
 //! derives inferred state from committed lane-1 records, and inferred state
 //! never becomes a finding, a plan, or a repair input — so the surface the
@@ -41,6 +42,14 @@ impl FeedRead<'_> {
     /// beside its cursors; a mismatch later means rescan, never seek.
     pub fn epoch(&self) -> &str {
         self.store.epoch()
+    }
+
+    /// The last write generation committed to the store — see
+    /// [`crate::Request::write_generation`]. A consumer reads it immediately
+    /// before the page that completes a feed, so the value it records beside
+    /// that completion covers every write the page could present.
+    pub fn write_generation(&mut self) -> Result<i64, StoreError> {
+        self.store.begin_request().write_generation()
     }
 
     /// The next page of current document rows in feed order — see

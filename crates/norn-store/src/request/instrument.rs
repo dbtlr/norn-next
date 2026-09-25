@@ -134,7 +134,9 @@ impl<'a> Request<'a> {
             ExplainedStatement::DocumentFields => DOCUMENT_FIELDS_SQL.to_string(),
             ExplainedStatement::StoredTombstone(_) => STORED_TOMBSTONE_SQL.to_string(),
             ExplainedStatement::StoredFindings(_) => stored_findings_sql(),
-            ExplainedStatement::VaultSchemaPin => norn_db::meta::META_READ_SQL.to_string(),
+            ExplainedStatement::VaultSchemaPin | ExplainedStatement::WriteGeneration => {
+                norn_db::meta::META_READ_SQL.to_string()
+            }
             ExplainedStatement::FindingCandidates(ids) => finding_candidates_sql(ids.get()),
             ExplainedStatement::FindingClasses(ids) => finding_classes_sql(ids.get()),
         };
@@ -236,6 +238,9 @@ impl<'a> Request<'a> {
             // taken under the first of the three.
             ExplainedStatement::VaultSchemaPin => {
                 database.emitted_plan(&sql, params![ddl::meta::VAULT_SCHEMA_BYTES])
+            }
+            ExplainedStatement::WriteGeneration => {
+                database.emitted_plan(&sql, params![norn_db::meta::WRITE_GENERATION])
             }
             ExplainedStatement::FindingCandidates(ids)
             | ExplainedStatement::FindingClasses(ids) => {
@@ -378,6 +383,11 @@ pub enum ExplainedStatement<'a> {
     /// it reports. One statement covers all three: the key rides the parameter
     /// rather than the text.
     VaultSchemaPin,
+    /// The pinned-scalar read [`Request::write_generation`] runs: the store's
+    /// last committed write generation, which a lane-2 consumer records at the
+    /// end of a drain. The statement text is the pin's; the key it binds is
+    /// its own.
+    WriteGeneration,
     /// The candidate heads of a chunk of this many findings, which
     /// [`Request::stored_findings`], [`Request::findings_in_class`] and
     /// [`Request::stored_findings_after`] read once per chunk of the findings
@@ -403,13 +413,13 @@ pub enum ExplainedStatement<'a> {
 /// It is the length of [`ExplainedStatement::point_reads`], and that is the
 /// whole of the guarantee: a point read dropped from the census does not
 /// compile, rather than quietly narrowing the bar that iterates it.
-pub const POINT_READS: usize = 11;
+pub const POINT_READS: usize = 12;
 
 /// How many statements this seam names in total.
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 26;
+pub const STATEMENTS: usize = 27;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -463,6 +473,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::StoredTombstone(subject),
             Self::StoredFindings(subject),
             Self::VaultSchemaPin,
+            Self::WriteGeneration,
             Self::FindingCandidates(ids),
             Self::FindingClasses(ids),
         ]
@@ -501,8 +512,9 @@ impl<'a> ExplainedStatement<'a> {
             Self::StoredTombstone(_) => 21,
             Self::StoredFindings(_) => 22,
             Self::VaultSchemaPin => 23,
-            Self::FindingCandidates(_) => 24,
-            Self::FindingClasses(_) => 25,
+            Self::WriteGeneration => 24,
+            Self::FindingCandidates(_) => 25,
+            Self::FindingClasses(_) => 26,
         };
         assert!(
             slot < STATEMENTS,
@@ -530,6 +542,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::StoredTombstone(subject),
             Self::StoredFindings(subject),
             Self::VaultSchemaPin,
+            Self::WriteGeneration,
         ]
     }
 
@@ -554,7 +567,8 @@ impl<'a> ExplainedStatement<'a> {
             | Self::DocumentFields
             | Self::StoredTombstone(_)
             | Self::StoredFindings(_)
-            | Self::VaultSchemaPin => true,
+            | Self::VaultSchemaPin
+            | Self::WriteGeneration => true,
             Self::SuffixCandidates(_)
             | Self::FindingsInClass(_)
             | Self::ClassDiscard(_)
