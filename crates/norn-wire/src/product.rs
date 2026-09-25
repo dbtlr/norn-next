@@ -24,6 +24,7 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::finding_row::CandidateHead;
 use crate::reading::AnswerReading;
 use crate::target::ResolutionTarget;
 
@@ -128,6 +129,24 @@ pub enum Unsatisfied {
         /// The query the request named.
         query: String,
     },
+    /// A links-to part named a target that resolves to more than one
+    /// document, so it names no one document a link could reach and no
+    /// document satisfies that part.
+    #[non_exhaustive]
+    LinksToAmbiguous {
+        /// The target the request named.
+        target: ResolutionTarget,
+        /// The first of the documents it resolves to, in the resolution
+        /// ladder's order, with how many there were.
+        candidates: CandidateHead,
+    },
+    /// A links-to part named a target that resolves to no document, so no
+    /// document satisfies that part.
+    #[non_exhaustive]
+    LinksToUnknown {
+        /// The target the request named.
+        target: ResolutionTarget,
+    },
 }
 
 impl Unsatisfied {
@@ -212,6 +231,17 @@ impl Unsatisfied {
         Unsatisfied::QueryNamesNoWord {
             query: query.into(),
         }
+    }
+
+    /// A links-to part named `target`, which resolves to the documents
+    /// `candidates` heads.
+    pub const fn links_to_ambiguous(target: ResolutionTarget, candidates: CandidateHead) -> Self {
+        Unsatisfied::LinksToAmbiguous { target, candidates }
+    }
+
+    /// A links-to part named `target`, which resolves to no document.
+    pub const fn links_to_unknown(target: ResolutionTarget) -> Self {
+        Unsatisfied::LinksToUnknown { target }
     }
 }
 

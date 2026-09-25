@@ -196,15 +196,16 @@ impl VaultSchema {
     /// **Read by the resolution ladder, and reported by `describe`.**
     /// Derivation declares the set on the declaration it hands the store,
     /// which holds it once: the store's one resolver applies it to every class
-    /// a target opens, which a find's `resolves` part reads today, and
-    /// `describe` reports each glob of it as a path rule. The globs match under
-    /// the store's recorded path order: with ASCII case folded on a root that
-    /// folds it, bytewise on a root that does not.
+    /// a target opens — a find's `resolves` part, a get's target, a links-to
+    /// part's target and the backlinks it matches, and each wikilink a row's
+    /// links resolve — and `describe` reports each glob of it as a path rule.
+    /// The globs match under the store's recorded path order: with ASCII case
+    /// folded on a root that folds it, bytewise on a root that does not.
     ///
-    /// Backlinks and link-health findings are the dormant consumers of the
-    /// same exclusion: the link index lands them in Layer 3, and they read a
-    /// link target's class through that one resolver. The current call graph
-    /// does not reach them, because no link index exists yet.
+    /// Link-health findings are the dormant consumer of the same exclusion:
+    /// the link-health unit of Layer 3 files them, reading a link target's
+    /// class through that one resolver. The current call graph does not reach
+    /// them, because no producer files a link-health finding yet.
     pub fn ambiguity_ignore(&self) -> &[Pattern] {
         &self.ambiguity_ignore
     }

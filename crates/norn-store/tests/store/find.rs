@@ -16,10 +16,10 @@ use std::sync::Arc;
 use crate::common::{Scratch, ambiguity, document, violation, write_documents};
 use norn_store::{
     BlockFact, ContentModel, DEFAULT_PAGE, FIND_STATEMENTS, FieldDeclaration, FieldOrder, FindPlan,
-    FindStatement, Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, MAX_PAGE,
-    NESTED_ROW_CEILING, Nested, PageDirection, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
-    Snapshot, SnapshotReader, Span, Store, StoreError, StoredPathOrder, SuffixKey, TagFact,
-    TagSource, TypedOrder, induced_failure,
+    FindStatement, Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, LinkFact, LinkFamily,
+    MAX_PAGE, NESTED_ROW_CEILING, Nested, PageDirection, PageRefusal, READ_FILTERS, ReadBound,
+    ReadFilter, Snapshot, SnapshotReader, Span, Store, StoreError, StoredPathOrder, SuffixKey,
+    TagFact, TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -91,7 +91,7 @@ pub(crate) fn integers(values: &[i64]) -> FrontmatterValue {
 ///
 /// | path | status | count | also |
 /// |---|---|---|---|
-/// | `notes/a.md` | `open` | `3` | the tag `draft`, the term `interloper` |
+/// | `notes/a.md` | `open` | `3` | the tag `draft`, the term `interloper`, a link to `glossary` |
 /// | `notes/B.md` | `closed` | `[10, 9]` | |
 /// | `notes/c.md` | `open` | `nine` | |
 /// | `other/glossary.md` | | | a finding |
@@ -114,6 +114,20 @@ pub(crate) fn seed(store: &mut Store) {
         name: "draft".to_string(),
         source: TagSource::Body,
         span: None,
+    });
+    tagged.links.push(LinkFact {
+        family: LinkFamily::Wikilink,
+        embed: false,
+        protocol: None,
+        target: "glossary".to_string(),
+        title: None,
+        anchor: None,
+        block_ref: None,
+        span: Span {
+            line: 1,
+            column: 1,
+            byte_offset: 0,
+        },
     });
     let mut request = store.begin_request();
     write_documents(
@@ -383,6 +397,10 @@ fn statement_barred_by(statement: FindStatement) -> &'static str {
         | FindStatement::FindingClasses => {
             "hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index"
         }
+        FindStatement::ClassHead
+        | FindStatement::ClassTotal
+        | FindStatement::CandidateSuffixes
+        | FindStatement::LinkTargets => "a_read_of_targets_seeks_the_class_or_the_path_each_names",
     }
 }
 
@@ -401,7 +419,8 @@ fn filter_barred_by(filter: ReadFilter) -> &'static str {
         | ReadFilter::PathGlob
         | ReadFilter::Resolves(_)
         | ReadFilter::Tag
-        | ReadFilter::Finding => "every_filter_seeks_the_index_its_values_are_bounds_for",
+        | ReadFilter::Finding
+        | ReadFilter::LinksTo(_) => "every_filter_seeks_the_index_its_values_are_bounds_for",
     }
 }
 
@@ -418,6 +437,9 @@ fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
         ReadFilter::After(_) => orders.map(ReadFilter::After).to_vec(),
         ReadFilter::Resolves(_) => [SuffixKey::Raw, SuffixKey::Folded]
             .map(ReadFilter::Resolves)
+            .to_vec(),
+        ReadFilter::LinksTo(_) => [SuffixKey::Raw, SuffixKey::Folded]
+            .map(ReadFilter::LinksTo)
             .to_vec(),
         ReadFilter::Present
         | ReadFilter::Absent
@@ -444,7 +466,7 @@ fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
 /// bars claim fills a slot twice.
 #[test]
 fn the_find_bars_cover_every_statement_and_filter_once() {
-    let per_bar: [Vec<FindStatement>; 6] = [
+    let per_bar: [Vec<FindStatement>; 7] = [
         std::iter::once(FindStatement::ActiveFingerprint)
             .chain(PAGE_BARS.iter().map(|(statement, ..)| *statement))
             .collect(),
@@ -456,6 +478,7 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
         vec![FindStatement::BareDirectory],
         vec![FindStatement::MatchProbe],
         hydration_statements(),
+        crate::links::LINK_READS.to_vec(),
     ];
     let mut slots: Vec<usize> = Vec::new();
     for statements in &per_bar {
@@ -517,6 +540,7 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
             "a_known_key_and_the_field_universe_read_the_presence_rows_alone",
             "a_match_probe_reads_the_full_text_index_through_its_selection",
             "a_path_page_seeks_the_case_insensitive_index_in_either_direction",
+            "a_read_of_targets_seeks_the_class_or_the_path_each_names",
             "every_filter_seeks_the_index_its_values_are_bounds_for",
             "hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index",
         ]
@@ -975,6 +999,24 @@ fn hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index(
             span: None,
         })
         .collect();
+    // Links written with a protocol name no document, so the head resolves
+    // none of them: what this bar judges is how the rows are read.
+    full.links = (0..NESTED_ROW_CEILING)
+        .map(|index| LinkFact {
+            family: LinkFamily::Markdown,
+            embed: false,
+            protocol: Some("https".to_string()),
+            target: format!("example.com/{index}"),
+            title: Some(String::new()),
+            anchor: None,
+            block_ref: None,
+            span: Span {
+                line: 1,
+                column: 1,
+                byte_offset: 0,
+            },
+        })
+        .collect();
     let mut writing = seeded.store.begin_request();
     write_documents(&mut writing, &[full]);
     for _ in 0..NESTED_ROW_CEILING {
@@ -994,6 +1036,7 @@ fn hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index(
         Column::tags(),
         Column::headings(),
         Column::blocks(),
+        Column::links(),
         Column::findings(),
     ]);
     let judge_documents = |plan: &QueryPlan| {
@@ -1324,6 +1367,33 @@ fn filter_bars() -> Vec<FilterBar> {
             )],
         },
         FilterBar {
+            shape: ReadFilter::LinksTo(SuffixKey::Raw),
+            probes: vec![
+                (
+                    Predicate::links_to(target("glossary")),
+                    ReadFilter::LinksTo(SuffixKey::Raw),
+                    Seek::Index {
+                        alias: "lk",
+                        table: "link_keys",
+                        access: Access::Index("link_keys_key"),
+                        constraint: "(key=?)",
+                        dropped: "link_keys_key",
+                    },
+                ),
+                (
+                    Predicate::links_to(target("glossary")),
+                    ReadFilter::LinksTo(SuffixKey::Folded),
+                    Seek::Index {
+                        alias: "lk",
+                        table: "link_keys",
+                        access: Access::Index("link_keys_folded_key"),
+                        constraint: "(folded_key=?)",
+                        dropped: "link_keys_folded_key",
+                    },
+                ),
+            ],
+        },
+        FilterBar {
             shape: ReadFilter::Finding,
             probes: vec![(
                 Predicate::has_finding(FindingKind::BodyBytesNotUtf8),
@@ -1345,7 +1415,9 @@ fn filter_bars() -> Vec<FilterBar> {
 /// other form is the same on either root.
 fn root_of(shape: ReadFilter) -> StoredPathOrder {
     match shape {
-        ReadFilter::Resolves(SuffixKey::Folded) => StoredPathOrder::AsciiCaseInsensitive,
+        ReadFilter::Resolves(SuffixKey::Folded) | ReadFilter::LinksTo(SuffixKey::Folded) => {
+            StoredPathOrder::AsciiCaseInsensitive
+        }
         _ => StoredPathOrder::Sensitive,
     }
 }
@@ -1389,7 +1461,9 @@ fn judge_filter(page: &QueryPlan, seek: &Seek) {
 /// the order's value column from the key; the full-text part the index's own
 /// `MATCH` selection; the path part the glob's literal-prefix range on
 /// `documents_path`; the resolution part each suffix range the target opens;
-/// the tag part `(name)`; and the finding part `(kind, fingerprint)`. No step
+/// the tag part `(name)`; the finding part `(kind, fingerprint)`; and the
+/// links-to part the link index at each key the named document is named by,
+/// raw or folded as the root probes. No step
 /// of any of these pages reads a relation end to end.
 ///
 /// Each filter is judged on the path page, and on the valued section of a field
@@ -1993,6 +2067,10 @@ fn each_filter_answers_the_documents_its_part_names() {
     );
     assert_eq!(with(Predicate::tag("draft")), ["notes/a.md"]);
     assert_eq!(
+        with(Predicate::links_to(target("other/glossary"))),
+        ["notes/a.md"]
+    );
+    assert_eq!(
         with(Predicate::has_finding(FindingKind::BodyBytesNotUtf8)),
         ["other/glossary.md"]
     );
@@ -2115,31 +2193,10 @@ fn a_full_text_index_that_does_not_prepare_refuses_the_find() {
     assert!(message.contains("documents_fts"), "{message}");
 }
 
-/// **A part the store keeps no index of, or a value that names no place in
-/// its key's order, is refused.** `links_to` filters by a link's target, which
-/// the store keeps no index of, and the refusal names that fact.
+/// **A value that names no place in its key's order is refused.**
 #[test]
-fn a_part_the_store_cannot_answer_is_refused_by_name() {
+fn a_value_that_names_no_place_in_its_order_is_refused() {
     let seeded = Seeded::new("find-refusals");
-    let refusal = seeded
-        .snapshot()
-        .find(
-            &request().with_predicates([Predicate::links_to(
-                ResolutionTarget::new("glossary").expect("a target"),
-            )]),
-            &declared(),
-        )
-        .expect_err("a links_to part is refused");
-    assert_eq!(
-        refusal,
-        PageRefusal::NotIndexed {
-            fact: "a link's target",
-        }
-    );
-    assert_eq!(
-        refusal.to_string(),
-        "the store keeps no index of a link's target"
-    );
     let refusal = seeded
         .snapshot()
         .find(

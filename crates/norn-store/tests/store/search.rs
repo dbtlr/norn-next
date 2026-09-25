@@ -710,8 +710,8 @@ fn a_part_narrows_the_hits_it_keeps_in_rank_order() {
 /// outside the field universe is reported with the keys near it and filters
 /// nothing; a `resolves` part is not applicable to a search and filters
 /// nothing; a match part the engine cannot parse and a glob that does not
-/// parse are reported, and empty the page. A `links_to` part is refused, as a
-/// find refuses it.
+/// parse are reported, and empty the page. A `links_to` part whose target names
+/// no document is reported, and empties the page, as a find reports it.
 #[test]
 fn a_part_a_search_cannot_apply_is_reported_as_a_find_reports_it() {
     let searching_store = Searching::new("search-unsatisfied");
@@ -755,11 +755,14 @@ fn a_part_a_search_cannot_apply_is_reported_as_a_find_reports_it() {
         vec![Unsatisfied::malformed_glob("", "a pattern cannot be empty")]
     );
 
-    assert!(matches!(
-        searching_store
-            .refusal(&searching("lantern").with_predicates([Predicate::links_to(target)])),
-        PageRefusal::NotIndexed { .. }
-    ));
+    let nowhere = ResolutionTarget::new("nowhere").expect("a target");
+    let links_to = searching_store
+        .search(&searching("lantern").with_predicates([Predicate::links_to(nowhere.clone())]));
+    assert_eq!(hit_paths(&links_to), Vec::<&str>::new());
+    assert_eq!(
+        links_to.unsatisfied,
+        vec![Unsatisfied::links_to_unknown(nowhere)]
+    );
 }
 
 // ---- the columns ----
@@ -837,10 +840,15 @@ fn a_hit_carries_the_row_its_columns_name() {
         ]
     );
 
-    assert!(matches!(
-        searching_store.refusal(&bare.clone().with_columns([Column::links()])),
-        PageRefusal::NotProjected { .. }
-    ));
+    let linked = searching_store.search(&bare.clone().with_columns([Column::links()]));
+    assert!(
+        !linked.hits.is_empty()
+            && linked
+                .hits
+                .iter()
+                .all(|hit| hit.document.as_ref().is_some_and(|row| row.links.is_some())),
+        "a hit's row does not carry the links column it names"
+    );
 }
 
 // ---- the plan bars ----

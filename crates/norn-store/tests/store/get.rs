@@ -10,7 +10,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use norn_store::{
-    BODY_ROW_CEILING, BlockFact, Collection, ContentModel, DocumentFacts, DocumentText,
+    BODY_ROW_CEILING, BlockFact, ContentModel, DocumentFacts, DocumentText, FindStatement,
     FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, HeadingFact, LinkFact,
     LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, RequestPart, SectionAt,
     Snapshot, SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity,
@@ -531,6 +531,7 @@ fn a_record_projects_each_column_as_a_find_row_projects_it() {
         Column::tags(),
         Column::headings(),
         Column::blocks(),
+        Column::links(),
         Column::findings(),
     ] {
         let gotten = vault.get(&getting("notes/a").with_columns([column.clone()]));
@@ -553,6 +554,7 @@ fn a_record_projects_each_column_as_a_find_row_projects_it() {
                 Column::tags(),
                 Column::headings(),
                 Column::blocks(),
+                Column::links(),
                 Column::findings(),
             ]
         )
@@ -593,9 +595,9 @@ fn a_whole_record_holds_each_collection_and_the_body_to_the_row_ceiling() {
 }
 
 /// **A projected key outside the field universe is reported as a find reports
-/// it**, and the links column a find does not project yet is refused by name.
+/// it.**
 #[test]
-fn an_unknown_projected_key_is_reported_and_the_links_column_refused() {
+fn an_unknown_projected_key_is_reported() {
     let vault = record_vault("get-record-unknown", Sensitive, 0);
     let gotten = vault.get(&getting("notes/a").with_columns([Column::field("statsu")]));
     assert!(
@@ -605,12 +607,6 @@ fn an_unknown_projected_key_is_reported_and_the_links_column_refused() {
         ),
         "{:?}",
         gotten.unsatisfied
-    );
-    assert_eq!(
-        vault.refusal(&getting("notes/a").with_columns([Column::links()])),
-        PageRefusal::NotProjected {
-            part: "the links column"
-        }
     );
 }
 
@@ -819,9 +815,9 @@ fn paged_vault(label: &str, bulk: usize) -> Vault {
     vault
 }
 
-/// Every collection a get pages. The links collection is refused until the
-/// Layer 3 link index unit resolves what a link names, and is judged apart.
-const SELECTORS: [CollectionSelector; 4] = [
+/// Every collection a get pages.
+const SELECTORS: [CollectionSelector; 5] = [
+    CollectionSelector::Links,
     CollectionSelector::Headings,
     CollectionSelector::Blocks,
     CollectionSelector::Tags,
@@ -882,46 +878,6 @@ fn each_collection_paged_at_one_two_and_three_is_its_one_whole_page() {
             assert_eq!(drained, rows, "{selector:?} at {limit}");
         }
     }
-}
-
-/// **The links collection is refused by name until the link index lands**,
-/// as a find's links column is: a stored link's target is unresolved, so a
-/// link row would name no document it resolves to and read as broken
-/// whatever the vault holds. The refusal is the same on a first page and on
-/// a continuation, and the plans of the page it composes are still explained
-/// (judged by `a_collection_page_seeks_the_document_from_its_cursor`).
-#[test]
-fn the_links_collection_is_refused_until_the_link_index_lands() {
-    let vault = paged_vault("get-links", 0);
-    let links = getting("paged").with_collection(CollectionSelector::Links);
-    let refusal = vault.refusal(&links.clone().with_limit(3));
-    assert_eq!(
-        refusal,
-        PageRefusal::NotProjected {
-            part: "the links collection"
-        }
-    );
-    assert_eq!(
-        refusal.to_string(),
-        "the links collection is not projected until the link index resolves what a link names"
-    );
-    let cursor = Cursor::new(
-        vault
-            .get(&getting("paged").with_collection(CollectionSelector::Tags))
-            .snapshot,
-        CursorKey::ordinal(CollectionSelector::Links, 0),
-    );
-    assert_eq!(
-        vault.refusal(&links.clone().with_after(cursor)),
-        PageRefusal::NotProjected {
-            part: "the links collection"
-        }
-    );
-    assert!(
-        vault.plans(&links).iter().any(|plan| plan.statement
-            == ReadStatement::Get(GetStatement::CollectionPage(Collection::Links))),
-        "the links page is composed and explained"
-    );
 }
 
 /// **A cursor names a position in the collection it was minted in**: an
@@ -1163,6 +1119,9 @@ fn a_gets_work_follows_its_document_not_the_vault() {
         getting("paged")
             .with_collection(CollectionSelector::Findings)
             .with_limit(2),
+        getting("paged")
+            .with_collection(CollectionSelector::Links)
+            .with_limit(2),
     ] {
         let (at_small, at_large) = (small.get(&params).work, large.get(&params).work);
         assert_eq!(at_small, at_large, "{params:?}");
@@ -1249,9 +1208,6 @@ fn rewritten(plan: &QueryPlan, edit: impl Fn(&str) -> String) -> QueryPlan {
 /// the bar.
 fn statement_barred_by(statement: GetStatement) -> &'static str {
     match statement {
-        GetStatement::ClassHead | GetStatement::ClassTotal | GetStatement::CandidateSuffix => {
-            "a_class_is_read_through_the_suffix_key_the_root_probes"
-        }
         GetStatement::DocumentHeadings
         | GetStatement::BlockDefinition
         | GetStatement::DocumentBody => "a_section_and_a_block_are_read_within_one_document",
@@ -1278,6 +1234,21 @@ fn the_get_bars_cover_every_statement() {
     }
 }
 
+/// Every plan `plans` holds for the find statement `statement`, which a get
+/// runs to resolve its target as every read resolves one.
+fn find_plans_of(plans: &[GetPlan], statement: FindStatement) -> Vec<QueryPlan> {
+    let matching: Vec<QueryPlan> = plans
+        .iter()
+        .filter(|plan| plan.statement == ReadStatement::Find(statement))
+        .map(plan)
+        .collect();
+    assert!(
+        !matching.is_empty(),
+        "the get runs no {statement:?}: {plans:?}"
+    );
+    matching
+}
+
 /// Judge a read of a class: a search of `documents` through `index`, the key
 /// the root probes, bounded on both sides, and nothing read end to end.
 fn judge_class(plan: &QueryPlan, index: &str, key: &str) {
@@ -1287,11 +1258,12 @@ fn judge_class(plan: &QueryPlan, index: &str, key: &str) {
     rows.assert_search_constraint("documents", &format!("({key}>? AND {key}<?)"));
 }
 
-/// **A class is read through the suffix key the root probes**: its head, its
-/// total and each candidate's suffix probe are each a seek of
-/// `documents_suffix_key` where the root tells spellings apart and of
-/// `documents_folded_suffix_key` where it folds ASCII case, bounded on both
-/// sides by the target's range.
+/// **A get's class is read through the suffix key the root probes**: the
+/// head, the total and each candidate's suffix probe a get's target runs —
+/// the find builder's class statements, which every resolution of a target
+/// runs — are each a seek of `documents_suffix_key` where the root tells
+/// spellings apart and of `documents_folded_suffix_key` where it folds ASCII
+/// case, bounded on both sides by the target's range.
 ///
 /// Controls: a head read end to end fails; the probed index dropped, the head
 /// reads something else, and fails.
@@ -1306,15 +1278,15 @@ fn a_class_is_read_through_the_suffix_key_the_root_probes() {
         let mut vault = Vault::at(&format!("get-class-plan-{order:?}"), order, &paths);
         let plans = vault.plans(&getting("glossary"));
         for statement in [
-            GetStatement::ClassHead,
-            GetStatement::ClassTotal,
-            GetStatement::CandidateSuffix,
+            FindStatement::ClassHead,
+            FindStatement::ClassTotal,
+            FindStatement::CandidateSuffixes,
         ] {
-            for plan in plans_of(&plans, statement) {
+            for plan in find_plans_of(&plans, statement) {
                 judge_class(&plan, index, key);
             }
         }
-        let head = plans_of(&plans, GetStatement::ClassHead).remove(0);
+        let head = find_plans_of(&plans, FindStatement::ClassHead).remove(0);
         let walked = rewritten(&head, |detail| {
             if detail.starts_with("SEARCH dr ") {
                 "SCAN dr".to_string()
@@ -1326,7 +1298,7 @@ fn a_class_is_read_through_the_suffix_key_the_root_probes() {
             judge_class(&walked, index, key)
         });
         vault.drop_index(index);
-        let unindexed = plans_of(&vault.plans(&getting("glossary")), GetStatement::ClassHead);
+        let unindexed = find_plans_of(&vault.plans(&getting("glossary")), FindStatement::ClassHead);
         failure_of(&format!("{index} dropped"), || {
             judge_class(&unindexed[0], index, key)
         });
@@ -1406,22 +1378,13 @@ fn a_section_and_a_block_are_read_within_one_document() {
 #[test]
 fn a_collection_page_seeks_the_document_from_its_cursor() {
     let mut vault = paged_vault("get-page-plan", 0);
-    // A get refuses the links collection, so its continuation is minted
-    // where every other collection's is read off a first page.
     let continued = |vault: &Vault, selector| {
-        let next = if selector == CollectionSelector::Links {
-            let reading = vault
-                .get(&getting("paged").with_collection(CollectionSelector::Tags))
-                .snapshot;
-            Cursor::new(reading, CursorKey::ordinal(selector, 0))
-        } else {
-            let (_, next) = page_of(
-                &vault
-                    .get(&getting("paged").with_collection(selector).with_limit(1))
-                    .report,
-            );
-            next.expect("a next page")
-        };
+        let (_, next) = page_of(
+            &vault
+                .get(&getting("paged").with_collection(selector).with_limit(1))
+                .report,
+        );
+        let next = next.expect("a next page");
         vault.plans(
             &getting("paged")
                 .with_collection(selector)
@@ -1446,16 +1409,10 @@ fn a_collection_page_seeks_the_document_from_its_cursor() {
     };
     let mut ordinal_pages = Vec::new();
     for (selector, collection) in [
-        (CollectionSelector::Links, Collection::Links),
-        (
-            CollectionSelector::Headings,
-            Collection::Nested(Nested::Headings),
-        ),
-        (
-            CollectionSelector::Blocks,
-            Collection::Nested(Nested::Blocks),
-        ),
-        (CollectionSelector::Tags, Collection::Nested(Nested::Tags)),
+        (CollectionSelector::Links, Nested::Links),
+        (CollectionSelector::Headings, Nested::Headings),
+        (CollectionSelector::Blocks, Nested::Blocks),
+        (CollectionSelector::Tags, Nested::Tags),
     ] {
         let page = plans_of(
             &continued(&vault, selector),
@@ -1485,7 +1442,7 @@ fn a_collection_page_seeks_the_document_from_its_cursor() {
     vault.drop_index("findings_path");
     let links = plans_of(
         &continued(&vault, CollectionSelector::Links),
-        GetStatement::CollectionPage(Collection::Links),
+        GetStatement::CollectionPage(Nested::Links),
     );
     failure_of("links_document_ordinal dropped", || {
         judge_ordinal(&links[0], "links")

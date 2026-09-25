@@ -28,13 +28,19 @@
 //! **Link health is computed, never stored.** Resolution runs at read time
 //! over syntactic link facts, so the health of a link is a fact about the
 //! vault at the instant of the read: one target is healthy, none is broken,
-//! and more than one is ambiguous. What the target resolved to crosses as a
-//! [`CandidateHead`] — the same bounded head of paths and total that a
-//! finding and the ambiguous-target refusal carry — so a short link a large
-//! vault resolves many ways puts a bounded head and a count on the row rather
-//! than the whole ambiguity class. [`LinkRow`] derives its health in its
-//! constructor from that total, and reads it back the same way, so the two
-//! halves of one fact cannot arrive disagreeing.
+//! and more than one is ambiguous. **A link is judged by resolving it
+//! first** ([`LinkHealth::of_link`]): a link addressed elsewhere — a protocol
+//! other than `vault`, or a Markdown target opening with a URI scheme — is not
+//! judged and names no document, and one that resolves to no document is not
+//! judged where its target names an attachment. How a target reaches
+//! documents is [`LinkAddress`], the one addressing selector. What the
+//! target resolved to crosses as a [`CandidateHead`] — the same bounded head
+//! of paths and total that a finding and the ambiguous-target refusal carry —
+//! so a short link a large vault resolves many ways puts a bounded head and a
+//! count on the row rather than the whole ambiguity class. [`LinkRow`] derives
+//! its health in its constructor from the link's addressing and that total,
+//! and reads it back the same way, so the two halves of one fact cannot
+//! arrive disagreeing.
 //!
 //! **A frontmatter value crosses as the tree it is written as.** The content
 //! model — which fields are numbers, which are dates, how two of them compare
@@ -441,37 +447,219 @@ impl<'de> Deserialize<'de> for BodyText {
     }
 }
 
+/// The extension a document's file carries, compared with ASCII case folded.
+pub const DOCUMENT_EXTENSION: &str = "md";
+
+/// The one protocol a link's address is read under rather than set aside: a
+/// `vault://` stem is read from the vault root.
+pub const VAULT_PROTOCOL: &str = "vault";
+
+/// The separator between a path's segments.
+const SEPARATOR: char = '/';
+
+/// How a link's target reaches documents: the one addressing selector every
+/// reading of a link — the store's keys, a row's health — reads.
+///
+/// **Protocol first, family second.** A link written with a protocol other
+/// than [`VAULT_PROTOCOL`] addresses whatever that protocol addresses. A
+/// `vault://` stem is read from the vault root, and its family keeps its own
+/// rules: a wikilink's stem is a rooted name, and a Markdown link's a path
+/// from the root. A link written with no protocol falls to its family: an
+/// empty target names the document holding the link, a wikilink's target is
+/// a suffix address, and a Markdown target is a path — unless it opens with a
+/// URI scheme, `mailto:` and `tel:` among them, which addresses no document.
+///
+/// **A path is read by URL rules.** Its query — from the first `?` — is not
+/// part of it and is cut off here; the fragment was split off when the link
+/// was recognized. Splitting it into segments, percent-decoding each, and
+/// joining it to where it is read from is the reader's. A wikilink's target,
+/// rooted or not, is read by no URL rule: nothing in it is cut off or
+/// decoded.
+///
+/// Plain rather than `#[non_exhaustive]`: a reader matches every address, and
+/// an address nobody chose a reading for should fail to compile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkAddress<'a> {
+    /// The link addresses no document of the vault, so no resolution judges
+    /// it.
+    Elsewhere,
+    /// The link names the document holding it: an empty target.
+    HoldingDocument,
+    /// A suffix address, resolved through the one resolver.
+    Suffix(&'a str),
+    /// A wikilink's name read from the vault root: it names the document at
+    /// exactly the root path one of its reductions spells — mirroring a
+    /// suffix wikilink's own two reductions: the stem as written, and, where
+    /// its leaf carries an extension, the stem with that extension stripped,
+    /// each with [`DOCUMENT_EXTENSION`] appended — and never a suffix of a
+    /// deeper path.
+    RootedName(&'a str),
+    /// A path read from the directory of the document holding the link.
+    Relative(&'a str),
+    /// A path read from the vault root, its leading separator cut off.
+    Rooted(&'a str),
+}
+
+impl<'a> LinkAddress<'a> {
+    /// How a link of `family`, written with `protocol` and `target`, reaches
+    /// documents.
+    pub fn of(family: LinkFamily, protocol: Option<&str>, target: &'a str) -> Self {
+        match protocol {
+            Some(VAULT_PROTOCOL) => match family {
+                LinkFamily::Wikilink => LinkAddress::RootedName(target),
+                LinkFamily::Markdown => LinkAddress::Rooted(without_query(target)),
+            },
+            Some(_) => LinkAddress::Elsewhere,
+            None if target.is_empty() => LinkAddress::HoldingDocument,
+            None => match family {
+                LinkFamily::Wikilink => LinkAddress::Suffix(target),
+                LinkFamily::Markdown if opens_with_a_scheme(target) => LinkAddress::Elsewhere,
+                LinkFamily::Markdown => match without_query(target) {
+                    "" => LinkAddress::HoldingDocument,
+                    path => match path.strip_prefix(SEPARATOR) {
+                        Some(rooted) => LinkAddress::Rooted(rooted),
+                        None => LinkAddress::Relative(path),
+                    },
+                },
+            },
+        }
+    }
+
+    /// Whether the address's last segment carries an extension other than
+    /// [`DOCUMENT_EXTENSION`], which names an attachment. An extension is what
+    /// follows the last dot inside the last segment: a dot leading the
+    /// segment starts a name rather than an extension.
+    pub fn names_an_attachment(&self) -> bool {
+        let (LinkAddress::Suffix(address)
+        | LinkAddress::RootedName(address)
+        | LinkAddress::Relative(address)
+        | LinkAddress::Rooted(address)) = *self
+        else {
+            return false;
+        };
+        let leaf = address.rsplit(SEPARATOR).next().unwrap_or(address);
+        match leaf.rfind('.') {
+            Some(dot) if dot > 0 => !leaf[dot + 1..].eq_ignore_ascii_case(DOCUMENT_EXTENSION),
+            _ => false,
+        }
+    }
+}
+
+/// `target` with its query — from the first `?` — cut off.
+fn without_query(target: &str) -> &str {
+    target.split_once('?').map_or(target, |(path, _)| path)
+}
+
+/// Whether `target` opens with an RFC 3986 scheme and its colon: a letter,
+/// then letters, digits, `+`, `-` or `.`, up to the first colon. A separator
+/// before that colon makes the colon part of a path.
+fn opens_with_a_scheme(target: &str) -> bool {
+    let Some((scheme, _)) = target.split_once(':') else {
+        return false;
+    };
+    let mut characters = scheme.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+        })
+}
+
 /// What resolving a link's target found.
 ///
 /// On the wire a health is the flat string itself: `"healthy"`, `"broken"`,
-/// `"ambiguous"`.
+/// `"ambiguous"`, `"not_judged"`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LinkHealth {
     /// The target resolves to exactly one document.
     Healthy,
-    /// The target resolves to no document.
+    /// The target resolves to no document, and names no attachment.
     Broken,
     /// The target resolves to more than one document.
     Ambiguous,
+    /// No resolution judges the link: it addresses no document of the vault,
+    /// or it resolves to none and its target names an attachment.
+    NotJudged,
 }
 
 impl LinkHealth {
-    /// The health of a link whose target resolved to `targets` documents.
+    /// The health of a link of `family`, written with `protocol` and
+    /// `target`, whose target resolved to `targets` documents.
+    ///
+    /// **A link is judged by resolving it first.** A link addressed elsewhere
+    /// ([`LinkAddress::Elsewhere`]) is not judged. Any other link is healthy
+    /// where it resolved to one document and ambiguous where it resolved to
+    /// more; one that resolved to none is not judged where its target names an
+    /// attachment ([`LinkAddress::names_an_attachment`]), and broken
+    /// otherwise. The count is the head's total rather than the candidates it
+    /// carries, so a head cut at its bound reports the health of the whole
+    /// class.
     ///
     /// This is the whole of the derivation, so a producer cannot file one
-    /// reading of a count and a consumer another. The count is the head's
-    /// total rather than the candidates it carries, so a head cut at its bound
-    /// reports the health of the whole class.
-    pub const fn of_targets(targets: u64) -> Self {
-        match targets {
-            0 => LinkHealth::Broken,
-            1 => LinkHealth::Healthy,
+    /// reading of a link and a consumer another.
+    pub fn of_link(family: LinkFamily, protocol: Option<&str>, target: &str, targets: u64) -> Self {
+        let address = LinkAddress::of(family, protocol, target);
+        match (address, targets) {
+            (LinkAddress::Elsewhere, _) => LinkHealth::NotJudged,
+            (_, 0) if address.names_an_attachment() => LinkHealth::NotJudged,
+            (_, 0) => LinkHealth::Broken,
+            (_, 1) => LinkHealth::Healthy,
             _ => LinkHealth::Ambiguous,
         }
     }
 }
+
+/// A link addressed elsewhere named documents it cannot resolve to.
+///
+/// A link addressed elsewhere ([`LinkAddress::Elsewhere`]) is not judged and
+/// names no document: a protocol other than `vault`, or a Markdown target
+/// opening with a URI scheme, is not a document address at all. A row built
+/// or read with any documents beside such a link describes one link that is
+/// both unaddressed and resolved, which no vault produces, so it is refused
+/// where a row is built and where one is read alike.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ElsewhereNamesDocuments {
+    total: u64,
+}
+
+impl ElsewhereNamesDocuments {
+    /// How many documents the elsewhere-addressed link was handed.
+    pub const fn total(&self) -> u64 {
+        self.total
+    }
+
+    /// `targets`, if `health` can carry it: a link not judged because it
+    /// addresses no document resolves to none. `health` is the derivation
+    /// [`LinkHealth::of_link`] already ran, so this reuses its judgement
+    /// rather than re-deciding addressing on its own — a link resolves to no
+    /// document *and* is not judged for reasons other than being addressed
+    /// elsewhere (an attachment target resolving to none), and only the
+    /// elsewhere case is refused here; that case is exactly the one where
+    /// `health` is [`LinkHealth::NotJudged`] and `targets` is nonzero, because
+    /// the attachment reading of [`LinkHealth::NotJudged`] only ever arises at
+    /// a total of zero.
+    fn check(health: LinkHealth, targets: u64) -> Result<(), Self> {
+        if health == LinkHealth::NotJudged && targets != 0 {
+            return Err(ElsewhereNamesDocuments { total: targets });
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for ElsewhereNamesDocuments {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the link addresses no document, and it resolves to {} of them",
+            self.total,
+        )
+    }
+}
+
+impl std::error::Error for ElsewhereNamesDocuments {}
 
 /// The written form a link was recognized from.
 ///
@@ -491,11 +679,11 @@ pub enum LinkFamily {
 /// The syntactic half is what the document says; the resolved half is what the
 /// vault held at the instant of the read. `targets` is a bounded head and a
 /// total, so a link a vault resolves many ways crosses as the first few of
-/// those documents and how many there were. `health` is derived from that
-/// total
-/// rather than carried beside it: the constructor computes it and the read
-/// path recomputes it, so a row whose health disagrees with the documents it
-/// names has no representation on either side of the seam.
+/// those documents and how many there were, and a link addressed elsewhere
+/// crosses with no document. `health` is derived from the link's addressing
+/// and that total rather than carried beside them: the constructor computes it
+/// and the read path recomputes it, so a row whose health disagrees with the
+/// documents it names has no representation on either side of the seam.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct LinkRow {
@@ -524,10 +712,15 @@ pub struct LinkRow {
 
 impl LinkRow {
     /// A link of `family` at `span`, written as `target`, resolving to the
-    /// documents `targets` heads.
+    /// documents `targets` heads, or the reason `targets` names documents a
+    /// link addressed elsewhere cannot.
     ///
-    /// The health is computed from the total `targets` carries rather than
-    /// passed in, so the two name one reading of the vault.
+    /// The health is computed from the link's addressing and the total
+    /// `targets` carries rather than passed in, so the two name one reading of
+    /// the vault. A link addressed elsewhere ([`LinkAddress::Elsewhere`])
+    /// resolves to none, so a nonzero `targets` for one is refused
+    /// ([`ElsewhereNamesDocuments`]) rather than built into a row the read
+    /// path would then refuse to read back.
     #[allow(clippy::too_many_arguments)] // A link row is the link's own facts; grouping them would mint a shape nothing else holds.
     pub fn new(
         family: LinkFamily,
@@ -538,19 +731,21 @@ impl LinkRow {
         anchor: Option<Anchor>,
         span: Span,
         targets: CandidateHead,
-    ) -> Self {
-        let health = LinkHealth::of_targets(targets.total());
-        LinkRow {
+    ) -> Result<Self, ElsewhereNamesDocuments> {
+        let target = target.into();
+        let health = LinkHealth::of_link(family, protocol.as_deref(), &target, targets.total());
+        ElsewhereNamesDocuments::check(health, targets.total())?;
+        Ok(LinkRow {
             family,
             embed,
             protocol,
-            target: target.into(),
+            target,
             title,
             anchor,
             span,
             targets,
             health,
-        }
+        })
     }
 
     /// What resolving this link's target found.
@@ -576,16 +771,25 @@ struct LinkRowFields {
 }
 
 impl<'de> Deserialize<'de> for LinkRow {
-    /// A row arrives with both halves of one fact and is read back by
-    /// recomputing the derived half: a row whose `health` is not the health of
-    /// the `targets` beside it is refused rather than read into a value whose
-    /// two fields say different things about one link.
+    /// A row arrives with both halves of one fact and is read back through the
+    /// same rule the constructor holds: a link addressed elsewhere that names
+    /// documents ([`ElsewhereNamesDocuments`]), or a row whose `health` is not
+    /// the health of its addressing and the `targets` beside it, is refused
+    /// rather than read into a value whose fields say different things about
+    /// one link.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let fields = LinkRowFields::deserialize(deserializer)?;
-        let derived = LinkHealth::of_targets(fields.targets.total());
+        let derived = LinkHealth::of_link(
+            fields.family,
+            fields.protocol.as_deref(),
+            &fields.target,
+            fields.targets.total(),
+        );
+        ElsewhereNamesDocuments::check(derived, fields.targets.total())
+            .map_err(D::Error::custom)?;
         if fields.health != derived {
             return Err(D::Error::custom(format!(
                 "the link's health {:?} is not the health of the {} documents it resolves to, {derived:?}",

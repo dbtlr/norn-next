@@ -18,21 +18,22 @@ use norn_wire::{
     CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage,
     CollectionSelector, Column, ContainerKind, ControlFile, ControlFileFailure, CountParams,
     Cursor, CursorKey, CursorOrderChanged, DescribeParams, Direction, Directory,
-    DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift, EmptyLadder,
-    EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind,
-    FieldType, FieldValue, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints,
-    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LadderDeclaration,
-    LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, ModelIdentity,
-    Moved, NameSet, NoProblems, NonFiniteScore, NotReady, Page, PathRuleKind, PollBackend,
-    Predicate, Published, ReasonCode, RegisterParams, RegisterReport, Registration,
-    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
-    ReloadStage, Replace, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp,
-    Rung, RungReport, RungSet, SchemaSource, Score, SearchParams, SetParams, SetReport, Severity,
-    Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
-    TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
-    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
-    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer,
-    VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift,
+    ElsewhereNamesDocuments, EmptyLadder, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
+    ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind, FindingRow,
+    FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
+    KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams,
+    ListReport, MaintainerIdentity, ModelIdentity, Moved, NameSet, NoProblems, NonFiniteScore,
+    NotReady, Page, PathRuleKind, PollBackend, Predicate, Published, ReasonCode, RegisterParams,
+    RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome,
+    ReloadParams, ReloadReport, ReloadStage, Replace, RequestScope, ResolutionTarget,
+    ResolveParams, ResolveReport, RollUp, Rung, RungReport, RungSet, SchemaSource, Score,
+    SearchParams, SetParams, SetReport, Severity, Snapshot, Sort, SortKey, Span, StatusParams,
+    StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead, TrustState,
+    UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
+    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
+    Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -489,6 +490,14 @@ fn unsatisfied_parts() -> Vec<Unsatisfied> {
         Unsatisfied::missing_block("a1"),
         Unsatisfied::resolves_not_applicable(target("norn/glossary")),
         Unsatisfied::query_names_no_word("-- !!"),
+        Unsatisfied::links_to_ambiguous(
+            target("glossary"),
+            head(
+                [candidate("notes/glossary"), candidate("archive/glossary")],
+                2,
+            ),
+        ),
+        Unsatisfied::links_to_unknown(target("nowhere")),
     ]
 }
 
@@ -518,12 +527,13 @@ fn columns() -> Vec<Column> {
     ]
 }
 
-/// Every reading a resolved link's health takes.
+/// Every reading a link's health takes.
 fn link_healths() -> Vec<LinkHealth> {
     vec![
         LinkHealth::Healthy,
         LinkHealth::Broken,
         LinkHealth::Ambiguous,
+        LinkHealth::NotJudged,
     ]
 }
 
@@ -569,16 +579,38 @@ fn nested_field_value() -> FieldValue {
 }
 
 /// One link row per health, built through the constructor that derives it
-/// from the total of the bounded head beside it.
+/// from the link's addressing and the total of the bounded head beside it.
 fn link_rows() -> Vec<LinkRow> {
-    [
+    let mut rows: Vec<LinkRow> = [
         head([], 0),
         head([candidate("notes/a")], 1),
         head([candidate("notes/a"), candidate("archive/a")], 2),
     ]
     .into_iter()
     .map(link_row)
-    .collect()
+    .collect();
+    rows.push(addressed_row(
+        Some("https"),
+        "example.com/page",
+        head([], 0),
+    ));
+    rows
+}
+
+/// A link row written with `protocol` and `target`, resolving to `targets`,
+/// built through the constructor that derives its health.
+fn addressed_row(protocol: Option<&str>, target: &str, targets: CandidateHead) -> LinkRow {
+    LinkRow::new(
+        LinkFamily::Markdown,
+        false,
+        protocol.map(str::to_string),
+        target,
+        Some(String::new()),
+        None,
+        span(),
+        targets,
+    )
+    .expect("a document link, or an elsewhere link resolving to none")
 }
 
 /// A link row resolving to `targets`, built through the constructor that
@@ -594,6 +626,7 @@ fn link_row(targets: CandidateHead) -> LinkRow {
         span(),
         targets,
     )
+    .expect("a wikilink names a document, never elsewhere")
 }
 
 /// The candidates a link row's head carries, as the bytes a reader is handed.
@@ -607,11 +640,22 @@ fn candidate_values(paths: &[&str]) -> Vec<serde_json::Value> {
 /// A link row as bytes, with the head and the health named apart so a test can
 /// hand the reader halves that disagree.
 fn link_row_json(health: &str, candidates: &[serde_json::Value], total: u64) -> String {
+    addressed_row_json(None, "a", health, candidates, total)
+}
+
+/// A link row as bytes, written with `protocol` and `target`.
+fn addressed_row_json(
+    protocol: Option<&str>,
+    target: &str,
+    health: &str,
+    candidates: &[serde_json::Value],
+    total: u64,
+) -> String {
     serde_json::json!({
         "family": "wikilink",
         "embed": false,
-        "protocol": null,
-        "target": "a",
+        "protocol": protocol,
+        "target": target,
         "title": null,
         "anchor": null,
         "span": {"line": 1, "column": 1, "byte_offset": 0},
@@ -2960,6 +3004,21 @@ fn an_unsatisfied_part_is_an_object_tagged_part() {
         wire(&Unsatisfied::query_names_no_word("-- !!")),
         r#"{"part":"query_names_no_word","query":"-- !!"}"#
     );
+    assert_eq!(
+        wire(&Unsatisfied::links_to_unknown(target("nowhere"))),
+        r#"{"part":"links_to_unknown","target":"nowhere"}"#
+    );
+    assert_eq!(
+        wire(&Unsatisfied::links_to_ambiguous(
+            target("glossary"),
+            head([candidate("notes/glossary")], 3),
+        )),
+        r#"{"part":"links_to_ambiguous","target":"glossary","candidates":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"}],"total":3}}"#
+    );
+    assert!(
+        serde_json::from_str::<Unsatisfied>(r#"{"part":"links_to_unknown","target":""}"#).is_err(),
+        "a links-to part carrying an addressless target read back as one"
+    );
 }
 
 /// The two answering exits are one type: a complete answer is one with no
@@ -3310,9 +3369,279 @@ fn a_links_health_is_the_count_of_what_it_resolves_to() {
     assert_eq!(rows[0].health(), LinkHealth::Broken);
     assert_eq!(rows[1].health(), LinkHealth::Healthy);
     assert_eq!(rows[2].health(), LinkHealth::Ambiguous);
-    assert_eq!(LinkHealth::of_targets(0), LinkHealth::Broken);
-    assert_eq!(LinkHealth::of_targets(1), LinkHealth::Healthy);
-    assert_eq!(LinkHealth::of_targets(400), LinkHealth::Ambiguous);
+    assert_eq!(rows[3].health(), LinkHealth::NotJudged);
+}
+
+/// **A link's address is selected protocol first and family second.** A
+/// protocol other than `vault` addresses no document, and a `vault://` stem is
+/// read from the vault root under its family's rules: a wikilink's as a name,
+/// kept as written, and a Markdown link's as a path, its query cut off. With
+/// no protocol, an empty target names the document holding the link, a
+/// wikilink's target is a suffix address — a colon in it is a character like
+/// any other — and a Markdown target is a path: from the vault root where it opens with the separator, and from the
+/// holding document's directory otherwise, its query cut off. A Markdown
+/// target opening with a URI scheme, `://` or not, addresses no document; a
+/// scheme opens with a letter and ends at the first colon, before any
+/// separator.
+#[test]
+fn a_links_address_is_selected_protocol_first_and_family_second() {
+    use LinkFamily::{Markdown, Wikilink};
+    for (family, protocol, target, address) in [
+        (
+            Markdown,
+            Some("https"),
+            "example.com",
+            LinkAddress::Elsewhere,
+        ),
+        (
+            Wikilink,
+            Some("https"),
+            "example.com",
+            LinkAddress::Elsewhere,
+        ),
+        (
+            Wikilink,
+            Some("vault"),
+            "notes/x",
+            LinkAddress::RootedName("notes/x"),
+        ),
+        (
+            Wikilink,
+            Some("vault"),
+            "notes/my%20x.md?raw=1",
+            LinkAddress::RootedName("notes/my%20x.md?raw=1"),
+        ),
+        (
+            Markdown,
+            Some("vault"),
+            "notes/x.md?raw=1",
+            LinkAddress::Rooted("notes/x.md"),
+        ),
+        (Wikilink, None, "", LinkAddress::HoldingDocument),
+        (Markdown, None, "", LinkAddress::HoldingDocument),
+        (Markdown, None, "?x=1", LinkAddress::HoldingDocument),
+        (Wikilink, None, "notes/x", LinkAddress::Suffix("notes/x")),
+        (Wikilink, None, "mailto:x", LinkAddress::Suffix("mailto:x")),
+        (
+            Markdown,
+            None,
+            "mailto:someone@example.com",
+            LinkAddress::Elsewhere,
+        ),
+        (Markdown, None, "tel:", LinkAddress::Elsewhere),
+        (
+            Markdown,
+            None,
+            "Note+1.x-y:draft.md",
+            LinkAddress::Elsewhere,
+        ),
+        (
+            Markdown,
+            None,
+            "a/b:c.md",
+            LinkAddress::Relative("a/b:c.md"),
+        ),
+        (Markdown, None, "1a:b.md", LinkAddress::Relative("1a:b.md")),
+        (Markdown, None, ":b.md", LinkAddress::Relative(":b.md")),
+        (Markdown, None, "q.md?x=1", LinkAddress::Relative("q.md")),
+        (Markdown, None, "../x.md", LinkAddress::Relative("../x.md")),
+        (Markdown, None, "/x.md", LinkAddress::Rooted("x.md")),
+    ] {
+        assert_eq!(
+            LinkAddress::of(family, protocol, target),
+            address,
+            "{family:?} {protocol:?} `{target}`"
+        );
+    }
+}
+
+/// **A link is judged by resolving it first.** A link addressed elsewhere —
+/// written with a protocol other than `vault`, or a Markdown target opening
+/// with a URI scheme — is not judged, and a nonzero head for one is refused
+/// rather than built. Any other link that resolves to documents is judged by
+/// how many, whatever its leaf carries. One that resolves to none is not
+/// judged where its leaf carries an extension other than the document
+/// extension, which names an attachment, and is broken otherwise: a leaf with
+/// no extension, or the document extension in any ASCII case. A dot in a
+/// directory segment or leading a name is no extension.
+#[test]
+fn a_link_is_judged_by_resolving_it_first() {
+    use LinkFamily::{Markdown, Wikilink};
+    let judged = |family, protocol: Option<&str>, target: &str, total: u64| {
+        let candidates: Vec<Candidate> = (0..total)
+            .map(|index| candidate(&format!("notes/c{index}")))
+            .collect();
+        LinkRow::new(
+            family,
+            false,
+            protocol.map(str::to_string),
+            target,
+            None,
+            None,
+            span(),
+            head(candidates, total),
+        )
+    };
+    for (family, protocol, target) in [
+        (Markdown, Some("https"), "example.com/page"),
+        (Wikilink, Some("https"), "example.com/wiki"),
+        (Markdown, None, "mailto:someone@example.com"),
+        (Markdown, None, "tel:+1-555-0100"),
+    ] {
+        let label = format!("{family:?} {protocol:?} `{target}`");
+        assert_eq!(
+            judged(family, protocol, target, 0)
+                .unwrap_or_else(|error| panic!("{label} resolving to 0: {error}"))
+                .health(),
+            LinkHealth::NotJudged,
+            "{label}"
+        );
+        for total in [1, 2] {
+            assert!(
+                judged(family, protocol, target, total).is_err(),
+                "{label} addressed elsewhere accepted a head of {total}"
+            );
+        }
+    }
+    for (family, protocol, target, unresolved) in [
+        (Wikilink, None, "picture.png", LinkHealth::NotJudged),
+        (Markdown, None, "assets/pic.png", LinkHealth::NotJudged),
+        (Markdown, None, "pic.png?size=2", LinkHealth::NotJudged),
+        (Wikilink, None, "archive.tar.gz", LinkHealth::NotJudged),
+        (Wikilink, None, "v1.2", LinkHealth::NotJudged),
+        (
+            Wikilink,
+            Some("vault"),
+            "assets/pic.png",
+            LinkHealth::NotJudged,
+        ),
+        (Wikilink, None, "notes", LinkHealth::Broken),
+        (Markdown, None, "notes.md", LinkHealth::Broken),
+        (Wikilink, None, "Notes.MD", LinkHealth::Broken),
+        (Wikilink, None, "a.b/c", LinkHealth::Broken),
+        (Wikilink, None, ".hidden", LinkHealth::Broken),
+        (Wikilink, None, "note:draft", LinkHealth::Broken),
+        (Markdown, None, "../x/my%20note.md", LinkHealth::Broken),
+        (Markdown, None, "", LinkHealth::Broken),
+        (Wikilink, Some("vault"), "Notes", LinkHealth::Broken),
+    ] {
+        let label = format!("{family:?} {protocol:?} `{target}`");
+        assert_eq!(
+            judged(family, protocol, target, 0)
+                .unwrap_or_else(|error| panic!("{label} resolving to 0: {error}"))
+                .health(),
+            unresolved,
+            "{label}"
+        );
+        assert_eq!(
+            judged(family, protocol, target, 1)
+                .unwrap_or_else(|error| panic!("{label} resolving to 1: {error}"))
+                .health(),
+            LinkHealth::Healthy,
+            "{label}"
+        );
+        assert_eq!(
+            judged(family, protocol, target, 2)
+                .unwrap_or_else(|error| panic!("{label} resolving to 2: {error}"))
+                .health(),
+            LinkHealth::Ambiguous,
+            "{label}"
+        );
+    }
+}
+
+/// A link addressed elsewhere carries no documents: `LinkRow::new` refuses a
+/// nonzero head for one ([`ElsewhereNamesDocuments`]), over every other
+/// combination of family, addressing and head size a row built here or read
+/// off the wire accepts and round-trips.
+#[test]
+fn link_row_new_accepts_a_head_only_where_its_address_names_documents() {
+    use LinkFamily::{Markdown, Wikilink};
+    for (family, protocol, target) in [
+        (Markdown, Some("https"), "example.com"),
+        (Wikilink, Some("https"), "example.com"),
+        (Markdown, None, "mailto:someone@example.com"),
+        (Wikilink, Some("vault"), "notes/x"),
+        (Markdown, Some("vault"), "notes/x.md?raw=1"),
+        (Wikilink, None, ""),
+        (Markdown, None, ""),
+        (Wikilink, None, "notes/x"),
+        (Markdown, None, "notes/x.md"),
+        (Markdown, None, "/notes/x.md"),
+        (Markdown, None, "picture.png"),
+    ] {
+        let elsewhere = LinkAddress::of(family, protocol, target) == LinkAddress::Elsewhere;
+        let label = format!("{family:?} {protocol:?} `{target}`");
+        for total in [0, 1, 2] {
+            let candidates: Vec<Candidate> = (0..total)
+                .map(|index| candidate(&format!("notes/c{index}")))
+                .collect();
+            let row = LinkRow::new(
+                family,
+                false,
+                protocol.map(str::to_string),
+                target,
+                None,
+                None,
+                span(),
+                head(candidates, total),
+            );
+            if elsewhere && total != 0 {
+                let refusal: ElsewhereNamesDocuments =
+                    row.expect_err(&format!("{label} accepted a head of {total}"));
+                assert_eq!(refusal.total(), total, "{label} resolving to {total}");
+            } else {
+                round_trip(
+                    &row.unwrap_or_else(|error| panic!("{label} resolving to {total}: {error}")),
+                );
+            }
+        }
+    }
+}
+
+/// A link that is not judged reads back only as not judged and only with no
+/// document beside it; a document link reads back only with the health its
+/// targets give it.
+#[test]
+fn a_links_judgement_is_read_back_off_its_addressing() {
+    let json = addressed_row_json(Some("https"), "example.com", "not_judged", &[], 0);
+    let read: LinkRow =
+        serde_json::from_str(&json).unwrap_or_else(|error| panic!("reading {json}: {error}"));
+    assert_eq!(read.health(), LinkHealth::NotJudged);
+    let json = addressed_row_json(
+        None,
+        "pic.png",
+        "healthy",
+        &candidate_values(&["pic.png"]),
+        1,
+    );
+    let read: LinkRow =
+        serde_json::from_str(&json).unwrap_or_else(|error| panic!("reading {json}: {error}"));
+    assert_eq!(read.health(), LinkHealth::Healthy);
+    for json in [
+        addressed_row_json(Some("https"), "example.com", "broken", &[], 0),
+        addressed_row_json(
+            Some("https"),
+            "example.com",
+            "not_judged",
+            &candidate_values(&["example.md"]),
+            1,
+        ),
+        addressed_row_json(None, "pic.png", "broken", &[], 0),
+        addressed_row_json(None, "notes", "not_judged", &[], 0),
+        addressed_row_json(
+            None,
+            "pic.png",
+            "not_judged",
+            &candidate_values(&["pic.png"]),
+            1,
+        ),
+    ] {
+        assert!(
+            serde_json::from_str::<LinkRow>(&json).is_err(),
+            "reading {json} produced a row whose judgement is not its addressing's"
+        );
+    }
 }
 
 /// The count the health is read off is the head's total, not the candidates
@@ -4267,7 +4596,7 @@ fn every_document_row_setter_lands_in_the_bytes() {
     assert_eq!(
         wire(&request),
         [
-            r##"{"path":"notes/a.md","fields":{"type":{"kind":"scalar","raw":"note"}},"body":{"text":"Design\n","byte_length":4096},"links":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"}],"total":1},"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"},{"path":"archive/a.md","suffix":"archive/a"}],"total":2},"health":"ambiguous"}],"total":9},"headings":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"blocks":{"items":[{"id":"a1","span":null}],"total":1},"tags":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12}],"total":1}}"##,
+            r##"{"path":"notes/a.md","fields":{"type":{"kind":"scalar","raw":"note"}},"body":{"text":"Design\n","byte_length":4096},"links":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"}],"total":1},"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"},{"path":"archive/a.md","suffix":"archive/a"}],"total":2},"health":"ambiguous"},{"family":"markdown","embed":false,"protocol":"https","target":"example.com/page","title":"","anchor":null,"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"not_judged"}],"total":9},"headings":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"blocks":{"items":[{"id":"a1","span":null}],"total":1},"tags":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12}],"total":1}}"##,
         ]
         .concat()
     );

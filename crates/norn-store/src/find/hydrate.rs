@@ -7,6 +7,14 @@
 //! only the columns named; each nested collection is one statement over its
 //! own table, and a collection nobody named is a table nobody reads.
 //!
+//! **The links column reads what its links name as one set.** Its rows are
+//! read as every collection's are, and then every link the page's rows carry
+//! is resolved at once, as [`Snapshot::link_rows`] states: one statement reads
+//! what each link names from the keys the link index holds it under, and one
+//! more names every candidate by its minimal disambiguating suffix. So the
+//! column costs a fixed number of statements, however many links or rows the
+//! page carries, and a page that does not name it resolves nothing.
+//!
 //! **The findings column is a nested collection too.** It carries the findings
 //! standing at the document's path under the active fingerprint, in `(kind,
 //! id)` order — the order `validate` pages them in at one path — each a
@@ -26,20 +34,21 @@ use std::collections::{BTreeMap, HashMap};
 
 use norn_db::rusqlite::Row;
 use norn_wire::{
-    BlockRow, BodyText, Collection, DocumentRow, FieldValue, FindingRow, HeadingRow, TagRow,
-    TotalBelowHead,
+    BlockRow, BodyText, Collection, DocumentRow, FieldValue, FindingRow, HeadingRow, LinkRow,
+    TagRow, TotalBelowHead,
 };
 
 use super::statement::{
-    DocumentColumns, FindStatement, Nested, compose_documents, compose_finding_head,
-    compose_finding_total, compose_nested_head, compose_nested_total,
+    DocumentColumns, FindStatement, LINK_ID_COLUMN, Nested, compose_documents,
+    compose_finding_head, compose_finding_total, compose_nested_head, compose_nested_total,
 };
 use super::{FoundKey, Projection};
 use crate::error::{self, StoreError};
-use crate::facts::{BlockFact, HeadingFact, Span, TagSource};
+use crate::facts::{BlockFact, HeadingFact, LinkFact, Span, TagSource};
 use crate::json::projected_fields;
 use crate::read::{Ran, Stepped, finding_base};
-use crate::request::{Reading, stored_block, stored_heading, stored_tag};
+use crate::request::{Reading, stored_block, stored_heading, stored_link, stored_tag};
+use crate::resolve::AmbiguityIgnore;
 use crate::store::Snapshot;
 
 /// How many items one nested collection carries on one row.
@@ -113,6 +122,7 @@ impl FindWork {
             ("find_tag_rows", self.nested_rows.tags),
             ("find_heading_rows", self.nested_rows.headings),
             ("find_block_rows", self.nested_rows.blocks),
+            ("find_link_rows", self.nested_rows.links),
             ("find_finding_rows", self.finding_rows),
         ]
         .into_iter()
@@ -135,6 +145,8 @@ pub struct NestedRows {
     pub headings: u64,
     /// Rows of `blocks`.
     pub blocks: u64,
+    /// Rows of `links`.
+    pub links: u64,
 }
 
 impl NestedRows {
@@ -144,6 +156,7 @@ impl NestedRows {
             Nested::Tags => self.tags,
             Nested::Headings => self.headings,
             Nested::Blocks => self.blocks,
+            Nested::Links => self.links,
         }
     }
 
@@ -152,6 +165,7 @@ impl NestedRows {
             Nested::Tags => &mut self.tags,
             Nested::Headings => &mut self.headings,
             Nested::Blocks => &mut self.blocks,
+            Nested::Links => &mut self.links,
         };
         *count += rows;
     }
@@ -172,15 +186,18 @@ type Heads<T> = HashMap<i64, Vec<(i64, T)>>;
 impl Snapshot {
     /// The rows of the documents `keys` name, in their order, carrying the
     /// columns `projection` names; `fields` is the field keys it names that
-    /// the vault's field universe holds, and `findings_under` the fingerprint
-    /// the findings column reads under where the projection names it. Each
-    /// statement it runs is recorded in `record`.
+    /// the vault's field universe holds, `findings_under` the fingerprint the
+    /// findings column reads under where the projection names it, and
+    /// `ignore` the places the links column's resolutions keep out of a
+    /// class. Each statement it runs is recorded in `record`.
+    #[allow(clippy::too_many_arguments)] // What a hydration reads is named by each of these, and none of them groups with another.
     pub(super) fn hydrate(
         &self,
         keys: &[FoundKey],
         projection: &Projection<'_>,
         fields: &[&str],
         findings_under: Option<&str>,
+        ignore: &AmbiguityIgnore,
         work: &mut FindWork,
         record: &mut Vec<Ran>,
     ) -> Result<Vec<DocumentRow>, StoreError> {
@@ -219,6 +236,22 @@ impl Snapshot {
 
         for nested in projection.nested.iter().copied() {
             match nested {
+                Nested::Links => {
+                    let mut heads =
+                        self.read_nested(nested, &ids, identified_link, work, record)?;
+                    let carried: Vec<(Vec<(i64, LinkFact)>, u64)> = ids
+                        .iter()
+                        .map(|id| heads.remove(id).unwrap_or_default())
+                        .collect();
+                    let counts: Vec<usize> = carried.iter().map(|(items, _)| items.len()).collect();
+                    let totals: Vec<u64> = carried.iter().map(|(_, total)| *total).collect();
+                    let every = carried.into_iter().flat_map(|(items, _)| items).collect();
+                    let mut resolved = self.link_rows(every, ignore, record)?.into_iter();
+                    for ((row, count), total) in rows.iter_mut().zip(counts).zip(totals) {
+                        let links: Vec<LinkRow> = resolved.by_ref().take(count).collect();
+                        row.links = Some(Collection::new(links, total).map_err(cut_below_head)?);
+                    }
+                }
                 Nested::Tags => {
                     let mut heads = self.read_nested(nested, &ids, tag_row, work, record)?;
                     for (row, id) in rows.iter_mut().zip(&ids) {
@@ -498,6 +531,13 @@ fn cut_below_head(problem: TotalBelowHead) -> StoreError {
 
 pub(crate) fn wire_span(span: Span) -> norn_wire::Span {
     norn_wire::Span::new(span.line, span.column, span.byte_offset)
+}
+
+/// A link as a nested read hands it back, beside its row id, which a read of
+/// what it names seeks its keys by.
+pub(crate) fn identified_link(row: &Row<'_>) -> Reading<(i64, LinkFact)> {
+    let id = row.get(LINK_ID_COLUMN)?;
+    Ok(stored_link(row)?.map(|link| (id, link)))
 }
 
 pub(crate) fn tag_row(row: &Row<'_>) -> Reading<TagRow> {

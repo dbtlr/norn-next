@@ -25,6 +25,7 @@ mod find_rows;
 mod get;
 mod increments;
 mod lifecycle;
+mod links;
 mod pillars;
 mod readers;
 mod resolve;

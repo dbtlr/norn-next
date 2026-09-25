@@ -629,6 +629,7 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::StoredDocument(_)
         | ExplainedStatement::StoredFactsDocument(_)
         | ExplainedStatement::DocumentLinks
+        | ExplainedStatement::DocumentLinkKeys
         | ExplainedStatement::DocumentHeadings
         | ExplainedStatement::DocumentBlocks
         | ExplainedStatement::DocumentTags
@@ -1188,6 +1189,9 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         ExplainedStatement::DocumentLinks => {
             seek("links", "links_document_ordinal", "(document=?)")
         }
+        // The link keys are reached by the link rows the document's own index
+        // hands back, each link's keys by the link, in link and key order.
+        ExplainedStatement::DocumentLinkKeys => seek("link_keys", "link_keys_link", "(link=?)"),
         ExplainedStatement::DocumentHeadings => {
             seek("headings", "headings_document_ordinal", "(document=?)")
         }
@@ -1246,7 +1250,7 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
 /// that found its rows by stepping over the rows ahead of them would cost the
 /// whole table for every question about one place.
 ///
-/// Four assertions hold every statement, and a fifth holds nine of the ten:
+/// Four assertions hold every statement, and a fifth holds ten of the eleven:
 ///
 /// - It does not read its table end to end, and it searches that table.
 /// - The step that searches the table runs through [`PointReadBar::access`]

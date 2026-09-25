@@ -684,7 +684,7 @@ The contract is stated whole and filled shape by shape, as each builder lands. T
 a statement it emitted, because a plan cannot be taken by a crate that may not reach the
 database, and beside the plan every column the statement reads, which SQLite's authorizer
 reports while the explain is prepared and a plan never names — and, beside the statements
-the read builders below name, twenty-five named statements carry a plan bar through it:
+the read builders below name, twenty-six named statements carry a plan bar through it:
 suffix candidates, findings in a class, the class- and subject-scoped findings discards —
 the subject discard in both the whole form and the form narrowed to the kinds a producer
 re-derives — the clear a schema pin runs over the field projection's typed values, the page
@@ -694,8 +694,8 @@ the findings table, the tombstones, every row's stored suffix keys, raw and fold
 the path that has to produce them, and the vocabulary the full-text index holds — and the
 two drains a lane-2 consumer
 ([ADR 0021](decisions/0021-derived-indexes-split-into-two-lanes.md)) reads change through:
-the live document rows, and the recorded deaths — and the ten keyed point reads: the
-document row a path stands at, the row a facts snapshot opens on and the five fact reads
+the live document rows, and the recorded deaths — and the eleven keyed point reads: the
+document row a path stands at, the row a facts snapshot opens on and the six fact reads
 keyed by the row id it found, the death recorded for a path, the findings recorded about
 one, and the pinned vault-schema projection — and the two chunked reads every findings read
 collects each finding's candidate head and class memberships through, a chunk of finding ids
@@ -704,16 +704,16 @@ seek of its table's primary key on the finding id, with no full scan and no sort
 the statement that binds exactly that many ids.
 
 A point read is barred harder than a page, because a search is not a point read on its
-own: a range over the same index reports the same step, so each of the ten is judged on
+own: a range over the same index reports the same step, so each of the eleven is judged on
 the **equality constraint** its seek carries as well as on the index it runs through. Four
-assertions hold all ten: it never reads its table end to end, it searches that table, and
+assertions hold all eleven: it never reads its table end to end, it searches that table, and
 the step that searches it runs through the named access and carries the equality
-constraint. Eight name a declared index. The pinned-schema read and the field-row read each
+constraint. Nine name a declared index. The pinned-schema read and the field-row read each
 seek the primary key of a `WITHOUT ROWID` table, which SQLite reports with no index name,
 and the bar names that access as the primary key. A fifth assertion, that it builds no
-temporary B-tree, holds the other nine and not the findings read, because the findings read
+temporary B-tree, holds the other ten and not the findings read, because the findings read
 states an order — generation, then row key — that no index over that table holds; the
-other nine state an order their own index already gives them.
+other ten state an order their own index already gives them.
 
 The typed-value clear is stated over the typed index's own partial predicate, so that index
 holds exactly the rows the clear touches, and the bar is that the clear reads that index and
@@ -767,7 +767,7 @@ drain this bar is the strongest one available.
 None of those is a query shape's bar. **The predicate + sort + page shape has a builder**:
 the find builder compiles a request's conjunction, order and page bound into statements a
 read snapshot runs, and names them in an enumeration of its own under the same discipline —
-fifteen statements and twelve filter shapes, each explained as the find ran it (the text and
+twenty statements and thirteen filter shapes, each explained as the find ran it (the text and
 values the one site that runs a find's statements recorded) on the read-only connection,
 each carrying a plan bar with a negative control run against it, and a census that holds
 every statement slot and every filter slot to exactly one bar. The statements are the
@@ -782,7 +782,14 @@ parse is met before the page runs; and the hydration of the rows a page returns 
 document rows by id, each projected nested collection's head and total by its
 `(document, ordinal)` index, and the findings column's head and total by `findings_path` at
 each row's path and the active fingerprint, with the candidate heads and classes of the
-findings it kept by their primary keys. A page with no filter reads its order index in page order, and
+findings it kept by their primary keys; and the reads that resolve targets — a class's head
+and, where the head filled, its total, each a seek of the suffix key the root probes, run
+for a get's target and a links-to part's target; what every link a page carries names, one
+statement over the link index's keys, each distinct key read once, a suffix key's class a
+seek of the suffix key the root probes and a path key's documents a seek of the path index
+the root orders by; and every candidate's minimal disambiguating suffix, one statement whose
+each spelling's range is the same seek stopping at its second member — so a page's links
+and candidates cost a fixed number of statements, however many there are. A page with no filter reads its order index in page order, and
 sorts nothing: the path page and a field sort's valued section seek it and stop at the
 page's bound. A field sort's missing section passes every document that carries the key to
 reach one that does not, so an ascending first page, which reads the missing section first,
@@ -803,8 +810,8 @@ on `(key, typed)` where the key carries a typed order; presence and absence on t
 rows; a `before` or `after` bound on the order's value column; full text through the index's
 own `MATCH` selection; a path glob on the range its literal prefix opens in the path index;
 a resolution target on each suffix range its class opens, over the raw suffix key where the
-root tells spellings apart and the folded one where it folds ASCII case; a tag by name; and a finding by
-kind under the active fingerprint. The full-text match shape is barred as that filter, and
+root tells spellings apart and the folded one where it folds ASCII case; a tag by name; a finding by
+kind under the active fingerprint; and a links-to part on the link index, below. The full-text match shape is barred as that filter, and
 suffix/stem resolve and findings-for-path are read through statements the seam above bars;
 findings-for-path is also a validate narrowed by a path part, below. Suffix/stem resolve to
 one document is the get builder's too, below.
@@ -939,9 +946,7 @@ with the total and the hint naming the `find` that resolves them all; none as an
 target. It answers the document's record through the hydration a find's rows are read
 through, the section a heading anchor names, the block a block anchor names, or one page of
 one nested collection. A collection's cursor names the collection it pages, and refuses on
-another. The links collection is refused by name, as a find's links column is, until the
-link index resolves what a link names; its page is composed and held to its plan bar as the
-dormant carrier. A section runs to the start of the line holding the heading that ends it,
+another. A page of links resolves each link it holds as a find's links column does, below. A section runs to the start of the line holding the heading that ends it,
 so a container's prefix on that line is the next section's. The store parses no document, so a section and a block are read
 through the reader the caller hands a get — `norn-text`'s one section resolver and its one
 block reading — over the one document's heading rows and body. A heading anchor is matched
@@ -953,10 +958,10 @@ write of `dup` over `## Dup` and `## dup` refuses as ambiguous where a read take
 No index orders by the folded text, so matching an anchor reads the document's headings and
 costs them, a pass bounded by the one document. A section or a
 block the document does not carry is answered in band beside the record of its path alone.
-It names eight statements under the same discipline, each carrying a plan bar with a
-negative control and held by a census: the class's head, its total where the head filled,
-and each candidate's suffix probe, all seeks of the raw or folded suffix key the root
-probes; the document's headings and its block definition, seeks of their
+It resolves its target through the find builder's class statements, the reads every
+resolution of a target runs, and names five statements of its own under the same
+discipline, each carrying a plan bar with a negative control and held by a census: the
+document's headings and its block definition, seeks of their
 `(document, ordinal)` indexes at the document; its body, by row id; a collection's page, a
 seek of its `(document, ordinal)` index from the cursor's ordinal; and the findings' page, a
 seek of `findings_path` at the document's path and the active fingerprint from the cursor's
@@ -966,10 +971,69 @@ names. A work bar reads the SQLite counters of every statement a get ran over tw
 sizes whose classes did not grow: every shape costs the same at both, an ambiguous target's
 refusal among them.
 
-**Links-to carries no bar**: no builder emits it, and a find refuses a links-to part by
-name, because the Layer 3 link index unit it would filter by has not landed. The count
-shape carries no counter-lane, memory or timing bar yet, and neither do the validate,
-describe and search builders. The
+**Links are resolved at the read, and the links-to shape has a builder.** A link row stores
+the link as written; what it names is read at the instant of the read. Which reading a
+target takes is the wire's one addressing selector, protocol first and family second: a
+link written with a protocol other than `vault`, or a Markdown target opening with a URI
+scheme such as `mailto:`, is addressed elsewhere, names no document and is not judged. A
+wikilink's target is a suffix address, resolved through the one resolver under the store's
+order and the schema's ignored places, whatever its leaf carries. A Markdown link's target
+is a path read by URL rules: its query cut off, split into segments and then each
+percent-decoded — so an encoded separator is a character inside a segment, and names no
+document — joined to its document's directory, or to the vault root where it opens with a
+separator, with `.` and `..` folded in and never reduced, so it names one vault path or
+none, and a path climbing above the root names none; a segment that decodes to `.` or `..`
+is data, which no document path holds. A `vault://` stem is read from the vault root under
+its family's own rules: a Markdown one is a path, read the same way, and a wikilink's is a
+rooted name, read with nothing decoded or cut off, that names exactly the root path each
+reduction of its leaf spells — mirroring a suffix wikilink's own two reductions: the stem as
+written, and, where its leaf carries an extension, the stem with that extension stripped,
+each with `.md` appended — matched under the store's order and never as a suffix. A
+same-document anchor names its own document. A link is
+judged by resolving it first: one document is healthy and more are ambiguous, and none is
+broken unless the target's last segment carries an extension other than `.md`, which names
+an attachment and is not judged. A
+heading or block anchor is carried as written and not checked on the row. So a row's links
+column and a get's links page carry, for each link, the head of the documents it names now —
+at most five, in the ladder's order, each by its minimal disambiguating suffix, with the
+total — and the health that gives it. The column is read only where it is named and is cut
+at the per-row ceiling with its true total beside it. **A page's links are read as one
+set**, from the keys derivation held each link under rather than by re-deriving its address:
+one statement reads what every link on the page names, each distinct key once, and one more
+names every candidate, so the column and a get's links page cost a fixed number of
+statements however many links and rows they carry. A work bar holds that a row of two links
+and one of forty, a page of one row and one of eight, and a links page of one link and of
+forty run the same statements, and that a row's column costs the same work beside 40 and
+beside 400 more documents.
+
+**The link index is what a links-to part seeks.** Each link that can name a document is held
+in `link_keys` under the keys a seek finds it by, derived at the write from the link and the
+path of the document holding it: a wikilink's under each prefix its suffix probe opens — one,
+or two for a dotted leaf, which reduces both ways — beside the segments its target spells,
+a path's under the vault path it names, and a rooted name's under each root path its
+reductions spell; each raw and with ASCII case folded. A link
+addressed elsewhere, or naming no vault path, is held under no key. A
+`links_to <target>` part first resolves its own target to one document; a target naming
+several documents or none is reported in band, beside the head of an ambiguous one, and
+matches nothing. It then matches the documents holding a link whose resolution is exactly
+that document: a link naming two or more documents is a backlink of none of them, and a
+broken link of none. Backlinks are this part on a find; it composes into the one conjunction
+a find, a count and a validate share, where a validate judges the finding's document. The
+filter is one of the find builder's thirteen, barred with them: the links that could name
+the document are equality seeks of `link_keys_key` — `link_keys_folded_key` where the root
+folds ASCII case — at each segment-aligned prefix of the document's suffix key and at its
+path, and each link reached is confirmed to name it alone by a seek of its own keys on
+`link_keys_link` and of the documents each reaches — a range of the suffix key the root
+probes, less the ignored places, or a seek of the path — so the part never reads `links` and
+never scans the index. A path key is confirmed as a suffix key is, since a rooted name
+reached at the document's path may name another document at its other reduction's path. A
+work bar holds a links-to part to the same work beside 40 and beside 400 more documents,
+and growing with the target's backlinks; a payload bar holds that
+no statement a link's resolution or a links-to part runs reads a document's body or its
+frontmatter.
+
+The count shape carries no counter-lane, memory or timing bar yet, and neither do the
+validate, describe and search builders. The
 warm-zero counter bar gates per PR, and the find shape carries four bars of its own. In the
 counter lane, a find through a live read hold reads nothing through `norn-fs` on its own
 thread and lands nothing in the host's account of its jobs, at a pinned number of statements
@@ -1088,11 +1152,11 @@ contract.
 
 | Crate | Owns | Earned by |
 |---|---|---|
-| `norn-wire` | **The vocabulary** — request params, reports, typed plans, findings, trust states. Pure types: no I/O and no effects; the logic they hold is the vocabulary's own grammar — parsing a name, a path, a target, a cursor; rendering a cursor; judging a continuation; sorting a candidate list — never a vault's or a store's. **A name a request carries is a grammar here, not a string**: the vault name, whose read path is its constructor, so a name that crossed is a name that parsed, and the attach mode a demand asks its derived state under. **Three path grammars sit beside that name**, each with its read path as its constructor: the vault root, the schema source a vault's schema is read from, and the directory a client asks a question about. **The glob grammar is the wire's too**: the one pattern language a `/`-separated name is matched by, and its linear matcher, `Pattern`, whose caller names at every match whether a literal ASCII letter folds case, live beside the path part that carries a glob, so a request's path glob and a schema's path and tag sets are read by one grammar. **The registration is a wire shape too**: the four fields a registered vault is spelled by — name, root, schema source, poll backend — are defined here, and the registry entry `norn-config` projects into its file is that same type rather than a second shape with a conversion between them. A finding's candidate head is **one type**, carried alike by the finding row and the ambiguous-target refusal: at most **5** candidates in deterministic resolution-ladder order, and the total they head. The bound is wire shape, it is checked on the way in as well as on the way out, and it holds at rest in the findings table too. **Every enumerable code lives in one registry here** — refusal codes and finding kinds alike — under one grammar: a flat `namespace/what-happened` string is what a client branches on, a nested typed reason is structure inside a code rather than a code, a note a layer files about its own reading of one document is not a code and does not cross this seam, and an advisory `detail` string is prose no client matches on. The refusal registry holds **three namespaces**, and which one a code sits in is decided by what the fact is about: `host/` is a fact about the host's serving of an entry, `vault/` a fact about the requested vault's content or control files — every outcome of a reload that ran included — and `engine/` a fact about that vault's engine. **Addressing, request scope and a vault address are wire types**: a verb names whether it carries a vault address — required, none, or optional — the scope a request is answered from follows from that addressing and whether an address was carried, and a request names its vault by a registered name or by a root. **A cursor is a typed envelope rendered as one opaque string** and read back through that same type: a client passes it back unchanged and branches on nothing inside it. A finding kind also carries the scope its findings stand at, so whether a document row at a subject withholds a finding is one answer the producer and the client read from the same registry. | Params and reports are defined exactly once; CLI flags and MCP tool schemas are derived renderings of these types. |
+| `norn-wire` | **The vocabulary** — request params, reports, typed plans, findings, trust states. Pure types: no I/O and no effects; the logic they hold is the vocabulary's own grammar — parsing a name, a path, a target, a cursor; rendering a cursor; judging a continuation; sorting a candidate list — never a vault's or a store's. **A name a request carries is a grammar here, not a string**: the vault name, whose read path is its constructor, so a name that crossed is a name that parsed, and the attach mode a demand asks its derived state under. **Three path grammars sit beside that name**, each with its read path as its constructor: the vault root, the schema source a vault's schema is read from, and the directory a client asks a question about. **The glob grammar is the wire's too**: the one pattern language a `/`-separated name is matched by, and its linear matcher, `Pattern`, whose caller names at every match whether a literal ASCII letter folds case, live beside the path part that carries a glob, so a request's path glob and a schema's path and tag sets are read by one grammar. **A link's addressing and its health are the wire's too**: the one addressing selector reads a link's family, protocol and target — protocol first and family second, a `vault://` stem read from the vault root under its family's rules (a wikilink's a rooted name, a Markdown link's a path), a Markdown target opening with a URI scheme addressed elsewhere, a Markdown path's query cut off — and the health rule judges a link by resolving it first: addressed elsewhere is not judged, one document is healthy and more are ambiguous, and none is broken unless the target's leaf names an attachment, which is not judged. The document extension a vault file is read as a document by is the one the addressing reads. **The registration is a wire shape too**: the four fields a registered vault is spelled by — name, root, schema source, poll backend — are defined here, and the registry entry `norn-config` projects into its file is that same type rather than a second shape with a conversion between them. A finding's candidate head is **one type**, carried alike by the finding row and the ambiguous-target refusal: at most **5** candidates in deterministic resolution-ladder order, and the total they head. The bound is wire shape, it is checked on the way in as well as on the way out, and it holds at rest in the findings table too. **Every enumerable code lives in one registry here** — refusal codes and finding kinds alike — under one grammar: a flat `namespace/what-happened` string is what a client branches on, a nested typed reason is structure inside a code rather than a code, a note a layer files about its own reading of one document is not a code and does not cross this seam, and an advisory `detail` string is prose no client matches on. The refusal registry holds **three namespaces**, and which one a code sits in is decided by what the fact is about: `host/` is a fact about the host's serving of an entry, `vault/` a fact about the requested vault's content or control files — every outcome of a reload that ran included — and `engine/` a fact about that vault's engine. **Addressing, request scope and a vault address are wire types**: a verb names whether it carries a vault address — required, none, or optional — the scope a request is answered from follows from that addressing and whether an address was carried, and a request names its vault by a registered name or by a root. **A cursor is a typed envelope rendered as one opaque string** and read back through that same type: a client passes it back unchanged and branches on nothing inside it. A finding kind also carries the scope its findings stand at, so whether a document row at a subject withholds a finding is one answer the producer and the client read from the same registry. | Params and reports are defined exactly once; CLI flags and MCP tool schemas are derived renderings of these types. |
 | `norn-text` | **The syntax of a vault document, never its semantics** — frontmatter parse / lossless edit / serialize, headings, sections, both link families (wikilink and inline Markdown, one fact shape carrying family, protocol and title, from which the resolution mode derives — protocol first, family second), `#tag` syntax (body tokens with code-span exclusion, plus the frontmatter tags shape). Frontmatter string values are scanned for wikilinks only. Pure functions over strings; answers "what does this document say", never "what does it mean" or "is it right". **A frontmatter block is read only up to an authored byte bound** (`FRONTMATTER_MAX_BYTES`), because the YAML scanner behind the seam is quadratic in block length on nested flow collections; a block past it is refused unparsed, so what a block costs to read has the ceiling the bound sets rather than growing with the block's own length — a ceiling, not a flat cost: inside the bound a nested block still costs about two orders of magnitude more than an ordinary mapping of the same length. Inside the bound, reading an ordinary mapping is **linear in its key count**, and so is deriving every field's strings back out of it: both places a block's keys are all resolved — the field split, over each scanned key line, and the text derive, over each field — go through a by-key view of the parsed mapping rather than a scan of it, and the soak lane bars both shapes by taking one whole block against four blocks of a quarter its keys. The `#tag` family graduates past syntax in two steps, in that order: the facet belongs to the vault schema's content model and binds with it, which is landed, and the query surface that reads the facet — whose shape the verb charter decides — comes after. Syntax stays here either way: what a document writes is this crate's, and whether the vault declares that name is the content model's. | The one-parser invariant — every consumer reads documents through one grammar. Carve-out future: the serde-based frontmatter path can be replaced by a purpose-built parser without surgery elsewhere. |
 | `norn-fs` | **Everything that touches the vault filesystem, and nothing that doesn't** — walk, read, stat/fingerprint, the atomic-write protocol (fingerprint → shadow → verify → swap), the per-entry flock primitive, the watcher as a subscribable stream of typed filesystem facts (debounced, coalesced, atomic-replace aware), and **the one path-spelling normalization point** — case, dot-prefix, redundant separators — so every consumer compares normalized identity instead of deriving its own. Case-insensitive identity folds ASCII case only, and only where the root proves it folds; a volume's wider fold — Unicode case, or the normalization APFS also ignores — is outside the contract, and on such a root a document's identity is the spelling the tree lists, so a spelling only the volume resolves names no document. **Reaching a caller-supplied path on a folding root costs a directory listing per component**: a stat there answers for every spelling the volume resolves, so each name is confirmed against the listing that renders it, and the confirmation reads the parent until it finds the name or reaches the end. That is O(siblings) per component in time — a flat vault pays its own width for each path reached this way — and nothing in memory, since the listing streams and holds one key. A root that tells spellings apart pays neither: the stat is exact and no listing is read. **A vault's own mechanism files are part of "everything that touches the vault filesystem"**: the maintainer lock file and the shadow home — one of each per registration, keyed by data base, channel and vault name — rather than among documents. The lock file is in the norn data root; the home is under the data root too unless the vault is on another filesystem, where it falls back under the vault root carrying that same key, so two registrations over one root stage into two homes and neither sweeps the other's. Creating, reading, writing and sweeping them is `norn-fs`'s — no other crate reaches them. Watcher coverage includes the canonical vault tree recursively; its parent non-recursively; the parent of each registration-owned symbolic-link name in the registered root chain; and, when the configured schema source is outside the vault, its parent when no earlier edge reaches it. A link event rechecks the complete registered root and ends coverage only when it no longer resolves to the covered identity. The subscription's canonical root is the operational authority for every attachment read. Filesystem facts only; not a general event bus. Behind an off-by-default feature, so a shipped build has no reader for the variables that arm it and nothing in it can be armed, three sibling fault seams are each widened once at their own boundary — the write protocol's at the public write entry point, naming the stage a publication fails at and how, which is what a child that dies mid-write is arranged through; the watcher's at watch establishment, naming a registration that refuses, an event stream that fails or reports its path set lost, and a synchronization boundary that never arrives; and the walk's at a walk's construction, naming what one entry's paging stat meets between the listing that named it and the stat itself — the name gone, the name holding another kind, or the machine refusing to answer for it. Each reads the arm from the environment the process was started with, each appends to one record file — which belongs outside every watched tree, since it is written while coverage is live — and a record's `seam` field says which of the three fired. | The second effect seam; heavy-dependency isolation for the platform watcher backend; churn semantics unit-testable in-crate against a temp tree. Which backend wins is invisible outside the crate: no other crate learns it. |
 | `norn-db` | **The mechanics of running a SQLite database, and no domain content at all** — connection ownership with the pragmas a schema is designed to be read under, the DDL fingerprint over a statement list the caller hands over, the pinned-scalar `meta` pattern the mechanics keys live in, the store epoch a database carries from creation to discard, the open ceremony every derived database runs over those parts — connect, take the mechanics verdict, and create, adopt or rebuild from zero with a typed reason — changeset transaction discipline, damage typing at the driver seam, the `EXPLAIN` plan handout with the columns SQLite's authorizer reports each explained statement reads, and the database file's own lifecycle — its parent directory, the file, and the sidecars a journal leaves beside it. **No other crate opens a SQLite connection**, harness included, and this is the one crate manifest that declares the driver — the workspace root pins its version and its features. What a statement list means belongs to the crate that hands it over: nothing here reads a document, a vault, a wire type or a lane, and the verdict over a client's *own* pinned keys is taken by the client through the ceremony's adopt hook. Behind the same off-by-default feature its clients carry, so a shipped build carries none of it, the driver-seam arrangements a suite reaches a rung through — the page cap an open applies, and the busy a pinned-scalar read reports. | The substrate seam, earned by the second database consumer: without it either every lane-2 engine re-grows rebuild, fingerprint and damage machinery for its own sidecar, or the lane-1 crate learns the mechanics of lanes it should not know exist. See [ADR 0022](decisions/0022-one-crate-knows-sql.md). |
-| `norn-store` | **An SDK for talking to SQL** — the lane-1 DDL, migration machinery, the four pillars (FTS5, findings, field projection, migrations), write-through increments, what the database-side heal rungs mean for derived state, derivation counters, the read builders (wire params → emitted SQL; the find, count, validate, describe and get builders and the search builder's lexical floor are built, the links-to shape is not) with the snapshot read handles they run on, and the sub-fingerprints a document row is stamped with at the write that derives it, because the canonical frontmatter projection they hash exists nowhere above this crate, the feed-read handle — the read-only surface a lane-2 engine consumes the feed and its fetches through — and, behind an off-by-default feature, so a shipped build carries none of it, the arrangements the induced-failure suite reaches a rung or a refusal through from outside. It is `norn-db`'s first client and owns what the derived database *means*; connection ownership, the DDL fingerprint, the pinned-scalar mechanics, the store epoch, the database file's lifecycle and the open ceremony over them are `norn-db`'s, reached through that API. What the store hands that ceremony is its statement list, the mode its file lifetime depends on, the path order its rows are derived under, and the derivation version the deriver names for the derivation that writes them, each of which an open under another value rebuilds over — the store records and compares the version and knows nothing of what changed; what it reads back is which heal rung the state was at. Its verbs translate cleanly to SQL; no business logic beyond how queries are composed. Describe's declared sections are the exception that runs no SQL: they are read from the pinned content model in memory, and run no statement. A findings row records the kind it was handed: **finding-kind vocabulary is `norn-wire`'s**, and the store stores it rather than defining it. | The first effect seam. Read builders live here because the `EXPLAIN` gates test the builder's emitted SQL — store schema and queries co-evolve or they drift. |
+| `norn-store` | **An SDK for talking to SQL** — the lane-1 DDL, migration machinery, the four pillars (FTS5, findings, field projection, migrations), write-through increments, what the database-side heal rungs mean for derived state, derivation counters, the read builders (wire params → emitted SQL; the find, count, validate, describe and get builders, the links-to shape over the link index, and the search builder's lexical floor are built) with the snapshot read handles they run on, and the sub-fingerprints a document row is stamped with at the write that derives it, because the canonical frontmatter projection they hash exists nowhere above this crate, the feed-read handle — the read-only surface a lane-2 engine consumes the feed and its fetches through — and, behind an off-by-default feature, so a shipped build carries none of it, the arrangements the induced-failure suite reaches a rung or a refusal through from outside. It is `norn-db`'s first client and owns what the derived database *means*; connection ownership, the DDL fingerprint, the pinned-scalar mechanics, the store epoch, the database file's lifecycle and the open ceremony over them are `norn-db`'s, reached through that API. What the store hands that ceremony is its statement list, the mode its file lifetime depends on, the path order its rows are derived under, and the derivation version the deriver names for the derivation that writes them, each of which an open under another value rebuilds over — the store records and compares the version and knows nothing of what changed; what it reads back is which heal rung the state was at. Its verbs translate cleanly to SQL; no business logic beyond how queries are composed. Describe's declared sections are the exception that runs no SQL: they are read from the pinned content model in memory, and run no statement. A findings row records the kind it was handed: **finding-kind vocabulary is `norn-wire`'s**, and the store stores it rather than defining it. | The first effect seam. Read builders live here because the `EXPLAIN` gates test the builder's emitted SQL — store schema and queries co-evolve or they drift. |
 | `norn-embed` | **Text in → vector out, model identity explicit** — the embedding trait with `(model id, version)` first-class in the API; the deterministic stub is the default build; the real pinned runtime compiles only behind the release/soak feature. Never touches the vault or the database, never decides anything. Its one permitted effect is the opt-in machine-local weight fetch/load, at a path the host injects **from `norn-config`**; fetched weights are integrity-pinned by a static manifest compiled into the crate, mapping `(model id, version)` to a sha256 digest and a source URL. A blob's on-disk name carries its digest, and verification happens at fetch, so an unverified blob never appears under a name anything loads. A fetch failure or a digest mismatch refuses with a structured reason: semantic search stays un-enabled, and nothing else degrades. Acquisition is an explicit installation-scope act, never lazy inside a query and never inside a vault request, and a vault enabled before its weights are present runs its engine self-disabled with a typed reason (both target shape: no fetch exists today, the stub embedder needs no weights, and the carrier arrives with the real-model runtime behind the release feature). A model upgrade is a release-time manifest change plus a migration of derived vector state, never ambient upstream drift. | Heavy-dependency isolation (the model runtime stays out of every development build), and a structural guarantee that inference cannot reach findings or plans. |
 | `norn-semantic` | **The first lane-2 engine — semantic search over a sidecar database.** It consumes the store's change feed through consumer-owned cursors recorded in its own sidecar (`norn-db`'s second client), triages a fed row by its body sub-fingerprint before fetching anything, embeds changed bodies through `norn-embed`, retracts deaths, and answers vector-nearest over what it holds. A moved store epoch is a reconcile and a rescan from the start of the feed — content-addressed rows make the rescan recompute only what changed. The sidecar records its model: an open under a moved model rebuilds from zero, the migration floor, and rows are keyed `(path, model id, model version)`, never by a main-database rowid. Eventual consistency is the stated contract, and the bar that holds it is exact: a settled drain equals a from-zero recompute over current lane-1 rows, values included, proven with the deterministic stub. | The lane-2 proof ([ADR 0021](decisions/0021-derived-indexes-split-into-two-lanes.md)): feed discipline, sidecar lifecycle and the convergence bar exercised end to end with no model runtime. The host composes it: config delivery is the enable act, the post-leg drain is the nudge, and vector-nearest answers through the host's semantic capability. |
 | `norn-config` | **Configuration shapes with no vault I/O** — the machine-local layout, the registry file, bearer tokens, the loopback endpoint convention, and the pure parsers for both per-vault control files: the config envelope, and the vault schema's **content model** — the declared fields with their types and rules, the declared tag facet, the declared folders, and the path rules including the ambiguity-ignore set. The host supplies both files' bytes to those parsers, and the model is a pure function of the schema bytes, so its identity is the schema fingerprint and two holders of one fingerprint hold one model. The token file holds a **set of tokens keyed by label**, not one token: rotation adds a second label and removes the first. Every machine-local path is channel-qualified, and no API takes a channel. The vault name, root, schema source, and poll backend grammars are `norn-wire`'s and are re-exported here, as is the glob grammar's `Pattern` that the schema's path and tag sets are read by, and so is the registration those four fields make: the registration is the wire's, and the registry file projects it, so a registry entry and a registration are one type rather than two shapes and a conversion between them. | The one owner of configuration shapes that both sides of the client and host boundary use. Vault file access stays in `norn-fs`. |
@@ -1725,8 +1789,9 @@ disambiguating suffixes, and the findings pillar indexes full candidate enumerat
 wire's bounded head stays a head rather than becoming the query surface.
 
 **One resolver compiles a target for its root**, and every surface that reads a class reads
-it through that one: a find's `resolves` part and a class read today, and the link-health
-findings the link index lands in Layer 3, which file under the class keys it compiles. Case
+it through that one: a find's `resolves` part, a get's target, a links-to part's target and
+the backlinks it confirms, and the suffix keys of the links a page carries; and Layer 3's
+link-health unit, when it lands, files its findings under the class keys it compiles. Case
 is the root's: the coverage proves the root's case behaviour when it is installed, and the
 store records the order its rows were derived under. A read answers under the store's order,
 which its snapshot takes from the handle the store minted, so no read detects one. An attach
@@ -1753,7 +1818,10 @@ is read or filed.
 The links table stores **syntactic facts only** — raw target, family, protocol, title, span —
 and resolution runs at query time through this one grammar; resolved edges are never stored,
 and a materialized projection could only ever arrive as keyed, invalidated derived state.
-Backlinks are an indexed suffix join over those facts. How a target resolves **derives from
+Beside it, the link index holds each link under the keys its target spells in the
+documents' own key space — a function of the link and its document's path, never of what
+the vault holds — and backlinks are equality seeks of those keys, each link confirmed at the
+read to name one document alone. How a target resolves **derives from
 the fact, protocol first and family second**: a written `protocol://` prefix shadows the
 family, because the family says which grammar the author wrote and the protocol says what
 the address is. A protocol-free wikilink target resolves as a suffix address, while a

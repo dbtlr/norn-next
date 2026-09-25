@@ -65,7 +65,7 @@ use norn_wire::{FindingKind, FindingScope, Severity, TagStance};
 /// pinned corpus from zero and digests every derived row, pinned beside the
 /// version it was taken under, and it fails when the digest moves while this
 /// does not.
-pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(2);
+pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(3);
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -1051,6 +1051,72 @@ mod tests {
             .expect("a schema declaring a tag facet"),
             "reporting",
         )
+    }
+
+    /// **The text layer's reading of a link and the wire's address agree.**
+    /// `norn-text` states the syntax-only rule — protocol first, family
+    /// second — and the wire's selector refines it: the reserved `vault`
+    /// protocol is read from the vault root, a wikilink's as a rooted name and
+    /// a Markdown link's as a path, every other protocol addresses
+    /// no document, a wikilink written without one is a suffix address, and a
+    /// Markdown target written without one is a path, or addresses no
+    /// document where it opens with a URI scheme. An empty target names the
+    /// holding document under either family. The links are the ones the text
+    /// layer recognized in a body, as derivation stores them.
+    #[test]
+    fn the_text_layers_reading_of_a_link_agrees_with_the_wires_address() {
+        use norn_text::Resolution;
+        use norn_wire::{LinkAddress, VAULT_PROTOCOL};
+        let body = "[[notes/x]] [[vault://notes/x.md]] [[https://example.com|web]] \
+                    [[#Heading]] [[mailto:x]] [t](../y.md) [t](/z.md?raw=1) \
+                    [t](vault://notes/y.md) [t](https://example.com) \
+                    [t](mailto:someone@example.com) [t](#frag)\n";
+        let expected = [
+            LinkAddress::Suffix("notes/x"),
+            LinkAddress::RootedName("notes/x.md"),
+            LinkAddress::Elsewhere,
+            LinkAddress::HoldingDocument,
+            LinkAddress::Suffix("mailto:x"),
+            LinkAddress::Relative("../y.md"),
+            LinkAddress::Rooted("z.md"),
+            LinkAddress::Rooted("notes/y.md"),
+            LinkAddress::Elsewhere,
+            LinkAddress::Elsewhere,
+            LinkAddress::HoldingDocument,
+        ];
+        let links = norn_text::BodyScan::new(body).links();
+        assert_eq!(links.len(), expected.len(), "{links:?}");
+        for (link, expected) in links.iter().zip(expected) {
+            let stored = map_link(link.clone());
+            let family = match stored.family {
+                LinkFamily::Wikilink => norn_wire::LinkFamily::Wikilink,
+                LinkFamily::Markdown => norn_wire::LinkFamily::Markdown,
+            };
+            let address = LinkAddress::of(family, stored.protocol.as_deref(), &stored.target);
+            assert_eq!(address, expected, "{}", link.raw);
+            let agrees = match (link.resolution(), address) {
+                (
+                    Resolution::Protocol(VAULT_PROTOCOL),
+                    LinkAddress::Rooted(_) | LinkAddress::RootedName(_),
+                ) => true,
+                (Resolution::Protocol(scheme), LinkAddress::Elsewhere) => scheme != VAULT_PROTOCOL,
+                (Resolution::Suffix, LinkAddress::Suffix(_) | LinkAddress::HoldingDocument) => true,
+                (
+                    Resolution::RelativePath,
+                    LinkAddress::Relative(_)
+                    | LinkAddress::Rooted(_)
+                    | LinkAddress::HoldingDocument
+                    | LinkAddress::Elsewhere,
+                ) => true,
+                _ => false,
+            };
+            assert!(
+                agrees,
+                "`{}`: the text layer reads {:?}, the wire {address:?}",
+                link.raw,
+                link.resolution()
+            );
+        }
     }
 
     /// **The declaration a find is compiled under carries the schema's

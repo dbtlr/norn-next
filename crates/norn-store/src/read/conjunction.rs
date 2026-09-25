@@ -7,6 +7,7 @@ use norn_db::rusqlite::types::Value;
 use norn_wire::{Pattern, Predicate, Unsatisfied};
 
 use super::filter::{Filter, ReadFilter};
+use super::naming::Naming;
 use super::run::StatementFailure;
 use super::{FieldOrder, Lookups, PageRefusal, Ran, ReadBound, glob, suggest};
 use crate::error::{self, StoreError};
@@ -15,7 +16,8 @@ use crate::find::{
     FindStatement, compose_bare_directory, compose_known_key, compose_match_probe, compose_universe,
 };
 use crate::json::{FrontmatterValue, canonical_json};
-use crate::path::{DirectoryPrefix, DocumentPath};
+use crate::link::keys_naming;
+use crate::path::{DirectoryPrefix, DocumentPath, SuffixKey};
 use crate::resolve::TargetClass;
 use crate::store::Snapshot;
 
@@ -292,9 +294,31 @@ impl Snapshot {
                     )
                 }
             },
-            Predicate::LinksTo { .. } => Err(PageRefusal::NotIndexed {
-                fact: "a link's target",
-            }),
+            Predicate::LinksTo { target, .. } => {
+                let ignore = declared.ambiguity_ignore();
+                match self.name_target(target.address(), ignore, &mut lookups.ran)? {
+                    Naming::Nothing => Ok(Part::MatchesNothing(Unsatisfied::links_to_unknown(
+                        target.clone(),
+                    ))),
+                    Naming::Several(head) => Ok(Part::MatchesNothing(
+                        Unsatisfied::links_to_ambiguous(target.clone(), head),
+                    )),
+                    Naming::One { document, path } => {
+                        let key = SuffixKey::under(self.path_order());
+                        let mut values: Vec<Value> = keys_naming(&DocumentPath::new(&path)?, key)
+                            .into_iter()
+                            .map(Value::Text)
+                            .collect();
+                        values.extend([
+                            Value::Text(ignore.encoded()),
+                            Value::Text(self.path_order().as_str().to_string()),
+                            Value::Text(path),
+                            Value::Integer(document),
+                        ]);
+                        filter(ReadFilter::LinksTo(key), values)
+                    }
+                }
+            }
             Predicate::Resolves { target, .. } => match TargetClass::compile(
                 target.address(),
                 self.path_order(),

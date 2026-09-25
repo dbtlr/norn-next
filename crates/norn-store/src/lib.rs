@@ -118,6 +118,7 @@ mod get;
 mod hash;
 mod increment;
 mod json;
+mod link;
 mod path;
 mod read;
 mod request;
@@ -134,7 +135,8 @@ pub use facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, DerivationVersion, DocumentFacts, FeedDocument,
     FeedTombstone, FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily,
     PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding,
-    StoredPathOrder, StoredSuffixKeys, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTombstone, TagFact, TagSource,
+    VaultSchemaPin,
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
@@ -144,9 +146,7 @@ pub use find::{
     BODY_ROW_CEILING, FIND_STATEMENTS, FindPlan, FindStatement, FindWork, Found,
     NESTED_ROW_CEILING, Nested, NestedRows, PageDirection,
 };
-pub use get::{
-    Collection, DocumentText, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, SectionAt,
-};
+pub use get::{DocumentText, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, SectionAt};
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use read::{

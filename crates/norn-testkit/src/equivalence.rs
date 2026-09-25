@@ -12,7 +12,8 @@
 //! It carries every **derived fact**: the document rows and their bodies, the
 //! content hashes and the sub-fingerprints beside them, byte lengths, body
 //! offsets and frontmatter diagnostic counts, the frontmatter projection, the
-//! links, headings, block ids and tags, the field rows with their typed sort
+//! links and the keys the link index holds them under, headings, block ids and
+//! tags, the field rows with their typed sort
 //! keys, the terms the full-text index holds, the
 //! pinned vault schema, and every finding — findings at paths no document row
 //! stands at included, because those are exactly the ones a keyed read cannot be
@@ -89,7 +90,7 @@ use std::fmt::Write as _;
 use norn_fixtures::digest::{Sha256, hex};
 use norn_store::{
     BlockFact, DocumentPath, FieldRow, FieldRows, FindingCursor, HeadingFact, IndexedTerm,
-    LinkFact, PillarReport, Span, Store, StoreError, StoredFinding, StoredPathOrder,
+    LinkFact, PillarReport, Span, Store, StoreError, StoredFinding, StoredLinkKey, StoredPathOrder,
     StoredSuffixKeys, StoredTombstone, TagFact, ddl,
 };
 use norn_wire::{FindingKind, FindingScope};
@@ -137,6 +138,9 @@ pub struct ProjectedDocument {
     pub frontmatter_diagnostic_count: u32,
     pub body: String,
     pub links: Vec<LinkFact>,
+    /// The keys the link index holds the links under: a function of each link
+    /// and the document's path, and what a links-to seek reads.
+    pub link_keys: Vec<StoredLinkKey>,
     pub headings: Vec<HeadingFact>,
     pub blocks: Vec<BlockFact>,
     pub tags: Vec<TagFact>,
@@ -372,6 +376,7 @@ impl StoreProjection {
                     frontmatter_diagnostic_count: facts.document.frontmatter_diagnostic_count,
                     body: facts.body,
                     links: facts.links,
+                    link_keys: facts.link_keys,
                     headings: facts.headings,
                     blocks: facts.blocks,
                     tags: facts.tags,
@@ -574,6 +579,7 @@ impl StoreProjection {
             ));
             entries.push((format!("{at}.body"), quoted(&document.body)));
             push_indexed(&mut entries, &at, "link", &document.links);
+            push_indexed(&mut entries, &at, "link_key", &document.link_keys);
             push_indexed(&mut entries, &at, "heading", &document.headings);
             push_indexed(&mut entries, &at, "block", &document.blocks);
             push_indexed(&mut entries, &at, "tag", &document.tags);
@@ -1039,8 +1045,10 @@ const NULL: &str = "(none)";
 ///   Where a row landed, never a fact about the vault.
 /// - **The owning row's foreign key** — `document` on `links`, `headings`,
 ///   `blocks`, `document_tags` and `document_fields`; `finding` on
-///   `finding_classes` and `finding_candidates`. [`StoreProjection::entries`]
-///   already names the row this one stands under in its `at`.
+///   `finding_classes` and `finding_candidates`; `document` on `link_keys`.
+///   [`StoreProjection::entries`] already names the row this one stands under
+///   in its `at`. A link key's `link` names the link row by its row
+///   identifier, so it is rendered as that link's ordinal instead.
 /// - **`ordinal`** on `links`, `headings`, `blocks` and `document_tags`, and
 ///   **`rank`** on `finding_candidates`. These are read in that order and
 ///   rendered at their position within their owning row ([`push_indexed`] and
@@ -1075,6 +1083,21 @@ impl StoredColumns for LinkFact {
         ];
         columns.extend(span_columns(Some(self.span)));
         columns
+    }
+}
+
+impl StoredColumns for StoredLinkKey {
+    fn columns(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("link", self.link.to_string()),
+            ("key", quoted(&self.key)),
+            ("folded_key", quoted(&self.folded_key)),
+            (
+                "segments",
+                self.segments
+                    .map_or_else(|| NULL.to_string(), |segments| segments.to_string()),
+            ),
+        ]
     }
 }
 
@@ -1250,6 +1273,7 @@ mod tests {
                 frontmatter_diagnostic_count: 0,
                 body: "a body\n".to_string(),
                 links: Vec::new(),
+                link_keys: Vec::new(),
                 headings: Vec::new(),
                 blocks: Vec::new(),
                 tags: Vec::new(),

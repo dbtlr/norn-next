@@ -3,18 +3,24 @@
 //! compiled into the class of documents the target names.
 //!
 //! Every surface that asks which documents a target names asks here: a find's
-//! `resolves` part, and a read of a class's candidates. What a [`TargetClass`]
-//! carries is what each of them needs and nothing more — the probe, over the key
-//! the root selects, and the exclusion — and one spelling of both in SQL, so no
-//! two surfaces can disagree about a class.
+//! `resolves` part, a read of a class's candidates — a get's target, a
+//! links-to part's, and each candidate's minimal disambiguating suffix — and
+//! every read of what a stored link names, which reads the class or the path
+//! each of the link's keys opens: a row's links, and a links-to part's
+//! confirmation that a link names one document alone. What a [`TargetClass`]
+//! carries is what each of them needs and nothing more — the probe, over the
+//! key the root selects, and the exclusion — and this module holds the one
+//! spelling of each class predicate in SQL — a range of the probed key, the
+//! exclusion, and a link key's class or path — so no two surfaces can disagree
+//! about a class.
 //!
 //! **The class keys are a dormant carrier.** [`TargetClass::class_keys`] is the
 //! set a finding about a target is filed under, and its consumer is the
-//! link-health findings and backlinks the link index lands in Layer 3: a
-//! producer that reads a link's target, reads its class here, and files what
-//! it found under these keys. The current call graph does not reach it,
-//! because no link index exists yet — every finding the host files is about
-//! its own subject and belongs to no class.
+//! link-health findings the link-health unit of Layer 3 files: a producer that
+//! reads a link's target, reads its class here, and files what it found under
+//! these keys. The current call graph does not reach it, because no producer
+//! files a link-health finding yet — every finding the host files is about its
+//! own subject and belongs to no class.
 //!
 //! # Case is the root's
 //!
@@ -58,12 +64,17 @@ use norn_wire::{CaseFold, Pattern};
 
 use crate::error::{self, StoreError};
 use crate::facts::StoredPathOrder;
-use crate::path::{ClassKey, SuffixKey, SuffixProbe, suffix_probe};
+use crate::path::{ClassKey, SuffixKey, SuffixProbe, prefix_successor, suffix_probe};
 use crate::request::range_predicate_from;
 
 /// The name a statement calls the exclusion by:
 /// `norn_ambiguity_admits(ignored, target_segments, path_order, path)`.
 pub(crate) const ADMITS_FUNCTION: &str = "norn_ambiguity_admits";
+
+/// The name a statement calls the prefix step by: `norn_key_successor(key)`,
+/// the least text after every text a separator-terminated suffix key opens,
+/// which is [`crate::path::prefix_successor`] itself.
+pub(crate) const SUCCESSOR_FUNCTION: &str = "norn_key_successor";
 
 /// How many values [`TargetClass::parameters`] numbers after the ranges'
 /// bounds: the ignore set, the target's segment count, and the path order.
@@ -174,7 +185,7 @@ impl AmbiguityIgnore {
     /// The set as one text value a statement binds: each glob's byte length,
     /// a colon, and the glob. Length-prefixed, so a glob may hold any character
     /// and the encoding still reads back one way.
-    fn encoded(&self) -> String {
+    pub(crate) fn encoded(&self) -> String {
         self.patterns
             .iter()
             .map(|pattern| format!("{}:{}", pattern.as_str().len(), pattern.as_str()))
@@ -302,7 +313,85 @@ pub(crate) fn predicate(alias: &str, key: SuffixKey, ranges: usize, first: usize
     let ignored = first + ranges * 2;
     let segments = ignored + 1;
     let order = segments + 1;
-    format!("({seeks}) AND {ADMITS_FUNCTION}(?{ignored}, ?{segments}, ?{order}, {alias}.path)")
+    format!(
+        "({seeks}) AND {}",
+        admits(
+            &format!("?{ignored}"),
+            &format!("?{segments}"),
+            &format!("?{order}"),
+            &format!("{alias}.path")
+        )
+    )
+}
+
+/// The exclusion, spelled over its four arguments: whether the document at
+/// `path` stays in the class of a target of `segments` segments under the
+/// ignore set `ignored` and the path order `order`.
+pub(crate) fn admits(ignored: &str, segments: &str, order: &str, path: &str) -> String {
+    format!("{ADMITS_FUNCTION}({ignored}, {segments}, {order}, {path})")
+}
+
+/// The rows of `documents` a statement calls `alias` in the one range from
+/// `lower` to `upper` of the key the root probes, less the places the ignore
+/// set `ignored` excludes from a class of a target of `segments` segments
+/// under `order`: one class range, each bound an expression the caller names.
+pub(crate) fn range_class(
+    alias: &str,
+    key: SuffixKey,
+    (lower, upper): (&str, &str),
+    segments: &str,
+    ignored: &str,
+    order: &str,
+) -> String {
+    let column = format!("{alias}.{}", key.column());
+    format!(
+        "{column} >= {lower} AND {column} < {upper} AND {}",
+        admits(ignored, segments, order, &format!("{alias}.path"))
+    )
+}
+
+/// The `link_keys` column a read under `key` seeks: the raw key where the root
+/// tells spellings apart, and the folded key where it folds ASCII case.
+pub(crate) fn link_key_column(key: SuffixKey) -> &'static str {
+    match key {
+        SuffixKey::Raw => "key",
+        SuffixKey::Folded => "folded_key",
+    }
+}
+
+/// The rows of `documents` a statement calls `alias` in the class a link's
+/// suffix key `link_key` — an expression holding the key in the space `key`
+/// selects — opens, less the places the ignore set `ignored` excludes for a
+/// target of `segments` segments under `order`. The range's upper bound is the
+/// key's [`SUCCESSOR_FUNCTION`], so the range is the one the link's own probe
+/// opens.
+pub(crate) fn link_key_class(
+    alias: &str,
+    key: SuffixKey,
+    link_key: &str,
+    segments: &str,
+    ignored: &str,
+    order: &str,
+) -> String {
+    range_class(
+        alias,
+        key,
+        (link_key, &format!("{SUCCESSOR_FUNCTION}({link_key})")),
+        segments,
+        ignored,
+        order,
+    )
+}
+
+/// The rows of `documents` a statement calls `alias` standing at a link's path
+/// key `link_key` — an expression holding the key in the space `key` selects —
+/// under the root's order: bytewise where it tells spellings apart, and with
+/// ASCII case folded where it folds, which `documents_path_nocase` seeks.
+pub(crate) fn link_key_path(alias: &str, key: SuffixKey, link_key: &str) -> String {
+    match key {
+        SuffixKey::Raw => format!("{alias}.path = {link_key}"),
+        SuffixKey::Folded => format!("{alias}.path = {link_key} COLLATE NOCASE"),
+    }
 }
 
 /// The rows of `documents` a statement calls `dr` that are in `class`: the
@@ -320,18 +409,43 @@ pub(crate) fn class_rows(class: &TargetClass) -> String {
 /// what an ambiguity class is made of, and a ladder whose ties fell out in
 /// row-insertion order would reorder itself when a document is re-derived.
 pub(crate) fn ladder_order(class: &TargetClass) -> String {
-    format!("ORDER BY dr.{}, dr.path", class.probe().key().column())
+    format!(
+        "ORDER BY {}",
+        ladder(&format!("dr.{}", class.probe().key().column()), "dr.path")
+    )
 }
 
-/// Register the exclusion on `connection`, so every statement a resolution
-/// spells can call it: the writer's and every read snapshot's alike.
+/// The resolution ladder's order over rows whose probed key is `key` and whose
+/// path is `path`, each an expression: the key, then the path.
+pub(crate) fn ladder(key: &str, path: &str) -> String {
+    format!("{key}, {path}")
+}
+
+/// Register the exclusion and the prefix step on `connection`, so every
+/// statement a resolution spells can call them: the writer's and every read
+/// snapshot's alike.
 ///
-/// **Deterministic**, and registered as such: its answer is a function of its
-/// four arguments, the path order among them, so the case the globs match
-/// under is the statement's input rather than the connection's state. The
+/// **Deterministic**, both, and registered as such: the exclusion's answer is
+/// a function of its four arguments, the path order among them, so the case
+/// the globs match under is the statement's input rather than the
+/// connection's state, and the step's is a function of its one key. The
 /// ignore set is decoded once per statement and kept as the call's auxiliary
 /// data for the rows after the first.
 pub(crate) fn register_functions(connection: &Connection) -> Result<(), StoreError> {
+    connection
+        .create_scalar_function(
+            SUCCESSOR_FUNCTION,
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            |context| {
+                let key = context
+                    .get_raw(0)
+                    .as_str()
+                    .map_err(|problem| rusqlite::Error::UserFunctionError(Box::new(problem)))?;
+                Ok(prefix_successor(key))
+            },
+        )
+        .map_err(|problem| error::sql("registering the key successor function", problem))?;
     connection
         .create_scalar_function(
             ADMITS_FUNCTION,

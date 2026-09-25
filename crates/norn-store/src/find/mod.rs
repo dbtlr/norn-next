@@ -105,10 +105,19 @@
 //!   stands is none of these: it is a part that can be applied and matches no
 //!   document, and it is answered as that — an empty page, not a report.
 //! - **A resolution target that is not a suffix address** names no document.
+//! - **A links-to target that names several documents or none** names no one
+//!   document a link could reach: it is reported, beside the head of an
+//!   ambiguous one, and the page is empty.
 //! - **A match part whose query the full-text engine cannot parse** is
 //!   malformed. Whether it parses is asked before the page runs, by one probe
 //!   of the full-text index; a malformed query's part is reported with the
 //!   engine's words, and the page is empty, as a malformed glob's is.
+//!
+//! A `links_to` part resolves its own target to one document through the one
+//! resolver, then matches the documents holding a link whose resolution is
+//! exactly that document, sought on the link index at the keys the document is
+//! named by ([`ReadFilter::LinksTo`]): a link naming two or more documents is a
+//! backlink of none of them.
 //!
 //! A `resolves` part enumerates the target's ambiguity class through the one
 //! resolver, [`crate::resolve::TargetClass`]: both reductions of a dotted leaf, over the raw
@@ -173,13 +182,15 @@ use crate::store::Snapshot;
 
 pub use hydrate::{BODY_ROW_CEILING, FindWork, NESTED_ROW_CEILING, NestedRows};
 pub(crate) use hydrate::{
-    block_row, bounded_body, heading_row, tag_row, wire_block, wire_heading, wire_span,
+    block_row, bounded_body, heading_row, identified_link, tag_row, wire_block, wire_heading,
+    wire_span,
 };
 pub use statement::{FIND_STATEMENTS, FindStatement, Nested, PageDirection};
 use statement::{Section, SectionStart, compose_page};
 pub(crate) use statement::{
-    compose_bare_directory, compose_finding_candidates, compose_finding_classes, compose_known_key,
-    compose_match_probe, compose_universe,
+    SpellingRange, compose_bare_directory, compose_candidate_suffixes, compose_class_head,
+    compose_class_total, compose_finding_candidates, compose_finding_classes, compose_known_key,
+    compose_link_targets, compose_match_probe, compose_universe,
 };
 
 /// Where a page stopped, or where a continuation resumes: the value the row
@@ -347,8 +358,8 @@ impl<'a> Projection<'a> {
         }
     }
 
-    /// What `columns` projects, or the refusal of a column the store keeps no
-    /// index of.
+    /// What `columns` projects, or the refusal of a column this build of the
+    /// store does not know.
     pub(crate) fn of(columns: &'a [Column]) -> Result<Self, PageRefusal> {
         let mut projection = Projection {
             all_fields: false,
@@ -378,9 +389,7 @@ impl<'a> Projection<'a> {
                     nested.insert(2);
                 }
                 Column::Links {} => {
-                    return Err(PageRefusal::NotProjected {
-                        part: "the links column",
-                    });
+                    nested.insert(3);
                 }
                 Column::Findings {} => projection.findings = true,
                 _ => return Err(PageRefusal::UnknownPart { part: "a column" }),
@@ -410,9 +419,9 @@ impl Snapshot {
     /// naming no value or more than [`crate::IN_VALUES_CEILING`]; a declaration read
     /// from another schema than the snapshot pins; a cursor among rows that
     /// are not documents; a cursor that is not a position in the request's
-    /// order, as the module states; a projected column or a part the store
-    /// keeps no index of; and a bound that does not read as its key's declared
-    /// type.
+    /// order, as the module states; a projected column or a part this build
+    /// of the store does not know; and a bound that does not read as its key's
+    /// declared type.
     pub fn find(&self, params: &FindParams, declared: &ContentModel) -> Result<Found, PageRefusal> {
         self.run_find(params, declared, &mut Lookups::default())
     }
@@ -474,7 +483,7 @@ impl Snapshot {
         let next =
             next.map(|at| Cursor::new(snapshot.clone(), CursorKey::document(at.sort, at.path)));
         let unsatisfied = self.resolve(compiled.reports, declared, lookups)?;
-        let rows = self.hydrate_rows(&keys, &projection, &fields, lookups, &mut work)?;
+        let rows = self.hydrate_rows(&keys, &projection, &fields, declared, lookups, &mut work)?;
         work.statements = self.counters().statements_executed() - started;
         Ok(Found {
             rows,
@@ -559,12 +568,14 @@ impl Snapshot {
     /// Every read that answers document rows hydrates them here, so a row
     /// carries the same columns at the same cost whichever verb paged it. The
     /// findings column reads under the active fingerprint, which is read only
-    /// where the projection names that column.
+    /// where the projection names that column, and the links column resolves
+    /// under `declared`'s ambiguity-ignore set.
     pub(crate) fn hydrate_rows(
         &self,
         keys: &[FoundKey],
         projection: &Projection<'_>,
         fields: &[&str],
+        declared: &ContentModel,
         lookups: &mut Lookups,
         work: &mut FindWork,
     ) -> Result<Vec<DocumentRow>, StoreError> {
@@ -580,6 +591,7 @@ impl Snapshot {
             projection,
             fields,
             findings_under.as_deref(),
+            declared.ambiguity_ignore(),
             work,
             &mut lookups.ran,
         )

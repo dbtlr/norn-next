@@ -5,6 +5,7 @@ use norn_db::rusqlite::types::Value;
 
 use super::FieldOrder;
 use crate::path::SuffixKey;
+use crate::resolve;
 
 /// Every filter shape a page statement narrows by, named.
 ///
@@ -44,6 +45,17 @@ pub enum ReadFilter {
     Resolves(SuffixKey),
     /// The document carries the tag, on `document_tags_name`.
     Tag,
+    /// The document holds a link that resolves to exactly the one document a
+    /// links-to part's target names: an equality seek of `link_keys_key`
+    /// where the root tells spellings apart, and of `link_keys_folded_key`
+    /// where it folds ASCII case, at each key that document is named by, then
+    /// for each link reached, a seek of `link_keys_link` for the link's keys
+    /// and of the documents each of them reaches — a range of the suffix key
+    /// the root probes, or the path — to confirm no other document is in the
+    /// link's resolution. A path key is confirmed as a suffix key is: a
+    /// rooted wikilink holds a path key per reduction, so a link reached at
+    /// the named document's path may name another document at its other one.
+    LinksTo(SuffixKey),
     /// A finding of the kind stands over the document under the active
     /// fingerprint: one covering seek of the findings at `(fingerprint,
     /// kind)`, which `findings_fingerprint_kind_severity` and
@@ -54,7 +66,7 @@ pub enum ReadFilter {
 }
 
 /// How many filter shapes [`ReadFilter::all`] holds.
-pub const READ_FILTERS: usize = 12;
+pub const READ_FILTERS: usize = 13;
 
 impl ReadFilter {
     /// Every filter shape, in slot order. A filter that compares values is
@@ -73,6 +85,7 @@ impl ReadFilter {
             Self::Resolves(SuffixKey::Raw),
             Self::Tag,
             Self::Finding,
+            Self::LinksTo(SuffixKey::Raw),
         ]
     }
 
@@ -100,6 +113,7 @@ impl ReadFilter {
             Self::Resolves(_) => 9,
             Self::Tag => 10,
             Self::Finding => 11,
+            Self::LinksTo(_) => 12,
         };
         assert!(
             slot < READ_FILTERS,
@@ -119,7 +133,8 @@ pub(crate) struct Filter {
     /// their placeholders. A resolution filter binds two per suffix range and
     /// [`crate::resolve::EXCLUSION_PARAMETERS`] more — the ignore set, the
     /// target's segment count and the path order — so the count also says how
-    /// many ranges it opens.
+    /// many ranges it opens. A links-to filter binds each key it seeks and
+    /// [`LINKS_TO_PARAMETERS`] more.
     pub(crate) values: Vec<Value>,
 }
 
@@ -216,16 +231,46 @@ impl Filter {
                 for _ in &self.values {
                     next();
                 }
-                let ranges = (self.values.len() - crate::resolve::EXCLUSION_PARAMETERS) / 2;
+                let ranges = (self.values.len() - resolve::EXCLUSION_PARAMETERS) / 2;
                 format!(
                     "{id} IN (SELECT dr.id FROM documents AS dr WHERE {})",
-                    crate::resolve::predicate("dr", key, ranges, first)
+                    resolve::predicate("dr", key, ranges, first)
                 )
             }
             ReadFilter::Tag => {
                 let name = next();
                 format!(
                     "{id} IN (SELECT tg.document FROM document_tags AS tg WHERE tg.name = {name})"
+                )
+            }
+            ReadFilter::LinksTo(key) => {
+                let listed: Vec<String> = (0..self.values.len() - LINKS_TO_PARAMETERS)
+                    .map(|_| next())
+                    .collect();
+                let (ignored, order, path, document) = (next(), next(), next(), next());
+                let link_key = resolve::link_key_column(key);
+                format!(
+                    "{id} IN (SELECT lk.document FROM link_keys AS lk
+                     WHERE lk.{link_key} IN ({listed})
+                       AND (lk.segments IS NULL OR {named_admitted})
+                       AND NOT EXISTS (SELECT 1 FROM link_keys AS lo, documents AS dl
+                           WHERE lo.link = lk.link AND lo.segments IS NOT NULL
+                             AND {other_in_class}
+                             AND dl.id <> {document})
+                       AND NOT EXISTS (SELECT 1 FROM link_keys AS lp, documents AS dp
+                           WHERE lp.link = lk.link AND lp.segments IS NULL
+                             AND {other_at_path} AND dp.id <> {document}))",
+                    listed = listed.join(", "),
+                    named_admitted = resolve::admits(&ignored, "lk.segments", &order, &path),
+                    other_in_class = resolve::link_key_class(
+                        "dl",
+                        key,
+                        &format!("lo.{link_key}"),
+                        "lo.segments",
+                        &ignored,
+                        &order,
+                    ),
+                    other_at_path = resolve::link_key_path("dp", key, &format!("lp.{link_key}")),
                 )
             }
             ReadFilter::Finding => {
@@ -240,6 +285,11 @@ impl Filter {
         }
     }
 }
+
+/// How many values a links-to filter binds after the keys it seeks: the
+/// ignore set, the path order it is matched under, and the named document's
+/// path and row id.
+pub(crate) const LINKS_TO_PARAMETERS: usize = 4;
 
 /// The test that `path`, a column holding a path, matches the glob bound at
 /// `pattern`: the one spelling of a glob match every statement runs.

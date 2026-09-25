@@ -10,8 +10,11 @@
 use norn_db::rusqlite::types::Value;
 
 use crate::error::StoreError;
+use crate::facts::StoredPathOrder;
 use crate::json::{FrontmatterValue, canonical_json};
+use crate::path::SuffixKey;
 use crate::read::{Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter, key_walk};
+use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 
 /// Every statement shape the find builder runs, named.
 ///
@@ -84,10 +87,37 @@ pub enum FindStatement {
     /// `finding_classes`' primary key per finding. Run by every read that
     /// answers finding rows.
     FindingClasses,
+    /// The head of the class a target opens, in the resolution ladder's
+    /// order: the target's suffix ranges on `documents_suffix_key` where the
+    /// root tells spellings apart and on `documents_folded_suffix_key` where
+    /// it folds ASCII case, less the places the schema ignores, at most
+    /// [`crate::CANDIDATE_HEAD`] of them. The ladder's tie-break on the path
+    /// sorts the rows the ranges reached, so it costs the class. Run by every
+    /// read that resolves one target: a get's and a links-to part's.
+    ClassHead,
+    /// How many documents the class holds, run only where the head filled
+    /// [`crate::CANDIDATE_HEAD`]: a count over the same ranges.
+    ClassTotal,
+    /// Whether each suffix spelling of each candidate a read names names that
+    /// candidate alone, for every candidate at once: for each range of each
+    /// spelling's class, at most two of the documents in it — a range of the
+    /// suffix key the root probes, less the places the schema ignores — each
+    /// then reached by its row id. Run once by every read that names
+    /// candidates, however many there are.
+    CandidateSuffixes,
+    /// What each of a page's links names, for every link at once: the keys of
+    /// the links on `link_keys_link`, each distinct key read once — a suffix
+    /// key's class a range of the suffix key the root probes, less the places
+    /// the schema ignores, and a path key the documents at the path on
+    /// `documents_path` or `documents_path_nocase` — and for each link, at
+    /// most [`crate::CANDIDATE_HEAD`] of the documents its keys reached, in
+    /// the resolution ladder's order, beside how many there were. Run once by
+    /// every read that carries links, however many it carries.
+    LinkTargets,
 }
 
 /// How many statement shapes [`FindStatement::all`] holds.
-pub const FIND_STATEMENTS: usize = 15;
+pub const FIND_STATEMENTS: usize = 19;
 
 impl FindStatement {
     /// Every statement shape, in slot order.
@@ -112,6 +142,10 @@ impl FindStatement {
             Self::FindingTotal,
             Self::FindingCandidates,
             Self::FindingClasses,
+            Self::ClassHead,
+            Self::ClassTotal,
+            Self::CandidateSuffixes,
+            Self::LinkTargets,
         ]
     }
 
@@ -134,6 +168,10 @@ impl FindStatement {
             Self::FindingTotal => 12,
             Self::FindingCandidates => 13,
             Self::FindingClasses => 14,
+            Self::ClassHead => 15,
+            Self::ClassTotal => 16,
+            Self::CandidateSuffixes => 17,
+            Self::LinkTargets => 18,
         };
         assert!(
             slot < FIND_STATEMENTS,
@@ -156,11 +194,18 @@ pub enum Nested {
     Headings,
     /// The block identifiers the document defines, in `blocks`.
     Blocks,
+    /// The links the document carries, in `links`, each resolved at the read.
+    Links,
 }
 
 impl Nested {
     /// Every collection, in the order a row's columns are hydrated in.
-    pub const ALL: [Nested; 3] = [Nested::Tags, Nested::Headings, Nested::Blocks];
+    pub const ALL: [Nested; 4] = [
+        Nested::Tags,
+        Nested::Headings,
+        Nested::Blocks,
+        Nested::Links,
+    ];
 
     /// The table the collection's rows live in.
     pub const fn table(self) -> &'static str {
@@ -168,11 +213,14 @@ impl Nested {
             Nested::Tags => "document_tags",
             Nested::Headings => "headings",
             Nested::Blocks => "blocks",
+            Nested::Links => "links",
         }
     }
 
     /// The columns an item is read from, in the order the stored-fact reader
-    /// of the same table reads them.
+    /// of the same table reads them, and a link's row id after its own, at
+    /// [`LINK_ID_COLUMN`], which a read of what the link names seeks its keys
+    /// by.
     pub(crate) const fn columns(self) -> &'static str {
         match self {
             Nested::Tags => "n.name, n.source, n.span_line, n.span_column, n.span_offset",
@@ -181,6 +229,10 @@ impl Nested {
                  n.body_offset, n.inside_container"
             }
             Nested::Blocks => "n.block_id, n.span_line, n.span_column, n.span_offset",
+            Nested::Links => {
+                "n.family, n.embed, n.protocol, n.target, n.title, n.anchor, n.block_ref, \
+                 n.span_line, n.span_column, n.span_offset, n.id"
+            }
         }
     }
 
@@ -191,9 +243,13 @@ impl Nested {
             Nested::Tags => 5,
             Nested::Headings => 8,
             Nested::Blocks => 4,
+            Nested::Links => LINK_ID_COLUMN + 1,
         }
     }
 }
+
+/// Where a link's row id stands among [`Nested::columns`] of the links.
+pub(crate) const LINK_ID_COLUMN: usize = 10;
 
 /// Which way a page runs.
 ///
@@ -270,7 +326,11 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
         | FindStatement::FindingHead
         | FindStatement::FindingTotal
         | FindStatement::FindingCandidates
-        | FindStatement::FindingClasses => {
+        | FindStatement::FindingClasses
+        | FindStatement::ClassHead
+        | FindStatement::ClassTotal
+        | FindStatement::CandidateSuffixes
+        | FindStatement::LinkTargets => {
             unreachable!("{:?} is not a page section", section.statement)
         }
         FindStatement::PathPage(direction) => {
@@ -572,5 +632,153 @@ pub(crate) fn compose_finding_classes(ids: &[i64]) -> (String, Vec<Value>) {
              WHERE k.finding IN (SELECT value FROM json_each(?1))"
             .to_string(),
         vec![id_list(ids)],
+    )
+}
+
+/// [`FindStatement::ClassHead`]: at most `rows` of `class`, each as its id and
+/// its path, in the resolution ladder's order.
+///
+/// **A class is read as every read of a class reads it**: its rows are
+/// [`resolve::class_rows`], and a head of it is in [`resolve::ladder_order`].
+pub(crate) fn compose_class_head(class: &TargetClass, rows: usize) -> (String, Vec<Value>) {
+    let mut values = class.parameters();
+    let limit = values.len() + 1;
+    values.push(Value::Integer(
+        i64::try_from(rows).expect("a row count fits i64"),
+    ));
+    (
+        format!(
+            "SELECT dr.id, dr.path {} {} LIMIT ?{limit}",
+            resolve::class_rows(class),
+            resolve::ladder_order(class)
+        ),
+        values,
+    )
+}
+
+/// [`FindStatement::ClassTotal`]: how many documents `class` holds.
+pub(crate) fn compose_class_total(class: &TargetClass) -> (String, Vec<Value>) {
+    (
+        format!("SELECT COUNT(*) {}", resolve::class_rows(class)),
+        class.parameters(),
+    )
+}
+
+/// One range of one suffix spelling's class, as
+/// [`FindStatement::CandidateSuffixes`] reads it: the range's bounds in the key
+/// space the root probes, and how many segments the spelling spells.
+pub(crate) struct SpellingRange<'a> {
+    pub(crate) lower: &'a str,
+    pub(crate) upper: &'a str,
+    pub(crate) segments: usize,
+}
+
+/// [`FindStatement::CandidateSuffixes`]: for each of `ranges`, at most two of
+/// the documents in it under `ignore` and `order`, each as the range's index in
+/// `ranges` and the document's id, in no order.
+///
+/// The ranges drive the statement — `CROSS JOIN` keeps them the outer loop —
+/// and each range is a seek of the suffix key the root probes that stops at its
+/// second document, each document then reached by its row id, so a range
+/// costs at most two of its class, however large the class. **A range is read
+/// as every class range is read**: [`resolve::range_class`].
+pub(crate) fn compose_candidate_suffixes(
+    ranges: &[SpellingRange<'_>],
+    ignore: &AmbiguityIgnore,
+    order: StoredPathOrder,
+) -> Result<(String, Vec<Value>), StoreError> {
+    let listed = canonical_json(&FrontmatterValue::Sequence(
+        ranges
+            .iter()
+            .map(|range| {
+                FrontmatterValue::Sequence(vec![
+                    FrontmatterValue::String(range.lower.to_string()),
+                    FrontmatterValue::String(range.upper.to_string()),
+                    FrontmatterValue::Int(
+                        i64::try_from(range.segments).expect("a segment count fits i64"),
+                    ),
+                ])
+            })
+            .collect(),
+    ))?;
+    let class = resolve::range_class(
+        "dr",
+        SuffixKey::under(order),
+        (
+            "json_extract(j.value, '$[0]')",
+            "json_extract(j.value, '$[1]')",
+        ),
+        "json_extract(j.value, '$[2]')",
+        "?2",
+        "?3",
+    );
+    Ok((
+        format!(
+            "SELECT j.key, dc.id FROM json_each(?1) AS j
+             CROSS JOIN documents AS dc
+             WHERE dc.id IN (SELECT dr.id FROM documents AS dr WHERE {class} LIMIT 2)"
+        ),
+        vec![
+            Value::Text(listed),
+            Value::Text(ignore.encoded()),
+            Value::Text(order.as_str().to_string()),
+        ],
+    ))
+}
+
+/// [`FindStatement::LinkTargets`]: for each link `links` names that names a
+/// document, at most `head` of the documents it names under `ignore` and
+/// `order`, in the resolution ladder's order, each as the link's id, the
+/// document's id and path, and how many documents the link names.
+///
+/// **Each distinct key is read once**, however many of the links carry it:
+/// `keyed` is the page's keys, each once, and `reached` the documents each
+/// reaches — a suffix key's class through [`resolve::link_key_class`], a path
+/// key's documents through [`resolve::link_key_path`] — so links sharing a key
+/// share its read. Each link's head and total are then read off the rows its
+/// own keys reached, ranked in the ladder's order: the probed key, then the
+/// path. A path key's rows share one key, so they rank by the path alone,
+/// which is its path order among documents a folding root reads as one.
+pub(crate) fn compose_link_targets(
+    links: &[i64],
+    ignore: &AmbiguityIgnore,
+    order: StoredPathOrder,
+    head: usize,
+) -> (String, Vec<Value>) {
+    let key = SuffixKey::under(order);
+    let link_key = resolve::link_key_column(key);
+    let class = resolve::link_key_class("dl", key, "keyed.key", "keyed.segments", "?2", "?3");
+    let path = resolve::link_key_path("dp", key, "keyed.key");
+    let rung = format!("dl.{}", key.column());
+    let ladder = resolve::ladder("reached.rung", "reached.path");
+    (
+        format!(
+            "WITH page(link) AS (SELECT value FROM json_each(?1)),
+             keyed(key, segments) AS MATERIALIZED (
+                 SELECT DISTINCT lk.{link_key}, lk.segments
+                 FROM page CROSS JOIN link_keys AS lk WHERE lk.link = page.link),
+             reached(key, id, path, rung) AS MATERIALIZED (
+                 SELECT keyed.key, dl.id, dl.path, {rung}
+                 FROM keyed CROSS JOIN documents AS dl
+                 WHERE keyed.segments IS NOT NULL AND {class}
+                 UNION ALL
+                 SELECT keyed.key, dp.id, dp.path, keyed.key
+                 FROM keyed CROSS JOIN documents AS dp
+                 WHERE keyed.segments IS NULL AND {path}),
+             ranked(link, id, path, place, total) AS (
+                 SELECT lr.link, reached.id, reached.path,
+                        ROW_NUMBER() OVER (PARTITION BY lr.link ORDER BY {ladder}),
+                        COUNT(*) OVER (PARTITION BY lr.link)
+                 FROM page CROSS JOIN link_keys AS lr CROSS JOIN reached
+                 WHERE lr.link = page.link AND reached.key = lr.{link_key})
+             SELECT link, id, path, total FROM ranked WHERE place <= ?4
+             ORDER BY link, place"
+        ),
+        vec![
+            id_list(links),
+            Value::Text(ignore.encoded()),
+            Value::Text(order.as_str().to_string()),
+            Value::Integer(i64::try_from(head).expect("a head fits i64")),
+        ],
     )
 }

@@ -465,7 +465,9 @@
           "crates/norn-host/tests/counter_gate.rs::a_warm_request_over_an_attached_vault_finishes_at_zero",
           "crates/norn-host/tests/counter_gate.rs::warm_requests_under_a_live_attachment_finish_at_zero",
           "crates/norn-host/tests/fd_budget.rs::attached_entry_has_a_bounded_vault_size_independent_fd_cost",
-          "crates/norn-store/tests/store/get.rs::a_gets_work_follows_its_document_not_the_vault"
+          "crates/norn-store/tests/store/get.rs::a_gets_work_follows_its_document_not_the_vault",
+          "crates/norn-store/tests/store/links.rs::a_links_to_parts_work_follows_its_backlinks_not_the_vault",
+          "crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements"
         ]
       }
     },
@@ -649,11 +651,13 @@
       "sources": ["NRN-a60", "NRN-a63", "NRN-a61", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the readers exist and a cost term is assertable over them: crates/norn-store/src/request/mod.rs pages every enumeration behind a cursor, and crates/norn-testkit/src/work.rs holds a drain of n rows under a line in n, so a reader that re-reads the rows ahead of its own position fails. What has no subject is a request that could multiply two of its own quantities: nothing issues a statement per row of a result set and nothing computes link impact for a moved document, because crates/norn-serve is not in the workspace. The nested scan this class was mined from is inside one frontmatter block, where crates/norn-text/src/frontmatter/fields.rs now resolves the parsed mapping by key, and what bars it is a wall-clock ratio in a soak lane — not an evidence kind this stratum binds on.",
+        "reason": "the readers exist and a cost term is assertable over them: crates/norn-store/src/request/mod.rs pages every enumeration behind a cursor, and crates/norn-testkit/src/work.rs holds a drain of n rows under a line in n, so a reader that re-reads the rows ahead of its own position fails. The links column reads a page's links in a fixed number of statements: crates/norn-store/src/read/naming.rs reads what every link a find's page or a get's links page carries names in one set-valued statement over the link index's keys, and names every candidate in one more, so a request's statements do not grow with the links or the rows it returns, which crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements holds. Nothing computes link impact for a moved document, because crates/norn-serve is not in the workspace. The nested scan this class was mined from is inside one frontmatter block, where crates/norn-text/src/frontmatter/fields.rs now resolves the parsed mapping by key, and what bars it is a wall-clock ratio in a soak lane — not an evidence kind this stratum binds on.",
         "grounds": [
           { "present": "crates/norn-store/src/request/mod.rs" },
           { "present": "crates/norn-testkit/src/work.rs" },
           { "present": "crates/norn-text/src/frontmatter/fields.rs" },
+          { "present": "crates/norn-store/src/read/naming.rs" },
+          { "symbol-present": "crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -722,11 +726,15 @@
       "sources": ["NRN-433", "NRN-440", "NRN-356", "NRN-357", "NRN-350", "NRN-432", "NRN-123"],
       "binding": {
         "status": "dormant",
-        "reason": "the recognition half is carried: crates/norn-text/src/link.rs is the one authority, and crates/norn-text/tests/markdown_links.rs holds code opacity, the destination split, the caret rule and one link universe across all four accessors. The target-normalization half has a subject now and no consumer: crates/norn-store/src/path.rs drops a leaf's markdown extension and opens both readings of a leaf that carries a dot, and nothing resolves a link's target through it — the two halves meet in a resolver a request reaches, and crates/norn-serve is not in the workspace.",
+        "reason": "the recognition half is carried: crates/norn-text/src/link.rs is the one authority, and crates/norn-text/tests/markdown_links.rs holds code opacity, the destination split, the caret rule and one link universe across all four accessors. The target-normalization half has a consumer now: which reading a link's target takes is selected in one place, the address in crates/norn-wire/src/document.rs, protocol first and family second, a Markdown path read by URL rules with its query cut off; crates/norn-host/src/derivation.rs::the_text_layers_reading_of_a_link_agrees_with_the_wires_address holds norn-text's syntax-only reading of a link in agreement with it; crates/norn-store/src/link.rs maps it onto the store's addressing and derives each link's index keys at the write through crates/norn-store/src/path.rs, which drops a leaf's markdown extension and opens both readings of a leaf that carries a dot; and crates/norn-store/src/read/naming.rs resolves what a link names at the read from those keys. No test holds the link universe equal across the consumers that compute it, and no verb a surface dispatches reads a link, because crates/norn-serve is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-text/src/link.rs" },
           { "present": "crates/norn-text/tests/markdown_links.rs" },
           { "present": "crates/norn-store/src/path.rs" },
+          { "present": "crates/norn-store/src/link.rs" },
+          { "present": "crates/norn-store/src/read/naming.rs" },
+          { "present": "crates/norn-wire/src/document.rs" },
+          { "symbol-present": "crates/norn-host/src/derivation.rs::the_text_layers_reading_of_a_link_agrees_with_the_wires_address" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -903,14 +911,15 @@
       "sources": ["NRN-a60", "NRN-a63", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "the index and the targeted readers exist: crates/norn-store/src/ddl/documents.rs indexes the path and suffix keys, crates/norn-store/src/request/mod.rs answers one identifier with one bounded statement, and crates/norn-store/tests/store/pillars.rs proves those plans over the SQL the readers emitted. Resolving one string has a subject: crates/norn-store/src/get/mod.rs resolves a target by one seek of the suffix key its root probes, and crates/norn-store/tests/store/get.rs::a_gets_work_follows_its_document_not_the_vault holds its statements independent of vault size. The rest of the re-entry points the property binds have none: asking which documents link here needs the link index, whose absence crates/norn-store/src/read/mod.rs::NotIndexed refuses by name, and k membership probes and every advisory uniqueness or collision check are request paths, and crates/norn-serve is not in the workspace.",
+        "reason": "the index and the targeted readers exist: crates/norn-store/src/ddl/documents.rs indexes the path and suffix keys, crates/norn-store/src/request/mod.rs answers one identifier with one bounded statement, and crates/norn-store/tests/store/pillars.rs proves those plans over the SQL the readers emitted. Resolving one string has a subject: crates/norn-store/src/get/mod.rs resolves a target by one seek of the suffix key its root probes, and crates/norn-store/tests/store/get.rs::a_gets_work_follows_its_document_not_the_vault holds its statements independent of vault size. Asking which documents link here has a subject too: crates/norn-store/src/ddl/facts.rs holds every link under the keys a links-to seek reads, a find's links-to part seeks them at the handful of keys one document is named by, and crates/norn-store/tests/store/links.rs::a_links_to_parts_work_follows_its_backlinks_not_the_vault holds its statements and steps independent of vault size. The rest of the re-entry points the property binds have none: k membership probes and every advisory uniqueness or collision check are request paths, and crates/norn-serve is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-store/src/ddl/documents.rs" },
           { "present": "crates/norn-store/src/request/mod.rs" },
           { "present": "crates/norn-store/tests/store/pillars.rs" },
           { "present": "crates/norn-store/src/get/mod.rs" },
           { "symbol-present": "crates/norn-store/tests/store/get.rs::a_gets_work_follows_its_document_not_the_vault" },
-          { "symbol-present": "crates/norn-store/src/read/mod.rs::NotIndexed" },
+          { "present": "crates/norn-store/src/ddl/facts.rs" },
+          { "symbol-present": "crates/norn-store/tests/store/links.rs::a_links_to_parts_work_follows_its_backlinks_not_the_vault" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -1310,7 +1319,7 @@
       "sources": ["NRN-a59", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the landed read builders, find, count, validate, describe, search and get, answer in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others; crates/norn-store/src/count/mod.rs answers a count's tallies as aggregate SQL and hydrates no document row; crates/norn-store/src/validate/mod.rs pages the findings standing under the active fingerprint in SQL, one kind's seek at a time, reading one finding past the bound and the candidate heads of the findings it returns and no others, and answers its summary as one aggregate statement; crates/norn-store/src/describe/mod.rs pages the keys documents carry in SQL, reading one key past the bound, and draws the declared facets from the page's position off the declaration the host holds in memory, building none past the one that says a next page exists, so that draw is no post-pass over rows SQL answered; crates/norn-store/src/search/mod.rs scores, sorts and pages a search's lexical hits in SQL, reading one hit past the bound, and hydrates the rows of the hits it returns and no others; and crates/norn-store/src/get/mod.rs resolves a target, pages a collection and hydrates a record in SQL, with one declared exception: a heading anchor is matched in memory over the one document's heading rows, because the anchor's text reading folds case and whitespace, which no index orders by, so what a section lookup materializes is bounded by one document's headings rather than by the rows it returns. The property is stated over each read verb, and no read verb exists: the exception carries no counter ceiling, and nothing dispatches a verb, because crates/norn-serve is not in the workspace.",
+        "reason": "the landed read builders, find, count, validate, describe, search and get, answer in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others; crates/norn-store/src/count/mod.rs answers a count's tallies as aggregate SQL and hydrates no document row; crates/norn-store/src/validate/mod.rs pages the findings standing under the active fingerprint in SQL, one kind's seek at a time, reading one finding past the bound and the candidate heads of the findings it returns and no others, and answers its summary as one aggregate statement; crates/norn-store/src/describe/mod.rs pages the keys documents carry in SQL, reading one key past the bound, and draws the declared facets from the page's position off the declaration the host holds in memory, building none past the one that says a next page exists, so that draw is no post-pass over rows SQL answered; crates/norn-store/src/search/mod.rs scores, sorts and pages a search's lexical hits in SQL, reading one hit past the bound, and hydrates the rows of the hits it returns and no others; crates/norn-store/src/read/naming.rs resolves what the links a find's page or a get's links page returns name as one set in SQL, each link's head bounded at five documents in the statement, so what it materializes follows the links returned; and crates/norn-store/src/get/mod.rs resolves a target, pages a collection and hydrates a record in SQL, with one declared exception: a heading anchor is matched in memory over the one document's heading rows, because the anchor's text reading folds case and whitespace, which no index orders by, so what a section lookup materializes is bounded by one document's headings rather than by the rows it returns. The property is stated over each read verb, and no read verb exists: the exception carries no counter ceiling, and nothing dispatches a verb, because crates/norn-serve is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-store/src/find/mod.rs" },
           { "present": "crates/norn-store/src/count/mod.rs" },
@@ -1318,6 +1327,7 @@
           { "present": "crates/norn-store/src/describe/mod.rs" },
           { "present": "crates/norn-store/src/search/mod.rs" },
           { "present": "crates/norn-store/src/get/mod.rs" },
+          { "present": "crates/norn-store/src/read/naming.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }

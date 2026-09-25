@@ -80,11 +80,12 @@
 //! finding's class is the class a find's `resolves` part reads on that root.
 //!
 //! The class-bearing findings are a dormant carrier: their producer is the
-//! link-health findings the link index lands in Layer 3, which reads a link
-//! target's class and files what it found under the class's keys. The current
-//! call graph files none, because no link index exists yet — every finding the
-//! host files is about its own subject and carries no class key — so the
-//! class half of this table is reached by its maintenance and its tests alone.
+//! link-health findings the link-health unit of Layer 3 files, reading a link
+//! target's class and filing what it found under the class's keys. The current
+//! call graph files none, because no producer files a link-health finding yet
+//! — every finding the host files is about its own subject and carries no
+//! class key — so the class half of this table is reached by its maintenance
+//! and its tests alone.
 //!
 //! A finding's class keys are spelled in the key space its root probes, which
 //! the store's path order selects, and a changed path names its class in that

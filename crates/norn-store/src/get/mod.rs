@@ -30,8 +30,11 @@
 //! Each candidate in a head is named by its **minimal disambiguating
 //! suffix**: the first of its path's suffix spellings
 //! ([`crate::DocumentPath::suffix_spellings`]) whose class holds that
-//! candidate alone, each tried by one statement that stops at a class's second
-//! member; a candidate no suffix names alone is named by its path.
+//! candidate alone, every spelling tried by one statement whose each range
+//! stops at its second member; a candidate no suffix names alone is named by
+//! its path. A target is resolved as every read resolves one — a links-to
+//! part's, and a page's links — so the statements it runs are
+//! [`crate::FindStatement`]s.
 //!
 //! # A record is a find's row
 //!
@@ -62,7 +65,7 @@
 //!
 //! # A collection page is a keyset page by ordinal
 //!
-//! One nested collection — headings, block definitions or tags — is
+//! One nested collection — links, headings, block definitions or tags — is
 //! paged in document order by its ordinal, with the collection and the
 //! ordinal the page stopped at as its cursor
 //! ([`norn_wire::CursorKey::Ordinal`]). Each collection is its own row type,
@@ -80,13 +83,10 @@
 //! exists, through the keyset page every read builder reads
 //! ([`Snapshot::read_page`]).
 //!
-//! The links collection is refused ([`PageRefusal::NotProjected`]) until the
-//! Layer 3 link index unit resolves what a link names: a stored link's target
-//! is unresolved, so a link row would name no document and read as broken
-//! whatever the vault holds. Its page is a **dormant carrier** for that unit,
-//! composed as the other ordinal pages are; no get reaches it, and
-//! [`Snapshot::get_plans`] composes and explains it, so its plan bar judges
-//! the statement the unit will run.
+//! A page of links resolves the links it holds as a find's links column
+//! resolves a page's: what each link names now, and the health that gives it,
+//! read as one set in a fixed number of statements, however many links the
+//! page holds.
 
 mod statement;
 
@@ -95,27 +95,25 @@ use std::ops::Range;
 use norn_db::EmittedPlan;
 use norn_db::rusqlite::Row;
 use norn_wire::{
-    Anchor, BodyText, Candidate, CandidateHead, CollectionPage, CollectionSelector, Cursor,
-    CursorKey, DocumentRow, FindingKind, GetParams, GetReport, Hint, LinkRow, Page,
-    ResolutionTarget, Unsatisfied,
+    Anchor, BodyText, CollectionPage, CollectionSelector, Cursor, CursorKey, DocumentRow,
+    FindingKind, GetParams, GetReport, Hint, Page, ResolutionTarget, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
-use crate::facts::{BlockFact, CANDIDATE_HEAD, HeadingFact, LinkFact, LinkFamily};
+use crate::facts::{BlockFact, HeadingFact};
 use crate::fields::ContentModel;
 use crate::find::{
-    FindWork, FoundKey, Nested, Projection, block_row, bounded_body, heading_row, tag_row,
-    wire_block, wire_heading, wire_span,
+    FindWork, FoundKey, Nested, Projection, block_row, bounded_body, heading_row, identified_link,
+    tag_row, wire_block, wire_heading,
 };
 use crate::read::{
-    Lookups, PageRefusal, ReadFilter, ReadStatement, RequestPart, Stepped, TargetAmbiguity,
-    finding_base, page_limit,
+    Lookups, Naming, PageRefusal, ReadFilter, ReadStatement, RequestPart, Stepped, TargetAmbiguity,
+    finding_base, page_limit, wire_path,
 };
-use crate::request::{Reading, stored_block, stored_heading, stored_link, unreadable};
-use crate::resolve::TargetClass;
+use crate::request::{Reading, stored_block, stored_heading, unreadable};
 use crate::store::Snapshot;
 
-pub use statement::{Collection, GET_STATEMENTS, GetStatement};
+pub use statement::{GET_STATEMENTS, GetStatement};
 use statement::{Spelled, compose};
 
 /// What a get reads a document's text through: the one section resolver and
@@ -286,20 +284,12 @@ impl<'a> Shape<'a> {
     }
 }
 
-/// Whether a run answers the links collection: a get refuses it, and
-/// [`Snapshot::get_plans`] composes its page, as the module states.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LinkPages {
-    Refused,
-    Composed,
-}
-
 /// One page of one collection a get pages by ordinal.
 struct OrdinalPage<'a> {
     /// The collection as the request named it, which the next page's cursor
     /// names.
     selector: CollectionSelector,
-    collection: Collection,
+    collection: Nested,
     document: i64,
     limit: usize,
     /// The ordinal the page continues after, and `None` on a first page.
@@ -328,25 +318,18 @@ impl Snapshot {
     ///
     /// Refused: a target naming several documents or none, as the module
     /// states; a declaration read from another schema than the snapshot pins;
-    /// a page bound outside `1..=`[`crate::MAX_PAGE`]; a projected column the
-    /// store does not project yet, and the links collection; a cursor that
-    /// names no position in the
-    /// collection paged, that was minted paging another collection, or that
-    /// the snapshot's reading refuses; and a part
-    /// the answer asked for does not take ([`PageRefusal::PartNotTaken`]).
+    /// a page bound outside `1..=`[`crate::MAX_PAGE`]; a projected column this
+    /// build of the store does not know; a cursor that names no position in
+    /// the collection paged, that was minted paging another collection, or
+    /// that the snapshot's reading refuses; and a part the answer asked for
+    /// does not take ([`PageRefusal::PartNotTaken`]).
     pub fn get(
         &self,
         params: &GetParams,
         declared: &ContentModel,
         text: &dyn DocumentText,
     ) -> Result<Gotten, PageRefusal> {
-        self.run_get(
-            params,
-            declared,
-            text,
-            LinkPages::Refused,
-            &mut Lookups::default(),
-        )
+        self.run_get(params, declared, text, &mut Lookups::default())
     }
 
     /// Every statement [`Snapshot::get`] runs for `params`, in the order it
@@ -357,9 +340,7 @@ impl Snapshot {
     /// [`Snapshot::find_plans`] takes a find's. A statement the get did not
     /// run is not listed. A get refused because its target names several
     /// documents or none ran the statements that decided so, and those are
-    /// explained; any other refusal is returned. The links collection a get
-    /// refuses is composed, run and explained here as a page of it would be,
-    /// because its page is the dormant carrier the module states.
+    /// explained; any other refusal is returned.
     pub fn get_plans(
         &self,
         params: &GetParams,
@@ -367,7 +348,7 @@ impl Snapshot {
         text: &dyn DocumentText,
     ) -> Result<Vec<GetPlan>, PageRefusal> {
         let mut lookups = Lookups::default();
-        match self.run_get(params, declared, text, LinkPages::Composed, &mut lookups) {
+        match self.run_get(params, declared, text, &mut lookups) {
             Ok(_) | Err(PageRefusal::AmbiguousTarget(_) | PageRefusal::UnknownTarget { .. }) => {}
             Err(refusal) => return Err(refusal),
         }
@@ -394,18 +375,10 @@ impl Snapshot {
         params: &GetParams,
         declared: &ContentModel,
         text: &dyn DocumentText,
-        links: LinkPages,
         lookups: &mut Lookups,
     ) -> Result<Gotten, PageRefusal> {
         let started = self.counters().statements_executed();
         let shape = Shape::of(params)?;
-        if matches!(shape, Shape::Collection(CollectionSelector::Links))
-            && links == LinkPages::Refused
-        {
-            return Err(PageRefusal::NotProjected {
-                part: "the links collection",
-            });
-        }
         let limit = match shape {
             Shape::Collection(_) => page_limit(params.limit)?,
             _ => 0,
@@ -421,6 +394,7 @@ impl Snapshot {
                     &[FoundKey::unsorted(named.document, named.path.clone())],
                     &projection,
                     &fields,
+                    declared,
                     lookups,
                     &mut FindWork::default(),
                 )?;
@@ -437,6 +411,7 @@ impl Snapshot {
                     limit,
                     params.after.as_ref(),
                     &snapshot,
+                    declared,
                     lookups,
                 )?;
                 (GetReport::collection(path, page), Vec::new())
@@ -465,58 +440,20 @@ impl Snapshot {
         declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<Named, PageRefusal> {
-        const OPERATION: &str = "reading the documents a target names";
-        let unknown = || PageRefusal::UnknownTarget {
-            target: target.clone(),
-        };
-        let Ok(class) = TargetClass::compile(
+        match self.name_target(
             target.address(),
-            self.path_order(),
             declared.ambiguity_ignore(),
-        ) else {
-            return Err(unknown());
-        };
-        let head: Vec<(i64, String)> = self
-            .run_statement(
-                &mut lookups.ran,
-                compose(&Spelled::ClassHead {
-                    class: &class,
-                    rows: CANDIDATE_HEAD,
-                }),
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|problem| error::sql(OPERATION, problem))?;
-        match head.as_slice() {
-            [] => Err(unknown()),
-            [(document, path)] => Ok(Named {
-                document: *document,
-                path: path.clone(),
-                wire: wire_path(path)?,
+            &mut lookups.ran,
+        )? {
+            Naming::Nothing => Err(PageRefusal::UnknownTarget {
+                target: target.clone(),
             }),
-            _ => {
-                let total = if head.len() < CANDIDATE_HEAD {
-                    head.len() as u64
-                } else {
-                    self.run_statement(
-                        &mut lookups.ran,
-                        compose(&Spelled::ClassTotal { class: &class }),
-                        |row| row.get::<_, u64>(0),
-                    )
-                    .map_err(|problem| error::sql(OPERATION, problem))?
-                    .into_iter()
-                    .next()
-                    .unwrap_or_default()
-                };
-                let mut candidates = Vec::with_capacity(head.len());
-                for (document, path) in &head {
-                    let suffix = self.candidate_suffix(*document, path, declared, lookups)?;
-                    candidates.push(Candidate::new(wire_path(path)?, suffix));
-                }
-                let head = CandidateHead::new(candidates, total).map_err(|problem| {
-                    StoreError::Damaged {
-                        what: format!("a class's head outgrew its count: {problem}"),
-                    }
-                })?;
+            Naming::One { document, path } => Ok(Named {
+                document,
+                wire: wire_path(&path)?,
+                path,
+            }),
+            Naming::Several(head) => {
                 let address = ResolutionTarget::new(target.address())
                     .expect("a target's address is a target of its own");
                 Err(PageRefusal::AmbiguousTarget(Box::new(TargetAmbiguity {
@@ -526,37 +463,6 @@ impl Snapshot {
                 })))
             }
         }
-    }
-
-    /// The minimal disambiguating suffix of the candidate `document` at
-    /// `path`: the first of its suffix spellings whose class holds it alone,
-    /// or its path where none does.
-    fn candidate_suffix(
-        &self,
-        document: i64,
-        path: &str,
-        declared: &ContentModel,
-        lookups: &mut Lookups,
-    ) -> Result<String, StoreError> {
-        let at = crate::path::DocumentPath::new(path)?;
-        for spelling in at.suffix_spellings() {
-            let Ok(class) =
-                TargetClass::compile(&spelling, self.path_order(), declared.ambiguity_ignore())
-            else {
-                continue;
-            };
-            let members: Vec<i64> = self
-                .run_statement(
-                    &mut lookups.ran,
-                    compose(&Spelled::CandidateSuffix { class: &class }),
-                    |row| row.get(0),
-                )
-                .map_err(|problem| error::sql("naming a candidate by its suffix", problem))?;
-            if members == [document] {
-                return Ok(spelling);
-            }
-        }
-        Ok(path.to_string())
     }
 
     /// The section `anchor` names in the named document, or the record of its
@@ -662,7 +568,10 @@ impl Snapshot {
         })
     }
 
-    /// One page of the collection `selector` names on the named document.
+    /// One page of the collection `selector` names on the named document, a
+    /// links page resolving its links under `declared`'s ambiguity-ignore
+    /// set.
+    #[allow(clippy::too_many_arguments)] // A page is named by each of these, and none of them groups with another.
     fn collection(
         &self,
         named: Named,
@@ -670,6 +579,7 @@ impl Snapshot {
         limit: usize,
         after: Option<&Cursor>,
         snapshot: &norn_wire::Snapshot,
+        declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<CollectionPage, PageRefusal> {
         let collection = match selector {
@@ -678,10 +588,10 @@ impl Snapshot {
                     self.finding_page(&named, limit, after, snapshot, lookups)?,
                 ));
             }
-            CollectionSelector::Links => Collection::Links,
-            CollectionSelector::Headings => Collection::Nested(Nested::Headings),
-            CollectionSelector::Blocks => Collection::Nested(Nested::Blocks),
-            CollectionSelector::Tags => Collection::Nested(Nested::Tags),
+            CollectionSelector::Links => Nested::Links,
+            CollectionSelector::Headings => Nested::Headings,
+            CollectionSelector::Blocks => Nested::Blocks,
+            CollectionSelector::Tags => Nested::Tags,
             _ => {
                 return Err(PageRefusal::UnknownPart {
                     part: "a collection",
@@ -698,19 +608,20 @@ impl Snapshot {
             snapshot,
         };
         Ok(match collection {
-            Collection::Links => {
-                let (rows, next) = self.ordinal_page(&page, link_row, lookups)?;
+            Nested::Links => {
+                let (links, next) = self.ordinal_page(&page, identified_link, lookups)?;
+                let rows = self.link_rows(links, declared.ambiguity_ignore(), &mut lookups.ran)?;
                 CollectionPage::links(Page::new(rows, next, moved))
             }
-            Collection::Nested(Nested::Headings) => {
+            Nested::Headings => {
                 let (rows, next) = self.ordinal_page(&page, heading_row, lookups)?;
                 CollectionPage::headings(Page::new(rows, next, moved))
             }
-            Collection::Nested(Nested::Blocks) => {
+            Nested::Blocks => {
                 let (rows, next) = self.ordinal_page(&page, block_row, lookups)?;
                 CollectionPage::blocks(Page::new(rows, next, moved))
             }
-            Collection::Nested(Nested::Tags) => {
+            Nested::Tags => {
                 let (rows, next) = self.ordinal_page(&page, tag_row, lookups)?;
                 CollectionPage::tags(Page::new(rows, next, moved))
             }
@@ -853,51 +764,9 @@ impl Snapshot {
     }
 }
 
-/// `path` as the wire spells a document's path.
-fn wire_path(path: &str) -> Result<norn_wire::DocumentPath, StoreError> {
-    norn_wire::DocumentPath::new(path).map_err(|problem| StoreError::Damaged {
-        what: format!("`documents.path` holds no document path: {problem}"),
-    })
-}
-
 /// The document reader named bytes or a heading the document does not hold.
 fn outside(what: &str, at: usize) -> StoreError {
     StoreError::Damaged {
         what: format!("the document reader named {what} at {at}, outside the document"),
     }
-}
-
-fn link_row(row: &Row<'_>) -> Reading<LinkRow> {
-    Ok(stored_link(row)?.map(wire_link))
-}
-
-/// A stored link as the wire's row carries it.
-///
-/// **A dormant carrier** for the Layer 3 link index unit, reached only by the
-/// links page [`Snapshot::get_plans`] composes: a link's target is stored raw
-/// and unresolved, and no statement resolves it, so the row carries the empty
-/// head out of none, and the health derived from it would read broken
-/// whatever the vault holds. That is why a get refuses the links collection.
-/// The unit resolves each link's target through the one resolver and fills
-/// the head.
-fn wire_link(link: LinkFact) -> LinkRow {
-    let family = match link.family {
-        LinkFamily::Wikilink => norn_wire::LinkFamily::Wikilink,
-        LinkFamily::Markdown => norn_wire::LinkFamily::Markdown,
-    };
-    let anchor = match (link.block_ref, link.anchor) {
-        (Some(id), _) => Some(Anchor::block(id)),
-        (None, Some(text)) => Some(Anchor::heading(text)),
-        (None, None) => None,
-    };
-    LinkRow::new(
-        family,
-        link.embed,
-        link.protocol,
-        link.target,
-        link.title,
-        anchor,
-        wire_span(link.span),
-        CandidateHead::new([], 0).expect("no candidate heads no document"),
-    )
 }

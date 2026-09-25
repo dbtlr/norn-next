@@ -36,29 +36,68 @@
 //! not as a resolved edge, and not as a mode column either.
 //!
 //! **There is deliberately no addressing-mode column.** How a target resolves
-//! derives from the fact protocol-first and family-second, and it derives in
-//! exactly one place: `norn-text`'s own `Link::resolution`. A column beside
+//! derives from the fact protocol-first and family-second: the wire's
+//! `LinkAddress` is the one selector, which [`crate::link`] reads the family,
+//! protocol and target columns through, and `norn-text`'s syntax-only
+//! `Link::resolution` agrees with it. A column beside
 //! `family` and `protocol` would be a second answer to a question those two
 //! already settle, and a stored answer that disagreed with them would be
 //! believed. For the same reason the store never re-derives emission order
 //! from spans: link ranges of the two families may overlap and nest, so a
 //! span comparison is not a total order and `ordinal` is.
 //!
-//! **`target` is stored raw, and it is not indexed yet.** The links-to join
-//! probes it — a document's own path yields the handful of segment-suffixes
-//! that can address it, and the join looks each of them up — but that builder
-//! is Layer 3's, and the crate's own rule is that index support arrives with
-//! the statement whose `EXPLAIN` bar can judge it. The same rule is why the
-//! one other lookup index here is `document_tags_name`, which a find's tag
-//! part seeks and its bar judges.
+//! **`target` is stored raw**, and compared under `BINARY`: no normalization,
+//! no percent-decoding, no case folding. What a link's target names is
+//! decided at read time against the vault as it stands, and nothing here
+//! stores that answer.
 //!
-//! Raw also means **unfolded**: `links.target` is compared under `BINARY`.
-//! Case folding is in the resolution grammar on a root that folds ASCII case,
-//! and `documents` carries it as a folded suffix key beside the raw one; the
-//! link side's counterpart, when the link index lands, is a derived
-//! `target_key` beside `target` — a DDL edit, which pre-release costs a rebuild
-//! and nothing else.
+//! # `link_keys` is the link index
 //!
+//! A links-to part asks which documents hold a link that could name one
+//! document, and a scan of `links` would answer it by reading every link in the
+//! vault. So each link that can name a document is held under the keys a seek
+//! finds it by, derived at the write from the link and the path of the document
+//! holding it ([`crate::link`]):
+//!
+//! - A wikilink's target is a suffix address, and its keys are its probe's
+//!   prefixes in the segment-reversed form `documents.suffix_key` takes — one
+//!   key, or two for a leaf carrying a dot, which reduces both ways — beside
+//!   the number of segments the target spells, which the ambiguity-ignore test
+//!   reads.
+//! - A path — a Markdown target, `vault://` or not — has one key: the vault
+//!   path it names, read from the holding document's directory or from the
+//!   vault root by URL rules; a same-document anchor's key is the holding
+//!   document's own path. A `vault://` wikilink is a rooted name, and its keys
+//!   are the root paths its reductions spell — one, or two for a leaf
+//!   carrying an extension. `segments` is `NULL` beside a path's key.
+//!
+//! A target naming an attachment is keyed like any other, since a document
+//! may carry the attachment's name. A link addressed elsewhere — a protocol
+//! other than `vault`, a Markdown target opening with a URI scheme — and a
+//! target that names no vault path are held under no key.
+//!
+//! **A document's keys are a handful, so a links-to seek is a handful of
+//! equality seeks.** The documents a link could name share a key with it: a
+//! suffix key is a segment-aligned prefix of the named document's own suffix
+//! key, and a path key is the document's path. A seek for the links that could
+//! name one document therefore reads `link_keys_key` — or
+//! `link_keys_folded_key`, where the root folds ASCII case — at each of that
+//! document's prefixes and its path, and reaches the holding document off the
+//! index entry. A suffix key always ends in the separator and a path never
+//! does, so the two kinds share one column, and the `CHECK` holds `segments`
+//! to the kind its key is.
+//!
+//! The keys are the link's own derived columns and never a resolution: which
+//! documents a key reaches is read against `documents` at the instant of the
+//! read. Their rows are the link row's: `link_keys_link` leads with the link,
+//! so a re-derivation's delete of a document's link rows cascades to their keys
+//! through it, and a document's death reaches them the same way. `document`
+//! is the link row's own document, copied beside the key so a seek reads the
+//! holding document off the index without visiting the link, and the foreign
+//! key is the pair — the link and its document, which `links_id_document`
+//! makes a key of `links` — so a key held beside any other document is refused
+//! at rest.
+
 //! # `headings` is addressed two ways
 //!
 //! A wikilink `#anchor` addresses a heading's **text**; an inline Markdown
@@ -134,6 +173,20 @@ const STATEMENTS: &[&str] = &[
     span_offset INTEGER NOT NULL
 )",
     "CREATE UNIQUE INDEX links_document_ordinal ON links(document, ordinal)",
+    "CREATE UNIQUE INDEX links_id_document ON links(id, document)",
+    "CREATE TABLE link_keys (
+    id         INTEGER PRIMARY KEY,
+    link       INTEGER NOT NULL,
+    document   INTEGER NOT NULL,
+    key        TEXT    NOT NULL,
+    folded_key TEXT    NOT NULL,
+    segments   INTEGER,
+    FOREIGN KEY (link, document) REFERENCES links(id, document) ON DELETE CASCADE,
+    CHECK ((segments IS NULL) = (substr(key, -1) <> '/'))
+)",
+    "CREATE UNIQUE INDEX link_keys_link ON link_keys(link, key)",
+    "CREATE INDEX link_keys_key ON link_keys(key, document)",
+    "CREATE INDEX link_keys_folded_key ON link_keys(folded_key, document)",
     "CREATE TABLE headings (
     id               INTEGER PRIMARY KEY,
     document         INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,

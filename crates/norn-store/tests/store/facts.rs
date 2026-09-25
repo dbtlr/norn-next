@@ -11,7 +11,8 @@ use crate::common::{
 };
 use norn_store::{
     BlockFact, Change, ContentModel, DocumentFacts, FrontmatterValue, HeadingFact,
-    IncrementProvenance, LinkFact, LinkFamily, Provenance, StoreError, TagFact, TagSource, ddl,
+    IncrementProvenance, LinkFact, LinkFamily, Provenance, StoreError, StoredLinkKey, TagFact,
+    TagSource, ddl, induced_failure,
 };
 
 /// One of every fact shape, written and read back unchanged — including the
@@ -212,6 +213,145 @@ fn a_re_derivation_replaces_fact_rows_wholesale() {
 
     request.finish();
     store.verify_integrity().expect("a re-derived store");
+}
+
+/// A link written with `family` and `protocol` to `target`.
+fn link(family: LinkFamily, protocol: Option<&str>, target: &str) -> LinkFact {
+    LinkFact {
+        family,
+        embed: false,
+        protocol: protocol.map(str::to_string),
+        target: target.to_string(),
+        title: None,
+        anchor: None,
+        block_ref: None,
+        span: span(1, 1, 0),
+    }
+}
+
+/// **A link is held under the keys a links-to seek reads**, derived from the
+/// link and the path of the document holding it. A wikilink's are its suffix
+/// address's segment-reversed prefixes, one per reduction of a dotted leaf,
+/// beside the segments the target spells, an attachment's name among them; a
+/// path's — a Markdown target's, `vault://` or not — is the vault path it
+/// names, split before each segment is percent-decoded, its query cut off and
+/// nothing reduced; a `vault://` wikilink's are the root paths its reductions
+/// spell, nothing decoded; a same-document anchor's is the holding document's
+/// own path. A link addressed elsewhere — a protocol other than `vault`, a
+/// Markdown target opening with a URI scheme — and a target that names no
+/// vault path or no suffix address are held under no key. Each key is held
+/// raw and folded.
+#[test]
+fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
+    let scratch = Scratch::new("link-keys");
+    let mut store = scratch.open();
+    let mut facts = document("a/b/doc.md", "hash-1", "a body\n");
+    facts.links = vec![
+        link(LinkFamily::Wikilink, None, "norn/Glossary.md"),
+        link(LinkFamily::Wikilink, None, "Notes"),
+        link(LinkFamily::Markdown, None, "../x/My%20Note.md"),
+        link(LinkFamily::Markdown, None, "foo"),
+        link(LinkFamily::Markdown, None, "/top.md"),
+        link(LinkFamily::Markdown, None, "../../../escape.md"),
+        link(LinkFamily::Wikilink, None, ""),
+        link(LinkFamily::Markdown, Some("https"), "example.com/page.md"),
+        link(LinkFamily::Wikilink, None, "picture.png"),
+        link(LinkFamily::Wikilink, None, "../relative"),
+        link(LinkFamily::Markdown, Some("vault"), "notes/X.md?raw=1"),
+        link(LinkFamily::Markdown, None, "mailto:someone@example.com"),
+        link(LinkFamily::Markdown, None, "sub%2Fc.md"),
+        link(LinkFamily::Markdown, None, "q.md?x=1"),
+        link(LinkFamily::Wikilink, Some("vault"), "Notes/v1.2"),
+    ];
+    let mut request = store.begin_request();
+    write_document(&mut request, &facts);
+    let stored = request
+        .stored_facts(&facts.path)
+        .expect("reading a document")
+        .expect("a document");
+    let key = |link: u64, key: &str, folded: &str, segments: Option<u64>| StoredLinkKey {
+        link,
+        key: key.to_string(),
+        folded_key: folded.to_string(),
+        segments,
+    };
+    assert_eq!(
+        stored.link_keys,
+        vec![
+            key(0, "Glossary.md/norn/", "glossary.md/norn/", Some(2)),
+            key(0, "Glossary/norn/", "glossary/norn/", Some(2)),
+            key(1, "Notes/", "notes/", Some(1)),
+            key(2, "a/x/My Note.md", "a/x/my note.md", None),
+            key(3, "a/b/foo", "a/b/foo", None),
+            key(4, "top.md", "top.md", None),
+            key(6, "a/b/doc.md", "a/b/doc.md", None),
+            key(8, "picture.png/", "picture.png/", Some(1)),
+            key(8, "picture/", "picture/", Some(1)),
+            key(10, "notes/X.md", "notes/x.md", None),
+            key(13, "a/b/q.md", "a/b/q.md", None),
+            key(14, "Notes/v1.2.md", "notes/v1.2.md", None),
+            key(14, "Notes/v1.md", "notes/v1.md", None),
+        ]
+    );
+
+    // A re-derivation replaces the keys with the links they are keys of.
+    facts.links.truncate(1);
+    write_document(&mut request, &facts);
+    let again = request
+        .stored_facts(&facts.path)
+        .expect("reading a document")
+        .expect("a document");
+    assert_eq!(again.link_keys.len(), 2, "{:?}", again.link_keys);
+    request.finish();
+    store.verify_integrity().expect("a store holding link keys");
+}
+
+/// A key's kind is its shape: a suffix key ends in the separator and carries
+/// the segments its target spells, and a path's key does neither. The table
+/// refuses a row whose two halves disagree.
+#[test]
+fn a_link_key_carries_segments_exactly_where_it_is_a_suffix_key() {
+    let declared = ddl::statements()
+        .into_iter()
+        .find(|statement| statement.contains("CREATE TABLE link_keys"))
+        .expect("the link key table");
+    assert!(
+        declared.contains("CHECK ((segments IS NULL) = (substr(key, -1) <> '/'))"),
+        "{declared}"
+    );
+}
+
+/// **A link key belongs to its link's document**: the document a key is held
+/// beside is the one holding the link it is a key of, so a key moved onto
+/// another document, or written for another document's link, is refused at
+/// rest, while a key left on its own link's document is kept.
+#[test]
+fn a_link_key_is_held_beside_its_links_own_document() {
+    let scratch = Scratch::new("link-key-document");
+    let mut store = scratch.open();
+    let mut holder = document("a.md", "hash-a", "a body\n");
+    holder.links = vec![link(LinkFamily::Wikilink, None, "b")];
+    let other = document("b.md", "hash-b", "a body\n");
+    let mut request = store.begin_request();
+    write_document(&mut request, &holder);
+    write_document(&mut request, &other);
+    request.finish();
+    let other_document = "(SELECT id FROM documents WHERE path = 'b.md')";
+    induced_failure::execute_out_of_band(&mut store, "UPDATE link_keys SET document = document")
+        .expect("a key on its own link's document is kept");
+    induced_failure::execute_out_of_band(
+        &mut store,
+        &format!("UPDATE link_keys SET document = {other_document}"),
+    )
+    .expect_err("a key moved onto another document is kept");
+    induced_failure::execute_out_of_band(
+        &mut store,
+        &format!(
+            "INSERT INTO link_keys (link, document, key, folded_key, segments)
+             SELECT link, {other_document}, 'c/', 'c/', 1 FROM link_keys"
+        ),
+    )
+    .expect_err("a key written for another document's link is kept");
 }
 
 /// Ordinals are dense and ascending because the store assigns them from the
@@ -476,12 +616,14 @@ fn a_derived_path_form_has_one_home() {
             "`{absent}` is declared, and no statement in this build reads it"
         );
     }
-    // The eight that stay, because a statement in this build reads each: the
+    // The eleven that stay, because a statement in this build reads each: the
     // resolution ladder's range under either key, the order a heal's page seeks on a vault that
     // folds ASCII case, the class direction of findings maintenance, the
     // schema-key discard's two ranges, the two change feeds, each of which is
-    // answered out of its own index without the row being read at all, and the
-    // documents a find's tag part names.
+    // answered out of its own index without the row being read at all, the
+    // documents a find's tag part names, the links a links-to part seeks under
+    // either key, and a link's own keys, which a links-to part reads beside
+    // the one it sought and a link row's discard cascades through.
     for present in [
         "document_tags_name",
         "documents_suffix_key",
@@ -491,6 +633,9 @@ fn a_derived_path_form_has_one_home() {
         "tombstones_change_feed",
         "finding_classes_class_key",
         "findings_vault_schema_fingerprint",
+        "link_keys_link",
+        "link_keys_key",
+        "link_keys_folded_key",
     ] {
         assert!(
             declared
