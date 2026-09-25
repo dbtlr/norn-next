@@ -11,8 +11,8 @@
 //!
 //! [`ServingSet::insert`] and [`ServingSet::remove`] are how a vault joins and
 //! leaves, and [`ServingSet::replace`] is how an edited registration takes
-//! its name's place. Startup takes the first: [`Host::new`] inserts one entry per
-//! registration it was built from, so a vault gained later joins the set
+//! its name's place. Startup takes the first: [`Host::new`] inserts one entry
+//! per registration it was built from, so a vault gained later joins the set
 //! exactly the way every vault in it joined.
 //!
 //! Joining while the host runs carries a classification with it, and that is

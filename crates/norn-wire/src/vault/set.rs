@@ -18,14 +18,34 @@
 //! **An edit under a standing park is refused under the park's own code**, so
 //! a `vault set` never silently withdraws a park.
 //!
+//! **The registry file changes first, and the serving set after.** From the
+//! moment the edit finds the vault idle until it commits or is refused, every
+//! request that asks the vault for anything is refused `host/entry-held`, while
+//! `vault list` and `vault resolve` go on naming the registration as it stood.
+//! Once the file records the edit, the vault is served under the registration
+//! as edited, and the next attach reads its root, its schema source and its
+//! watch backend. An edit that changes nothing answers the registration as it
+//! stands and writes nothing.
+//!
+//! **A root move discards the derived state the old root left** — the derived
+//! database, its sidecars, the semantic sidecar and the shadow homes, as
+//! `vault unregister` discards them — so nothing the old root held is answered
+//! from the new one, and the next attach derives the new root under a new
+//! store epoch. The vault's own documents, at either root, are never touched.
+//!
 //! The other refusals are `host/unknown-vault` where no such registration
 //! exists, `host/entry-held` where the entry is in use,
-//! `host/registry-unwritable` where the registry file could not be replaced,
-//! and the pre-check codes a register meets where the edit moves the root:
-//! `host/duplicate-root` where another registration already reaches the new
-//! root, and `host/entry-untrusted` where the new root itself could not be
+//! `host/registry-unwritable` where the registry file could not be read or
+//! replaced, and the pre-check codes a register meets where the edit moves the
+//! root: `host/duplicate-root` where another registration already reaches the
+//! new root, and `host/entry-untrusted` where the new root itself could not be
 //! read — carrying the environmental-refusal reason, which is the rendering
-//! the registry recheck gives such a root.
+//! the registry recheck gives such a root. A root move is also refused as
+//! `vault unregister` is refused over the derived state it discards:
+//! `host/maintainer-contended` where another process maintains it, and
+//! `host/entry-untrusted` carrying the environmental-refusal reason where the
+//! data directory refused the maintainer lock or the discard. After any
+//! refusal the registration that stood before still stands.
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;

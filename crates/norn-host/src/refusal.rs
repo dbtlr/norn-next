@@ -67,10 +67,10 @@ impl Demand {
     ///
     /// `name` is the name that was asked for, and [`Demand::UnknownVault`] and
     /// [`Demand::EntryHeld`] are the demands that echo it: a demand for a
-    /// vault the host does not serve, or for one a registration change holds, has
-    /// no entry in service to read a name off, so the ask is all the refusal
-    /// has to name. Every other demand answers out of what it carries and
-    /// reads nothing from `name`. A caller holding the entry's lease answers
+    /// vault the host does not serve, or for one a registration change holds,
+    /// has no entry in service to read a name off, so the ask is all the
+    /// refusal has to name. Every other demand answers out of what it carries
+    /// and reads nothing from `name`. A caller holding the entry's lease answers
     /// through [`DemandLease::answer`](crate::DemandLease::answer), which is
     /// the entry point that supplies the name the lease itself holds; this one
     /// is the mapping that entry point renders, taking the name as a parameter

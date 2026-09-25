@@ -21579,7 +21579,10 @@ mod tests {
             assert_eq!(report.registration.schema_source, Some(source));
             assert_eq!(report.published, Published::state(TrustState::Unattached));
             assert_eq!(recorded(&ops, &name), Some(report.registration.clone()));
-            assert_eq!(listed_registrations(&host), [report.registration.clone()]);
+            assert_eq!(
+                listed_registrations(&host),
+                std::slice::from_ref(&report.registration)
+            );
             assert_eq!(attached_under(&host, &ops, &name), report.registration);
         }
 
@@ -21739,7 +21742,10 @@ mod tests {
 
             assert_eq!(report.registration.root, directory);
             assert_eq!(recorded(&ops, &name), Some(report.registration.clone()));
-            assert_eq!(listed_registrations(&host), [report.registration.clone()]);
+            assert_eq!(
+                listed_registrations(&host),
+                std::slice::from_ref(&report.registration)
+            );
             assert_eq!(attached_under(&host, &ops, &name).root, directory);
         }
 
@@ -21948,7 +21954,7 @@ mod tests {
                 &host.shared.entries.get(&name).expect("the vault is served")
             ));
             assert_eq!(recorded(&ops, &name), Some(standing.clone()));
-            assert_eq!(listed_registrations(&host), [standing.clone()]);
+            assert_eq!(listed_registrations(&host), std::slice::from_ref(&standing));
             assert_eq!(entry_park(&host, &name), None);
             assert_eq!(host.state(&name), answered(TrustState::Unattached));
             assert_eq!(attached_under(&host, &ops, &name), standing);
@@ -22015,7 +22021,10 @@ mod tests {
             assert_eq!(state, Err(ErrorDetail::entry_held(name.clone())));
             assert_eq!(listing, [standing]);
             let edited = edited.expect("the idle vault is edited");
-            assert_eq!(listed_registrations(&host), [edited.registration.clone()]);
+            assert_eq!(
+                listed_registrations(&host),
+                std::slice::from_ref(&edited.registration)
+            );
             assert_eq!(host.state(&name), answered(TrustState::Unattached));
             assert_eq!(status_of(&host, &name).registration, edited.registration);
             assert_eq!(
@@ -22130,7 +22139,7 @@ mod tests {
             let unwound = std::panic::catch_unwind(AssertUnwindSafe(|| set(&host, edit.clone())));
 
             assert!(unwound.is_err(), "the amendment did not unwind");
-            assert_eq!(listed_registrations(&host), [standing.clone()]);
+            assert_eq!(listed_registrations(&host), std::slice::from_ref(&standing));
             assert_eq!(host.state(&name), answered(TrustState::Unattached));
             attach_and_idle(&host, &name);
             ops.panic_in_amend.store(false, Ordering::SeqCst);

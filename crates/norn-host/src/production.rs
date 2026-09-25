@@ -1588,11 +1588,13 @@ impl EntryOps for ProductionEntryOps {
         }
     }
 
-    /// The retirement [`ProductionEntryOps::retire_state`] runs, writing the
-    /// file without the name. What is discarded is the derived database and
-    /// the files its journal leaves beside it, the semantic sidecar and its
-    /// own, and both shadow homes the vault's maintainership key resolves to;
-    /// the lock file and the derived directory holding it stay.
+    /// The lock is the one an attach takes, in the vault's derived directory,
+    /// held until the registry file's change has returned, and the discard
+    /// runs inside that change, between the read and the write that leaves
+    /// the name out. What is discarded is the derived database and the files
+    /// its journal leaves beside it, the semantic sidecar and its own, and
+    /// both shadow homes the vault's maintainership key resolves to; the lock
+    /// file and the derived directory holding it stay.
     fn retire(
         &self,
         registration: &Registration,
@@ -15183,7 +15185,7 @@ mod tests {
                 );
                 assert_eq!(
                     host.vault_list(&ListParams::new()).registrations,
-                    [standing.clone()],
+                    std::slice::from_ref(&standing),
                     "{edit:?}"
                 );
             }
