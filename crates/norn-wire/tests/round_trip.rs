@@ -5976,7 +5976,8 @@ fn doctor_names_a_duplicate_root_once_among_the_registry_problems() {
 /// **`doctor` names a root it cannot read once, among the registry's
 /// problems**: the park the entry raises when it cannot read its root's
 /// identity is left out of the roll-up's attention for each name a missing or
-/// unreadable root names, and kept for a name no such problem names. The
+/// unreadable root names, and kept for a name no such problem names. A park
+/// of any other code on such a name is a different cause and is kept. The
 /// counts are the roll-up's own.
 #[test]
 fn doctor_names_an_unreadable_root_once_among_the_registry_problems() {
@@ -5994,9 +5995,20 @@ fn doctor_names_an_unreadable_root_once_among_the_registry_problems() {
             EngineSection::absent(),
         )
     };
+    let parked_on_contention = VaultStatus::new(
+        Registration::new(name("delta"), vault_roots().remove(1)),
+        Published::parked(ErrorEnvelope::new(
+            "another process maintains this vault's derived state",
+            ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
+        )),
+        Drift::reload_pending(),
+        EngineStatus::off(),
+        EngineSection::absent(),
+    );
     let statuses = [
         parked_on_identity("alpha"),
         parked_on_identity("beta"),
+        parked_on_contention,
         parked_on_identity("gamma"),
     ];
     let roll_up = RollUp::of(&statuses);
@@ -6005,6 +6017,7 @@ fn doctor_names_an_unreadable_root_once_among_the_registry_problems() {
         RegistrySanity::problems([
             RegistryProblem::root_missing(name("alpha")),
             RegistryProblem::root_unreadable(name("beta"), "permission denied"),
+            RegistryProblem::root_missing(name("delta")),
         ])
         .expect("problems that name one"),
         [],
@@ -6016,6 +6029,8 @@ fn doctor_names_an_unreadable_root_once_among_the_registry_problems() {
         [
             Attention::reload_pending(name("alpha")),
             Attention::reload_pending(name("beta")),
+            Attention::parked(name("delta"), ReasonCode::HostMaintainerContended),
+            Attention::reload_pending(name("delta")),
             Attention::parked(name("gamma"), ReasonCode::HostEntryUntrusted),
             Attention::reload_pending(name("gamma")),
         ]
