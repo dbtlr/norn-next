@@ -1053,6 +1053,62 @@ fn a_cursor_past_what_the_store_counts_names_no_position_in_the_collection() {
     }
 }
 
+/// **An ordinal's or a finding's cursor carrying a schema fingerprint is
+/// refused as not taken**: no page of a document's collection mints one, so
+/// it names no position among the rows the get pages, even under the
+/// fingerprint the snapshot pins.
+#[test]
+fn a_collection_cursor_carrying_a_fingerprint_is_not_taken() {
+    let vault = paged_vault("get-cursor-fingerprint", 0);
+    let reading = page_of(
+        &vault
+            .get(
+                &getting("paged")
+                    .with_collection(CollectionSelector::Headings)
+                    .with_limit(1),
+            )
+            .report,
+    )
+    .1
+    .expect("a next page")
+    .snapshot()
+    .clone();
+    let forged = norn_wire::Snapshot::new(
+        reading.epoch.clone(),
+        reading.generation,
+        Some(SCHEMA.to_string()),
+        None,
+    );
+    let headings = PagedRows::Collection {
+        of: CollectionSelector::Headings,
+    };
+    for (selector, key, paged) in [
+        (
+            CollectionSelector::Headings,
+            CursorKey::ordinal(CollectionSelector::Headings, 1),
+            headings,
+        ),
+        (
+            CollectionSelector::Findings,
+            CursorKey::finding(FindingKind::UndeclaredTag, "paged.md", 1),
+            PagedRows::Finding,
+        ),
+    ] {
+        assert_eq!(
+            vault.refusal(
+                &getting("paged")
+                    .with_collection(selector)
+                    .with_after(Cursor::new(forged.clone(), key))
+            ),
+            PageRefusal::CursorNotTaken {
+                cursor: paged,
+                paged
+            },
+            "{selector:?}"
+        );
+    }
+}
+
 /// **An ordinal cursor continues its collection positionally**: minted on
 /// one document's headings, it continues another document's headings from
 /// the same position, as every builder's cursor continues its row type's

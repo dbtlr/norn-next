@@ -1041,7 +1041,10 @@ mod page_refusal_tests {
                 },
                 ReasonCode::RequestPartNotTaken,
             ),
-            (PageRefusal::SummaryNotPaged, ReasonCode::RequestPartNotTaken),
+            (
+                PageRefusal::SummaryNotPaged,
+                ReasonCode::RequestPartNotTaken,
+            ),
             (
                 PageRefusal::Store(StoreError::Damaged {
                     what: "a row".to_string(),

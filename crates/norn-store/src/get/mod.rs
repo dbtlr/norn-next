@@ -653,7 +653,8 @@ impl Snapshot {
             return Err(not_taken());
         }
         let index = i64::try_from(*index).map_err(|_| not_taken())?;
-        let moved = self.judge_reading(cursor, None, false, lookups)?;
+        let moved =
+            self.judge_unordered_reading(cursor, PagedRows::Collection { of: paged }, lookups)?;
         Ok((Some(index), moved))
     }
 
@@ -722,7 +723,7 @@ impl Snapshot {
                     return Err(not_taken());
                 }
                 let id = i64::try_from(*id).map_err(|_| not_taken())?;
-                let moved = self.judge_reading(cursor, None, false, lookups)?;
+                let moved = self.judge_unordered_reading(cursor, PagedRows::Finding, lookups)?;
                 (Some((kind.as_str(), id)), moved)
             }
         };

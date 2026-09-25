@@ -61,7 +61,10 @@
 //! key names the sort key and direction its page was read in, so such an
 //! answer refuses a document cursor continued in another key or direction
 //! too: the fingerprint says which schema an order is taken under, and the key
-//! says which order it is.
+//! says which order it is. Hits, facets, findings and a collection's ordinals
+//! are in no schema's order and no page of them mints a fingerprint, so an
+//! answer paging them refuses a cursor carrying one as naming no position
+//! among its rows rather than as an order that changed.
 //!
 //! **Two asymmetries follow from those rules.** A cursor minted without a
 //! sidecar revision and continued where a sidecar now answers reports nothing

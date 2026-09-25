@@ -569,9 +569,9 @@ fn a_floor_admits_the_hits_scored_at_or_above_it() {
     assert_eq!(hit_paths(&at(-1.0)), hit_paths(&whole));
 }
 
-/// **A cursor that is no hit's is refused, and so is one minted under a schema
-/// fingerprint**: a ranking is no schema's order, so a cursor naming one names
-/// a position in another order.
+/// **A cursor that is no hit's is refused, and so is a hit's carrying a
+/// schema fingerprint**: a ranking is no schema's order and no page of hits
+/// mints one, so such a cursor names no position among hits.
 #[test]
 fn a_cursor_that_is_no_position_among_hits_is_refused() {
     let searching_store = Searching::new("search-cursor-refused");
@@ -601,12 +601,13 @@ fn a_cursor_that_is_no_position_among_hits_is_refused() {
         ),
         hit.clone(),
     ));
-    assert!(
-        matches!(
-            searching_store.refusal(&typed),
-            PageRefusal::OrderChanged(_)
-        ),
-        "a hit cursor minted under a fingerprint was continued"
+    assert_eq!(
+        searching_store.refusal(&typed),
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Hit,
+            paged: PagedRows::Hit,
+        },
+        "a hit cursor carrying a fingerprint was not refused as not taken"
     );
     let raw = searching("lantern").with_after(Cursor::new(reading, hit));
     assert!(searching_store.search(&raw).moved.is_empty());

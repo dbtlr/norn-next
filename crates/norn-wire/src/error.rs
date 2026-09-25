@@ -380,9 +380,11 @@ pub enum ReasonCode {
     /// kind of row by a shape the request does not read — a tally's cursor
     /// of another grouping width or with a member naming no place in its
     /// key's order, a finding's cursor minted at another document than the
-    /// one a get pages, or a path order's document cursor carrying a sort
-    /// value. The detail is the rows the cursor names a position among and
-    /// the rows the request pages.
+    /// one a get pages, a path order's document cursor carrying a sort
+    /// value, a hit's, a facet's, a finding's or an ordinal's cursor carrying
+    /// a schema fingerprint, which no page of those rows mints, or a position
+    /// past what the store counts. The detail is the rows the cursor names a
+    /// position among and the rows the request pages.
     #[serde(rename = "request/cursor-not-taken")]
     RequestCursorNotTaken,
     /// `engine/not-enabled` — the vault has not enabled the rung the request

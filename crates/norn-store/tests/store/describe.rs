@@ -490,7 +490,7 @@ fn a_cursor_at_the_last_facet_continues_to_an_empty_page() {
 }
 
 /// **A cursor that names no position among facets is refused**: a
-/// document's, and a finding's.
+/// document's, and a tally's.
 #[test]
 fn a_cursor_that_is_no_facets_position_is_refused() {
     let describing_store = Describing::new("describe-cursor-refused");
@@ -530,6 +530,34 @@ fn a_cursor_that_is_no_facets_position_is_refused() {
         }
         .to_string(),
         "the cursor names a position among tallies, and the request pages facets"
+    );
+}
+
+/// **A facet's cursor carrying a schema fingerprint is refused as not
+/// taken**: no page of facets mints one, so it names no position among them,
+/// even under the fingerprint the snapshot pins.
+#[test]
+fn a_facet_cursor_carrying_a_fingerprint_is_not_taken() {
+    let describing_store = Describing::new("describe-cursor-fingerprint");
+    let reading = describing_store.describe(&describing()).snapshot;
+    let forged = Cursor::new(
+        norn_wire::Snapshot::new(
+            reading.epoch.clone(),
+            reading.generation,
+            Some(DESCRIBE_SCHEMA.to_string()),
+            None,
+        ),
+        CursorKey::facet(FacetKind::UndeclaredTags, TagStance::Report.as_str()),
+    );
+    assert_eq!(
+        describing_store
+            .snapshot()
+            .describe(&describing().with_after(forged), &describing_store.declared)
+            .expect_err("the cursor is refused"),
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Facet,
+            paged: PagedRows::Facet,
+        }
     );
 }
 

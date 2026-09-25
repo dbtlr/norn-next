@@ -44,7 +44,8 @@
 //! fingerprint, and one minted under another schema continues from the same
 //! place among whatever the snapshot now answers. A cursor minted under a
 //! request naming other kinds continues too, since its position is one in the
-//! whole order.
+//! whole order. A facet's cursor carrying a fingerprint was minted by no
+//! page, so it names no position among facets and is refused as not taken.
 
 mod statement;
 
@@ -190,7 +191,7 @@ impl Snapshot {
                 let CursorKey::Facet { kind, key, .. } = cursor.key() else {
                     return Err(PageRefusal::cursor_not_taken(cursor, PagedRows::Facet));
                 };
-                let moved = self.judge_reading(cursor, None, false, lookups)?;
+                let moved = self.judge_unordered_reading(cursor, PagedRows::Facet, lookups)?;
                 (Some((*kind, key.as_str())), moved)
             }
         };

@@ -232,7 +232,9 @@ pub enum PageRefusal {
     /// among them: a tally's of another grouping width than the request's or
     /// with a member naming no place in its key's order, a finding's at
     /// another path than the document a get pages, a path order's carrying a
-    /// sort value, or one whose position is past what the store counts.
+    /// sort value, a hit's, a facet's, a finding's or an ordinal's carrying a
+    /// schema fingerprint, which no page of those rows mints, or one whose
+    /// position is past what the store counts.
     CursorNotTaken { cursor: PagedRows, paged: PagedRows },
     /// The request answers a summary and carries a cursor. A summary answers
     /// every tally at once and is not paged, so no cursor names a position it

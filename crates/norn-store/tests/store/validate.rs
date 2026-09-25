@@ -748,6 +748,34 @@ fn a_finding_cursor_past_what_the_store_counts_is_refused() {
     );
 }
 
+/// **A finding's cursor carrying a schema fingerprint is refused as not
+/// taken**: no page of findings mints one, so it names no position among
+/// them, even under the fingerprint the snapshot pins.
+#[test]
+fn a_finding_cursor_carrying_a_fingerprint_is_not_taken() {
+    let validating_store = Validating::new("validate-cursor-fingerprint");
+    let reading = validating_store.validate(&validating()).snapshot;
+    let forged = Cursor::new(
+        norn_wire::Snapshot::new(
+            reading.epoch.clone(),
+            reading.generation,
+            Some(VALIDATE_SCHEMA.to_string()),
+            None,
+        ),
+        CursorKey::finding(FindingKind::UndeclaredTag, "a.md", 1),
+    );
+    assert_eq!(
+        validating_store
+            .snapshot()
+            .validate(&validating().with_after(forged), &declared())
+            .expect_err("the cursor is refused"),
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Finding,
+            paged: PagedRows::Finding,
+        }
+    );
+}
+
 /// **A declaration read from another schema than the snapshot pins is
 /// refused**, as every read refuses it, by a page and a summary alike: one
 /// read from another schema, and the declaration of a store with none, each

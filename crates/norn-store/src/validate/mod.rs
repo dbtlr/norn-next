@@ -292,7 +292,8 @@ impl Snapshot {
                     let CursorKey::Finding { kind, path, id, .. } = cursor.key() else {
                         return Err(not_taken());
                     };
-                    let moved = self.judge_reading(cursor, None, false, lookups)?;
+                    let moved =
+                        self.judge_unordered_reading(cursor, PagedRows::Finding, lookups)?;
                     let id = i64::try_from(*id).map_err(|_| not_taken())?;
                     (Some((kind.as_str(), path.as_str(), id)), moved)
                 }
