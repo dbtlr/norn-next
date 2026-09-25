@@ -209,6 +209,17 @@ impl Engine {
         self.embedder.model()
     }
 
+    /// Discard the sidecar at `path`, and every file its journal leaves beside
+    /// it, without opening it.
+    ///
+    /// For a projection nothing is going to open again: the vault its store
+    /// was derived from is no longer served. The caller holds the maintainer
+    /// lock over the directory, so no engine is open on the file. A sidecar
+    /// that is not there is already discarded.
+    pub fn discard_at(path: &Path) -> Result<(), EngineError> {
+        Ok(norn_db::remove_database(path)?)
+    }
+
     /// Discard the sidecar and open it again from zero.
     ///
     /// The resolution for [`EngineError::SidecarDamaged`], and always safe:
