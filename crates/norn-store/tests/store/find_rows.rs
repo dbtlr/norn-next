@@ -481,6 +481,80 @@ fn a_cursor_minted_while_its_sort_key_was_unknown_is_refused_once_it_is_known() 
     );
 }
 
+/// **A cursor is judged by the order its page was read in, not the one its
+/// request named.** Two requests by a key no document carries both read the
+/// path ascending, whatever direction each names, so a cursor minted by one
+/// goes on exactly under the other. A cursor minted while a document carried
+/// the key is refused once none does: its page was read in the key's order,
+/// and the request's now reads the path's.
+#[test]
+fn a_cursor_is_judged_by_the_order_its_page_was_read_in() {
+    let mut seeded = Seeded::new("find-cursor-read-order");
+    let priority = |direction| sorted(SortKey::field("priority"), direction).with_limit(2);
+    let by_path = Sort::new(SortKey::path(), Direction::Ascending);
+
+    let minted = seeded
+        .found(&priority(Direction::Descending))
+        .next
+        .expect("a next page");
+    let continued = seeded.found(&priority(Direction::Ascending).with_after(minted));
+    assert!(continued.moved.is_empty());
+    assert_eq!(paths(&continued), ["notes/c.md", "other/glossary.md"]);
+
+    let prioritized = |frontmatter| {
+        document("notes/d.md", "hash-d", "a body\n").with_frontmatter(frontmatter, &declared())
+    };
+    seeded.write(&[prioritized(Some(map(vec![("priority", string("high"))])))]);
+    let known = seeded
+        .found(&priority(Direction::Descending))
+        .next
+        .expect("a next page");
+    assert!(
+        matches!(known.key(), CursorKey::Document { order, .. } if *order == order_of(&priority(Direction::Descending))),
+        "the cursor names another order than its page was read in: {known:?}"
+    );
+    seeded.write(&[prioritized(None)]);
+    assert_eq!(
+        seeded
+            .snapshot()
+            .find(
+                &priority(Direction::Descending).with_after(known),
+                &declared()
+            )
+            .expect_err("a cursor minted in the key's order, continued in the path's"),
+        PageRefusal::OrderChanged(
+            CursorOrderChanged::minted_raw(None)
+                .in_orders(order_of(&priority(Direction::Descending)), by_path)
+        )
+    );
+}
+
+/// **A path order's cursor carries no sort value.** One that carries a value
+/// is no position in the path order, though it names that order and its
+/// fingerprint, and it is refused.
+#[test]
+fn a_path_order_cursor_carrying_a_sort_value_is_refused() {
+    let seeded = Seeded::new("find-cursor-path-value");
+    let by_path = request().with_limit(1);
+    let minted = seeded.found(&by_path).next.expect("a next page");
+    let CursorKey::Document { order, path, .. } = minted.key() else {
+        panic!("a find mints a document cursor: {minted:?}");
+    };
+    let forged = Cursor::new(
+        minted.snapshot().clone(),
+        CursorKey::document(order.clone(), Some("zzzz".to_string()), path.clone()),
+    );
+    assert_eq!(
+        seeded
+            .snapshot()
+            .find(&by_path.clone().with_after(forged), &declared())
+            .expect_err("a path order's cursor carrying a sort value"),
+        PageRefusal::OrderChanged(
+            CursorOrderChanged::minted_raw(None).in_orders(order_of(&by_path), order_of(&by_path))
+        )
+    );
+}
+
 /// **A find's declaration is the one the snapshot pins.** A declaration read
 /// from another schema than the pinned one — or from any schema where none is
 /// pinned, or from none where one is — is refused, naming both fingerprints,
