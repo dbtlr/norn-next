@@ -614,6 +614,28 @@ fn a_cursor_that_is_no_position_among_hits_is_refused() {
         },
         "a hit cursor carrying a fingerprint was not refused as not taken"
     );
+    let fused = CursorKey::hit(
+        RungSet::of([Rung::Lexical, Rung::Vector]).expect("a ladder"),
+        Score::new(1.0).expect("a score"),
+        "notes/lantern.md",
+    );
+    let typed_and_fused = searching("lantern").with_after(Cursor::new(
+        norn_wire::Snapshot::new(
+            reading.epoch.clone(),
+            reading.generation,
+            Some(SEARCH_SCHEMA.to_string()),
+            None,
+        ),
+        fused,
+    ));
+    assert_eq!(
+        searching_store.refusal(&typed_and_fused),
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Hit,
+            paged: PagedRows::Hit,
+        },
+        "a fingerprinted hit cursor under another ladder was judged by its ladder before its fingerprint"
+    );
     let raw = searching("lantern").with_after(Cursor::new(reading.clone(), hit));
     assert!(searching_store.search(&raw).moved.is_empty());
 }

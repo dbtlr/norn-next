@@ -491,9 +491,9 @@ pub enum Moved {
 ///
 /// The cursor names a position in an order the request does not read: an
 /// order taken under another schema's fingerprint, another sort key or
-/// direction, or a ranking by another ladder. The sequence its key names a position in is not the sequence the
-/// answer would walk, so the page is refused rather than answered from a
-/// position that means something else.
+/// direction, or a ranking by another ladder. The sequence its key names a
+/// position in is not the sequence the answer would walk, so the page is
+/// refused rather than answered from a position that means something else.
 ///
 /// The detail says which order was asked for and which one stands. The two
 /// fingerprints name the schema each order is taken under: `minted_under` is
