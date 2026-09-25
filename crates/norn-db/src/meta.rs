@@ -25,8 +25,8 @@
 //! Two readings sit outside that ceremony and are the substrate's own:
 //! [`crate::Database::adopt`] reads [`STORE_EPOCH`] to bind a connection to the
 //! lifetime it belongs to, and [`next_generation`] writes [`WRITE_GENERATION`],
-//! the counter a client seeds among its own keys where its rows carry
-//! generations.
+//! the count of committed writes a client seeds among its own keys where it
+//! counts its writes.
 //!
 //! **Every other key belongs to the client that writes it.** A key naming what
 //! a database was derived under, what it holds a projection of, or whether its
@@ -64,15 +64,20 @@ pub const DDL_FINGERPRINT: &str = "ddl_fingerprint";
 /// The digest of the schema this database held when it was created.
 pub const SCHEMA_DIGEST: &str = "schema_digest";
 
-/// The global write sequence a derived row draws its stamp from.
+/// The database's count of committed writes: every write that takes
+/// [`next_generation`] moves it by one, inside the transaction that commits
+/// the write.
 ///
-/// It is a **global write sequence**, not a per-derivation one: every
-/// derivation in the database draws from it, so two rows anywhere are
-/// comparable, and a single derivation touching two tables stamps both with
-/// the same number. **Generation orders; a timestamp only informs** — a clock
-/// can move backwards and a generation cannot.
+/// It is **one sequence for the whole database**, not one per derivation or
+/// per table, so its value says how far the database's writes had got. A
+/// client may also stamp rows with the generation their write took, which
+/// makes two of its rows anywhere comparable and stamps a single write
+/// touching two tables with one number in both; a client may equally stamp
+/// nothing and read the count alone, as a revision of the database's state.
+/// **Generation orders; a timestamp only informs** — a clock can move
+/// backwards and a generation cannot.
 ///
-/// A pinned scalar is not a derivation and takes none: [`put_meta`] writes the
+/// A pinned scalar written through [`put_meta`] takes none: it writes the
 /// value it was handed, so a key a client reconciles at open moves no counter
 /// and orders nothing.
 pub const WRITE_GENERATION: &str = "write_generation";

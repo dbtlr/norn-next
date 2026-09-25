@@ -4,8 +4,9 @@
 //! lane-1 records, so its whole shape is the projection's rows plus the pinned
 //! scalars that say which build wrote them, how far the feed was consumed, and
 //! how many committed mutations the sidecar has seen — its revision, which is
-//! the substrate's write generation (`norn_db::meta::WRITE_GENERATION`),
-//! seeded at create and taken by every committing transaction.
+//! the substrate's count of committed writes (`norn_db::meta::WRITE_GENERATION`),
+//! seeded at create and taken by every committing transaction. The sidecar
+//! reads the count alone and stamps no row with it.
 //!
 //! # A row is keyed by content and model, never by a main-database rowid
 //!
