@@ -112,10 +112,14 @@ pub enum Predicate {
         /// escape.
         glob: String,
     },
-    /// The document carries a link whose target is `target`.
+    /// The document holds a link that resolves to exactly the one document
+    /// `target` names: a link naming that document among others, or naming
+    /// none, does not match. A `target` that names several documents or none
+    /// matches no document, and is reported in band as an ambiguous or an
+    /// unknown target.
     #[non_exhaustive]
     LinksTo {
-        /// The link target.
+        /// The target naming the one document the links resolve to.
         target: ResolutionTarget,
     },
     /// The document is what `target` resolves to. Meaningful on `find` alone;
@@ -209,7 +213,9 @@ impl Predicate {
         Predicate::Path { glob: glob.into() }
     }
 
-    /// A link to `target` stands in the document.
+    /// The document holds a link that resolves to exactly the one document
+    /// `target` names; a `target` naming several documents or none is
+    /// reported in band and matches nothing.
     pub const fn links_to(target: ResolutionTarget) -> Self {
         Predicate::LinksTo { target }
     }
