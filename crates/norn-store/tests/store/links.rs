@@ -377,6 +377,25 @@ fn a_markdown_link_names_the_one_path_it_joins_to() {
     }
 }
 
+/// **A `%` spells a byte only before two hexadecimal digits**: `%+1` is no
+/// escape, so `[t](100%+1.md)` names the document whose name holds those
+/// three characters as written.
+#[test]
+fn a_percent_not_before_two_hexadecimal_digits_is_itself() {
+    let linked = Linked::holding(
+        "links-percent-sign",
+        Sensitive,
+        &[
+            holding("a/100%+1.md", Vec::new()),
+            holding("a/src.md", vec![markdown("100%+1.md")]),
+        ],
+    );
+    assert_eq!(
+        reading(&linked.links("a/src.md")[0]),
+        names(LinkHealth::Healthy, &["a/100%+1.md"])
+    );
+}
+
 /// **A link that names no document is not judged**: one written with a
 /// protocol and one naming an attachment each carry no document and the
 /// fourth health, on either root.

@@ -179,6 +179,7 @@ fn percent_decoded(text: &str) -> Option<String> {
         let spelled = (bytes[at] == b'%')
             .then(|| bytes.get(at + 1..at + 3))
             .flatten()
+            .filter(|digits| digits.iter().all(u8::is_ascii_hexdigit))
             .and_then(|digits| std::str::from_utf8(digits).ok())
             .and_then(|digits| u8::from_str_radix(digits, 16).ok());
         match spelled {
@@ -266,6 +267,8 @@ mod tests {
     fn a_percent_spells_a_byte_only_before_two_hexadecimal_digits() {
         assert_eq!(percent_decoded("100%").as_deref(), Some("100%"));
         assert_eq!(percent_decoded("%zz%4").as_deref(), Some("%zz%4"));
+        assert_eq!(percent_decoded("100%+1").as_deref(), Some("100%+1"));
+        assert_eq!(percent_decoded("%-1%+f").as_deref(), Some("%-1%+f"));
         assert_eq!(percent_decoded("a%2Fb%20c").as_deref(), Some("a/b c"));
         assert_eq!(percent_decoded("caf%C3%A9").as_deref(), Some("café"));
         assert_eq!(percent_decoded("%C3"), None);
