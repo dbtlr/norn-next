@@ -843,6 +843,124 @@ mod tests {
     use super::*;
     use crate::semantic::SemanticRefusal;
 
+    /// A store its own scratch directory holds, a snapshot read handle over
+    /// it, and the generation it stood at before `documents` were derived in
+    /// one write and the first `deaths` of them recorded dead in another.
+    struct Lagging {
+        _scratch: norn_testkit::scratch::Scratch,
+        store: norn_store::Store,
+        reader: std::sync::Arc<norn_store::SnapshotReader>,
+        before: i64,
+    }
+
+    impl Lagging {
+        fn new(label: &str, documents: usize, deaths: usize) -> Self {
+            let scratch = norn_testkit::scratch::Scratch::new(label);
+            let mut store = norn_store::Store::open(
+                scratch.join("store.sqlite3"),
+                norn_store::StoredPathOrder::Sensitive,
+                crate::DERIVATION_VERSION,
+            )
+            .expect("a store");
+            let before = store
+                .begin_request()
+                .write_generation()
+                .expect("the store's generation");
+            let path = |at: usize| {
+                norn_store::DocumentPath::new(&format!("d/{at:04}.md")).expect("a path")
+            };
+            let derived: Vec<norn_store::Change> = (0..documents)
+                .map(|at| {
+                    norn_store::Change::Upsert(norn_store::DocumentFacts::new(
+                        path(at),
+                        format!("hash-{at}"),
+                        "a body\n",
+                        7,
+                    ))
+                })
+                .collect();
+            let dead: Vec<norn_store::Change> = (0..deaths)
+                .map(|at| norn_store::Change::Death {
+                    path: path(at),
+                    provenance: norn_store::Provenance::WatcherRemoval,
+                })
+                .collect();
+            for changes in [derived, dead] {
+                store
+                    .begin_request()
+                    .apply_increment(norn_store::IncrementProvenance::Derived, changes, &[])
+                    .expect("one write");
+            }
+            let reader = std::sync::Arc::new(store.open_reader().reader.expect("a reader"));
+            Lagging {
+                _scratch: scratch,
+                store,
+                reader,
+                before,
+            }
+        }
+
+        fn snapshot(&self) -> Snapshot {
+            self.reader
+                .try_take()
+                .expect("a handle nothing reads")
+                .establish()
+                .snapshot
+                .expect("a snapshot")
+        }
+
+        /// Both feeds' watermarks at `generation`, in this store's lifetime.
+        fn marks(&self, generation: i64) -> Watermarks {
+            let at = Some(Watermark {
+                store_epoch: self.store.epoch().to_string(),
+                generation,
+            });
+            Watermarks {
+                documents: at.clone(),
+                tombstones: at,
+            }
+        }
+    }
+
+    /// **The margin is the drain lag in feed rows, never in write
+    /// generations.** Forty documents derived in one write and thirty of them
+    /// recorded dead in another trail watermarks taken before both by the ten
+    /// documents that stand and the thirty deaths — two generations, forty
+    /// rows. Watermarks taken after both trail by nothing.
+    #[test]
+    fn the_margin_is_the_drain_lag_in_feed_rows() {
+        let lagging = Lagging::new("search-margin-rows", 40, 30);
+        let snapshot = lagging.snapshot();
+        let now = snapshot.reading().write_generation();
+        assert_eq!(now, lagging.before + 2, "the writes took other generations");
+        assert_eq!(margin(&snapshot, &lagging.marks(lagging.before)), Ok(40));
+        assert_eq!(margin(&snapshot, &lagging.marks(now)), Ok(0));
+    }
+
+    /// **The margin is capped, and a lag nothing can read is the cap.** More
+    /// feed rows past the watermarks than the cap make a margin of the cap; a
+    /// feed that has completed no drain, or whose watermark was taken in
+    /// another store lifetime, trails by a count nothing reads, and the margin
+    /// is the cap.
+    #[test]
+    fn the_margin_is_capped_and_an_unreadable_lag_is_the_cap() {
+        let cap = VECTOR_MARGIN_CAP as usize;
+        let lagging = Lagging::new("search-margin-cap", cap + 8, 0);
+        let snapshot = lagging.snapshot();
+        assert_eq!(margin(&snapshot, &lagging.marks(lagging.before)), Ok(cap));
+
+        let now = snapshot.reading().write_generation();
+        let mut undrained = lagging.marks(now);
+        undrained.tombstones = None;
+        assert_eq!(margin(&snapshot, &undrained), Ok(cap));
+        let mut elsewhere = lagging.marks(now);
+        elsewhere.documents = Some(Watermark {
+            store_epoch: "another lifetime".to_string(),
+            generation: now,
+        });
+        assert_eq!(margin(&snapshot, &elsewhere), Ok(cap));
+    }
+
     fn paths(ranked: &[Ranked]) -> Vec<&str> {
         ranked.iter().map(|hit| hit.path.as_str()).collect()
     }
