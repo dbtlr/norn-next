@@ -291,7 +291,6 @@ fn a_count_answers_under_the_reading_of_its_snapshot() {
         u64::try_from(generation).expect("a generation at or above zero"),
         "the answer names another generation than its snapshot read"
     );
-    assert_eq!(answered.answer.reading.ladder, None);
     assert!(answered.answer.is_complete());
     let [tally] = answered.answer.report.rows.as_slice() else {
         panic!(

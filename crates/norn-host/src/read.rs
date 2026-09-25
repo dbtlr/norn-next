@@ -76,7 +76,6 @@ impl HoldReading {
             trust,
             self.store().epoch(),
             generation,
-            None,
         ))
     }
 }
