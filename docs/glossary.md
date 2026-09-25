@@ -62,7 +62,7 @@ The trust state and store generation a vault report was answered under, carried 
 _Avoid_: Reading (unqualified; a walk refusal that stands is also a reading)
 
 **Search ladder**:
-The ordered rungs a ranked search may answer from: a model-free lexical floor, then model-backed rungs a vault enables. The lexical floor and vectors are retrieval rungs, which find candidates of their own; expansion and re-ranking are enhancements above them, which expand the query for or re-order what a retrieval rung found. Every ladder holds at least one retrieval rung. A request may run fewer rungs than the vault enables.
+The ordered rungs a ranked search may answer from: a model-free lexical floor, then model-backed rungs a vault enables. The lexical floor and vectors are retrieval rungs, which find candidates of their own; expansion and re-ranking act on retrieval, expanding the query for or re-ordering what a retrieval rung found. Every ladder holds at least one retrieval rung. A request may run fewer rungs than the vault enables.
 
 **Field universe**:
 The exact set of field names a vault can be asked about: the keys its vault schema declares united with the keys its documents actually carry.

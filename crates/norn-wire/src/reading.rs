@@ -243,7 +243,7 @@ impl RungReport {
 #[non_exhaustive]
 pub enum MalformedLadder {
     /// No rung it declares retrieves, so there was nothing to rank: the
-    /// empty list, or enhancers alone.
+    /// empty list, or expansion and re-ranking alone.
     NoRetrievalRung,
     /// A rung is declared twice, or before a rung the ladder runs ahead of it.
     OutOfLadderOrder,

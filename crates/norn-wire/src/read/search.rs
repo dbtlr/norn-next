@@ -20,14 +20,13 @@
 //! decided what a new selection resolves to should fail to compile rather than
 //! fall into a default arm.
 //!
-//! **A ladder holds a retrieval rung.** Enhancement is a tier above
-//! retrieval: a retrieval rung — the lexical floor, or vectors — finds
-//! candidates of its own, and an enhancer — expansion, re-ranking — only
-//! expands the query for, or re-orders, what a retrieval rung found. A set
-//! holding no retrieval rung, the empty set or enhancers alone, would answer
-//! nothing at all, so it is refused where a set is built, where one is read,
-//! and in the schema a surface validates against alike, and so is a
-//! subtraction that leaves out every retrieval rung. Which retrieval rungs a
+//! **A ladder holds a retrieval rung.** A retrieval rung — the lexical floor,
+//! or vectors — finds candidates of its own; expansion and re-ranking only
+//! expand the query for, or re-order, what a retrieval rung found. A set
+//! holding no retrieval rung, the empty set or expansion and re-ranking alone,
+//! would answer nothing at all, so it is refused where a set is built, where
+//! one is read, and in the schema a surface validates against alike, and so is
+//! a subtraction that leaves out every retrieval rung. Which retrieval rungs a
 //! vault enables and has an engine for is a fact the wire cannot see: a
 //! selection that resolves to no retrieval rung there is the host's refusal,
 //! described on [`RungSelection`].
@@ -76,9 +75,9 @@ pub const RUNG_DEPTH: u32 = 1024;
 /// A set of rungs, or what a subtraction leaves, holding no retrieval rung.
 ///
 /// Every search runs at least one retrieval rung
-/// ([`Rung::retrieves`]): an enhancer expands or re-orders the candidates a
-/// retrieval rung found, so a set holding none — the empty set, or enhancers
-/// alone — has nothing to answer from.
+/// ([`Rung::retrieves`]): expansion and re-ranking expand or re-order the
+/// candidates a retrieval rung found, so a set holding none — the empty set, or
+/// expansion and re-ranking alone — has nothing to answer from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NoRetrievalRung;
 
@@ -185,7 +184,7 @@ impl JsonSchema for RungSet {
         let rung = generator.subschema_for::<Rung>();
         json_schema!({
             "type": "array",
-            "description": "A set of rungs, in ladder order, each once. It holds at least one retrieval rung: every search runs the lexical floor or vectors, and an enhancer re-orders or expands what a retrieval rung found.",
+            "description": "A set of rungs, in ladder order, each once. It holds at least one retrieval rung: every search runs the lexical floor or vectors, and expansion or re-ranking expands or re-orders what a retrieval rung found.",
             "items": rung,
             "minItems": 1,
             "uniqueItems": true,
