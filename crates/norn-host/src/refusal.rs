@@ -402,8 +402,9 @@ pub(crate) fn page_refusal(refusal: PageRefusal) -> PageRefused {
 /// might, so a message is not redacted but left out: a redaction can only
 /// strike the spellings it knows, and the driver may spell a path another way
 /// or name a sidecar beside it. What is kept is what a caller can act on —
-/// the act that failed, the store's damage verdict, and the store's own
-/// bounds and fingerprints. The whole account stays on the `StoreError`,
+/// the act that failed, SQLite's own description of the result code it
+/// failed with (a full disk, a read-only database), the store's damage
+/// verdict, and the store's own bounds and fingerprints. The whole account stays on the `StoreError`,
 /// where a log line that needs it reads it.
 ///
 /// The match carries no wildcard, so a variant minted in the store takes its
@@ -413,9 +414,17 @@ pub(crate) fn store_refusal_told(error: &StoreError) -> String {
         StoreError::Path { problem, .. } => {
             format!("a path handed to the store is not a document path: {problem}")
         }
-        StoreError::Sql { operation, .. } | StoreError::Lifecycle { operation, .. } => {
-            format!("{operation} failed")
+        StoreError::Sql {
+            operation,
+            condition: Some(condition),
+            ..
+        } => format!("{operation} failed: {condition}"),
+        StoreError::Sql {
+            operation,
+            condition: None,
+            ..
         }
+        | StoreError::Lifecycle { operation, .. } => format!("{operation} failed"),
         StoreError::Damaged { .. } => "the store is damaged".to_string(),
         StoreError::Bound { what, limit, given } => {
             format!("{what} holds at most {limit}, and {given} were given")
@@ -1385,10 +1394,14 @@ mod page_refusal_tests {
             (
                 PageRefusal::Store(StoreError::Sql {
                     operation: "reading a page",
-                    message: "disk I/O error".to_string(),
+                    condition: Some("disk I/O error"),
+                    message: "disk I/O error reading /data/notes/store.db".to_string(),
                 }),
                 ReasonCode::HostReadFailed,
-                ErrorDetail::read_failed(ReadFailure::statement(), "reading a page failed"),
+                ErrorDetail::read_failed(
+                    ReadFailure::statement(),
+                    "reading a page failed: disk I/O error",
+                ),
             ),
         ]
     }

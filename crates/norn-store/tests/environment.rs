@@ -274,7 +274,10 @@ fn a_store_schema_refused_at_a_statement_names_the_statement() {
         error.damage().is_none(),
         "a read-only database was typed as damage: {error:?}"
     );
-    let StoreError::Sql { operation, message } = &error else {
+    let StoreError::Sql {
+        operation, message, ..
+    } = &error
+    else {
         panic!("a refused creation reported {error:?} rather than a refused operation");
     };
     assert!(operation.contains("store schema"), "{operation}");

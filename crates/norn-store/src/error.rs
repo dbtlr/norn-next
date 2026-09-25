@@ -40,6 +40,10 @@ pub enum StoreError {
     /// never which write.
     Sql {
         operation: &'static str,
+        /// SQLite's own description of the result code the driver refused
+        /// with — the library's static string for that code, which names no
+        /// file — or `None` where the refusal carries no result code.
+        condition: Option<&'static str>,
         message: String,
     },
     /// A file-lifecycle step the driver does not cover failed: preparing the
@@ -105,7 +109,9 @@ impl fmt::Display for StoreError {
             StoreError::Path { path, problem } => {
                 write!(f, "`{path}` is not a document path: {problem}")
             }
-            StoreError::Sql { operation, message } => write!(f, "{operation} failed: {message}"),
+            StoreError::Sql {
+                operation, message, ..
+            } => write!(f, "{operation} failed: {message}"),
             StoreError::Lifecycle {
                 operation,
                 path,
@@ -183,7 +189,15 @@ fn schema_named(fingerprint: Option<&str>) -> String {
 impl From<DbError> for StoreError {
     fn from(error: DbError) -> Self {
         match error {
-            DbError::Sql { operation, message } => StoreError::Sql { operation, message },
+            DbError::Sql {
+                operation,
+                condition,
+                message,
+            } => StoreError::Sql {
+                operation,
+                condition,
+                message,
+            },
             DbError::Lifecycle {
                 operation,
                 path,
