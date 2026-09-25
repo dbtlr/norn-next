@@ -3205,6 +3205,9 @@ impl EnvironmentalFailure for norn_fs::NormalizerError {}
 impl sealed::Sealed for norn_fs::ExclusionError {}
 impl EnvironmentalFailure for norn_fs::ExclusionError {}
 
+/// A refusal about the vault's own files, told in its own words, which name
+/// the vault path the caller registered. A refusal met in the host's data
+/// directory goes through [`data_dir_effect`] instead.
 fn effect(error: impl EnvironmentalFailure) -> JobFailure {
     environmental(error.to_string())
 }
@@ -3213,6 +3216,9 @@ fn effect(error: impl EnvironmentalFailure) -> JobFailure {
 /// the shadow home — as the environmental failure it is, told without the
 /// directory's path: that directory holds the derived database, and a caller
 /// told where it is opens its own connection over it.
+///
+/// A refusal about the vault's own files goes through [`effect`] instead, and
+/// names the vault path the caller registered.
 fn data_dir_effect(error: norn_fs::Refusal) -> JobFailure {
     environmental(crate::refusal::data_dir_refusal_told(&error))
 }

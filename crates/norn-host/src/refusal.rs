@@ -403,8 +403,9 @@ pub(crate) fn page_refusal(refusal: PageRefusal) -> PageRefused {
 /// strike the spellings it knows, and the driver may spell a path another way
 /// or name a sidecar beside it. What is kept is what a caller can act on —
 /// the act that failed, SQLite's own description of the result code it
-/// failed with (a full disk, a read-only database), the store's damage
-/// verdict, and the store's own bounds and fingerprints. The whole account stays on the `StoreError`,
+/// failed with (a full disk, a read-only database), that the store found its
+/// data damaged (never the store's words for what it found), and the store's
+/// own bounds and fingerprints. The whole account stays on the `StoreError`,
 /// where a log line that needs it reads it.
 ///
 /// The match carries no wildcard, so a variant minted in the store takes its
