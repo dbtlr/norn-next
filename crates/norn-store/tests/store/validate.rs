@@ -533,7 +533,7 @@ fn a_summary_tallies_what_a_drain_answers() {
             .collect();
         assert_eq!(tallied, expected, "{params:?}");
     }
-    let (_, report) = validating_store
+    let (_, _, report) = validating_store
         .validate(&validating().summarized())
         .into_report();
     assert!(

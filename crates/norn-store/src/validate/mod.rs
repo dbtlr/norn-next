@@ -34,7 +34,9 @@
 //! shares, so a part that cannot be applied is reported as a find reports it,
 //! and **a `resolves` part is not applicable**: it answers which documents a
 //! target names, which is a find, so a validate reports it
-//! ([`Unsatisfied::ResolvesNotApplicable`]) and filters nothing by it.
+//! ([`Unsatisfied::ResolvesNotApplicable`]) and filters nothing by it. A part
+//! comparing dates of both offset spellings is advised as a find's is, in
+//! [`Validated::advisories`].
 //!
 //! **A path part judges the path the finding stands at**, so a finding where
 //! no document row stands — a file that could not be read — is found by a
@@ -61,8 +63,8 @@ mod statement;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    Cursor, CursorKey, FindingKind, FindingRow, KindTally, Moved, Page, Severity, Unsatisfied,
-    ValidateParams, ValidateReport,
+    AnswerAdvisory, Cursor, CursorKey, FindingKind, FindingRow, KindTally, Moved, Page, Severity,
+    Unsatisfied, ValidateParams, ValidateReport,
 };
 
 use crate::error::{self, StoreError};
@@ -77,8 +79,8 @@ use crate::store::Snapshot;
 use statement::{Findings, compose_findings};
 pub use statement::{VALIDATE_STATEMENTS, ValidateStatement};
 
-/// What [`Snapshot::validate`] answers: the findings or their tally, and what
-/// the request could not apply.
+/// What [`Snapshot::validate`] answers: the findings or their tally, what the
+/// request could not apply, and what the parts it applied assumed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Validated {
     /// The page of findings, or the tally of them.
@@ -86,6 +88,9 @@ pub struct Validated {
     /// The parts of the request that could not be applied as asked, in the
     /// order the request names them.
     pub unsatisfied: Vec<Unsatisfied>,
+    /// What the parts that were applied assumed: a mixed-offset comparison,
+    /// once per key, in the order the request names the parts.
+    pub advisories: Vec<AnswerAdvisory>,
     /// The reading the answer was established under, as a cursor carries it.
     /// A validate's order is no field's, so it names no fingerprint.
     pub snapshot: norn_wire::Snapshot,
@@ -115,16 +120,16 @@ pub enum Validation {
 }
 
 impl Validated {
-    /// The unsatisfied parts and the report a handler wraps in a
-    /// [`norn_wire::VaultAnswer`].
-    pub fn into_report(self) -> (Vec<Unsatisfied>, ValidateReport) {
+    /// The unsatisfied parts, the advisories and the report a handler wraps
+    /// in a [`norn_wire::VaultAnswer`].
+    pub fn into_report(self) -> (Vec<Unsatisfied>, Vec<AnswerAdvisory>, ValidateReport) {
         let report = match self.answer {
             Validation::Findings { rows, next, moved } => {
                 ValidateReport::findings(Page::new(rows, next, moved))
             }
             Validation::Summary { by_kind } => ValidateReport::summary(by_kind),
         };
-        (self.unsatisfied, report)
+        (self.unsatisfied, self.advisories, report)
     }
 }
 
@@ -308,11 +313,14 @@ impl Snapshot {
             let rows = self.finding_rows(&mut lookups.ran, bases)?;
             Validation::Findings { rows, next, moved }
         };
+        let advisories =
+            self.offset_advisories(&narrowing.conjunction.date_comparisons([]), lookups)?;
         let unsatisfied = self.resolve(narrowing.conjunction.reports, declared, lookups)?;
         work.statements = self.counters().statements_executed() - started;
         Ok(Validated {
             answer,
             unsatisfied,
+            advisories,
             snapshot,
             work,
         })

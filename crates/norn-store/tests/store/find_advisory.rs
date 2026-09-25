@@ -1,6 +1,8 @@
-//! The advisory a find answers beside its rows: a comparison that decided the
-//! answer's order or membership compared a date stating an offset against one
-//! stating none.
+//! The advisory a read answers beside its rows: a comparison that decided the
+//! answer's order, grouping or membership compared a date stating an offset
+//! against one stating none. A find carries the most cases; a count, a
+//! validate and a search raise it through the same machinery, and each is
+//! held to raising it over a mixed vault and not over a uniform one.
 //!
 //! Every case derives its documents under a declaration whose `due` key carries
 //! a dated order, written in the two spellings the order parts: `2026-03-04Z`
@@ -14,11 +16,15 @@ use std::sync::Arc;
 use crate::common::{Scratch, dated_order, document, write_documents};
 use crate::find::{failure_of, map, plan_of, request, string};
 use norn_store::{
-    ContentModel, FieldDeclaration, FindPlan, FindStatement, Found, FrontmatterValue, Snapshot,
-    SnapshotReader, Store, TypedOrder, induced_failure,
+    ContentModel, Counted, FieldDeclaration, FindPlan, FindStatement, Found, FrontmatterValue,
+    LexicalQuery, Searched, Snapshot, SnapshotReader, Store, TypedOrder, Validated,
+    induced_failure,
 };
 use norn_testkit::explain::Access;
-use norn_wire::{AnswerAdvisory, ComparedBy, Direction, FindParams, Predicate, Sort, SortKey};
+use norn_wire::{
+    AnswerAdvisory, ComparedBy, CountParams, Direction, FindParams, GroupKey, Predicate, Sort,
+    SortKey, ValidateParams, VaultAddress, VaultName,
+};
 
 /// The statements the offset-spelling bar judges.
 pub(crate) const OFFSET_PROBES: [FindStatement; 1] = [FindStatement::OffsetSpellings];
@@ -146,11 +152,33 @@ impl Vault {
         self.find_under(params, &declared())
     }
 
+    fn count(&self, params: &CountParams) -> Counted {
+        self.snapshot()
+            .count(params, &declared())
+            .unwrap_or_else(|refusal| panic!("a count of {params:?}: {refusal}"))
+    }
+
+    fn validate(&self, params: &ValidateParams) -> Validated {
+        self.snapshot()
+            .validate(params, &declared())
+            .unwrap_or_else(|refusal| panic!("a validate of {params:?}: {refusal}"))
+    }
+
+    fn search(&self, query: &LexicalQuery) -> Searched {
+        self.snapshot()
+            .search(query, &declared())
+            .unwrap_or_else(|refusal| panic!("a search of {query:?}: {refusal}"))
+    }
+
     fn plans(&self, params: &FindParams) -> Vec<FindPlan> {
         self.snapshot()
             .find_plans(params, &declared())
             .expect("the plans of a request")
     }
+}
+
+fn address() -> VaultAddress {
+    VaultAddress::name(VaultName::new("notes").expect("a vault name"))
 }
 
 fn by_due(direction: Direction) -> FindParams {
@@ -167,6 +195,16 @@ fn sort_advised() -> Vec<AnswerAdvisory> {
 
 fn predicate_advised() -> Vec<AnswerAdvisory> {
     vec![AnswerAdvisory::mixed_offset("due", ComparedBy::Predicate)]
+}
+
+fn group_advised() -> Vec<AnswerAdvisory> {
+    vec![AnswerAdvisory::mixed_offset("due", ComparedBy::Group)]
+}
+
+/// A stated bound over `due`, which compares across spellings in the mixed
+/// vault and against one spelling in the stated one.
+fn stated_bound() -> Predicate {
+    Predicate::after("due", "2026-03-05Z")
 }
 
 /// **A date order over both spellings is advised, whatever the page holds.**
@@ -404,4 +442,84 @@ fn a_date_keys_offset_spellings_are_two_seeks_of_the_offset_index() {
         .expect("dropping the offset index");
     let plans = vault.plans(&params);
     failure_of("document_fields_offset dropped", || judge(&plans));
+}
+
+/// **A count grouping by a dated key over both spellings is advised, as a
+/// grouping.** A grouping makes one tally of the dates reading as one instant
+/// and orders the tallies, so it compares the key's dates as an order does;
+/// its conjunction's parts are advised as a find's are, after the grouping. A
+/// grouping by an undated key, and a count over one spelling, are not
+/// advised.
+#[test]
+fn a_count_grouping_or_comparing_dates_across_spellings_is_advised() {
+    let vault = Vault::mixed("advisory-count", &declared());
+    let by_due = CountParams::new(address()).with_by([GroupKey::field("due")]);
+    assert_eq!(vault.count(&by_due).advisories, group_advised());
+    assert_eq!(
+        vault
+            .count(&CountParams::new(address()).with_predicates([stated_bound()]))
+            .advisories,
+        predicate_advised()
+    );
+    let both = vault.count(&by_due.clone().with_predicates([stated_bound()]));
+    assert_eq!(
+        both.advisories,
+        [
+            AnswerAdvisory::mixed_offset("due", ComparedBy::Group),
+            AnswerAdvisory::mixed_offset("due", ComparedBy::Predicate),
+        ]
+    );
+    assert!(both.unsatisfied.is_empty(), "{:?}", both.unsatisfied);
+    assert_eq!(
+        vault
+            .count(&CountParams::new(address()).with_by([GroupKey::field("count")]))
+            .advisories,
+        []
+    );
+
+    let uniform = Vault::stated("advisory-count-uniform");
+    assert_eq!(
+        uniform
+            .count(&by_due.with_predicates([stated_bound()]))
+            .advisories,
+        []
+    );
+}
+
+/// **A validate whose conjunction compares dates across spellings is
+/// advised**, whatever findings stand: the part decided which documents'
+/// findings it admits. The same part over one spelling is not advised.
+#[test]
+fn a_validate_comparing_dates_across_spellings_is_advised() {
+    let params = ValidateParams::new(address()).with_predicates([stated_bound()]);
+    let vault = Vault::mixed("advisory-validate", &declared());
+    assert_eq!(vault.validate(&params).advisories, predicate_advised());
+    assert_eq!(
+        vault.validate(&params.clone().summarized()).advisories,
+        predicate_advised()
+    );
+
+    let uniform = Vault::stated("advisory-validate-uniform");
+    assert_eq!(uniform.validate(&params).advisories, []);
+}
+
+/// **A search whose conjunction compares dates across spellings is
+/// advised.** The same part over one spelling is not, and a query holding no
+/// word runs no page, so its conjunction compared no date.
+#[test]
+fn a_search_comparing_dates_across_spellings_is_advised() {
+    let query = LexicalQuery::new("body").with_predicates([stated_bound()]);
+    let vault = Vault::mixed("advisory-search", &declared());
+    let searched = vault.search(&query);
+    assert_eq!(searched.advisories, predicate_advised());
+    assert!(!searched.hits.is_empty(), "the query matches every body");
+    assert_eq!(
+        vault
+            .search(&LexicalQuery::new("  ").with_predicates([stated_bound()]))
+            .advisories,
+        []
+    );
+
+    let uniform = Vault::stated("advisory-search-uniform");
+    assert_eq!(uniform.search(&query).advisories, []);
 }

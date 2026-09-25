@@ -517,6 +517,7 @@ fn unsatisfied_parts() -> Vec<Unsatisfied> {
 fn answer_advisories() -> Vec<AnswerAdvisory> {
     vec![
         AnswerAdvisory::mixed_offset("due", ComparedBy::Sort),
+        AnswerAdvisory::mixed_offset("due", ComparedBy::Group),
         AnswerAdvisory::mixed_offset("due", ComparedBy::Predicate),
     ]
 }
@@ -3080,6 +3081,10 @@ fn an_answer_advisory_is_an_object_tagged_advisory() {
     assert_eq!(
         wire(&AnswerAdvisory::mixed_offset("due", ComparedBy::Sort)),
         r#"{"advisory":"mixed_offset","key":"due","compared_by":"sort"}"#
+    );
+    assert_eq!(
+        wire(&AnswerAdvisory::mixed_offset("due", ComparedBy::Group)),
+        r#"{"advisory":"mixed_offset","key":"due","compared_by":"group"}"#
     );
     assert_eq!(
         wire(&AnswerAdvisory::mixed_offset("due", ComparedBy::Predicate)),

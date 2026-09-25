@@ -4,9 +4,9 @@
 use std::collections::BTreeSet;
 
 use norn_db::rusqlite::types::Value;
-use norn_wire::{ComparedBy, Pattern, Predicate, Unsatisfied};
+use norn_wire::{Pattern, Predicate, Unsatisfied};
 
-use super::advisory::DateComparison;
+use super::advisory::{Compared, DateComparison};
 use super::filter::{Filter, ReadFilter};
 use super::naming::Naming;
 use super::run::StatementFailure;
@@ -461,15 +461,12 @@ fn date_comparison(predicate: &Predicate, declared: &ContentModel) -> Option<Dat
         Predicate::In { key, values, .. } => (key, values.iter().collect()),
         _ => return None,
     };
-    let order = declared.typed_order(key).filter(|order| order.is_dated())?;
-    Some(DateComparison {
-        key: key.clone(),
-        by: ComparedBy::Predicate,
-        named: values
-            .into_iter()
-            .filter_map(|value| order.read(value).and_then(|(_, offset)| offset))
-            .collect(),
-    })
+    let order = declared.typed_order(key)?;
+    let named = values
+        .into_iter()
+        .filter_map(|value| order.read(value).and_then(|(_, offset)| offset))
+        .collect();
+    DateComparison::of_dated(key, Compared::Parts(named), declared)
 }
 
 /// The key a predicate names, where it names one.

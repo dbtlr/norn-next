@@ -1423,7 +1423,7 @@ fn an_answer_advisory_advertises_its_tag_and_where_it_compared() {
     let compared_by = schema_of::<ComparedBy>();
     assert_eq!(
         sorted(branches(&compared_by).iter().filter_map(string_constant)),
-        sorted(["sort", "predicate"])
+        sorted(["sort", "group", "predicate"])
     );
 }
 

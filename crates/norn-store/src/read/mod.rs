@@ -49,7 +49,7 @@ use crate::search::SearchStatement;
 use crate::store::Snapshot;
 use crate::validate::ValidateStatement;
 
-pub(crate) use advisory::DateComparison;
+pub(crate) use advisory::{Compared, DateComparison};
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
 pub(crate) use filter::glob_test;
 pub(crate) use filter::{Binder, Filter};

@@ -265,9 +265,12 @@ pub enum AnswerAdvisory {
     /// from UTC against one stating none, and read the one stating none at
     /// offset zero. It speaks for every value the key holds in the vault the
     /// answer was read from, not only for the rows the answer carries: an
-    /// order places each row among those values, and a predicate compares its
-    /// own value against each of them to decide which documents it keeps. So
-    /// it can stand beside rows that all write one spelling.
+    /// order places each row among those values, a grouping decides which of
+    /// them are one group, and a predicate compares its own value against
+    /// each of them to decide which documents it keeps. So it can stand
+    /// beside rows that all write one spelling. `find`, `count`, `validate`
+    /// and `search` each raise it where their order, grouping or conjunction
+    /// made such a comparison.
     #[non_exhaustive]
     MixedOffset {
         /// The date key whose values were compared.
@@ -290,13 +293,17 @@ impl AnswerAdvisory {
 
 /// Where a request compared a key's values.
 ///
-/// On the wire the flat string itself: `"sort"`, `"predicate"`.
+/// On the wire the flat string itself: `"sort"`, `"group"`, `"predicate"`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ComparedBy {
     /// The order the rows are sorted in.
     Sort,
+    /// A count's grouping, which makes one group of the values that compare
+    /// equal and orders the groups. It is its own place rather than a sort
+    /// because it decides which values are one tally, not only their order.
+    Group,
     /// A predicate comparing the key's values against a value the request
     /// names: an equality, an inequality, a membership, or a before or after
     /// bound.

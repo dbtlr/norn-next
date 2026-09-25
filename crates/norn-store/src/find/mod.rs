@@ -178,14 +178,14 @@ use std::collections::BTreeSet;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    AnswerAdvisory, Column, ComparedBy, Cursor, CursorKey, Direction, DocumentRow, FindParams,
-    FindReport, Moved, Page, Sort, SortKey, Unsatisfied,
+    AnswerAdvisory, Column, Cursor, CursorKey, Direction, DocumentRow, FindParams, FindReport,
+    Moved, Page, Sort, SortKey, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
-    DateComparison, FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter,
+    Compared, DateComparison, FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter,
     ReadStatement, Report, ResolvesPart, page_limit,
 };
 use crate::store::Snapshot;
@@ -348,7 +348,8 @@ struct Compiled<'a> {
     /// empties every section.
     matches_nothing: bool,
     /// The comparisons the order and the conjunction make over keys with a
-    /// dated order: the order's first, then the parts' in request order.
+    /// dated order: the order's first, then the parts' in request order, and
+    /// none where a part matches nothing.
     comparisons: Vec<DateComparison>,
 }
 
@@ -518,11 +519,7 @@ impl Snapshot {
                 CursorKey::document(compiled.order.wire(), at.sort, at.path),
             )
         });
-        let advisories = if compiled.matches_nothing {
-            Vec::new()
-        } else {
-            self.offset_advisories(&compiled.comparisons, lookups)?
-        };
+        let advisories = self.offset_advisories(&compiled.comparisons, lookups)?;
         let unsatisfied = self.resolve(compiled.reports, declared, lookups)?;
         let rows = self.hydrate_rows(&keys, &projection, &fields, declared, lookups, &mut work)?;
         work.statements = self.counters().statements_executed() - started;
@@ -695,30 +692,20 @@ impl Snapshot {
             declared,
             lookups,
         )?;
-        reports.extend(conjunction.reports);
         let sorted_date = match order {
-            PageOrder::Field { key, .. }
-                if declared
-                    .typed_order(key)
-                    .is_some_and(|order| order.is_dated()) =>
-            {
-                Some(DateComparison {
-                    key: key.to_string(),
-                    by: ComparedBy::Sort,
-                    named: BTreeSet::new(),
-                })
+            PageOrder::Field { key, .. } => {
+                DateComparison::of_dated(key, Compared::Order, declared)
             }
-            _ => None,
+            PageOrder::Path(_) => None,
         };
+        let comparisons = conjunction.date_comparisons(sorted_date);
+        reports.extend(conjunction.reports);
         Ok(Compiled {
             order,
+            comparisons,
             filters: conjunction.filters,
             reports,
             matches_nothing: conjunction.matches_nothing,
-            comparisons: sorted_date
-                .into_iter()
-                .chain(conjunction.compared_dates)
-                .collect(),
         })
     }
 
