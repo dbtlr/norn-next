@@ -290,8 +290,11 @@ pub enum AnswerAdvisory {
     },
     /// A search selected the vault's enabled set, a rung that set holds had
     /// no engine standing for it, and the answer ran the rest of the set
-    /// without it. A search naming that rung exactly is refused for the same
-    /// reason.
+    /// without it. A rung is left out and advised only while a retrieval rung
+    /// remains to answer from: where leaving it out would leave none, the
+    /// search is refused with the reason's code naming that rung, never
+    /// answered empty. A search naming that rung exactly is refused for the
+    /// same reason.
     #[non_exhaustive]
     RungSkipped {
         /// The rung left out.
@@ -301,13 +304,12 @@ pub enum AnswerAdvisory {
     },
     /// A rung's candidates reached the rung's depth, so the ladder ranked
     /// the candidates that rung found within that depth and none beyond it.
+    /// The depth is one number for every rung, `RUNG_DEPTH` in the
+    /// vocabulary, so the advisory names the rung alone.
     #[non_exhaustive]
     RungDepthReached {
         /// The rung whose candidates reached its depth.
         rung: Rung,
-        /// The depth they reached: the most candidates the rung hands a
-        /// ranking.
-        depth: u32,
     },
 }
 
@@ -326,19 +328,19 @@ impl AnswerAdvisory {
         AnswerAdvisory::RungSkipped { rung, reason }
     }
 
-    /// `rung`'s candidates reached its `depth`.
-    pub const fn rung_depth_reached(rung: Rung, depth: u32) -> Self {
-        AnswerAdvisory::RungDepthReached { rung, depth }
+    /// `rung`'s candidates reached its depth.
+    pub const fn rung_depth_reached(rung: Rung) -> Self {
+        AnswerAdvisory::RungDepthReached { rung }
     }
 }
 
 /// Why a rung the enabled set holds was left out of an answer: the refusal a
 /// search naming that rung exactly meets instead.
 ///
-/// On the wire an object tagged `reason` with that refusal's code:
-/// `{"reason":"engine/unavailable","detail":"the engine slot is empty"}`.
+/// On the wire an object tagged `code` with that refusal's code, as an error
+/// detail is: `{"code":"engine/unavailable","detail":"the engine slot is empty"}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "reason")]
+#[serde(tag = "code")]
 #[non_exhaustive]
 pub enum RungSkipReason {
     /// The rung is enabled and no engine stands for it here and now.
@@ -388,8 +390,8 @@ pub enum ComparedBy {
 }
 
 /// What a read verb answers with: the reading it was taken under, the parts of
-/// the request that were not applied, what the parts that were applied had to
-/// assume, and the verb's own report.
+/// the request that were not applied, what the parts that were applied are
+/// advised of, and the verb's own report.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(bound(serialize = "R: Serialize", deserialize = "R: DeserializeOwned"))]
 #[non_exhaustive]
@@ -399,8 +401,12 @@ pub struct VaultAnswer<R> {
     /// The parts of the request that could not be applied. Empty when the
     /// whole request was.
     pub unsatisfied: Vec<Unsatisfied>,
-    /// What the parts that were applied had to assume to answer. Empty when
-    /// they assumed nothing.
+    /// What the parts that were applied are advised of: what one had to
+    /// assume, such as a comparison of dates across offset spellings, and
+    /// where one stopped or what it left out, such as a rung skipped from the
+    /// enabled set or a rung whose candidates reached its depth. Each was
+    /// applied and the answer is complete. Empty when there is nothing to
+    /// advise.
     pub advisories: Vec<AnswerAdvisory>,
     /// The verb's own report.
     pub report: R,

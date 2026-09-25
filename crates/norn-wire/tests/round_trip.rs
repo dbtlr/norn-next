@@ -25,16 +25,16 @@ use norn_wire::{
     KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams,
     ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet, NoProblems,
     NoRetrievalRung, NonFiniteScore, NotReady, Page, PagedRows, PathRuleKind, PollBackend,
-    Predicate, Published, RUNG_DEPTH, ReadFailure, ReasonCode, RegisterParams, RegisterReport,
-    Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams,
-    ReloadReport, ReloadStage, Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget,
-    ResolveParams, ResolveReport, RollUp, Rung, RungReport, RungSelection, RungSet, RungSkipReason,
-    SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity,
-    SidecarRevision, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind,
-    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
-    UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
-    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    Predicate, Published, ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration,
+    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
+    ReloadStage, Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
+    ResolveReport, RollUp, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
+    Score, SearchParams, SearchReport, SetParams, SetReport, Severity, SidecarRevision, Snapshot,
+    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
+    TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
+    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
+    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer,
+    VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -602,7 +602,7 @@ fn answer_advisories() -> Vec<AnswerAdvisory> {
             Rung::Vector,
             RungSkipReason::unavailable("the engine slot is empty"),
         ),
-        AnswerAdvisory::rung_depth_reached(Rung::Vector, RUNG_DEPTH),
+        AnswerAdvisory::rung_depth_reached(Rung::Vector),
     ]
 }
 
@@ -3506,33 +3506,30 @@ fn an_unsatisfied_part_is_an_object_tagged_part() {
 }
 
 /// A rung left out of the enabled set is advised with the rung and the reason,
-/// and the reason is spelled as the refusal code a search naming the rung
-/// exactly meets. A rung that reached its depth is advised with the rung and
-/// the depth, which is one page.
+/// and the reason carries, as its `code`, the refusal code a search naming the
+/// rung exactly meets. A rung that reached its depth is advised with the rung
+/// alone: the depth is every rung's one `RUNG_DEPTH`, which the advisory does
+/// not repeat.
 #[test]
 fn a_rung_advisory_names_the_rung_and_why() {
     let reason = RungSkipReason::unavailable("the engine slot is empty");
     assert_eq!(reason.code(), ReasonCode::EngineUnavailable);
     assert_eq!(
-        tag_string(&reason, "reason"),
+        tag_string(&reason, "code"),
         flat_string(&ReasonCode::EngineUnavailable),
         "a skip reason is spelled as another code than the refusal it stands for"
     );
     assert_eq!(
         wire(&AnswerAdvisory::rung_skipped(Rung::Vector, reason)),
-        r#"{"advisory":"rung_skipped","rung":"vector","reason":{"reason":"engine/unavailable","detail":"the engine slot is empty"}}"#
+        r#"{"advisory":"rung_skipped","rung":"vector","reason":{"code":"engine/unavailable","detail":"the engine slot is empty"}}"#
     );
     assert!(
-        serde_json::from_str::<RungSkipReason>(r#"{"reason":"engine/failed","detail":"x"}"#)
-            .is_err(),
+        serde_json::from_str::<RungSkipReason>(r#"{"code":"engine/failed","detail":"x"}"#).is_err(),
         "a reason nobody skips a rung for read back as one"
     );
     assert_eq!(
-        wire(&AnswerAdvisory::rung_depth_reached(
-            Rung::Vector,
-            RUNG_DEPTH
-        )),
-        r#"{"advisory":"rung_depth_reached","rung":"vector","depth":1024}"#
+        wire(&AnswerAdvisory::rung_depth_reached(Rung::Vector)),
+        r#"{"advisory":"rung_depth_reached","rung":"vector"}"#
     );
 }
 

@@ -392,19 +392,26 @@ pub enum PagedRows {
     },
 }
 
-/// Which sidecar state an answer read: the sidecar's own epoch, and how far
-/// its committed mutations had got within that epoch.
+/// Which sidecar state an answer read: the sidecar's own epoch, and how many
+/// commits the sidecar had made within that epoch.
 ///
 /// On the wire an object of the two: `{"epoch":"sidecar-1","revision":4}`.
 /// The pair, never the bare revision, is the identity: a sidecar rebuilt under
 /// a new epoch counts its revisions again from the start, so a revision
 /// compared across two epochs compares nothing.
+///
+/// The revision is the sidecar's own commit count and never the store
+/// generation the sidecar has consumed up to: two answers at one store
+/// generation may read a sidecar at two revisions, and one sidecar revision
+/// may stand across many store generations. How far a sidecar trails the
+/// store is a rung's freshness, not this.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SidecarRevision {
     /// The sidecar's own epoch, which is not the store's.
     pub epoch: String,
-    /// How many committed mutations the sidecar had seen within that epoch.
+    /// How many commits the sidecar had made within that epoch: its own
+    /// count, and never the store generation it has consumed.
     pub revision: u64,
 }
 
@@ -436,7 +443,8 @@ pub struct Snapshot {
     /// where the order was raw.
     pub schema_fingerprint: Option<String>,
     /// The sidecar state the answer read, and `null` where the answer read no
-    /// sidecar.
+    /// sidecar. A cursor carrying `null` reports nothing about a sidecar
+    /// whatever its continuation reads.
     pub sidecar_revision: Option<SidecarRevision>,
 }
 
@@ -472,8 +480,10 @@ pub enum Moved {
     /// Writes landed in the same database after the cursor was minted, or the
     /// count they landed under is behind the one the cursor named.
     Generation,
-    /// The sidecar the answer reads is at another revision, or under another
-    /// sidecar epoch.
+    /// The cursor read a sidecar, and the answer reads it at another
+    /// revision, under another sidecar epoch, or not at all. A sidecar the
+    /// answer reads where the cursor read none is not reported: the cursor's
+    /// position was taken without one, so there is no revision it moved from.
     SidecarRevision,
 }
 

@@ -1515,7 +1515,7 @@ fn an_answer_advisory_advertises_its_tag_and_where_it_compared() {
         Some("#/$defs/RungSkipReason")
     );
     assert_eq!(
-        sorted(tag_constants(&schema_of::<RungSkipReason>(), "reason")),
+        sorted(tag_constants(&schema_of::<RungSkipReason>(), "code")),
         sorted(["engine/unavailable"])
     );
     let reached = branches(&schema)
@@ -1524,7 +1524,7 @@ fn an_answer_advisory_advertises_its_tag_and_where_it_compared() {
         .expect("the rung-depth-reached branch");
     assert_eq!(
         property_names(reached),
-        ["advisory", "rung", "depth"].into_iter().collect()
+        ["advisory", "rung"].into_iter().collect()
     );
     let compared_by = schema_of::<ComparedBy>();
     assert_eq!(
