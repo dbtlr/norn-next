@@ -15,7 +15,7 @@
 //! declaration — and every derived row each store holds is digested: the document rows with their sub-fingerprints and their raw and
 //! folded suffix keys, the links and the keys the link index holds them
 //! under, the headings, blocks and tags, the field rows
-//! with their typed halves, every finding with its candidates and classes, the
+//! with their typed halves and the offset spelling beside a typed date, every finding with its candidates and classes, the
 //! terms the full-text index holds, and the pinned vault schema. Row
 //! identifiers, write generations and timestamps are left out, because none of
 //! them is a function of the vault: they say where a row landed, how many
@@ -50,7 +50,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_host::DERIVATION_VERSION;
-use norn_store::{DerivationVersion, FieldContainer, FieldRow, LinkFamily, OpenOutcome, TagSource};
+use norn_store::{
+    DerivationVersion, FieldContainer, FieldRow, LinkFamily, OffsetSpelling, OpenOutcome, TagSource,
+};
 use norn_testkit::equivalence::{DerivedRows, assert_operationally_valid};
 use norn_testkit::process::Sandbox;
 use norn_wire::FindingKind;
@@ -58,8 +60,8 @@ use norn_wire::FindingKind;
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(3),
-    "b9f05fed217911b6a0ade6f8c894c1120be274e1d2c839623630db2a5b175959",
+    DerivationVersion::new(4),
+    "d420b32c4184911719c63bfffa46af59b27d4f6edac9d6de500ad31a1471de33",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -711,6 +713,18 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
                 FieldRow::Value { raw: Some(held), typed: Some(_), .. } if held == raw
             )),
             "no typed `{key}: {raw}` is exercised"
+        );
+    }
+
+    // A typed date records the spelling of its offset, and the corpus writes
+    // both: a calendar day states none, and an instant states one.
+    for spelling in [OffsetSpelling::Unstated, OffsetSpelling::Stated] {
+        assert!(
+            rows_under("created").iter().any(|row| matches!(
+                row,
+                FieldRow::Value { offset: Some(held), .. } if *held == spelling
+            )),
+            "no typed date spelled {spelling:?} is exercised"
         );
     }
 

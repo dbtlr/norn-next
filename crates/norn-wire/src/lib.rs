@@ -34,7 +34,9 @@
 //! document is addressed by. What a read answers with is spelled here as
 //! well: the [`AnswerReading`] every answer carries — its [`TrustState`], its
 //! establishment, and the [`LadderDeclaration`] of [`RungReport`]s a search
-//! ran — the [`Unsatisfied`] parts of a request that could not be applied, and
+//! ran — the [`Unsatisfied`] parts of a request that could not be applied, the
+//! [`AnswerAdvisory`] saying what an applied part assumed and the
+//! [`ComparedBy`] place it compared in, and
 //! the [`Cursor`] a page continues from, with the [`Snapshot`] a continuation
 //! is judged against, what [`Moved`] under it, and the [`CursorKey`] each
 //! paged row type stops at.
@@ -202,14 +204,14 @@
 //! [`NotReady::warming`], [`NotReady::unattached`],
 //! [`VaultAddress::name`], [`VaultAddress::root`],
 //! the constructor on each [`Predicate`], [`Anchor`], [`CursorKey`],
-//! [`Unsatisfied`], [`ReloadFailure`] and [`RungReport`] variant,
+//! [`Unsatisfied`], [`AnswerAdvisory`], [`ReloadFailure`] and [`RungReport`] variant,
 //! [`EngineSection::malformed`], whose variant is the one part of a plain enum
 //! that extends by gaining a field,
 //! [`Cursor::new`], [`Page::new`], [`Snapshot::new`],
 //! [`CursorOrderChanged::new`], [`DocumentOrders::new`], [`Score::new`],
 //! [`AnswerReading::new`], [`LadderDeclaration::new`],
 //! [`ModelIdentity::new`], [`Freshness::trailing`], [`Freshness::rescanning`],
-//! [`VaultAnswer::new`],
+//! [`VaultAnswer::new`], [`VaultAnswer::with_advisories`],
 //! [`MaintainerIdentity::named`] and
 //! [`MaintainerIdentity::unknown`];
 //! the constructor on each [`Column`], [`FieldValue`], [`SortKey`],
@@ -382,7 +384,7 @@ pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint
 pub use glob::{CaseFold, Pattern, PatternError};
 pub use name::{IllegalVaultName, VaultName};
 pub use predicate::Predicate;
-pub use product::{Unsatisfied, VaultAnswer};
+pub use product::{AnswerAdvisory, ComparedBy, Unsatisfied, VaultAnswer};
 pub use read::count::{CountParams, CountReport, GroupKey, Tally};
 pub use read::describe::{
     ContainerKind, DescribeParams, DescribeReport, Facet, FieldType, PathRuleKind, TagStance,

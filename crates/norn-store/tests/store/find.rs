@@ -330,7 +330,7 @@ fn plan(emitted: &FindPlan) -> QueryPlan {
 }
 
 /// The one plan `plans` holds for `statement`.
-fn plan_of(plans: &[FindPlan], statement: FindStatement) -> QueryPlan {
+pub(crate) fn plan_of(plans: &[FindPlan], statement: FindStatement) -> QueryPlan {
     let matching: Vec<&FindPlan> = plans
         .iter()
         .filter(|plan| plan.statement == statement)
@@ -394,6 +394,9 @@ fn statement_barred_by(statement: FindStatement) -> &'static str {
             "a_known_key_and_the_field_universe_read_the_presence_rows_alone"
         }
         FindStatement::BareDirectory => "a_bare_directory_probe_is_two_seeks_of_the_path_index",
+        FindStatement::OffsetSpellings => {
+            "a_date_keys_offset_spellings_are_two_seeks_of_the_offset_index"
+        }
         FindStatement::MatchProbe => {
             "a_match_probe_reads_the_full_text_index_through_its_selection"
         }
@@ -463,7 +466,8 @@ fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
 /// one bar judges each. The path-page bar judges the statements [`PAGE_BARS`]
 /// names and the fingerprint read; the field-sort bar judges both sections of
 /// every [`FIELD_BARS`] entry; the key-probe bar judges [`KEY_PROBES`]; the
-/// bare-directory bar and the match-probe bar their one probe each; the
+/// bare-directory bar, the match-probe bar and the offset-spelling bar their
+/// one probe each; the
 /// hydration bar [`hydration_statements`]; the filter bar judges [`filter_bars`]. A bar
 /// ranges over the order and the direction a statement carries, and those are
 /// not slots, so each bar's statements are read as the set of slots it
@@ -475,7 +479,7 @@ fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
 /// bars claim fills a slot twice.
 #[test]
 fn the_find_bars_cover_every_statement_and_filter_once() {
-    let per_bar: [Vec<FindStatement>; 7] = [
+    let per_bar: [Vec<FindStatement>; 8] = [
         std::iter::once(FindStatement::ActiveFingerprint)
             .chain(PAGE_BARS.iter().map(|(statement, ..)| *statement))
             .collect(),
@@ -486,6 +490,7 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
         KEY_PROBES.to_vec(),
         vec![FindStatement::BareDirectory],
         vec![FindStatement::MatchProbe],
+        crate::find_advisory::OFFSET_PROBES.to_vec(),
         hydration_statements(),
         crate::links::LINK_READS.to_vec(),
     ];
@@ -545,6 +550,7 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
         bars,
         [
             "a_bare_directory_probe_is_two_seeks_of_the_path_index",
+            "a_date_keys_offset_spellings_are_two_seeks_of_the_offset_index",
             "a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path",
             "a_known_key_and_the_field_universe_read_the_presence_rows_alone",
             "a_match_probe_reads_the_full_text_index_through_its_selection",

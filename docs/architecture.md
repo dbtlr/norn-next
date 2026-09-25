@@ -789,7 +789,17 @@ statement over the link index's keys, each distinct key read once, a suffix key'
 seek of the suffix key the root probes and a path key's documents a seek of the path index
 the root orders by; and every candidate's minimal disambiguating suffix, one statement whose
 each spelling's range is the same seek stopping at its second member — so a page's links
-and candidates cost a fixed number of statements, however many there are. A page with no filter reads its order index in page order, and
+and candidates cost a fixed number of statements, however many there are; and the
+offset-spelling probe, two seeks of `document_fields_offset`, one at each spelling, run once
+for each key with a dated order the request sorts, groups or compares by. **A comparison
+that read an unstated offset as zero against a stated one is advised**: an answer carries a
+mixed-offset advisory, once per key and place, where its order, its grouping or a comparing
+part met both spellings. The advisory speaks for every value the key holds in the snapshot,
+not for the page, so it may stand beside rows that all write one spelling, and it is never
+silent where such a comparison decided the answer; a part that matches nothing empties the
+answer without comparing, and no advisory is raised beside it; and it costs one probe per
+compared dated key. Every builder that compiles a conjunction raises it through the one read
+machinery. A page with no filter reads its order index in page order, and
 sorts nothing: the path page and a field sort's valued section seek it and stop at the
 page's bound. A field sort's missing section passes every document that carries the key to
 reach one that does not, so an ascending first page, which reads the missing section first,
@@ -827,7 +837,9 @@ document once per element, a tag grouping once per tag, and several keys by thei
 product, so a tally counts documents and one document may stand in several groups; a
 key the declaration gives a typed order groups by typed equality. A member is `null`
 where the document carries no scalar value under its key — and, under a key with a typed
-order, where no scalar it carries reads as that type. It names three
+order, where no scalar it carries reads as that type. A grouping by a key with a dated
+order is advised as a grouping where the key holds both offset spellings, since it decides
+which dates are one tally. It names three
 statements under the same discipline, each carrying a plan bar with a negative control
 and held by a census to exactly one bar: the ungrouped total, the count of `documents`
 or of the rows a filter's seek reaches by row id; the tallies whose leading member is
@@ -852,7 +864,8 @@ standing under the active fingerprint — every finding recorded under the schem
 snapshot pins — and runs no rule and emits no plan. It answers a page of finding rows in
 `(kind, path, id)` order, one kind after another, or a summary of one tally per kind and
 severity, which is one aggregate and is not paged. Its conjunction is compiled by the same
-compilation, with a `resolves` part reported as not applicable, and one rule decides what a
+compilation, with a `resolves` part reported as not applicable and a mixed-offset comparison
+advised as a find's is, and one rule decides what a
 part judges: a path part judges the path a finding stands at, so a finding where no document
 row stands is found by the path naming it, and every other part judges the document row at
 that path, which a finding with no row beside it never satisfies — a part on a key outside
@@ -919,7 +932,8 @@ hit's score is FTS5's BM25 negated, so it is higher for the more relevant hit, a
 floor admits the hits scored at or above it. A page resumes after the `(score, path)` its
 cursor carries, compared with each match's score as the page computes it, so a drain on
 one snapshot is the whole ranking. Its conjunction is compiled by the same compilation,
-with a `resolves` part reported as not applicable, and a hit's document row is hydrated
+with a `resolves` part reported as not applicable and, where a lexical page runs, a
+mixed-offset comparison advised as a find's is, and a hit's document row is hydrated
 through the hydration a find's rows are read through, only where the request names a
 column. It names one statement under the same discipline, carrying a plan bar with
 negative controls and held by a census to exactly one bar: the lexical page, whose
@@ -1926,14 +1940,15 @@ their input is the document's canonical frontmatter projection; derivation is
 deterministic, one pure function from the projection to a presence row per key and a value
 row per scalar; they are maintained inside the document's own changeset; and their
 invalidation key is the document's content hash, because they are written with the
-document's changeset and rewritten whenever the document is. The typed column and its
-least-value marker: their inputs are the value rows and the vault's schema content model;
-derivation is deterministic, one pure function from a value and its key's declared type;
-they are maintained inside the document's changeset beside the value they type; and their
+document's changeset and rewritten whenever the document is. The typed column, its
+least-value marker and, beside a typed date, whether the date stated an offset from UTC:
+their inputs are the value rows and the vault's schema content model; derivation is
+deterministic, one pure function from a value and its key's declared type; they are
+maintained inside the document's changeset beside the value they type; and their
 invalidation key is the standing schema pin held in `meta`. **The typed column joins what a
-re-pin discards**: the pin's own transaction clears every typed value and its least-value
-marker beside the findings it discards, and the walk that follows refills them. That is safe
-because a schema reload closes the entry's reader and publishes `Warming` in its `Healing`
+re-pin discards**: the pin's own transaction clears every typed value, its least-value
+marker and its offset spelling beside the findings it discards, and the walk that follows
+refills them. That is safe because a schema reload closes the entry's reader and publishes `Warming` in its `Healing`
 phase until the heal converges, so no read observes a column the walk has half refilled.
 **The pin is the key at both ends**: the declaration the host hands the store names the
 fingerprint it was read from, an increment refuses typed values derived under any other

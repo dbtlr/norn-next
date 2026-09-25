@@ -80,7 +80,7 @@ use crate::facts::{
     SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredLinkKey, StoredPathOrder,
     StoredSuffixKeys, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
-use crate::fields::{FieldContainer, FieldRow, FieldRows};
+use crate::fields::{FieldContainer, FieldRow, FieldRows, OffsetSpelling};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixKey, SuffixProbe};
 use crate::resolve::{self, AmbiguityIgnore, TargetClass};
@@ -1731,7 +1731,8 @@ const DOCUMENT_TAGS_SQL: &str = "SELECT name, source, span_line, span_column, sp
 /// and page by it without a join to `documents`, and a copy that drifted from
 /// the document it names would be caught nowhere else.
 const DOCUMENT_FIELDS_SQL: &str =
-    "SELECT key, ordinal, path, container, raw, typed, least_raw, least_typed
+    "SELECT key, ordinal, path, container, raw, typed, least_raw, least_typed,
+                        offset_stated
                  FROM document_fields WHERE document = ?1 ORDER BY key, ordinal";
 
 /// The statement [`Request::pin_vault_schema`] clears the typed field values
@@ -1741,7 +1742,8 @@ const DOCUMENT_FIELDS_SQL: &str =
 /// holding a typed value — and never the rows that hold none. A pin that moves
 /// nothing typed reads an empty index.
 pub(crate) const TYPED_VALUE_DISCARD_SQL: &str =
-    "UPDATE document_fields SET typed = NULL, least_typed = 0 WHERE typed IS NOT NULL";
+    "UPDATE document_fields SET typed = NULL, least_typed = 0, offset_stated = NULL
+     WHERE typed IS NOT NULL";
 
 /// The statement [`Request::stored_tombstone`] emits.
 ///
@@ -2506,6 +2508,9 @@ fn stored_field(row: &Row<'_>) -> Reading<FieldRow> {
         ordinal,
         raw: row.get(4)?,
         typed: row.get(5)?,
+        offset: row
+            .get::<_, Option<bool>>(8)?
+            .map(OffsetSpelling::of_stated),
         least_raw: row.get(6)?,
         least_typed: row.get(7)?,
         path,

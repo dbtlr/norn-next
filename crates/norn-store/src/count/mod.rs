@@ -75,19 +75,26 @@
 //! and filters nothing. **A `resolves` part is not applicable**: it answers
 //! which documents a target names, which is a find, so a count reports it
 //! ([`Unsatisfied::ResolvesNotApplicable`]) and filters nothing by it.
+//!
+//! **A count is advised of a mixed-offset comparison as a find is**, in
+//! [`Counted::advisories`]: a grouping by a key with a dated order compares
+//! its dates — it makes one group of the dates reading as one instant and
+//! orders the groups — and is advised as a grouping where the key holds both
+//! offset spellings, before the conjunction's parts are advised.
 
 mod statement;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    CountParams, CountReport, Cursor, CursorKey, GroupKey, Moved, Page, Tally, Unsatisfied,
+    AnswerAdvisory, CountParams, CountReport, Cursor, CursorKey, GroupKey, Moved, Page, Tally,
+    Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
-    Conjunction, FieldOrder, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement,
-    Report, ResolvesPart, Stepped, page_limit,
+    Compared, Conjunction, DateComparison, FieldOrder, KeyPlace, Lookups, PageRefusal, Ran,
+    ReadFilter, ReadStatement, Report, ResolvesPart, Stepped, page_limit,
 };
 use crate::store::Snapshot;
 
@@ -95,7 +102,7 @@ pub use statement::{COUNT_STATEMENTS, CountStatement, GroupMember};
 use statement::{Member, Tallies, compose_tallies};
 
 /// What [`Snapshot::count`] answers: a page of tallies, where the next begins,
-/// and what the request could not apply.
+/// what the request could not apply, and what the parts it applied assumed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Counted {
     /// The tallies, at most the page bound of them, in tuple order.
@@ -109,6 +116,9 @@ pub struct Counted {
     /// order the request names them: the grouping's keys, then the
     /// conjunction's parts.
     pub unsatisfied: Vec<Unsatisfied>,
+    /// What the parts that were applied assumed: a mixed-offset comparison,
+    /// once per key and place, the grouping before the predicates.
+    pub advisories: Vec<AnswerAdvisory>,
     /// The reading the page was answered from, as a cursor carries it: the
     /// schema fingerprint where some member groups under a typed order, and
     /// `None` otherwise.
@@ -118,11 +128,12 @@ pub struct Counted {
 }
 
 impl Counted {
-    /// The unsatisfied parts and the report a handler wraps in a
-    /// [`norn_wire::VaultAnswer`].
-    pub fn into_report(self) -> (Vec<Unsatisfied>, CountReport) {
+    /// The unsatisfied parts, the advisories and the report a handler wraps
+    /// in a [`norn_wire::VaultAnswer`].
+    pub fn into_report(self) -> (Vec<Unsatisfied>, Vec<AnswerAdvisory>, CountReport) {
         (
             self.unsatisfied,
+            self.advisories,
             Page::new(self.tallies, self.next, self.moved),
         )
     }
@@ -267,6 +278,16 @@ impl Snapshot {
         )?;
         let snapshot = self.reading_facts(order, lookups)?;
         let next = next.map(|last| Cursor::new(snapshot.clone(), last.cursor_key()));
+        let grouped_dates = members
+            .iter()
+            .filter_map(|member| match (member.shape, member.key) {
+                (GroupMember::Field(_), Some(key)) => {
+                    DateComparison::of_dated(key, Compared::Group, declared)
+                }
+                _ => None,
+            });
+        let advisories =
+            self.offset_advisories(&conjunction.date_comparisons(grouped_dates), lookups)?;
         reports.extend(conjunction.reports);
         let unsatisfied = self.resolve(reports, declared, lookups)?;
         work.statements = self.counters().statements_executed() - started;
@@ -275,6 +296,7 @@ impl Snapshot {
             next,
             moved,
             unsatisfied,
+            advisories,
             snapshot,
             work,
         })

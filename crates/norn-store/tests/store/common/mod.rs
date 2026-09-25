@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use norn_store::{
     BlockFact, CandidateFact, Change, ClassKey, ContentModel, DerivationCounters, DocumentFacts,
     DocumentPath, EmittedPlan, FindingFacts, FrontmatterValue, HeadingFact, IncrementOutcome,
-    IncrementProvenance, LinkFact, LinkFamily, Provenance, Request, Span, Store, TagFact,
-    TagSource, suffix_probe,
+    IncrementProvenance, LinkFact, LinkFamily, OffsetSpelling, Provenance, Request, Span, Store,
+    TagFact, TagSource, TypedOrder, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::explain::StatementReads;
@@ -211,6 +211,24 @@ pub fn drained(mut page: impl FnMut(Option<&DocumentPath>) -> Vec<DocumentPath>)
         seen.push(next.as_str().to_string());
         after = Some(next);
     }
+}
+
+/// A dated order enough to part the two offset spellings: a date is a
+/// `YYYY-MM-DD` day, and a `Z` after it states an offset. `2026-03-04Z` and
+/// `2026-03-04` are one place in the order, as a date reading them at offset
+/// zero places them, and differ in the spelling each records.
+pub fn dated_order() -> TypedOrder {
+    TypedOrder::dated(|raw| {
+        let (day, spelling) = match raw.strip_suffix('Z') {
+            Some(day) => (day, OffsetSpelling::Stated),
+            None => (raw, OffsetSpelling::Unstated),
+        };
+        let is_day = day.len() == 10
+            && day.bytes().enumerate().all(|(at, byte)| {
+                matches!(at, 4 | 7) == (byte == b'-') && (byte == b'-' || byte.is_ascii_digit())
+            });
+        is_day.then(|| (day.to_string(), spelling))
+    })
 }
 
 /// A document path, or a panic naming what was wrong with it.

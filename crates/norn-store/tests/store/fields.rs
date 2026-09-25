@@ -5,10 +5,11 @@
 //! [`norn_store::Request::stored_facts`], so what is asserted is the rows at
 //! rest rather than the value the derivation handed over.
 
-use crate::common::{Scratch, document, path, record_death, write_document};
+use crate::common::{Scratch, dated_order, document, path, record_death, write_document};
 use norn_store::{
     Change, ContentModel, DocumentFacts, FieldContainer, FieldDeclaration, FieldRow, FieldRows,
-    FrontmatterValue, IncrementProvenance, Provenance, StoreError, TypedOrder, induced_failure,
+    FrontmatterValue, IncrementProvenance, OffsetSpelling, Provenance, StoreError, TypedOrder,
+    induced_failure,
 };
 
 /// A presence row at `at`, as the rows are compared.
@@ -28,6 +29,7 @@ fn raw(at: &str, key: &str, ordinal: u32, text: Option<&str>, least: bool) -> Fi
         ordinal,
         raw: text.map(str::to_string),
         typed: None,
+        offset: None,
         least_raw: least,
         least_typed: false,
         path: at.to_string(),
@@ -517,6 +519,88 @@ fn a_moved_pin_clears_every_typed_value_and_nothing_else() {
     store
         .verify_integrity()
         .expect("a store whose typed values a pin cleared");
+}
+
+/// **A typed date records whether its text stated an offset, and a moved pin
+/// clears the record with the typed key it qualifies.** Under a dated order
+/// each value that reads as a date carries its spelling beside its typed key;
+/// a value that does not read as a date carries neither, and neither does a
+/// value under an order that is not dated or under no typed order at all,
+/// whatever its text says. The spelling stands at rest as derived, and a pin
+/// that moves the schema clears it where it clears the typed key.
+#[test]
+fn a_typed_date_records_whether_it_stated_an_offset() {
+    let declared = ContentModel::under("schema-1")
+        .declare_field("due", FieldDeclaration::date(dated_order()))
+        .declare_field("rank", FieldDeclaration::number(integer_order()));
+    let value = map(vec![
+        (
+            "due",
+            FrontmatterValue::Sequence(vec![
+                string("2026-03-04Z"),
+                string("2026-03-05"),
+                string("soon"),
+            ]),
+        ),
+        ("rank", string("9")),
+        ("title", string("2026-03-04Z")),
+    ]);
+    let at = "docs/due.md";
+    let rows = FieldRows::derive(&path(at), Some(&value), &declared);
+    let offsets: Vec<(&str, u32, bool, Option<OffsetSpelling>)> = rows
+        .rows()
+        .iter()
+        .filter_map(|row| match row {
+            FieldRow::Value {
+                key,
+                ordinal,
+                typed,
+                offset,
+                ..
+            } => Some((key.as_str(), *ordinal, typed.is_some(), *offset)),
+            FieldRow::Presence { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        offsets,
+        vec![
+            ("due", 1, true, Some(OffsetSpelling::Stated)),
+            ("due", 2, true, Some(OffsetSpelling::Unstated)),
+            ("due", 3, false, None),
+            ("rank", 1, true, None),
+            ("title", 1, false, None),
+        ]
+    );
+
+    let scratch = Scratch::new("field-offsets");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    request
+        .pin_vault_schema(b"version: 1\n", "schema-1")
+        .expect("pinning a schema");
+    write_document(
+        &mut request,
+        &fielded(at, "hash-1", value.clone(), &declared),
+    );
+    assert_eq!(
+        stored_fields(&mut request, at),
+        rows,
+        "the spellings at rest are not the ones derived"
+    );
+
+    let moved = request
+        .pin_vault_schema(b"version: 1\nfields: {}\n", "schema-2")
+        .expect("re-pinning a schema");
+    assert_eq!(moved.invalidated.typed_values_discarded, 3);
+    assert_eq!(
+        stored_fields(&mut request, at),
+        FieldRows::derive(&path(at), Some(&value), &ContentModel::none()),
+        "the pin left an offset spelling standing without its typed key"
+    );
+    request.finish();
+    store
+        .verify_integrity()
+        .expect("a store whose offset spellings a pin cleared");
 }
 
 /// **A document's field rows are the rows its frontmatter derives.** The

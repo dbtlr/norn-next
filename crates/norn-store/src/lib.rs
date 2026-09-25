@@ -141,7 +141,9 @@ pub use facts::{
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
 pub use feed::FeedRead;
-pub use fields::{ContentModel, FieldContainer, FieldDeclaration, FieldRow, FieldRows, TypedOrder};
+pub use fields::{
+    ContentModel, FieldContainer, FieldDeclaration, FieldRow, FieldRows, OffsetSpelling, TypedOrder,
+};
 pub use find::{
     BODY_ROW_CEILING, FIND_STATEMENTS, FindPlan, FindStatement, FindWork, Found,
     NESTED_ROW_CEILING, Nested, NestedRows, PageDirection,

@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use norn_db::rusqlite::types::Value;
 use norn_wire::{Pattern, Predicate, Unsatisfied};
 
+use super::advisory::{Compared, DateComparison};
 use super::filter::{Filter, ReadFilter};
 use super::naming::Naming;
 use super::run::StatementFailure;
@@ -46,6 +47,10 @@ pub(crate) struct Conjunction {
     pub(crate) reports: Vec<Report>,
     /// Whether some part matches no document, which empties the answer.
     pub(crate) matches_nothing: bool,
+    /// The parts comparing a key with a dated order against values they name,
+    /// in the order the request names them: what a read's mixed-offset
+    /// advisory is asked about.
+    pub(crate) compared_dates: Vec<DateComparison>,
     /// Whether some part names a predicate key outside the field universe.
     /// Such a part filters nothing among documents, and is still a fact of a
     /// document: a read whose rows can stand where no document does admits
@@ -173,6 +178,7 @@ impl Snapshot {
             filters: Vec::new(),
             reports: Vec::new(),
             matches_nothing: false,
+            compared_dates: Vec::new(),
             names_unknown_key: false,
         };
         for predicate in predicates {
@@ -197,7 +203,12 @@ impl Snapshot {
                 continue;
             }
             match self.compile_predicate(predicate, declared, lookups)? {
-                Part::Filter(filter) => conjunction.filters.push(filter),
+                Part::Filter(filter) => {
+                    conjunction.filters.push(filter);
+                    conjunction
+                        .compared_dates
+                        .extend(date_comparison(predicate, declared));
+                }
                 Part::MatchesNothing(part) => {
                     conjunction.matches_nothing = true;
                     conjunction.reports.push(Report::Part(part));
@@ -434,6 +445,28 @@ fn query_problem(problem: &norn_db::rusqlite::Error) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// The comparison `predicate` makes over a key with a dated order, naming the
+/// spellings of the values it compares the key's dates against, or `None`
+/// where it compares no value against a dated key.
+///
+/// Called on a part that compiled, so every value it names reads as a date.
+fn date_comparison(predicate: &Predicate, declared: &ContentModel) -> Option<DateComparison> {
+    let (key, values): (&String, Vec<&String>) = match predicate {
+        Predicate::Eq { key, value, .. }
+        | Predicate::NotEq { key, value, .. }
+        | Predicate::Before { key, value, .. }
+        | Predicate::After { key, value, .. } => (key, vec![value]),
+        Predicate::In { key, values, .. } => (key, values.iter().collect()),
+        _ => return None,
+    };
+    let order = declared.typed_order(key)?;
+    let named = values
+        .into_iter()
+        .filter_map(|value| order.read(value).and_then(|(_, offset)| offset))
+        .collect();
+    DateComparison::of_dated(key, Compared::Parts(named), declared)
 }
 
 /// The key a predicate names, where it names one.

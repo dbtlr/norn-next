@@ -21,6 +21,7 @@ mod equivalence;
 mod facts;
 mod fields;
 mod find;
+mod find_advisory;
 mod find_rows;
 mod get;
 mod increments;

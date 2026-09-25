@@ -66,7 +66,9 @@
 //! empties the page, and a predicate key outside the field universe is
 //! reported and filters nothing. **A `resolves` part is not applicable**: it
 //! answers which documents a target names, which is a find, so a search
-//! reports it and filters nothing by it.
+//! reports it and filters nothing by it. A part comparing dates of both offset
+//! spellings is advised as a find's is, in [`Searched::advisories`], wherever
+//! a lexical page ran.
 //!
 //! # A hit carries the row its columns name
 //!
@@ -79,7 +81,8 @@ mod words;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    Column, Cursor, CursorKey, Hit, Moved, Page, Predicate, Score, SearchReport, Unsatisfied,
+    AnswerAdvisory, Column, Cursor, CursorKey, Hit, Moved, Page, Predicate, Score, SearchReport,
+    Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -171,7 +174,8 @@ impl LexicalQuery {
 }
 
 /// What [`Snapshot::search`] answers: a page of ranked hits, where the next
-/// begins, and what the request could not apply.
+/// begins, what the request could not apply, and what the parts it applied
+/// assumed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Searched {
     /// The hits, at most the page bound of them, most relevant first.
@@ -185,6 +189,9 @@ pub struct Searched {
     /// order the request names them: a query holding no word, the
     /// conjunction's parts, then the projection's keys.
     pub unsatisfied: Vec<Unsatisfied>,
+    /// What the parts that were applied assumed: a mixed-offset comparison,
+    /// once per key, in the order the request names the parts.
+    pub advisories: Vec<AnswerAdvisory>,
     /// The reading the page was answered from, as a cursor carries it. The
     /// ranking is no schema's order, so it names no fingerprint.
     pub snapshot: norn_wire::Snapshot,
@@ -193,11 +200,12 @@ pub struct Searched {
 }
 
 impl Searched {
-    /// The unsatisfied parts and the report a handler wraps in a
-    /// [`norn_wire::VaultAnswer`].
-    pub fn into_report(self) -> (Vec<Unsatisfied>, SearchReport) {
+    /// The unsatisfied parts, the advisories and the report a handler wraps
+    /// in a [`norn_wire::VaultAnswer`].
+    pub fn into_report(self) -> (Vec<Unsatisfied>, Vec<AnswerAdvisory>, SearchReport) {
         (
             self.unsatisfied,
+            self.advisories,
             Page::new(self.hits, self.next, self.moved),
         )
     }
@@ -359,6 +367,13 @@ impl Snapshot {
             .map(|last| Ok::<_, StoreError>(CursorKey::hit(score_of(last.score)?, last.path)))
             .transpose()?
             .map(|key| Cursor::new(snapshot.clone(), key));
+        // A query holding no word runs no lexical page, so its conjunction
+        // compared no date.
+        let compared = match expression {
+            Some(_) => conjunction.date_comparisons([]),
+            None => Vec::new(),
+        };
+        let advisories = self.offset_advisories(&compared, lookups)?;
         let mut unsatisfied = Vec::new();
         if expression.is_none() {
             unsatisfied.push(Unsatisfied::query_names_no_word(&request.query));
@@ -379,6 +394,7 @@ impl Snapshot {
             next,
             moved,
             unsatisfied,
+            advisories,
             snapshot,
             work,
         })

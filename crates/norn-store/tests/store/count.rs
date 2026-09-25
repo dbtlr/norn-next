@@ -1461,9 +1461,10 @@ fn a_narrowing_part_narrows_a_counts_work_to_the_documents_it_matches() {
     }
 }
 
-/// Whether `statement` is one a count runs: a tally statement, or a probe the
-/// conjunction's compilation runs, or the fingerprint read. A page of document
-/// rows and a hydration are neither.
+/// Whether `statement` is one a count runs: a tally statement, a probe the
+/// conjunction's compilation runs, the offset-spelling probe a grouping or a
+/// comparing part on a dated key runs, or the fingerprint read. A page of
+/// document rows and a hydration are neither.
 fn a_count_runs(statement: ReadStatement) -> bool {
     matches!(
         statement,
@@ -1474,6 +1475,7 @@ fn a_count_runs(statement: ReadStatement) -> bool {
                     | FindStatement::FieldUniverse
                     | FindStatement::BareDirectory
                     | FindStatement::MatchProbe
+                    | FindStatement::OffsetSpellings
             )
     )
 }

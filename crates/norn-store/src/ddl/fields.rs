@@ -18,23 +18,24 @@
 //! - **Invalidation key.** The document's content hash: the rows are written
 //!   with the document's changeset and rewritten whenever the document is.
 //!
-//! The `typed` column and its `least_typed` marker:
+//! The `typed` column, its `least_typed` marker and its `offset_stated` flag:
 //!
 //! - **Inputs.** The value rows and the schema content model's declared field
 //!   types.
 //! - **Determinism.** Deterministic: a typed value is a function of the raw
 //!   value and its key's declared type.
 //! - **Maintenance.** Inside the document's changeset, written by the same
-//!   statement as the value it types.
+//!   statement as the value it types. `offset_stated` is written beside a
+//!   typed key its key's dated order read, and is `NULL` on every other row.
 //! - **Invalidation key.** The standing schema pin, held in `meta`: the pin's
 //!   own transaction clears every typed value, and the walk that follows
 //!   refills them.
 //!
 //! # Why clearing the typed column at the pin is safe
 //!
-//! A pin clears `typed` and `least_typed` everywhere, and the heal that follows
-//! a schema reload refills them for every document derived before the pin,
-//! whether or not its bytes moved. Between the two, a reader could meet a column
+//! A pin clears `typed`, `least_typed` and `offset_stated` everywhere, and the
+//! heal that follows a schema reload refills them for every document derived
+//! before the pin, whether or not its bytes moved. Between the two, a reader could meet a column
 //! that is half refilled. None does: a schema reload closes the reader and
 //! publishes the vault as warming while the heal runs, and hands a reader back
 //! only once the heal has converged — so no read observes the column between the
@@ -87,6 +88,10 @@
 //!   keys the vault holds are its distinct leading column, and whether any
 //!   document holds a key in a container is one seek of both — so the
 //!   containers a key is observed in are read off the index, never the rows.
+//! - `document_fields_offset` holds the typed dates alone, by `(key,
+//!   offset_stated)`: whether a date key holds a value of either spelling is
+//!   one seek of it, which is how a read learns that an order or a comparison
+//!   over the key met both.
 
 use crate::fields::FieldContainer;
 
@@ -108,11 +113,13 @@ pub(crate) fn statements() -> Vec<String> {
     typed       TEXT,
     least_raw   INTEGER NOT NULL DEFAULT 0 CHECK (least_raw IN (0, 1)),
     least_typed INTEGER NOT NULL DEFAULT 0 CHECK (least_typed IN (0, 1)),
+    offset_stated INTEGER CHECK (offset_stated IN (0, 1)),
     PRIMARY KEY (document, key, ordinal),
     CHECK ((ordinal = 0) = (container IS NOT NULL)),
     CHECK (ordinal > 0 OR (raw IS NULL AND typed IS NULL AND least_raw = 0 AND least_typed = 0)),
     CHECK (least_raw = 0 OR raw IS NOT NULL),
-    CHECK (least_typed = 0 OR typed IS NOT NULL)
+    CHECK (least_typed = 0 OR typed IS NOT NULL),
+    CHECK (offset_stated IS NULL OR typed IS NOT NULL)
 ) WITHOUT ROWID"
         ),
         "CREATE INDEX document_fields_raw ON document_fields(key, raw)
@@ -129,6 +136,9 @@ pub(crate) fn statements() -> Vec<String> {
             .to_string(),
         "CREATE INDEX document_fields_presence ON document_fields(key, container)
     WHERE ordinal = 0"
+            .to_string(),
+        "CREATE INDEX document_fields_offset ON document_fields(key, offset_stated)
+    WHERE offset_stated IS NOT NULL"
             .to_string(),
     ]
 }
