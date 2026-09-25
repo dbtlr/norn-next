@@ -302,24 +302,35 @@ pub enum AnswerAdvisory {
         /// Why it was left out.
         reason: RungSkipReason,
     },
-    /// A rung's candidates reached the rung's depth, so the ladder ranked
-    /// the candidates that rung found within that depth and none beyond it.
-    /// The depth is one number for every rung, `RUNG_DEPTH` in the
-    /// vocabulary, so the advisory names the rung alone.
+    /// A rung handed the ranking `RUNG_DEPTH` candidates and found more
+    /// beyond them — or, on the vector rung, scored rows past those it held,
+    /// whose documents were never checked against the snapshot — so the
+    /// ladder ranked the candidates within that depth and none beyond it. It
+    /// is raised only then: a rung that delivered its depth with nothing
+    /// scored beyond it is not advised. The depth is one number for every
+    /// rung, `RUNG_DEPTH` in the vocabulary, so the advisory names the rung
+    /// alone.
     #[non_exhaustive]
     RungDepthReached {
         /// The rung whose candidates reached its depth.
         rung: Rung,
     },
-    /// A rung handed the ranking fewer candidates than its depth though more
-    /// stood beyond what it read: it held as many rows as its bound allows,
-    /// some of those rows named documents the answer's snapshot does not
-    /// hold and were dropped, and the rows past its bound were never read. So
-    /// the ladder ranked the `delivered` candidates that rung found, fewer
-    /// than `RUNG_DEPTH`, and none beyond them. The vector rung raises it
-    /// where its derived state trails the snapshot by more rows than its
-    /// bound absorbs; a later answer, once the engine has drained, delivers
-    /// the depth again.
+    /// A rung handed the ranking `delivered` candidates, fewer than
+    /// `RUNG_DEPTH`, though it scored rows beyond those it held: it held as
+    /// many rows as its bound allows, some of them named documents the
+    /// answer's snapshot does not hold and were dropped, and the rows it
+    /// scored past its bound were not held, so whether their documents stand
+    /// was never checked. So the ladder ranked the `delivered` candidates and
+    /// none beyond them. The vector rung raises it where its derived state
+    /// trails the snapshot by more rows than its bound absorbs; a later
+    /// answer, once the engine has drained, delivers the depth again.
+    ///
+    /// A client tells a rung's three outcomes apart by these two advisories:
+    /// `rung_depth_reached` — the rung delivered `RUNG_DEPTH` candidates and
+    /// more stood beyond them; `rung_short_of_depth` — it delivered fewer,
+    /// because its margin could not cover the rows its derived state holds
+    /// that the snapshot lacks; neither — it delivered every candidate it
+    /// found.
     #[non_exhaustive]
     RungShortOfDepth {
         /// The rung whose candidates fell short of its depth.
@@ -344,13 +355,13 @@ impl AnswerAdvisory {
         AnswerAdvisory::RungSkipped { rung, reason }
     }
 
-    /// `rung`'s candidates reached its depth.
+    /// `rung` delivered its depth, with more beyond it.
     pub const fn rung_depth_reached(rung: Rung) -> Self {
         AnswerAdvisory::RungDepthReached { rung }
     }
 
-    /// `rung` delivered `delivered` candidates, short of its depth, with more
-    /// beyond what it read.
+    /// `rung` delivered `delivered` candidates, short of its depth, having
+    /// scored rows past those it held.
     pub const fn rung_short_of_depth(rung: Rung, delivered: u32) -> Self {
         AnswerAdvisory::RungShortOfDepth { rung, delivered }
     }
