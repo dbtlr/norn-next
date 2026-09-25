@@ -15,7 +15,10 @@
 //!
 //! The refusals are the ones a reload answers with: `host/unknown-vault` for a
 //! name the registry does not hold, `host/unsupported-attach-mode` for an
-//! address that names a root, `host/entry-not-ready` for an entry holding
+//! address that names a root, the park's own code for an entry standing on a
+//! park — `host/duplicate-root`, `host/maintainer-contended`, or
+//! `host/entry-untrusted` for a root the registry cannot read — exactly as
+//! `vault status` answers it, `host/entry-not-ready` for an entry holding
 //! nothing to reload yet, `host/entry-untrusted` for an entry whose derived
 //! state cannot be trusted, `vault/reload-busy` for a vault that is serving
 //! and already has something working over it — a warm job among them — and

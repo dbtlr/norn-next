@@ -719,9 +719,9 @@ fn reload(host: &attach::ServingHost, name: &VaultName, applied: &Applied) {
         "the explicit reload to activate the vault's control files",
         CONVERGING.budget_for(applied.steps()),
         || match host.reload(name) {
-            Ok(()) => Observed::Met(()),
-            Err(ReloadRefusal::Unavailable(trust)) => {
-                Observed::pending(format!("the entry is {trust:?}"))
+            Ok(_) => Observed::Met(()),
+            Err(ReloadRefusal::Unavailable(standing)) => {
+                Observed::pending(format!("the entry stands at {standing:?}"))
             }
             Err(refused) => panic!("the reload was refused: {refused:?}\n{applied}"),
         },

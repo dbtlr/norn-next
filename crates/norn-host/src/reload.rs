@@ -1,4 +1,5 @@
-//! Typed input and diagnostics for one vault reload candidate.
+//! Typed input and diagnostics for one vault reload candidate, and the
+//! `vault reload` handler that answers through them.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -7,8 +8,10 @@ use norn_config::schema::VaultSchema;
 use norn_config::vault::{VaultConfig, VaultConfigError};
 use norn_config::{IN_VAULT_CONFIG_PATH, IN_VAULT_SCHEMA_PATH};
 use norn_fs::{ContentHash, Refusal};
-use norn_wire::{TrustState, VaultName};
+use norn_wire::{ErrorEnvelope, ReloadParams, ReloadReport, TrustState, VaultName};
 
+use crate::address::registered_name;
+use crate::lifecycle::{Demand, EntryOps, Host, HostError};
 use crate::{JobFailure, Registration};
 
 /// A registered engine boundary that receives one vault's optional parsed
@@ -96,12 +99,92 @@ pub enum ReloadOutcome {
     SchemaChanged,
 }
 
+impl From<ActiveFingerprints> for norn_wire::Fingerprints {
+    /// Each fingerprint as 64 lowercase hex digits, and no config where the
+    /// vault serves the missing-file default.
+    fn from(active: ActiveFingerprints) -> Self {
+        let fingerprints = norn_wire::Fingerprints::new(active.schema.to_hex());
+        match active.config {
+            ConfigFingerprint::Missing => fingerprints,
+            ConfigFingerprint::File(config) => fingerprints.with_config(config.to_hex()),
+        }
+    }
+}
+
+impl From<ReloadOutcome> for norn_wire::ReloadOutcome {
+    fn from(outcome: ReloadOutcome) -> Self {
+        match outcome {
+            ReloadOutcome::ConfigOnly => norn_wire::ReloadOutcome::ConfigOnly,
+            ReloadOutcome::SchemaChanged => norn_wire::ReloadOutcome::SchemaChanged,
+        }
+    }
+}
+
+/// What a reload judged its candidate to be: the outcome it decided about the
+/// schema, and the fingerprints the candidate was read at.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReloadJudgment {
+    pub outcome: ReloadOutcome,
+    pub fingerprints: ActiveFingerprints,
+}
+
+impl<O: EntryOps> Host<O> {
+    /// Answer a `vault reload`: validate the vault's schema-and-config
+    /// candidate and activate it, or with `dry_run` validate it and activate
+    /// nothing.
+    ///
+    /// Both are admitted and run as one reload is, so a dry run is refused
+    /// whenever an activation asked at the same moment would be — among them
+    /// `vault/reload-busy` while something works over the vault — and answers
+    /// the outcome and fingerprints that activation would. A runtime failure
+    /// either meets gets the same policy, and a reload the host drops without
+    /// an answer — moved past before it ran, or lost with a leg that unwound —
+    /// answers where the entry stands once it is dropped. Where the entry
+    /// stands is its published demand, so an entry standing on a park is
+    /// refused with the park's own code, as `vault status` answers it. Every
+    /// refusal renders through [`ReloadRefusal::answer`].
+    ///
+    /// `Err(HostError)` is a host shutting down or whose job channel is gone,
+    /// which is transport death and carries no code: nothing about the vault
+    /// was learned.
+    pub fn vault_reload(
+        &self,
+        params: &ReloadParams,
+    ) -> Result<Result<ReloadReport, ErrorEnvelope>, HostError> {
+        let name = match registered_name(&params.vault) {
+            Ok(name) => name,
+            Err(refused) => return Ok(Err(refused)),
+        };
+        let judged = if params.dry_run {
+            self.judge_reload(name)
+        } else {
+            self.reload(name)
+        };
+        match judged {
+            Ok(judgment) => {
+                let report =
+                    ReloadReport::new(judgment.outcome.into(), judgment.fingerprints.into());
+                Ok(Ok(if params.dry_run {
+                    report.validated()
+                } else {
+                    report
+                }))
+            }
+            Err(refusal) => refusal.answer(name).map(Err),
+        }
+    }
+}
+
 /// Why one internal reload request did not return a Ready vault.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReloadRefusal {
     UnknownVault,
     Unsupported,
-    Unavailable(TrustState),
+    /// The entry is not reloadable right now, and this is where it stands:
+    /// its published demand, the park it stands on first and its trust state
+    /// where nothing parks it — the one reading `vault status` and a demand
+    /// lease answer the same entry with.
+    Unavailable(Demand),
     Core(ReloadError),
     Runtime(JobFailure),
     HostStopped,

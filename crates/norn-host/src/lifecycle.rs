@@ -20,7 +20,8 @@ use crate::evidence::{ReadEvidence, ReadReading};
 use crate::registry::{AliasConflict, RegistryRead};
 use crate::reload::ReloadCandidate;
 use crate::{
-    ActiveFingerprints, AuthoredDrift, ReloadError, ReloadOutcome, ReloadRefusal, VaultInspection,
+    ActiveFingerprints, AuthoredDrift, ReloadError, ReloadJudgment, ReloadOutcome, ReloadRefusal,
+    VaultInspection,
 };
 
 mod claim;
@@ -268,14 +269,27 @@ pub trait EntryOps: Send + Sync + 'static {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure>;
-    /// Read, validate, and apply the two authored vault control files. The
-    /// default reports unsupported, which does not change the vault state.
+    /// Read, validate, and apply the two authored vault control files, and
+    /// answer what was decided about the schema and the fingerprints of the
+    /// candidate put into service. The default reports unsupported, which does
+    /// not change the vault state.
     fn reload(
         &self,
         _: &VaultName,
         _: &mut Self::Attachment,
         _: &ProgressReporter<Self::Attachment>,
-    ) -> Result<ReloadOutcome, EntryReloadFailure> {
+    ) -> Result<ReloadJudgment, EntryReloadFailure> {
+        Err(EntryReloadFailure::Unsupported)
+    }
+    /// Read and validate the two authored vault control files and answer what
+    /// [`EntryOps::reload`] would decide about them, at the fingerprints it
+    /// would put into service, changing nothing. The default reports
+    /// unsupported, as the default reload does.
+    fn judge_reload(
+        &self,
+        _: &VaultName,
+        _: &Self::Attachment,
+    ) -> Result<ReloadJudgment, EntryReloadFailure> {
         Err(EntryReloadFailure::Unsupported)
     }
     /// The core fingerprints active in this attachment, where it has them.
@@ -1236,10 +1250,16 @@ enum Job {
     Rebuild(VaultName, u64),
     Reconcile(VaultName, u64),
     Maintenance(VaultName, u64),
-    Reload(VaultName, u64, mpsc::SyncSender<Result<(), ReloadRefusal>>),
-    ReloadReconcile(VaultName, u64, mpsc::SyncSender<Result<(), ReloadRefusal>>),
+    Reload(VaultName, u64, ReloadReply),
+    /// A dry run of a reload: judge the candidate and activate nothing.
+    JudgeReload(VaultName, u64, ReloadReply),
+    /// A schema reload's next turn, carrying what its first turn judged.
+    ReloadReconcile(VaultName, u64, ReloadJudgment, ReloadReply),
     Detach(VaultName, u64),
 }
+
+/// Where an explicit reload's asker waits for what the reload judged.
+type ReloadReply = mpsc::SyncSender<Result<ReloadJudgment, ReloadRefusal>>;
 
 impl Job {
     fn epoch(&self) -> u64 {
@@ -1250,7 +1270,8 @@ impl Job {
             | Self::Reconcile(_, epoch)
             | Self::Maintenance(_, epoch)
             | Self::Reload(_, epoch, _)
-            | Self::ReloadReconcile(_, epoch, _)
+            | Self::JudgeReload(_, epoch, _)
+            | Self::ReloadReconcile(_, epoch, _, _)
             | Self::Detach(_, epoch) => *epoch,
         }
     }
@@ -1263,8 +1284,25 @@ impl Job {
             | Self::Reconcile(name, _)
             | Self::Maintenance(name, _)
             | Self::Reload(name, _, _)
-            | Self::ReloadReconcile(name, _, _)
+            | Self::JudgeReload(name, _, _)
+            | Self::ReloadReconcile(name, _, _, _)
             | Self::Detach(name, _) => name,
+        }
+    }
+
+    /// A second sender to the asker an explicit reload job answers, where the
+    /// job is one.
+    fn reload_reply(&self) -> Option<ReloadReply> {
+        match self {
+            Self::Reload(_, _, reply)
+            | Self::JudgeReload(_, _, reply)
+            | Self::ReloadReconcile(_, _, _, reply) => Some(reply.clone()),
+            Self::Attach(..)
+            | Self::Recover(..)
+            | Self::Rebuild(..)
+            | Self::Reconcile(..)
+            | Self::Maintenance(..)
+            | Self::Detach(..) => None,
         }
     }
 }
@@ -2323,6 +2361,11 @@ struct Shared<O: EntryOps> {
     /// Root identities claimed by coverage acquisitions while their
     /// filesystem work runs outside this gate.
     attach_gate: Mutex<BTreeMap<Identity, VaultName>>,
+    /// Unwind the next reload turn that hands its reload on, straight after
+    /// the hand-on. That turn no longer holds the entry, so its unwind is the
+    /// one whose asker the turn it handed on to answers.
+    #[cfg(test)]
+    panic_after_reload_handoff: AtomicBool,
 }
 
 pub struct Host<O: EntryOps> {
@@ -2809,6 +2852,8 @@ impl<O: EntryOps> Host<O> {
             shutting_down: AtomicBool::new(false),
             idle_after: policy.idle_after,
             attach_gate: Mutex::new(BTreeMap::new()),
+            #[cfg(test)]
+            panic_after_reload_handoff: AtomicBool::new(false),
         });
         let mut workers = Vec::with_capacity(policy.worker_slots);
         for _ in 0..policy.worker_slots {
@@ -2824,6 +2869,14 @@ impl<O: EntryOps> Host<O> {
                             };
                             let leg = Leg::Job(job.epoch());
                             let name = job.name().clone();
+                            // A second sender to an explicit reload's asker,
+                            // held until the reconciliation below has run. An
+                            // unwind drops the job's own sender with the stack,
+                            // and the asker left unanswered reads where the
+                            // entry stands once every sender is gone, so this
+                            // is what keeps that reading from being taken
+                            // before the unwind has published over the entry.
+                            let asker = job.reload_reply();
                             // The unwind is caught here rather than around the
                             // leg's own work, and that placement is the whole
                             // of what keeps the pool alive: the thread that
@@ -2842,6 +2895,7 @@ impl<O: EntryOps> Host<O> {
                                     unwind_detail(payload.as_ref()),
                                 );
                             }
+                            drop(asker);
                         }
                         Err(_) => break,
                     }
@@ -2949,14 +3003,59 @@ impl<O: EntryOps> Host<O> {
         )
     }
 
-    /// Request one explicit reload and wait until the vault has its outcome.
+    /// Request one explicit reload and wait until the vault has its outcome:
+    /// what the reload decided about the schema, and the fingerprints it put
+    /// into service, which are the ones the entry reports as active from here.
     ///
-    /// This is the seam the vault reload verb Layer 3's verb charter places lands
-    /// on. Watcher events activate neither control file, so an edited schema
+    /// [`Host::vault_reload`] answers the `vault reload` verb through this.
+    /// Watcher events activate neither control file, so an edited schema
     /// reaches the store's pin only through this reload or through the fresh
-    /// read an attach or a recovery leg makes for itself; nothing in this crate
-    /// outside its own cases reaches it yet.
-    pub fn reload(&self, name: &VaultName) -> Result<(), ReloadRefusal> {
+    /// read an attach or a recovery leg makes for itself.
+    pub fn reload(&self, name: &VaultName) -> Result<ReloadJudgment, ReloadRefusal> {
+        self.request_reload(name, Job::Reload)
+    }
+
+    /// Request one judgment of the vault's reload candidate and wait for it:
+    /// what a reload asked now would decide, at the fingerprints it would put
+    /// into service, with nothing put into service.
+    ///
+    /// It is admitted and run as a reload is, holding the entry's claim and
+    /// coverage while it reads, so it is refused whenever a reload would be and
+    /// judges the candidate against the controls the attachment holds. It
+    /// records nothing about the candidate: no active fingerprint, no retained
+    /// diagnostic, and no config delivered. A runtime failure it meets — damaged
+    /// derived state, a lost maintainership — is a fact about the entry, and it
+    /// applies the policy a reload that met it applies.
+    pub(crate) fn judge_reload(&self, name: &VaultName) -> Result<ReloadJudgment, ReloadRefusal> {
+        self.request_reload(name, Job::JudgeReload)
+    }
+
+    /// Admit one reload-shaped job against `name`, send it, and wait for its
+    /// answer. The entry must be `Ready`, hold its coverage, and have nothing
+    /// working over it.
+    ///
+    /// Where the entry stands is [`EntryState::published_demand`] on every
+    /// path that tells the asker so — the refusal at admission, a leg that
+    /// does not run or no longer stands, and a reload dropped unanswered — so
+    /// a park answers in its own code, as `vault status` and a demand lease
+    /// answer it, rather than as the label beneath it.
+    ///
+    /// A leg that runs answers the asker itself. A reload that is dropped
+    /// with no answer sent is one the host moved past, and the asker is told
+    /// where the entry stands, read once every sender of its reply is gone:
+    /// a job the entry was moved past on its marker, in the channel, or on
+    /// its way back to its marker; a job whose vault left the serving set;
+    /// and a leg that unwound, whose worker holds the asker until the
+    /// unwind has published over the entry. A turn that handed the reload on
+    /// before it unwound leaves a sender with the turn it handed on to, and
+    /// that turn is what answers. `HostStopped` is what is left: a job
+    /// channel that refused the send, or a job dropped undelivered because
+    /// the host is shutting down.
+    fn request_reload(
+        &self,
+        name: &VaultName,
+        job: fn(VaultName, u64, ReloadReply) -> Job,
+    ) -> Result<ReloadJudgment, ReloadRefusal> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Err(ReloadRefusal::UnknownVault);
         };
@@ -2968,14 +3067,35 @@ impl<O: EntryOps> Host<O> {
                 || state.claim.is_held()
                 || state.detach_in_flight
             {
-                return Err(ReloadRefusal::Unavailable(state.trust.clone()));
+                return Err(ReloadRefusal::Unavailable(state.published_demand()));
             }
             state
                 .claim
-                .schedule(|epoch| Job::Reload(name.clone(), epoch, reply));
+                .schedule(|epoch| job(name.clone(), epoch, reply));
         }
         dispatch_pending(&self.shared, &entry).map_err(|_| ReloadRefusal::HostStopped)?;
-        answer.recv().unwrap_or(Err(ReloadRefusal::HostStopped))
+        answer
+            .recv()
+            .unwrap_or_else(|_| Err(self.unanswered_reload(name)))
+    }
+
+    /// What the asker of a reload the host dropped unanswered is told: where
+    /// the entry stands now — its published demand, park first — a vault the serving set no longer holds, or a
+    /// host that is shutting down.
+    fn unanswered_reload(&self, name: &VaultName) -> ReloadRefusal {
+        if self.shared.shutting_down.load(Ordering::SeqCst) {
+            return ReloadRefusal::HostStopped;
+        }
+        match self.shared.entries.get(name) {
+            Some(entry) => ReloadRefusal::Unavailable(
+                entry
+                    .gate
+                    .lock()
+                    .expect("entry gate poisoned")
+                    .published_demand(),
+            ),
+            None => ReloadRefusal::UnknownVault,
+        }
     }
 
     /// How many passes that stat every served root this host has run against
@@ -3796,6 +3916,9 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
         // back only where it is this job's own, and so does the marker — both
         // at another epoch belong to the work that superseded this job.
         state.claim.free_slot(epoch);
+        // A job the entry has moved past runs nothing. An explicit reload
+        // among them is answered by its asker, which reads where the entry
+        // stands once the job's last sender is gone.
         if !state.claim.stands_at(epoch) {
             if state.claim.marker().map(Job::epoch) == Some(epoch) {
                 state.claim.drop_marker();
@@ -3922,7 +4045,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         | Job::Reconcile(name, _)
         | Job::Maintenance(name, _)
         | Job::Reload(name, _, _)
-        | Job::ReloadReconcile(name, _, _)
+        | Job::JudgeReload(name, _, _)
+        | Job::ReloadReconcile(name, _, _, _)
         | Job::Detach(name, _) => name,
     };
     let entry = shared.entries.get(name)?;
@@ -4693,9 +4817,17 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         Job::Reload(name, epoch, reply) => {
             run_reload_job(shared, entry, name, epoch, reply, ReloadStep::Activate)
         }
-        Job::ReloadReconcile(name, epoch, reply) => {
-            run_reload_job(shared, entry, name, epoch, reply, ReloadStep::Reconcile)
+        Job::JudgeReload(name, epoch, reply) => {
+            run_reload_judgment_job(shared, entry, name, epoch, reply)
         }
+        Job::ReloadReconcile(name, epoch, judgment, reply) => run_reload_job(
+            shared,
+            entry,
+            name,
+            epoch,
+            reply,
+            ReloadStep::Reconcile(judgment),
+        ),
         Job::Maintenance(name, epoch) => {
             let mut attachment = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -4861,7 +4993,114 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
 #[derive(Clone, Copy)]
 enum ReloadStep {
     Activate,
-    Reconcile,
+    /// A later turn of a schema reload, carrying what its first turn judged.
+    Reconcile(ReloadJudgment),
+}
+
+/// Take the entry's coverage for one reload-shaped leg at `epoch` and pin the
+/// entry for it, returning the gate still held so the caller can take what
+/// else the leg starts from under the same hold.
+///
+/// A claim no longer standing at `epoch`, or coverage already out, is a leg
+/// that does not run: the asker is told where the entry stands — its
+/// published demand, park first — and `None` comes back. A reload and its dry run both begin here.
+fn begin_reload_leg<'entry, A: SnapshotSource>(
+    entry: &'entry Entry<A>,
+    epoch: u64,
+    reply: &ReloadReply,
+) -> Option<(MutexGuard<'entry, EntryState<A>>, A)> {
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    if !state.claim.stands_at(epoch) {
+        let _ = reply.send(Err(ReloadRefusal::Unavailable(state.published_demand())));
+        return None;
+    }
+    let Some(attachment) = state.coverage.take(epoch) else {
+        state.claim.release();
+        let _ = reply.send(Err(ReloadRefusal::Unavailable(state.published_demand())));
+        return None;
+    };
+    state.pin_for_leg(Leg::Job(epoch));
+    Some((state, attachment))
+}
+
+/// Where a reload-shaped leg stands once its work is back under the gate.
+enum ReloadLegEnd<'entry, A: SnapshotSource> {
+    /// The claim still stands at the leg's epoch and no release opened over
+    /// it: the leg publishes what its work met, under this hold.
+    Standing(MutexGuard<'entry, EntryState<A>>, A),
+    /// The claim was taken away or a release opened while the leg ran. The
+    /// asker has been told where the entry stands, and the job returns this
+    /// attachment for the release to take.
+    Superseded(A),
+}
+
+/// Bring a reload-shaped leg's work back under the gate: give back its pin,
+/// and end the leg where it no longer stands over the entry.
+///
+/// The claim this leg ran under may have been taken away while it ran, so the
+/// work it did is not what stands over the entry any more; or a release may
+/// have opened over it. Either way the asker is told where the entry stands
+/// now — its published demand, park first — read off the gate under the same
+/// hold, which is the value
+/// [`begin_reload_leg`] reports for the same condition. A reload and its dry
+/// run both end here.
+fn end_reload_leg<'entry, A: SnapshotSource>(
+    entry: &'entry Entry<A>,
+    epoch: u64,
+    attachment: A,
+    reply: &ReloadReply,
+) -> ReloadLegEnd<'entry, A> {
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    state.unpin_leg(Leg::Job(epoch));
+    if !state.claim.stands_at(epoch) || state.detach_in_flight {
+        let stands = state.published_demand();
+        drop(state);
+        let _ = reply.send(Err(ReloadRefusal::Unavailable(stands)));
+        return ReloadLegEnd::Superseded(attachment);
+    }
+    ReloadLegEnd::Standing(state, attachment)
+}
+
+/// Run one dry run of a reload: judge the candidate over the entry's coverage
+/// and hand the coverage back as it was.
+///
+/// It begins and ends as a reload's leg does, so a dry run is refused when a
+/// reload asked at the same moment would be. What it judges of the candidate
+/// is the answer and nothing else: the handle stays as it stood, and no
+/// fingerprint, diagnostic or trust state is recorded for the candidate.
+/// Every failure it meets goes to [`apply_reload_runtime_failure`], which
+/// answers a candidate's own failure and records nothing, and applies to a
+/// fact about the entry the policy an activation's meets.
+fn run_reload_judgment_job<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    name: VaultName,
+    epoch: u64,
+    reply: ReloadReply,
+) -> Option<O::Attachment> {
+    let (state, attachment) = begin_reload_leg(entry, epoch, &reply)?;
+    drop(state);
+
+    let judged = shared.ops.judge_reload(&name, &attachment);
+
+    let (mut state, attachment) = match end_reload_leg(entry, epoch, attachment, &reply) {
+        ReloadLegEnd::Standing(state, attachment) => (state, attachment),
+        ReloadLegEnd::Superseded(attachment) => return Some(attachment),
+    };
+    let response = match judged {
+        Ok(judgment) => Ok(judgment),
+        Err(EntryReloadFailure::Unsupported) => Err(ReloadRefusal::Unsupported),
+        Err(EntryReloadFailure::Runtime(failure)) => {
+            return apply_reload_runtime_failure(
+                shared, entry, state, name, epoch, attachment, failure, reply,
+            );
+        }
+    };
+    state.coverage.park_by(epoch, attachment);
+    state.claim.release();
+    drop(state);
+    let _ = reply.send(response);
+    None
 }
 
 /// Run one bounded turn of an explicit reload.
@@ -4874,112 +5113,94 @@ fn run_reload_job<O: EntryOps>(
     entry: &Arc<Entry<O::Attachment>>,
     name: VaultName,
     epoch: u64,
-    reply: mpsc::SyncSender<Result<(), ReloadRefusal>>,
+    reply: ReloadReply,
     step: ReloadStep,
 ) -> Option<O::Attachment> {
-    let (mut attachment, work) = {
-        let mut state = entry.gate.lock().expect("entry gate poisoned");
-        if !state.claim.stands_at(epoch) {
-            let _ = reply.send(Err(ReloadRefusal::Unavailable(state.trust.clone())));
-            return None;
-        }
-        let Some(attachment) = state.coverage.take(epoch) else {
-            state.claim.release();
-            let _ = reply.send(Err(ReloadRefusal::Unavailable(state.trust.clone())));
-            return None;
-        };
-        state.pin_for_leg(Leg::Job(epoch));
-        let work = match step {
-            ReloadStep::Activate => Batch::default(),
-            ReloadStep::Reconcile => std::mem::take(&mut state.pending),
-        };
-        (attachment, work)
+    let (mut state, mut attachment) = begin_reload_leg(entry, epoch, &reply)?;
+    let work = match step {
+        ReloadStep::Activate => Batch::default(),
+        ReloadStep::Reconcile(_) => std::mem::take(&mut state.pending),
     };
+    drop(state);
 
-    let mut unsupported = false;
+    // `None` is an attachment that holds no reload at all.
     let mut result = match step {
         ReloadStep::Activate => {
             match shared
                 .ops
                 .reload(&name, &mut attachment, &reporter(entry, epoch))
             {
-                Ok(outcome) => Ok(outcome),
-                Err(EntryReloadFailure::Unsupported) => {
-                    unsupported = true;
-                    Ok(ReloadOutcome::ConfigOnly)
-                }
-                Err(EntryReloadFailure::Runtime(failure)) => Err(failure),
+                Ok(judgment) => Some(Ok(judgment)),
+                Err(EntryReloadFailure::Unsupported) => None,
+                Err(EntryReloadFailure::Runtime(failure)) => Some(Err(failure)),
             }
         }
-        ReloadStep::Reconcile if work.is_empty() => Ok(ReloadOutcome::SchemaChanged),
-        ReloadStep::Reconcile => shared
-            .ops
-            .reconcile(
-                &name,
-                &mut attachment,
-                ReconcileWork { batch: work },
-                &reporter(entry, epoch),
-            )
-            .map(|()| ReloadOutcome::SchemaChanged),
+        ReloadStep::Reconcile(judgment) if work.is_empty() => Some(Ok(judgment)),
+        ReloadStep::Reconcile(judgment) => Some(
+            shared
+                .ops
+                .reconcile(
+                    &name,
+                    &mut attachment,
+                    ReconcileWork { batch: work },
+                    &reporter(entry, epoch),
+                )
+                .map(|()| judgment),
+        ),
     };
     let mut observed = Batch::default();
     let mut handoff_saturated = false;
-    if !unsupported && matches!(result, Ok(ReloadOutcome::SchemaChanged)) {
+    if let Some(Ok(judgment)) = &result
+        && judgment.outcome == ReloadOutcome::SchemaChanged
+    {
         match drain_observed(&shared.ops, &name, &mut attachment) {
             Ok((batch, saturated)) => {
                 observed = batch;
                 handoff_saturated = saturated;
             }
-            Err(error) => result = Err(error),
+            Err(error) => result = Some(Err(error)),
         }
     }
 
-    let mut state = entry.gate.lock().expect("entry gate poisoned");
-    state.unpin_leg(Leg::Job(epoch));
-    if !state.claim.stands_at(epoch) {
-        // The claim this job ran under was taken away while it ran, so the
-        // reload it asked for is not the work that stands over this entry any
-        // more. What the asker is told is where the entry stands now, read off
-        // the gate under the same hold — the same value the prologue of this
-        // job reports for the same condition, and the same one the epilogue
-        // below reports for a detach in flight.
-        let trust = state.trust.clone();
-        drop(state);
-        let _ = reply.send(Err(ReloadRefusal::Unavailable(trust)));
-        return Some(attachment);
-    }
-    if state.detach_in_flight {
-        let trust = state.trust.clone();
-        drop(state);
-        let _ = reply.send(Err(ReloadRefusal::Unavailable(trust)));
-        return Some(attachment);
-    }
-    if unsupported {
+    let (mut state, attachment) = match end_reload_leg(entry, epoch, attachment, &reply) {
+        ReloadLegEnd::Standing(state, attachment) => (state, attachment),
+        ReloadLegEnd::Superseded(attachment) => return Some(attachment),
+    };
+    let Some(result) = result else {
         state.coverage.park_by(epoch, attachment);
         state.claim.release();
         drop(state);
         let _ = reply.send(Err(ReloadRefusal::Unsupported));
         return None;
-    }
-    if matches!(result, Ok(ReloadOutcome::SchemaChanged))
+    };
+    if let Ok(judgment) = &result
+        && judgment.outcome == ReloadOutcome::SchemaChanged
         && (handoff_saturated || !observed.is_empty())
     {
+        let judgment = *judgment;
         state.pending.merge(observed);
         state.coverage.park_by(epoch, attachment);
         let next = state
             .claim
-            .hand_on(|epoch| Job::ReloadReconcile(name.clone(), epoch, reply));
+            .hand_on(|epoch| Job::ReloadReconcile(name.clone(), epoch, judgment, reply));
         drop(state);
         dispatch_handoff(shared, entry, epoch, next);
+        #[cfg(test)]
+        if shared
+            .panic_after_reload_handoff
+            .swap(false, Ordering::SeqCst)
+        {
+            panic!("the reload turn unwound after its hand-on");
+        }
         return None;
     }
 
     let response = match result {
-        Ok(outcome) => {
+        Ok(judgment) => {
             record_active_declaration(&mut state, &*shared.ops, &attachment);
             state.last_reload_error = None;
             state.clear_rung_requirements();
-            match outcome {
+            match judgment.outcome {
                 ReloadOutcome::ConfigOnly => {
                     // A config-only reload closed no handle, so the slot is
                     // full and this mints nothing. It is spelled as the
@@ -4994,7 +5215,7 @@ fn run_reload_job<O: EntryOps>(
                 }
             }
             state.trust = TrustState::Ready;
-            Ok(())
+            Ok(judgment)
         }
         Err(JobFailure::Reload(error)) => {
             record_active_declaration(&mut state, &*shared.ops, &attachment);
@@ -5008,7 +5229,48 @@ fn run_reload_job<O: EntryOps>(
             }
             Err(ReloadRefusal::Core(error))
         }
-        Err(error @ JobFailure::LostMaintainership) => {
+        Err(failure) => {
+            return apply_reload_runtime_failure(
+                shared, entry, state, name, epoch, attachment, failure, reply,
+            );
+        }
+    };
+    state.claim.release();
+    drop(state);
+    let _ = reply.send(response);
+    None
+}
+
+/// Answer a runtime failure a reload-shaped leg met, and apply the policy the
+/// entry owes for it: a lost or contended maintainership releases the entry,
+/// a terminal watch or a refusing environment owes the recovery, and damaged
+/// derived state withdraws trust and hands the claim on to rung 3.
+///
+/// Each of these is a fact about the entry rather than about the candidate
+/// the leg read, so an activation and a dry run that meet one both answer it
+/// here. A candidate's own failure is not such a fact: it is answered and
+/// nothing is recorded for it, and an activation, which retains it, handles
+/// it before reaching this.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the leg's whole standing: its gate hold, its coverage, its epoch and its asker"
+)]
+fn apply_reload_runtime_failure<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    mut state: MutexGuard<'_, EntryState<O::Attachment>>,
+    name: VaultName,
+    epoch: u64,
+    attachment: O::Attachment,
+    failure: JobFailure,
+    reply: ReloadReply,
+) -> Option<O::Attachment> {
+    let response = match failure {
+        JobFailure::Reload(error) => {
+            state.coverage.park_by(epoch, attachment);
+            Err(ReloadRefusal::Core(error))
+        }
+        error @ JobFailure::LostMaintainership => {
             begin_release(&mut state);
             drop(state);
             finish_release(
@@ -5022,7 +5284,7 @@ fn run_reload_job<O: EntryOps>(
             let _ = reply.send(Err(ReloadRefusal::Runtime(error)));
             return None;
         }
-        Err(JobFailure::MaintainerContended(incumbent)) => {
+        JobFailure::MaintainerContended(incumbent) => {
             let error = JobFailure::MaintainerContended(incumbent.clone());
             state.maintainer_contended = Some(incumbent);
             begin_release(&mut state);
@@ -5038,7 +5300,7 @@ fn run_reload_job<O: EntryOps>(
             let _ = reply.send(Err(ReloadRefusal::Runtime(error)));
             return None;
         }
-        Err(JobFailure::WatcherTerminal(error)) => {
+        JobFailure::WatcherTerminal(error) => {
             let failure = JobFailure::WatcherTerminal(error.clone());
             let reclassify = root_moved(&error);
             record_active_declaration(&mut state, &*shared.ops, &attachment);
@@ -5054,7 +5316,7 @@ fn run_reload_job<O: EntryOps>(
             let _ = reply.send(Err(ReloadRefusal::Runtime(failure)));
             return None;
         }
-        Err(JobFailure::Environmental(detail)) => {
+        JobFailure::Environmental(detail) => {
             let failure = JobFailure::Environmental(detail.clone());
             record_active_declaration(&mut state, &*shared.ops, &attachment);
             state.park_coverage(epoch, attachment);
@@ -5063,10 +5325,10 @@ fn run_reload_job<O: EntryOps>(
             state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
             Err(ReloadRefusal::Runtime(failure))
         }
-        Err(JobFailure::StoreDamaged(detail)) => {
+        JobFailure::StoreDamaged(detail) => {
             let failure = JobFailure::StoreDamaged(detail.clone());
             record_active_declaration(&mut state, &*shared.ops, &attachment);
-            // The schema half of this reload may have closed the handle before
+            // The schema half of an activation may have closed the handle before
             // the damage was met, so the slot is answered for here rather than
             // left empty with nothing beside it. The entry publishes a
             // withdrawn label either way and no read is served under one; what
@@ -5647,6 +5909,10 @@ mod tests {
         /// verdict the caller is refused under. One-shot, so the rung the
         /// verdict schedules finds the leg sound.
         damaged_reload: std::sync::atomic::AtomicBool,
+        /// Report the reload as having lost maintainership. One-shot, and
+        /// spent by a reload or its dry run alike, so the attach a release
+        /// honors finds the lock its own.
+        lost_reload: std::sync::atomic::AtomicBool,
         /// Report the rebuild itself as damaged, which is rung 3 failing to
         /// resolve what it was scheduled for.
         damaged_rebuild: std::sync::atomic::AtomicBool,
@@ -5738,6 +6004,8 @@ mod tests {
         panic_in_attach: std::sync::atomic::AtomicBool,
         panic_in_reconcile: std::sync::atomic::AtomicBool,
         panic_in_recover: std::sync::atomic::AtomicBool,
+        panic_in_reload: std::sync::atomic::AtomicBool,
+        panic_in_judge_reload: std::sync::atomic::AtomicBool,
         /// The one vault whose polls panic. A dispatcher tick polls every
         /// attached vault, so the arming names which of them unwinds and the
         /// rest of the tick is what a case reads.
@@ -5762,6 +6030,8 @@ mod tests {
     const RECOVER_PANIC: &str = "the fake recover unwound";
     const POLL_PANIC: &str = "the fake poll unwound";
     const DETACH_PANIC: &str = "the fake detach unwound";
+    const RELOAD_PANIC: &str = "the fake reload unwound";
+    const JUDGE_RELOAD_PANIC: &str = "the fake reload judgment unwound";
 
     /// The state an entry publishes for a leg that unwound carrying `message`.
     fn unwound(message: &str) -> TrustState {
@@ -5788,6 +6058,22 @@ mod tests {
                 mint_fails: Arc::clone(&self.reader_mint_fails),
                 content_model: Arc::new(ContentModel::under(format!("pin-{pin}"))),
             }
+        }
+    }
+
+    /// What the fake answers a reload with: `outcome`, at fingerprints that
+    /// name the schema it decided on and no config file.
+    fn fake_judgment(outcome: ReloadOutcome) -> ReloadJudgment {
+        let schema: &[u8] = match outcome {
+            ReloadOutcome::ConfigOnly => b"the attached schema",
+            ReloadOutcome::SchemaChanged => b"the reloaded schema",
+        };
+        ReloadJudgment {
+            outcome,
+            fingerprints: ActiveFingerprints {
+                schema: norn_fs::ContentHash::of(schema),
+                config: crate::ConfigFingerprint::Missing,
+            },
         }
     }
 
@@ -5963,7 +6249,7 @@ mod tests {
             _: &VaultName,
             _: &mut FakeCoverage,
             progress: &ProgressReporter<FakeCoverage>,
-        ) -> Result<ReloadOutcome, EntryReloadFailure> {
+        ) -> Result<ReloadJudgment, EntryReloadFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             if !self.reload_supported.load(Ordering::SeqCst) {
                 return Err(EntryReloadFailure::Unsupported);
@@ -5972,10 +6258,16 @@ mod tests {
                 self.reload_started.store(true, Ordering::SeqCst);
                 wait_for_release("reload_release", &self.reload_release);
             }
+            if self.panic_in_reload.load(Ordering::SeqCst) {
+                panic!("{RELOAD_PANIC}");
+            }
             if self.damaged_reload.swap(false, Ordering::SeqCst) {
                 return Err(EntryReloadFailure::Runtime(JobFailure::StoreDamaged(
                     "the reloaded database disagrees with its own schema".into(),
                 )));
+            }
+            if self.lost_reload.swap(false, Ordering::SeqCst) {
+                return Err(EntryReloadFailure::Runtime(JobFailure::LostMaintainership));
             }
             if self.reload_schema_changed.load(Ordering::SeqCst) {
                 progress.begin_schema_reload();
@@ -5987,10 +6279,45 @@ mod tests {
                         ReloadError::SchemaApply("the candidate could not be pinned".into()),
                     )));
                 }
-                Ok(ReloadOutcome::SchemaChanged)
+                Ok(fake_judgment(ReloadOutcome::SchemaChanged))
             } else {
-                Ok(ReloadOutcome::ConfigOnly)
+                Ok(fake_judgment(ReloadOutcome::ConfigOnly))
             }
+        }
+
+        /// The reload's judgment, held open on the reload's own probe and
+        /// meeting the reload's own runtime armings.
+        fn judge_reload(
+            &self,
+            _: &VaultName,
+            _: &FakeCoverage,
+        ) -> Result<ReloadJudgment, EntryReloadFailure> {
+            ON_JOB_THREAD.with(|flag| flag.set(true));
+            if !self.reload_supported.load(Ordering::SeqCst) {
+                return Err(EntryReloadFailure::Unsupported);
+            }
+            if self.block_reload.load(Ordering::SeqCst) {
+                self.reload_started.store(true, Ordering::SeqCst);
+                wait_for_release("reload_release", &self.reload_release);
+            }
+            if self.panic_in_judge_reload.load(Ordering::SeqCst) {
+                panic!("{JUDGE_RELOAD_PANIC}");
+            }
+            if self.damaged_reload.swap(false, Ordering::SeqCst) {
+                return Err(EntryReloadFailure::Runtime(JobFailure::StoreDamaged(
+                    "the reloaded database disagrees with its own schema".into(),
+                )));
+            }
+            if self.lost_reload.swap(false, Ordering::SeqCst) {
+                return Err(EntryReloadFailure::Runtime(JobFailure::LostMaintainership));
+            }
+            Ok(fake_judgment(
+                if self.reload_schema_changed.load(Ordering::SeqCst) {
+                    ReloadOutcome::SchemaChanged
+                } else {
+                    ReloadOutcome::ConfigOnly
+                },
+            ))
         }
 
         fn poll(
@@ -6856,21 +7183,17 @@ mod tests {
             },
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
-        assert_eq!(response, Ok(()));
+        assert_eq!(response, Ok(fake_judgment(ReloadOutcome::ConfigOnly)));
         assert_eq!(host.state(&name), answered(TrustState::Ready));
     }
 
-    /// A reload whose claim is taken away while it runs reports where the
-    /// entry stands, not a state the send site invented. The claim goes with
-    /// an identity park, so what the asker is told is the park's own refusal —
-    /// the same value the status surface answers with — rather than
-    /// `Unattached`, which would say the entry holds nothing at all.
+    /// A reload-shaped leg whose claim is taken away by `park` while it runs,
+    /// on a host of its own, in the mode `dry_run` names: what its asker is
+    /// told, beside the detail the park's own refusal carries.
     #[cfg(unix)]
-    #[test]
-    fn a_reload_whose_claim_was_taken_away_reports_the_trust_the_entry_stands_at() {
+    fn a_leg_superseded_by(park: Park, dry_run: bool) -> (ReloadRefusal, ErrorDetail) {
         let scratch = temp_base("reload-claim-superseded");
-        let base = scratch.root();
-        let root = base.join("root");
+        let root = scratch.root().join("root");
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.block_reload.store(true, Ordering::SeqCst);
@@ -6879,27 +7202,47 @@ mod tests {
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
-        let reloading = Arc::clone(&host);
-        let reload_name = name.clone();
-        let reload = thread::spawn(move || reloading.reload(&reload_name));
+        let asking = Arc::clone(&host);
+        let asked = name.clone();
+        let answer = thread::spawn(move || {
+            if dry_run {
+                asking.judge_reload(&asked)
+            } else {
+                asking.reload(&asked)
+            }
+        });
         wait_for_flag("reload_started", &ops.reload_started);
 
-        refuse_root_identity(&root);
-        park_on_current_classification(&host.shared, &name);
-        let park = entry_park(host.as_ref(), &name);
-        let Some(Demand::IdentityRefused(detail)) = park.clone() else {
-            panic!("the entry stands on no identity park: {park:?}");
-        };
+        let parked = park_entry(&host, &name, &root, park);
         ops.reload_release.store(true, Ordering::SeqCst);
-
-        assert_eq!(
-            reload.join().unwrap(),
-            Err(ReloadRefusal::Unavailable(TrustState::untrusted(
-                UntrustedReason::environmental_refusal(detail)
-            ))),
-            "the reload reported a state the send site invented"
-        );
+        let refusal = answer
+            .join()
+            .unwrap()
+            .expect_err("the leg answered a judgment its claim no longer stood for");
         drop(host);
+        (refusal, parked)
+    }
+
+    /// A reload whose claim is taken away while it runs reports where the
+    /// entry stands, not a state the send site invented. The claim goes with a
+    /// park, so what the asker is told is the park's own refusal — the same
+    /// value the status surface answers with — rather than the `Unattached` or
+    /// releasing label beneath it, which would say the entry holds nothing yet.
+    #[cfg(unix)]
+    #[test]
+    fn a_reload_whose_claim_was_taken_away_reports_where_the_entry_stands() {
+        for park in [Park::Identity, Park::DuplicateRoot] {
+            let (refusal, parked) = a_leg_superseded_by(park, false);
+            let name = VaultName::new("notes").unwrap();
+            assert_eq!(
+                refusal
+                    .answer(&name)
+                    .expect("a live host answers with a code")
+                    .detail(),
+                &parked,
+                "{park:?}: the reload reported a state the send site invented"
+            );
+        }
     }
 
     #[test]
@@ -6922,13 +7265,91 @@ mod tests {
 
         assert_eq!(
             reload.join().unwrap(),
-            Err(ReloadRefusal::Unavailable(releasing()))
+            Err(ReloadRefusal::Unavailable(Demand::State(releasing())))
         );
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         let state = entry.gate.lock().unwrap();
         assert!(!state.detach_in_flight);
         assert!(state.coverage.in_hand());
+    }
+
+    /// A dry run whose claim is taken away while it reads reports where the
+    /// entry stands, as the reload it judges for does: the park's own refusal,
+    /// not the judgment it reached over a claim that no longer stands.
+    #[cfg(unix)]
+    #[test]
+    fn a_dry_run_whose_claim_was_taken_away_reports_where_the_entry_stands() {
+        for park in [Park::Identity, Park::DuplicateRoot] {
+            let (refusal, parked) = a_leg_superseded_by(park, true);
+            let name = VaultName::new("notes").unwrap();
+            assert_eq!(
+                refusal
+                    .answer(&name)
+                    .expect("a live host answers with a code")
+                    .detail(),
+                &parked,
+                "{park:?}: the dry run reported a state the send site invented"
+            );
+        }
+    }
+
+    /// A release opened over a dry run closes where the dry run's leg ends, as
+    /// it does over a reload: the asker is told the entry is releasing, the
+    /// coverage goes to the detach, and the lease standing over the entry
+    /// attaches it again.
+    #[test]
+    fn a_release_window_opened_over_a_dry_run_closes_at_the_job_epilogue() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.block_reload.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let host = Arc::new(host);
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let judging = Arc::clone(&host);
+        let judge_name = name.clone();
+        let judgment = thread::spawn(move || judging.judge_reload(&judge_name));
+        wait_for_flag("reload_started", &ops.reload_started);
+        let entry = host.shared.entries.get(&name).unwrap();
+        begin_release(&mut entry.gate.lock().unwrap());
+        ops.reload_release.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            judgment.join().unwrap(),
+            Err(ReloadRefusal::Unavailable(Demand::State(releasing())))
+        );
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        let state = entry.gate.lock().unwrap();
+        assert!(!state.detach_in_flight);
+        assert!(state.coverage.in_hand());
+    }
+
+    /// A schema reload whose drain observed watcher facts reconciles them on
+    /// its next turn, and that turn answers what the first turn judged.
+    #[test]
+    fn a_reload_turn_that_reconciles_observed_facts_answers_the_first_turns_judgment() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let reconciled = ops.reconciles.load(Ordering::SeqCst);
+
+        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+        assert_eq!(
+            host.reload(&name),
+            Ok(fake_judgment(ReloadOutcome::SchemaChanged))
+        );
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            reconciled + 1,
+            "the facts the first turn observed were not reconciled"
+        );
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
     }
 
     #[test]
@@ -6975,7 +7396,11 @@ mod tests {
             Ok(TrustState::Warming { .. })
         ));
         *ops.continuous_handoff_poll_for.lock().unwrap() = None;
-        reload.join().unwrap().expect("the reload to become Ready");
+        // The turn that finishes answers what the first turn judged.
+        assert_eq!(
+            reload.join().unwrap(),
+            Ok(fake_judgment(ReloadOutcome::SchemaChanged))
+        );
         sibling_ready.unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(host.state(&reloaded), answered(TrustState::Ready));
         assert_eq!(
@@ -7021,6 +7446,591 @@ mod tests {
             read.reading().published(),
             &Demand::State(TrustState::Ready)
         );
+    }
+
+    // ---- the `vault reload` handler ----
+
+    /// A `vault reload` of `name`, activating or dry.
+    fn reload_params(name: &VaultName, dry_run: bool) -> norn_wire::ReloadParams {
+        let params = norn_wire::ReloadParams::new(norn_wire::VaultAddress::name(name.clone()));
+        if dry_run { params.dry_run() } else { params }
+    }
+
+    /// The envelope `vault reload` refused `params` with.
+    fn reload_refused(host: &Host<Arc<FakeOps>>, params: &norn_wire::ReloadParams) -> ErrorDetail {
+        host.vault_reload(params)
+            .expect("the host is running")
+            .expect_err("the reload was answered")
+            .detail()
+            .clone()
+    }
+
+    /// **A name the registry does not hold is refused as unknown, echoing the
+    /// name**, whether the request activates or only validates.
+    #[test]
+    fn vault_reload_refuses_an_unregistered_name_as_unknown() {
+        let (host, _) = fixture_without_ambient_polling(Arc::new(FakeOps::default()));
+        let unregistered = VaultName::new("elsewhere").unwrap();
+        for dry_run in [false, true] {
+            assert_eq!(
+                reload_refused(&host, &reload_params(&unregistered, dry_run)),
+                ErrorDetail::unknown_vault(unregistered.clone())
+            );
+        }
+    }
+
+    /// **An address naming a root asks for a throwaway attach**, which holds
+    /// no control files to re-read.
+    #[test]
+    fn vault_reload_refuses_a_root_as_an_unsupported_attach() {
+        let (host, _) = fixture_without_ambient_polling(Arc::new(FakeOps::default()));
+        let root = norn_wire::VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap();
+        for dry_run in [false, true] {
+            let params = norn_wire::ReloadParams::new(norn_wire::VaultAddress::root(root.clone()));
+            let params = if dry_run { params.dry_run() } else { params };
+            assert_eq!(
+                reload_refused(&host, &params),
+                ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
+            );
+        }
+    }
+
+    /// **An entry nothing has attached holds nothing to reload yet.**
+    #[test]
+    fn vault_reload_refuses_an_unattached_entry_as_not_ready() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        for dry_run in [false, true] {
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                ErrorDetail::entry_not_ready(norn_wire::NotReady::unattached())
+            );
+        }
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 0);
+    }
+
+    /// **An entry whose derived state cannot be trusted refuses with the
+    /// reason its trust state carries.**
+    #[test]
+    fn vault_reload_refuses_an_untrusted_entry_with_its_reason() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.environmental_reconcile.store(true, Ordering::SeqCst);
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
+        let reason = UntrustedReason::environmental_refusal("refused");
+        wait_for_state(&host, &name, TrustState::untrusted(reason.clone()));
+
+        for dry_run in [false, true] {
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                ErrorDetail::entry_untrusted(reason.clone())
+            );
+        }
+    }
+
+    /// **An entry parked on a duplicate root refuses with the park's own code,
+    /// naming the aliases**, in either mode — the answer `vault status` gives
+    /// for the same entry, not the `Unattached` label the park stands over.
+    #[test]
+    fn vault_reload_refuses_an_entry_parked_on_a_duplicate_root_with_its_aliases() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let conflict = conflict_over(&name);
+        refuse_conflict(&host.shared, &conflict);
+        wait_for_published_label(&host, &name, TrustState::Unattached);
+
+        let parked = ErrorDetail::duplicate_root(conflict.aliases().clone());
+        assert_eq!(
+            host.state(&name)
+                .map_err(|refused| refused.detail().clone()),
+            Err(parked.clone())
+        );
+        for dry_run in [false, true] {
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                parked,
+                "dry run: {dry_run}"
+            );
+        }
+    }
+
+    /// **An entry parked on a contended maintainer lock refuses with the
+    /// park's own code, naming the incumbent**, in either mode.
+    #[test]
+    fn vault_reload_refuses_an_entry_parked_maintainer_contended_with_the_incumbent() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.contend_attach.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_park(
+            &host,
+            &name,
+            Demand::MaintainerContended(MaintainerIdentity::unknown()),
+        );
+
+        let parked = ErrorDetail::maintainer_contended(MaintainerIdentity::unknown());
+        for dry_run in [false, true] {
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                parked,
+                "dry run: {dry_run}"
+            );
+        }
+    }
+
+    /// **An entry parked on a root the registry cannot read refuses with the
+    /// park's own code**, in either mode.
+    #[cfg(unix)]
+    #[test]
+    fn vault_reload_refuses_an_entry_parked_on_its_root_identity_with_the_refusal() {
+        let scratch = temp_base("reload-identity-parked");
+        let root = scratch.root().join("root");
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let name = VaultName::new("notes").unwrap();
+        let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let parked = park_entry(&host, &name, &root, Park::Identity);
+        for dry_run in [false, true] {
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                parked,
+                "dry run: {dry_run}"
+            );
+        }
+    }
+
+    /// **A `Ready` entry something is already working over refuses busy**,
+    /// and a dry run is refused behind that work as an activation is.
+    #[test]
+    fn vault_reload_refuses_a_ready_entry_a_job_holds_as_busy() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.block_reload.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let host = Arc::new(host);
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let holding = Arc::clone(&host);
+        let held = name.clone();
+        let first = thread::spawn(move || holding.reload(&held));
+        wait_for_flag("reload_started", &ops.reload_started);
+
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
+        for dry_run in [false, true] {
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                ErrorDetail::reload_busy()
+            );
+        }
+        ops.reload_release.store(true, Ordering::SeqCst);
+        first.join().unwrap().expect("the reload holding the entry");
+    }
+
+    /// **An attachment that holds no reload at all refuses as a reload that
+    /// failed, of the unsupported kind**, and stays `Ready`.
+    #[test]
+    fn vault_reload_refuses_an_attachment_without_a_reload_as_unsupported() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        for dry_run in [false, true] {
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                ErrorDetail::reload_failed(norn_wire::ReloadFailure::unsupported())
+            );
+            assert_eq!(host.state(&name), answered(TrustState::Ready));
+        }
+    }
+
+    /// **A runtime failure a reload meets is its detail, and a dry run that
+    /// meets one applies an activation's policy to it.** Damaged derived state
+    /// is a fact about the entry, not the candidate, so either mode withdraws
+    /// trust and owes rung 3, and the rebuild puts the entry back.
+    #[test]
+    fn a_reload_that_meets_store_damage_owes_rung_three_in_either_mode() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let detail = "the reloaded database disagrees with its own schema";
+        let damaged = ErrorDetail::reload_failed(norn_wire::ReloadFailure::store_damaged(detail));
+
+        for (rebuilt, dry_run) in [(1, true), (2, false)] {
+            ops.rebuild_started.store(false, Ordering::SeqCst);
+            ops.rebuild_release.store(false, Ordering::SeqCst);
+            ops.block_rebuild.store(true, Ordering::SeqCst);
+            ops.damaged_reload.store(true, Ordering::SeqCst);
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                damaged
+            );
+            wait_for_flag("rebuild_started", &ops.rebuild_started);
+            assert_eq!(
+                host.state(&name),
+                answered(TrustState::untrusted(
+                    UntrustedReason::store_damaged_rebuilding(detail)
+                )),
+                "the entry kept serving over the damage"
+            );
+            ops.block_rebuild.store(false, Ordering::SeqCst);
+            ops.rebuild_release.store(true, Ordering::SeqCst);
+            wait_for_state(&host, &name, TrustState::Ready);
+            assert_eq!(ops.rebuilds.load(Ordering::SeqCst), rebuilt);
+        }
+    }
+
+    /// **A reload that finds its maintainership lost releases the entry in
+    /// either mode**, and the lease standing over it attaches it again. The
+    /// lock is the entry's, not the candidate's, so a dry run applies the
+    /// activation's policy to it.
+    #[test]
+    fn a_reload_that_lost_maintainership_releases_the_entry_in_either_mode() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        for (released, dry_run) in [(1, true), (2, false)] {
+            ops.lost_reload.store(true, Ordering::SeqCst);
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                ErrorDetail::reload_failed(norn_wire::ReloadFailure::lost_maintainership())
+            );
+            wait_for_state(&host, &name, TrustState::Ready);
+            assert_eq!(ops.detaches.load(Ordering::SeqCst), released);
+            assert_eq!(ops.attaches.load(Ordering::SeqCst), released + 1);
+        }
+    }
+
+    /// **A reload whose leg unwinds answers the reading the unwind published**,
+    /// in either mode: the entry is untrusted for the leg that unwound, and a
+    /// live host says so rather than answering as a stopped one. The next
+    /// demand attaches the entry again, and a dry run and an activation over
+    /// it then succeed.
+    #[test]
+    fn a_reload_whose_leg_unwinds_answers_the_reading_the_unwind_published() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        for (arming, message, dry_run) in [
+            (&ops.panic_in_judge_reload, JUDGE_RELOAD_PANIC, true),
+            (&ops.panic_in_reload, RELOAD_PANIC, false),
+        ] {
+            arming.store(true, Ordering::SeqCst);
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                ErrorDetail::entry_untrusted(UntrustedReason::leg_unwound(message))
+            );
+            arming.store(false, Ordering::SeqCst);
+            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, &name, TrustState::Ready);
+        }
+
+        let fingerprints = fake_judgment(ReloadOutcome::ConfigOnly).fingerprints.into();
+        let report =
+            norn_wire::ReloadReport::new(norn_wire::ReloadOutcome::ConfigOnly, fingerprints);
+        for dry_run in [true, false] {
+            let answered = host
+                .vault_reload(&reload_params(&name, dry_run))
+                .expect("the host is running")
+                .expect("the reload over the entry attached again");
+            let expected = if dry_run {
+                report.clone().validated()
+            } else {
+                report.clone()
+            };
+            assert_eq!(answered, expected);
+        }
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 3);
+    }
+
+    /// Two vaults over roots of their own, both `Ready`, on a host with one
+    /// worker and no dispatcher tick of its own, so a job blocked on one entry
+    /// holds every other entry's job behind it for as long as a case drives.
+    #[cfg(unix)]
+    fn one_worker_host_over(
+        ops: &Arc<FakeOps>,
+        base: &std::path::Path,
+        names: &[&VaultName],
+    ) -> Arc<Host<Arc<FakeOps>>> {
+        let roots: Vec<_> = names.iter().map(|name| base.join(name.as_str())).collect();
+        let pairs: Vec<_> = names
+            .iter()
+            .copied()
+            .zip(roots.iter().map(std::path::PathBuf::as_path))
+            .collect();
+        let host = Arc::new(rooted_host(
+            Arc::clone(ops),
+            &pairs,
+            1,
+            Duration::from_secs(60),
+        ));
+        for name in names {
+            drop(host.demand(name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, name, TrustState::Ready);
+        }
+        host
+    }
+
+    /// Ask `vault reload` of `name` on a thread of its own.
+    fn reload_on_a_thread(
+        host: &Arc<Host<Arc<FakeOps>>>,
+        name: &VaultName,
+        dry_run: bool,
+    ) -> thread::JoinHandle<Result<Result<norn_wire::ReloadReport, ErrorEnvelope>, HostError>> {
+        let host = Arc::clone(host);
+        let params = reload_params(name, dry_run);
+        thread::spawn(move || host.vault_reload(&params))
+    }
+
+    /// A park a case stands an entry on, raised the way the host raises it.
+    #[cfg(unix)]
+    #[derive(Clone, Copy, Debug)]
+    enum Park {
+        /// The registry cannot read the entry's root.
+        Identity,
+        /// The entry's name and one registration the host does not hold reach
+        /// one root.
+        DuplicateRoot,
+    }
+
+    /// Park `name` on `park`, and return the detail the park's own refusal
+    /// carries — the one `vault status` answers the parked entry with.
+    #[cfg(unix)]
+    fn park_entry(
+        host: &Host<Arc<FakeOps>>,
+        name: &VaultName,
+        root: &std::path::Path,
+        park: Park,
+    ) -> ErrorDetail {
+        match park {
+            Park::Identity => {
+                refuse_root_identity(root);
+                park_on_current_classification(&host.shared, name);
+                let Some(Demand::IdentityRefused(detail)) = entry_park(host, name) else {
+                    panic!("the entry stands on no identity park");
+                };
+                ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(detail))
+            }
+            Park::DuplicateRoot => {
+                let conflict = conflict_over(name);
+                refuse_conflict(&host.shared, &conflict);
+                ErrorDetail::duplicate_root(conflict.aliases().clone())
+            }
+        }
+    }
+
+    /// Every park a case stands an entry on, paired with each reload mode.
+    #[cfg(unix)]
+    fn every_park_in_either_mode() -> impl Iterator<Item = (Park, bool)> {
+        [Park::Identity, Park::DuplicateRoot]
+            .into_iter()
+            .flat_map(|park| [(park, false), (park, true)])
+    }
+
+    /// **A reload the entry moves past while it waits in the channel is
+    /// answered with where the entry stands**, in either mode, rather than as
+    /// a stopped host: the park that moved the entry past it, in that park's
+    /// own code. The reload queues behind another vault's reload on the one
+    /// worker, a park moves the entry past it, and the worker that then picks
+    /// it up runs nothing of it.
+    #[cfg(unix)]
+    #[test]
+    fn a_reload_moved_past_in_the_channel_answers_where_the_entry_stands() {
+        for (park, dry_run) in every_park_in_either_mode() {
+            let scratch = temp_base("reload-moved-past-in-channel");
+            let queued = VaultName::new("queued").unwrap();
+            let holding = VaultName::new("holding").unwrap();
+            let ops = Arc::new(FakeOps::default());
+            ops.reload_supported.store(true, Ordering::SeqCst);
+            let host = one_worker_host_over(&ops, scratch.root(), &[&queued, &holding]);
+            ops.block_reload.store(true, Ordering::SeqCst);
+            let held = reload_on_a_thread(&host, &holding, dry_run);
+            wait_for_flag("reload_started", &ops.reload_started);
+
+            let moved_past = reload_on_a_thread(&host, &queued, dry_run);
+            let entry = host.shared.entries.get(&queued).unwrap();
+            wait_until(
+                "the queued vault's reload to wait in the channel",
+                lifecycle_wait_budget(),
+                || {
+                    if entry.gate.lock().unwrap().claim.slot_taken() {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending("the queued vault's slot is free")
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let refused = park_entry(&host, &queued, &scratch.root().join("queued"), park);
+            ops.reload_release.store(true, Ordering::SeqCst);
+
+            let answered = moved_past
+                .join()
+                .unwrap()
+                .expect("a live host answered the reload it moved past with no code")
+                .expect_err("the reload the entry moved past was answered as run");
+            assert_eq!(answered.detail(), &refused, "{park:?}, dry run: {dry_run}");
+            held.join()
+                .unwrap()
+                .expect("the host is running")
+                .expect("the reload holding the worker");
+        }
+    }
+
+    /// **A reload the entry moves past before any worker takes it is answered
+    /// with where the entry stands**, in either mode. The channel is full, so
+    /// the reload waits on its marker for a later dispatch; a park moves the
+    /// entry past the marker, and the asker is answered then, in the park's
+    /// own code, rather than behind the work still holding the channel.
+    #[cfg(unix)]
+    #[test]
+    fn a_reload_moved_past_on_its_marker_answers_where_the_entry_stands() {
+        for (park, dry_run) in every_park_in_either_mode() {
+            let scratch = temp_base("reload-moved-past-on-marker");
+            let queued = VaultName::new("queued").unwrap();
+            let holding = VaultName::new("holding").unwrap();
+            let filling = VaultName::new("filling").unwrap();
+            let ops = Arc::new(FakeOps::default());
+            ops.reload_supported.store(true, Ordering::SeqCst);
+            let host = one_worker_host_over(&ops, scratch.root(), &[&queued, &holding, &filling]);
+            ops.block_reload.store(true, Ordering::SeqCst);
+            let held = reload_on_a_thread(&host, &holding, dry_run);
+            wait_for_flag("reload_started", &ops.reload_started);
+            let filled = reload_on_a_thread(&host, &filling, dry_run);
+            let filling_entry = host.shared.entries.get(&filling).unwrap();
+            wait_until(
+                "the filling vault's reload to take the channel",
+                lifecycle_wait_budget(),
+                || {
+                    if filling_entry.gate.lock().unwrap().claim.slot_taken() {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending("the filling vault's slot is free")
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+
+            let moved_past = reload_on_a_thread(&host, &queued, dry_run);
+            let entry = host.shared.entries.get(&queued).unwrap();
+            wait_until(
+                "the queued vault's reload to stand on its marker",
+                lifecycle_wait_budget(),
+                || {
+                    if entry.gate.lock().unwrap().claim.marker().is_some() {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending("the queued vault holds no marker")
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let refused = park_entry(&host, &queued, &scratch.root().join("queued"), park);
+
+            let answered = moved_past
+                .join()
+                .unwrap()
+                .expect("a live host answered the reload it moved past with no code")
+                .expect_err("the reload the entry moved past was answered as run");
+            assert_eq!(answered.detail(), &refused, "{park:?}, dry run: {dry_run}");
+            ops.reload_release.store(true, Ordering::SeqCst);
+            for asked in [held, filled] {
+                asked
+                    .join()
+                    .unwrap()
+                    .expect("the host is running")
+                    .expect("a reload the entry stood at");
+            }
+        }
+    }
+
+    /// **A reload turn that unwinds after handing the reload on is answered
+    /// once, by the turn it handed on to.** The unwinding turn no longer holds
+    /// the entry, so its unwind publishes nothing and the asker waits for the
+    /// next turn's activation rather than being told a reading the reload is
+    /// about to leave.
+    #[test]
+    fn a_reload_turn_unwinding_after_its_hand_on_leaves_the_answer_to_the_next_turn() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+        host.shared
+            .panic_after_reload_handoff
+            .store(true, Ordering::SeqCst);
+
+        let entry = host.shared.entries.get(&name).unwrap();
+        let (reply, answer) = mpsc::sync_channel(1);
+        entry
+            .gate
+            .lock()
+            .unwrap()
+            .claim
+            .schedule(|epoch| Job::Reload(name.clone(), epoch, reply));
+        dispatch_pending(&host.shared, &entry).unwrap();
+
+        assert_eq!(
+            answer.recv(),
+            Ok(Ok(fake_judgment(ReloadOutcome::SchemaChanged))),
+            "the asker was answered before the turn it was handed on to"
+        );
+        assert!(
+            answer.recv().is_err(),
+            "the reload was answered a second time"
+        );
+        assert!(
+            !host
+                .shared
+                .panic_after_reload_handoff
+                .load(Ordering::SeqCst),
+            "the turn never reached its hand-on"
+        );
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
+    }
+
+    /// **A host whose job channel is gone answers no reload at all**: no code,
+    /// because nothing about the vault was learned.
+    ///
+    /// The channel is taken from under a live host here, a state only a test
+    /// reaches: `Host::drop` is what closes it, and it needs the host no asker
+    /// can then be holding. The refused dispatch leaves its job marked, so
+    /// each mode asks a host of its own rather than being refused behind the
+    /// other's residue.
+    #[test]
+    fn vault_reload_answers_a_stopped_host_with_no_code() {
+        for dry_run in [false, true] {
+            let ops = Arc::new(FakeOps::default());
+            ops.reload_supported.store(true, Ordering::SeqCst);
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_for_state(&host, &name, TrustState::Ready);
+            host.shared.jobs.lock().unwrap().take();
+            assert!(matches!(
+                host.vault_reload(&reload_params(&name, dry_run)),
+                Err(HostError::WorkerStopped)
+            ));
+        }
     }
 
     /// A contended attach parks the entry and schedules nothing behind it.
@@ -16154,9 +17164,11 @@ mod tests {
             Job::Recover(..) => Some(DemandedWork::Recover),
             Job::Rebuild(..) => Some(DemandedWork::Rebuild),
             Job::Reconcile(..) => Some(DemandedWork::Reconcile),
-            Job::Maintenance(..) | Job::Reload(..) | Job::ReloadReconcile(..) | Job::Detach(..) => {
-                None
-            }
+            Job::Maintenance(..)
+            | Job::Reload(..)
+            | Job::JudgeReload(..)
+            | Job::ReloadReconcile(..)
+            | Job::Detach(..) => None,
         }
     }
 

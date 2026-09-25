@@ -27,7 +27,8 @@ use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
     EntryOps, Established, Establishment, Healing, JobFailure, MintedReader, ProgressReporter,
-    ReadSource, ReaderUnavailable, ReconcileWork, ReloadError, ReloadOutcome, SnapshotSource,
+    ReadSource, ReaderUnavailable, ReconcileWork, ReloadError, ReloadJudgment, ReloadOutcome,
+    SnapshotSource,
 };
 
 /// Maximum number of document changes materialized for one store transaction.
@@ -460,6 +461,47 @@ impl ProductionEntryOps {
                     )
             })
             .unwrap_or_else(|| covered_root.join(IN_VAULT_SCHEMA_PATH))
+    }
+
+    /// Read the reload candidate the attachment's covered root holds and judge
+    /// it against the controls the attachment serves under: the part of a
+    /// reload that changes nothing, which a reload and its dry run share.
+    ///
+    /// A reload refuses a declaration this build cannot act on: the vault is
+    /// already serving one it can, and replacing it with a schema nothing
+    /// reads would take that away. The refusal is retained by the reload and
+    /// the active pin stands.
+    fn judge_candidate(
+        attachment: &ProductionAttachment,
+    ) -> Result<(ReloadCandidate, ReloadJudgment), JobFailure> {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
+            return Err(JobFailure::LostMaintainership);
+        }
+        let candidate =
+            ReloadCandidate::read_at(&attachment.registration, &attachment.covered_root)
+                .map_err(JobFailure::Reload)?;
+        if let Some(detail) = candidate.undeclarable() {
+            return Err(JobFailure::Reload(ReloadError::SchemaParse(
+                detail.to_string(),
+            )));
+        }
+        let fingerprints = candidate.fingerprints();
+        let outcome = if fingerprints.schema == attachment.controls.fingerprints().schema {
+            ReloadOutcome::ConfigOnly
+        } else {
+            ReloadOutcome::SchemaChanged
+        };
+        Ok((
+            candidate,
+            ReloadJudgment {
+                outcome,
+                fingerprints,
+            },
+        ))
     }
 
     #[cfg(test)]
@@ -975,26 +1017,10 @@ impl EntryOps for ProductionEntryOps {
         name: &VaultName,
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
-    ) -> Result<ReloadOutcome, crate::EntryReloadFailure> {
+    ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
         attachment.drop_controls_held_for_rung_three();
         let _job = self.evidence.attributing();
-        if !attachment
-            .maintainership
-            .still_current()
-            .map_err(data_dir_effect)?
-        {
-            return Err(JobFailure::LostMaintainership.into());
-        }
-        let candidate =
-            ReloadCandidate::read_at(&attachment.registration, &attachment.covered_root)
-                .map_err(JobFailure::Reload)?;
-        // A reload refuses a declaration this build cannot act on: the vault is
-        // already serving one it can, and replacing it with a schema nothing
-        // reads would take that away. The refusal is retained and the active
-        // pin stands.
-        if let Some(detail) = candidate.undeclarable() {
-            return Err(JobFailure::Reload(ReloadError::SchemaParse(detail.to_string())).into());
-        }
+        let (candidate, judgment) = Self::judge_candidate(attachment)?;
         // A store whose rows were derived under another order than the
         // coverage proved is neither pinned nor derived into here: it owes
         // rung 3, which derives the vault again under the proven order and
@@ -1004,13 +1030,11 @@ impl EntryOps for ProductionEntryOps {
             attachment.hold_for_rung_three(candidate);
             return Err(JobFailure::StoreDamaged(reason.to_string()).into());
         }
-        let schema_changed =
-            candidate.fingerprints().schema != attachment.controls.fingerprints().schema;
-        if !schema_changed {
+        if judgment.outcome == ReloadOutcome::ConfigOnly {
             attachment.controls = candidate;
             self.dispatch_config(attachment);
             self.drain_semantic(name, attachment);
-            return Ok(ReloadOutcome::ConfigOnly);
+            return Ok(judgment);
         }
 
         progress.begin_schema_reload();
@@ -1038,7 +1062,23 @@ impl EntryOps for ProductionEntryOps {
         self.dispatch_config(attachment);
         self.heal_under_coverage(attachment, progress)?;
         self.drain_semantic(name, attachment);
-        Ok(ReloadOutcome::SchemaChanged)
+        Ok(judgment)
+    }
+
+    /// The reload's judgment of the candidate, over the attachment as it
+    /// stands. A store owing rung 3 for its path order is the damage the
+    /// reload would meet, and is reported as such.
+    fn judge_reload(
+        &self,
+        _: &VaultName,
+        attachment: &Self::Attachment,
+    ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
+        let _job = self.evidence.attributing();
+        let (_, judgment) = Self::judge_candidate(attachment)?;
+        if let Some(reason) = attachment.path_order_moved() {
+            return Err(JobFailure::StoreDamaged(reason.to_string()).into());
+        }
+        Ok(judgment)
     }
 
     fn active_fingerprints(
@@ -4064,6 +4104,255 @@ mod tests {
         assert_eq!(inspection.last_reload_error, Some(error));
     }
 
+    /// A production host over `ops` serving the fixture's one vault, `Ready`,
+    /// with the lease that keeps it served.
+    fn ready_host(
+        f: &Fixture,
+        ops: ProductionEntryOps,
+    ) -> (
+        crate::Host<ProductionEntryOps>,
+        VaultName,
+        crate::DemandLease<ProductionEntryOps>,
+    ) {
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let host = crate::Host::new(
+            registry,
+            ops,
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        (host, name, lease)
+    }
+
+    /// The production ops over the fixture's own directories.
+    fn fixture_ops(f: &Fixture) -> ProductionEntryOps {
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap())
+    }
+
+    /// A `vault reload` of `name`, activating or dry.
+    fn reload_params(name: &VaultName, dry_run: bool) -> norn_wire::ReloadParams {
+        let params = norn_wire::ReloadParams::new(norn_wire::VaultAddress::name(name.clone()));
+        if dry_run { params.dry_run() } else { params }
+    }
+
+    /// What `vault reload` answered `params` with, where the host is running.
+    fn vault_reload(
+        host: &crate::Host<ProductionEntryOps>,
+        params: &norn_wire::ReloadParams,
+    ) -> Result<norn_wire::ReloadReport, norn_wire::ErrorEnvelope> {
+        host.vault_reload(params).expect("the host is running")
+    }
+
+    /// Whether the wire's `spelled` names `active`: each fingerprint as 64
+    /// lowercase hex digits, which is all [`norn_fs::ContentHash::from_hex`]
+    /// parses, spelling that hash, and no config where the vault serves the
+    /// missing-file default.
+    fn spells(spelled: &norn_wire::Fingerprints, active: crate::ActiveFingerprints) -> bool {
+        let config = match (&spelled.config, active.config) {
+            (None, crate::ConfigFingerprint::Missing) => true,
+            (Some(config), crate::ConfigFingerprint::File(hash)) => {
+                norn_fs::ContentHash::from_hex(config) == Some(hash)
+            }
+            _ => false,
+        };
+        config && norn_fs::ContentHash::from_hex(&spelled.schema) == Some(active.schema)
+    }
+
+    /// The control-file failure a refused `vault reload` carries.
+    fn control_file_refusal(refused: &norn_wire::ErrorEnvelope) -> norn_wire::ControlFileFailure {
+        match refused.detail() {
+            norn_wire::ErrorDetail::ReloadFailed {
+                failure: norn_wire::ReloadFailure::ControlFile { failure, .. },
+                ..
+            } => failure.clone(),
+            other => panic!("the reload was refused with {other:?}"),
+        }
+    }
+
+    /// **A reload over an unchanged schema activates as config-only**, and
+    /// answers the fingerprints the entry then reports as active: the config
+    /// it put into service beside the schema it kept.
+    #[test]
+    fn vault_reload_activates_a_config_edit_as_config_only() {
+        let f = Fixture::new("vault-reload-config-only");
+        let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
+        let before = host.inspect(&name).unwrap().active_fingerprints.unwrap();
+
+        fs::write(f.vault().join(".norn/config.toml"), "# edited\n").unwrap();
+        let report = vault_reload(&host, &reload_params(&name, false)).expect("the reload");
+
+        let active = host.inspect(&name).unwrap().active_fingerprints.unwrap();
+        assert!(report.activated);
+        assert_eq!(report.outcome, norn_wire::ReloadOutcome::ConfigOnly);
+        assert!(spells(&report.fingerprints, active), "{report:?}");
+        assert_eq!(active.schema, before.schema);
+        assert_ne!(active.config, before.config);
+    }
+
+    /// **A reload over an edited schema activates as schema-changed**, and
+    /// answers the fingerprints the entry then reports as active.
+    #[test]
+    fn vault_reload_activates_a_schema_edit_as_schema_changed() {
+        let f = Fixture::new("vault-reload-schema-changed");
+        let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
+        let before = host.inspect(&name).unwrap().active_fingerprints.unwrap();
+
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\nfields:\n  created:\n    type: date\n",
+        )
+        .unwrap();
+        let report = vault_reload(&host, &reload_params(&name, false)).expect("the reload");
+
+        let active = host.inspect(&name).unwrap().active_fingerprints.unwrap();
+        assert!(report.activated);
+        assert_eq!(report.outcome, norn_wire::ReloadOutcome::SchemaChanged);
+        assert!(spells(&report.fingerprints, active), "{report:?}");
+        assert_ne!(active.schema, before.schema);
+    }
+
+    /// **A dry run of a config edit answers what the activation then does, and
+    /// takes nothing into service.** The entry's status reading stands as it
+    /// was, the edit still reads as a pending reload, and no engine is handed
+    /// the edited section. The activating reload after it is the control: it
+    /// answers the same outcome at the same fingerprints and changes all three.
+    #[test]
+    fn a_dry_run_of_a_config_edit_answers_what_activation_does_and_activates_nothing() {
+        let f = Fixture::new("vault-reload-dry-config");
+        fs::write(
+            f.vault().join(".norn/config.toml"),
+            "[engine.sample]\nvalue = 1\n",
+        )
+        .unwrap();
+        let receiver = Arc::new(RecordingEngineConfig {
+            name: "sample",
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let ops = fixture_ops(&f).with_engine_config_receiver(receiver.clone());
+        let (host, name, _lease) = ready_host(&f, ops);
+        let standing = host.inspect(&name);
+        let delivered = receiver.seen.lock().unwrap().len();
+
+        fs::write(
+            f.vault().join(".norn/config.toml"),
+            "[engine.sample]\nvalue = 2\n",
+        )
+        .unwrap();
+        let validated = vault_reload(&host, &reload_params(&name, true)).expect("the dry run");
+
+        assert!(!validated.activated);
+        assert_eq!(validated.outcome, norn_wire::ReloadOutcome::ConfigOnly);
+        assert_eq!(host.inspect(&name), standing);
+        assert_eq!(
+            host.authored_drift(&name),
+            Some(crate::AuthoredDrift::ReloadPending)
+        );
+        assert_eq!(receiver.seen.lock().unwrap().len(), delivered);
+        assert_eq!(host.state(&name), answered(norn_wire::TrustState::Ready));
+
+        let activated = vault_reload(&host, &reload_params(&name, false)).expect("the reload");
+        assert_eq!(
+            activated,
+            norn_wire::ReloadReport::new(validated.outcome, validated.fingerprints)
+        );
+        assert_ne!(host.inspect(&name), standing);
+        assert_eq!(
+            host.authored_drift(&name),
+            Some(crate::AuthoredDrift::Current)
+        );
+        assert!(receiver.seen.lock().unwrap().len() > delivered);
+    }
+
+    /// **A dry run of a schema edit answers what the activation then does, and
+    /// derives nothing.** No document is derived again, the entry never leaves
+    /// `Ready`, and its status reading stands as it was. The activating reload
+    /// after it is the control: the same answer, a new pin, and the vault
+    /// derived again under it.
+    #[test]
+    fn a_dry_run_of_a_schema_edit_answers_what_activation_does_and_derives_nothing() {
+        let f = Fixture::new("vault-reload-dry-schema");
+        fs::write(
+            f.vault().join("note.md"),
+            "---\ncreated: 2024-01-02\n---\nbody\n",
+        )
+        .unwrap();
+        let ops = fixture_ops(&f);
+        let evidence = Arc::clone(&ops.evidence);
+        let (host, name, _lease) = ready_host(&f, ops);
+        let standing = host.inspect(&name);
+
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\nfields:\n  created:\n    type: date\n",
+        )
+        .unwrap();
+        let before = evidence.read();
+        let validated = vault_reload(&host, &reload_params(&name, true)).expect("the dry run");
+        let spent = evidence.read().since(before);
+
+        assert!(!validated.activated);
+        assert_eq!(validated.outcome, norn_wire::ReloadOutcome::SchemaChanged);
+        assert_eq!(spent.documents_derived, 0);
+        assert_eq!(spent.changesets_applied, 0);
+        assert_eq!(spent.findings_discarded, 0);
+        assert_eq!(host.inspect(&name), standing);
+        assert_eq!(host.state(&name), answered(norn_wire::TrustState::Ready));
+
+        let before = evidence.read();
+        let activated = vault_reload(&host, &reload_params(&name, false)).expect("the reload");
+        let spent = evidence.read().since(before);
+        assert_eq!(
+            activated,
+            norn_wire::ReloadReport::new(validated.outcome, validated.fingerprints)
+        );
+        assert!(spent.documents_derived > 0);
+        assert_ne!(host.inspect(&name), standing);
+    }
+
+    /// **A dry run refused for a control file carries what refused, and leaves
+    /// the diagnostic the entry retains standing.** The entry retains the
+    /// config error an activation met; a dry run over a broken schema is
+    /// refused with the schema's error and the config error is still the one
+    /// retained. The activating reload over the same schema is the control: it
+    /// retains the schema's error in its place.
+    #[test]
+    fn a_dry_run_refused_for_a_control_file_leaves_the_retained_error_standing() {
+        let f = Fixture::new("vault-reload-dry-refused");
+        let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
+
+        fs::write(f.vault().join(".norn/config.toml"), "[engine.sample\n").unwrap();
+        let refused = vault_reload(&host, &reload_params(&name, false)).expect_err("bad TOML");
+        assert_eq!(
+            control_file_refusal(&refused).file,
+            norn_wire::ControlFile::Config
+        );
+        let retained = host.inspect(&name).unwrap().last_reload_error;
+        assert!(retained.is_some());
+
+        fs::write(f.vault().join(".norn/config.toml"), "").unwrap();
+        fs::write(f.vault().join(".norn/schema.yaml"), "\tinvalid: yaml\n").unwrap();
+        let refused = vault_reload(&host, &reload_params(&name, true)).expect_err("bad YAML");
+        let failure = control_file_refusal(&refused);
+        assert_eq!(failure.file, norn_wire::ControlFile::Schema);
+        assert_eq!(failure.stage, norn_wire::ReloadStage::Parse);
+        assert_eq!(host.inspect(&name).unwrap().last_reload_error, retained);
+        assert_eq!(host.state(&name), answered(norn_wire::TrustState::Ready));
+
+        let refused = vault_reload(&host, &reload_params(&name, false)).expect_err("bad YAML");
+        assert_eq!(control_file_refusal(&refused), failure);
+        let now = host.inspect(&name).unwrap().last_reload_error.unwrap();
+        assert_eq!(now.file(), crate::ReloadFile::Schema);
+    }
+
     /// **A schema that reads as YAML and declares something this grammar does
     /// not hold is refused on the same path invalid YAML is.** The candidate
     /// never reaches a pin, so the vault keeps the declaration it was serving
@@ -4140,7 +4429,10 @@ mod tests {
         );
 
         fs::write(f.vault().join(".norn/schema.yaml"), "version: 1\n").unwrap();
-        let outcome = ops.reload(&name, &mut attachment, &progress).unwrap();
+        let outcome = ops
+            .reload(&name, &mut attachment, &progress)
+            .unwrap()
+            .outcome;
         assert_eq!(outcome, ReloadOutcome::SchemaChanged);
         assert_eq!(
             ops.withheld_trust(&attachment),
@@ -4368,6 +4660,9 @@ mod tests {
         assert_eq!(values, [Some(1), Some(2)]);
     }
 
+    /// A reload and its dry run both check maintainership before they read
+    /// the candidate: a replaced lock is a lost maintainership, whatever the
+    /// candidate would have been refused for.
     #[cfg(unix)]
     #[test]
     fn reload_checks_maintainership_before_it_reads_the_candidate() {
@@ -4381,6 +4676,12 @@ mod tests {
         fs::write(&lock, "replacement lock identity").unwrap();
         fs::write(f.vault().join(".norn/config.toml"), "[engine.sample\n").unwrap();
 
+        assert_eq!(
+            ops.judge_reload(&name, &attachment),
+            Err(crate::EntryReloadFailure::Runtime(
+                JobFailure::LostMaintainership
+            ))
+        );
         assert_eq!(
             ops.reload(&name, &mut attachment, &progress),
             Err(crate::EntryReloadFailure::Runtime(
@@ -4514,7 +4815,9 @@ mod tests {
 
         fs::write(f.vault().join(".norn/schema.yaml"), REPORTING_SCHEMA).unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
 
@@ -4548,7 +4851,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
         let after = stored(&mut attachment, "note.md").expect("the document's row");
@@ -4579,7 +4884,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
 
@@ -4662,7 +4969,9 @@ mod tests {
         let numbered = "version: 1\nfields:\n  rating:\n    type: number\n";
         fs::write(f.vault().join(".norn/schema.yaml"), numbered).unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
         let after = stored(&mut attachment, "note.md").expect("the document's row");
@@ -4681,7 +4990,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
         let after = stored(&mut attachment, "note.md").expect("the document's row");
@@ -4700,7 +5011,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
         let after = stored(&mut attachment, "note.md").expect("the document's row");
@@ -5051,7 +5364,8 @@ mod tests {
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             let outcome = ops
                 .reload(&name, &mut attachment, &ProgressReporter::disconnected())
-                .expect("the enabling reload");
+                .expect("the enabling reload")
+                .outcome;
             assert_eq!(outcome, ReloadOutcome::ConfigOnly);
             assert!(matches!(
                 engines.status(&name),
@@ -5386,7 +5700,8 @@ mod tests {
             .unwrap();
             let outcome = ops
                 .reload(&name, &mut attachment, &ProgressReporter::disconnected())
-                .expect("the schema reload");
+                .expect("the schema reload")
+                .outcome;
             assert_eq!(outcome, ReloadOutcome::SchemaChanged);
             let answer = engines.nearest(&name, "beta", 5).expect("an answer");
             assert_eq!(answer.neighbors.len(), 2, "{answer:?}");
@@ -8646,7 +8961,9 @@ mod tests {
 
         fs::write(&schema, "version: 1\n").unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
         assert_eq!(attachment.store.path_order(), proven);
@@ -8722,6 +9039,55 @@ mod tests {
             foo_resolves_through(&mut attachment),
             foo_resolves_under(proven)
         );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A dry run judges its store's path order as a reload does**, and
+    /// answers the damage the reload then meets: the same verdict, which the
+    /// lifecycle answers with the same owed rung 3. It holds nothing for that
+    /// rung — the controls it read are a candidate's, and a dry run puts a
+    /// candidate nowhere — and derives nothing into the store.
+    #[test]
+    fn a_dry_run_over_a_store_derived_under_the_other_path_order_meets_the_reloads_damage() {
+        let f = Fixture::new("dry-run-order-moved");
+        write_two_spellings_of_one_stem(&f);
+        let schema = f.vault().join(".norn/schema.yaml");
+        fs::write(&schema, "version: 9\n").unwrap();
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let proven = proven_order(&f);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        attachment.store = attachment
+            .store
+            .discard_and_reopen(other_order(proven))
+            .unwrap();
+        derive_stale_rows(&mut attachment.store);
+        fs::write(&schema, "version: 1\n").unwrap();
+
+        let judged = ops
+            .judge_reload(&name, &attachment)
+            .expect_err("a dry run over a store derived under the other order");
+        assert!(
+            matches!(
+                judged,
+                crate::EntryReloadFailure::Runtime(JobFailure::StoreDamaged(_))
+            ),
+            "the moved order was judged as {judged:?} rather than owing rung 3"
+        );
+        assert!(
+            attachment.held_for_rung_three.is_none(),
+            "the dry run held its candidate for rung 3"
+        );
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["a/Foo.md", "stale.md"]
+        );
+
+        let reloaded = ops
+            .reload(&name, &mut attachment, &progress)
+            .expect_err("a reload over a store derived under the other order");
+        assert_eq!(judged, reloaded);
         ops.detach(&name, attachment);
     }
 
@@ -9905,7 +10271,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
 
@@ -12074,7 +12442,9 @@ mod tests {
         let mut attachment = ops.attach(&registration, &progress).unwrap();
         fs::write(&schema, "version: 1\n# a second declaration\n").unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
         assert!(stored(&mut attachment, ".norn/schema.md").is_none());

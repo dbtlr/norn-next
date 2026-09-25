@@ -1902,7 +1902,21 @@ retains a typed file-and-stage error, and leaves a `Ready` vault `Ready`. A sche
 declaration this build cannot read — a later grammar version, a key the grammar does not
 hold — is one of those errors: the vault is already serving a declaration it can read, and
 replacing it with one nothing reads would take that away. A successful candidate clears that
-error.
+error. A dry run is admitted and run as a reload is, holding the entry while it reads, and
+judges the same candidate the same way. A dry run that completes activates nothing and records
+nothing about the candidate — no active fingerprint, retained error or config delivery. A
+runtime failure a dry run meets — damaged derived state, a moved path order, a lost
+maintainership — is a fact about the entry rather than the candidate, and gets the policy an
+activation applies to it: withdrawn trust and an owed rung, or a release. A reload of either
+mode that the entry is not in a state to run answers with where the entry stands: its
+published demand, the park first, rendered by the one mapping `vault status` and a demand
+lease answer through. A parked entry therefore answers in the park's own code, not the
+label beneath it. That holds at admission, at a leg that no longer stands, and for a reload
+the host drops without an answer, whether moved past before a worker ran it or lost with a
+leg that unwound; for an unwound leg with no park, the entry stands at the untrusted reading
+the unwind publishes. A turn that unwinds after handing the reload on leaves the answer to
+the turn it handed on to. A reload is answered
+with no code only by a host shutting down or whose job channel is gone.
 
 **An attach has no such declaration to fall back on, and does not refuse.** It acquires
 the maintainer lock, watcher coverage and the store, pins nothing, derives nothing, and

@@ -178,29 +178,36 @@ impl ReloadRefusal {
     /// was asked for.
     ///
     /// Every reload outcome is a fact about the vault, so every one of them is
-    /// `vault/…` — except the three the host answers before a reload is a
-    /// thing that happened at all: a name the registry does not hold
-    /// (`host/unknown-vault`), an entry that holds nothing to reload yet
-    /// (`host/entry-not-ready`), and an entry whose derived state cannot be
-    /// trusted (`host/entry-untrusted`).
+    /// `vault/…` — except where the host answers before a reload is a thing
+    /// that happened at all: a name the registry does not hold
+    /// (`host/unknown-vault`), and an entry that is not reloadable because of
+    /// where it stands. That entry answers with its published demand rendered
+    /// through [`Demand::answer`], the mapping `vault status` and a demand
+    /// lease answer through: a park in its own code (`host/duplicate-root`,
+    /// `host/maintainer-contended`, or `host/entry-untrusted` for a root the
+    /// registry cannot read), an entry whose derived state cannot be trusted
+    /// in `host/entry-untrusted`, an entry that holds nothing to reload yet in
+    /// `host/entry-not-ready`, and a `Ready` entry a warm job holds in
+    /// `vault/reload-busy`.
     ///
     /// `Err(HostError)` is the host being gone rather than the vault refusing.
     /// It carries no code and no detail: no reload outcome was learned, so
     /// there is nothing about the vault to report.
     ///
-    /// A dormant carrier for the vault namespace handlers: the `vault reload`
-    /// handler is the one caller this mapping has, and it is not built, so
-    /// nothing outside this module's tests calls it yet. The mapping lives
-    /// here because the vocabulary an answer is spelled in is not a surface's
-    /// to choose, so the handler that arrives renders this rather than
-    /// minting refusals of its own.
+    /// [`Host::vault_reload`](crate::Host::vault_reload) renders every reload
+    /// refusal through this, an activation's and a dry run's alike. The
+    /// mapping lives here because the vocabulary an answer is spelled in is
+    /// not a surface's to choose.
     pub fn answer(self, name: &VaultName) -> Result<ErrorEnvelope, HostError> {
         Ok(match self {
             ReloadRefusal::UnknownVault => ErrorEnvelope::new(
                 format!("no vault is registered under the name `{name}`"),
                 ErrorDetail::unknown_vault(name.clone()),
             ),
-            ReloadRefusal::Unavailable(state) => unavailable(state),
+            ReloadRefusal::Unavailable(demand) => match demand.answer(name) {
+                Err(envelope) => envelope,
+                Ok(state) => unavailable(state),
+            },
             ReloadRefusal::Core(error) => {
                 reload_failed(ReloadFailure::control_file(control_file_failure(&error)))
             }
@@ -211,18 +218,23 @@ impl ReloadRefusal {
     }
 }
 
-/// What an entry that is not reloadable right now refuses with.
+/// What an entry that is not reloadable right now refuses with, where its
+/// published demand is a state that [`Demand::answer`] answers rather than
+/// refuses.
 ///
-/// Three readings of one trust state, taken in the order that makes each of
-/// them true: a state that refuses carries its own reason, a state that holds
-/// nothing yet is filed as not ready, and what is left is an entry that is
-/// ready and busy — a warm job holds it, which is what a reload waits behind.
+/// Two readings of that state, taken in the order that makes each of them
+/// true: a state that holds nothing yet is filed as not ready, and what is left
+/// is an entry that is ready and busy — a warm job holds it, which is what a
+/// reload is refused behind. A park and a state that refuses never reach here:
+/// [`Demand::answer`] renders them in their own codes.
 ///
-/// **`Ready` reaches here by two paths, and on both the reload did not run.**
-/// At the ask, a claim held or coverage out with a leg is a job holding the
-/// entry. At a reload leg's epilogue, a claim superseded by newer work is a
+/// **`Ready` reaches here by three paths, and on each the reload did not
+/// run.** At the ask, a claim held or coverage out with a leg is a job holding
+/// the entry. At a reload leg's epilogue, a claim superseded by newer work is a
 /// reload that lost its turn, and the entry may stand `Ready` again by the
-/// time that epilogue reports. A release does not reach it as `Ready`:
+/// time that epilogue reports. A reload the host moved past before any leg ran
+/// it is answered with the demand the entry publishes once it is dropped, and
+/// where no park stands that too may be `Ready` again. A release does not reach it as `Ready`:
 /// `begin_release` sets `detach_in_flight` and sets the trust to
 /// `Warming(WarmingPhase::ReleasingCoverage)` in the same statement pair under
 /// one hold of the gate, so the epilogue that reads the flag reads that state
@@ -230,13 +242,6 @@ impl ReloadRefusal {
 /// pins the value that arrives. Either way the answer is the same: nothing of
 /// the asker's ran, and a retry is what asks again.
 fn unavailable(state: TrustState) -> ErrorEnvelope {
-    if let Some(reason) = state.refusal() {
-        return ErrorEnvelope::new(
-            "this vault's derived state cannot be trusted, so its control files are not \
-             re-read over it",
-            ErrorDetail::entry_untrusted(reason.clone()),
-        );
-    }
     if let Some(not_ready) = state.not_ready() {
         return ErrorEnvelope::new(
             "this vault holds nothing to re-read its control files over yet",
@@ -922,7 +927,8 @@ mod reload_tests {
         TrustState, UntrustedReason, VaultName, WarmingPhase,
     };
 
-    use crate::lifecycle::{HostError, JobFailure};
+    use crate::lifecycle::{Demand, HostError, JobFailure};
+    use crate::registry::AliasConflict;
     use crate::reload::{ReloadError, ReloadRefusal};
 
     fn name(text: &str) -> VaultName {
@@ -990,15 +996,19 @@ mod reload_tests {
                 Some(ErrorDetail::reload_failed(ReloadFailure::unsupported())),
             ),
             (
-                ReloadRefusal::Unavailable(TrustState::Ready),
+                ReloadRefusal::Unavailable(Demand::State(TrustState::Ready)),
                 Some(ErrorDetail::reload_busy()),
             ),
             (
-                ReloadRefusal::Unavailable(TrustState::Unattached),
+                ReloadRefusal::Unavailable(Demand::State(TrustState::Unattached)),
                 Some(ErrorDetail::entry_not_ready(NotReady::unattached())),
             ),
             (
-                ReloadRefusal::Unavailable(TrustState::warming(WarmingPhase::Healing, 3, Some(9))),
+                ReloadRefusal::Unavailable(Demand::State(TrustState::warming(
+                    WarmingPhase::Healing,
+                    3,
+                    Some(9),
+                ))),
                 Some(ErrorDetail::entry_not_ready(NotReady::warming(
                     WarmingPhase::Healing,
                     3,
@@ -1006,9 +1016,37 @@ mod reload_tests {
                 ))),
             ),
             (
-                ReloadRefusal::Unavailable(TrustState::untrusted(UntrustedReason::WatcherOverflow)),
+                ReloadRefusal::Unavailable(Demand::State(TrustState::untrusted(
+                    UntrustedReason::WatcherOverflow,
+                ))),
                 Some(ErrorDetail::entry_untrusted(
                     UntrustedReason::WatcherOverflow,
+                )),
+            ),
+            (
+                ReloadRefusal::Unavailable(Demand::DuplicateRoot(
+                    AliasConflict::new([name("notes"), name("journal")])
+                        .expect("two distinct registrations"),
+                )),
+                Some(ErrorDetail::duplicate_root(
+                    norn_wire::NameSet::new([name("notes"), name("journal")])
+                        .expect("two distinct names"),
+                )),
+            ),
+            (
+                ReloadRefusal::Unavailable(Demand::MaintainerContended(
+                    MaintainerIdentity::unknown(),
+                )),
+                Some(ErrorDetail::maintainer_contended(
+                    MaintainerIdentity::unknown(),
+                )),
+            ),
+            (
+                ReloadRefusal::Unavailable(Demand::IdentityRefused(
+                    "the root is a symlink cycle".to_string(),
+                )),
+                Some(ErrorDetail::entry_untrusted(
+                    UntrustedReason::environmental_refusal("the root is a symlink cycle"),
                 )),
             ),
             (
