@@ -76,7 +76,7 @@ use crate::reload::EngineConfigReceiver;
 
 /// The sidecar's file, beside the vault's `store.sqlite3` in the same
 /// derived directory.
-const SIDECAR_FILE: &str = "semantic.sqlite3";
+pub(crate) const SIDECAR_FILE: &str = "semantic.sqlite3";
 
 /// One vault's engine, or the typed reason it is not running.
 enum Slot {

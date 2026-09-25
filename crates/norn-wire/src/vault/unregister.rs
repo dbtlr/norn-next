@@ -12,7 +12,10 @@
 //! `host/entry-held` where the entry is in use, `host/maintainer-contended`
 //! where another process maintains the derived state,
 //! `host/registry-unwritable` where the registry file could not be replaced,
-//! and a parked entry's own code.
+//! `host/entry-untrusted` carrying the environmental-refusal reason where the
+//! data directory refused the maintainer lock or the discard, and a parked
+//! entry's own code. After any of them the registration that stood before
+//! still stands.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

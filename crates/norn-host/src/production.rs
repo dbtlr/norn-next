@@ -10,7 +10,8 @@ use norn_config::schema::VaultSchema;
 use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH};
 use norn_fs::{
     Acquisition, Maintainership, MaintainershipKey, OwnWrites, Placement, RescanScope, ShadowHome,
-    Subscription, WatchError, try_acquire, walk, walk_subtree, watch, watch_polling,
+    Subscription, WatchError, canonical_spelling, discard_homes, try_acquire, walk, walk_subtree,
+    watch, watch_polling,
 };
 use norn_store::{
     Change, ContentModel, DerivedFinding, DirectoryPrefix, DocumentPath, FindingFacts,
@@ -27,9 +28,20 @@ use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
     EntryOps, Established, Establishment, Healing, JobFailure, MintedReader, ProgressReporter,
-    ReadSource, ReaderUnavailable, ReconcileWork, ReloadError, ReloadJudgment, ReloadOutcome,
-    SnapshotSource,
+    ReadSource, ReaderUnavailable, ReconcileWork, RegistryChange, RegistryUnwritable, ReloadError,
+    ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
 };
+
+/// The derived database's file, inside the vault's derived directory.
+const STORE_FILE: &str = "store.sqlite3";
+
+/// The maintainer lock's file, inside the vault's derived directory. It is
+/// never removed: see [`norn_fs::Maintainership`].
+const MAINTAINER_LOCK_FILE: &str = "maintainer.lock";
+
+/// The temporary directory inside the vault's derived directory, which is the
+/// shadow home wherever the device comparison places it there.
+const DATA_TMP: &str = "tmp";
 
 /// Maximum number of document changes materialized for one store transaction.
 pub const MAX_CHANGESET_SIZE: usize = 1024;
@@ -815,7 +827,7 @@ impl EntryOps for ProductionEntryOps {
         progress.installing_coverage();
         let derived = self.derived(&registration.name);
         let maintainership =
-            match try_acquire(&derived.join("maintainer.lock")).map_err(data_dir_effect)? {
+            match try_acquire(&derived.join(MAINTAINER_LOCK_FILE)).map_err(data_dir_effect)? {
                 Acquisition::Acquired(guard) => guard,
                 Acquisition::Contended { incumbent } => {
                     return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
@@ -833,7 +845,7 @@ impl EntryOps for ProductionEntryOps {
         let path_order = stored_path_order(subscription.case_sensitivity());
         let root = covered_root.as_path();
         let shadows =
-            ShadowHome::resolve(root, &derived.join("tmp"), &key).map_err(data_dir_effect)?;
+            ShadowHome::resolve(root, &derived.join(DATA_TMP), &key).map_err(data_dir_effect)?;
         shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
         if shadows.placement() == Placement::VaultFallback {
             // Residue no key's own sweep will ever open again: what a build that
@@ -853,7 +865,7 @@ impl EntryOps for ProductionEntryOps {
         // is rebuilt from zero here, before anything derives into it or reads
         // from it.
         let store = Store::open(
-            derived.join("store.sqlite3"),
+            derived.join(STORE_FILE),
             path_order,
             crate::DERIVATION_VERSION,
         )
@@ -975,7 +987,7 @@ impl EntryOps for ProductionEntryOps {
             .map_err(JobFailure::Reload)?;
         let derived = self.derived(&attachment.registration.name);
         let key = maintainership_key(&self.dirs, &attachment.registration.name);
-        let shadows = ShadowHome::resolve(&covered_root, &derived.join("tmp"), &key)
+        let shadows = ShadowHome::resolve(&covered_root, &derived.join(DATA_TMP), &key)
             .map_err(data_dir_effect)?;
         shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
         attachment.subscription = Some(subscription);
@@ -1255,6 +1267,85 @@ impl EntryOps for ProductionEntryOps {
             semantic.detach(name);
         }
         release(attachment);
+    }
+
+    /// The registry file is `norn-config`'s, changed through its locked
+    /// read-modify-write, so no second writer's change is lost under this one
+    /// and a key this build does not model survives it.
+    ///
+    /// A write whose replacement landed and whose durability could not be
+    /// confirmed is a written change: every reader of the file sees it, so
+    /// the host's serving set follows it rather than standing as though the
+    /// file had refused.
+    #[allow(clippy::disallowed_methods)] // The registry surface is this crate's.
+    fn write_registry(&self, change: RegistryChange<'_>) -> Result<(), RegistryUnwritable> {
+        let written = norn_config::registry::mutate(&self.dirs, |registry| {
+            match change {
+                RegistryChange::Register(registration) => {
+                    registry.insert(registration.clone());
+                }
+                RegistryChange::Unregister(name) => {
+                    registry.remove(name);
+                }
+            }
+            Ok(())
+        });
+        match written {
+            Ok(()) | Err(norn_config::ConfigError::MutationUnconfirmed { .. }) => Ok(()),
+            Err(refused) => Err(RegistryUnwritable::new(refused.to_string())),
+        }
+    }
+
+    /// The lock is the one an attach takes, in the vault's derived directory.
+    /// What is discarded is everything else this composition keeps for the
+    /// vault: the derived database and the files its journal leaves beside
+    /// it, the semantic sidecar and its own, and every shadow home the vault's
+    /// maintainership key resolves to — the one inside the derived directory,
+    /// and the one under the vault root's fallback directory, found at the
+    /// directory the registered root resolves to now. The lock file stays, and
+    /// so does the derived directory that holds it.
+    ///
+    /// Every refusal here is told without the paths it names, because the
+    /// account reaches a caller that holds no hold on the derived state.
+    fn retire<E>(
+        &self,
+        registration: &Registration,
+        keep_state: bool,
+        leave: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), RetireRefusal<E>> {
+        let told = |refused: &norn_fs::Refusal| crate::refusal::data_dir_refusal_told(refused);
+        let name = &registration.name;
+        let derived = self.derived(name);
+        let maintainership = match try_acquire(&derived.join(MAINTAINER_LOCK_FILE)) {
+            Ok(Acquisition::Acquired(guard)) => guard,
+            Ok(Acquisition::Contended { incumbent }) => {
+                return Err(RetireRefusal::MaintainerContended(map_incumbent(incumbent)));
+            }
+            Err(refused) => return Err(RetireRefusal::Unclaimed(told(&refused))),
+        };
+        leave().map_err(RetireRefusal::Left)?;
+        if keep_state {
+            return Ok(());
+        }
+        // A vault that is no longer served holds no engine: the slot goes
+        // back before the sidecar it would read from is discarded.
+        if let Some(semantic) = &self.semantic {
+            semantic.detach(name);
+        }
+        Store::discard_at(&derived.join(STORE_FILE)).map_err(|refused| {
+            RetireRefusal::Undiscarded(crate::refusal::store_refusal_told(&refused))
+        })?;
+        norn_semantic::Engine::discard_at(&derived.join(crate::semantic::SIDECAR_FILE)).map_err(
+            |refused| RetireRefusal::Undiscarded(crate::refusal::engine_refusal_told(&refused)),
+        )?;
+        discard_homes(
+            &canonical_spelling(registration.root.as_path()),
+            &derived.join(DATA_TMP),
+            &maintainership_key(&self.dirs, name),
+        )
+        .map_err(|refused| RetireRefusal::Undiscarded(told(&refused)))?;
+        drop(maintainership);
+        Ok(())
     }
 
     /// The engine goes back for a leg whose attachment went with an unwinding
@@ -13055,6 +13146,199 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.content_hash, during);
+    }
+
+    /// The registration changes over the production seam: the registry file
+    /// written through `norn-config`, the maintainer lock taken in the data
+    /// directory, and the derived state discarded there.
+    mod registration_changes {
+        use super::*;
+        use norn_wire::{
+            ErrorEnvelope, ListParams, ReasonCode, RegisterParams, RegisterReport,
+            UnregisterParams, UnregisterReport,
+        };
+
+        const NOTES: &str = "notes";
+
+        fn notes() -> VaultName {
+            VaultName::new(NOTES).unwrap()
+        }
+
+        /// A production host over `f`'s directories, started from a registry
+        /// file that records nothing.
+        fn empty_host(f: &Fixture) -> (crate::Host<ProductionEntryOps>, ConfigDirs) {
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            let host = crate::Host::new(
+                crate::RegistryRead::from_entries([]),
+                ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(2, 2).unwrap()),
+                crate::LifecyclePolicy {
+                    idle_after: Duration::from_secs(60),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_secs(60),
+                },
+            )
+            .unwrap();
+            (host, dirs)
+        }
+
+        fn register(
+            host: &crate::Host<ProductionEntryOps>,
+            root: &Path,
+        ) -> Result<RegisterReport, ErrorEnvelope> {
+            host.vault_register(&RegisterParams::new(Registration::new(
+                notes(),
+                VaultRoot::new(root).unwrap(),
+            )))
+        }
+
+        /// What the registry file records under `name`, read the way a host
+        /// starting over it reads it.
+        fn recorded(dirs: &ConfigDirs, name: &VaultName) -> Option<Registration> {
+            norn_config::registry::read(dirs)
+                .expect("the registry file reads")
+                .get(name)
+                .cloned()
+        }
+
+        fn listed(host: &crate::Host<ProductionEntryOps>) -> Vec<VaultName> {
+            host.vault_list(&ListParams::new())
+                .registrations
+                .into_iter()
+                .map(|registration| registration.name)
+                .collect()
+        }
+
+        /// Attach the registered vault, then let it idle out.
+        fn attach_and_idle(host: &crate::Host<ProductionEntryOps>) {
+            let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
+            wait_state(host, &notes(), norn_wire::TrustState::Ready);
+            drop(lease);
+            host.reap_idle(Instant::now() + Duration::from_secs(61))
+                .unwrap();
+            wait_state(host, &notes(), norn_wire::TrustState::Unattached);
+        }
+
+        /// Unregister, asking again while the release that idled the entry out
+        /// still holds it — which is what an operator told the entry is held
+        /// does.
+        fn unregister_once_idle(
+            host: &crate::Host<ProductionEntryOps>,
+            params: &UnregisterParams,
+        ) -> Result<UnregisterReport, ErrorEnvelope> {
+            wait_until(
+                "the entry to be let go of",
+                lifecycle_budget(),
+                || match host.vault_unregister(params) {
+                    Err(refusal) if refusal.code() == &ReasonCode::HostEntryHeld => {
+                        Observed::Pending("the entry is held".to_string())
+                    }
+                    answer => Observed::Met(answer),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+        }
+
+        /// A root spelled through a link is recorded, listed and served at the
+        /// directory the link reaches, so the attach that follows reads one
+        /// directory with no link as its last component.
+        #[cfg(unix)]
+        #[test]
+        fn a_vault_registered_through_a_link_is_recorded_at_its_directory_and_attaches() {
+            use std::os::unix::fs::symlink;
+
+            let f = Fixture::new("register-through-link");
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let link = f.root.join("link");
+            symlink(f.vault(), &link).unwrap();
+            let (host, dirs) = empty_host(&f);
+
+            let report = register(&host, &link).expect("the vault is registered");
+
+            let directory = VaultRoot::new(fs::canonicalize(f.vault()).unwrap()).unwrap();
+            assert_eq!(report.registration.root, directory);
+            assert_eq!(recorded(&dirs, &notes()), Some(report.registration));
+            assert_eq!(listed(&host), [notes()]);
+            let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
+            wait_state(&host, &notes(), norn_wire::TrustState::Ready);
+            drop(lease);
+        }
+
+        /// An unregistered vault leaves the registry file and the set, and
+        /// its derived database, the database's sidecars and its shadow home
+        /// go with it — while its maintainer lock file and its documents stay.
+        #[test]
+        fn an_unregistered_vault_discards_its_derived_state_and_keeps_its_lock_file() {
+            let f = Fixture::new("unregister-discards");
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            attach_and_idle(&host);
+            let derived = dirs.derived_dir(&notes());
+            assert!(fs::metadata(derived.join("store.sqlite3")).is_ok());
+
+            let report = unregister_once_idle(&host, &UnregisterParams::new(notes()))
+                .expect("the idle vault is unregistered");
+
+            assert_eq!(report, UnregisterReport::new(notes(), true));
+            let left = fs::read_dir(&derived)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                left,
+                ["maintainer.lock"],
+                "the derived directory kept state, or lost its lock file"
+            );
+            assert!(
+                fs::metadata(f.vault().join("a.md")).is_ok(),
+                "a vault document went with the derived state"
+            );
+            assert_eq!(recorded(&dirs, &notes()), None);
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// Keeping the state leaves the derived database where it was.
+        #[test]
+        fn an_unregistration_keeping_state_leaves_the_derived_database() {
+            let f = Fixture::new("unregister-keeps");
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            attach_and_idle(&host);
+
+            let report =
+                unregister_once_idle(&host, &UnregisterParams::new(notes()).keeping_state())
+                    .expect("the idle vault is unregistered");
+
+            assert_eq!(report, UnregisterReport::new(notes(), false));
+            assert!(fs::metadata(dirs.derived_dir(&notes()).join("store.sqlite3")).is_ok());
+            assert_eq!(recorded(&dirs, &notes()), None);
+        }
+
+        /// Another holder of the vault's maintainer lock refuses the change,
+        /// and nothing changes: the file, the set and the derived state all
+        /// stand.
+        #[test]
+        fn another_holder_of_the_maintainer_lock_changes_nothing() {
+            let f = Fixture::new("unregister-contended");
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            attach_and_idle(&host);
+            let derived = dirs.derived_dir(&notes());
+            let norn_fs::Acquisition::Acquired(held) =
+                norn_fs::try_acquire(&derived.join("maintainer.lock")).unwrap()
+            else {
+                panic!("the idle vault's lock is held");
+            };
+
+            let answer = unregister_once_idle(&host, &UnregisterParams::new(notes()));
+
+            let refusal = answer.expect_err("a contended vault was unregistered");
+            assert_eq!(refusal.code(), &ReasonCode::HostMaintainerContended);
+            assert!(recorded(&dirs, &notes()).is_some());
+            assert_eq!(listed(&host), [notes()]);
+            assert!(fs::metadata(derived.join("store.sqlite3")).is_ok());
+            drop(held);
+        }
     }
 
     /// The budget every lifecycle condition here is given: long enough that a

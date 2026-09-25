@@ -22,15 +22,14 @@
 //! only one code fills is a field every other code leaves empty, and readers
 //! learn to check the code before believing it.
 //!
-//! **One registry code is minted ahead of the handler that raises it.**
+//! **The registry codes are raised by the host's registry handlers.**
 //! `host/registry-unwritable` answers a registration change whose write of the
-//! registry file refused, and no handler writes the registry file yet, so the
-//! call graph reaches it from no crate today. `vault/ambiguous-root`, which
-//! answers a `vault resolve` ask over a directory whose most specific
-//! containing root more than one registration reaches, is raised by the
-//! host's resolve handler. Both are spelled here because the vocabulary a
-//! refusal is spelled in is not a surface's to choose: a handler renders one
-//! of these rather than minting a string of its own.
+//! registry file refused, raised by the register and unregister handlers.
+//! `vault/ambiguous-root`, which answers a `vault resolve` ask over a
+//! directory whose most specific containing root more than one registration
+//! reaches, is raised by the resolve handler. Both are spelled here because
+//! the vocabulary a refusal is spelled in is not a surface's to choose: a
+//! handler renders one of these rather than minting a string of its own.
 //!
 //! **The codes a store's read refusals are spelled in are minted ahead too.**
 //! `host/read-failed`, `vault/unreadable-bound`, `request/out-of-bound`,

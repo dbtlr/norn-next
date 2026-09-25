@@ -1436,7 +1436,7 @@ membership rule binds.
 
 | Site | Effect |
 |---|---|
-| `norn-fs` | The vault filesystem seam itself: walk, read, stat, atomic write, flock. Plus the per-registration mechanism files it owns, keyed by data base, channel and vault name — the maintainer lock file under the norn data root (created once, never unlinked) and the shadow home (created, staged into, swept), which is under the data root too unless the vault is on another filesystem. This is the rule's home, not a carve-out. Its own suites carry allows besides, for the trees and states a case arranges and judges |
+| `norn-fs` | The vault filesystem seam itself: walk, read, stat, atomic write, flock. Plus the per-registration mechanism files it owns, keyed by data base, channel and vault name — the maintainer lock file under the norn data root (created once, never unlinked) and the shadow home (created, staged into, swept, and discarded under the lock when its maintainership ends), which is under the data root too unless the vault is on another filesystem. This is the rule's home, not a carve-out. Its own suites carry allows besides, for the trees and states a case arranges and judges |
 | `norn-db` | The parts of a database file's lifecycle the driver does not cover: deleting the file and the sidecars a journal leaves beside it, and preparing its parent directory. Its ceremony suite carries allows too — the scratch directory a case's database lives in, and the foreign bytes a case writes where a database would stand |
 | `norn-store` | Behind the induced-failure feature, the record file a fired arm appends to — the rest of the derived database's file lifecycle is `norn-db`'s, and the rungs and modes that decide when it happens reach it through that API. Its suites carry allows too — the directory a case's store lives in, the bytes a case damages, and the sidecar a torn changeset left |
 | `norn-semantic` | Its suites' scaffolding only: the scratch directories a case's store and sidecar live in. The sidecar file's own lifecycle is `norn-db`'s, reached through that API |
@@ -1588,7 +1588,8 @@ ruleset — drifting from the code the moment either moved. See [ADR
 service, or an auto-launched TTL instance (supervisor off, TTL on). Same binary, same attach
 seam — the one described in [the heal ladder](#2-the-heal-ladder).
 
-The registry is the host's serving set. Registration gates durability — durable database,
+The host's serving set is seeded from the registry file at startup, and the registration
+verbs change both, the file first. Registration gates durability — durable database,
 watcher, warm trust — while unregistered roots get disposable derivation over a throwaway
 store. That second half is not built: the attach seam refuses a throwaway demand, and only
 registered vaults attach. Lazy attach bounds file-descriptor and watch usage against a
@@ -1605,7 +1606,7 @@ graph LR
   shim -- "loopback HTTP + bearer" --> api
   agents -- "loopback HTTP + bearer" --> api
   subgraph hostp["host process — supervised service or TTL instance"]
-    api["norn-serve — HTTP · auth · MCP (norn-mcp)"] --> reg["registry (serving set, norn-host)"]
+    api["norn-serve — HTTP · auth · MCP (norn-mcp)"] --> reg["serving set (seeded from the registry, norn-host)"]
     reg --> v1
     subgraph v1["vault entry (per registered vault, lazy attach)"]
       watcher["watcher (norn-fs facts)"] --> orch["host orchestration — scoped increments (via norn-store)"]
