@@ -5,7 +5,8 @@ use norn_semantic::{Engine, RebuildReason, SidecarOutcome, SidecarRevision, Wate
 use norn_store::Store;
 
 use crate::common::{
-    CountingEmbedder, InterferingEmbedder, Scratch, document, record_death, write_document,
+    CountingEmbedder, InterferingEmbedder, RefusingEmbedder, Scratch, document, record_death,
+    write_document,
 };
 
 /// The store's last committed write generation, read the way a drain reads it.
@@ -283,4 +284,37 @@ fn recorded_progress_that_will_not_read_is_rebuilt_from_zero() {
         }
         assert_eq!(engine.revision().revision, 0, "{label}");
     }
+}
+
+/// **A drain that fails still answers the revision of what it committed.** The
+/// reconcile after a store rebuild commits on its own, so a drain whose embed
+/// then refuses has moved the sidecar — the reconciled-away row is gone — and
+/// an answer taken after it must not name the state before it.
+#[test]
+fn a_drain_that_fails_after_its_reconcile_answers_the_reconciled_revision() {
+    let scratch = Scratch::new("revision-reconcile");
+    let mut store = scratch.store();
+    write_document(&mut store, &document("docs/a.md", "hash-1", "alpha\n"));
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    engine.drain(&mut store.feed_read()).expect("a drain");
+    drop(engine);
+
+    let mut store = store
+        .discard_and_reopen(norn_store::StoredPathOrder::Sensitive)
+        .expect("a store rebuilt from zero");
+    write_document(&mut store, &document("docs/c.md", "hash-3", "charlie\n"));
+
+    let mut engine = scratch.engine(RefusingEmbedder::new());
+    let before = engine.revision();
+    engine
+        .drain(&mut store.feed_read())
+        .expect_err("the embedder refuses");
+    assert!(
+        engine.projection().expect("a projection").is_empty(),
+        "the reconcile committed"
+    );
+    assert!(
+        engine.revision().revision > before.revision,
+        "the revision does not name the reconcile the sidecar committed"
+    );
 }
