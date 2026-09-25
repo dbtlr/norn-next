@@ -1902,7 +1902,9 @@ retains a typed file-and-stage error, and leaves a `Ready` vault `Ready`. A sche
 declaration this build cannot read — a later grammar version, a key the grammar does not
 hold — is one of those errors: the vault is already serving a declaration it can read, and
 replacing it with one nothing reads would take that away. A successful candidate clears that
-error.
+error. A dry run is admitted and run as a reload is, holding the entry while it reads, and
+judges the same candidate the same way; it activates nothing and records nothing — no active
+fingerprint, retained error, trust change or owed rung.
 
 **An attach has no such declaration to fall back on, and does not refuse.** It acquires
 the maintainer lock, watcher coverage and the store, pins nothing, derives nothing, and

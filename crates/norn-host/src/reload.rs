@@ -96,6 +96,27 @@ pub enum ReloadOutcome {
     SchemaChanged,
 }
 
+impl From<ActiveFingerprints> for norn_wire::Fingerprints {
+    /// Each fingerprint as 64 lowercase hex digits, and no config where the
+    /// vault serves the missing-file default.
+    fn from(active: ActiveFingerprints) -> Self {
+        let fingerprints = norn_wire::Fingerprints::new(active.schema.to_hex());
+        match active.config {
+            ConfigFingerprint::Missing => fingerprints,
+            ConfigFingerprint::File(config) => fingerprints.with_config(config.to_hex()),
+        }
+    }
+}
+
+impl From<ReloadOutcome> for norn_wire::ReloadOutcome {
+    fn from(outcome: ReloadOutcome) -> Self {
+        match outcome {
+            ReloadOutcome::ConfigOnly => norn_wire::ReloadOutcome::ConfigOnly,
+            ReloadOutcome::SchemaChanged => norn_wire::ReloadOutcome::SchemaChanged,
+        }
+    }
+}
+
 /// What a reload judged its candidate to be: the outcome it decided about the
 /// schema, and the fingerprints the candidate was read at.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

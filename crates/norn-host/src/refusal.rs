@@ -188,12 +188,10 @@ impl ReloadRefusal {
     /// It carries no code and no detail: no reload outcome was learned, so
     /// there is nothing about the vault to report.
     ///
-    /// A dormant carrier for the vault namespace handlers: the `vault reload`
-    /// handler is the one caller this mapping has, and it is not built, so
-    /// nothing outside this module's tests calls it yet. The mapping lives
-    /// here because the vocabulary an answer is spelled in is not a surface's
-    /// to choose, so the handler that arrives renders this rather than
-    /// minting refusals of its own.
+    /// [`Host::vault_reload`](crate::Host::vault_reload) renders every reload
+    /// refusal through this, an activation's and a dry run's alike. The
+    /// mapping lives here because the vocabulary an answer is spelled in is
+    /// not a surface's to choose.
     pub fn answer(self, name: &VaultName) -> Result<ErrorEnvelope, HostError> {
         Ok(match self {
             ReloadRefusal::UnknownVault => ErrorEnvelope::new(
