@@ -2199,7 +2199,10 @@ fn a_full_text_index_that_does_not_prepare_refuses_the_find() {
         &request().with_predicates([Predicate::matches("interloper")]),
         &declared(),
     );
-    let Err(PageRefusal::Store(StoreError::Sql { operation, message })) = answered else {
+    let Err(PageRefusal::Store(StoreError::Sql {
+        operation, message, ..
+    })) = answered
+    else {
         panic!(
             "a find over a missing full-text index was not refused as the store's: {answered:?}"
         );

@@ -276,11 +276,17 @@ impl Vault {
     /// that grows with the vault up to that bound, and a flatness pair drawn
     /// across it would be measuring the bound rather than the invariant.
     pub fn host(&self) -> ServingHost {
-        let entry = Entry::new(
-            self.name.clone(),
-            VaultRoot::new(&self.vault).expect("vault root"),
+        self.host_under([self.name.clone()])
+    }
+
+    /// A host serving this vault's root under each of `names`, holding the
+    /// real-watcher lease for as long as it serves. More than one name over the
+    /// one root is a registry in conflict, which the host parks.
+    pub fn host_under(&self, names: impl IntoIterator<Item = VaultName>) -> ServingHost {
+        let root = VaultRoot::new(&self.vault).expect("vault root");
+        let registry = RegistryRead::from_entries(
+            names.into_iter().map(|name| Entry::new(name, root.clone())),
         );
-        let registry = RegistryRead::from_entries([entry.clone()]);
         let policy = ProductionPolicy::new(128, 128).expect("production policy");
         // Taken before the host exists, because the watcher is installed by
         // the attach the host runs and there is no later moment that is still

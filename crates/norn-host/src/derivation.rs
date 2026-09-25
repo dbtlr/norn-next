@@ -40,6 +40,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use norn_config::schema::{FieldType, Offset, TypedValue, UndeclaredTags, VaultSchema};
 use norn_store::{
@@ -823,23 +824,25 @@ pub(crate) fn plan_document(
     }
 }
 
-/// The declaration a plan derives under: the pinned schema's content model,
-/// and the typed orders its declared fields hand the store, named by the
-/// fingerprint the schema is pinned under.
+/// The declaration a plan derives and a read compiles under: the pinned
+/// schema's content model, and the typed orders its declared fields hand the
+/// store, named by the fingerprint the schema is pinned under.
 ///
 /// Built once per schema rather than per document, and only through
 /// [`Declared::pinned`] and [`Declared::unpinned`], so the typed orders a plan
 /// fills the field pillar with are always the ones the schema beside them
 /// declares, and carry the fingerprint the store compares with its own pin.
+/// The model is shared, because a read carries the one its attachment's store
+/// pins for the read's whole length.
 pub(crate) struct Declared {
     schema: VaultSchema,
-    content_model: ContentModel,
+    content_model: Arc<ContentModel>,
 }
 
 impl Declared {
     /// The declaration `schema` makes, pinned under `fingerprint`.
     pub(crate) fn pinned(schema: VaultSchema, fingerprint: impl Into<String>) -> Self {
-        let content_model = content_model(&schema, fingerprint.into());
+        let content_model = Arc::new(content_model(&schema, fingerprint.into()));
         Declared {
             schema,
             content_model,
@@ -851,7 +854,7 @@ impl Declared {
     pub(crate) fn unpinned() -> Self {
         Declared {
             schema: VaultSchema::default(),
-            content_model: ContentModel::none(),
+            content_model: Arc::new(ContentModel::none()),
         }
     }
 
@@ -862,6 +865,11 @@ impl Declared {
 
     /// The content model as the store reads it.
     pub(crate) fn content_model(&self) -> &ContentModel {
+        &self.content_model
+    }
+
+    /// The content model, shared with whatever outlives this declaration.
+    pub(crate) fn shared_content_model(&self) -> &Arc<ContentModel> {
         &self.content_model
     }
 }

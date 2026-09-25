@@ -13,9 +13,9 @@ use norn_fs::{
     Subscription, WatchError, try_acquire, walk, walk_subtree, watch, watch_polling,
 };
 use norn_store::{
-    Change, DerivedFinding, DirectoryPrefix, DocumentPath, FindingFacts, IncrementProvenance,
-    Provenance, RebuildReason, SchemaPin, Store, StoreError, StoredDocument, StoredPathOrder,
-    SubjectScope,
+    Change, ContentModel, DerivedFinding, DirectoryPrefix, DocumentPath, FindingFacts,
+    IncrementProvenance, Provenance, RebuildReason, SchemaPin, Store, StoreError, StoredDocument,
+    StoredPathOrder, SubjectScope,
 };
 use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, UntrustedReason, VaultName};
 
@@ -163,6 +163,14 @@ pub struct ProductionAttachment {
     /// [`ProductionAttachment::drop_controls_held_for_rung_three`]
     /// asserts.
     held_for_rung_three: Option<ReloadCandidate>,
+    /// The content model of the schema the store pins, built off the pin by
+    /// the one construction every deriving act builds its declaration by, so
+    /// a read compiles against the bytes its store pins rather than against
+    /// the controls a leg holds beside them.
+    ///
+    /// Taken again wherever the store's pin can have moved: where the store
+    /// is opened or reopened, and after every pin.
+    pinned_model: Arc<ContentModel>,
     /// Whether the engines are owed the config `controls` carries.
     ///
     /// It is set only where a leg holds controls it could not pin because
@@ -201,6 +209,24 @@ pub struct ProductionAttachment {
 type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
 
 impl ProductionAttachment {
+    /// Pin `candidate`'s schema into the store and take the content model
+    /// back off the pin it wrote.
+    fn pin(&mut self, candidate: &ReloadCandidate) -> Result<(), JobFailure> {
+        ProductionEntryOps::pin_candidate(&mut self.store, candidate)?;
+        self.read_pinned_model()
+    }
+
+    /// Take the content model of the schema the store pins, as a deriving
+    /// act reads it.
+    fn read_pinned_model(&mut self) -> Result<(), JobFailure> {
+        self.pinned_model = Arc::clone(
+            Declaration::read(&mut self.store)?
+                .model
+                .shared_content_model(),
+        );
+        Ok(())
+    }
+
     /// The case behaviour the installed coverage proved for `covered_root`,
     /// or `None` where no coverage stands.
     ///
@@ -314,26 +340,13 @@ impl ReadSource for norn_store::SnapshotReader {
     }
 }
 
-/// Render a store refusal as the reason a read is refused with.
-///
-/// **The inspection surface names no file.** The reason a mint or an
-/// establishment left behind is retained beside the entry's published demand
-/// and is rendered into the vault inspection and into a read's refusal detail,
-/// both of which answer a caller holding no hold — while `StoreError` renders
-/// its file-lifecycle refusals with the derived database's path in them. A
-/// caller reading that path opens its own connection over the same database
-/// and answers from it under no adjudication, which is the escape the reader
-/// type carries no route to. So the path is dropped here and the refusal keeps
-/// what a caller can act on: what was being done, and what the driver said.
-/// The path stays on the `StoreError` itself, where a log line that needs it
-/// reads it.
+/// Render a store refusal as the reason a read is refused with, told through
+/// [`crate::refusal::store_refusal_told`] so it names no file: the reason is
+/// retained beside the entry's published demand and rendered into the vault
+/// inspection and into a read's refusal detail, both of which answer a caller
+/// holding no hold.
 fn reader_unavailable(error: &StoreError) -> ReaderUnavailable {
-    match error {
-        StoreError::Lifecycle {
-            operation, message, ..
-        } => ReaderUnavailable::new(format!("{operation} failed: {message}")),
-        named => ReaderUnavailable::new(named.to_string()),
-    }
+    ReaderUnavailable::new(crate::refusal::store_refusal_told(error))
 }
 
 impl ProductionEntryOps {
@@ -488,7 +501,11 @@ impl ProductionEntryOps {
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
     ) -> Result<(), JobFailure> {
-        if !attachment.maintainership.still_current().map_err(effect)? {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
             return Err(JobFailure::LostMaintainership);
         }
         // Coverage is established by the time a heal runs, and what follows is
@@ -614,6 +631,7 @@ impl ProductionEntryOps {
                 return Err(store_effect(error));
             }
         }
+        attachment.read_pinned_model()?;
         attachment.store_verification_due = Instant::now() + STORE_VERIFICATION_INTERVAL;
         // Controls a leg held for this rung are the ones the rebuilt store is
         // pinned and derived under.
@@ -628,6 +646,7 @@ impl ProductionEntryOps {
             return Ok(attachment);
         }
         Self::pin_candidate(&mut attachment.store, &attachment.controls)?;
+        attachment.read_pinned_model()?;
         let derived = self
             .heal_under_coverage(&mut attachment, progress)
             .and_then(|()| {
@@ -753,12 +772,13 @@ impl EntryOps for ProductionEntryOps {
         let _job = self.evidence.attributing();
         progress.installing_coverage();
         let derived = self.derived(&registration.name);
-        let maintainership = match try_acquire(&derived.join("maintainer.lock")).map_err(effect)? {
-            Acquisition::Acquired(guard) => guard,
-            Acquisition::Contended { incumbent } => {
-                return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
-            }
-        };
+        let maintainership =
+            match try_acquire(&derived.join("maintainer.lock")).map_err(data_dir_effect)? {
+                Acquisition::Acquired(guard) => guard,
+                Acquisition::Contended { incumbent } => {
+                    return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
+                }
+            };
         // The lock and the shadow home are two mechanisms of one maintainership,
         // so both are keyed by the coordinates the derived directory is keyed
         // by: the lock by sitting in that directory, the home by carrying the
@@ -770,8 +790,9 @@ impl EntryOps for ProductionEntryOps {
         let covered_root = subscription.covered_root().to_owned();
         let path_order = stored_path_order(subscription.case_sensitivity());
         let root = covered_root.as_path();
-        let shadows = ShadowHome::resolve(root, &derived.join("tmp"), &key).map_err(effect)?;
-        shadows.sweep(Duration::ZERO).map_err(effect)?;
+        let shadows =
+            ShadowHome::resolve(root, &derived.join("tmp"), &key).map_err(data_dir_effect)?;
+        shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
         if shadows.placement() == Placement::VaultFallback {
             // Residue no key's own sweep will ever open again: what a build that
             // staged before homes were keyed left directly under the fallback
@@ -805,6 +826,7 @@ impl EntryOps for ProductionEntryOps {
             covered_root,
             controls: candidate.clone(),
             held_for_rung_three: None,
+            pinned_model: Arc::new(ContentModel::none()),
             config_delivery_owed: false,
             maintainership,
             store,
@@ -815,6 +837,7 @@ impl EntryOps for ProductionEntryOps {
             last_shadow_sweep: Instant::now(),
             store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
         };
+        attachment.read_pinned_model()?;
         if candidate.undeclarable().is_some() {
             // Nothing is pinned and nothing is derived under a declaration this
             // build cannot read. The attachment stands so the vault is
@@ -823,7 +846,7 @@ impl EntryOps for ProductionEntryOps {
             // controls the attachment holds.
             return Ok(attachment);
         }
-        Self::pin_candidate(&mut attachment.store, &candidate)?;
+        attachment.pin(&candidate)?;
         // The open resolves damage it can see in the store schema, and the heal
         // is where damage in the pages under it is met: a corrupt page an open
         // never read is met by the first read that does. Rung 3 runs here
@@ -848,7 +871,11 @@ impl EntryOps for ProductionEntryOps {
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
         let _job = self.evidence.attributing();
-        if !attachment.maintainership.still_current().map_err(effect)? {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
             return Err(JobFailure::LostMaintainership);
         }
         // A reconcile derives document changes under the active schema. Schema
@@ -885,7 +912,11 @@ impl EntryOps for ProductionEntryOps {
         attachment.drop_controls_held_for_rung_three();
         let _job = self.evidence.attributing();
         self.evidence.count_recovery();
-        if !attachment.maintainership.still_current().map_err(effect)? {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
             return Err(JobFailure::LostMaintainership);
         }
         // Recovery re-installs coverage before it re-heals, so it enters the
@@ -902,9 +933,9 @@ impl EntryOps for ProductionEntryOps {
             .map_err(JobFailure::Reload)?;
         let derived = self.derived(&attachment.registration.name);
         let key = maintainership_key(&self.dirs, &attachment.registration.name);
-        let shadows =
-            ShadowHome::resolve(&covered_root, &derived.join("tmp"), &key).map_err(effect)?;
-        shadows.sweep(Duration::ZERO).map_err(effect)?;
+        let shadows = ShadowHome::resolve(&covered_root, &derived.join("tmp"), &key)
+            .map_err(data_dir_effect)?;
+        shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
         attachment.subscription = Some(subscription);
         attachment._own_writes = own_writes;
         attachment._shadows = shadows;
@@ -931,7 +962,7 @@ impl EntryOps for ProductionEntryOps {
             attachment.controls = candidate;
             return Ok(());
         }
-        Self::pin_candidate(&mut attachment.store, &candidate)?;
+        attachment.pin(&candidate)?;
         attachment.controls = candidate;
         self.dispatch_config(attachment);
         self.heal_under_coverage(attachment, progress)?;
@@ -947,7 +978,11 @@ impl EntryOps for ProductionEntryOps {
     ) -> Result<ReloadOutcome, crate::EntryReloadFailure> {
         attachment.drop_controls_held_for_rung_three();
         let _job = self.evidence.attributing();
-        if !attachment.maintainership.still_current().map_err(effect)? {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
             return Err(JobFailure::LostMaintainership.into());
         }
         let candidate =
@@ -979,6 +1014,9 @@ impl EntryOps for ProductionEntryOps {
         }
 
         progress.begin_schema_reload();
+        // A pin the store refused leaves the store pinning the schema the
+        // entry serves under, so the refusal is the schema's to report and
+        // the entry keeps serving.
         Self::pin_candidate(&mut attachment.store, &candidate).map_err(
             |failure| match failure {
                 JobFailure::Environmental(detail) => {
@@ -987,7 +1025,16 @@ impl EntryOps for ProductionEntryOps {
                 other => other,
             },
         )?;
+        // **From here the store pins the candidate**, so the controls are the
+        // candidate's before anything else can fail: a rebuild owed below pins
+        // the controls the attachment holds. A failure to read the pin back is
+        // not the schema's. It would leave the entry serving the model of a
+        // schema its store no longer pins, so it keeps its own class — the
+        // environment refusing, which untrusts the entry and owes a recovery
+        // that pins and reads the schema again, or damage, which owes a
+        // rebuild — and is never a refused apply that leaves the entry serving.
         attachment.controls = candidate;
+        attachment.read_pinned_model()?;
         self.dispatch_config(attachment);
         self.heal_under_coverage(attachment, progress)?;
         self.drain_semantic(name, attachment);
@@ -999,6 +1046,13 @@ impl EntryOps for ProductionEntryOps {
         attachment: &Self::Attachment,
     ) -> Option<crate::ActiveFingerprints> {
         Some(attachment.controls.fingerprints())
+    }
+
+    /// The model built off the store's own pin, the way every deriving act
+    /// builds the declaration it judges under, so a read and a derivation
+    /// read one declaration out of one set of bytes.
+    fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+        Arc::clone(&attachment.pinned_model)
     }
 
     fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf> {
@@ -1027,7 +1081,11 @@ impl EntryOps for ProductionEntryOps {
         // this reading answers is whether the dispatcher kept scanning this
         // attachment at all, and a pass that refuses below is one it took.
         self.evidence.count_watcher_poll();
-        if !attachment.maintainership.still_current().map_err(effect)? {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
             return Err(JobFailure::LostMaintainership);
         }
         let drained = if attachment.heal_observed.is_empty() {
@@ -1092,7 +1150,7 @@ impl EntryOps for ProductionEntryOps {
                 Err(JobFailure::LostMaintainership)
             }
             Err(refusal) => {
-                let failure = effect(refusal);
+                let failure = data_dir_effect(refusal);
                 release(attachment);
                 Err(failure)
             }
@@ -1115,7 +1173,11 @@ impl EntryOps for ProductionEntryOps {
 
     fn maintain(&self, _: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure> {
         let _job = self.evidence.attributing();
-        if !attachment.maintainership.still_current().map_err(effect)? {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
             return Err(JobFailure::LostMaintainership);
         }
         // Shadow residue is inert, and a sweep is only bounded cleanup. Losing
@@ -3143,8 +3205,22 @@ impl EnvironmentalFailure for norn_fs::NormalizerError {}
 impl sealed::Sealed for norn_fs::ExclusionError {}
 impl EnvironmentalFailure for norn_fs::ExclusionError {}
 
+/// A refusal about the vault's own files, told in its own words, which name
+/// the vault path the caller registered. A refusal met in the host's data
+/// directory goes through [`data_dir_effect`] instead.
 fn effect(error: impl EnvironmentalFailure) -> JobFailure {
     environmental(error.to_string())
+}
+
+/// A refusal met in the host's own data directory — the maintainer lock or
+/// the shadow home — as the environmental failure it is, told without the
+/// directory's path: that directory holds the derived database, and a caller
+/// told where it is opens its own connection over it.
+///
+/// A refusal about the vault's own files goes through [`effect`] instead, and
+/// names the vault path the caller registered.
+fn data_dir_effect(error: norn_fs::Refusal) -> JobFailure {
+    environmental(crate::refusal::data_dir_refusal_told(&error))
 }
 
 /// The failure class a store refusal belongs to.
@@ -3155,10 +3231,16 @@ fn effect(error: impl EnvironmentalFailure) -> JobFailure {
 /// environment refusing, which the entry answers by staying untrusted and
 /// saying so. Flattening the first onto the second is a loop: a corrupt page
 /// answers a retry exactly as it answered the operation before it.
+///
+/// Either failure reaches a caller — as the entry's untrusted reason and as a
+/// reload's failure — so both are told through
+/// [`store_refusal_told`](crate::refusal::store_refusal_told), from the
+/// refusal's typed facts, and name no file.
 fn store_effect(error: StoreError) -> JobFailure {
+    let told = crate::refusal::store_refusal_told(&error);
     match error.damage() {
-        Some(damage) => JobFailure::StoreDamaged(damage.to_string()),
-        None => environmental(error.to_string()),
+        Some(_) => JobFailure::StoreDamaged(told),
+        None => environmental(told),
     }
 }
 fn watcher(error: WatchError) -> JobFailure {
@@ -3206,9 +3288,9 @@ mod tests {
     /// is rendered into the vault inspection and into a read's refusal detail,
     /// both of which answer a caller holding no hold. The store's own rendering
     /// of a file-lifecycle refusal carries the derived database's path; what
-    /// crosses into the read seam keeps the act and the driver's message and
-    /// drops the path, because a caller holding it opens its own connection
-    /// over the same database and answers from it under no adjudication.
+    /// crosses into the read seam keeps the act and drops the path, because a
+    /// caller holding it opens its own connection over the same database and
+    /// answers from it under no adjudication.
     #[test]
     fn a_reader_refusal_carries_what_failed_and_never_the_database_file() {
         let derived = PathBuf::from("/machine-local/derived/a-vault");
@@ -3233,10 +3315,254 @@ mod tests {
             detail.contains("opening the database read-only failed"),
             "the refusal dropped the act that failed: {detail}"
         );
+    }
+
+    /// **No store refusal the host sends names a file, whatever the driver
+    /// said.** The driver writes the database's path into its own account of
+    /// an open it could not make, so a store under a directory spelled with
+    /// spaces, a backtick, a quote and an emoji is made unreadable and its
+    /// read handle opened: the refusal that open leaves, told as the read
+    /// seam's reason, as a refused statement, and nested inside a changeset
+    /// entry's refusal, names neither the directory nor the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_reader_open_names_no_file_the_driver_named() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new("norn-host-refusal-names-no-file");
+        let unusual = "a dir `with` \"quotes\" and 🌲 spaces";
+        let database = scratch.join(unusual).join("store.sqlite3");
+        let store = Store::open(
+            &database,
+            StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .expect("a store under an unusually spelled directory");
+        fs::set_permissions(&database, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&database).is_ok() {
+            eprintln!("skipped: this account reads a mode-000 file");
+            fs::set_permissions(&database, fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        let Err(refused) = store.open_reader().reader else {
+            panic!("an unreadable database minted a read handle");
+        };
+        fs::set_permissions(&database, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(
-            detail.contains("write-ahead logging"),
-            "the refusal dropped what the driver said: {detail}"
+            refused.to_string().contains(unusual),
+            "the store's own account names no path, so this case proves nothing: {refused}"
         );
+
+        let nested = StoreError::Entry {
+            index: 3,
+            path: database.to_string_lossy().into_owned(),
+            problem: Box::new(refused.clone()),
+        };
+        let told = [
+            reader_unavailable(&refused).detail().to_string(),
+            reader_unavailable(&nested).detail().to_string(),
+            format!(
+                "{:?}",
+                crate::refusal::page_refusal(norn_store::PageRefusal::Store(refused.clone()))
+            ),
+            format!(
+                "{:?}",
+                crate::refusal::page_refusal(norn_store::PageRefusal::Store(nested))
+            ),
+        ];
+        let named = [
+            scratch.root().to_string_lossy().into_owned(),
+            unusual.to_string(),
+            "a dir".to_string(),
+            "🌲".to_string(),
+            "store.sqlite3".to_string(),
+        ];
+        for told in told {
+            assert!(
+                told.contains("opening the database read-only failed"),
+                "the refusal dropped the act that failed: {told}"
+            );
+            for named in &named {
+                assert!(
+                    !told.contains(named.as_str()),
+                    "the refusal names `{named}`: {told}"
+                );
+            }
+        }
+    }
+
+    /// Every spelling of the scratch root and the unusually named component
+    /// under it that a refusal could carry the path by.
+    fn path_spellings(scratch: &Scratch, unusual: &str) -> [String; 5] {
+        [
+            scratch.root().to_string_lossy().into_owned(),
+            unusual.to_string(),
+            "odd `name`".to_string(),
+            "🌲".to_string(),
+            "store.sqlite3".to_string(),
+        ]
+    }
+
+    /// **A store refusal a job leg meets reaches a caller naming no file.** A
+    /// store opened under an unusually spelled path whose parent is a regular
+    /// file is refused with that path in the store's own account; the job
+    /// failure it becomes, told as a reload's failure and as the untrusted
+    /// state the entry publishes, names neither the directory nor the file.
+    #[test]
+    fn a_store_refusal_on_the_job_route_names_no_file() {
+        let scratch = Scratch::new("norn-host-job-refusal-names-no-file");
+        let unusual = "odd `name` \"quoted\" and 🌲 spaced";
+        fs::write(scratch.join(unusual), b"a regular file").unwrap();
+        let database = scratch.join(unusual).join("store.sqlite3");
+        let Err(refused) = Store::open(
+            &database,
+            StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        ) else {
+            panic!("a store opened under a regular file");
+        };
+        assert!(
+            refused.to_string().contains(unusual),
+            "the store's own account names no path, so this case proves nothing: {refused}"
+        );
+
+        let failure = store_effect(refused);
+        let JobFailure::Environmental(detail) = &failure else {
+            panic!("a refused open is not the environment refusing: {failure:?}");
+        };
+        let name = VaultName::new("notes").unwrap();
+        let told = [
+            format!(
+                "{:?}",
+                crate::ReloadRefusal::Runtime(failure.clone()).answer(&name)
+            ),
+            format!(
+                "{:?}",
+                answered(norn_wire::TrustState::untrusted(
+                    UntrustedReason::environmental_refusal(detail.clone())
+                ))
+            ),
+        ];
+        for told in told {
+            for named in path_spellings(&scratch, unusual) {
+                assert!(
+                    !told.contains(named.as_str()),
+                    "the refusal names `{named}`: {told}"
+                );
+            }
+        }
+    }
+
+    /// **A rebuild refused in the host's own data directory reaches a caller
+    /// naming no file.** The data directory is unusually spelled, and the
+    /// derived directory under it is made unreadable after the attach, so the
+    /// rebuild cannot confirm the maintainer lock it holds: the failure, and
+    /// the untrusted state the entry publishes for it, say the environment
+    /// refused and name neither the directory nor the lock.
+    #[cfg(unix)]
+    #[test]
+    fn a_rebuild_refused_in_the_data_directory_names_no_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = Fixture::new("rebuild-data-dir-names-no-file");
+        let unusual = "odd `name` \"quoted\" and 🌲 spaced";
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join(unusual)).unwrap();
+        let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(64, 2).unwrap());
+        let name = f.registration().name;
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        let derived = ops.derived(&name);
+        let mode = fs::metadata(&derived).unwrap().permissions().mode();
+        fs::set_permissions(&derived, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::metadata(derived.join("maintainer.lock")).is_ok() {
+            fs::set_permissions(&derived, fs::Permissions::from_mode(mode)).unwrap();
+            eprintln!("skipped: this account reads a mode-000 directory");
+            ops.detach(&name, attachment);
+            return;
+        }
+        let refused = ops.rebuild(&name, attachment, &progress);
+        fs::set_permissions(&derived, fs::Permissions::from_mode(mode)).unwrap();
+
+        let detail = match refused {
+            Err(JobFailure::Environmental(detail)) => detail,
+            Err(other) => {
+                panic!("an unconfirmable lock is not the environment refusing: {other:?}")
+            }
+            Ok(rebuilt) => {
+                ops.detach(&name, rebuilt);
+                panic!("a rebuild confirmed a lock in an unreadable directory");
+            }
+        };
+        let told = [
+            detail.clone(),
+            format!(
+                "{:?}",
+                answered(norn_wire::TrustState::untrusted(
+                    UntrustedReason::environmental_refusal(detail.clone())
+                ))
+            ),
+        ];
+        for told in told {
+            for named in path_spellings(&f.root, unusual)
+                .into_iter()
+                .chain(["maintainer.lock".to_string()])
+            {
+                assert!(
+                    !told.contains(named.as_str()),
+                    "the refusal names `{named}`: {told}"
+                );
+            }
+        }
+    }
+
+    /// **An attach refused in the host's own data directory reaches a caller
+    /// naming no file.** The data directory is an unusually spelled regular
+    /// file, so the maintainer lock cannot be taken beneath it: the untrusted
+    /// state the entry publishes says the environment refused and names
+    /// neither the directory nor anything under it.
+    #[test]
+    fn an_attach_refused_in_the_data_directory_names_no_file() {
+        let f = Fixture::watcherless("attach-data-dir-names-no-file");
+        let unusual = "odd `name` \"quoted\" and 🌲 spaced";
+        fs::write(f.root.join(unusual), b"a regular file").unwrap();
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join(unusual)).unwrap();
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+
+        let refused = wait_until(
+            "the attach to be refused",
+            lifecycle_budget(),
+            || match host.state(&name) {
+                Err(refused) => Observed::Met(refused),
+                Ok(state) => Observed::Pending(format!("the state is {state:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            refused.code(),
+            &norn_wire::ReasonCode::HostEntryUntrusted,
+            "{refused:?}"
+        );
+        let told = format!("{refused:?}");
+        for named in path_spellings(&f.root, unusual) {
+            assert!(
+                !told.contains(named.as_str()),
+                "the refusal names `{named}`: {told}"
+            );
+        }
     }
 
     /// **The maintainer lock is the last thing an attachment gives back**, and
@@ -8530,6 +8856,59 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **The model a read compiles against is the one rung 3 pins from the
+    /// controls a recovery held for it.** The recovery reads a new schema it
+    /// cannot pin, so the attachment's model stays the one its store pins;
+    /// the rebuild pins the held schema, and the model is then the rebuilt
+    /// store's own, named by the fingerprint that store pins.
+    #[test]
+    fn a_rebuild_over_held_controls_takes_the_model_of_the_schema_it_pins() {
+        let f = Fixture::new("recover-order-moved-model");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+
+        let mut attachment =
+            derive_under_the_other_order(&f, ops.attach(&f.registration(), &progress).unwrap());
+        let served = ops.active_content_model(&attachment);
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\nfields:\n  created:\n    type: date\n",
+        )
+        .unwrap();
+
+        ops.recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over a store derived under the other order");
+        assert_eq!(
+            ops.active_content_model(&attachment).schema(),
+            served.schema(),
+            "a schema held for rung 3 was handed to reads before any pin"
+        );
+
+        let mut attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 under the order the coverage proved");
+        let pinned = attachment
+            .store
+            .begin_request()
+            .vault_schema_pin()
+            .unwrap()
+            .expect("the rebuild pinned the held schema")
+            .fingerprint;
+        let model = ops.active_content_model(&attachment);
+        assert_ne!(
+            model.schema(),
+            served.schema(),
+            "the rebuild kept the old model"
+        );
+        assert_eq!(model.schema(), Some(pinned.as_str()));
+        assert!(
+            model.typed_order("created").is_some(),
+            "the model does not type the key the pinned schema declares"
+        );
+        ops.detach(&name, attachment);
+    }
+
     /// **A reload that owes rung 3 for the path order delivers the config it
     /// read once, at the rung 3 that pins it.**
     #[test]
@@ -12090,7 +12469,11 @@ mod tests {
             attachment: &mut Self::Attachment,
             progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<(), JobFailure> {
-            if !attachment.maintainership.still_current().map_err(effect)? {
+            if !attachment
+                .maintainership
+                .still_current()
+                .map_err(data_dir_effect)?
+            {
                 return Err(JobFailure::LostMaintainership);
             }
             let schema = ProductionEntryOps::schema_path(&attachment.registration);

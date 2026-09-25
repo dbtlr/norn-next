@@ -6,10 +6,12 @@
 //! host decides *when* attach, reconciliation and detach happen, while the
 //! filesystem and store crates remain the only owners of those effects.
 
+mod address;
 mod derivation;
 mod evidence;
 mod lifecycle;
 mod production;
+mod read;
 mod refusal;
 mod registry;
 mod reload;
@@ -54,13 +56,14 @@ pub use norn_config::registry::Entry as Registration;
 /// layer lands, by deriving over a throwaway store and throwing it away with
 /// the work. The store-side half of that seam is built — `norn-store` opens a
 /// throwaway store today — while nothing here establishes an entry over one,
-/// which is why the only path this crate's call graph reaches the mode by is
-/// the refusal at the demand seam.
+/// which is why the only paths this crate's call graph reaches the mode by are
+/// refusals: a demand naming it, and a request addressing its vault by root.
 pub use norn_wire::AttachMode;
 pub use production::{
     MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy, ProductionPolicyError,
     WATCH_SYNCHRONIZATION_DEADLINE, stored_path_order,
 };
+pub use read::Answered;
 pub use registry::{AliasConflict, RegistryRead};
 pub use reload::{
     ActiveFingerprints, AuthoredDrift, ConfigFingerprint, EngineConfigReceiver, ReloadError,

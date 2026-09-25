@@ -49,6 +49,7 @@ use std::path::{Path, PathBuf};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
+use crate::demand::AttachMode;
 use crate::name::VaultName;
 
 /// What a path refused for not being text is told.
@@ -446,5 +447,49 @@ impl VaultAddress {
     /// A vault addressed by its `root`.
     pub const fn root(root: VaultRoot) -> Self {
         VaultAddress::Root { root }
+    }
+
+    /// The registered name this address names, or `None` where it names its
+    /// vault some other way.
+    pub const fn registered_name(&self) -> Option<&VaultName> {
+        match self {
+            VaultAddress::Name { name } => Some(name),
+            VaultAddress::Root { .. } => None,
+        }
+    }
+
+    /// The attach a request addressed this way asks for: a registered name
+    /// asks for the durable derivation its registration gates, and a root
+    /// with no registration behind it asks for a throwaway one.
+    ///
+    /// The match carries no wildcard, so an address minted beside these takes
+    /// its stance on the attach it asks for where the addresses are written,
+    /// rather than falling through at whichever caller reads one.
+    pub const fn attach_mode(&self) -> AttachMode {
+        match self {
+            VaultAddress::Name { .. } => AttachMode::Durable,
+            VaultAddress::Root { .. } => AttachMode::Throwaway,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A registered name asks for the durable attach its registration gates,
+    /// and names itself; a root names no registration and asks for a
+    /// throwaway attach.
+    #[test]
+    fn an_address_names_the_attach_it_asks_for() {
+        let name = VaultName::new("notes").expect("a legal vault name");
+        let by_name = VaultAddress::name(name.clone());
+        assert_eq!(by_name.registered_name(), Some(&name));
+        assert_eq!(by_name.attach_mode(), AttachMode::Durable);
+
+        let by_root =
+            VaultAddress::root(VaultRoot::new("/home/person/notes").expect("an absolute root"));
+        assert_eq!(by_root.registered_name(), None);
+        assert_eq!(by_root.attach_mode(), AttachMode::Throwaway);
     }
 }

@@ -12,8 +12,10 @@
 //! derived again — stays the client's decision to make.
 //!
 //! A client maps these onto its own vocabulary. The driver type crosses no
-//! public signature above this crate, which is what keeps SQLite result codes
-//! out of every API but this one.
+//! public signature above this crate, so no SQLite result code does either:
+//! what crosses upward is SQLite's static description of the code a refusal
+//! carried, which names no file, so a client can say what kind of refusal it
+//! met without the driver's message.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -26,6 +28,10 @@ pub enum DbError {
     /// which write.
     Sql {
         operation: &'static str,
+        /// SQLite's own description of the result code the driver refused
+        /// with — the library's static string for that code, which names no
+        /// file — or `None` where the refusal carries no result code.
+        condition: Option<&'static str>,
         message: String,
     },
     /// A file-lifecycle step the driver does not cover failed: preparing the
@@ -46,7 +52,9 @@ pub enum DbError {
 impl fmt::Display for DbError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DbError::Sql { operation, message } => write!(f, "{operation} failed: {message}"),
+            DbError::Sql {
+                operation, message, ..
+            } => write!(f, "{operation} failed: {message}"),
             DbError::Lifecycle {
                 operation,
                 path,
@@ -78,7 +86,21 @@ pub fn sql(operation: &'static str, error: rusqlite::Error) -> DbError {
     }
     DbError::Sql {
         operation,
+        condition: condition(&error),
         message: error.to_string(),
+    }
+}
+
+/// SQLite's description of the result code a driver error carries, where it
+/// carries one. The string is the library's own for the code, so it says what
+/// kind of refusal this was — a full disk, a read-only database, a busy lock —
+/// without the path or the statement the driver's message may name.
+fn condition(error: &rusqlite::Error) -> Option<&'static str> {
+    match error {
+        rusqlite::Error::SqliteFailure(failure, _) => {
+            Some(rusqlite::ffi::code_to_str(failure.extended_code))
+        }
+        _ => None,
     }
 }
 
@@ -95,8 +117,13 @@ pub fn sql_at_statement(
     error: rusqlite::Error,
 ) -> DbError {
     match sql(operation, error) {
-        DbError::Sql { operation, message } => DbError::Sql {
+        DbError::Sql {
             operation,
+            condition,
+            message,
+        } => DbError::Sql {
+            operation,
+            condition,
             message: format!(
                 "`{}`: {message}",
                 statement.lines().next().unwrap_or(statement)

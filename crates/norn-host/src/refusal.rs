@@ -47,9 +47,11 @@
 //! reads inside the host and one fact to a client: the derived state cannot be
 //! trusted, because the environment refused.
 
+use norn_semantic::EngineError;
+use norn_store::{PageRefusal, ReadBound, StoreError};
 use norn_wire::{
-    ControlFile, ControlFileFailure, ErrorDetail, ErrorEnvelope, ReloadFailure, TrustState,
-    UntrustedReason, VaultName,
+    AnswerShape, AttachMode, ControlFile, ControlFileFailure, ErrorDetail, ErrorEnvelope,
+    ReadFailure, ReloadFailure, RequestBound, RequestPart, TrustState, UntrustedReason, VaultName,
 };
 
 use crate::lifecycle::{Demand, HostError, JobFailure, ReadRefusal, ServingRefusal};
@@ -88,13 +90,20 @@ impl Demand {
                 format!("no vault is registered under the name `{name}`"),
                 ErrorDetail::unknown_vault(name.clone()),
             )),
-            Demand::UnsupportedMode(mode) => Err(ErrorEnvelope::new(
-                "this host attaches registered vaults durably and holds no lifecycle for the \
-                 mode this demand named",
-                ErrorDetail::unsupported_attach_mode(mode),
-            )),
+            Demand::UnsupportedMode(mode) => Err(unsupported_attach_mode(mode)),
         }
     }
+}
+
+/// The envelope a request for an attach mode this host has no lifecycle for is
+/// refused with — whether a demand named the mode, or the address a request
+/// named its vault by asked for it.
+pub(crate) fn unsupported_attach_mode(mode: AttachMode) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        "this host attaches registered vaults durably and holds no lifecycle for the attach \
+         mode this request asks for",
+        ErrorDetail::unsupported_attach_mode(mode),
+    )
 }
 
 impl ServingRefusal {
@@ -105,14 +114,16 @@ impl ServingRefusal {
     /// are `host/…` and both echo the name: what a caller does about either
     /// one is addressed to that name.
     ///
-    /// Nothing calls it yet. The serving set is changed by the registry verbs
-    /// — `vault register` and `vault unregister` — and this is the rendering
-    /// those verbs refuse through. Their handlers land in this crate
-    /// (NORN-231), which is why the visibility is `pub(crate)`: the mapping
+    /// A dormant carrier for the vault namespace handlers. The serving set is
+    /// changed by the registry verbs — `vault register` and `vault
+    /// unregister` — and this is the rendering those verbs refuse through;
+    /// their handlers are not built, so nothing calls it yet. They land in
+    /// this crate, which is why the visibility is `pub(crate)`: the mapping
     /// waits for the handler beside it rather than for a surface above it.
     #[allow(
         dead_code,
-        reason = "the registry verbs that refuse through this mapping land in NORN-231"
+        reason = "a dormant carrier: the vault namespace's registry verbs, not yet built, \
+                  refuse through this mapping"
     )]
     pub(crate) fn answer(self, name: &VaultName) -> ErrorEnvelope {
         match self {
@@ -146,11 +157,12 @@ impl ReloadRefusal {
     /// It carries no code and no detail: no reload outcome was learned, so
     /// there is nothing about the vault to report.
     ///
-    /// Nothing calls it yet. The `vault reload` handler is the one caller this
-    /// mapping has, and it lands above this layer (NORN-230); the mapping
-    /// lands here because the vocabulary an answer is spelled in is not a
-    /// surface's to choose, so the handler that arrives renders this rather
-    /// than minting refusals of its own.
+    /// A dormant carrier for the vault namespace handlers: the `vault reload`
+    /// handler is the one caller this mapping has, and it is not built, so
+    /// nothing outside this module's tests calls it yet. The mapping lives
+    /// here because the vocabulary an answer is spelled in is not a surface's
+    /// to choose, so the handler that arrives renders this rather than
+    /// minting refusals of its own.
     pub fn answer(self, name: &VaultName) -> Result<ErrorEnvelope, HostError> {
         Ok(match self {
             ReloadRefusal::UnknownVault => ErrorEnvelope::new(
@@ -217,10 +229,11 @@ fn reload_failed(failure: ReloadFailure) -> ErrorEnvelope {
 /// A core reload error as the wire control-file failure it is: which file,
 /// which boundary, and the reader's own account of it.
 ///
-/// The reload refusals here are its first caller; its second is the `vault
-/// status` handler, which lands in this crate (NORN-231) and reports the same
-/// failure as an entry's last reload failure, so the visibility is
-/// `pub(crate)` rather than private to this module.
+/// The reload refusals here are its first caller. Its second is the `vault
+/// status` handler, one of the vault namespace handlers, which is not built
+/// yet; it lands in this crate and reports the same failure as an entry's
+/// last reload failure, so the visibility is `pub(crate)` rather than private
+/// to this module.
 pub(crate) fn control_file_failure(error: &ReloadError) -> ControlFileFailure {
     let file = match error.file() {
         ReloadFile::Schema => ControlFile::Schema,
@@ -269,11 +282,9 @@ impl ReadRefusal {
     /// a caller as a state, and a read that met it is refused rather than
     /// answered from an entry that gave it nothing.
     ///
-    /// Nothing calls it yet. The read verbs — `find`, `search`, `get`,
-    /// `count`, `validate`, `describe` — are the callers this mapping has, and
-    /// their handlers land above this layer (NORN-230/231); the mapping lands
-    /// here because the vocabulary an answer is spelled in is not a surface's
-    /// to choose.
+    /// The read seam every read verb answers through is its caller, so a
+    /// read verb refused before its builder ran is refused here and nowhere
+    /// else.
     pub fn answer(self, name: &VaultName) -> ErrorEnvelope {
         match self {
             ReadRefusal::NotServing(demand) => match demand.answer(name) {
@@ -289,6 +300,199 @@ impl ReadRefusal {
                 },
             },
             ReadRefusal::ReaderUnavailable(reason) => reader_unavailable(reason.detail()),
+        }
+    }
+}
+
+/// A store read refusal as the read seam answers it.
+#[derive(Debug)]
+pub(crate) enum PageRefused {
+    /// The refusal the read answers with.
+    Answered(ErrorEnvelope),
+    /// The store found its derived data damaged, told without the driver's
+    /// words. The read seam publishes that damage on the entry, which then
+    /// owes the rebuild that resolves it, and answers with what the entry
+    /// publishes: `host/entry-untrusted` under the store-damaged-rebuilding
+    /// reason, never `host/read-failed`.
+    Damaged(String),
+}
+
+/// A store read refusal in the wire vocabulary.
+///
+/// Total by its match, which reads only the variants and carries no wildcard:
+/// a refusal or store error minted in the store without an arm here, or
+/// either enum turned `#[non_exhaustive]`, does not compile. Each arm carries
+/// the variant's own facts into the detail its code spells, and the message is
+/// the store's account in words, except a store error's, whose account is
+/// told through [`store_refusal_told`] so it names no file.
+///
+/// A refusal a request earns is filed under a `request/` code, and one the
+/// vault's own state earns under `vault/`. A store error
+/// [`StoreError::damage`] reads as damage is [`PageRefused::Damaged`], which
+/// the read seam answers from the entry. Every other statement the store refused is a failed read, and so is
+/// [`PageRefusal::DeclarationNotPinned`], which is a host defect: a hold hands
+/// a builder the content model its snapshot pins, so a read through a hold
+/// never meets it.
+pub(crate) fn page_refusal(refusal: PageRefusal) -> PageRefused {
+    let message = refusal.to_string();
+    let detail = match refusal {
+        PageRefusal::UnreadableBound { key, value } => ErrorDetail::unreadable_bound(key, value),
+        PageRefusal::DeclarationNotPinned {
+            declared_under,
+            pinned,
+        } => ErrorDetail::read_failed(
+            ReadFailure::declaration_not_pinned(declared_under, pinned),
+            message.clone(),
+        ),
+        PageRefusal::OrderChanged(changed) => ErrorDetail::cursor_order_changed(changed),
+        PageRefusal::CursorNotTaken { cursor, paged } => {
+            ErrorDetail::cursor_not_taken(cursor, paged)
+        }
+        PageRefusal::SummaryNotPaged => {
+            ErrorDetail::part_not_taken(RequestPart::Cursor, Some(AnswerShape::Summary))
+        }
+        PageRefusal::EmptyMembership { key } => {
+            ErrorDetail::out_of_bound(RequestBound::empty_membership(key))
+        }
+        PageRefusal::OutOfBound { bound, given } => {
+            let ceiling = bound.ceiling();
+            ErrorDetail::out_of_bound(match bound {
+                ReadBound::PageRows => RequestBound::page_rows(given, ceiling),
+                ReadBound::MembershipValues { key } => {
+                    RequestBound::membership_values(key, given, ceiling)
+                }
+            })
+        }
+        PageRefusal::UnknownPart { part } => ErrorDetail::part_not_taken(part, None),
+        PageRefusal::AmbiguousTarget(ambiguity) => {
+            let ambiguity = *ambiguity;
+            ErrorDetail::ambiguous_target(ambiguity.target, ambiguity.head, ambiguity.hint)
+        }
+        PageRefusal::UnknownTarget { target } => ErrorDetail::unknown_target(target),
+        PageRefusal::PartNotTaken { part, answer } => {
+            ErrorDetail::part_not_taken(part, Some(answer))
+        }
+        // Damage is what the store's own verdict says it is, so a changeset
+        // entry refused for damage is damage here as it is on a job leg.
+        PageRefusal::Store(
+            error @ (StoreError::Damaged { .. }
+            | StoreError::Entry { .. }
+            | StoreError::Path { .. }
+            | StoreError::Sql { .. }
+            | StoreError::Lifecycle { .. }
+            | StoreError::Bound { .. }
+            | StoreError::UnpinnedDeclaration { .. }
+            | StoreError::KeySpace { .. }),
+        ) => {
+            let told = store_refusal_told(&error);
+            return match error.damage() {
+                Some(_) => PageRefused::Damaged(told),
+                None => PageRefused::Answered(ErrorEnvelope::new(
+                    "the store refused a statement this read ran",
+                    ErrorDetail::read_failed(ReadFailure::statement(), told),
+                )),
+            };
+        }
+    };
+    PageRefused::Answered(ErrorEnvelope::new(message, detail))
+}
+
+/// A store refusal in words, naming no file.
+///
+/// A refusal told here reaches a caller holding no hold — a read's refusal
+/// detail, the vault inspection. A caller reading the derived database's path
+/// opens its own connection over the same database and answers from it under
+/// no adjudication, which is the escape the reader type carries no route to.
+///
+/// **The account is built from the refusal's typed facts and never from the
+/// driver's words.** The driver writes the database's path into its own
+/// account of an open it could not make, and nothing bounds where else it
+/// might, so a message is not redacted but left out: a redaction can only
+/// strike the spellings it knows, and the driver may spell a path another way
+/// or name a sidecar beside it. What is kept is what a caller can act on —
+/// the act that failed, SQLite's own description of the result code it
+/// failed with (a full disk, a read-only database), that the store found its
+/// data damaged (never the store's words for what it found), and the store's
+/// own bounds and fingerprints. The whole account stays on the `StoreError`,
+/// where a log line that needs it reads it.
+///
+/// The match carries no wildcard, so a variant minted in the store takes its
+/// stance on what it tells here.
+pub(crate) fn store_refusal_told(error: &StoreError) -> String {
+    match error {
+        StoreError::Path { problem, .. } => {
+            format!("a path handed to the store is not a document path: {problem}")
+        }
+        StoreError::Sql {
+            operation,
+            condition: Some(condition),
+            ..
+        } => format!("{operation} failed: {condition}"),
+        StoreError::Sql {
+            operation,
+            condition: None,
+            ..
+        }
+        | StoreError::Lifecycle { operation, .. } => format!("{operation} failed"),
+        StoreError::Damaged { .. } => "the store is damaged".to_string(),
+        StoreError::Bound { what, limit, given } => {
+            format!("{what} holds at most {limit}, and {given} were given")
+        }
+        // Rendered from schema fingerprints, a path order and the store's own
+        // static words, none of which is a path.
+        StoreError::UnpinnedDeclaration { .. } | StoreError::KeySpace { .. } => error.to_string(),
+        StoreError::Entry { index, problem, .. } => {
+            format!("changeset entry {index}: {}", store_refusal_told(problem))
+        }
+    }
+}
+
+/// A semantic engine refusal in words, naming no file.
+///
+/// The engine's sidecar is a database beside the store, and its substrate
+/// refusals carry the sidecar's path and the driver's words the way a store's
+/// do, so they are told through [`store_refusal_told`] on the store's reading
+/// of the same substrate refusal. The embedder's refusals name the vault
+/// document an input came from and the model, which a caller already reads.
+///
+/// The match carries no wildcard, so a variant minted in the engine takes its
+/// stance on what it tells here.
+pub(crate) fn engine_refusal_told(error: &EngineError) -> String {
+    match error {
+        EngineError::Db(refused) => store_refusal_told(&StoreError::from(refused.clone())),
+        EngineError::Store(refused) => {
+            format!("the lane-1 store refused: {}", store_refusal_told(refused))
+        }
+        EngineError::Embed { .. } | EngineError::WrongWidth { .. } => error.to_string(),
+        EngineError::SidecarDamaged { .. } => "the sidecar is damaged".to_string(),
+    }
+}
+
+/// A refusal met in the host's own data directory in words, naming no file.
+///
+/// The maintainer lock and the shadow home sit beside the derived database,
+/// so a path any of them names is a path to the directory that database is
+/// in. The account keeps the act that failed and what the operating system
+/// said, and drops every path.
+///
+/// The match carries no wildcard, so a variant minted in the filesystem crate
+/// takes its stance on what it tells here.
+pub(crate) fn data_dir_refusal_told(error: &norn_fs::Refusal) -> String {
+    match error {
+        norn_fs::Refusal::Environment {
+            operation, kind, ..
+        } => format!("{operation} in the data directory failed: {kind}"),
+        norn_fs::Refusal::LockFileReplaced { attempts, .. } => {
+            format!("the lock file was replaced on each of {attempts} attempts to lock it")
+        }
+        norn_fs::Refusal::Drifted { .. } | norn_fs::Refusal::Republished { .. } => {
+            "a file in the data directory changed under the host".to_string()
+        }
+        norn_fs::Refusal::DestinationExists { .. } => {
+            "a file in the data directory already exists".to_string()
+        }
+        norn_fs::Refusal::SymlinkDestination { .. } => {
+            "a file in the data directory is a symbolic link".to_string()
         }
     }
 }
@@ -689,7 +893,7 @@ mod reload_tests {
     }
 
     /// The shape a sample is of. The match carries no wildcard, so a refusal
-    /// variant minted without a shape does not compile.
+    /// or store error variant minted without a shape does not compile.
     fn shape(refusal: &ReloadRefusal) -> Shape {
         match refusal {
             ReloadRefusal::UnknownVault => Shape::UnknownVault,
@@ -989,21 +1193,82 @@ mod read_tests {
 
 #[cfg(test)]
 mod page_refusal_tests {
-    use norn_store::{PageRefusal, ReadBound, StoreError};
-    use norn_wire::{AnswerShape, PagedRows, ReasonCode, RequestPart};
+    use norn_store::{MAX_PAGE, PageRefusal, ReadBound, StoreError, TargetAmbiguity};
+    use norn_wire::{
+        AnswerShape, CandidateHead, CursorOrderChanged, ErrorDetail, Hint, PagedRows, ReadFailure,
+        ReasonCode, RequestBound, RequestPart, ResolutionTarget,
+    };
 
-    /// The code each store read refusal is filed under. A compile guard over
-    /// [`PageRefusal`] and the [`StoreError`] it carries: the match reads only
-    /// the variants and carries no wildcard, so a variant of either minted
-    /// without a code, or either enum turned `#[non_exhaustive]`, does not
-    /// compile. Damaged derived data answers the entry as untrusted; every
-    /// other store error is a failed read.
-    fn code_of(refusal: &PageRefusal) -> ReasonCode {
+    use super::{ErrorEnvelope, PageRefused, page_refusal};
+
+    /// What a store read refusal is, apart from what it carries.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Shape {
+        UnreadableBound,
+        DeclarationNotPinned,
+        OrderChanged,
+        CursorNotTaken,
+        SummaryNotPaged,
+        EmptyMembership,
+        OutOfBound,
+        UnknownPart,
+        AmbiguousTarget,
+        UnknownTarget,
+        PartNotTaken,
+        StoreDamaged,
+        Store,
+    }
+
+    impl Shape {
+        /// The shape after this one, and nothing at the end of the walk. The
+        /// match carries no wildcard, so a shape minted without a place in the
+        /// walk does not compile.
+        const fn after(self) -> Option<Shape> {
+            match self {
+                Shape::UnreadableBound => Some(Shape::DeclarationNotPinned),
+                Shape::DeclarationNotPinned => Some(Shape::OrderChanged),
+                Shape::OrderChanged => Some(Shape::CursorNotTaken),
+                Shape::CursorNotTaken => Some(Shape::SummaryNotPaged),
+                Shape::SummaryNotPaged => Some(Shape::EmptyMembership),
+                Shape::EmptyMembership => Some(Shape::OutOfBound),
+                Shape::OutOfBound => Some(Shape::UnknownPart),
+                Shape::UnknownPart => Some(Shape::AmbiguousTarget),
+                Shape::AmbiguousTarget => Some(Shape::UnknownTarget),
+                Shape::UnknownTarget => Some(Shape::PartNotTaken),
+                Shape::PartNotTaken => Some(Shape::StoreDamaged),
+                Shape::StoreDamaged => Some(Shape::Store),
+                Shape::Store => None,
+            }
+        }
+    }
+
+    /// Every shape there is, walked from the first.
+    fn every_shape() -> Vec<Shape> {
+        let mut shapes = vec![Shape::UnreadableBound];
+        while let Some(next) = shapes.last().expect("the walk starts at a shape").after() {
+            assert!(!shapes.contains(&next), "{next:?} is reached twice");
+            shapes.push(next);
+        }
+        shapes
+    }
+
+    /// The shape a sample is of. The match carries no wildcard, so a refusal
+    /// or store error variant minted without a shape does not compile.
+    fn shape(refusal: &PageRefusal) -> Shape {
         match refusal {
-            PageRefusal::UnreadableBound { .. } => ReasonCode::VaultUnreadableBound,
-            PageRefusal::Store(StoreError::Damaged { .. }) => ReasonCode::HostEntryUntrusted,
-            PageRefusal::DeclarationNotPinned { .. }
-            | PageRefusal::Store(
+            PageRefusal::UnreadableBound { .. } => Shape::UnreadableBound,
+            PageRefusal::DeclarationNotPinned { .. } => Shape::DeclarationNotPinned,
+            PageRefusal::OrderChanged(_) => Shape::OrderChanged,
+            PageRefusal::CursorNotTaken { .. } => Shape::CursorNotTaken,
+            PageRefusal::SummaryNotPaged => Shape::SummaryNotPaged,
+            PageRefusal::EmptyMembership { .. } => Shape::EmptyMembership,
+            PageRefusal::OutOfBound { .. } => Shape::OutOfBound,
+            PageRefusal::UnknownPart { .. } => Shape::UnknownPart,
+            PageRefusal::AmbiguousTarget(_) => Shape::AmbiguousTarget,
+            PageRefusal::UnknownTarget { .. } => Shape::UnknownTarget,
+            PageRefusal::PartNotTaken { .. } => Shape::PartNotTaken,
+            PageRefusal::Store(StoreError::Damaged { .. }) => Shape::StoreDamaged,
+            PageRefusal::Store(
                 StoreError::Path { .. }
                 | StoreError::Sql { .. }
                 | StoreError::Lifecycle { .. }
@@ -1011,32 +1276,69 @@ mod page_refusal_tests {
                 | StoreError::UnpinnedDeclaration { .. }
                 | StoreError::KeySpace { .. }
                 | StoreError::Entry { .. },
-            ) => ReasonCode::HostReadFailed,
-            PageRefusal::OrderChanged(_) => ReasonCode::VaultCursorOrderChanged,
-            PageRefusal::CursorNotTaken { .. } => ReasonCode::RequestCursorNotTaken,
-            PageRefusal::EmptyMembership { .. } | PageRefusal::OutOfBound { .. } => {
-                ReasonCode::RequestOutOfBound
-            }
-            PageRefusal::SummaryNotPaged
-            | PageRefusal::UnknownPart { .. }
-            | PageRefusal::PartNotTaken { .. } => ReasonCode::RequestPartNotTaken,
-            PageRefusal::AmbiguousTarget(_) => ReasonCode::VaultAmbiguousTarget,
-            PageRefusal::UnknownTarget { .. } => ReasonCode::VaultUnknownTarget,
+            ) => Shape::Store,
         }
     }
 
-    /// A refusal a request earns is filed under a `request/` code, a store
-    /// that finds its derived data damaged under `host/entry-untrusted`, and a
-    /// statement the store otherwise refused under `host/read-failed`.
-    #[test]
-    fn a_store_read_refusal_is_filed_under_its_wire_code() {
-        for (refusal, expected) in [
+    fn target(text: &str) -> ResolutionTarget {
+        ResolutionTarget::new(text).expect("a legal target")
+    }
+
+    /// Every store read refusal, paired with the code it is filed under and
+    /// the whole detail it carries. The detail is pinned rather than the code
+    /// alone, because what a client reads off a refusal is the payload.
+    fn every_refusal() -> Vec<(PageRefusal, ReasonCode, ErrorDetail)> {
+        let changed =
+            || CursorOrderChanged::new("fingerprint-a", Some("fingerprint-b".to_string()));
+        let head = || CandidateHead::new([], 2).expect("a head of two");
+        vec![
+            (
+                PageRefusal::UnreadableBound {
+                    key: "due".to_string(),
+                    value: "soon".to_string(),
+                },
+                ReasonCode::VaultUnreadableBound,
+                ErrorDetail::unreadable_bound("due", "soon"),
+            ),
+            (
+                PageRefusal::DeclarationNotPinned {
+                    declared_under: Some("fingerprint-a".to_string()),
+                    pinned: None,
+                },
+                ReasonCode::HostReadFailed,
+                ErrorDetail::read_failed(
+                    ReadFailure::declaration_not_pinned(Some("fingerprint-a".to_string()), None),
+                    PageRefusal::DeclarationNotPinned {
+                        declared_under: Some("fingerprint-a".to_string()),
+                        pinned: None,
+                    }
+                    .to_string(),
+                ),
+            ),
+            (
+                PageRefusal::OrderChanged(changed()),
+                ReasonCode::VaultCursorOrderChanged,
+                ErrorDetail::cursor_order_changed(changed()),
+            ),
             (
                 PageRefusal::CursorNotTaken {
                     cursor: PagedRows::Hit,
                     paged: PagedRows::Document,
                 },
                 ReasonCode::RequestCursorNotTaken,
+                ErrorDetail::cursor_not_taken(PagedRows::Hit, PagedRows::Document),
+            ),
+            (
+                PageRefusal::SummaryNotPaged,
+                ReasonCode::RequestPartNotTaken,
+                ErrorDetail::part_not_taken(RequestPart::Cursor, Some(AnswerShape::Summary)),
+            ),
+            (
+                PageRefusal::EmptyMembership {
+                    key: "status".to_string(),
+                },
+                ReasonCode::RequestOutOfBound,
+                ErrorDetail::out_of_bound(RequestBound::empty_membership("status")),
             ),
             (
                 PageRefusal::OutOfBound {
@@ -1044,6 +1346,51 @@ mod page_refusal_tests {
                     given: 0,
                 },
                 ReasonCode::RequestOutOfBound,
+                ErrorDetail::out_of_bound(RequestBound::page_rows(0, MAX_PAGE)),
+            ),
+            (
+                PageRefusal::OutOfBound {
+                    bound: ReadBound::MembershipValues {
+                        key: "status".to_string(),
+                    },
+                    given: 900,
+                },
+                ReasonCode::RequestOutOfBound,
+                ErrorDetail::out_of_bound(RequestBound::membership_values(
+                    "status",
+                    900,
+                    ReadBound::MembershipValues {
+                        key: "status".to_string(),
+                    }
+                    .ceiling(),
+                )),
+            ),
+            (
+                PageRefusal::UnknownPart {
+                    part: RequestPart::unknown("a sort key"),
+                },
+                ReasonCode::RequestPartNotTaken,
+                ErrorDetail::part_not_taken(RequestPart::unknown("a sort key"), None),
+            ),
+            (
+                PageRefusal::AmbiguousTarget(Box::new(TargetAmbiguity {
+                    target: target("glossary"),
+                    head: head(),
+                    hint: Hint::resolves(target("glossary")),
+                })),
+                ReasonCode::VaultAmbiguousTarget,
+                ErrorDetail::ambiguous_target(
+                    target("glossary"),
+                    head(),
+                    Hint::resolves(target("glossary")),
+                ),
+            ),
+            (
+                PageRefusal::UnknownTarget {
+                    target: target("nowhere"),
+                },
+                ReasonCode::VaultUnknownTarget,
+                ErrorDetail::unknown_target(target("nowhere")),
             ),
             (
                 PageRefusal::PartNotTaken {
@@ -1051,26 +1398,149 @@ mod page_refusal_tests {
                     answer: AnswerShape::Section,
                 },
                 ReasonCode::RequestPartNotTaken,
-            ),
-            (
-                PageRefusal::SummaryNotPaged,
-                ReasonCode::RequestPartNotTaken,
-            ),
-            (
-                PageRefusal::Store(StoreError::Damaged {
-                    what: "a row".to_string(),
-                }),
-                ReasonCode::HostEntryUntrusted,
+                ErrorDetail::part_not_taken(RequestPart::Column, Some(AnswerShape::Section)),
             ),
             (
                 PageRefusal::Store(StoreError::Sql {
                     operation: "reading a page",
-                    message: "disk I/O error".to_string(),
+                    condition: Some("disk I/O error"),
+                    message: "disk I/O error reading /data/notes/store.db".to_string(),
                 }),
                 ReasonCode::HostReadFailed,
+                ErrorDetail::read_failed(
+                    ReadFailure::statement(),
+                    "reading a page failed: disk I/O error",
+                ),
             ),
-        ] {
-            assert_eq!(code_of(&refusal), expected, "{refusal:?}");
+        ]
+    }
+
+    /// Every store read refusal the store finds its derived data damaged for:
+    /// the read seam answers it from the entry rather than as a failed read.
+    fn every_damage() -> Vec<PageRefusal> {
+        let damaged = || StoreError::Damaged {
+            what: "reading a page met a database that is not readable: /data/notes/store.db"
+                .to_string(),
+        };
+        vec![
+            PageRefusal::Store(damaged()),
+            PageRefusal::Store(StoreError::Entry {
+                index: 2,
+                path: "notes/today.md".to_string(),
+                problem: Box::new(damaged()),
+            }),
+        ]
+    }
+
+    /// The envelope a refusal the read answers as it stands is told with.
+    fn answered(refusal: PageRefusal) -> ErrorEnvelope {
+        match page_refusal(refusal) {
+            PageRefused::Answered(envelope) => envelope,
+            PageRefused::Damaged(detail) => panic!("answered from the entry as damage: {detail}"),
         }
+    }
+
+    /// Every store read refusal reaches exactly one code, carrying the facts
+    /// its variant carries, and says so in words.
+    #[test]
+    fn every_store_read_refusal_reaches_its_code_and_detail() {
+        for (refusal, code, detail) in every_refusal() {
+            let envelope = answered(refusal.clone());
+            assert_eq!(
+                envelope.code(),
+                &code,
+                "{refusal:?} is filed under another code"
+            );
+            assert_eq!(
+                envelope.detail(),
+                &detail,
+                "{refusal:?} carries another detail"
+            );
+            assert_eq!(
+                envelope.code(),
+                &detail.code(),
+                "{refusal:?} is filed under a code its detail does not name"
+            );
+            assert!(
+                !envelope.message().is_empty(),
+                "{refusal:?} refuses without saying so"
+            );
+        }
+    }
+
+    /// Every shape a store read refusal takes is sampled above, so the code a
+    /// new variant is filed under is pinned rather than merely compiled.
+    #[test]
+    fn every_store_read_refusal_shape_is_sampled() {
+        let sampled: Vec<Shape> = every_refusal()
+            .iter()
+            .map(|(r, _, _)| shape(r))
+            .chain(every_damage().iter().map(shape))
+            .collect();
+        for expected in every_shape() {
+            assert!(
+                sampled.contains(&expected),
+                "no refusal of shape {expected:?} is sampled"
+            );
+        }
+    }
+
+    /// A store that finds its derived data damaged is never a failed read:
+    /// it is handed to the read seam as damage, told without the driver's
+    /// words, so the entry publishes it and owes the rebuild.
+    #[test]
+    fn damage_is_answered_from_the_entry_and_names_no_file() {
+        for refusal in every_damage() {
+            let PageRefused::Damaged(detail) = page_refusal(refusal.clone()) else {
+                panic!("{refusal:?} is answered as it stands rather than from the entry");
+            };
+            assert!(
+                !detail.contains("store.db") && !detail.contains("/data"),
+                "the damage names the database file: {detail}"
+            );
+        }
+    }
+
+    /// A semantic engine refusal is told without the sidecar's path or the
+    /// driver's words, whichever seam it came from.
+    #[test]
+    fn an_engine_refusal_names_no_file() {
+        let lifecycle = || norn_db::DbError::Lifecycle {
+            operation: "preparing the sidecar's directory",
+            path: std::path::PathBuf::from("/data/notes/semantic.sqlite3"),
+            message: "denied: /data/notes".to_string(),
+        };
+        for refused in [
+            norn_semantic::EngineError::Db(lifecycle()),
+            norn_semantic::EngineError::Store(StoreError::from(lifecycle())),
+            norn_semantic::EngineError::SidecarDamaged {
+                what: "reading /data/notes/semantic.sqlite3 met a file that is not a database"
+                    .to_string(),
+            },
+        ] {
+            let told = super::engine_refusal_told(&refused);
+            assert!(
+                !told.contains("/data") && !told.contains("semantic.sqlite3"),
+                "the refusal names the sidecar: {told}"
+            );
+        }
+    }
+
+    /// A statement the store refused is told without the database's path, so
+    /// a refusal handed to a caller holding no hold names no file to open.
+    #[test]
+    fn a_refused_statement_names_no_file() {
+        let envelope = answered(PageRefusal::Store(StoreError::Lifecycle {
+            operation: "opening the derived database",
+            path: std::path::PathBuf::from("/data/notes/store.sqlite3"),
+            message: "denied".to_string(),
+        }));
+        let ErrorDetail::ReadFailed { detail, .. } = envelope.detail() else {
+            panic!("a refused statement refused under another detail: {envelope:?}");
+        };
+        assert!(
+            !detail.contains("store.sqlite3") && !envelope.message().contains("store.sqlite3"),
+            "the refusal names the database file: {envelope:?}"
+        );
     }
 }

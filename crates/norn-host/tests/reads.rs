@@ -18,9 +18,13 @@ mod attach;
 
 use std::path::Path;
 
-use norn_host::{Demand, ReadRefusal};
+use norn_host::{Demand, ReadRefusal, ReloadRefusal};
 use norn_testkit::process::Sandbox;
-use norn_wire::TrustState;
+use norn_testkit::wait::{Observed, wait_until};
+use norn_wire::{
+    AttachMode, CountParams, ErrorDetail, GroupKey, NotReady, ReasonCode, TrustState,
+    UntrustedReason, VaultAddress, VaultName, VaultRoot,
+};
 
 /// The generated profile every case here attaches.
 const PROFILE: &str = "tiny";
@@ -182,5 +186,358 @@ fn reads_over_one_entry_each_run_one_statement_under_the_gate() {
     assert_eq!(
         reading.reader_waits, 0,
         "reads that never overlapped waited for the handle anyway"
+    );
+}
+
+/// **A hold carries the declaration its snapshot pins, across a reload that
+/// changes it.** The model is taken in the gate hold that establishes the
+/// snapshot, so a builder handed both compiles against the schema the
+/// snapshot's store pins — before the reload and after it — and is never
+/// refused as compiled under another.
+#[test]
+fn a_hold_carries_the_declaration_its_snapshot_pins_across_a_schema_reload() {
+    let (_sandbox, vault) = a_vault("host-reads-declaration");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let pinned = |store: &mut norn_store::Store| {
+        store
+            .begin_request()
+            .vault_schema_pin()
+            .expect("reading the pin")
+            .expect("an attachment pins the vault schema")
+            .fingerprint
+    };
+    let before = pinned(&mut vault.store());
+    {
+        let hold = host
+            .begin_read(vault.name())
+            .expect("an attached vault answers a read");
+        assert_eq!(hold.content_model().schema(), Some(before.as_str()));
+        hold.snapshot()
+            .count(
+                &CountParams::new(VaultAddress::name(vault.name().clone())),
+                hold.content_model(),
+            )
+            .expect("a count compiled against the hold's declaration");
+    }
+
+    std::fs::write(
+        vault.path().join(".norn/schema.yaml"),
+        b"version: 1\nfields:\n  created:\n    type: date\n",
+    )
+    .expect("rewrite the vault schema");
+    wait_until(
+        "the reload to activate the rewritten schema",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.reload(vault.name()) {
+            Ok(()) => Observed::Met(()),
+            Err(ReloadRefusal::Unavailable(trust)) => {
+                Observed::pending(format!("the entry is {trust:?}"))
+            }
+            Err(refused) => panic!("the reload was refused: {refused:?}"),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+
+    let after = pinned(&mut vault.store());
+    assert_ne!(after, before, "the reload pinned the schema it replaced");
+    let hold = host
+        .begin_read(vault.name())
+        .expect("a reloaded vault answers a read");
+    assert_eq!(
+        hold.content_model().schema(),
+        Some(after.as_str()),
+        "the hold carries a declaration its snapshot does not pin"
+    );
+    hold.snapshot()
+        .count(
+            &CountParams::new(VaultAddress::name(vault.name().clone()))
+                .with_by([GroupKey::field("created")]),
+            hold.content_model(),
+        )
+        .expect("a count grouping by a typed key compiled against the hold's declaration");
+}
+
+/// A count over `name`, every document in one tally.
+fn a_count(name: &VaultName) -> CountParams {
+    CountParams::new(VaultAddress::name(name.clone()))
+}
+
+/// **A count answers under the reading of the snapshot it was read from.** The
+/// trust is the `Ready` the entry published, the epoch is the database the
+/// attachment derived, and the generation is the one its writes had reached —
+/// nothing writes to the vault here, so the store's generation after the
+/// answer is the one its snapshot was established at.
+#[test]
+fn a_count_answers_under_the_reading_of_its_snapshot() {
+    let (_sandbox, vault) = a_vault("host-reads-count");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let answered = host
+        .count(&a_count(vault.name()))
+        .expect("an attached vault answers a count");
+
+    let mut store = vault.store();
+    let generation = store
+        .begin_request()
+        .write_generation()
+        .expect("the store's generation");
+    assert_eq!(answered.answer.reading.trust, TrustState::Ready);
+    assert_eq!(answered.answer.reading.epoch, store.epoch());
+    assert_eq!(
+        answered.answer.reading.generation,
+        u64::try_from(generation).expect("a generation at or above zero"),
+        "the answer names another generation than its snapshot read"
+    );
+    assert_eq!(answered.answer.reading.ladder, None);
+    assert!(answered.answer.is_complete());
+    let [tally] = answered.answer.report.rows.as_slice() else {
+        panic!(
+            "an ungrouped count answered {} tallies",
+            answered.answer.report.rows.len()
+        );
+    };
+    assert!(tally.count > 0, "the count found no document in the vault");
+    assert_eq!(
+        answered.snapshot.snapshots_opened(),
+        1,
+        "the answer was read from other than the one snapshot its hold established"
+    );
+    assert_eq!(
+        answered.snapshot.statements_executed(),
+        1 + answered.work.statements,
+        "the snapshot ran statements the count does not account for"
+    );
+}
+
+/// **A count over an entry that holds nothing yet is refused with the warming
+/// state of the attach it asked for**, filed under `host/entry-not-ready`
+/// rather than answered as a state.
+#[test]
+fn a_count_over_an_unattached_vault_is_not_ready() {
+    let (_sandbox, vault) = a_vault("host-reads-count-warming");
+    let host = vault.host();
+
+    let refused = host
+        .count(&a_count(vault.name()))
+        .expect_err("an unattached vault answered a count");
+    assert_eq!(refused.code(), &ReasonCode::HostEntryNotReady);
+    let ErrorDetail::EntryNotReady { state, .. } = refused.detail() else {
+        panic!("a count over an unattached vault refused with {refused:?}");
+    };
+    assert!(
+        matches!(state, NotReady::Warming { .. }),
+        "the count did not ask for the attach it was refused for: {state:?}"
+    );
+}
+
+/// **A count over a parked entry is refused with the park's own code.** Two
+/// names over one root are a registry in conflict: the attach the first count
+/// asks for classifies the root and parks the entry, and every count after it
+/// is refused as that park rather than restated as a state — a read withdraws
+/// no park.
+#[test]
+fn a_count_over_a_parked_vault_is_refused_with_the_parks_code() {
+    let (_sandbox, vault) = a_vault("host-reads-count-parked");
+    let alias = VaultName::new("alias").expect("a legal vault name");
+    let host = vault.host_under([vault.name().clone(), alias]);
+
+    let refused = wait_until(
+        "the attach a count asked for to park the conflicting entry",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.count(&a_count(vault.name())) {
+            Err(refused) if refused.code() == &ReasonCode::HostEntryNotReady => {
+                Observed::pending(format!("the count was refused with {refused:?}"))
+            }
+            Err(refused) => Observed::Met(refused),
+            Ok(answered) => panic!("a vault registered twice answered a count: {answered:?}"),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        refused.code(),
+        &ReasonCode::HostDuplicateRoot,
+        "{refused:?}"
+    );
+    assert!(
+        host.count(&a_count(vault.name()))
+            .is_err_and(|again| again == refused),
+        "a count withdrew the park it was refused with"
+    );
+}
+
+/// A count naming a vault the registry does not hold is refused under the name
+/// it asked for.
+#[test]
+fn a_count_over_an_unknown_name_is_an_unknown_vault() {
+    let (_sandbox, vault) = a_vault("host-reads-count-unknown");
+    let host = vault.host();
+    let ledger = VaultName::new("ledger").expect("a legal vault name");
+
+    let refused = host
+        .count(&a_count(&ledger))
+        .expect_err("an unknown name answered a count");
+    assert_eq!(refused.detail(), &ErrorDetail::unknown_vault(ledger));
+}
+
+/// A count addressing its vault by root asks for a throwaway attach, which
+/// the host refuses — even over the root of a vault it serves by name.
+#[test]
+fn a_count_by_root_is_an_unsupported_attach() {
+    let (_sandbox, vault) = a_vault("host-reads-count-root");
+    let host = vault.host();
+    let root = VaultRoot::new(vault.path()).expect("an absolute root");
+
+    let refused = host
+        .count(&CountParams::new(VaultAddress::root(root)))
+        .expect_err("a root answered a count");
+    assert_eq!(
+        refused.detail(),
+        &ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
+    );
+}
+
+/// A count over `name` grouping by the typed key `created`, which compiles
+/// only against a declaration that types it.
+fn a_count_by_created(name: &VaultName) -> CountParams {
+    a_count(name).with_by([GroupKey::field("created")])
+}
+
+/// **A recovery that pins a corrected schema hands a read the declaration it
+/// pinned.** The attach reads a schema this build cannot declare, pins nothing
+/// and publishes it as untrusted; the schema is corrected; the read's own
+/// demand runs the recovery that pins it. The count that follows groups by a
+/// key only that schema types, so it answers once the recovery has published —
+/// and is never refused as compiled under another declaration than the one its
+/// snapshot pins.
+#[test]
+fn a_read_after_a_recovery_compiles_against_the_schema_the_recovery_pinned() {
+    let (_sandbox, vault) = a_vault("host-reads-recovered-declaration");
+    let schema = vault.path().join(".norn/schema.yaml");
+    std::fs::write(&schema, b"\tinvalid: yaml\n").expect("write an unreadable schema");
+    let host = vault.host();
+    let _lease = host
+        .demand(vault.name(), AttachMode::Durable)
+        .expect("request attachment");
+    let reason = attach::wait_for_withdrawn_trust(&host, vault.name(), attach::READY_LIMIT);
+    assert!(
+        matches!(reason, UntrustedReason::SchemaUnreadable { .. }),
+        "the attach withheld trust for another reason: {reason:?}"
+    );
+
+    std::fs::write(
+        &schema,
+        b"version: 1\nfields:\n  created:\n    type: date\n",
+    )
+    .expect("correct the vault schema");
+    let answered = wait_until(
+        "a count grouping by a typed key to answer after the recovery",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.count(&a_count_by_created(vault.name())) {
+            Ok(answered) => Observed::Met(answered),
+            Err(refused) if refused.code() == &ReasonCode::HostReadFailed => {
+                panic!("the count was compiled against another declaration: {refused:?}")
+            }
+            Err(refused) => Observed::pending(format!("the count was refused with {refused:?}")),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(answered.answer.reading.trust, TrustState::Ready);
+}
+
+/// Make every page of the `documents` table and its indexes unreadable, the
+/// way a corrupt file is: the write-ahead log is folded into the database
+/// first, so the file holds every page, and then each page's type byte is
+/// overwritten with one no b-tree page carries.
+fn damage_the_documents_table(database: &Path) {
+    let (pages, page_size) = match norn_db::connect(database).expect("connecting to the store") {
+        norn_db::Attempt::Connected(connection) => {
+            connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                .expect("fold the log into the database");
+            let page_size: u64 = connection
+                .query_row("PRAGMA page_size", [], |row| row.get(0))
+                .expect("the page size");
+            let mut statement = connection
+                .prepare(
+                    "SELECT pageno FROM dbstat WHERE name IN \
+                     (SELECT name FROM sqlite_schema WHERE tbl_name = 'documents')",
+                )
+                .expect("the pages of the documents table");
+            let pages: Vec<u64> = statement
+                .query_map([], |row| row.get(0))
+                .expect("read the pages")
+                .collect::<Result<_, _>>()
+                .expect("a page number");
+            (pages, page_size)
+        }
+        norn_db::Attempt::Unreadable { detail } => panic!("the store is unreadable: {detail}"),
+    };
+    assert!(
+        !pages.is_empty() && !pages.contains(&1),
+        "the documents table stands on pages {pages:?}"
+    );
+    let mut bytes = std::fs::read(database).expect("read the database file");
+    for page in pages {
+        let at = usize::try_from((page - 1) * page_size).expect("an offset in memory");
+        bytes[at] = 0x00;
+    }
+    std::fs::write(database, bytes).expect("write the damaged database");
+}
+
+/// **A count whose store finds its derived data damaged is refused as an
+/// untrusted entry, and the entry rebuilds.** The damage is the store's own
+/// verdict on a corrupt page the count read, so the answer is
+/// `host/entry-untrusted` under the store-damaged-rebuilding reason, never a
+/// failed read; the entry publishes that and runs rung 3, which discards the
+/// damaged database and derives the vault into a new one that answers.
+#[test]
+fn a_count_that_meets_damage_is_untrusted_and_the_entry_rebuilds() {
+    let (_sandbox, vault) = a_vault("host-reads-count-damaged");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let damaged_epoch = vault.store().epoch().to_string();
+
+    damage_the_documents_table(&vault.database());
+
+    let refused = wait_until(
+        "a count to meet the damage over an entry nothing else holds",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.count(&a_count(vault.name())) {
+            Err(refused) if refused.code() == &ReasonCode::HostReaderUnavailable => {
+                Observed::pending(format!("the count was refused with {refused:?}"))
+            }
+            Err(refused) => Observed::Met(refused),
+            Ok(answered) => panic!("a damaged store answered a count: {answered:?}"),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        refused.detail(),
+        &ErrorDetail::entry_untrusted(UntrustedReason::store_damaged_rebuilding(
+            "the store is damaged"
+        )),
+        "{refused:?}"
+    );
+
+    let answered = wait_until(
+        "the rebuild to put the entry back into service",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.count(&a_count(vault.name())) {
+            Ok(answered) => Observed::Met(answered),
+            Err(refused) if refused.code() == &ReasonCode::HostReadFailed => {
+                panic!("a count over a rebuilding entry failed as a read: {refused:?}")
+            }
+            Err(refused) => Observed::pending(format!("the count was refused with {refused:?}")),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(answered.answer.reading.trust, TrustState::Ready);
+    assert_ne!(
+        answered.answer.reading.epoch.to_string(),
+        damaged_epoch,
+        "the count answered from the database the damage was met in"
     );
 }

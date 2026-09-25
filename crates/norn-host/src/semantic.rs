@@ -67,6 +67,7 @@ use norn_semantic::{Engine, Neighbor, Settings, SidecarRevision, Watermark, Wate
 use norn_store::{FeedRead, StoreReading};
 use norn_wire::{EngineSection, ErrorDetail, ErrorEnvelope, Freshness, Rung, VaultName};
 
+use crate::refusal::engine_refusal_told;
 use crate::reload::EngineConfigReceiver;
 
 /// The sidecar's file, beside the vault's `store.sqlite3` in the same
@@ -375,7 +376,7 @@ impl SemanticEngines {
                     engine
                         .nearest(text, limit)
                         .map_err(|error| SemanticRefusal::Failed {
-                            detail: error.to_string(),
+                            detail: engine_refusal_told(&error),
                         })?;
                 Ok(SemanticAnswer {
                     neighbors,
@@ -429,22 +430,24 @@ impl SemanticEngines {
                         *last_drain_error = match outcome {
                             Ok(_) => None,
                             Err(after) => Some(format!(
-                                "rebuilt after damage ({error}), and the drain after it \
-                                 failed: {after}"
+                                "rebuilt after damage ({}), and the drain after it failed: {}",
+                                engine_refusal_told(&error),
+                                engine_refusal_told(&after)
                             )),
                         };
                     }
                     Err(failed) => {
                         *slot = Slot::SelfDisabled {
                             detail: format!(
-                                "the sidecar was damaged ({error}) and its rebuild failed: \
-                                 {failed}"
+                                "the sidecar was damaged ({}) and its rebuild failed: {}",
+                                engine_refusal_told(&error),
+                                engine_refusal_told(&failed)
                             ),
                         };
                     }
                 }
             }
-            Err(error) => *last_drain_error = Some(error.to_string()),
+            Err(error) => *last_drain_error = Some(engine_refusal_told(&error)),
         }
     }
 
@@ -533,7 +536,7 @@ impl EngineConfigReceiver for SemanticEngines {
                 last_drain_error: None,
             },
             Err(error) => Slot::SelfDisabled {
-                detail: format!("the sidecar did not open: {error}"),
+                detail: format!("the sidecar did not open: {}", engine_refusal_told(&error)),
             },
         };
         self.deliver(vault, EngineSection::enabled(), Some(slot));

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use norn_config::registry::Entry as Registration;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
-use norn_store::StoreReading;
+use norn_store::{ContentModel, StoreReading};
 use norn_wire::{
     AttachMode, ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, VaultName,
     WarmingPhase, WatcherLossCause,
@@ -285,6 +285,20 @@ pub trait EntryOps: Send + Sync + 'static {
     /// The root authored control reads must use for this attachment.
     fn control_root(&self, _: &Self::Attachment) -> Option<std::path::PathBuf> {
         None
+    }
+    /// The content model of the schema this attachment's store pins, which
+    /// every read answered over this coverage compiles against.
+    ///
+    /// Read under the gate hold that publishes a leg's outcome, beside
+    /// [`EntryOps::active_fingerprints`], so the model an entry keeps is the
+    /// one its last pinning leg pinned. It is handed out rather than built
+    /// here: this runs under the entry gate, and the model is built where the
+    /// leg reads the pin back off the store, outside it.
+    ///
+    /// The default declares nothing, which is the declaration of a store that
+    /// pins no schema.
+    fn active_content_model(&self, _: &Self::Attachment) -> Arc<ContentModel> {
+        Arc::new(ContentModel::none())
     }
     /// Why nothing may be derived under this attachment, where the attachment
     /// itself stands.
@@ -614,6 +628,7 @@ impl<A: SnapshotSource> Entry<A> {
                 reader_unavailable: None,
                 pending: Batch::default(),
                 active_fingerprints: None,
+                active_content_model: Arc::new(ContentModel::none()),
                 control_root: None,
                 last_reload_error: None,
                 recovery_required: false,
@@ -679,6 +694,18 @@ struct EntryState<A: SnapshotSource> {
     pending: Batch,
     /// The core fingerprints active in the attached runtime.
     active_fingerprints: Option<ActiveFingerprints>,
+    /// The content model of the schema the entry's store pins, which a read
+    /// compiles its request against.
+    ///
+    /// **Every leg that pins a schema publishes through a gate hold that
+    /// records this model**, and no read is served between that pin and that
+    /// hold: a reload that changes the schema closes the entry's reader and
+    /// publishes warming before it pins, and a recovery or a rebuild runs over
+    /// an entry that owes a rung, which publishes no `Ready` until its leg's
+    /// own gate hold. So a read that establishes its snapshot under the gate
+    /// and takes this model under the same hold compiles against the
+    /// declaration its snapshot pins.
+    active_content_model: Arc<ContentModel>,
     /// The operational root the active controls were read from.
     control_root: Option<std::path::PathBuf>,
     /// The last typed core error from reading, parsing, or applying vault
@@ -824,6 +851,22 @@ impl<A: SnapshotSource> EntryState<A> {
         self.rebuild_required = true;
         self.recovery_required = false;
         self.retire_recovery_demands();
+    }
+
+    /// Owe the rebuild that resolves damaged derived state, and withdraw
+    /// trust for it.
+    ///
+    /// Every leg that meets [`JobFailure::StoreDamaged`] while it holds an
+    /// attachment, and a read whose store met damage over a free entry, give
+    /// this verdict here, so what a client reads does not depend on who met
+    /// the damage. The reason is the rebuilding one — the entry holds the
+    /// database and discards it on its own — rather than
+    /// [`UntrustedReason::StoreDamagedAwaitingDemand`], which an attach that
+    /// acquired no store publishes and which promises nothing until a demand
+    /// opens a file to discard.
+    fn withdraw_trust_for_damage(&mut self, detail: impl Into<String>) {
+        self.require_rebuild();
+        self.trust = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
     }
 
     /// Whether the entry owes a rung of the ladder, which is work no ordinary
@@ -1236,19 +1279,6 @@ fn watcher_lost(error: WatchError) -> UntrustedReason {
     UntrustedReason::watcher_lost(cause, detail)
 }
 
-/// The trust an entry holding a damaged database publishes.
-///
-/// Every leg that meets [`JobFailure::StoreDamaged`] while it holds an
-/// attachment withdraws trust here, so what a client reads does not depend on
-/// which leg met the damage. The reason is the rebuilding one — the entry holds
-/// the database and discards it on its own — rather than
-/// [`UntrustedReason::StoreDamagedAwaitingDemand`], which an attach that
-/// acquired no store publishes and which promises nothing until a demand opens
-/// a file to discard.
-fn trust_withdrawn_for_damage(detail: impl Into<String>) -> TrustState {
-    TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail))
-}
-
 /// Whether a terminal watch failure says the ground under the entry moved.
 ///
 /// Coverage that ended because the root stopped being covered is the one
@@ -1501,6 +1531,21 @@ fn record_demand<A: SnapshotSource>(state: &mut EntryState<A>) -> Option<u64> {
     recovery_demand
 }
 
+/// Record the declaration `attachment` serves under — its active control-file
+/// fingerprints and the content model its store pins — as the entry's own.
+///
+/// Called under the gate hold that publishes a leg's outcome, so the entry's
+/// account of its declaration moves with the publication that puts the
+/// coverage back, and a read taken under a later hold reads both together.
+fn record_active_declaration<O: EntryOps>(
+    state: &mut EntryState<O::Attachment>,
+    ops: &O,
+    attachment: &O::Attachment,
+) {
+    state.active_fingerprints = ops.active_fingerprints(attachment);
+    state.active_content_model = ops.active_content_model(attachment);
+}
+
 fn begin_release<A: SnapshotSource>(state: &mut EntryState<A>) {
     // A job that lost the attachment to this leg left its marker behind for a
     // later tick, and the resources it was scheduled against are going back:
@@ -1593,6 +1638,7 @@ fn finish_release<O: EntryOps>(
     state.detach_in_flight = false;
     state.pending = Batch::default();
     state.active_fingerprints = None;
+    state.active_content_model = Arc::new(ContentModel::none());
     state.control_root = None;
     // The derived state a damage verdict was about is with the ops, and an
     // attach opens the database again from nothing: a requirement kept here
@@ -2315,6 +2361,9 @@ pub struct ReadHold<O: EntryOps> {
     /// snapshot stands from the hold's making to the hold's end.
     snapshot: Option<<<O::Attachment as SnapshotSource>::Reader as ReadSource>::Snapshot>,
     reading: HoldReading,
+    /// The content model the snapshot's store pins, taken under the gate hold
+    /// that established the snapshot.
+    content_model: Arc<ContentModel>,
     /// The demand this read holds on the entry for its own length. Declared
     /// last because fields drop in declaration order: the pin goes back in
     /// this type's own drop, under the gate, and the lease takes the gate
@@ -2376,6 +2425,17 @@ impl<O: EntryOps> ReadHold<O> {
         self.snapshot
             .as_ref()
             .expect("a hold holds its snapshot until it is dropped")
+    }
+
+    /// The content model a read builder compiles its request against: the
+    /// declaration of the schema the snapshot's store pins.
+    ///
+    /// It is the entry's own, taken in the gate hold that established the
+    /// snapshot, so a builder handed both compiles against the declaration
+    /// the snapshot pins and never refuses the request as compiled under
+    /// another.
+    pub fn content_model(&self) -> &ContentModel {
+        &self.content_model
     }
 }
 
@@ -3278,6 +3338,9 @@ impl<O: EntryOps> Host<O> {
                 (turn, published)
             }
         };
+        // The model is the entry's under this same hold, so it and the
+        // snapshot established below describe one declaration.
+        let content_model = Arc::clone(&state.active_content_model);
         // The establishment is accounted where it returns, for the reason the
         // mint above is: it ran under this hold either way, and the refusal
         // below is a path that paid for it.
@@ -3303,8 +3366,79 @@ impl<O: EntryOps> Host<O> {
                 published,
                 store: established.reading,
             },
+            content_model,
             _lease: lease.into_lease(),
         })
+    }
+
+    /// Answer a read whose store found its derived data damaged: publish the
+    /// damage the way a job leg that meets it does, schedule the rebuild that
+    /// resolves it, and refuse the read with what the entry then publishes.
+    ///
+    /// It runs after the builder returned, so no statement runs under the
+    /// gate it takes. The publication and the refusal come out of that one
+    /// hold, so the read answers the demand it published.
+    ///
+    /// **The entry publishes the damage only where nothing else holds it**:
+    /// it still serves `Ready` on the handle this read ran on, and no claim is
+    /// held and no job is scheduled against it. Every other entry publishes
+    /// nothing here, and the read is refused as follows:
+    ///
+    /// - An entry that publishes anything but `Ready` — damage another read or
+    ///   a leg already published, a warming phase, a park — answers with that
+    ///   published demand, and schedules nothing more.
+    /// - An entry still `Ready` on a handle other than the one this read ran
+    ///   on reads another store, so the read is refused as reader-unavailable.
+    /// - An entry `Ready` on this handle whose claim is held is running, or has
+    ///   scheduled, a leg that publishes over it when it ends, so damage
+    ///   written beneath it would be overwritten or left owing a rebuild no one
+    ///   schedules. The read is refused as reader-unavailable; the damage
+    ///   stands in the store, and the next read to meet it over a free entry
+    ///   publishes it.
+    ///
+    /// An entry `Ready` on this handle with its claim open holds its coverage
+    /// and has no detach in flight: every move that takes coverage out of the
+    /// entry's hand either holds the claim or closes the reader and publishes
+    /// a state other than `Ready` under the same hold.
+    pub(crate) fn withdraw_for_read_damage(
+        &self,
+        hold: &ReadHold<O>,
+        detail: String,
+    ) -> ReadRefusal {
+        let entry = &hold.entry;
+        let name = entry.name();
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        let published = state.published_demand();
+        let on_this_handle = state
+            .reader
+            .as_ref()
+            .is_some_and(|standing| Arc::ptr_eq(standing, &hold.reader));
+        if published != Demand::State(TrustState::Ready) {
+            return ReadRefusal::NotServing(published);
+        }
+        if !on_this_handle {
+            return ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "this entry's reads moved to another handle while this read ran",
+            ));
+        }
+        if state.claim.is_held() {
+            return ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "the store found its derived data damaged while other work held this entry",
+            ));
+        }
+        debug_assert!(
+            state.coverage.in_hand() && !state.detach_in_flight,
+            "an entry serving a read's handle with its claim open does not hold its coverage"
+        );
+        state.withdraw_trust_for_damage(detail);
+        schedule_demand(&mut state, name);
+        let published = state.published_demand();
+        drop(state);
+        // The dispatch's one failure is the worker pool being gone, which is
+        // the host coming down; the published demand answers the read either
+        // way.
+        let _ = dispatch_pending(&self.shared, entry);
+        ReadRefusal::NotServing(published)
     }
 
     /// What this host's reads have cost: how many were served, what they ran
@@ -3523,8 +3657,7 @@ fn poll_claimed_entry<O: EntryOps>(
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.claim.drop_marker();
                     state.claim.end_poll(epoch);
-                    state.require_rebuild();
-                    state.trust = trust_withdrawn_for_damage(detail);
+                    state.withdraw_trust_for_damage(detail);
                     state.coverage.park_by(epoch, attachment);
                     schedule = Some(
                         state
@@ -3907,7 +4040,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             match result {
                 Ok((attachment, observed, handoff_saturated)) => {
                     state.pending.merge(observed);
-                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    record_active_declaration(&mut state, &*shared.ops, &attachment);
                     state.control_root = shared.ops.control_root(&attachment);
                     state.last_reload_error = None;
                     let withheld = shared.ops.withheld_trust(&attachment);
@@ -4119,7 +4252,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             match result {
                 Ok(()) => {
                     state.pending.merge(observed);
-                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    record_active_declaration(&mut state, &*shared.ops, &attachment);
                     state.last_reload_error = None;
                     let withheld = shared.ops.withheld_trust(&attachment);
                     // The handle is minted again where the slot is empty: a
@@ -4204,9 +4337,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::StoreDamaged(detail)) => {
-                    state.require_rebuild();
+                    state.withdraw_trust_for_damage(detail);
                     state.coverage.park_by(epoch, attachment);
-                    state.trust = trust_withdrawn_for_damage(detail);
                     next = Some(
                         state
                             .claim
@@ -4282,7 +4414,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Ok(attachment) => {
                     state.claim.release();
                     state.pending.merge(observed);
-                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    record_active_declaration(&mut state, &*shared.ops, &attachment);
                     let withheld = shared.ops.withheld_trust(&attachment);
                     // The store inside this coverage is not the store the
                     // entry's reader was minted from, so the handle is minted
@@ -4516,8 +4648,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 // the leg that follows this one.
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
-                    state.require_rebuild();
-                    state.trust = trust_withdrawn_for_damage(detail);
+                    state.withdraw_trust_for_damage(detail);
                     let next = state
                         .claim
                         .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
@@ -4652,8 +4783,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 // nothing else meets arrives through.
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
-                    state.require_rebuild();
-                    state.trust = trust_withdrawn_for_damage(detail);
+                    state.withdraw_trust_for_damage(detail);
                     next = Some(
                         state
                             .claim
@@ -4814,7 +4944,7 @@ fn run_reload_job<O: EntryOps>(
 
     let response = match result {
         Ok(outcome) => {
-            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            record_active_declaration(&mut state, &*shared.ops, &attachment);
             state.last_reload_error = None;
             state.clear_rung_requirements();
             match outcome {
@@ -4835,7 +4965,7 @@ fn run_reload_job<O: EntryOps>(
             Ok(())
         }
         Err(JobFailure::Reload(error)) => {
-            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            record_active_declaration(&mut state, &*shared.ops, &attachment);
             state.park_coverage(epoch, attachment);
             let ready = state.trust == TrustState::Ready;
             let detail = state.record_reload_error(error.clone());
@@ -4879,7 +5009,7 @@ fn run_reload_job<O: EntryOps>(
         Err(JobFailure::WatcherTerminal(error)) => {
             let failure = JobFailure::WatcherTerminal(error.clone());
             let reclassify = root_moved(&error);
-            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            record_active_declaration(&mut state, &*shared.ops, &attachment);
             state.park_coverage(epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
@@ -4894,7 +5024,7 @@ fn run_reload_job<O: EntryOps>(
         }
         Err(JobFailure::Environmental(detail)) => {
             let failure = JobFailure::Environmental(detail.clone());
-            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            record_active_declaration(&mut state, &*shared.ops, &attachment);
             state.park_coverage(epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
@@ -4903,7 +5033,7 @@ fn run_reload_job<O: EntryOps>(
         }
         Err(JobFailure::StoreDamaged(detail)) => {
             let failure = JobFailure::StoreDamaged(detail.clone());
-            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            record_active_declaration(&mut state, &*shared.ops, &attachment);
             // The schema half of this reload may have closed the handle before
             // the damage was met, so the slot is answered for here rather than
             // left empty with nothing beside it. The entry publishes a
@@ -4911,8 +5041,7 @@ fn run_reload_job<O: EntryOps>(
             // the mint settles is which of a handle and a reason stands when
             // the rebuild puts the entry back.
             state.park_coverage(epoch, attachment);
-            state.require_rebuild();
-            state.trust = trust_withdrawn_for_damage(detail);
+            state.withdraw_trust_for_damage(detail);
             let next = state
                 .claim
                 .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
@@ -5116,6 +5245,11 @@ mod tests {
         /// attach and the leg that mints again, and a real mint answers for
         /// the environment as it stands at the open.
         mint_fails: Arc<AtomicBool>,
+        /// The content model this coverage's store pins. Every coverage the
+        /// fake hands out pins a declaration of its own, so a case reads which
+        /// leg's coverage the entry recorded off the fingerprint a read
+        /// carries.
+        content_model: Arc<ContentModel>,
     }
 
     /// What a case reads about an entry's readers: one open counted where the
@@ -5413,6 +5547,9 @@ mod tests {
 
     #[derive(Default)]
     struct FakeOps {
+        /// How many coverages this fake has handed out, which names the
+        /// declaration the next one pins.
+        pins: AtomicUsize,
         /// The ledger every coverage this fake installs mints its reader
         /// through, so a case reads the readers of every entry the fake serves
         /// off one place.
@@ -5613,15 +5750,21 @@ mod tests {
         /// asked for. Every leg that hands coverage out builds it here, so a
         /// case reads one ledger whichever leg minted the handle.
         fn coverage(&self) -> FakeCoverage {
+            let pin = self.pins.fetch_add(1, Ordering::SeqCst) + 1;
             FakeCoverage {
                 readers: Arc::clone(&self.readers),
                 mint_fails: Arc::clone(&self.reader_mint_fails),
+                content_model: Arc::new(ContentModel::under(format!("pin-{pin}"))),
             }
         }
     }
 
     impl EntryOps for Arc<FakeOps> {
         type Attachment = FakeCoverage;
+
+        fn active_content_model(&self, attachment: &FakeCoverage) -> Arc<ContentModel> {
+            Arc::clone(&attachment.content_model)
+        }
 
         fn withheld_trust(&self, _: &FakeCoverage) -> Option<UntrustedReason> {
             self.withholds_trust
@@ -8390,9 +8533,7 @@ mod tests {
             // The state a maintenance or poll verdict of damage leaves behind:
             // the entry holds its coverage and owes the rung against it.
             let mut state = entry.gate.lock().unwrap();
-            state.require_rebuild();
-            state.trust =
-                TrustState::untrusted(UntrustedReason::store_damaged_rebuilding("malformed"));
+            state.withdraw_trust_for_damage("malformed");
         }
 
         refuse_identity_error(&host.shared, &name, "root unreadable".to_string());
@@ -10687,6 +10828,266 @@ mod tests {
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         assert!(ops.reconciles.load(Ordering::SeqCst) > failed_count);
         drop(lease);
+    }
+
+    /// **A read after a rebuild compiles against the declaration the rebuild
+    /// pinned.** Rung 3 answers with coverage over a store it pinned itself,
+    /// and the entry records that store's declaration in the hold that
+    /// publishes the rung's outcome, so the first read the rebuilt entry
+    /// serves carries the rebuilt store's model rather than the one the
+    /// damaged store pinned.
+    #[test]
+    fn a_read_after_a_rebuild_carries_the_declaration_the_rebuild_pinned() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            host.begin_read(&name)
+                .expect("an attached entry answers a read")
+                .content_model()
+                .schema(),
+            Some("pin-1"),
+            "a read carries another declaration than the attach pinned"
+        );
+
+        arrange_for(&ops.damaged_reconcile_at, &name);
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
+        wait_until(
+            "the rebuild to put the entry back into service",
+            lifecycle_wait_budget(),
+            || match (ops.rebuilds.load(Ordering::SeqCst), host.state(&name)) {
+                (1, Ok(TrustState::Ready)) => Observed::Met(()),
+                (rebuilds, state) => {
+                    Observed::pending(format!("{rebuilds} rebuilds, the entry is {state:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        assert_eq!(
+            host.begin_read(&name)
+                .expect("a rebuilt entry answers a read")
+                .content_model()
+                .schema(),
+            Some("pin-2"),
+            "a read after the rebuild carries a declaration the rebuilt store does not pin"
+        );
+    }
+
+    /// **A read over an untrusted entry whose owed work cannot be scheduled
+    /// answers with the untrusted state it found.** Rung 3 holds the entry's
+    /// claim while it runs, so the read's demand schedules nothing, and the
+    /// read is refused as `host/entry-untrusted` carrying the reason the entry
+    /// publishes rather than as the warming of work it could not ask for.
+    #[test]
+    fn a_read_over_an_untrusted_entry_whose_work_is_held_answers_untrusted() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        arrange_for(&ops.damaged_reconcile_at, &name);
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+
+        let reason =
+            UntrustedReason::store_damaged_rebuilding("the database disk image is malformed");
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("an untrusted entry answered a read");
+        let envelope = refusal.answer(&name);
+        assert_eq!(
+            envelope.code(),
+            &norn_wire::ReasonCode::HostEntryUntrusted,
+            "{envelope:?}"
+        );
+        assert!(
+            matches!(
+                envelope.detail(),
+                ErrorDetail::EntryUntrusted { reason: carried, .. } if carried == &reason
+            ),
+            "the read was refused without the reason the entry publishes: {envelope:?}"
+        );
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            1,
+            "the read scheduled work while the entry's claim was held"
+        );
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A read whose store finds its derived data damaged publishes the
+    /// damage, schedules the rebuild, and is refused with what it published.**
+    /// The refusal and the published state are one reading: the entry says
+    /// its store is damaged and being rebuilt, and the rebuild that says so is
+    /// the next leg the entry runs, with no recovery beside it.
+    #[test]
+    fn a_read_that_meets_damage_publishes_it_and_schedules_the_rebuild() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        let refusal = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+        let damaged = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+            "the store is damaged",
+        ));
+        assert_eq!(
+            refusal,
+            ReadRefusal::NotServing(Demand::State(damaged.clone())),
+            "the read was refused with another demand than the damage it published"
+        );
+        assert_eq!(
+            host.state(&name),
+            answered(damaged.clone()),
+            "the entry publishes another state than the read was refused with"
+        );
+        drop(hold);
+
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            0,
+            "the damage a read met was answered by the ladder that cannot resolve it"
+        );
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A read that meets damage while a leg holds the entry publishes
+    /// nothing.** The leg holds the entry's coverage and publishes over it
+    /// when it ends, so the read is refused as the read seam being down and
+    /// the entry goes on standing where the leg left it, owing nothing.
+    #[test]
+    fn a_read_that_meets_damage_under_a_held_claim_publishes_nothing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        let entry = host.shared.entries.get(&name).unwrap();
+        let epoch = {
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            state.claim.begin_poll(epoch);
+            epoch
+        };
+        let refusal = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "a read under a held claim was refused with {refusal:?}"
+        );
+        {
+            let mut state = entry.gate.lock().unwrap();
+            assert_eq!(state.trust, TrustState::Ready);
+            assert!(
+                !state.owes_a_rung(),
+                "the read left a rung owed under a leg"
+            );
+            state.claim.end_poll(epoch);
+        }
+        drop(hold);
+        assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 0);
+    }
+
+    /// **A read that meets damage on a handle the entry has already replaced
+    /// publishes nothing.** The entry goes on serving from the handle that
+    /// replaced it, which reads another store, so the read is refused as the
+    /// read seam being down and no rebuild is owed or scheduled for it.
+    #[test]
+    fn a_read_that_meets_damage_on_a_replaced_handle_publishes_nothing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        let entry = host.shared.entries.get(&name).unwrap();
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state.close_reader();
+            assert!(
+                state.remint_for_a_read().handle.is_some(),
+                "the entry minted no handle over the coverage it holds"
+            );
+        }
+        let refusal = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "a read on a replaced handle was refused with {refusal:?}"
+        );
+        {
+            let state = entry.gate.lock().unwrap();
+            assert_eq!(state.trust, TrustState::Ready);
+            assert!(
+                !state.owes_a_rung(),
+                "damage met on a replaced handle left a rung owed"
+            );
+            assert!(
+                !state.claim.is_held(),
+                "damage met on a replaced handle scheduled work"
+            );
+        }
+        drop(hold);
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
+        assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 0);
+    }
+
+    /// **A read that meets damage the entry already publishes answers what
+    /// it publishes and schedules nothing more.** The first report published
+    /// the damage and scheduled the one rebuild that resolves it; a second
+    /// report over the entry it left is refused with that same untrusted
+    /// state, and the rebuild runs once.
+    #[test]
+    fn a_read_that_meets_damage_already_published_answers_it_and_schedules_nothing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        let damaged = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+            "the store is damaged",
+        ));
+        assert_eq!(
+            host.withdraw_for_read_damage(&hold, "the store is damaged".to_string()),
+            ReadRefusal::NotServing(Demand::State(damaged.clone()))
+        );
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+
+        let refusal =
+            host.withdraw_for_read_damage(&hold, "the store is damaged again".to_string());
+        assert_eq!(
+            refusal,
+            ReadRefusal::NotServing(Demand::State(damaged.clone())),
+            "a read over published damage was refused with another demand than it publishes"
+        );
+        assert_eq!(host.state(&name), answered(damaged));
+        drop(hold);
+
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            1,
+            "a read over published damage scheduled a second rebuild"
+        );
     }
 
     /// **A damaged store reaches rung 3 without passing through the
