@@ -218,17 +218,23 @@ pub enum AnswerShape {
 /// Why the store answered a read with no rows, as `host/read-failed` carries
 /// it.
 ///
-/// Either names a host defect rather than anything a client can change: the
-/// read is not one to try again as it stands.
+/// Neither is anything a client's request can change. A read the store finds
+/// its derived data damaged for is not one of these: it answers
+/// `host/entry-untrusted` with the untrusted reason whose `kind` is
+/// `store_damaged_rebuilding`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ReadFailure {
-    /// The store refused a statement the read ran.
+    /// The store refused a statement the read ran: its file, its driver or
+    /// its environment refused, and the detail is the store's own account.
+    /// A fault of the environment may pass, so the same read may later be
+    /// answered.
     Statement {},
     /// The declaration the read was compiled under was read from a schema
     /// other than the one the store's snapshot pins. Each fingerprint is
-    /// `null` for no schema.
+    /// `null` for no schema. It is a host defect, not advice to try the read
+    /// again as it stands.
     #[non_exhaustive]
     DeclarationNotPinned {
         /// The fingerprint of the schema the declaration was read from.
@@ -310,10 +316,13 @@ pub enum ReasonCode {
     /// what refused.
     #[serde(rename = "host/registry-unwritable")]
     HostRegistryUnwritable,
-    /// `host/read-failed` — the store answered a read with no rows because
-    /// the host asked it wrongly: it refused a statement, or the declaration
-    /// the read was compiled under is not the schema its snapshot pins. It
-    /// is a host defect where it fires, not advice to try the read again. The
+    /// `host/read-failed` — the store answered a read with no rows: its file,
+    /// its driver or its environment refused a statement the read ran, or the
+    /// declaration the read was compiled under is not the schema its snapshot
+    /// pins, which is a host defect. Neither is anything the request can
+    /// change. A read the store finds its derived data damaged for answers
+    /// `host/entry-untrusted` instead, with the untrusted reason whose `kind`
+    /// is `store_damaged_rebuilding`. The
     /// detail is which failure, and the store's own account.
     #[serde(rename = "host/read-failed")]
     HostReadFailed,

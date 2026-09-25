@@ -993,15 +993,25 @@ mod page_refusal_tests {
     use norn_wire::{AnswerShape, PagedRows, ReasonCode, RequestPart};
 
     /// The code each store read refusal is filed under. A compile guard over
-    /// [`PageRefusal`]: the match reads only the variant and carries no
-    /// wildcard, so a variant minted without a code, or the enum turned
-    /// `#[non_exhaustive]`, does not compile.
+    /// [`PageRefusal`] and the [`StoreError`] it carries: the match reads only
+    /// the variants and carries no wildcard, so a variant of either minted
+    /// without a code, or either enum turned `#[non_exhaustive]`, does not
+    /// compile. Damaged derived data answers the entry as untrusted; every
+    /// other store error is a failed read.
     fn code_of(refusal: &PageRefusal) -> ReasonCode {
         match refusal {
             PageRefusal::UnreadableBound { .. } => ReasonCode::VaultUnreadableBound,
-            PageRefusal::DeclarationNotPinned { .. } | PageRefusal::Store(_) => {
-                ReasonCode::HostReadFailed
-            }
+            PageRefusal::Store(StoreError::Damaged { .. }) => ReasonCode::HostEntryUntrusted,
+            PageRefusal::DeclarationNotPinned { .. }
+            | PageRefusal::Store(
+                StoreError::Path { .. }
+                | StoreError::Sql { .. }
+                | StoreError::Lifecycle { .. }
+                | StoreError::Bound { .. }
+                | StoreError::UnpinnedDeclaration { .. }
+                | StoreError::KeySpace { .. }
+                | StoreError::Entry { .. },
+            ) => ReasonCode::HostReadFailed,
             PageRefusal::OrderChanged(_) => ReasonCode::VaultCursorOrderChanged,
             PageRefusal::CursorNotTaken { .. } => ReasonCode::RequestCursorNotTaken,
             PageRefusal::EmptyMembership { .. } | PageRefusal::OutOfBound { .. } => {
@@ -1015,8 +1025,9 @@ mod page_refusal_tests {
         }
     }
 
-    /// A refusal a request earns is filed under a `request/` code, and one the
-    /// host earns by asking wrongly under `host/read-failed`.
+    /// A refusal a request earns is filed under a `request/` code, a store
+    /// that finds its derived data damaged under `host/entry-untrusted`, and a
+    /// statement the store otherwise refused under `host/read-failed`.
     #[test]
     fn a_store_read_refusal_is_filed_under_its_wire_code() {
         for (refusal, expected) in [
@@ -1048,6 +1059,13 @@ mod page_refusal_tests {
             (
                 PageRefusal::Store(StoreError::Damaged {
                     what: "a row".to_string(),
+                }),
+                ReasonCode::HostEntryUntrusted,
+            ),
+            (
+                PageRefusal::Store(StoreError::Sql {
+                    operation: "reading a page",
+                    message: "disk I/O error".to_string(),
                 }),
                 ReasonCode::HostReadFailed,
             ),

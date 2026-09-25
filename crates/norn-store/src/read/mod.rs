@@ -263,7 +263,11 @@ pub enum PageRefusal {
         part: RequestPart,
         answer: AnswerShape,
     },
-    /// The store refused a statement.
+    /// The store refused a statement: its file, its driver or its environment
+    /// refused, and the error is the store's own account. A
+    /// [`StoreError::Damaged`] is the store's derived data being damaged, which
+    /// the host answers as an entry untrusted while it discards and rebuilds
+    /// that data; every other store error is filed as a failed read.
     Store(StoreError),
 }
 
