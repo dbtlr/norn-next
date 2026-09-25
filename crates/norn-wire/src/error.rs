@@ -326,12 +326,14 @@ pub enum ReasonCode {
     /// detail is which failure, and the store's own account.
     #[serde(rename = "host/read-failed")]
     HostReadFailed,
-    /// `vault/ambiguous-root` — the directory that was asked about is
-    /// contained by more than one registration, so the ask names no one vault.
-    /// It answers a resolution of a directory and never a request against an
-    /// entry: what a host refuses about entries it serves under names that
-    /// resolve to one root is `host/duplicate-root`. The detail is every name
-    /// that contains the directory.
+    /// `vault/ambiguous-root` — the most specific registered root containing
+    /// the directory that was asked about is reached by more than one
+    /// registration, so the ask names no one vault. A directory that several
+    /// nested roots contain is not refused while one registration alone
+    /// reaches the innermost of them. It answers a resolution of a directory
+    /// and never a request against an entry: what a host refuses about entries
+    /// it serves under names that resolve to one root is `host/duplicate-root`.
+    /// The detail is every registered name that reaches that one root.
     #[serde(rename = "vault/ambiguous-root")]
     VaultAmbiguousRoot,
     /// `vault/ambiguous-target` — the target the request named resolves to
@@ -614,9 +616,10 @@ pub enum ErrorDetail {
         /// reading a message or a log. Clients never match on it.
         detail: String,
     },
-    /// The detail of `vault/ambiguous-root`: every registered name whose
-    /// registration contains the directory that was asked about. No entry is
-    /// involved; the ask is a resolution of a directory.
+    /// The detail of `vault/ambiguous-root`: every registered name that
+    /// reaches the most specific registered root containing the directory that
+    /// was asked about. No entry is involved; the ask is a resolution of a
+    /// directory.
     #[serde(rename = "vault/ambiguous-root")]
     #[non_exhaustive]
     AmbiguousRoot {
