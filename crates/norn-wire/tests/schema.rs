@@ -11,23 +11,23 @@
 //! restating it.
 
 use norn_wire::{
-    Addressing, Advisory, Anchor, AnswerReading, AttachMode, Attention, BlockRow, BodyText,
-    CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage,
-    CollectionSelector, Column, ContainerKind, ControlFileFailure, CountParams, CountReport,
-    Cursor, CursorKey, DescribeParams, DescribeReport, Direction, Directory, DoctorRegistryParams,
-    DoctorRegistryReport, DocumentPath, DocumentRow, Drift, EngineHealth, EngineSection,
-    EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams,
-    FindReport, FindingKind, FindingRow, FindingScope, Fingerprints, Freshness, GetParams,
-    GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LinkFamily, LinkHealth, LinkRow,
-    ListParams, ListReport, MaintainerIdentity, Moved, NameSet, NotReady, Page, PathRuleKind,
-    PollBackend, Predicate, Published, ReasonCode, RegisterParams, RegisterReport, Registration,
-    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
-    Replace, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung,
-    RungReport, RungSet, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport,
-    Severity, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
-    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
-    Verb, WarmingPhase, WatcherLossCause,
+    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AttachMode, Attention, BlockRow,
+    BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage,
+    CollectionSelector, Column, ComparedBy, ContainerKind, ControlFileFailure, CountParams,
+    CountReport, Cursor, CursorKey, DescribeParams, DescribeReport, Direction, Directory,
+    DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift, EngineHealth,
+    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType,
+    FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope, Fingerprints,
+    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LinkFamily,
+    LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, Moved, NameSet, NotReady,
+    Page, PathRuleKind, PollBackend, Predicate, Published, ReasonCode, RegisterParams,
+    RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome,
+    ReloadParams, ReloadReport, Replace, RequestScope, ResolutionTarget, ResolveParams,
+    ResolveReport, RollUp, Rung, RungReport, RungSet, SchemaSource, Score, SearchParams,
+    SearchReport, SetParams, SetReport, Severity, Snapshot, Sort, SortKey, Span, StatusParams,
+    StatusReport, TagRow, TagSource, TagStance, Tally, TrustState, UnregisterParams,
+    UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
+    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -150,6 +150,8 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<Score>(),
         schema_of::<EngineSection>(),
         schema_of::<Unsatisfied>(),
+        schema_of::<ComparedBy>(),
+        schema_of::<AnswerAdvisory>(),
         schema_of::<VaultAnswer<String>>(),
         schema_of::<NotReady>(),
         schema_of::<ControlFileFailure>(),
@@ -1410,16 +1412,39 @@ fn an_unsatisfied_part_advertises_its_part_tag() {
     );
 }
 
-/// An answer advertises the reading, the unapplied parts and the verb's own
-/// report, so a surface publishing a verb publishes all three together.
+/// An answer advisory advertises its tag, and where a mixed-offset comparison
+/// was made as the flat strings the vocabulary holds.
+#[test]
+fn an_answer_advisory_advertises_its_tag_and_where_it_compared() {
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<AnswerAdvisory>(), "advisory")),
+        sorted(["mixed_offset"])
+    );
+    let compared_by = schema_of::<ComparedBy>();
+    assert_eq!(
+        sorted(branches(&compared_by).iter().filter_map(string_constant)),
+        sorted(["sort", "predicate"])
+    );
+}
+
+/// An answer advertises the reading, the unapplied parts, the advisories and
+/// the verb's own report, so a surface publishing a verb publishes all four
+/// together.
 #[test]
 fn a_vault_answer_advertises_its_reading_its_unsatisfied_parts_and_its_report() {
     let schema = schema_of::<VaultAnswer<String>>();
     assert_eq!(
         property_names(&schema),
-        ["reading", "unsatisfied", "report"].into_iter().collect()
+        ["reading", "unsatisfied", "advisories", "report"]
+            .into_iter()
+            .collect()
     );
-    for definition in ["AnswerReading", "Unsatisfied", "TrustState"] {
+    for definition in [
+        "AnswerReading",
+        "Unsatisfied",
+        "AnswerAdvisory",
+        "TrustState",
+    ] {
         assert!(
             schema["$defs"][definition].is_object(),
             "an answer carries no definition of {definition}"

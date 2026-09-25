@@ -1328,18 +1328,20 @@ fn a_path_part_that_cannot_match_is_reported_and_one_matching_nothing_is_not() {
     assert!(exact.unsatisfied.is_empty());
 }
 
-/// A find hands a handler the unsatisfied parts and the page it wraps.
+/// A find hands a handler the unsatisfied parts, the advisories and the page
+/// it wraps.
 #[test]
 fn a_find_is_the_report_a_handler_wraps() {
     let seeded = Seeded::new("find-report");
     let found = seeded.found(&sorted(SortKey::field("nope"), Direction::Ascending).with_limit(1));
     let next = found.next.clone();
     let rows = found.rows.clone();
-    let (unsatisfied, report) = found.into_report();
+    let (unsatisfied, advisories, report) = found.into_report();
     assert_eq!(
         unsatisfied,
         [Unsatisfied::unknown_sort_key("nope", Vec::new())]
     );
+    assert!(advisories.is_empty(), "{advisories:?}");
     assert_eq!(report.rows, rows);
     assert_eq!(report.next, next);
     assert!(report.moved.is_empty());

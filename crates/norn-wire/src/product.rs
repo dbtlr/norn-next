@@ -15,6 +15,14 @@
 //! reason the rest were not applied. Refusing the whole request would make a
 //! typo in one flag indistinguishable from a vault that cannot be read.
 //!
+//! **An advisory is not an unsatisfied part.** An [`AnswerAdvisory`] says what
+//! a part that *was* applied had to assume to answer: the part decided the
+//! answer's order or membership, and the answer is complete, but a comparison
+//! it made read something the vault's text leaves open. It sits beside the
+//! unsatisfied parts rather than among them, so an answer carrying one is
+//! still [`VaultAnswer::is_complete`], and on the answer rather than inside a
+//! verb's report, so every verb that compares values says it one way.
+//!
 //! **A suggestion is advice, never a decision.** `did_you_mean` is drawn from
 //! the vault's field universe by the handler that met the unknown key. How
 //! near a candidate has to be, and how many are offered, are that handler's,
@@ -245,8 +253,59 @@ impl Unsatisfied {
     }
 }
 
+/// Something a part of the request that was applied had to assume to answer.
+///
+/// On the wire an advisory is an object tagged `advisory`:
+/// `{"advisory":"mixed_offset","key":"due","compared_by":"sort"}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "advisory", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AnswerAdvisory {
+    /// A comparison that decided the answer compared a date stating an offset
+    /// from UTC against one stating none, and read the one stating none at
+    /// offset zero. It speaks for every value the key holds in the vault the
+    /// answer was read from, not only for the rows the answer carries: an
+    /// order places each row among those values, and a predicate compares its
+    /// own value against each of them to decide which documents it keeps. So
+    /// it can stand beside rows that all write one spelling.
+    #[non_exhaustive]
+    MixedOffset {
+        /// The date key whose values were compared.
+        key: String,
+        /// Where the request compared them.
+        compared_by: ComparedBy,
+    },
+}
+
+impl AnswerAdvisory {
+    /// A comparison of `key`'s dates, made by `compared_by`, read an unstated
+    /// offset as zero against a stated one.
+    pub fn mixed_offset(key: impl Into<String>, compared_by: ComparedBy) -> Self {
+        AnswerAdvisory::MixedOffset {
+            key: key.into(),
+            compared_by,
+        }
+    }
+}
+
+/// Where a request compared a key's values.
+///
+/// On the wire the flat string itself: `"sort"`, `"predicate"`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ComparedBy {
+    /// The order the rows are sorted in.
+    Sort,
+    /// A predicate comparing the key's values against a value the request
+    /// names: an equality, an inequality, a membership, or a before or after
+    /// bound.
+    Predicate,
+}
+
 /// What a read verb answers with: the reading it was taken under, the parts of
-/// the request that were not applied, and the verb's own report.
+/// the request that were not applied, what the parts that were applied had to
+/// assume, and the verb's own report.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(bound(serialize = "R: Serialize", deserialize = "R: DeserializeOwned"))]
 #[non_exhaustive]
@@ -256,22 +315,34 @@ pub struct VaultAnswer<R: JsonSchema + Serialize + DeserializeOwned> {
     /// The parts of the request that could not be applied. Empty when the
     /// whole request was.
     pub unsatisfied: Vec<Unsatisfied>,
+    /// What the parts that were applied had to assume to answer. Empty when
+    /// they assumed nothing.
+    pub advisories: Vec<AnswerAdvisory>,
     /// The verb's own report.
     pub report: R,
 }
 
 impl<R: JsonSchema + Serialize + DeserializeOwned> VaultAnswer<R> {
     /// The answer `report`, taken under `reading`, with `unsatisfied` parts of
-    /// the request not applied.
+    /// the request not applied and no advisory.
     pub fn new(reading: AnswerReading, unsatisfied: Vec<Unsatisfied>, report: R) -> Self {
         VaultAnswer {
             reading,
             unsatisfied,
+            advisories: Vec::new(),
             report,
         }
     }
 
-    /// Whether every part of the request was applied.
+    /// The same answer, carrying `advisories`.
+    #[must_use]
+    pub fn with_advisories(mut self, advisories: Vec<AnswerAdvisory>) -> Self {
+        self.advisories = advisories;
+        self
+    }
+
+    /// Whether every part of the request was applied. An advisory does not
+    /// make an answer incomplete.
     pub fn is_complete(&self) -> bool {
         self.unsatisfied.is_empty()
     }

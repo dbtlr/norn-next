@@ -55,6 +55,11 @@ pub enum FindStatement {
     /// under and no document: one seek of `documents_path` at the path, and
     /// one of the range beneath it.
     BareDirectory,
+    /// Whether a date key holds a typed date stating no offset, and whether it
+    /// holds one stating an offset: one seek of `document_fields_offset` at
+    /// each spelling. Run once for each key with a dated order that a request
+    /// sorts or compares by.
+    OffsetSpellings,
     /// Whether the full-text engine parses a match part's query: one
     /// selection of `documents_fts` through its `MATCH` constraint, stepped
     /// until it answers whether any document matches, which is where the
@@ -117,7 +122,7 @@ pub enum FindStatement {
 }
 
 /// How many statement shapes [`FindStatement::all`] holds.
-pub const FIND_STATEMENTS: usize = 19;
+pub const FIND_STATEMENTS: usize = 20;
 
 impl FindStatement {
     /// Every statement shape, in slot order.
@@ -146,6 +151,7 @@ impl FindStatement {
             Self::ClassTotal,
             Self::CandidateSuffixes,
             Self::LinkTargets,
+            Self::OffsetSpellings,
         ]
     }
 
@@ -172,6 +178,7 @@ impl FindStatement {
             Self::ClassTotal => 16,
             Self::CandidateSuffixes => 17,
             Self::LinkTargets => 18,
+            Self::OffsetSpellings => 19,
         };
         assert!(
             slot < FIND_STATEMENTS,
@@ -319,6 +326,7 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
         | FindStatement::KnownKey
         | FindStatement::FieldUniverse
         | FindStatement::BareDirectory
+        | FindStatement::OffsetSpellings
         | FindStatement::MatchProbe
         | FindStatement::HydrateDocuments
         | FindStatement::NestedHead(_)
@@ -423,6 +431,19 @@ pub(crate) fn compose_known_key(key: &str) -> (String, Vec<Value>) {
     (
         "SELECT EXISTS (SELECT 1 FROM document_fields AS fk
                          WHERE fk.key = ?1 AND fk.ordinal = 0)"
+            .to_string(),
+        vec![Value::Text(key.to_string())],
+    )
+}
+
+/// [`FindStatement::OffsetSpellings`]: whether `key` holds a typed date
+/// stating no offset, and whether it holds one stating an offset.
+pub(crate) fn compose_offset_spellings(key: &str) -> (String, Vec<Value>) {
+    (
+        "SELECT EXISTS (SELECT 1 FROM document_fields AS fu
+                         WHERE fu.key = ?1 AND fu.offset_stated = 0),
+                EXISTS (SELECT 1 FROM document_fields AS fs
+                         WHERE fs.key = ?1 AND fs.offset_stated = 1)"
             .to_string(),
         vec![Value::Text(key.to_string())],
     )

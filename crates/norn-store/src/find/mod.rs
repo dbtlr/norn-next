@@ -127,6 +127,17 @@
 //! snapshot's ([`Snapshot::path_order`]): the order the rows it reads were
 //! derived under, so no find detects it.
 //!
+//! # A comparison that assumed an offset is advised
+//!
+//! **A find whose order or conjunction compared dates of both offset
+//! spellings says so** in [`Found::advisories`], once per key and place, the
+//! order before the predicates: a sort on a key with a dated order, and an
+//! equality, inequality, membership or `before`/`after` part on one. The
+//! advisory speaks for every value the key holds in the snapshot, not for the
+//! page, and costs one probe per dated key the request compares, as
+//! [`crate::read`]'s advisory module states. A page a part empties compared
+//! no date and is advised of nothing.
+//!
 //! # A find is keys, then rows
 //!
 //! [`Snapshot::find`] is the whole request: it judges the wire cursor the
@@ -167,15 +178,15 @@ use std::collections::BTreeSet;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    Column, Cursor, CursorKey, Direction, DocumentRow, FindParams, FindReport, Moved, Page, Sort,
-    SortKey, Unsatisfied,
+    AnswerAdvisory, Column, ComparedBy, Cursor, CursorKey, Direction, DocumentRow, FindParams,
+    FindReport, Moved, Page, Sort, SortKey, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
-    FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, Report,
-    ResolvesPart, page_limit,
+    DateComparison, FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter,
+    ReadStatement, Report, ResolvesPart, page_limit,
 };
 use crate::store::Snapshot;
 
@@ -189,7 +200,7 @@ use statement::{Section, SectionStart, compose_page};
 pub(crate) use statement::{
     SpellingRange, compose_bare_directory, compose_candidate_suffixes, compose_class_head,
     compose_class_total, compose_finding_candidates, compose_finding_classes, compose_known_key,
-    compose_link_targets, compose_match_probe, compose_universe,
+    compose_link_targets, compose_match_probe, compose_offset_spellings, compose_universe,
 };
 
 /// Where a page stopped, or where a continuation resumes: the value the row
@@ -258,6 +269,9 @@ pub struct Found {
     /// order the request names them: the sort key, the conjunction's parts,
     /// then the projection's keys.
     pub unsatisfied: Vec<Unsatisfied>,
+    /// What the parts that were applied assumed: a mixed-offset comparison,
+    /// once per key and place, the order before the predicates.
+    pub advisories: Vec<AnswerAdvisory>,
     /// The reading the page was answered from, as a cursor carries it: the
     /// schema fingerprint where the page ran in a typed order, and `None`
     /// where it ran in any other.
@@ -267,11 +281,12 @@ pub struct Found {
 }
 
 impl Found {
-    /// The unsatisfied parts and the report a handler wraps in a
-    /// [`norn_wire::VaultAnswer`].
-    pub fn into_report(self) -> (Vec<Unsatisfied>, FindReport) {
+    /// The unsatisfied parts, the advisories and the report a handler wraps
+    /// in a [`norn_wire::VaultAnswer`].
+    pub fn into_report(self) -> (Vec<Unsatisfied>, Vec<AnswerAdvisory>, FindReport) {
         (
             self.unsatisfied,
+            self.advisories,
             Page::new(self.rows, self.next, self.moved),
         )
     }
@@ -332,6 +347,9 @@ struct Compiled<'a> {
     /// Whether some part of the conjunction matches no document, which
     /// empties every section.
     matches_nothing: bool,
+    /// The comparisons the order and the conjunction make over keys with a
+    /// dated order: the order's first, then the parts' in request order.
+    comparisons: Vec<DateComparison>,
 }
 
 impl Compiled<'_> {
@@ -500,6 +518,11 @@ impl Snapshot {
                 CursorKey::document(compiled.order.wire(), at.sort, at.path),
             )
         });
+        let advisories = if compiled.matches_nothing {
+            Vec::new()
+        } else {
+            self.offset_advisories(&compiled.comparisons, lookups)?
+        };
         let unsatisfied = self.resolve(compiled.reports, declared, lookups)?;
         let rows = self.hydrate_rows(&keys, &projection, &fields, declared, lookups, &mut work)?;
         work.statements = self.counters().statements_executed() - started;
@@ -508,6 +531,7 @@ impl Snapshot {
             next,
             moved,
             unsatisfied,
+            advisories,
             snapshot,
             work,
         })
@@ -672,11 +696,29 @@ impl Snapshot {
             lookups,
         )?;
         reports.extend(conjunction.reports);
+        let sorted_date = match order {
+            PageOrder::Field { key, .. }
+                if declared
+                    .typed_order(key)
+                    .is_some_and(|order| order.is_dated()) =>
+            {
+                Some(DateComparison {
+                    key: key.to_string(),
+                    by: ComparedBy::Sort,
+                    named: BTreeSet::new(),
+                })
+            }
+            _ => None,
+        };
         Ok(Compiled {
             order,
             filters: conjunction.filters,
             reports,
             matches_nothing: conjunction.matches_nothing,
+            comparisons: sorted_date
+                .into_iter()
+                .chain(conjunction.compared_dates)
+                .collect(),
         })
     }
 

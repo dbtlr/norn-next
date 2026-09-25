@@ -14,10 +14,10 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Addressing, Advisory, Anchor, AnswerReading, AttachMode, Attention, BlockRow, BodyText,
-    CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage,
-    CollectionSelector, Column, ContainerKind, ControlFile, ControlFileFailure, CountParams,
-    Cursor, CursorKey, CursorOrderChanged, DescribeParams, Direction, Directory,
+    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AttachMode, Attention, BlockRow,
+    BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage,
+    CollectionSelector, Column, ComparedBy, ContainerKind, ControlFile, ControlFileFailure,
+    CountParams, Cursor, CursorKey, CursorOrderChanged, DescribeParams, Direction, Directory,
     DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift,
     ElsewhereNamesDocuments, EmptyLadder, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
     ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind, FindingRow,
@@ -510,6 +510,14 @@ fn unsatisfied_parts() -> Vec<Unsatisfied> {
             ),
         ),
         Unsatisfied::links_to_unknown(target("nowhere")),
+    ]
+}
+
+/// One advisory of each kind an answer carries.
+fn answer_advisories() -> Vec<AnswerAdvisory> {
+    vec![
+        AnswerAdvisory::mixed_offset("due", ComparedBy::Sort),
+        AnswerAdvisory::mixed_offset("due", ComparedBy::Predicate),
     ]
 }
 
@@ -1058,6 +1066,14 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<Unsatisfied>(Some("part")),
         "the parts built here are not the parts the vocabulary holds"
+    );
+    assert_eq!(
+        answer_advisories()
+            .iter()
+            .map(|advisory| tag_string(advisory, "advisory"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<AnswerAdvisory>(Some("advisory")),
+        "the advisories built here are not the advisories the vocabulary holds"
     );
     assert_eq!(
         cursor_keys()
@@ -2906,6 +2922,9 @@ fn every_answer_reading_survives_the_round_trip() {
     for part in unsatisfied_parts() {
         round_trip(&part);
     }
+    for advisory in answer_advisories() {
+        round_trip(&advisory);
+    }
 }
 
 /// A reading is the trust state, the database, how far its writes had got, and
@@ -3053,16 +3072,50 @@ fn an_unsatisfied_part_is_an_object_tagged_part() {
     );
 }
 
+/// An answer advisory is an object tagged `advisory`, naming the key whose
+/// values a comparison assumed something about and where the request compared
+/// them.
+#[test]
+fn an_answer_advisory_is_an_object_tagged_advisory() {
+    assert_eq!(
+        wire(&AnswerAdvisory::mixed_offset("due", ComparedBy::Sort)),
+        r#"{"advisory":"mixed_offset","key":"due","compared_by":"sort"}"#
+    );
+    assert_eq!(
+        wire(&AnswerAdvisory::mixed_offset("due", ComparedBy::Predicate)),
+        r#"{"advisory":"mixed_offset","key":"due","compared_by":"predicate"}"#
+    );
+    assert!(
+        serde_json::from_str::<AnswerAdvisory>(
+            r#"{"advisory":"mixed_offset","key":"due","compared_by":"projection"}"#
+        )
+        .is_err(),
+        "an advisory compared somewhere the vocabulary does not name read back as one"
+    );
+}
+
 /// The two answering exits are one type: a complete answer is one with no
 /// unsatisfied parts, and a partial one is the same shape saying which parts
-/// were not applied.
+/// were not applied. An advisory is not a part left unapplied, so an answer
+/// carrying one is still complete.
 #[test]
 fn a_vault_answer_is_complete_exactly_when_nothing_was_left_unapplied() {
     let reading = || AnswerReading::new(TrustState::Ready, "epoch-1", 12, None);
     let whole: VaultAnswer<u64> = VaultAnswer::new(reading(), vec![], 3);
     assert!(whole.is_complete());
+    assert!(whole.advisories.is_empty());
     assert_eq!(whole.report, 3);
     round_trip(&whole);
+    assert_eq!(
+        wire(&whole),
+        r#"{"reading":{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12,"ladder":null},"unsatisfied":[],"advisories":[],"report":3}"#
+    );
+
+    let advised: VaultAnswer<u64> =
+        VaultAnswer::new(reading(), vec![], 3).with_advisories(answer_advisories());
+    assert!(advised.is_complete());
+    assert_eq!(advised.advisories, answer_advisories());
+    round_trip(&advised);
 
     let partial: VaultAnswer<u64> = VaultAnswer::new(reading(), unsatisfied_parts(), 3);
     assert!(!partial.is_complete());

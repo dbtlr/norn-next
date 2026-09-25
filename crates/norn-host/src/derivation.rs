@@ -2035,7 +2035,7 @@ paths:
             ))
         }
 
-        fn find(&self, params: norn_wire::FindParams) -> Vec<String> {
+        fn found(&self, params: norn_wire::FindParams) -> norn_store::Found {
             self.reader
                 .try_take()
                 .expect("an idle reader")
@@ -2044,6 +2044,10 @@ paths:
                 .expect("a snapshot")
                 .find(&params, self.declared.content_model())
                 .expect("a find")
+        }
+
+        fn find(&self, params: norn_wire::FindParams) -> Vec<String> {
+            self.found(params)
                 .rows
                 .into_iter()
                 .map(|row| row.path.as_str().to_string())
@@ -2269,6 +2273,100 @@ paths:
             )])),
             ["b.md", "e.md", "f.md", "g.md"]
         );
+    }
+
+    /// **A find is advised of a mixed-offset comparison exactly where the
+    /// in-process comparison signals one.** Over the same raw text the rule
+    /// reads, a sort on each typed key is advised where some pair of the key's
+    /// values signals, and a bound, an equality, an inequality and a
+    /// membership part are advised where the value they name signals against
+    /// some value the key holds — whether or not the documents that value
+    /// decided reach the page. A number and a boolean never signal and are
+    /// never advised; the dates mix a stated offset with an unstated one, so
+    /// a date named with either spelling is advised, and so is the order.
+    #[test]
+    fn a_find_is_advised_exactly_where_the_in_process_comparison_signals() {
+        use norn_config::schema::{ComparisonSignal, FieldType, TypedValue};
+        use norn_wire::{AnswerAdvisory, ComparedBy, Direction, Predicate, Sort, SortKey};
+
+        let documents: Vec<(&str, String)> = COMPARED
+            .iter()
+            .map(|(path, when, weight, code, flag)| {
+                (
+                    *path,
+                    format!(
+                        "---\nwhen: {when}\nweight: {weight}\ncode: {code}\nflag: {flag}\n---\nbody\n"
+                    ),
+                )
+            })
+            .collect();
+        let vault = DerivedVault::new(
+            "norn-host-comparison-signal",
+            b"version: 1\nfields:\n  when:\n    type: date\n  weight:\n    type: number\n  code:\n    type: text\n  flag:\n    type: boolean\n",
+            &documents,
+        );
+        let unquoted = |raw: &str| raw.trim_matches('"').to_string();
+        let typed = |kind: FieldType, raw: &str| {
+            kind.read(&unquoted(raw))
+                .unwrap_or_else(|_| panic!("`{raw}` reads as {kind}"))
+        };
+        let signals = |left: &TypedValue, right: &TypedValue| {
+            left.compare(right).signal == Some(ComparisonSignal::MixedOffset)
+        };
+
+        let typed_keys: [(&str, FieldType, Written); 3] = [
+            ("when", FieldType::Date, |row| row.1),
+            ("weight", FieldType::Number, |row| row.2),
+            ("flag", FieldType::Boolean, |row| row.4),
+        ];
+        for (key, kind, written) in typed_keys {
+            let held: Vec<TypedValue> = COMPARED
+                .iter()
+                .map(|row| typed(kind, written(row)))
+                .collect();
+            let order_signals = held
+                .iter()
+                .any(|left| held.iter().any(|right| signals(left, right)));
+            let sorted = vault.found(
+                DerivedVault::request()
+                    .with_sort(Sort::new(SortKey::field(key), Direction::Ascending)),
+            );
+            assert_eq!(
+                sorted.advisories,
+                if order_signals {
+                    vec![AnswerAdvisory::mixed_offset(key, ComparedBy::Sort)]
+                } else {
+                    Vec::new()
+                },
+                "`{key}` sorted"
+            );
+            for row in &COMPARED {
+                let raw = unquoted(written(row));
+                let named = typed(kind, &raw);
+                let part_signals = held.iter().any(|value| signals(value, &named));
+                for part in [
+                    Predicate::after(key, raw.clone()),
+                    Predicate::before(key, raw.clone()),
+                    Predicate::equal_to(key, raw.clone()),
+                    Predicate::not_equal_to(key, raw.clone()),
+                    Predicate::in_any(key, [raw.clone()]),
+                ] {
+                    assert_eq!(
+                        vault
+                            .found(DerivedVault::request().with_predicates([part.clone()]))
+                            .advisories,
+                        if part_signals {
+                            vec![AnswerAdvisory::mixed_offset(key, ComparedBy::Predicate)]
+                        } else {
+                            Vec::new()
+                        },
+                        "{part:?}"
+                    );
+                }
+            }
+            // The dates are the key the rule signals over, both ways.
+            assert_eq!(order_signals, kind == FieldType::Date, "`{key}`");
+        }
     }
 
     /// **Matching is symmetric in the shape of the stored value.** A value

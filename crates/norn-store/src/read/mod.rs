@@ -1,7 +1,7 @@
 //! What every read builder shares: the refusal a builder answers with instead
 //! of a page, the statements a read runs and records, the reading a cursor is
 //! judged against, the one compilation of a conjunction, the filters it
-//! spells, the one walk of the keys documents carry, and the one keyset page a
+//! spells, the advisories its applied parts earn, the one walk of the keys documents carry, and the one keyset page a
 //! builder reads section after section.
 //!
 //! A read builder is inherent methods on [`Snapshot`], so every statement it
@@ -20,6 +20,7 @@
 //! explains that record, so a plan is never of a second spelling of a
 //! statement, and a section a page never reached is never explained.
 
+mod advisory;
 mod conjunction;
 mod filter;
 mod finding;
@@ -47,6 +48,7 @@ use crate::search::SearchStatement;
 use crate::store::Snapshot;
 use crate::validate::ValidateStatement;
 
+pub(crate) use advisory::DateComparison;
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
 pub(crate) use filter::glob_test;
 pub(crate) use filter::{Binder, Filter};
