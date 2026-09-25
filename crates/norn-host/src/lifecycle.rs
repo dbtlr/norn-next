@@ -10830,17 +10830,6 @@ mod tests {
         drop(lease);
     }
 
-    /// **A damaged store reaches rung 3 without passing through the
-    /// environmental ladder.** The sequence is the whole assertion: Ready, then
-    /// the damage published under its own reason, then the prologue of the
-    /// rebuild, then Ready again — and no recovery anywhere in it.
-    ///
-    /// A recovery re-installs coverage and re-heals against the same database,
-    /// so an entry answering damage that way meets the same verdict every time
-    /// round. What makes that impossible is not the ordering below but the
-    /// requirement the verdict sets: `rebuild_required` dominates
-    /// `recovery_required`, so the work the entry owes is the rebuild whichever
-    /// door asks for it.
     /// **A read after a rebuild compiles against the declaration the rebuild
     /// pinned.** Rung 3 answers with coverage over a store it pinned itself,
     /// and the entry records that store's declaration in the hold that
@@ -11101,6 +11090,17 @@ mod tests {
         );
     }
 
+    /// **A damaged store reaches rung 3 without passing through the
+    /// environmental ladder.** The sequence is the whole assertion: Ready, then
+    /// the damage published under its own reason, then the prologue of the
+    /// rebuild, then Ready again — and no recovery anywhere in it.
+    ///
+    /// A recovery re-installs coverage and re-heals against the same database,
+    /// so an entry answering damage that way meets the same verdict every time
+    /// round. What makes that impossible is not the ordering below but the
+    /// requirement the verdict sets: `rebuild_required` dominates
+    /// `recovery_required`, so the work the entry owes is the rebuild whichever
+    /// door asks for it.
     #[test]
     fn a_damaged_store_reaches_rung_three_and_never_the_recovery_ladder() {
         let ops = Arc::new(FakeOps::default());
