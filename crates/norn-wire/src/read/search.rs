@@ -356,7 +356,7 @@ pub struct Hit {
     /// The document the hit is for.
     pub path: DocumentPath,
     /// How relevant the ladder judged it: higher is more relevant. It is on
-    /// the scale of the ladder the answer ran, which the answer's reading
+    /// the scale of the ladder the answer ran, which the search report
     /// declares, and is not normalized across ladders. Hits are ordered by
     /// score descending, then by path in byte order, and a request's
     /// `min_score` floors this same scale.
