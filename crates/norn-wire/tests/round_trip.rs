@@ -537,19 +537,11 @@ fn rung_reports() -> Vec<RungReport> {
 /// Every reading an answer is taken under, with and without a ladder.
 fn answer_readings() -> Vec<AnswerReading> {
     vec![
-        AnswerReading::new(TrustState::Ready, "epoch-1", 12, None),
-        AnswerReading::new(
-            TrustState::Ready,
-            "epoch-1",
-            12,
-            Some(LadderDeclaration::new(rung_reports(), false)),
-        ),
-        AnswerReading::new(
-            TrustState::Ready,
-            "epoch-1",
-            12,
-            Some(LadderDeclaration::new(vec![RungReport::lexical()], true)),
-        ),
+        AnswerReading::new(TrustState::Ready, "epoch-1", 12),
+        AnswerReading::new(TrustState::Ready, "epoch-1", 12)
+            .with_ladder(LadderDeclaration::new(rung_reports(), false)),
+        AnswerReading::new(TrustState::Ready, "epoch-1", 12)
+            .with_ladder(LadderDeclaration::lexical()),
     ]
 }
 
@@ -3233,16 +3225,30 @@ fn every_answer_reading_survives_the_round_trip() {
 }
 
 /// A reading is the trust state, the database, how far its writes had got, and
-/// the ladder where a model ran. A `null` ladder is an answer no model
-/// contributed to.
+/// the ladder a search ran. A `null` ladder is an answer that ranks nothing;
+/// a search over the lexical floor alone declares that floor, repeatable.
 #[test]
 fn a_reading_carries_the_trust_state_the_database_and_the_ladder() {
     assert_eq!(
-        wire(&AnswerReading::new(TrustState::Ready, "epoch-1", 12, None)),
+        wire(&AnswerReading::new(TrustState::Ready, "epoch-1", 12)),
         concat!(
             r#"{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12,"#,
             r#""ladder":null}"#
         )
+    );
+    assert_eq!(
+        wire(
+            &AnswerReading::new(TrustState::Ready, "epoch-1", 12)
+                .with_ladder(LadderDeclaration::lexical())
+        ),
+        concat!(
+            r#"{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12,"#,
+            r#""ladder":{"rungs":[{"rung":"lexical"}],"repeatable":true}}"#
+        )
+    );
+    assert_eq!(
+        LadderDeclaration::lexical(),
+        LadderDeclaration::new(vec![RungReport::lexical()], true)
     );
 }
 
@@ -3440,7 +3446,7 @@ fn an_answer_advisory_is_an_object_tagged_advisory() {
 /// carrying one is still complete.
 #[test]
 fn a_vault_answer_is_complete_exactly_when_nothing_was_left_unapplied() {
-    let reading = || AnswerReading::new(TrustState::Ready, "epoch-1", 12, None);
+    let reading = || AnswerReading::new(TrustState::Ready, "epoch-1", 12);
     let whole: VaultAnswer<u64> = VaultAnswer::new(reading(), vec![], 3);
     assert!(whole.is_complete());
     assert!(whole.advisories.is_empty());

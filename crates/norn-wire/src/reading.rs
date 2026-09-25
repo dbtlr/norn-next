@@ -2,14 +2,18 @@
 //!
 //! **Every vault answer carries its own reading.** A consumer judges an answer
 //! without a second request: where the entry stood, which database the rows
-//! came from, how far that database's writes had got, and — where a model
-//! contributed — which models ran and how far each one's derived state
-//! trailed. A reading that had to be asked for separately would be a reading
+//! came from, how far that database's writes had got, and — where the answer
+//! is a ranking — which rungs ranked it, which models ran, and how far each
+//! one's derived state trailed. A reading that had to be asked for separately would be a reading
 //! taken at another instant from the answer it describes.
 //!
 //! **A ladder is declared, not inferred.** Which rungs ran is a fact about the
 //! answer, and a rung that was enabled and did not run is not in the
-//! declaration. `repeatable` is what says the same request against the same
+//! declaration. Every search answer declares its ladder, the lexical floor
+//! alone included — as `[lexical]`, repeatable — so a consumer never infers
+//! the floor from an absence; an answer of a verb that ranks nothing declares
+//! none. A score is on the scale of the ladder that ranked it, and no ladder's
+//! scale is normalized into another's. `repeatable` is what says the same request against the same
 //! reading produces the same rows: a rung that ranks by a request-time model
 //! is still repeatable, and one whose order depends on state that drains
 //! underneath it is not.
@@ -200,6 +204,11 @@ impl RungReport {
 
 /// The ladder this answer ran.
 ///
+/// Every search answer declares one, the lexical floor alone included:
+/// `{"rungs":[{"rung":"lexical"}],"repeatable":true}`. A hit's score, and a
+/// request's floor on it, are on the scale this ladder ranks on, and no
+/// ladder's scale is normalized into another's.
+///
 /// The rungs are reports rather than a repeated flat shape: each one carries
 /// what that rung has and nothing it does not, so a request-time rung cannot
 /// be spelled with a lag it never held.
@@ -219,6 +228,11 @@ impl LadderDeclaration {
     pub fn new(rungs: Vec<RungReport>, repeatable: bool) -> Self {
         LadderDeclaration { rungs, repeatable }
     }
+
+    /// The lexical floor alone, which runs no model and is repeatable.
+    pub fn lexical() -> Self {
+        LadderDeclaration::new(vec![RungReport::lexical()], true)
+    }
 }
 
 /// What a vault answer was answered under.
@@ -232,24 +246,27 @@ pub struct AnswerReading {
     /// The last write generation committed to that database when the answer
     /// was established.
     pub generation: u64,
-    /// The ladder that ran, and `null` where no model ran at all.
+    /// The ladder a search ran, and `null` for a verb that ranks nothing.
+    /// Every search answer carries one, the lexical floor alone included.
     pub ladder: Option<LadderDeclaration>,
 }
 
 impl AnswerReading {
-    /// The reading an answer was taken under.
-    pub fn new(
-        trust: TrustState,
-        epoch: impl Into<String>,
-        generation: u64,
-        ladder: Option<LadderDeclaration>,
-    ) -> Self {
+    /// The reading an answer that ranks nothing was taken under.
+    pub fn new(trust: TrustState, epoch: impl Into<String>, generation: u64) -> Self {
         AnswerReading {
             trust,
             epoch: epoch.into(),
             generation,
-            ladder,
+            ladder: None,
         }
+    }
+
+    /// The same reading, of a search that ran `ladder`.
+    #[must_use]
+    pub fn with_ladder(mut self, ladder: LadderDeclaration) -> Self {
+        self.ladder = Some(ladder);
+        self
     }
 }
 

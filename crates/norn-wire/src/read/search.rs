@@ -214,9 +214,11 @@ impl RungSelection {
 pub struct Hit {
     /// The document the hit is for.
     pub path: DocumentPath,
-    /// How relevant the ladder judged it: higher is more relevant. Hits are
-    /// ordered by score descending, then by path in byte order, and a
-    /// request's `min_score` floors this same scale.
+    /// How relevant the ladder judged it: higher is more relevant. It is on
+    /// the scale of the ladder the answer ran, which the answer's reading
+    /// declares, and is not normalized across ladders. Hits are ordered by
+    /// score descending, then by path in byte order, and a request's
+    /// `min_score` floors this same scale.
     pub score: Score,
     /// The document's row, projected onto the columns the request asked for,
     /// and `null` where the request projected no column.
@@ -280,8 +282,10 @@ pub struct SearchParams {
     /// exactly the rungs named. The enabled set whole unless the request
     /// selects otherwise.
     pub rungs: RungSelection,
-    /// The relevance a hit must reach, on the scale a hit's `score` is: a hit
-    /// scored at or above it is answered. `null` returns every hit the ladder
+    /// The relevance a hit must reach, on the scale a hit's `score` is, which
+    /// is the scale of the ladder the selection resolves to: a hit scored at
+    /// or above it is answered. A floor that suits one ladder says nothing
+    /// about another. `null` returns every hit the ladder
     /// ranked.
     pub min_score: Option<Score>,
     /// The columns each hit's document row carries. Empty hydrates no row.

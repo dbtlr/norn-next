@@ -215,7 +215,8 @@
 //! [`CursorOrderChanged::new`], [`DocumentOrders::new`], [`HitLadders::new`],
 //! [`Score::new`],
 //! [`RungSkipReason::unavailable`],
-//! [`AnswerReading::new`], [`LadderDeclaration::new`],
+//! [`AnswerReading::new`], [`AnswerReading::with_ladder`],
+//! [`LadderDeclaration::new`], [`LadderDeclaration::lexical`],
 //! [`ModelIdentity::new`], [`Freshness::trailing`], [`Freshness::rescanning`],
 //! [`VaultAnswer::new`], [`VaultAnswer::with_advisories`],
 //! [`MaintainerIdentity::named`] and
