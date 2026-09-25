@@ -7,6 +7,11 @@
 //! entry proves that the root treats alternate case spellings as the same
 //! entry. No platform-name or mount-type guess is made.
 //!
+//! An absolute path is spelled once too. [`canonical_spelling`] is the one
+//! spelling two absolute paths are compared in — the directory the filesystem
+//! resolves each to, links taken — so no consumer resolves a path its own way
+//! before asking whether one lies beneath another.
+//!
 //! # Where case is folded, and what "case-insensitive" means
 //!
 //! **This module owns the fold that every case-insensitive path comparison in
@@ -373,6 +378,50 @@ impl Hash for NormalizedPath {
     }
 }
 
+/// The one spelling of the absolute `path`: the directory the filesystem
+/// resolves it to, and the rest of it as spelled where the filesystem resolves
+/// only part of it.
+///
+/// The filesystem takes every symbolic link, `.`, `..` and redundant separator
+/// in the part it resolves, so a `..` after a link steps out of the link's
+/// target and two spellings of one directory come back as one. Past the last
+/// component it resolves — a directory that does not exist yet, or one this
+/// process may not search — each remaining component is kept as spelled
+/// beneath what did resolve, and a `..` there steps back over the spelling
+/// before it, because a component nothing resolves is no link to step out of.
+/// That is how a path that does not exist still has a spelling to compare
+/// rather than being refused.
+///
+/// No case is folded. Where the filesystem resolves a component, the
+/// spelling is the one it reports; where it does not, the spelling is the
+/// caller's. Whether two spellings that differ in case are one directory is
+/// the root's own question, answered by [`PathNormalizer::detect`] for a vault
+/// and by nothing here.
+///
+/// Each component the filesystem does not resolve costs one more resolution
+/// of the path above it, so a path whose every component resolves costs one.
+#[allow(clippy::disallowed_methods)] // norn-fs owns path resolution.
+pub fn canonical_spelling(path: &Path) -> PathBuf {
+    if let Ok(resolved) = fs::canonicalize(path) {
+        return resolved;
+    }
+    let Some(parent) = path.parent() else {
+        return path.to_owned();
+    };
+    let mut spelling = canonical_spelling(parent);
+    match path.components().next_back() {
+        Some(Component::Normal(name)) => spelling.push(name),
+        Some(Component::ParentDir) => {
+            spelling.pop();
+        }
+        // A path with a parent ends in one of the two above: `.` is dropped
+        // from every position but a relative path's first, and a root or
+        // prefix has no parent.
+        _ => {}
+    }
+    spelling
+}
+
 fn same_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     identity_of(left) == identity_of(right)
 }
@@ -657,6 +706,53 @@ mod tests {
     /// on the machine.
     fn scratch() -> Scratch {
         Scratch::new("norn-path")
+    }
+
+    /// A spelling the filesystem resolves is the directory it reaches, with
+    /// every link along it and every `.`, `..` and redundant separator taken
+    /// by the filesystem: a `..` after a link steps out of the link's target,
+    /// not back out of the link's own name.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // The tree this case arranges and judges.
+    fn a_spelling_the_filesystem_resolves_is_the_directory_it_reaches() {
+        let scratch = scratch();
+        let target = scratch.join("elsewhere/target");
+        std::fs::create_dir_all(target.join("inner")).unwrap();
+        std::fs::create_dir_all(scratch.join("links")).unwrap();
+        std::os::unix::fs::symlink(&target, scratch.join("links/link")).unwrap();
+        let resolved = std::fs::canonicalize(&target).unwrap();
+
+        assert_eq!(
+            canonical_spelling(&scratch.join("links//link/./inner")),
+            resolved.join("inner")
+        );
+        assert_eq!(
+            canonical_spelling(&scratch.join("links/link/..")),
+            resolved.parent().unwrap(),
+            "a `..` after a link stepped back out of the link's own name"
+        );
+    }
+
+    /// Past the last component the filesystem resolves, the rest of the path
+    /// is kept as spelled beneath what did resolve, and a `..` there steps
+    /// back over the spelling before it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // The tree this case arranges and judges.
+    fn a_spelling_past_what_resolves_is_kept_beneath_what_did() {
+        let scratch = scratch();
+        let target = scratch.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, scratch.join("link")).unwrap();
+        let resolved = std::fs::canonicalize(&target).unwrap();
+
+        assert_eq!(
+            canonical_spelling(&scratch.join("link/not/yet")),
+            resolved.join("not/yet")
+        );
+        assert_eq!(
+            canonical_spelling(&scratch.join("link/not/../yet/.")),
+            resolved.join("yet")
+        );
     }
 
     #[test]
