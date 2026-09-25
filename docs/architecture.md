@@ -782,11 +782,14 @@ parse is met before the page runs; and the hydration of the rows a page returns 
 document rows by id, each projected nested collection's head and total by its
 `(document, ordinal)` index, and the findings column's head and total by `findings_path` at
 each row's path and the active fingerprint, with the candidate heads and classes of the
-findings it kept by their primary keys; and the reads that resolve a target — a class's head
-and, where the head filled, its total, each a seek of the suffix key the root probes; each
-candidate's suffix probe, the same seek stopping at a class's second member; and the head
-and total of the documents at one path, a seek of the path index the root orders by — run
-for a get's target, a links-to part's target, and each link the links column carries. A page with no filter reads its order index in page order, and
+findings it kept by their primary keys; and the reads that resolve targets — a class's head
+and, where the head filled, its total, each a seek of the suffix key the root probes, run
+for a get's target and a links-to part's target; what every link a page carries names, one
+statement over the link index's keys, each distinct key read once, a suffix key's class a
+seek of the suffix key the root probes and a path key's documents a seek of the path index
+the root orders by; and every candidate's minimal disambiguating suffix, one statement whose
+each spelling's range is the same seek stopping at its second member — so a page's links
+and candidates cost a fixed number of statements, however many there are. A page with no filter reads its order index in page order, and
 sorts nothing: the path page and a field sort's valued section seek it and stop at the
 page's bound. A field sort's missing section passes every document that carries the key to
 reach one that does not, so an ascending first page, which reads the missing section first,
@@ -987,10 +990,15 @@ an attachment and is not judged. A
 heading or block anchor is carried as written and not checked on the row. So a row's links
 column and a get's links page carry, for each link, the head of the documents it names now —
 at most five, in the ladder's order, each by its minimal disambiguating suffix, with the
-total — and the health that gives it. The column is read only where it is named, is cut at the per-row ceiling with
-its true total beside it, and costs the page's links, each its own seeks: a work bar holds a
-row's column to the same work beside 40 and beside 400 more documents, and growing with the
-links the row holds.
+total — and the health that gives it. The column is read only where it is named and is cut
+at the per-row ceiling with its true total beside it. **A page's links are read as one
+set**, from the keys derivation held each link under rather than by re-deriving its address:
+one statement reads what every link on the page names, each distinct key once, and one more
+names every candidate, so the column and a get's links page cost a fixed number of
+statements however many links and rows they carry. A work bar holds that a row of two links
+and one of forty, a page of one row and one of eight, and a links page of one link and of
+forty run the same statements, and that a row's column costs the same work beside 40 and
+beside 400 more documents.
 
 **The link index is what a links-to part seeks.** Each link that can name a document is held
 in `link_keys` under the keys a seek finds it by, derived at the write from the link and the
@@ -1773,7 +1781,7 @@ wire's bounded head stays a head rather than becoming the query surface.
 
 **One resolver compiles a target for its root**, and every surface that reads a class reads
 it through that one: a find's `resolves` part, a get's target, a links-to part's target and
-the backlinks it confirms, and each wikilink a row's links carry; the link-health findings
+the backlinks it confirms, and the suffix keys of the links a page carries; the link-health findings
 Layer 3's link-health unit files will file under the class keys it compiles. Case
 is the root's: the coverage proves the root's case behaviour when it is installed, and the
 store records the order its rows were derived under. A read answers under the store's order,

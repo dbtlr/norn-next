@@ -30,10 +30,11 @@
 //! Each candidate in a head is named by its **minimal disambiguating
 //! suffix**: the first of its path's suffix spellings
 //! ([`crate::DocumentPath::suffix_spellings`]) whose class holds that
-//! candidate alone, each tried by one statement that stops at a class's second
-//! member; a candidate no suffix names alone is named by its path. A target is
-//! resolved as every read resolves one — a links-to part's and a link's on a
-//! row — so the statements it runs are [`crate::FindStatement`]s.
+//! candidate alone, every spelling tried by one statement whose each range
+//! stops at its second member; a candidate no suffix names alone is named by
+//! its path. A target is resolved as every read resolves one — a links-to
+//! part's, and a page's links — so the statements it runs are
+//! [`crate::FindStatement`]s.
 //!
 //! # A record is a find's row
 //!
@@ -82,9 +83,10 @@
 //! exists, through the keyset page every read builder reads
 //! ([`Snapshot::read_page`]).
 //!
-//! A page of links resolves each link it holds as a find's links column
-//! resolves a row's links: what the link names now, and the health that gives
-//! it. So a links page costs its page's links, each its own seeks.
+//! A page of links resolves the links it holds as a find's links column
+//! resolves a page's: what each link names now, and the health that gives it,
+//! read as one set in a fixed number of statements, however many links the
+//! page holds.
 
 mod statement;
 
@@ -101,14 +103,14 @@ use crate::error::{self, StoreError};
 use crate::facts::{BlockFact, HeadingFact};
 use crate::fields::ContentModel;
 use crate::find::{
-    FindWork, FoundKey, Nested, Projection, block_row, bounded_body, heading_row, tag_row,
-    wire_block, wire_heading,
+    FindWork, FoundKey, Nested, Projection, block_row, bounded_body, heading_row, identified_link,
+    tag_row, wire_block, wire_heading,
 };
 use crate::read::{
     Lookups, Naming, PageRefusal, ReadFilter, ReadStatement, RequestPart, Stepped, TargetAmbiguity,
     finding_base, page_limit, wire_path,
 };
-use crate::request::{Reading, stored_block, stored_heading, stored_link, unreadable};
+use crate::request::{Reading, stored_block, stored_heading, unreadable};
 use crate::store::Snapshot;
 
 pub use statement::{GET_STATEMENTS, GetStatement};
@@ -607,14 +609,8 @@ impl Snapshot {
         };
         Ok(match collection {
             Nested::Links => {
-                let holder = crate::path::DocumentPath::new(&named.path)?;
-                let (links, next) = self.ordinal_page(&page, stored_link, lookups)?;
-                let rows = links
-                    .into_iter()
-                    .map(|link| {
-                        self.link_row(link, &holder, declared.ambiguity_ignore(), &mut lookups.ran)
-                    })
-                    .collect::<Result<Vec<_>, StoreError>>()?;
+                let (links, next) = self.ordinal_page(&page, identified_link, lookups)?;
+                let rows = self.link_rows(links, declared.ambiguity_ignore(), &mut lookups.ran)?;
                 CollectionPage::links(Page::new(rows, next, moved))
             }
             Nested::Headings => {

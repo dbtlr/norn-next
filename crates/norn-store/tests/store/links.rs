@@ -35,14 +35,13 @@ use StoredPathOrder::{AsciiCaseInsensitive as Folding, Sensitive};
 /// The fingerprint the suite's schema is pinned under.
 const SCHEMA: &str = "links-schema";
 
-/// The statements a link's resolution runs, which the find census holds this
-/// suite's resolution bar to.
-pub(crate) const LINK_READS: [FindStatement; 5] = [
+/// The statements a read of what targets name runs, which the find census
+/// holds this suite's resolution bar to.
+pub(crate) const LINK_READS: [FindStatement; 4] = [
     FindStatement::ClassHead,
     FindStatement::ClassTotal,
-    FindStatement::CandidateSuffix,
-    FindStatement::PathHead,
-    FindStatement::PathTotal,
+    FindStatement::CandidateSuffixes,
+    FindStatement::LinkTargets,
 ];
 
 /// The declaration, keeping nothing out of any class.
@@ -887,15 +886,24 @@ fn judge_class(plan: &QueryPlan, index: &str, key: &str) {
     rows.assert_search_constraint("documents", &format!("({key}>? AND {key}<?)"));
 }
 
-/// Judge a read of the documents at one path: a search of `documents` through
-/// `index` at the path, handed back in path order, and nothing read end to
-/// end.
-fn judge_path(plan: &QueryPlan, index: &str) {
+/// Judge a read of what a page's links name: each link's keys a search of
+/// `link_keys_link` at the link, each suffix key's class a search of
+/// `documents` through `class_index` bounded on both sides, each path key's
+/// documents a search of `documents` through `path_index` at the path, and
+/// nothing read end to end.
+fn judge_link_targets(plan: &QueryPlan, class_index: &str, key: &str, path_index: &str) {
     plan.assert_no_full_scan();
-    plan.assert_no_temp_btree();
-    let rows = rows_of(plan, "dr");
-    rows.assert_searches_through("documents", Access::Index(index));
-    rows.assert_search_constraint("documents", "(path=?)");
+    for alias in ["lk", "lr"] {
+        let keys = rows_of(plan, alias);
+        keys.assert_searches_through("link_keys", Access::Index("link_keys_link"));
+        keys.assert_search_constraint("link_keys", "(link=?)");
+    }
+    let class = rows_of(plan, "dl");
+    class.assert_searches_through("documents", Access::Index(class_index));
+    class.assert_search_constraint("documents", &format!("({key}>? AND {key}<?)"));
+    let at = rows_of(plan, "dp");
+    at.assert_searches_through("documents", Access::Index(path_index));
+    at.assert_search_constraint("documents", "(path=?)");
 }
 
 /// A vault whose `src/many.md` links to a target naming seven documents and
@@ -919,20 +927,21 @@ fn crowded(label: &str, order: StoredPathOrder) -> Linked {
     Linked::holding(label, order, &all)
 }
 
-/// **A link's resolution reads the class or the path its target names**: a
-/// wikilink's head, its total and each candidate's suffix probe are each a
-/// seek of `documents_suffix_key` where the root tells spellings apart and of
-/// `documents_folded_suffix_key` where it folds ASCII case, bounded on both
-/// sides by the target's range; a Markdown link's head and total are a seek of
-/// `documents_path` at the path where the root tells spellings apart and of
-/// `documents_path_nocase` where it folds, the head handed back in path order.
-/// A get's target and a links-to part's are read by the same class
-/// statements.
+/// **A read of what targets name seeks the class or the path each names**: a
+/// page's links are read as one set, each link's keys a seek of
+/// `link_keys_link`, each suffix key's class a seek of `documents_suffix_key`
+/// where the root tells spellings apart and of `documents_folded_suffix_key`
+/// where it folds ASCII case, bounded on both sides by the key's range, and
+/// each path key's documents a seek of `documents_path` at the path where the
+/// root tells spellings apart and of `documents_path_nocase` where it folds;
+/// the candidates' suffixes are each a range seek of the same suffix key. A
+/// links-to part's target is read by the class statements, a head and a total
+/// over the same ranges.
 ///
-/// Controls: a head read end to end fails; each index dropped, the head reads
-/// something else, and fails.
+/// Controls: the read of what the links name reads a document end to end, and
+/// fails; each index dropped, the read reads something else, and fails.
 #[test]
-fn a_link_resolution_reads_the_class_or_the_path_its_target_names() {
+fn a_read_of_targets_seeks_the_class_or_the_path_each_names() {
     for (order, class_index, key, path_index) in [
         (
             Sensitive,
@@ -952,73 +961,50 @@ fn a_link_resolution_reads_the_class_or_the_path_its_target_names() {
             .with_predicates([Predicate::path("src/many.md")])
             .with_columns([Column::links()]);
         let plans = linked.plans(&params);
-        for statement in [
-            FindStatement::ClassHead,
-            FindStatement::ClassTotal,
-            FindStatement::CandidateSuffix,
-        ] {
-            for plan in plans_of(&plans, statement) {
+        let [targets] = &plans_of(&plans, FindStatement::LinkTargets)[..] else {
+            panic!("a page's links are not read by one statement: {plans:?}");
+        };
+        judge_link_targets(targets, class_index, key, path_index);
+        let [suffixes] = &plans_of(&plans, FindStatement::CandidateSuffixes)[..] else {
+            panic!("a page's candidates are not named by one statement: {plans:?}");
+        };
+        judge_class(suffixes, class_index, key);
+
+        let walked = rewritten(targets, |detail| {
+            if detail.starts_with("SEARCH dl ") {
+                "SCAN dl".to_string()
+            } else {
+                detail.to_string()
+            }
+        });
+        failure_of("a class read end to end", || {
+            judge_link_targets(&walked, class_index, key, path_index)
+        });
+
+        // A links-to part's target is read by the class statements.
+        let linking =
+            linked.plans(&request().with_predicates([Predicate::links_to(resolution("glossary"))]));
+        for statement in [FindStatement::ClassHead, FindStatement::ClassTotal] {
+            for plan in plans_of(&linking, statement) {
                 judge_class(&plan, class_index, key);
             }
         }
-        if order == Folding {
-            for statement in [FindStatement::PathHead, FindStatement::PathTotal] {
-                for plan in plans_of(&plans, statement) {
-                    judge_path(&plan, path_index);
-                }
-            }
-        } else {
-            judge_path(
-                &plans_of(&plans, FindStatement::PathHead).remove(0),
-                path_index,
-            );
-        }
-        let head = plans_of(&plans, FindStatement::ClassHead).remove(0);
-        let walked = rewritten(&head, |detail| {
-            if detail.starts_with("SEARCH dr ") {
-                "SCAN dr".to_string()
-            } else {
-                detail.to_string()
-            }
-        });
-        failure_of("a head read end to end", || {
-            judge_class(&walked, class_index, key)
-        });
-        let path = plans_of(&plans, FindStatement::PathHead).remove(0);
-        let walked = rewritten(&path, |detail| {
-            if detail.starts_with("SEARCH dr ") {
-                "SCAN dr".to_string()
-            } else {
-                detail.to_string()
-            }
-        });
-        failure_of("a path head read end to end", || {
-            judge_path(&walked, path_index)
-        });
-
-        // The same class statements answer a links-to part's target.
-        let linking = linked
-            .plans(&request().with_predicates([Predicate::links_to(resolution("d1/glossary"))]));
-        for plan in plans_of(&linking, FindStatement::ClassHead) {
+        for plan in plans_of(&linking, FindStatement::CandidateSuffixes) {
             judge_class(&plan, class_index, key);
         }
 
-        linked.drop_index(class_index);
-        linked.drop_index(path_index);
-        let unindexed = linked.plans(&params);
-        failure_of(&format!("{class_index} dropped"), || {
-            judge_class(
-                &plans_of(&unindexed, FindStatement::ClassHead)[0],
-                class_index,
-                key,
-            )
-        });
-        failure_of(&format!("{path_index} dropped"), || {
-            judge_path(
-                &plans_of(&unindexed, FindStatement::PathHead)[0],
-                path_index,
-            )
-        });
+        for index in ["link_keys_link", class_index, path_index] {
+            linked.drop_index(index);
+            let unindexed = linked.plans(&params);
+            failure_of(&format!("{index} dropped"), || {
+                judge_link_targets(
+                    &plans_of(&unindexed, FindStatement::LinkTargets)[0],
+                    class_index,
+                    key,
+                    path_index,
+                )
+            });
+        }
     }
 }
 
@@ -1143,30 +1129,99 @@ fn a_links_to_parts_work_follows_its_backlinks_not_the_vault() {
     assert_eq!(work(&small, "glossary").3, 0);
 }
 
-/// **A links column's work follows the page's links, not the vault**: the
-/// same row over the fixture and over it beside 400 more documents costs the
-/// same, and a row holding more links costs more.
+/// A vault of eight target documents `t/t0.md` to `t/t7.md`, a document
+/// holding `few` links to them and one holding `many`, and eight `r/` rows each
+/// holding one link of every shape: one document, two, none, a path, and one
+/// addressed elsewhere.
+fn linking(label: &str, few: usize, many: usize) -> Linked {
+    let to = |count: usize| {
+        (0..count)
+            .map(|at| wikilink(&format!("t{}", at % 8)))
+            .collect::<Vec<LinkFact>>()
+    };
+    let mut all: Vec<DocumentFacts> = (0..8)
+        .map(|at| holding(&format!("t/t{at}.md"), Vec::new()))
+        .collect();
+    all.push(holding("dup/one/d.md", Vec::new()));
+    all.push(holding("dup/two/d.md", Vec::new()));
+    all.push(holding("h/few.md", to(few)));
+    all.push(holding("h/many.md", to(many)));
+    all.extend((0..8).map(|at| {
+        holding(
+            &format!("r/{at}.md"),
+            vec![
+                wikilink(&format!("t{at}")),
+                wikilink("d"),
+                wikilink("missing"),
+                markdown(&format!("../t/t{at}.md")),
+                link(LinkFamily::Markdown, Some("https"), "example.com", None),
+            ],
+        )
+    }));
+    Linked::holding(label, Sensitive, &all)
+}
+
+/// **A page's links cost a fixed number of statements, however many links
+/// and rows it carries**: a row holding two links and one holding forty, a
+/// page of one row and a page of eight, and a get's links page of one link and
+/// of forty each run the same statements, while the link rows they read grow.
+/// The fixture beside 40 and beside 400 more documents costs the same work.
 #[test]
-fn a_links_columns_work_follows_the_pages_links_not_the_vault() {
+fn a_pages_links_cost_a_fixed_number_of_statements() {
+    let linked = linking("links-column-statements", 2, 40);
+    let column = |predicate: Predicate| {
+        let params = request()
+            .with_predicates([predicate])
+            .with_columns([Column::links()]);
+        let found = linked.find(&params);
+        (found.work.statements, found.work.nested_rows.links)
+    };
+    let (few, few_rows) = column(Predicate::path("h/few.md"));
+    let (many, many_rows) = column(Predicate::path("h/many.md"));
+    assert_eq!((few_rows, many_rows), (2, 40));
+    assert_eq!(few, many, "statements grew with the links a row holds");
+    let (one, one_rows) = column(Predicate::path("r/0*"));
+    let (eight, eight_rows) = column(Predicate::path("r/*"));
+    assert_eq!((one_rows, eight_rows), (5, 40));
+    assert_eq!(one, eight, "statements grew with the rows a page holds");
+
+    let page = |limit: u32| {
+        let gotten = linked
+            .snapshot()
+            .get(
+                &GetParams::new(address(), resolution("h/many"))
+                    .with_collection(CollectionSelector::Links)
+                    .with_limit(limit),
+                &declared(),
+                &NoText,
+            )
+            .unwrap_or_else(|refusal| panic!("a links page: {refusal}"));
+        let GetReport::Collection {
+            page: CollectionPage::Links { page, .. },
+            ..
+        } = &gotten.report
+        else {
+            panic!("a get answered {:?}, not a links page", gotten.report);
+        };
+        (page.rows.len(), gotten.work.statements)
+    };
+    let (one_link, at_one) = page(1);
+    let (forty_links, at_forty) = page(40);
+    assert_eq!((one_link, forty_links), (1, 40));
+    assert_eq!(at_one, at_forty, "a get's statements grew with its page");
+
     let small = Linked::new("links-column-work-small", Sensitive, 40);
     let large = Linked::new("links-column-work-large", Sensitive, 400);
     let work = |linked: &Linked, at: &str| {
         let params = request()
             .with_predicates([Predicate::path(at)])
             .with_columns([Column::links()]);
-        let plans = linked.plans(&params);
         let found = linked.find(&params);
-        (
-            plans.len(),
-            found.work.statements,
-            found.work.nested_rows.links,
-        )
+        (found.work.statements, found.work.nested_rows.links)
     };
     for at in ["src/a.md", "src/b.md", "src/c.md"] {
         assert_eq!(work(&small, at), work(&large, at), "{at}");
     }
-    assert!(work(&small, "src/a.md").1 > work(&small, "src/b.md").1);
-    assert_eq!(work(&small, "src/a.md").2, source_links().len() as u64);
 }
 
 /// **No statement a link's resolution or a links-to part runs reads a
@@ -1183,7 +1238,7 @@ fn no_link_read_reads_a_documents_payload() {
         assert!(
             plans
                 .iter()
-                .any(|plan| plan.statement == FindStatement::PathHead)
+                .any(|plan| plan.statement == FindStatement::LinkTargets)
         );
         for emitted in &plans {
             reads_of(&emitted.plan).assert_reads_none_of(DOCUMENT_PAYLOAD);

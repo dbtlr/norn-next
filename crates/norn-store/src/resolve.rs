@@ -409,7 +409,16 @@ pub(crate) fn class_rows(class: &TargetClass) -> String {
 /// what an ambiguity class is made of, and a ladder whose ties fell out in
 /// row-insertion order would reorder itself when a document is re-derived.
 pub(crate) fn ladder_order(class: &TargetClass) -> String {
-    format!("ORDER BY dr.{}, dr.path", class.probe().key().column())
+    format!(
+        "ORDER BY {}",
+        ladder(&format!("dr.{}", class.probe().key().column()), "dr.path")
+    )
+}
+
+/// The resolution ladder's order over rows whose probed key is `key` and whose
+/// path is `path`, each an expression: the key, then the path.
+pub(crate) fn ladder(key: &str, path: &str) -> String {
+    format!("{key}, {path}")
 }
 
 /// Register the exclusion and the prefix step on `connection`, so every

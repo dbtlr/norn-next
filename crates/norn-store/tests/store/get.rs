@@ -1280,7 +1280,7 @@ fn a_class_is_read_through_the_suffix_key_the_root_probes() {
         for statement in [
             FindStatement::ClassHead,
             FindStatement::ClassTotal,
-            FindStatement::CandidateSuffix,
+            FindStatement::CandidateSuffixes,
         ] {
             for plan in find_plans_of(&plans, statement) {
                 judge_class(&plan, index, key);

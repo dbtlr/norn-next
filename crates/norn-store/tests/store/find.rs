@@ -399,11 +399,8 @@ fn statement_barred_by(statement: FindStatement) -> &'static str {
         }
         FindStatement::ClassHead
         | FindStatement::ClassTotal
-        | FindStatement::CandidateSuffix
-        | FindStatement::PathHead
-        | FindStatement::PathTotal => {
-            "a_link_resolution_reads_the_class_or_the_path_its_target_names"
-        }
+        | FindStatement::CandidateSuffixes
+        | FindStatement::LinkTargets => "a_read_of_targets_seeks_the_class_or_the_path_each_names",
     }
 }
 
@@ -541,9 +538,9 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
             "a_bare_directory_probe_is_two_seeks_of_the_path_index",
             "a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path",
             "a_known_key_and_the_field_universe_read_the_presence_rows_alone",
-            "a_link_resolution_reads_the_class_or_the_path_its_target_names",
             "a_match_probe_reads_the_full_text_index_through_its_selection",
             "a_path_page_seeks_the_case_insensitive_index_in_either_direction",
+            "a_read_of_targets_seeks_the_class_or_the_path_each_names",
             "every_filter_seeks_the_index_its_values_are_bounds_for",
             "hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index",
         ]

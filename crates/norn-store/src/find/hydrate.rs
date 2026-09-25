@@ -7,13 +7,13 @@
 //! only the columns named; each nested collection is one statement over its
 //! own table, and a collection nobody named is a table nobody reads.
 //!
-//! **The links column resolves each link it carries.** Its rows are read as
-//! every collection's are, and each link is then resolved at the read, as
-//! [`Snapshot::link_row`] states: a wikilink's target reads its class
-//! through the one resolver, a Markdown link's reads the documents at the
-//! path it joins to, and each document a head names is named by its minimal
-//! disambiguating suffix. So the column costs the links the page's rows carry,
-//! each its own seeks, and a page that does not name it resolves nothing.
+//! **The links column reads what its links name as one set.** Its rows are
+//! read as every collection's are, and then every link the page's rows carry
+//! is resolved at once, as [`Snapshot::link_rows`] states: one statement reads
+//! what each link names from the keys the link index holds it under, and one
+//! more names every candidate by its minimal disambiguating suffix. So the
+//! column costs a fixed number of statements, however many links or rows the
+//! page carries, and a page that does not name it resolves nothing.
 //!
 //! **The findings column is a nested collection too.** It carries the findings
 //! standing at the document's path under the active fingerprint, in `(kind,
@@ -39,14 +39,13 @@ use norn_wire::{
 };
 
 use super::statement::{
-    DocumentColumns, FindStatement, Nested, compose_documents, compose_finding_head,
-    compose_finding_total, compose_nested_head, compose_nested_total,
+    DocumentColumns, FindStatement, LINK_ID_COLUMN, Nested, compose_documents,
+    compose_finding_head, compose_finding_total, compose_nested_head, compose_nested_total,
 };
 use super::{FoundKey, Projection};
 use crate::error::{self, StoreError};
-use crate::facts::{BlockFact, HeadingFact, Span, TagSource};
+use crate::facts::{BlockFact, HeadingFact, LinkFact, Span, TagSource};
 use crate::json::projected_fields;
-use crate::path::DocumentPath;
 use crate::read::{Ran, Stepped, finding_base};
 use crate::request::{Reading, stored_block, stored_heading, stored_link, stored_tag};
 use crate::resolve::AmbiguityIgnore;
@@ -238,14 +237,18 @@ impl Snapshot {
         for nested in projection.nested.iter().copied() {
             match nested {
                 Nested::Links => {
-                    let mut heads = self.read_nested(nested, &ids, stored_link, work, record)?;
-                    for (row, key) in rows.iter_mut().zip(keys) {
-                        let (items, total) = heads.remove(&key.document()).unwrap_or_default();
-                        let holder = DocumentPath::new(key.path())?;
-                        let links = items
-                            .into_iter()
-                            .map(|link| self.link_row(link, &holder, ignore, record))
-                            .collect::<Result<Vec<LinkRow>, StoreError>>()?;
+                    let mut heads =
+                        self.read_nested(nested, &ids, identified_link, work, record)?;
+                    let carried: Vec<(Vec<(i64, LinkFact)>, u64)> = ids
+                        .iter()
+                        .map(|id| heads.remove(id).unwrap_or_default())
+                        .collect();
+                    let counts: Vec<usize> = carried.iter().map(|(items, _)| items.len()).collect();
+                    let totals: Vec<u64> = carried.iter().map(|(_, total)| *total).collect();
+                    let every = carried.into_iter().flat_map(|(items, _)| items).collect();
+                    let mut resolved = self.link_rows(every, ignore, record)?.into_iter();
+                    for ((row, count), total) in rows.iter_mut().zip(counts).zip(totals) {
+                        let links: Vec<LinkRow> = resolved.by_ref().take(count).collect();
                         row.links = Some(Collection::new(links, total).map_err(cut_below_head)?);
                     }
                 }
@@ -528,6 +531,13 @@ fn cut_below_head(problem: TotalBelowHead) -> StoreError {
 
 pub(crate) fn wire_span(span: Span) -> norn_wire::Span {
     norn_wire::Span::new(span.line, span.column, span.byte_offset)
+}
+
+/// A link as a nested read hands it back, beside its row id, which a read of
+/// what it names seeks its keys by.
+pub(crate) fn identified_link(row: &Row<'_>) -> Reading<(i64, LinkFact)> {
+    let id = row.get(LINK_ID_COLUMN)?;
+    Ok(stored_link(row)?.map(|link| (id, link)))
 }
 
 pub(crate) fn tag_row(row: &Row<'_>) -> Reading<TagRow> {
