@@ -211,6 +211,10 @@ pub struct VaultInspection {
     /// itself, so a status answer says "served, reads refusing, and this is
     /// why" rather than leaving a client to infer it from a refused read.
     pub reader_unavailable: Option<crate::ReaderUnavailable>,
+    /// What the entry's last attachment met in its environment that is worth
+    /// telling an operator: the advisories [`crate::EntryOps::advisories`]
+    /// read at its last publication, kept past the release of its coverage.
+    pub advisories: Vec<norn_wire::Advisory>,
 }
 
 /// The authored control-file state relative to the active fingerprints.

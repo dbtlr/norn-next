@@ -18,7 +18,9 @@ use norn_store::{
     IncrementProvenance, Provenance, RebuildReason, SchemaPin, Store, StoreError, StoredDocument,
     StoredPathOrder, SubjectScope,
 };
-use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, UntrustedReason, VaultName};
+use norn_wire::{
+    Advisory, FindingKind, FindingScope, MaintainerIdentity, UntrustedReason, VaultName,
+};
 
 use crate::derivation::{
     Cause, Decided, Declared, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS,
@@ -45,6 +47,17 @@ const DATA_TMP: &str = "tmp";
 
 /// Maximum number of document changes materialized for one store transaction.
 pub const MAX_CHANGESET_SIZE: usize = 1024;
+/// How many of the symbolic links a walk of the whole vault passed over an
+/// attachment names in its advisories.
+///
+/// An authored bound rather than a measured one. The advisory tells an
+/// operator that the links under a vault root are not walked, and names the
+/// first of them in path order so they can be found and judged; a vault
+/// holding many links is told the same thing by the first few. A list that
+/// grew with the vault would make an attachment's retained state, and every
+/// status report and roll-up that carries it, grow with the vault too, which
+/// the memory invariant rules out.
+const SKIPPED_LINKS_RETAINED: usize = 16;
 /// How long an attachment goes between verifications of its own derived state.
 ///
 /// An authored bound rather than a measured one. `PRAGMA integrity_check` reads
@@ -198,7 +211,18 @@ pub struct ProductionAttachment {
     /// site: successful writes stay beside coverage so their watcher echoes
     /// can be hash-confirmed without hiding external edits.
     _own_writes: OwnWrites,
-    _shadows: ShadowHome,
+    /// Where this maintainership's shadows are staged, resolved when coverage
+    /// is installed. Its placement is read three ways: a walk excludes a
+    /// fallback home by its root, maintenance sweeps it, and
+    /// `shadow_advisory` is what it says to an operator.
+    shadows: ShadowHome,
+    /// The advisory the shadow placement raises: the vault-local fallback in
+    /// use, and whether the vault ignores it, read when the placement was
+    /// resolved. `None` where the home is under the data root.
+    shadow_advisory: Option<Advisory>,
+    /// The first symbolic links the last walk of the whole vault passed over,
+    /// in path order and at most [`SKIPPED_LINKS_RETAINED`] of them.
+    skipped_links: SkippedLinks,
     last_shadow_sweep: Instant,
     /// When the store is next asked to answer for its own consistency.
     ///
@@ -597,19 +621,20 @@ impl ProductionEntryOps {
         let healing = progress.healing();
         let exclusions = exclusions_at(
             &attachment.registration,
-            &attachment._shadows,
+            &attachment.shadows,
             &attachment.covered_root,
         );
         // The caller pins the candidate before this walk, so every finding
         // below records the active schema fingerprint and every document is
         // judged under the declaration that fingerprint names.
-        heal_documents(
+        attachment.skipped_links = heal_documents(
             &mut attachment.store,
             &attachment.covered_root,
             &exclusions,
             self.policy,
             &healing,
-        )
+        )?;
+        Ok(())
     }
 
     /// Run one hash-authoritative heal against coverage that is already live,
@@ -826,6 +851,53 @@ fn shadow_exclusion(placement: Placement, home: &Path, root: &Path) -> Option<Pa
     }
 }
 
+/// The advisory `shadows` raises over the vault at `root`: the vault-local
+/// fallback in use, or nothing where the home is under the data root.
+///
+/// The fallback is a directory inside the vault, so a vault kept in git
+/// commits staged shadows unless it ignores them, and whether it does is read
+/// here by [`norn_fs::fallback_ignored`]'s rule. A `.gitignore` that cannot be
+/// read is reported as not ignoring the fallback: the question went
+/// unanswered, and the answer that warns is the safe one.
+///
+/// The home is named vault-relative, the way a walk names every path under
+/// the root, so the advisory spells the same directory whichever spelling of
+/// the root the vault was registered under.
+fn fallback_advisory(shadows: &ShadowHome, root: &Path) -> Option<Advisory> {
+    placement_advisory(shadows.placement(), shadows.directory(), root)
+}
+
+/// [`fallback_advisory`] over the placement's parts, which is what a case
+/// reaches the fallback arm through on a machine with one filesystem.
+fn placement_advisory(placement: Placement, home: &Path, root: &Path) -> Option<Advisory> {
+    match placement {
+        Placement::DataRoot => None,
+        Placement::VaultFallback => Some(Advisory::tmp_fallback_in_use(
+            home.strip_prefix(root).unwrap_or(home).to_string_lossy(),
+            norn_fs::fallback_ignored(root).unwrap_or(false),
+        )),
+    }
+}
+
+/// The first [`SKIPPED_LINKS_RETAINED`] symbolic links one walk passed over,
+/// vault-relative, in the order the walk yielded them — which is path order.
+#[derive(Debug, Default)]
+struct SkippedLinks(Vec<PathBuf>);
+
+impl SkippedLinks {
+    /// Record `link`, where fewer than the bound are recorded already.
+    fn saw(&mut self, link: &Path) {
+        if self.0.len() < SKIPPED_LINKS_RETAINED {
+            self.0.push(link.to_owned());
+        }
+    }
+
+    /// The links recorded, in the order they were seen.
+    fn links(&self) -> impl Iterator<Item = &Path> {
+        self.0.iter().map(PathBuf::as_path)
+    }
+}
+
 /// The key this entry's maintainer lock and shadow home are both taken under.
 ///
 /// One join, in one place, so that the home is keyed by the same three
@@ -875,6 +947,7 @@ impl EntryOps for ProductionEntryOps {
         let shadows =
             ShadowHome::resolve(root, &derived.join(DATA_TMP), &key).map_err(data_dir_effect)?;
         shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
+        let shadow_advisory = fallback_advisory(&shadows, root);
         if shadows.placement() == Placement::VaultFallback {
             // Residue no key's own sweep will ever open again: what a build that
             // staged before homes were keyed left directly under the fallback
@@ -915,7 +988,9 @@ impl EntryOps for ProductionEntryOps {
             subscription: Some(subscription),
             heal_observed: norn_fs::Batch::default(),
             _own_writes: own_writes,
-            _shadows: shadows,
+            shadows,
+            shadow_advisory,
+            skipped_links: SkippedLinks::default(),
             last_shadow_sweep: Instant::now(),
             store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
         };
@@ -977,7 +1052,7 @@ impl EntryOps for ProductionEntryOps {
             &healing,
             &exclusions_at(
                 &attachment.registration,
-                &attachment._shadows,
+                &attachment.shadows,
                 &attachment.covered_root,
             ),
         )?;
@@ -1020,7 +1095,8 @@ impl EntryOps for ProductionEntryOps {
         shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
         attachment.subscription = Some(subscription);
         attachment._own_writes = own_writes;
-        attachment._shadows = shadows;
+        attachment.shadow_advisory = fallback_advisory(&shadows, &covered_root);
+        attachment.shadows = shadows;
         attachment.covered_root = covered_root;
         // The first point a recovery holds both the order its new coverage
         // proved and the store it will derive into, and the judgment is taken
@@ -1151,6 +1227,24 @@ impl EntryOps for ProductionEntryOps {
             .map(|detail| UntrustedReason::schema_unreadable(detail.to_string()))
     }
 
+    /// The shadow placement's advisory, where the fallback is in use, and one
+    /// advisory per link the last walk of the whole vault passed over, in
+    /// path order. Both are held on the attachment, read when its coverage
+    /// was installed and when a walk of the whole vault ran.
+    fn advisories(&self, attachment: &Self::Attachment) -> Vec<Advisory> {
+        attachment
+            .shadow_advisory
+            .iter()
+            .cloned()
+            .chain(
+                attachment
+                    .skipped_links
+                    .links()
+                    .map(|link| Advisory::symlink_skipped(link.to_string_lossy())),
+            )
+            .collect()
+    }
+
     fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
         self.semantic.as_deref()
     }
@@ -1268,7 +1362,7 @@ impl EntryOps for ProductionEntryOps {
         // that cleanup opportunity must not withdraw an otherwise healthy
         // attachment or force a full heal; try again at the next normal cadence.
         if attachment.last_shadow_sweep.elapsed() >= norn_fs::SHADOW_AGE_THRESHOLD {
-            let _ = attachment._shadows.sweep(norn_fs::SHADOW_AGE_THRESHOLD);
+            let _ = attachment.shadows.sweep(norn_fs::SHADOW_AGE_THRESHOLD);
             attachment.last_shadow_sweep = Instant::now();
         }
         // The store's own consistency is the other maintenance question, and it
@@ -1447,13 +1541,15 @@ fn drain_settled(subscription: &norn_fs::Subscription) -> (norn_fs::Batch, Optio
     (settled, None)
 }
 
+/// Heal the whole vault at `root` into `store`, and answer the symbolic links
+/// the walk passed over, as [`SkippedLinks`] records them.
 fn heal_documents(
     store: &mut Store,
     root: &Path,
     exclusions: &[PathBuf],
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
-) -> Result<(), JobFailure> {
+) -> Result<SkippedLinks, JobFailure> {
     let walk = walk(root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
     let mut account = Account::default();
@@ -1468,7 +1564,8 @@ fn heal_documents(
         progress,
         &mut account,
     )?;
-    close_job(store, root, exclusions, policy, &mut account)
+    close_job(store, root, exclusions, policy, &mut account)?;
+    Ok(account.links)
 }
 
 /// Converge the rows a scope addresses against the files a walk of it yields.
@@ -2318,9 +2415,9 @@ where
             Some(Err(error)) => return Err(effect(error)),
             Some(Ok(norn_fs::WalkFact::Skipped(skipped))) => {
                 let root = skipped.path().as_path().to_owned();
-                let stands = skipped.reason().stands();
+                let reason = skipped.reason();
                 files.next();
-                pending.passed_over(&root, stands);
+                pending.passed_over(&root, reason);
                 continue;
             }
             Some(Ok(norn_fs::WalkFact::File(file))) => {
@@ -2463,6 +2560,9 @@ struct Account {
     filed: Filed,
     withheld: Withheld,
     walked: Vec<Walked>,
+    /// The symbolic links the job's walks passed over. A walk of the whole
+    /// vault is what an attachment keeps them from.
+    links: SkippedLinks,
 }
 
 impl Account {
@@ -3131,8 +3231,14 @@ impl<'s> Pending<'s> {
     /// A root that **vanished** is a name nothing here read at all: what is at
     /// it now is a question this walk never asked, so it is absorbed and the
     /// job's prune leaves the findings beneath it standing.
-    fn passed_over(&mut self, root: &Path, stands: bool) {
-        if stands {
+    ///
+    /// A link is recorded among the job's skipped links as well, which is what
+    /// an attachment's advisories name.
+    fn passed_over(&mut self, root: &Path, reason: norn_fs::SkipReason) {
+        if let norn_fs::SkipReason::SymbolicLink(_) = reason {
+            self.account.links.saw(root);
+        }
+        if reason.stands() {
             return;
         }
         self.account.withheld.absorb(root);
@@ -3819,6 +3925,76 @@ mod tests {
                 });
             cursor = found + needle.len();
         }
+    }
+
+    /// **A home under the data root advises nothing, and the vault-local
+    /// fallback advises that it is in use**, named vault-relative, with
+    /// whether the vault's own `.gitignore` covers it — so the advisory an
+    /// operator acts on moves with that file.
+    #[test]
+    fn the_fallback_placement_advises_with_whether_the_vault_ignores_it() {
+        let f = Fixture::watcherless("fallback-advisory");
+        let root = f.vault();
+        let home = root.join(norn_fs::FALLBACK).join("key");
+        assert_eq!(
+            placement_advisory(Placement::DataRoot, &f.root.join("data/tmp"), &root),
+            None
+        );
+        assert_eq!(
+            placement_advisory(Placement::VaultFallback, &home, &root),
+            Some(Advisory::tmp_fallback_in_use(".norn/tmp/key", false))
+        );
+        fs::write(root.join(".gitignore"), "*.swp\n/.norn/\n").unwrap();
+        assert_eq!(
+            placement_advisory(Placement::VaultFallback, &home, &root),
+            Some(Advisory::tmp_fallback_in_use(".norn/tmp/key", true))
+        );
+    }
+
+    /// **A `.gitignore` that cannot be read is advised as not ignoring the
+    /// fallback**: the question went unanswered, and the answer that warns
+    /// is the one given.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_gitignore_is_advised_as_not_ignoring_the_fallback() {
+        let f = Fixture::watcherless("fallback-advisory-unreadable");
+        let root = f.vault();
+        fs::write(f.root.join("ignored"), ".norn/\n").unwrap();
+        std::os::unix::fs::symlink(f.root.join("ignored"), root.join(".gitignore")).unwrap();
+        assert_eq!(
+            placement_advisory(
+                Placement::VaultFallback,
+                &root.join(norn_fs::FALLBACK).join("key"),
+                &root
+            ),
+            Some(Advisory::tmp_fallback_in_use(".norn/tmp/key", false))
+        );
+    }
+
+    /// **An attach advises the links its walk of the vault passed over**,
+    /// vault-relative, in path order, and no more of them than the bound.
+    #[cfg(unix)]
+    #[test]
+    fn an_attach_advises_the_links_its_walk_passed_over_up_to_the_bound() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("advised-links");
+        fs::create_dir(f.vault().join("a")).unwrap();
+        let mut links = vec!["a/inner.md".to_owned()];
+        links.extend((0..SKIPPED_LINKS_RETAINED).map(|n| format!("link-{n:02}.md")));
+        for link in &links {
+            symlink("elsewhere.md", f.vault().join(link)).unwrap();
+        }
+        let (ops, _) = f.ops(64);
+        let attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .expect("an attach over a vault holding links");
+
+        let advised: Vec<Advisory> = links[..SKIPPED_LINKS_RETAINED]
+            .iter()
+            .map(|link| Advisory::symlink_skipped(link.as_str()))
+            .collect();
+        assert_eq!(ops.advisories(&attachment), advised);
     }
 
     /// **The bar on what a walk is told about shadows.** A fallback home is
@@ -6271,7 +6447,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6330,7 +6506,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "archive.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6551,7 +6727,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6597,7 +6773,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "folder/bad\u{fffd}name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6652,7 +6828,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
             ProductionPolicy::new(2, 1).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6713,7 +6889,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "other\u{fffd}doc.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6775,7 +6951,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\dir"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6832,7 +7008,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6894,7 +7070,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6976,7 +7152,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\u{fffd}dir"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7075,7 +7251,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "notes"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7114,7 +7290,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7155,7 +7331,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "notes"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7198,7 +7374,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7293,7 +7469,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\u{fffd}dir"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert!(
@@ -7585,7 +7761,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "fold\u{fffd}er"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7649,7 +7825,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "fold\u{fffd}er"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7702,7 +7878,7 @@ mod tests {
             &dirty,
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7764,7 +7940,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         );
         fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
         increment.expect("a directory the reading cannot open refused the event");
@@ -8338,7 +8514,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "linked"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -8400,7 +8576,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "away/note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -8544,7 +8720,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "hidden\\dir/note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert_eq!(
@@ -8597,7 +8773,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert_eq!(
@@ -10310,7 +10486,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10350,7 +10526,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10393,7 +10569,7 @@ mod tests {
                 &dirty_path(f.vault().as_path(), "note.md"),
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
         };
@@ -10637,7 +10813,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10848,7 +11024,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10889,7 +11065,7 @@ mod tests {
             &dirty,
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10924,7 +11100,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "folder"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10969,7 +11145,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "folder"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10995,7 +11171,7 @@ mod tests {
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(
-            attachment._shadows.placement(),
+            attachment.shadows.placement(),
             Placement::DataRoot,
             "this fixture stages outside the vault, so no host root names `.norn/tmp`"
         );
@@ -11008,7 +11184,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), ".norn"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11047,7 +11223,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "link/sub"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .expect("a dirty root behind a link to converge rather than fail the reconcile");
 
@@ -11091,7 +11267,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "link/sub/doc.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .expect("a dirty file behind a link to converge rather than fail the reconcile");
 
@@ -11279,7 +11455,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "folder"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11315,7 +11491,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11347,7 +11523,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11379,7 +11555,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\dir"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11427,7 +11603,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11444,7 +11620,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert!(stored_paths(&mut attachment.store).is_empty());
@@ -11497,7 +11673,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11516,7 +11692,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md/second.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert_eq!(
@@ -11531,7 +11707,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md/second.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert_eq!(
@@ -11578,7 +11754,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11723,7 +11899,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "NOTE.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11762,7 +11938,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "FOLDER"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11816,7 +11992,7 @@ mod tests {
                 batch.vault_roots(),
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
 
@@ -11885,7 +12061,7 @@ mod tests {
             batch.vault_roots(),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11950,7 +12126,7 @@ mod tests {
             batch.vault_roots(),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -12012,7 +12188,7 @@ mod tests {
             batch.vault_roots(),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -12062,7 +12238,7 @@ mod tests {
                 dirty,
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
         };
@@ -12144,7 +12320,7 @@ mod tests {
                 dirty,
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
         };
@@ -12201,7 +12377,7 @@ mod tests {
             "the vault heal read the tree this case then excludes"
         );
 
-        let mut excluding = exclusions(&attachment.registration, &attachment._shadows);
+        let mut excluding = exclusions(&attachment.registration, &attachment.shadows);
         excluding.push(PathBuf::from("staging"));
         fs::write(f.vault().join("staging/note.md"), "edited").unwrap();
         scoped_increment(
@@ -12264,7 +12440,7 @@ mod tests {
                 dirty,
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
             window.finish()
@@ -12310,7 +12486,7 @@ mod tests {
                 &dirty_path(f.vault().as_path(), &format!("dir/{spelled}/note.md")),
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
             assert_eq!(
@@ -12351,7 +12527,7 @@ mod tests {
                 &dirty_path(f.vault().as_path(), blocked),
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
             assert_eq!(
@@ -12391,7 +12567,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "UPPER.MD"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert!(
@@ -12422,7 +12598,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "before.md"),
             ProductionPolicy::new(8, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         let generation_before_prune = attachment
@@ -12435,7 +12611,7 @@ mod tests {
 
         fs::remove_dir_all(f.vault().join("folder")).unwrap();
         let pruned_root = DocumentPath::new("folder").unwrap();
-        let pruned_exclusions = exclusions(&attachment.registration, &attachment._shadows);
+        let pruned_exclusions = exclusions(&attachment.registration, &attachment.shadows);
         // The leg accrues the roots its deaths owe a reading of, and the job
         // around it is what reads them; this case is that job.
         let mut account = Account::default();
@@ -12465,7 +12641,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "after.md"),
             ProductionPolicy::new(8, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -12910,7 +13086,7 @@ mod tests {
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        let residue = attachment._shadows.directory().join("norn-shadow-77-3");
+        let residue = attachment.shadows.directory().join("norn-shadow-77-3");
         fs::write(&residue, "residue").unwrap();
         let aged =
             std::time::SystemTime::now() - norn_fs::SHADOW_AGE_THRESHOLD - Duration::from_secs(1);
@@ -12935,7 +13111,7 @@ mod tests {
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        let shadow_home = attachment._shadows.directory().to_owned();
+        let shadow_home = attachment.shadows.directory().to_owned();
         let displaced = shadow_home.with_extension("displaced");
         fs::rename(&shadow_home, &displaced).unwrap();
         fs::write(&shadow_home, "not a directory").unwrap();

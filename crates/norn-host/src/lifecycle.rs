@@ -12,8 +12,8 @@ use norn_config::registry::Entry as Registration;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
 use norn_store::{ContentModel, StoreReading};
 use norn_wire::{
-    AttachMode, ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, VaultName,
-    WarmingPhase, WatcherLossCause,
+    Advisory, AttachMode, ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason,
+    VaultName, WarmingPhase, WatcherLossCause,
 };
 
 use crate::evidence::{ReadEvidence, ReadReading};
@@ -338,6 +338,22 @@ pub trait EntryOps: Send + Sync + 'static {
     /// The default withholds nothing.
     fn withheld_trust(&self, _: &Self::Attachment) -> Option<UntrustedReason> {
         None
+    }
+    /// What establishing this attachment met in its environment that is worth
+    /// telling an operator and is neither a refusal nor a move of its trust:
+    /// where its shadows are staged, and what its walk of the vault passed
+    /// over.
+    ///
+    /// Read under the gate hold that records the entry's declaration, beside
+    /// [`EntryOps::active_fingerprints`], so it is answered out of what the
+    /// attachment already holds and does no I/O of its own. The entry keeps
+    /// the reading past the release of the coverage, which is what makes it a
+    /// fact about the entry's last attachment rather than about coverage it
+    /// holds now; `vault status` and `doctor` read it there.
+    ///
+    /// The default carries none.
+    fn advisories(&self, _: &Self::Attachment) -> Vec<Advisory> {
+        Vec::new()
     }
     /// The semantic engines these ops compose, where they compose them: what a
     /// search's vector rung is answered through.
@@ -716,6 +732,7 @@ impl<A: SnapshotSource> Entry<A> {
                 active_content_model: Arc::new(ContentModel::none()),
                 control_root: None,
                 last_reload_error: None,
+                advisories: Vec::new(),
                 recovery_required: false,
                 rebuild_required: false,
                 recovery_demands: 0,
@@ -797,6 +814,17 @@ struct EntryState<A: SnapshotSource> {
     /// The last typed core error from reading, parsing, or applying vault
     /// control files. A successful candidate clears it.
     last_reload_error: Option<ReloadError>,
+    /// The advisories the entry's last attachment carried, as
+    /// [`EntryOps::advisories`] read them at the last publication that
+    /// recorded its declaration.
+    ///
+    /// **A fact about the last attachment, kept past its release.** Nothing
+    /// clears it when the coverage goes back, so an entry idled out still
+    /// reports what its last attach met — the operator reading `doctor` over
+    /// a quiet host is told about a vault nobody is asking for — and the next
+    /// attachment's publication replaces it. An entry that has not attached
+    /// since this host started carries none.
+    advisories: Vec<Advisory>,
     recovery_required: bool,
     /// Whether the entry's derived state is damaged and owes the database-side
     /// heal rung.
@@ -1679,11 +1707,16 @@ fn record_demand<A: SnapshotSource>(state: &mut EntryState<A>) -> Option<u64> {
 }
 
 /// Record the declaration `attachment` serves under — its active control-file
-/// fingerprints and the content model its store pins — as the entry's own.
+/// fingerprints and the content model its store pins — as the entry's own,
+/// with the advisories the attachment carries.
 ///
 /// Called under the gate hold that publishes a leg's outcome, so the entry's
 /// account of its declaration moves with the publication that puts the
 /// coverage back, and a read taken under a later hold reads both together.
+/// The legs that call it are the ones that establish or replace what the
+/// attachment serves under — an attach, a recovery, a rebuild and a reload —
+/// which are the legs whose own work met the environment the advisories
+/// describe.
 fn record_active_declaration<O: EntryOps>(
     state: &mut EntryState<O::Attachment>,
     ops: &O,
@@ -1691,6 +1724,7 @@ fn record_active_declaration<O: EntryOps>(
 ) {
     state.active_fingerprints = ops.active_fingerprints(attachment);
     state.active_content_model = ops.active_content_model(attachment);
+    state.advisories = ops.advisories(attachment);
 }
 
 /// Enter the window in which an entry's resources are going back.
@@ -3378,6 +3412,7 @@ impl<O: EntryOps> Host<O> {
             active_fingerprints: state.active_fingerprints,
             last_reload_error: state.last_reload_error.clone(),
             reader_unavailable: state.reader_unavailable.clone(),
+            advisories: state.advisories.clone(),
         })
     }
 
@@ -6472,6 +6507,10 @@ mod tests {
         retire_pause: Mutex<Option<Arc<RetirePause>>>,
         /// Whether every retirement panics under the maintainer lock.
         panic_in_retire: AtomicBool,
+        /// What every coverage this fake hands out answers
+        /// [`EntryOps::advisories`] with, read at the publication the way an
+        /// implementation reads what its attachment met.
+        advisories: Mutex<Vec<Advisory>>,
     }
 
     /// A rendezvous two registry writes meet at, where both reach the write.
@@ -6602,6 +6641,10 @@ mod tests {
             self.withholds_trust
                 .load(Ordering::SeqCst)
                 .then(|| UntrustedReason::schema_unreadable("this fake withholds trust"))
+        }
+
+        fn advisories(&self, _: &FakeCoverage) -> Vec<Advisory> {
+            self.advisories.lock().expect("advisories poisoned").clone()
         }
 
         fn attach(
@@ -12049,6 +12092,34 @@ mod tests {
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
         wait_for_state(&host, &name, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// **An entry keeps the advisories its last attachment carried past the
+    /// release of that coverage**, and one that has not attached carries
+    /// none. The next attachment's publication is what replaces them.
+    #[test]
+    fn advisories_are_the_last_attachments_and_outlive_its_release() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
+        let advisories = |host: &Host<Arc<FakeOps>>| host.inspect(&name).unwrap().advisories;
+        assert_eq!(advisories(&host), [], "an entry never attached advises");
+
+        let first = vec![Advisory::symlink_skipped("away")];
+        *ops.advisories.lock().unwrap() = first.clone();
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(advisories(&host), first);
+
+        drop(lease);
+        host.reap_idle(Instant::now()).unwrap();
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(advisories(&host), first, "the release took the advisories");
+
+        let second = vec![Advisory::tmp_fallback_in_use(".norn/tmp/key", false)];
+        *ops.advisories.lock().unwrap() = second.clone();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(advisories(&host), second);
     }
 
     #[test]
