@@ -21,6 +21,7 @@ use crate::registry::{
     AliasConflict, RecordRefusal, RegistrationRefusal, RegistryRead, RegistryUnwritable,
     RetireRefusal,
 };
+use crate::semantic::DeliveredEngine;
 use crate::status::EngineReport;
 use crate::{
     ActiveFingerprints, AttachmentAdvisory, AuthoredDrift, ReloadError, ReloadJudgment,
@@ -817,6 +818,7 @@ impl<A: SnapshotSource> Entry<A> {
                 last_reload_error: None,
                 advisories: Vec::new(),
                 store_reading: None,
+                delivered_engine: None,
                 recovery_required: false,
                 rebuild_required: false,
                 recovery_demands: 0,
@@ -915,6 +917,11 @@ struct EntryState<A: SnapshotSource> {
     /// through [`ProgressReporter::record_store_reading`]; `None` until one
     /// has, and once the coverage goes back.
     store_reading: Option<StoreReading>,
+    /// What the engine delivery standing for the coverage the entry holds
+    /// left, as the entry committed it in the gate hold that published its
+    /// fingerprints; `None` where no delivery stands, and once the coverage
+    /// goes back.
+    delivered_engine: Option<DeliveredEngine>,
     recovery_required: bool,
     /// Whether the entry's derived state is damaged and owes the database-side
     /// heal rung.
@@ -1465,16 +1472,12 @@ impl<A: SnapshotSource> EntryState<A> {
     /// `vault status` and the inspection doors read, taken under the hold of
     /// the gate this is called under, with its engine read out of `engines`
     /// in that same hold.
-    fn observe(
-        &self,
-        registration: &Registration,
-        engines: Option<&crate::semantic::SemanticEngines>,
-    ) -> Result<Observation, Unserved> {
+    fn observe(&self, registration: &Registration) -> Result<Observation, Unserved> {
         if let Some(unserved) = self.out_of_service() {
             return Err(unserved);
         }
         Ok(Observation {
-            engine: self.engine_report(registration, engines),
+            engine: self.engine_report(),
             registration: registration.clone(),
             published: self.published_demand(),
             inspection: VaultInspection {
@@ -1488,14 +1491,10 @@ impl<A: SnapshotSource> EntryState<A> {
         })
     }
 
-    /// The engine of the vault `registration` names, out of `engines`,
-    /// judged against the store reading this entry recorded.
-    fn engine_report(
-        &self,
-        registration: &Registration,
-        engines: Option<&crate::semantic::SemanticEngines>,
-    ) -> EngineReport {
-        EngineReport::of(engines, &registration.name, self.store_reading.as_ref())
+    /// The engine delivery this entry committed, judged against the store
+    /// reading this entry recorded.
+    fn engine_report(&self) -> EngineReport {
+        EngineReport::of(self.delivered_engine.as_ref(), self.store_reading.as_ref())
     }
 
     /// What a caller reads off this entry: the park it stands on, or its trust
@@ -1852,10 +1851,12 @@ fn record_demand<A: SnapshotSource>(state: &mut EntryState<A>) -> Option<u64> {
 fn record_active_declaration<O: EntryOps>(
     state: &mut EntryState<O::Attachment>,
     ops: &O,
+    name: &VaultName,
     attachment: &O::Attachment,
 ) {
     state.active_fingerprints = ops.active_fingerprints(attachment);
     state.active_content_model = ops.active_content_model(attachment);
+    state.delivered_engine = ops.semantic().and_then(|engines| engines.delivery(name));
     record_advisories(state, ops, attachment);
 }
 
@@ -1993,6 +1994,7 @@ fn finish_release<O: EntryOps>(
     state.active_content_model = Arc::new(ContentModel::none());
     state.control_root = None;
     state.store_reading = None;
+    state.delivered_engine = None;
     // The derived state a damage verdict was about is with the ops, and an
     // attach opens the database again from nothing: a requirement kept here
     // would name a store this entry no longer holds.
@@ -3581,7 +3583,7 @@ impl<O: EntryOps> Host<O> {
             .get(name)
             .ok_or(Unserved::UnknownVault)?;
         let state = entry.gate.lock().expect("entry gate poisoned");
-        state.observe(&entry.registration, self.shared.ops.semantic())
+        state.observe(&entry.registration)
     }
 
     /// What every entry the set serves stands at, ascending by name: each
@@ -3593,20 +3595,19 @@ impl<O: EntryOps> Host<O> {
     /// gate is taken on its own, so the entries are read one after another
     /// rather than at one instant.
     pub(crate) fn observe_all(&self) -> Vec<Result<Observation, Held>> {
-        let engines = self.shared.ops.semantic();
         self.shared
             .entries
             .snapshot()
             .into_iter()
             .filter_map(|entry| {
                 let state = entry.gate.lock().expect("entry gate poisoned");
-                match state.observe(&entry.registration, engines) {
+                match state.observe(&entry.registration) {
                     Ok(observation) => Some(Ok(observation)),
                     Err(Unserved::UnknownVault) => None,
                     Err(unserved @ Unserved::EntryHeld) => Some(Err(Held {
                         registration: entry.registration.clone(),
                         unserved,
-                        engine: state.engine_report(&entry.registration, engines),
+                        engine: state.engine_report(),
                     })),
                 }
             })
@@ -4824,7 +4825,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             match result {
                 Ok((attachment, observed, handoff_saturated)) => {
                     state.pending.merge(observed);
-                    record_active_declaration(&mut state, &*shared.ops, &attachment);
+                    record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
                     state.control_root = shared.ops.control_root(&attachment);
                     state.last_reload_error = None;
                     let withheld = shared.ops.withheld_trust(&attachment);
@@ -5036,7 +5037,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             match result {
                 Ok(()) => {
                     state.pending.merge(observed);
-                    record_active_declaration(&mut state, &*shared.ops, &attachment);
+                    record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
                     state.last_reload_error = None;
                     let withheld = shared.ops.withheld_trust(&attachment);
                     // The handle is minted again where the slot is empty: a
@@ -5198,7 +5199,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Ok(attachment) => {
                     state.claim.release();
                     state.pending.merge(observed);
-                    record_active_declaration(&mut state, &*shared.ops, &attachment);
+                    record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
                     let withheld = shared.ops.withheld_trust(&attachment);
                     // The store inside this coverage is not the store the
                     // entry's reader was minted from, so the handle is minted
@@ -5826,7 +5827,7 @@ fn run_reload_job<O: EntryOps>(
 
     let response = match result {
         Ok(judgment) => {
-            record_active_declaration(&mut state, &*shared.ops, &attachment);
+            record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
             state.last_reload_error = None;
             state.clear_rung_requirements();
             match judgment.outcome {
@@ -5847,7 +5848,7 @@ fn run_reload_job<O: EntryOps>(
             Ok(judgment)
         }
         Err(JobFailure::Reload(error)) => {
-            record_active_declaration(&mut state, &*shared.ops, &attachment);
+            record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
             state.park_coverage(epoch, attachment);
             let ready = state.trust == TrustState::Ready;
             let detail = state.record_reload_error(error.clone());
@@ -5932,7 +5933,7 @@ fn apply_reload_runtime_failure<O: EntryOps>(
         JobFailure::WatcherTerminal(error) => {
             let failure = JobFailure::WatcherTerminal(error.clone());
             let reclassify = root_moved(&error);
-            record_active_declaration(&mut state, &*shared.ops, &attachment);
+            record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
             state.park_coverage(epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
@@ -5947,7 +5948,7 @@ fn apply_reload_runtime_failure<O: EntryOps>(
         }
         JobFailure::Environmental(detail) => {
             let failure = JobFailure::Environmental(detail.clone());
-            record_active_declaration(&mut state, &*shared.ops, &attachment);
+            record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
             state.park_coverage(epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
@@ -5956,7 +5957,7 @@ fn apply_reload_runtime_failure<O: EntryOps>(
         }
         JobFailure::StoreDamaged(detail) => {
             let failure = JobFailure::StoreDamaged(detail.clone());
-            record_active_declaration(&mut state, &*shared.ops, &attachment);
+            record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
             // The schema half of an activation may have closed the handle before
             // the damage was met, so the slot is answered for here rather than
             // left empty with nothing beside it. The entry publishes a

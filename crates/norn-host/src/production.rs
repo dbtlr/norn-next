@@ -6425,70 +6425,50 @@ mod tests {
             });
         }
 
-        /// **What an entry publishes and its engine are one instant**: a
-        /// status holds the entry's gate while it reads the engine, so an
-        /// attach cannot deliver an engine between the two, and an entry
-        /// reported unattached is reported with no delivered section and no
-        /// engine — never unattached beside an engine that stands.
+        /// **What an entry publishes and its engine are one instant**: an
+        /// attach delivers the engine ahead of the gate hold that publishes
+        /// it, and a status taken between the two reports the entry as it
+        /// stands with no delivered section and no engine — never an entry
+        /// that has not published its attach beside an engine that stands.
         #[test]
-        fn an_unattached_entry_is_never_reported_beside_a_standing_engine() {
+        fn an_entry_that_has_not_published_its_attach_is_never_reported_beside_its_engine() {
             let f = Fixture::new("status-engine-instant");
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             let (engines, ops) = engines_and_ops(&f);
             let name = f.registration().name;
-            let host = Arc::new(
-                crate::Host::new(
-                    crate::RegistryRead::from_entries([f.registration()]),
-                    ops,
-                    crate::LifecyclePolicy {
-                        idle_after: Duration::from_secs(60),
-                        worker_slots: 1,
-                        watch_poll_interval: Duration::from_secs(60),
-                    },
-                )
-                .unwrap(),
-            );
-            let (entered, reading_entered) = std::sync::mpsc::channel();
-            let (resume, reading_resumes) = std::sync::mpsc::channel::<()>();
-            engines.run_inside_next_reading(move || {
-                entered.send(()).unwrap();
-                let _ = reading_resumes.recv();
-            });
-            let asking = Arc::clone(&host);
-            let asked = name.clone();
-            let status = thread::spawn(move || super::status::status_of(&asking, &asked));
-            reading_entered
-                .recv_timeout(Duration::from_secs(15))
-                .expect("the status to reach the engine");
-
-            // A demand raised while the status is reading the engine attaches
-            // the vault and delivers its section as soon as it can.
-            let demanding = Arc::clone(&host);
-            let demanded = name.clone();
-            let lease = thread::spawn(move || demanding.demand(&demanded, AttachMode::Durable));
-            let delivered = wait_until(
-                "an attach to deliver the engine while the status reads it",
-                Budget::new(Duration::from_secs(1), Duration::from_millis(250)),
-                || match engines.section(&name) {
-                    Some(section) => Observed::Met(section),
-                    None => Observed::Pending("no delivery".to_string()),
+            let host = crate::Host::new(
+                crate::RegistryRead::from_entries([f.registration()]),
+                ops,
+                crate::LifecyclePolicy {
+                    idle_after: Duration::from_secs(60),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_secs(60),
                 },
-            );
-            resume.send(()).unwrap();
-            let status = status.join().expect("the status");
-            let _lease = lease.join().expect("the demand").expect("a lease");
+            )
+            .unwrap();
+            let (entered, delivery_entered) = std::sync::mpsc::channel();
+            let (resume, delivery_resumes) = std::sync::mpsc::channel::<()>();
+            engines.run_after_next_delivery(move || {
+                entered.send(()).unwrap();
+                let _ = delivery_resumes.recv();
+            });
 
-            assert!(
-                delivered.is_err(),
-                "an attach delivered while the status held the entry"
+            let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+            delivery_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the attach to deliver the engine");
+            let status = super::status::status_of(&host, &name);
+            let delivered = engines.section(&name);
+            resume.send(()).unwrap();
+
+            assert_eq!(delivered, Some(EngineSection::enabled()));
+            assert_ne!(
+                status.published,
+                norn_wire::Published::state(norn_wire::TrustState::Ready)
             );
             assert_eq!(
-                (status.published, status.section, status.engine),
-                (
-                    norn_wire::Published::state(norn_wire::TrustState::Unattached),
-                    EngineSection::undelivered(),
-                    norn_wire::EngineStatus::off()
-                )
+                (status.section, status.engine),
+                (EngineSection::undelivered(), norn_wire::EngineStatus::off())
             );
             wait_state(&host, &name, norn_wire::TrustState::Ready);
             assert_eq!(
@@ -6498,6 +6478,80 @@ mod tests {
                     norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
                 )
             );
+        }
+
+        /// **A reload's config delivery is reported in the instant that
+        /// publishes its fingerprints**: a status taken after the reload
+        /// delivered its section, and before the leg published, reports the
+        /// fingerprints, the section and the engine the entry served before
+        /// the reload, whichever way the section moves; one taken after the
+        /// leg reports all three moved.
+        #[test]
+        fn a_status_mid_reload_pairs_the_fingerprints_with_the_section_they_served() {
+            let off = || (EngineSection::disabled(), norn_wire::EngineStatus::off());
+            let on = || {
+                (
+                    EngineSection::enabled(),
+                    norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0))),
+                )
+            };
+            for (label, before, after, served, delivered) in [
+                (
+                    "enabling",
+                    "[engine.semantic]\nenabled = false\n",
+                    "[engine.semantic]\n",
+                    off(),
+                    on(),
+                ),
+                (
+                    "disabling",
+                    "[engine.semantic]\n",
+                    "[engine.semantic]\nenabled = false\n",
+                    on(),
+                    off(),
+                ),
+            ] {
+                let f = Fixture::new(&format!("status-engine-mid-reload-{label}"));
+                fs::write(f.vault().join(".norn/config.toml"), before).unwrap();
+                fs::write(f.vault().join("alpha.md"), "alpha alpha\n").unwrap();
+                let (engines, ops) = engines_and_ops(&f);
+                let (host, name, _lease) = ready_host(&f, ops);
+                let host = Arc::new(host);
+                let reported = |status: norn_wire::VaultStatus| {
+                    (status.fingerprints, (status.section, status.engine))
+                };
+                let (fingerprints, engine) = reported(super::status::status_of(&host, &name));
+                assert_eq!(engine, served, "{label}: before the reload");
+
+                fs::write(f.vault().join(".norn/config.toml"), after).unwrap();
+                let (entered, delivery_entered) = std::sync::mpsc::channel();
+                let (resume, delivery_resumes) = std::sync::mpsc::channel::<()>();
+                engines.run_after_next_delivery(move || {
+                    entered.send(()).unwrap();
+                    let _ = delivery_resumes.recv();
+                });
+                let reloading = Arc::clone(&host);
+                let reloaded = name.clone();
+                let reload = thread::spawn(move || reloading.reload(&reloaded));
+                delivery_entered
+                    .recv_timeout(Duration::from_secs(15))
+                    .expect("the reload to deliver the section");
+                let mid = reported(super::status::status_of(&host, &name));
+                resume.send(()).unwrap();
+                reload
+                    .join()
+                    .expect("the reload")
+                    .expect("a config-only reload");
+
+                assert_eq!(
+                    mid,
+                    (fingerprints.clone(), served.clone()),
+                    "{label}: during the reload"
+                );
+                let (moved, engine) = reported(super::status::status_of(&host, &name));
+                assert_ne!(moved, fingerprints, "{label}: the reload moved nothing");
+                assert_eq!(engine, delivered, "{label}: after the reload");
+            }
         }
     }
 

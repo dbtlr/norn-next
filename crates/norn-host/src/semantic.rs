@@ -31,7 +31,9 @@
 //!   answer needs the engine and its sidecar, never the vault's store, so it
 //!   runs on the caller's thread and answers whenever a slot stands — the
 //!   vault's trust label does not gate the capability. A status reads the
-//!   report kept beside the slot rather than the slot itself. The `search` verb
+//!   report kept beside the slot rather than the slot itself, through the
+//!   delivery the vault's entry committed with the fingerprints it publishes
+//!   ([`DeliveredEngine`]), so it never reads this set. The `search` verb
 //!   composes it through the read seam, so a search's vector rung answers only
 //!   for a ready entry, beside the snapshot its hold established.
 //! - **An answer carries its own reading.** A nearest answer is sampled under
@@ -375,6 +377,38 @@ struct Delivery {
     slot: Option<Arc<EngineSlot>>,
 }
 
+/// What one delivery left for a vault, as `vault status` and `doctor` report
+/// it: the section reading, and the report cell of the slot it opened, where
+/// it opened one.
+///
+/// **An entry commits one of these in the gate hold that publishes its
+/// fingerprints**, and a status reads the committed one rather than the
+/// delivery standing in this set. A leg delivers its config ahead of that
+/// publication, so a status taken between the two reports the section and
+/// the engine the published fingerprints were served beside, never the new
+/// section beside the old fingerprints. It holds the report cell and not the
+/// slot, so what the entry commits keeps no engine open: a slot a delivery
+/// replaced closes when this set lets it go, and the cell it leaves reads as
+/// that slot last stood.
+#[derive(Clone, Debug)]
+pub(crate) struct DeliveredEngine {
+    section: EngineSection,
+    report: Option<Arc<Mutex<SemanticStatus>>>,
+}
+
+impl DeliveredEngine {
+    /// The section this delivery read, and the report its slot's last act
+    /// left, or [`SemanticStatus::Off`] where it opened no slot. The slot's
+    /// own lock is not taken, so this never waits behind a drain.
+    pub(crate) fn reading(&self) -> (EngineSection, SemanticStatus) {
+        let status = self
+            .report
+            .as_ref()
+            .map_or(SemanticStatus::Off, |report| tolerant(report).clone());
+        (self.section.clone(), status)
+    }
+}
+
 /// One vault's engine slot, and the report of it a status reads.
 ///
 /// **The report is read without the slot's lock.** A drain holds the slot's
@@ -386,12 +420,14 @@ struct Delivery {
 /// during a drain, the slot as it stood before that drain.
 struct EngineSlot {
     slot: Mutex<Slot>,
-    report: Mutex<SemanticStatus>,
+    /// Shared with every [`DeliveredEngine`] an entry committed over this
+    /// slot, which reads it and nothing else of the slot.
+    report: Arc<Mutex<SemanticStatus>>,
 }
 
 impl EngineSlot {
     fn new(slot: Slot) -> Arc<Self> {
-        let report = Mutex::new(read_slot(&slot));
+        let report = Arc::new(Mutex::new(read_slot(&slot)));
         Arc::new(EngineSlot {
             slot: Mutex::new(slot),
             report,
@@ -424,8 +460,8 @@ impl Drop for Draining<'_> {
 pub struct SemanticEngines {
     dirs: ConfigDirs,
     vaults: Mutex<BTreeMap<VaultName, Delivery>>,
-    /// What a case arranged to run inside a status's reading and inside a
-    /// drain's hold of its slot.
+    /// What a case arranged to run inside a drain's hold of its slot and as
+    /// a delivery returns.
     #[cfg(test)]
     hooks: tests::Hooks,
 }
@@ -511,28 +547,18 @@ impl SemanticEngines {
             .map(|delivery| delivery.section.clone())
     }
 
-    /// The section reading the last delivery left for `vault` and its slot's
-    /// report, or `None` where no delivery stands.
+    /// What the delivery standing for `vault` left, for its entry to commit
+    /// as what a status reports, or `None` where no delivery stands.
     ///
-    /// Both come from one delivery: the map lock is held across finding
-    /// them. **The slot's own lock is not taken**, so a status is never held
-    /// behind a drain: the report is the slot as the last act that held it
-    /// left it ([`EngineSlot`]).
-    ///
-    /// `vault status` and `doctor` report a vault's engine through this,
-    /// under the hold of the entry's gate their observation of the entry is
-    /// taken under, so the engine they report and the demand the entry
-    /// publishes are one instant.
-    pub(crate) fn reading(&self, vault: &VaultName) -> Option<(EngineSection, SemanticStatus)> {
-        #[cfg(test)]
-        self.hooks.run_inside_reading();
-        let vaults = tolerant(&self.vaults);
-        let delivery = vaults.get(vault)?;
-        let status = delivery
-            .slot
-            .as_ref()
-            .map_or(SemanticStatus::Off, |slot| slot.report());
-        Some((delivery.section.clone(), status))
+    /// The section and the slot's report cell come from one delivery: the
+    /// map lock is held across finding them.
+    pub(crate) fn delivery(&self, vault: &VaultName) -> Option<DeliveredEngine> {
+        tolerant(&self.vaults)
+            .get(vault)
+            .map(|delivery| DeliveredEngine {
+                section: delivery.section.clone(),
+                report: delivery.slot.as_ref().map(|slot| Arc::clone(&slot.report)),
+            })
     }
 
     /// The `limit` nearest paths to `text` in `vault` with the reading they
@@ -740,6 +766,16 @@ impl EngineConfigReceiver for SemanticEngines {
     /// the filesystem, and holding the map through it would couple every
     /// vault's answers to this one's enable.
     fn receive(&self, vault: &VaultName, config: Option<&EngineConfig>) {
+        self.delivered(vault, config);
+        #[cfg(test)]
+        self.hooks.run_after_delivery();
+    }
+}
+
+impl SemanticEngines {
+    /// What [`EngineConfigReceiver::receive`] delivers: the section reading
+    /// `config` is, and the slot it opens, closes or keeps.
+    fn delivered(&self, vault: &VaultName, config: Option<&EngineConfig>) {
         let Some(section) = config else {
             self.deliver(vault, EngineSection::absent(), None);
             return;
@@ -799,20 +835,20 @@ pub(crate) mod tests {
     /// The places a case can arrange to run something inside.
     #[derive(Default)]
     pub(crate) struct Hooks {
-        reading: Mutex<Option<Arranged>>,
         drain: Mutex<Option<Arranged>>,
+        delivery: Mutex<Option<Arranged>>,
     }
 
     impl Hooks {
-        pub(super) fn run_inside_reading(&self) {
-            let arranged = tolerant(&self.reading).take();
+        pub(super) fn run_inside_drain(&self) {
+            let arranged = tolerant(&self.drain).take();
             if let Some(arranged) = arranged {
                 arranged();
             }
         }
 
-        pub(super) fn run_inside_drain(&self) {
-            let arranged = tolerant(&self.drain).take();
+        pub(super) fn run_after_delivery(&self) {
+            let arranged = tolerant(&self.delivery).take();
             if let Some(arranged) = arranged {
                 arranged();
             }
@@ -820,16 +856,16 @@ pub(crate) mod tests {
     }
 
     impl SemanticEngines {
-        /// Run `arranged` once, at the start of the next status reading of any
-        /// vault's engine, before the map lock is taken.
-        pub(crate) fn run_inside_next_reading(&self, arranged: impl FnOnce() + Send + 'static) {
-            *tolerant(&self.hooks.reading) = Some(Box::new(arranged));
-        }
-
         /// Run `arranged` once, inside the next drain of any vault's engine,
         /// while that drain holds its slot and before it reads the feed.
         pub(crate) fn run_inside_next_drain(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.drain) = Some(Box::new(arranged));
+        }
+
+        /// Run `arranged` once, as the next delivery to any vault returns,
+        /// once what it left is recorded and no lock of this set is held.
+        pub(crate) fn run_after_next_delivery(&self, arranged: impl FnOnce() + Send + 'static) {
+            *tolerant(&self.hooks.delivery) = Some(Box::new(arranged));
         }
     }
 }

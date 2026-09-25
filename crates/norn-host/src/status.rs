@@ -34,14 +34,14 @@ use std::path::Path;
 use norn_store::StoreReading;
 use norn_wire::{
     Advisory, EngineSection, EngineStatus, ErrorEnvelope, RollUp, StatusParams, StatusReport,
-    VaultName, VaultStatus,
+    VaultStatus,
 };
 
 use crate::address::registered_name;
 use crate::lifecycle::{Demand, EntryOps, Held, Host, Observation};
 use crate::refusal::control_file_failure;
 use crate::reload::AuthoredDrift;
-use crate::semantic::{SemanticEngines, engine_status};
+use crate::semantic::{DeliveredEngine, engine_status};
 
 /// Something an attachment met in its environment that a status reports as
 /// an [`Advisory`], as the entry keeps it past that attachment's release.
@@ -93,23 +93,21 @@ pub(crate) struct EngineReport {
 }
 
 impl EngineReport {
-    /// The engine of the vault `name` in `engines`, judged against `store`.
+    /// The engine `delivered` left, judged against `store`.
     ///
     /// Taken under the hold of the entry's gate its observation is taken
-    /// under, so the engine and the demand the entry publishes are one
-    /// instant; it takes no slot lock, so it never waits behind a drain.
+    /// under, from the delivery the entry committed in the hold that
+    /// published its fingerprints, so the engine, the fingerprints and the
+    /// demand the entry publishes are one instant. It reads the slot's report
+    /// cell and takes no slot lock, so it never waits behind a drain.
     ///
     /// **No delivery reads as an undelivered section.** A host that composes
     /// no engine delivers no section, and an entry that is not attached has
     /// had its delivery given back with its coverage; either way the host
     /// holds nothing of what the vault's config states, which is what the
     /// undelivered reading says, and the slot beside it is off.
-    pub(crate) fn of(
-        engines: Option<&SemanticEngines>,
-        name: &VaultName,
-        store: Option<&StoreReading>,
-    ) -> Self {
-        match engines.and_then(|engines| engines.reading(name)) {
+    pub(crate) fn of(delivered: Option<&DeliveredEngine>, store: Option<&StoreReading>) -> Self {
+        match delivered.map(DeliveredEngine::reading) {
             None => EngineReport {
                 section: EngineSection::undelivered(),
                 status: EngineStatus::off(),
