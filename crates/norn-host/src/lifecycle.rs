@@ -20167,5 +20167,39 @@ mod tests {
             assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
             drop(lease);
         }
+
+        /// A recovery whose root the registry can no longer read gives the
+        /// entry's coverage back after it has let go of the attach gate, and a
+        /// demand raised while that detach runs attaches nothing beside it.
+        #[cfg(unix)]
+        #[test]
+        fn a_demand_during_a_recoverys_identity_give_back_attaches_nothing_beside_it() {
+            let (ops, host, name, scratch) =
+                refused_under_a_blocked_give_back("recover-identity-give-back");
+            let root = scratch.root().join("root");
+            {
+                let entry = host.shared.entries.get(&name).unwrap();
+                let mut state = entry.gate.lock().unwrap();
+                state.require_recovery_keeping_demands();
+                state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(
+                    "the store needs recovery".to_string(),
+                ));
+            }
+
+            let recovering = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_for_flag("detach_started", &ops.detach_started);
+            std::fs::remove_file(&root).unwrap();
+            std::fs::create_dir(&root).unwrap();
+            let during = host.demand(&name, AttachMode::Durable).unwrap();
+            settle();
+            let attaches_during = ops.attaches.load(Ordering::SeqCst);
+            ops.detach_release.store(true, Ordering::SeqCst);
+
+            assert_eq!(
+                attaches_during, 1,
+                "a demand attached beside coverage still going back"
+            );
+            drop((recovering, during));
+        }
     }
 }
