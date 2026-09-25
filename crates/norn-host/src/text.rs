@@ -51,9 +51,10 @@ fn text_heading(heading: &HeadingFact) -> Heading {
     }
 }
 
-/// A stored position as an offset into the body. A position past the address
-/// space names no byte of any body held in memory, so it saturates to the
-/// end, which the resolver clamps to the body's length.
+/// A stored position as a `usize`. The store hands this reader only byte
+/// offsets that are positions in the body it hands with them, so an offset
+/// always converts; a line or a column past the address space saturates, and
+/// the resolver reads neither to cut a body.
 fn offset(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }

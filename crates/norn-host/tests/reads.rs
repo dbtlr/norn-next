@@ -1050,3 +1050,93 @@ fn assert_body(answered: &BodyText, expected: &str, path: &str) {
         "{path}: a whole body was cut"
     );
 }
+
+/// A document whose heading and block sit beside multibyte text: the
+/// heading's body starts at byte 15 and the block's marker at byte 26, and
+/// bytes 6 and 20 are each the second byte of an `é`.
+const CAFE: (&str, &str) = ("zz-damage/zz-cafe.md", "# Café ☕ ##\n\nCafé ☕ ^cafe\n");
+
+/// Rewrite one of [`CAFE`]'s derived rows in the store at `database` with
+/// `set`, a `table` row the document owns.
+fn rewrite_a_cafe_row(database: &Path, table: &str, set: &str) {
+    match norn_db::connect(database).expect("connecting to the store") {
+        norn_db::Attempt::Connected(connection) => {
+            let changed = connection
+                .execute(
+                    &format!(
+                        "UPDATE {table} SET {set} WHERE document = \
+                         (SELECT id FROM documents WHERE path = ?1)"
+                    ),
+                    [CAFE.0],
+                )
+                .expect("rewrite a derived row");
+            assert_eq!(
+                changed, 1,
+                "`{table}` holds another count of rows for the document"
+            );
+        }
+        norn_db::Attempt::Unreadable { detail } => panic!("the store is unreadable: {detail}"),
+    }
+}
+
+/// **A get that meets a stored offset its body cannot hold is refused as an
+/// untrusted entry, and the entry rebuilds.** A heading's body offset or a
+/// block's marker that falls inside a character, below zero or past the end
+/// of the body is a derived row that disagrees with the body it was derived
+/// from: store damage, answered as `host/entry-untrusted` under the
+/// store-damaged-rebuilding reason, never a panic or a failed read. The
+/// rebuild derives the rows again, so the same get answers after it.
+#[test]
+fn a_get_that_meets_an_offset_its_body_cannot_hold_is_untrusted_and_the_entry_rebuilds() {
+    let (_sandbox, vault, host) = a_verb_vault("host-reads-get-offset-damage", &[CAFE]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let section = GetParams::new(address(vault.name()), a_target("zz-cafe#Café ☕"));
+    let block = GetParams::new(address(vault.name()), a_target("zz-cafe#^cafe"));
+    assert!(matches!(
+        got(&host, &vault, &section),
+        GetReport::Section { .. }
+    ));
+    assert!(matches!(
+        got(&host, &vault, &block),
+        GetReport::Block { .. }
+    ));
+
+    let cases = [
+        ("headings", "body_offset = 6", &section, "inside the `é`"),
+        ("headings", "body_offset = -1", &section, "below zero"),
+        (
+            "headings",
+            "span_offset = -1",
+            &section,
+            "a heading below zero",
+        ),
+        ("blocks", "span_offset = 20", &block, "inside the `é`"),
+        ("blocks", "span_offset = -1", &block, "below zero"),
+        ("blocks", "span_offset = 4096", &block, "past the body"),
+    ];
+    for (table, set, params, what) in cases {
+        rewrite_a_cafe_row(&vault.database(), table, set);
+        let refused = host
+            .get(params)
+            .expect_err("a get answered over an offset its body cannot hold");
+        assert_eq!(
+            refused.detail(),
+            &ErrorDetail::entry_untrusted(UntrustedReason::store_damaged_rebuilding(
+                "the store is damaged"
+            )),
+            "{table} {what}: {refused:?}"
+        );
+        wait_until(
+            "the rebuild to put the entry back into service",
+            attach::state_budget(attach::READY_LIMIT),
+            || match host.get(params) {
+                Ok(answered) => Observed::Met(answered),
+                Err(refused) if refused.code() == &ReasonCode::HostReadFailed => {
+                    panic!("a get over a rebuilding entry failed as a read: {refused:?}")
+                }
+                Err(refused) => Observed::pending(format!("the get was refused with {refused:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+}
