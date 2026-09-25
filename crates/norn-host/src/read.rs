@@ -205,7 +205,7 @@ where
     /// it addresses, as its record, the section or block its anchor names, or
     /// one page of one of its collections.
     ///
-    /// A section and a block are cut by [`TextLayer`] from the body the
+    /// A section and a block are cut by `norn-text` from the body the
     /// snapshot holds of the document, so the text answered is the text the
     /// snapshot derived. A get compares no dates, so its answer carries no
     /// advisory.
