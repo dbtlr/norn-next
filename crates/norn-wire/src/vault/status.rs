@@ -23,7 +23,8 @@
 //! reports its park, an unattached entry reports that it is unattached, and
 //! neither is a refusal: asking where a vault stands never attaches one. The
 //! refusals are `host/unknown-vault`, for a name the registry does not hold,
-//! and `host/unsupported-attach-mode`, for an address that names a root.
+//! `host/entry-held`, for an entry an unregistration holds, and
+//! `host/unsupported-attach-mode`, for an address that names a root.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

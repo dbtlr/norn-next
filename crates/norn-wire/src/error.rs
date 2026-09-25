@@ -284,9 +284,9 @@ pub enum ReasonCode {
     /// vault's derived state.
     #[serde(rename = "host/maintainer-contended")]
     HostMaintainerContended,
-    /// `host/unknown-vault` — the requested name is not in the registry, so
-    /// there is no vault to serve under it. The detail is the name that was
-    /// asked for.
+    /// `host/unknown-vault` — this host serves no vault under the requested
+    /// name: a registry read answers from the serving set. The detail is the
+    /// name that was asked for.
     #[serde(rename = "host/unknown-vault")]
     HostUnknownVault,
     /// `host/unsupported-attach-mode` — the demand named a mode the host holds
@@ -294,8 +294,9 @@ pub enum ReasonCode {
     /// the mode that was named.
     #[serde(rename = "host/unsupported-attach-mode")]
     HostUnsupportedAttachMode,
-    /// `host/already-served` — the host already serves an entry under this
-    /// name, so nothing was registered over it. The detail is the name.
+    /// `host/already-served` — the host serves, or the registry file records,
+    /// a registration under this name, so nothing was registered over it. The
+    /// detail is the name.
     #[serde(rename = "host/already-served")]
     HostAlreadyServed,
     /// `host/entry-held` — the entry is holding something, or something is
