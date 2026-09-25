@@ -731,6 +731,14 @@ impl Slot {
 /// from a leg's epoch has superseded the work that leg was scheduled for, and
 /// the leg answers for itself alone from there. The gate, the running leg and
 /// the queue slot are all named by epochs raised under it.
+///
+/// **Epochs under one name never repeat, across entries.** A job in the
+/// channel carries a name and an epoch, and the worker resolves the name
+/// through the serving set, so a job an unregistered entry left queued can
+/// reach the entry registered under that name after it. That entry's epochs
+/// start where the serving set's last removal left them
+/// ([`Claim::starting_at`]), past every epoch a job left queued can carry, so
+/// such a job never stands at it.
 pub(super) struct Claim {
     epoch: u64,
     gate: Gate,
@@ -757,6 +765,16 @@ impl Default for Claim {
 }
 
 impl Claim {
+    /// A claim standing at `epoch`, holding nothing: what an entry joining
+    /// the serving set starts from, with every epoch at or below `epoch`
+    /// already spent by an entry that left it.
+    pub(super) fn starting_at(epoch: u64) -> Self {
+        Self {
+            epoch,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn epoch(&self) -> u64 {
         self.epoch
     }

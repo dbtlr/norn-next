@@ -29,7 +29,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use norn_config::registry::Entry as Registration;
@@ -75,7 +75,10 @@ pub(crate) enum ServingRefusal {
 /// strands nothing that is running. Work in the job channel keeps no handle:
 /// it carries a name and an epoch, and the worker that takes it resolves that
 /// name through the set again, so a job whose name the set no longer serves
-/// reaches no entry and does nothing where it arrives.
+/// reaches no entry and does nothing where it arrives. A job whose name the
+/// set serves again reaches the entry serving it now, and does nothing there
+/// either: an entry joins at the highest epoch any removed entry stood at, and
+/// every job a removed entry left queued carries an epoch below that.
 ///
 /// That second read is what a removal is admitted under while jobs are in
 /// flight. A job carrying the entry it was scheduled against would spare the
@@ -113,6 +116,14 @@ pub(crate) struct ServingSet<A: SnapshotSource> {
     /// root, so this counts the set's whole filesystem cost, and a path that
     /// leaves it unmoved spent no stat on the registry.
     classifications: AtomicUsize,
+    /// The highest epoch any entry this set removed stood at, which is where
+    /// an entry joining it starts.
+    ///
+    /// A job is queued at the epoch its entry stood at, and the entry moves
+    /// past it before the job's queue slot is given up — so a removed entry,
+    /// which holds no slot, stands past every job it left queued. Written and
+    /// read under the set's write lock.
+    retired_epoch: AtomicU64,
 }
 
 impl<A: SnapshotSource> ServingSet<A> {
@@ -121,6 +132,7 @@ impl<A: SnapshotSource> ServingSet<A> {
         Self {
             entries: RwLock::new(BTreeMap::new()),
             classifications: AtomicUsize::new(0),
+            retired_epoch: AtomicU64::new(0),
         }
     }
 
@@ -270,7 +282,8 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// Serve one more vault, from now.
     ///
     /// The entry appears exactly as an entry read at startup does — Unattached,
-    /// holding nothing, demandable — so the demand that follows attaches it the
+    /// holding nothing, demandable, its claim at the highest epoch a removed
+    /// entry stood at — so the demand that follows attaches it the
     /// way it attaches any registered vault, classification and maintainer
     /// singleton included. What a join into a *running* host owes beyond that
     /// is the classification of the incumbents, which is the lifecycle's move
@@ -282,7 +295,10 @@ impl<A: SnapshotSource> ServingSet<A> {
         }
         entries.insert(
             registration.name.clone(),
-            Arc::new(Entry::unattached(registration)),
+            Arc::new(Entry::unattached(
+                registration,
+                self.retired_epoch.load(Ordering::SeqCst),
+            )),
         );
         Ok(())
     }
@@ -326,6 +342,8 @@ impl<A: SnapshotSource> ServingSet<A> {
                 return Err(ServingRefusal::Held);
             }
             state.withdrawn = true;
+            self.retired_epoch
+                .fetch_max(state.claim.epoch(), Ordering::SeqCst);
         }
         let removed = entries.remove(name);
         drop(entries);

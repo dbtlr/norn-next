@@ -696,8 +696,9 @@ struct Entry<A: SnapshotSource> {
 
 impl<A: SnapshotSource> Entry<A> {
     /// An entry serving `registration` and holding nothing, which is what a
-    /// vault the host has never attached stands at.
-    fn unattached(registration: Registration) -> Self {
+    /// vault the host has never attached stands at, its claim standing at
+    /// `epoch`.
+    fn unattached(registration: Registration, epoch: u64) -> Self {
         Self {
             registration,
             gate: Mutex::new(EntryState {
@@ -715,7 +716,7 @@ impl<A: SnapshotSource> Entry<A> {
                 recovery_demands: 0,
                 recovery_generation: 0,
                 identity_refused: None,
-                claim: Claim::default(),
+                claim: Claim::starting_at(epoch),
                 maintainer_contended: None,
                 duplicate_root: None,
                 last_demand: Instant::now(),
@@ -19715,6 +19716,81 @@ mod tests {
             unregister(&host, UnregisterParams::new(name.clone()))
                 .expect("the vault is unregistered after the unwound attempt");
             assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// A job the unregistered entry left in the channel reaches no entry
+        /// registered under the name after it.
+        ///
+        /// The one worker is held on another vault's attach, so the first
+        /// entry's rebuild waits in the channel; a refusal then moves that
+        /// entry past the job, which leaves the job queued and the entry
+        /// holding nothing, and the entry is unregistered. The name is
+        /// registered again, and the new entry's own attach is scheduled no
+        /// lower than the epoch the queued job carries — at it, where the new
+        /// entry's epochs started over. The worker reaches the queued job
+        /// first, and the new entry is attached all the same.
+        #[test]
+        fn a_job_an_unregistered_entry_left_queued_reaches_no_entry_registered_after_it() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("unregister-stale-job");
+            let (busy_root, root) = (scratch.root().join("busy"), scratch.root().join("root"));
+            let (busy, name) = (
+                VaultName::new("busy").unwrap(),
+                VaultName::new("notes").unwrap(),
+            );
+            let host = rooted_host(
+                Arc::clone(&ops),
+                &[(&busy, busy_root.as_path()), (&name, root.as_path())],
+                1,
+                Duration::from_millis(2),
+            );
+            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_for_state(&host, &name, TrustState::Ready);
+            ops.block_attach.store(true, Ordering::SeqCst);
+            let busy_lease = host.demand(&busy, AttachMode::Durable).unwrap();
+            wait_for_flag("attach_started", &ops.attach_started);
+            {
+                let entry = host.shared.entries.get(&name).unwrap();
+                entry
+                    .gate
+                    .lock()
+                    .unwrap()
+                    .withdraw_trust_for_damage("the index disagrees with the documents");
+            }
+            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(lease);
+            let stale = host
+                .shared
+                .entries
+                .get(&name)
+                .unwrap()
+                .gate
+                .lock()
+                .unwrap()
+                .claim
+                .slot();
+            assert!(stale.is_some(), "the rebuild did not wait in the channel");
+            refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
+            unregister(&host, UnregisterParams::new(name.clone()).keeping_state())
+                .expect("the entry holding nothing is unregistered");
+
+            register(&host, &name, &root).expect("the name is registered again");
+            let reborn = host.shared.entries.get(&name).unwrap();
+            while reborn.gate.lock().unwrap().claim.epoch() + 1 < stale.unwrap() {
+                refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
+            }
+            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let scheduled = reborn.gate.lock().unwrap().claim.epoch();
+            ops.block_attach.store(false, Ordering::SeqCst);
+            ops.attach_release.store(true, Ordering::SeqCst);
+
+            assert!(
+                scheduled >= stale.unwrap(),
+                "the new entry scheduled its attach below the queued job's epoch"
+            );
+            wait_for_state(&host, &name, TrustState::Ready);
+            drop(lease);
+            drop(busy_lease);
         }
 
         /// A served vault whose root the registry can no longer read, idle
