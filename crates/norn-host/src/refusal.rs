@@ -986,3 +986,70 @@ mod read_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod page_refusal_tests {
+    use norn_store::{PageRefusal, ReadBound, StoreError};
+    use norn_wire::{AnswerShape, PagedRows, ReasonCode, RequestPart};
+
+    /// The code each store read refusal is filed under. A compile guard over
+    /// [`PageRefusal`]: the match reads only the variant and carries no
+    /// wildcard, so a variant minted without a code, or the enum turned
+    /// `#[non_exhaustive]`, does not compile.
+    fn code_of(refusal: &PageRefusal) -> ReasonCode {
+        match refusal {
+            PageRefusal::UnreadableBound { .. } => ReasonCode::VaultUnreadableBound,
+            PageRefusal::DeclarationNotPinned { .. } | PageRefusal::Store(_) => {
+                ReasonCode::HostReadFailed
+            }
+            PageRefusal::OrderChanged(_) => ReasonCode::VaultCursorOrderChanged,
+            PageRefusal::CursorNotTaken { .. } => ReasonCode::RequestCursorNotTaken,
+            PageRefusal::EmptyMembership { .. } | PageRefusal::OutOfBound { .. } => {
+                ReasonCode::RequestOutOfBound
+            }
+            PageRefusal::SummaryNotPaged
+            | PageRefusal::UnknownPart { .. }
+            | PageRefusal::PartNotTaken { .. } => ReasonCode::RequestPartNotTaken,
+            PageRefusal::AmbiguousTarget(_) => ReasonCode::VaultAmbiguousTarget,
+            PageRefusal::UnknownTarget { .. } => ReasonCode::VaultUnknownTarget,
+        }
+    }
+
+    /// A refusal a request earns is filed under a `request/` code, and one the
+    /// host earns by asking wrongly under `host/read-failed`.
+    #[test]
+    fn a_store_read_refusal_is_filed_under_its_wire_code() {
+        for (refusal, expected) in [
+            (
+                PageRefusal::CursorNotTaken {
+                    cursor: PagedRows::Hit,
+                    paged: PagedRows::Document,
+                },
+                ReasonCode::RequestCursorNotTaken,
+            ),
+            (
+                PageRefusal::OutOfBound {
+                    bound: ReadBound::PageRows,
+                    given: 0,
+                },
+                ReasonCode::RequestOutOfBound,
+            ),
+            (
+                PageRefusal::PartNotTaken {
+                    part: RequestPart::Column,
+                    answer: AnswerShape::Section,
+                },
+                ReasonCode::RequestPartNotTaken,
+            ),
+            (PageRefusal::SummaryNotPaged, ReasonCode::RequestPartNotTaken),
+            (
+                PageRefusal::Store(StoreError::Damaged {
+                    what: "a row".to_string(),
+                }),
+                ReasonCode::HostReadFailed,
+            ),
+        ] {
+            assert_eq!(code_of(&refusal), expected, "{refusal:?}");
+        }
+    }
+}

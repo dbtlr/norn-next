@@ -206,7 +206,6 @@ pub struct TargetAmbiguity {
 
 /// Why a read builder answered no page.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
 pub enum PageRefusal {
     /// A value a comparing part names — an equality, an inequality, a
     /// membership or a `before`/`after` bound — on a key declared with a typed
