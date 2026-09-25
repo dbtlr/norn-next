@@ -225,7 +225,8 @@ fn samples_vector(selection: WithRuntime<'_>) -> bool {
     }
 }
 
-/// Resolve `selection` against the vector rung's one sample.
+/// Resolve `selection` against the vector rung's one sample. The ladder it
+/// resolves holds the vector rung exactly where the sample answered.
 ///
 /// A host that composes no semantic engine samples the rung as not enabled
 /// ([`VectorRefusal::not_composed`]) whatever the vault's engine section says,
@@ -490,12 +491,12 @@ where
                 VectorSample::Unsampled
             };
             let resolved = resolve(selection, &vector).map_err(BuildRefused::Answered)?;
+            // A resolution over an answered sample holds the vector rung, and
+            // one over any other sample does not, so the sample alone says
+            // which ladder runs.
             let VectorSample::Answered(answered) = vector else {
                 return lexical_answer(snapshot, params, declared, resolved, cost);
             };
-            if !resolved.ladder.rungs().contains(&Rung::Vector) {
-                return lexical_answer(snapshot, params, declared, resolved, cost);
-            }
             let (answer, restriction) = *answered;
             ranked_answer(
                 snapshot,
