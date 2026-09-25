@@ -35,16 +35,31 @@
 //! **A ladder holding the vector rung is ranked here.** Each retrieval rung
 //! contributes at most [`RUNG_DEPTH`] candidates, and an answer whose rung
 //! reached that depth is advised so. The lexical rung contributes its first
-//! page at that depth, unfloored. The vector rung is scored over the documents
-//! the request's conjunction admits on the snapshot — drawn by paging the
-//! store's candidates, a find's pages — so a document the conjunction does not
-//! admit is never scored. The engine's scan holds at most the depth's scored
-//! rows at any vault size; the admitted set it is tested against is held
-//! whole, so it is proportional to the documents the conjunction admits. The
-//! candidates are also what reconciles the sidecar with the snapshot: a
-//! vector row whose path the snapshot does not hold — the sidecar ahead of the
-//! snapshot or behind it — is never scored, so no answer names a document its
-//! snapshot lacks.
+//! page at that depth, unfloored. The vector rung takes one of two paths, and
+//! on both no answer names a document its snapshot lacks — a vector row whose
+//! path the snapshot does not hold, the sidecar ahead of the snapshot or
+//! behind it, is never answered:
+//!
+//! - **A filtered search** — one whose conjunction names a part — scores only
+//!   the documents the conjunction admits on the snapshot, drawn first by
+//!   paging the store's candidates, a find's pages, so a document the
+//!   conjunction does not admit is never scored. The scan holds at most the
+//!   depth's scored rows; the admitted set it is tested against is held whole,
+//!   so what the search holds is proportional to the documents the
+//!   conjunction admits.
+//! - **An unfiltered search** takes no admitted-set pass. The scan holds the
+//!   depth and a margin more rows: the engine's drain lag counted in feed rows
+//!   on the snapshot — the documents changed and the deaths recorded past each
+//!   feed's watermark, however few write generations stamped them — capped at
+//!   [`VECTOR_MARGIN_CAP`], and the cap where no lag can be read. Each row the
+//!   scan kept, and each lexical hit, is then checked against the snapshot by
+//!   path, one seek each; a row the snapshot lacks is dropped, and at most the
+//!   depth of the rest are ranked. So what the search holds is bounded by the
+//!   depth and the cap at any vault size, and the check costs them and never
+//!   the vault. Where more rows the snapshot lacks stood in the scan than the
+//!   margin absorbed, the rung delivers fewer than the depth and the answer is
+//!   advised how many ([`AnswerAdvisory::RungShortOfDepth`]); it never claims
+//!   a depth it did not deliver.
 //!
 //! A two-rung ladder is fused by reciprocal rank: a document's score is the
 //! sum over the rungs that ranked it of `1 / (RRF_K + rank)`, its rank in
