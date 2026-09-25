@@ -511,9 +511,12 @@ fn freshnesses() -> Vec<Freshness> {
     ]
 }
 
-/// Every section reading the host retains for a vault's engine.
+/// Every section reading a status reports for a vault's engine: the four
+/// the host retains from a delivery, and the one it reports where no
+/// delivery stands.
 fn engine_sections() -> Vec<EngineSection> {
     vec![
+        EngineSection::undelivered(),
         EngineSection::absent(),
         EngineSection::disabled(),
         EngineSection::malformed("the `engine` table holds a string"),
@@ -3436,10 +3439,15 @@ fn every_rung_report_names_its_own_rung() {
     );
 }
 
-/// The section the host was delivered is four readings, and the malformed one
-/// carries its account as prose beside the tag a client branches on.
+/// The section the host was delivered is four readings, the malformed one
+/// carrying its account as prose beside the tag a client branches on, and a
+/// fifth says no section has been delivered at all.
 #[test]
 fn an_engine_section_is_an_object_tagged_state() {
+    assert_eq!(
+        wire(&EngineSection::undelivered()),
+        r#"{"state":"undelivered"}"#
+    );
     assert_eq!(wire(&EngineSection::absent()), r#"{"state":"absent"}"#);
     assert_eq!(wire(&EngineSection::disabled()), r#"{"state":"disabled"}"#);
     assert_eq!(wire(&EngineSection::enabled()), r#"{"state":"enabled"}"#);
@@ -5670,12 +5678,7 @@ fn a_published_answer_is_the_demand_an_entry_answers_with() {
         r#"{"answer":"state","state":{"state":"ready"}}"#
     );
     assert_eq!(
-        Published::of(Ok(TrustState::Ready)),
-        Published::state(TrustState::Ready)
-    );
-    assert_eq!(Published::of(Err(park())), Published::parked(park()));
-    assert_eq!(
-        tag_string(&Published::of(Err(park())), "answer"),
+        tag_string(&Published::parked(park()), "answer"),
         "parked",
         "a parked entry published a state"
     );
@@ -5880,6 +5883,182 @@ fn a_roll_up_names_what_each_status_wants_attention_for() {
         [Attention::untrusted(
             name("notes"),
             UntrustedReason::WatcherOverflow
+        )]
+    );
+}
+
+/// **An untrusted state that tells the vault's last reload failure is that
+/// failure, named once**: the roll-up names the reload failure alone. An
+/// untrusted state with a cause of its own beside a reload failure is two
+/// causes, and is named for both.
+#[test]
+fn an_untrusted_state_telling_the_last_reload_failure_is_named_once() {
+    let failure = ControlFileFailure::new(
+        ControlFile::Config,
+        ReloadStage::Read,
+        "the vault config cannot be read",
+    );
+    let untrusted_for = |detail: &str| {
+        VaultStatus::new(
+            registrations().remove(0),
+            Published::state(TrustState::untrusted(
+                UntrustedReason::environmental_refusal(detail),
+            )),
+            Drift::current(),
+            EngineStatus::off(),
+            EngineSection::absent(),
+        )
+        .with_last_reload_failure(failure.clone())
+    };
+    assert_eq!(
+        RollUp::of(&[untrusted_for("the vault config cannot be read")]).attention(),
+        [Attention::reload_failed(name("notes"), failure.clone())]
+    );
+    assert_eq!(
+        RollUp::of(&[untrusted_for("the disk is full")]).attention(),
+        [
+            Attention::untrusted(
+                name("notes"),
+                UntrustedReason::environmental_refusal("the disk is full")
+            ),
+            Attention::reload_failed(name("notes"), failure),
+        ]
+    );
+}
+
+/// **`doctor` names a duplicate root once, among the registry's problems**:
+/// the park that duplicate raises on each name the problem names is left
+/// out of the roll-up's attention, and a duplicate-root park on a name no
+/// problem names is kept, as is every other reason. The counts are the
+/// roll-up's own.
+#[test]
+fn doctor_names_a_duplicate_root_once_among_the_registry_problems() {
+    let parked_on_duplicate = |vault: &str| {
+        VaultStatus::new(
+            Registration::new(name(vault), vault_roots().remove(1)),
+            Published::parked(ErrorEnvelope::new(
+                "this vault's root is reached by another registration",
+                ErrorDetail::duplicate_root(names([name("alpha"), name("beta")])),
+            )),
+            Drift::reload_pending(),
+            EngineStatus::off(),
+            EngineSection::absent(),
+        )
+    };
+    let statuses = [
+        parked_on_duplicate("alpha"),
+        parked_on_duplicate("beta"),
+        parked_on_duplicate("gamma"),
+    ];
+    let roll_up = RollUp::of(&statuses);
+    let report = DoctorRegistryReport::new(
+        roll_up.clone(),
+        RegistrySanity::problems([RegistryProblem::duplicate_root(names([
+            name("alpha"),
+            name("beta"),
+        ]))])
+        .expect("problems that name one"),
+        [],
+    );
+
+    assert_eq!(report.roll_up.parked(), roll_up.parked());
+    assert_eq!(
+        report.roll_up.attention(),
+        [
+            Attention::reload_pending(name("alpha")),
+            Attention::reload_pending(name("beta")),
+            Attention::parked(name("gamma"), ReasonCode::HostDuplicateRoot),
+            Attention::reload_pending(name("gamma")),
+        ]
+    );
+}
+
+/// **`doctor` names a root it cannot read once, among the registry's
+/// problems**: the park the entry raises when it cannot read its root's
+/// identity is left out of the roll-up's attention for each name a missing or
+/// unreadable root names, and kept for a name no such problem names. A park
+/// of any other code on such a name is a different cause and is kept. The
+/// counts are the roll-up's own.
+#[test]
+fn doctor_names_an_unreadable_root_once_among_the_registry_problems() {
+    let parked_on_identity = |vault: &str| {
+        VaultStatus::new(
+            Registration::new(name(vault), vault_roots().remove(1)),
+            Published::parked(ErrorEnvelope::new(
+                "the registry cannot read this vault's root",
+                ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(
+                    "the root cannot be read",
+                )),
+            )),
+            Drift::reload_pending(),
+            EngineStatus::off(),
+            EngineSection::absent(),
+        )
+    };
+    let parked_on_contention = VaultStatus::new(
+        Registration::new(name("delta"), vault_roots().remove(1)),
+        Published::parked(ErrorEnvelope::new(
+            "another process maintains this vault's derived state",
+            ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
+        )),
+        Drift::reload_pending(),
+        EngineStatus::off(),
+        EngineSection::absent(),
+    );
+    let statuses = [
+        parked_on_identity("alpha"),
+        parked_on_identity("beta"),
+        parked_on_contention,
+        parked_on_identity("gamma"),
+    ];
+    let roll_up = RollUp::of(&statuses);
+    let report = DoctorRegistryReport::new(
+        roll_up.clone(),
+        RegistrySanity::problems([
+            RegistryProblem::root_missing(name("alpha")),
+            RegistryProblem::root_unreadable(name("beta"), "permission denied"),
+            RegistryProblem::root_missing(name("delta")),
+        ])
+        .expect("problems that name one"),
+        [],
+    );
+
+    assert_eq!(report.roll_up.parked(), roll_up.parked());
+    assert_eq!(
+        report.roll_up.attention(),
+        [
+            Attention::reload_pending(name("alpha")),
+            Attention::reload_pending(name("beta")),
+            Attention::parked(name("delta"), ReasonCode::HostMaintainerContended),
+            Attention::reload_pending(name("delta")),
+            Attention::parked(name("gamma"), ReasonCode::HostEntryUntrusted),
+            Attention::reload_pending(name("gamma")),
+        ]
+    );
+}
+
+/// **A vault-local shadow fallback wants attention only where the vault does
+/// not ignore it.** Both are reported on the vault's status; the roll-up
+/// names the vault for the one whose staged shadows the vault's own tooling
+/// will pick up.
+#[test]
+fn a_fallback_wants_attention_only_where_the_vault_does_not_ignore_it() {
+    let falling_back = |gitignored| {
+        VaultStatus::new(
+            registrations().remove(0),
+            Published::state(TrustState::Ready),
+            Drift::current(),
+            EngineStatus::off(),
+            EngineSection::absent(),
+        )
+        .with_advisories([Advisory::tmp_fallback_in_use(".norn/tmp/key", gitignored)])
+    };
+    assert!(RollUp::of(&[falling_back(true)]).attention().is_empty());
+    assert_eq!(
+        RollUp::of(&[falling_back(false)]).attention(),
+        [Attention::advisory(
+            name("notes"),
+            Advisory::tmp_fallback_in_use(".norn/tmp/key", false)
         )]
     );
 }

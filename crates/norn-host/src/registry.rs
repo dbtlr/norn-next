@@ -6,9 +6,10 @@ use std::path::Path;
 use norn_config::registry::{Entry, Registry, VaultRoot};
 use norn_fs::{Identity, Refusal, canonical_spelling, path_identity, readable_directory};
 use norn_wire::{
-    ErrorEnvelope, ListParams, ListReport, MaintainerIdentity, NameSet, Published, RegisterParams,
-    RegisterReport, ResolveParams, ResolveReport, TooFewNames, UnregisterParams, UnregisterReport,
-    VaultName,
+    DoctorRegistryParams, DoctorRegistryReport, EngineHealth, ErrorEnvelope, ListParams,
+    ListReport, MaintainerIdentity, NameSet, RegisterParams, RegisterReport, RegistryProblem,
+    RegistrySanity, ResolveParams, ResolveReport, RollUp, TooFewNames, UnregisterParams,
+    UnregisterReport, VaultName,
 };
 
 use crate::lifecycle::{EntryOps, Host, ServingRefusal};
@@ -176,10 +177,7 @@ impl<O: EntryOps> Host<O> {
         let (admitted, published) = self
             .register(params.registration.clone())
             .map_err(|refusal| refusal.answer(name))?;
-        Ok(RegisterReport::new(
-            admitted,
-            Published::of(published.answer(name)),
-        ))
+        Ok(RegisterReport::new(admitted, published.published(name)))
     }
 
     /// Answer a `vault unregister`: the name removed, and whether its derived
@@ -222,6 +220,102 @@ impl<O: EntryOps> Host<O> {
             !params.keep_state,
         ))
     }
+
+    /// Answer `doctor`'s registry half: the roll-up `vault status` computes,
+    /// whether the registry itself is in order, and each vault's engine
+    /// health, ascending by name.
+    ///
+    /// **One reading of every entry answers all three.** The statuses are
+    /// the ones a roll-up is computed from, so the roll-up here is the one
+    /// `vault status` naming no vault answers, less the parks whose cause
+    /// the sanity pass names as a registry problem, the engines are read off
+    /// the same statuses, and the sanity pass reads the roots of the same
+    /// registrations. Per-vault standing is not restated: the roll-up's
+    /// attention reasons are what `doctor` reports of it, the advisories
+    /// each vault's last attachment met among them, and one cause is named
+    /// once ([`DoctorRegistryReport::new`]).
+    ///
+    /// Nothing refuses it, and nothing it does changes a registration, an
+    /// entry or a vault: the statuses are observations that record no demand
+    /// and schedule nothing. **The sanity pass is `doctor`'s one reading of
+    /// a root's identity** — it states each served root once and lists each
+    /// that resolves — and no lock is held while it does. The statuses read
+    /// inside the vaults as a status does: the two control files of an entry
+    /// serving active fingerprints, and the `.gitignore` of one whose last
+    /// attachment staged shadows in the vault-local fallback.
+    pub fn doctor_registry(&self, _params: &DoctorRegistryParams) -> DoctorRegistryReport {
+        let statuses = self.statuses();
+        let registry = sanity(statuses.iter().map(|status| {
+            (
+                &status.registration.name,
+                status.registration.root.as_path(),
+            )
+        }));
+        let engines = statuses.iter().map(|status| {
+            EngineHealth::new(
+                status.registration.name.clone(),
+                status.section.clone(),
+                status.engine.clone(),
+            )
+        });
+        DoctorRegistryReport::new(RollUp::of(&statuses), registry, engines)
+    }
+}
+
+/// Whether the registry is in order over the served `roots`, given ascending
+/// by name: every root there, readable, and reached by one registration.
+///
+/// **Identity is the classification a recheck runs.** The roots are grouped by
+/// the identity each resolves to through [`roots_by_identity`], and a group
+/// of two or more names is one [`RegistryProblem::DuplicateRoot`] naming them
+/// all, reported at its first name. A root the filesystem answers for with
+/// nothing is [`RegistryProblem::RootMissing`], and one it refuses to answer
+/// for is [`RegistryProblem::RootUnreadable`] carrying the refusal. A root
+/// that resolves is then read the way a registration admits one — it is a
+/// directory, and it lists — and a root that is not is unreadable too, so a
+/// registration whose root became a file or lost its permissions is named.
+///
+/// The problems come in name order. The cost is one stat of every root and,
+/// for each that resolves, one stat and one listing more.
+pub(crate) fn sanity<'a>(
+    roots: impl IntoIterator<Item = (&'a VaultName, &'a Path)>,
+) -> RegistrySanity {
+    let roots: Vec<(&VaultName, &Path)> = roots.into_iter().collect();
+    let mut refused = BTreeMap::<VaultName, String>::new();
+    let Ok(identities) = roots_by_identity(roots.iter().copied(), |name, refusal| {
+        refused.insert(name.clone(), refusal.to_string());
+        Ok::<(), Infallible>(())
+    });
+    let groups: BTreeMap<&VaultName, &BTreeSet<VaultName>> = identities
+        .values()
+        .flat_map(|names| names.iter().map(move |name| (name, names)))
+        .collect();
+    let mut problems = Vec::new();
+    for (name, root) in roots {
+        if let Some(detail) = refused.get(name) {
+            problems.push(RegistryProblem::root_unreadable(
+                name.clone(),
+                detail.clone(),
+            ));
+            continue;
+        }
+        let Some(group) = groups.get(name) else {
+            problems.push(RegistryProblem::root_missing(name.clone()));
+            continue;
+        };
+        if let Err(refusal) = readable_directory(root) {
+            problems.push(RegistryProblem::root_unreadable(
+                name.clone(),
+                refusal.to_string(),
+            ));
+        }
+        if group.first() == Some(name)
+            && let Ok(conflict) = AliasConflict::new(group.iter().cloned())
+        {
+            problems.push(RegistryProblem::duplicate_root(conflict.aliases().clone()));
+        }
+    }
+    RegistrySanity::problems(problems).unwrap_or(RegistrySanity::sound())
 }
 
 /// Why a registration was not recorded in the registry file.
@@ -774,6 +868,93 @@ mod tests {
             Some("notes".to_owned())
         );
         assert_eq!(resolved(&registrations, &tree.path("loop/sub")), None);
+    }
+
+    /// The registry's sanity over `registrations`, as a doctor reads it.
+    fn sanity_over(registrations: &[Entry]) -> RegistrySanity {
+        sanity(
+            registrations
+                .iter()
+                .map(|entry| (&entry.name, entry.root.as_path())),
+        )
+    }
+
+    fn name(name: &str) -> VaultName {
+        VaultName::new(name).unwrap()
+    }
+
+    /// **Registrations each over a root of their own, every root there and
+    /// readable, are a sound registry**, and a registry of none is sound too.
+    #[test]
+    fn roots_of_their_own_that_are_there_and_readable_are_sound() {
+        let tree = Tree::new("sanity-sound");
+        let registrations = [
+            served("notes", &tree.dir("notes")),
+            served("work", &tree.dir("work")),
+        ];
+        assert_eq!(sanity_over(&registrations), RegistrySanity::sound());
+        assert_eq!(sanity_over(&[]), RegistrySanity::sound());
+    }
+
+    /// **Registrations reaching one root are one problem naming them all**,
+    /// however each spells the root.
+    #[cfg(unix)]
+    #[test]
+    fn registrations_reaching_one_root_are_a_duplicate_naming_them_all() {
+        let tree = Tree::new("sanity-duplicate");
+        let shared = tree.dir("shared");
+        let registrations = [
+            served("alpha", &shared),
+            served("beta", &tree.link("alias", &shared)),
+            served("gamma", &tree.dir("gamma")),
+        ];
+        assert_eq!(
+            sanity_over(&registrations),
+            RegistrySanity::problems([RegistryProblem::duplicate_root(
+                NameSet::new([name("alpha"), name("beta")]).unwrap()
+            )])
+            .unwrap()
+        );
+    }
+
+    /// **A root that is not there is missing**, and the registrations beside
+    /// it are judged on their own roots.
+    #[test]
+    fn a_root_that_is_not_there_is_missing() {
+        let tree = Tree::new("sanity-missing");
+        let registrations = [
+            served("gone", &tree.path("gone")),
+            served("notes", &tree.dir("notes")),
+        ];
+        assert_eq!(
+            sanity_over(&registrations),
+            RegistrySanity::problems([RegistryProblem::root_missing(name("gone"))]).unwrap()
+        );
+    }
+
+    /// **A root the filesystem refuses to answer for, and a root that is
+    /// there and is no directory a vault is read from, are unreadable**, each
+    /// carrying what refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_refuses_or_is_no_directory_is_unreadable() {
+        let tree = Tree::new("sanity-unreadable");
+        let looping = tree.link("loop", &tree.path("loop"));
+        let file = tree.path("file");
+        std::fs::write(&file, b"").unwrap();
+        let registrations = [served("file", &file), served("looping", &looping)];
+
+        let RegistrySanity::Problems { problems, .. } = sanity_over(&registrations) else {
+            panic!("a registry over a file and a loop is sound");
+        };
+        let unreadable: Vec<&VaultName> = problems
+            .iter()
+            .map(|problem| match problem {
+                RegistryProblem::RootUnreadable { name, detail, .. } if !detail.is_empty() => name,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(unreadable, [&name("file"), &name("looping")]);
     }
 
     /// A conflict is between at least two registrations, and the floor is the

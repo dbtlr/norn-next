@@ -32,16 +32,12 @@
 //! standing is those two readings disagreeing, and a status that carried only
 //! one of them could not say so.
 //!
-//! **Two readings here are typed before anything produces them.** No call
-//! graph reaches an [`Advisory`] yet: the host does not retain the shadow
-//! home's placement at attach, and that retention is what `doctor` and the
-//! vault-local temporary directory read this seam through. `freshness` on a
-//! standing [`EngineStatus`] is `None` for the same
-//! kind of reason: the host holds the engine's watermarks, and the `status`
-//! handler that judges them against a store reading is what renders one. Both
-//! are spelled now because the shape a status answer takes is not a handler's
-//! to choose, so the handlers that arrive render these rather than minting
-//! readings of their own.
+//! **An advisory is what the entry's last attachment met.** The host records
+//! the advisories an attachment carries when it publishes that attachment,
+//! and keeps them past its release, so an unattached entry reports what its
+//! last attach met and an entry that has not attached reports none. Not every
+//! advisory wants attention: [`Advisory::wants_attention`] says which a
+//! roll-up names its vault for.
 //!
 //! **A roll-up is derived on the writing side and checked on the reading
 //! side.** [`RollUp::of`] computes the counts and the attention from a list of
@@ -149,16 +145,6 @@ impl Published {
     /// The entry publishes the `refusal` it is parked under.
     pub const fn parked(refusal: ErrorEnvelope) -> Self {
         Published::Parked { refusal }
-    }
-
-    /// The published demand as an answer for the entry renders it: a trust
-    /// state where the entry answers with one, and the park's own refusal
-    /// where it does not.
-    pub fn of(answer: Result<TrustState, ErrorEnvelope>) -> Self {
-        match answer {
-            Ok(state) => Published::state(state),
-            Err(refusal) => Published::parked(refusal),
-        }
     }
 }
 
@@ -325,6 +311,23 @@ pub enum Advisory {
 }
 
 impl Advisory {
+    /// Whether a roll-up names the vault carrying this advisory as wanting
+    /// attention for it.
+    ///
+    /// A fallback the vault ignores wants none: what is staged there is
+    /// passed over by the vault's own tooling, and the status reporting it is
+    /// where an operator reads that it is in use. A fallback the vault does
+    /// not ignore does, because that tooling commits and syncs what is staged
+    /// there. A link that was not walked does, because nothing behind it is
+    /// served. The match carries no wildcard, so an advisory minted without a
+    /// stance here does not compile.
+    pub const fn wants_attention(&self) -> bool {
+        match self {
+            Advisory::TmpFallbackInUse { gitignored, .. } => !*gitignored,
+            Advisory::SymlinkSkipped { .. } => true,
+        }
+    }
+
     /// The vault-local shadow home at `path` is in use, ignored by the vault
     /// or not.
     pub fn tmp_fallback_in_use(path: impl Into<String>, gitignored: bool) -> Self {
@@ -399,7 +402,7 @@ pub enum Attention {
         /// Clients never match on it.
         detail: String,
     },
-    /// The vault carries an advisory.
+    /// The vault carries an advisory that wants attention.
     #[non_exhaustive]
     Advisory {
         /// The vault.
@@ -479,8 +482,9 @@ pub struct VaultStatus {
     /// authoring fact beside the slot fact above: a config that enables an
     /// engine which is not standing is the two disagreeing.
     pub section: EngineSection,
-    /// What is worth telling an operator about this vault's serving. Empty
-    /// where there is nothing.
+    /// What is worth telling an operator about this vault's serving, as the
+    /// entry's last attachment met it. Empty where there is nothing, and
+    /// where the entry has not attached.
     pub advisories: Vec<Advisory>,
 }
 
@@ -556,7 +560,23 @@ impl VaultStatus {
         }
     }
 
+    /// Whether `reason` is the environmental refusal telling this entry's
+    /// last reload failure: the untrusted state an entry publishes for a
+    /// control file its leg could not read or apply carries that failure's
+    /// own words.
+    fn tells_last_reload_failure(&self, reason: &UntrustedReason) -> bool {
+        matches!(
+            (reason, &self.last_reload_failure),
+            (UntrustedReason::EnvironmentalRefusal { detail }, Some(failure))
+                if *detail == failure.detail
+        )
+    }
+
     /// Everything about this entry a roll-up names as wanting attention.
+    ///
+    /// **One cause is named once.** An untrusted state telling the last
+    /// reload failure is that failure, and is named as the reload failure
+    /// alone, which says which control file refused and where.
     fn attention(&self) -> Vec<Attention> {
         let mut attention = Vec::new();
         match &self.published {
@@ -568,7 +588,7 @@ impl VaultStatus {
             }
             Published::State {
                 state: TrustState::Untrusted { reason },
-            } => {
+            } if !self.tells_last_reload_failure(reason) => {
                 attention.push(Attention::untrusted(
                     self.registration.name.clone(),
                     reason.clone(),
@@ -598,9 +618,12 @@ impl VaultStatus {
             ));
         }
         attention.extend(
-            self.advisories.iter().map(|advisory| {
-                Attention::advisory(self.registration.name.clone(), advisory.clone())
-            }),
+            self.advisories
+                .iter()
+                .filter(|advisory| advisory.wants_attention())
+                .map(|advisory| {
+                    Attention::advisory(self.registration.name.clone(), advisory.clone())
+                }),
         );
         attention
     }
@@ -706,6 +729,13 @@ impl RollUp {
     /// Every vault that wants attention, and what about it.
     pub fn attention(&self) -> &[Attention] {
         &self.attention
+    }
+
+    /// This roll-up, keeping only the attention reasons `keep` accepts. The
+    /// counts are unchanged.
+    pub(crate) fn retaining_attention(mut self, keep: impl FnMut(&Attention) -> bool) -> Self {
+        self.attention.retain(keep);
+        self
     }
 }
 

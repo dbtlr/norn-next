@@ -194,8 +194,8 @@ pub enum ReloadRefusal {
 
 /// The retained core reload facts for one served vault.
 ///
-/// Read through [`crate::Host::inspect`] by the vault status verb the Layer 3
-/// verb charter places; retained here so that consumer finds them without
+/// Read through [`crate::Host::inspect`], and reported by `vault status` out
+/// of the same observation; retained so a status finds them without
 /// re-reading a control file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultInspection {
@@ -211,19 +211,72 @@ pub struct VaultInspection {
     /// itself, so a status answer says "served, reads refusing, and this is
     /// why" rather than leaving a client to infer it from a refused read.
     pub reader_unavailable: Option<crate::ReaderUnavailable>,
+    /// What the entry's last attachment met in its environment that is worth
+    /// telling an operator: the advisories [`crate::EntryOps::advisories`]
+    /// read at its last publication, kept past the release of its coverage.
+    pub advisories: Vec<crate::AttachmentAdvisory>,
 }
 
 /// The authored control-file state relative to the active fingerprints.
 ///
-/// Answered through [`crate::Host::authored_drift`] for the same vault status
-/// verb: the reading that says a reload is pending, since no watcher event ever
-/// will.
+/// Answered through [`crate::Host::authored_drift`] and reported by `vault
+/// status`: the reading that says a reload is pending, since no watcher event
+/// ever will.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AuthoredDrift {
     Inactive,
     Current,
     ReloadPending,
     Unreadable(ReloadError),
+}
+
+impl AuthoredDrift {
+    /// The authored control files of `registration` against `active`, read
+    /// now from `control_root` — the root the active controls were read
+    /// from — or from the registered root where the entry holds none.
+    ///
+    /// No active fingerprints is an entry serving no controls yet, which
+    /// reads nothing. Otherwise both files are fingerprinted without being
+    /// parsed, outside any lock.
+    ///
+    /// **Both are read whole, with no bound.** No size contract binds a
+    /// control file: an attach, a recovery and a reload read the same two
+    /// files whole to serve under them. So a status reads no more than the
+    /// next reload of the same files would, and a bound here would report as
+    /// unreadable a file the entry serves under. What a status pays for the
+    /// drift is linear in the two files' size, which is the vault author's.
+    pub(crate) fn of(
+        registration: &Registration,
+        active: Option<ActiveFingerprints>,
+        control_root: Option<&Path>,
+    ) -> Self {
+        let Some(active) = active else {
+            return AuthoredDrift::Inactive;
+        };
+        match ReloadCandidate::authored_fingerprints_at(
+            registration,
+            control_root.unwrap_or_else(|| registration.root.as_path()),
+        ) {
+            Ok(authored) if authored == active => AuthoredDrift::Current,
+            Ok(_) => AuthoredDrift::ReloadPending,
+            Err(error) => AuthoredDrift::Unreadable(error),
+        }
+    }
+}
+
+impl From<AuthoredDrift> for norn_wire::Drift {
+    /// The drift as a status reports it, an unreadable file named by the
+    /// control-file failure a refused reload names it by.
+    fn from(drift: AuthoredDrift) -> Self {
+        match drift {
+            AuthoredDrift::Inactive => norn_wire::Drift::inactive(),
+            AuthoredDrift::Current => norn_wire::Drift::current(),
+            AuthoredDrift::ReloadPending => norn_wire::Drift::reload_pending(),
+            AuthoredDrift::Unreadable(error) => {
+                norn_wire::Drift::unreadable(crate::refusal::control_file_failure(&error))
+            }
+        }
+    }
 }
 
 /// One fully read and core-validated reload candidate.

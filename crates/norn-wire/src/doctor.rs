@@ -18,7 +18,9 @@
 //! **The roll-up's attention reasons include what each vault's advisories
 //! raise.** An [`Advisory`](crate::Advisory) is something about a vault's
 //! serving worth telling an operator that is neither a refusal nor a move of
-//! its trust state, and a roll-up names one vault per advisory it carries.
+//! its trust state, and a roll-up names one vault per advisory it carries that
+//! [wants attention](crate::Advisory::wants_attention) — among them a
+//! vault-local shadow fallback the vault does not ignore.
 //!
 //! **The engine slot and the delivered section sit together**, as they do on
 //! a vault status: a config that enables an engine which is not standing is
@@ -34,10 +36,10 @@ use std::fmt;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::error::NameSet;
+use crate::error::{NameSet, ReasonCode};
 use crate::name::VaultName;
 use crate::reading::EngineSection;
-use crate::status::{EngineStatus, RollUp};
+use crate::status::{Attention, EngineStatus, RollUp};
 
 /// What a `doctor` request carries: nothing.
 ///
@@ -163,6 +165,28 @@ impl RegistrySanity {
         }
         Ok(RegistrySanity::Problems { problems })
     }
+
+    /// Whether a problem this reading names is the cause `attention` names:
+    /// a park on a duplicate root, for a name a duplicate root here names, or
+    /// the park an entry raises when it cannot read its root's identity, for
+    /// a name whose root is missing or unreadable here.
+    fn owns(&self, attention: &Attention) -> bool {
+        let RegistrySanity::Problems { problems } = self else {
+            return false;
+        };
+        let Attention::Parked { name, code } = attention else {
+            return false;
+        };
+        problems.iter().any(|problem| match problem {
+            RegistryProblem::DuplicateRoot { aliases } => {
+                *code == ReasonCode::HostDuplicateRoot && aliases.names().contains(name)
+            }
+            RegistryProblem::RootUnreadable { name: named, .. }
+            | RegistryProblem::RootMissing { name: named } => {
+                *code == ReasonCode::HostEntryUntrusted && named == name
+            }
+        })
+    }
 }
 
 impl JsonSchema for RegistrySanity {
@@ -275,7 +299,8 @@ impl EngineHealth {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct DoctorRegistryReport {
-    /// What every entry this installation serves adds up to.
+    /// What every entry this installation serves adds up to, less the
+    /// attention a registry problem here names the cause of.
     pub roll_up: RollUp,
     /// Whether the registry itself is in order.
     pub registry: RegistrySanity,
@@ -289,6 +314,14 @@ impl DoctorRegistryReport {
     /// and the health of each `engines` entry, ascending by name. The field
     /// says a producer emits the engines in name order, so the constructor is
     /// what makes this one a producer that does.
+    ///
+    /// **One cause is named once.** A duplicate root is a registry problem,
+    /// so the park it raises on each name the problem names is left out of
+    /// the roll-up's attention; a duplicate-root park on a name no problem
+    /// here names is kept. A missing or unreadable root is one too, so the
+    /// park an entry raises when it cannot read its root's identity is left
+    /// out for each name such a problem names, and kept for any other name.
+    /// The counts are the roll-up's own.
     pub fn new(
         roll_up: RollUp,
         registry: RegistrySanity,
@@ -296,6 +329,7 @@ impl DoctorRegistryReport {
     ) -> Self {
         let mut engines: Vec<EngineHealth> = engines.into_iter().collect();
         engines.sort_by(|left, right| left.name.cmp(&right.name));
+        let roll_up = roll_up.retaining_attention(|attention| !registry.owns(attention));
         DoctorRegistryReport {
             roll_up,
             registry,

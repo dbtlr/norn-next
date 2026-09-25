@@ -17,6 +17,7 @@ mod registry;
 mod reload;
 mod search;
 mod semantic;
+mod status;
 mod text;
 
 pub use derivation::DERIVATION_VERSION;
@@ -76,3 +77,4 @@ pub use semantic::{
     SemanticAnswer, SemanticEngines, SemanticRefusal, SemanticStatus, compose_vector_refusal,
     freshness,
 };
+pub use status::AttachmentAdvisory;

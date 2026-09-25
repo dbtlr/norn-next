@@ -1,6 +1,6 @@
 //! Atomic observation of one file below one anchor directory.
 
-use std::io;
+use std::io::{self, Read};
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
@@ -128,25 +128,68 @@ pub fn read_if_present_and_hash(
     }
 }
 
+/// What a read of at most a bound's bytes of one file found.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Bounded {
+    /// The whole file, which is no longer than the bound.
+    Whole(Vec<u8>),
+    /// The file holds more than the bound, and nothing past it was read.
+    Longer,
+}
+
+/// Reads the regular file `relative` names below `anchor` where it holds at
+/// most `bound` bytes, answers [`Bounded::Longer`] where it holds more, or
+/// answers that there is no such file.
+///
+/// The same containment and the same stance on an unreached name as
+/// [`read_if_present_and_hash`]: only a missing path is `None`, and a link, a
+/// directory, a pipe or a socket is a refusal, reached without waiting on a
+/// pipe's writer. At most `bound` bytes and one more are read, and nothing is
+/// hashed.
+pub(crate) fn read_if_present_bounded(
+    anchor: &Path,
+    relative: &Path,
+    bound: usize,
+) -> Result<Option<Bounded>, Refusal> {
+    let path = anchor.join(relative);
+    let mut file = match reach(anchor, relative, &path)? {
+        Ok(file) => file,
+        Err(unreached) if unreached.error().kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(unreached) => {
+            return Err(environment_at(
+                unreached.operation(),
+                &path,
+                unreached.component(),
+                unreached.error(),
+            ));
+        }
+    };
+    let mut bytes = Vec::new();
+    let limit = u64::try_from(bound).unwrap_or(u64::MAX).saturating_add(1);
+    (&mut file)
+        .take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| environment("reading", &path, &error))?;
+    Ok(Some(if bytes.len() > bound {
+        Bounded::Longer
+    } else {
+        Bounded::Whole(bytes)
+    }))
+}
+
 /// One observation, before either caller decides what an unreached name means.
 enum Observed {
     Read(ReadAndHash),
     Nothing(Unreached),
 }
 
-#[allow(clippy::disallowed_types)] // norn-fs owns file handles.
 fn observe(anchor: &Path, relative: &Path, path: &Path) -> Result<Observed, Refusal> {
-    let anchor_fd = open(anchor, anchor_flags(), Mode::empty())
-        .map_err(|errno| environment("opening directory", anchor, &errno_error(errno)))?;
-    let reached = open_regular_at(anchor_fd.as_fd(), relative).map_err(|error| {
-        let (operation, component) = (error.operation(), error.component().to_owned());
-        environment_at(operation, path, &component, &error.into_error())
-    })?;
-    let fd = match reached {
-        Reached::Regular(fd) => fd,
-        Reached::Nothing(unreached) => return Ok(Observed::Nothing(unreached)),
+    let mut file = match reach(anchor, relative, path)? {
+        Ok(file) => file,
+        Err(unreached) => return Ok(Observed::Nothing(unreached)),
     };
-    let mut file = std::fs::File::from(fd);
     let (bytes, content_hash) =
         read_bytes_and_hash(&mut file).map_err(|error| environment("reading", path, &error))?;
     Ok(Observed::Read(ReadAndHash {
@@ -154,6 +197,26 @@ fn observe(anchor: &Path, relative: &Path, path: &Path) -> Result<Observed, Refu
         bytes,
         content_hash,
     }))
+}
+
+/// The regular file `relative` names below `anchor`, opened through the
+/// contained open, or the fact about the name that stopped the descent.
+#[allow(clippy::disallowed_types)] // norn-fs owns file handles.
+fn reach(
+    anchor: &Path,
+    relative: &Path,
+    path: &Path,
+) -> Result<Result<std::fs::File, Unreached>, Refusal> {
+    let anchor_fd = open(anchor, anchor_flags(), Mode::empty())
+        .map_err(|errno| environment("opening directory", anchor, &errno_error(errno)))?;
+    let reached = open_regular_at(anchor_fd.as_fd(), relative).map_err(|error| {
+        let (operation, component) = (error.operation(), error.component().to_owned());
+        environment_at(operation, path, &component, &error.into_error())
+    })?;
+    Ok(match reached {
+        Reached::Regular(fd) => Ok(std::fs::File::from(fd)),
+        Reached::Nothing(unreached) => Err(unreached),
+    })
 }
 
 fn errno_error(errno: rustix::io::Errno) -> io::Error {

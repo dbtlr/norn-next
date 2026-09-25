@@ -1446,7 +1446,7 @@ fn a_rung_a_freshness_and_a_section_advertise_their_vocabularies() {
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<EngineSection>(), "state")),
-        sorted(["absent", "disabled", "malformed", "enabled"])
+        sorted(["undelivered", "absent", "disabled", "malformed", "enabled"])
     );
 }
 

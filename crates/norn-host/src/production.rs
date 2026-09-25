@@ -14,9 +14,9 @@ use norn_fs::{
     watch, watch_polling,
 };
 use norn_store::{
-    Change, ContentModel, DerivedFinding, DirectoryPrefix, DocumentPath, FindingFacts,
-    IncrementProvenance, Provenance, RebuildReason, SchemaPin, Store, StoreError, StoredDocument,
-    StoredPathOrder, SubjectScope,
+    Change, ContentModel, DerivedFinding, DirectoryPrefix, DocumentPath, FeedRead, FindingFacts,
+    IncrementProvenance, Provenance, RebuildReason, SchemaPin, Store, StoreError, StoreReading,
+    StoredDocument, StoredPathOrder, SubjectScope,
 };
 use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, UntrustedReason, VaultName};
 
@@ -27,9 +27,9 @@ use crate::derivation::{
 use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
-    EntryOps, Established, Establishment, Healing, JobFailure, MintedReader, ProgressReporter,
-    ReadSource, ReaderUnavailable, ReconcileWork, RecordRefusal, RegistryUnwritable, ReloadError,
-    ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
+    AttachmentAdvisory, EntryOps, Established, Establishment, Healing, JobFailure, MintedReader,
+    ProgressReporter, ReadSource, ReaderUnavailable, ReconcileWork, RecordRefusal,
+    RegistryUnwritable, ReloadError, ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
 };
 
 /// The derived database's file, inside the vault's derived directory.
@@ -45,6 +45,17 @@ const DATA_TMP: &str = "tmp";
 
 /// Maximum number of document changes materialized for one store transaction.
 pub const MAX_CHANGESET_SIZE: usize = 1024;
+/// How many of the symbolic links a walk of the whole vault passed over an
+/// attachment names in its advisories.
+///
+/// An authored bound rather than a measured one. The advisory tells an
+/// operator that the links under a vault root are not walked, and names the
+/// first of them in path order so they can be found and judged; a vault
+/// holding many links is told the same thing by the first few. A list that
+/// grew with the vault would make an attachment's retained state, and every
+/// status report and roll-up that carries it, grow with the vault too, which
+/// the memory invariant rules out.
+const SKIPPED_LINKS_RETAINED: usize = 16;
 /// How long an attachment goes between verifications of its own derived state.
 ///
 /// An authored bound rather than a measured one. `PRAGMA integrity_check` reads
@@ -198,7 +209,19 @@ pub struct ProductionAttachment {
     /// site: successful writes stay beside coverage so their watcher echoes
     /// can be hash-confirmed without hiding external edits.
     _own_writes: OwnWrites,
-    _shadows: ShadowHome,
+    /// Where this maintainership's shadows are staged, resolved when coverage
+    /// is installed. Its placement is read three ways: a walk excludes a
+    /// fallback home by its root, maintenance sweeps it, and
+    /// `shadow_advisory` is what it says to an operator.
+    shadows: ShadowHome,
+    /// The advisory the shadow placement raises: the vault-local fallback in
+    /// use, resolved with the placement. `None` where the home is under the
+    /// data root. Whether the vault ignores the fallback is read when a
+    /// status reports it, not here.
+    shadow_advisory: Option<AttachmentAdvisory>,
+    /// The first symbolic links the last walk of the whole vault passed over,
+    /// in path order and at most [`SKIPPED_LINKS_RETAINED`] of them.
+    skipped_links: SkippedLinks,
     last_shadow_sweep: Instant,
     /// When the store is next asked to answer for its own consistency.
     ///
@@ -388,13 +411,229 @@ impl ProductionEntryOps {
         self
     }
 
-    /// The post-leg nudge: lane-1 work just committed, so the vault's engine
+    /// The post-leg nudge: lane-1 work just committed, so the leg records
+    /// where the store stands through `progress` and the vault's engine then
     /// pulls the feed on this same worker leg. Engine trouble never fails
     /// the leg — the engines retain their own diagnostics.
-    fn drain_semantic(&self, name: &VaultName, attachment: &mut ProductionAttachment) {
+    ///
+    /// The reading is recorded ahead of the drain, so a status taken while
+    /// the drain runs judges the engine against the work this leg committed
+    /// and reports it trailing, as a search would. A host that composes no
+    /// engine judges no engine, records nothing and drains nothing.
+    fn drain_semantic(
+        &self,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) {
         if let Some(semantic) = &self.semantic {
-            semantic.drain(name, &mut attachment.store.feed_read());
+            let mut feed = self.record_store_reading(attachment, progress);
+            semantic.drain(name, &mut feed);
         }
+    }
+
+    /// Record where `attachment`'s lane-1 store stands through `progress`,
+    /// and hand back the feed-read handle the reading was taken over. A
+    /// reading that cannot be taken is recorded as none, which is nothing to
+    /// judge against.
+    fn record_store_reading<'a>(
+        &self,
+        attachment: &'a mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> FeedRead<'a> {
+        let mut feed = attachment.store.feed_read();
+        let reading = feed
+            .write_generation()
+            .ok()
+            .map(|generation| StoreReading::of(feed.epoch(), generation));
+        progress.record_store_reading(reading);
+        feed
+    }
+
+    /// The end of a leg that keeps `attachment`: a leg that failed records
+    /// where the store stands, since lane-1 work it committed before the
+    /// failure is work no drain has reached. The coverage it leaves holds
+    /// the engine its attachment was delivered, and a status judges that
+    /// engine against this reading. A leg that succeeded recorded its
+    /// reading ahead of its drain. A host that composes no engine records
+    /// nothing.
+    fn leg_ended<T, E>(
+        &self,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+        ended: Result<T, E>,
+    ) -> Result<T, E> {
+        if ended.is_err() && self.semantic.is_some() {
+            self.record_store_reading(attachment, progress);
+        }
+        ended
+    }
+
+    /// The work of [`EntryOps::reconcile`], whose end [`Self::leg_ended`]
+    /// records.
+    fn reconcile_leg(
+        &self,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        work: ReconcileWork,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<(), JobFailure> {
+        let _job = self.evidence.attributing();
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
+            return Err(JobFailure::LostMaintainership);
+        }
+        // A reconcile derives document changes under the active schema. Schema
+        // watcher facts are inert; only an explicit vault reload can replace
+        // the active pin.
+        if work.batch.rescans().contains(&RescanScope::Vault) {
+            self.heal(attachment, progress)?;
+            self.drain_semantic(name, attachment, progress);
+            return Ok(());
+        }
+        let healing = progress.healing();
+        scoped_increment(
+            &mut attachment.store,
+            &attachment.covered_root,
+            work.batch.vault_roots(),
+            self.policy,
+            &healing,
+            &exclusions_at(
+                &attachment.registration,
+                &attachment.shadows,
+                &attachment.covered_root,
+            ),
+        )?;
+        self.drain_semantic(name, attachment, progress);
+        Ok(())
+    }
+
+    /// The work of [`EntryOps::recover`], whose end [`Self::leg_ended`]
+    /// records.
+    fn recover_leg(
+        &self,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<(), JobFailure> {
+        attachment.drop_controls_held_for_rung_three();
+        let _job = self.evidence.attributing();
+        self.evidence.count_recovery();
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
+            return Err(JobFailure::LostMaintainership);
+        }
+        // Recovery re-installs coverage before it re-heals, so it enters the
+        // same prologue phase an attach does.
+        progress.installing_coverage();
+        let schema = Self::schema_path(&attachment.registration);
+        let (subscription, own_writes) =
+            Self::start_watch(&attachment.registration, &schema).map_err(watcher)?;
+        subscription
+            .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
+            .map_err(watcher)?;
+        let covered_root = subscription.covered_root().to_owned();
+        let candidate = ReloadCandidate::read_at(&attachment.registration, &covered_root)
+            .map_err(JobFailure::Reload)?;
+        let derived = self.derived(&attachment.registration.name);
+        let key = maintainership_key(&self.dirs, &attachment.registration.name);
+        let shadows = ShadowHome::resolve(&covered_root, &derived.join(DATA_TMP), &key)
+            .map_err(data_dir_effect)?;
+        shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
+        attachment.subscription = Some(subscription);
+        attachment._own_writes = own_writes;
+        attachment.shadow_advisory = fallback_advisory(&shadows, &covered_root);
+        attachment.shadows = shadows;
+        attachment.covered_root = covered_root;
+        // The first point a recovery holds both the order its new coverage
+        // proved and the store it will derive into, and the judgment is taken
+        // whatever the declaration says. A store derived under the other order
+        // holds rows under another document identity — which spellings are
+        // one row — with its finding classes filed in another key space, so
+        // nothing is pinned or derived into it and no read is served from it:
+        // it owes rung 3, which discards it and derives the vault again under
+        // the order this coverage proved, where the declaration read here
+        // lets it derive at all, and delivers that declaration's config once
+        // the rebuild has pinned it.
+        if let Some(reason) = attachment.path_order_moved() {
+            attachment.hold_for_rung_three(candidate);
+            return Err(JobFailure::StoreDamaged(reason.to_string()));
+        }
+        if candidate.undeclarable().is_some() {
+            // The same stance the attach takes: coverage is re-installed, the
+            // schema is re-read, and a declaration this build still cannot read
+            // pins nothing and derives nothing. A recovery run after the schema
+            // is corrected is what returns the vault to service.
+            attachment.controls = candidate;
+            return Ok(());
+        }
+        attachment.pin(&candidate)?;
+        attachment.controls = candidate;
+        self.dispatch_config(attachment);
+        self.heal_under_coverage(attachment, progress)?;
+        self.drain_semantic(name, attachment, progress);
+        Ok(())
+    }
+
+    /// The work of [`EntryOps::reload`], whose end [`Self::leg_ended`]
+    /// records.
+    fn reload_leg(
+        &self,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
+        attachment.drop_controls_held_for_rung_three();
+        let _job = self.evidence.attributing();
+        let (candidate, judgment) = Self::judge_candidate(attachment)?;
+        // A store whose rows were derived under another order than the
+        // coverage proved is neither pinned nor derived into here: it owes
+        // rung 3, which derives the vault again under the proven order and
+        // under the declaration this reload read, and delivers that
+        // declaration's config once the rebuild has pinned it.
+        if let Some(reason) = attachment.path_order_moved() {
+            attachment.hold_for_rung_three(candidate);
+            return Err(JobFailure::StoreDamaged(reason.to_string()).into());
+        }
+        if judgment.outcome == ReloadOutcome::ConfigOnly {
+            attachment.controls = candidate;
+            self.dispatch_config(attachment);
+            self.drain_semantic(name, attachment, progress);
+            return Ok(judgment);
+        }
+
+        progress.begin_schema_reload();
+        // A pin the store refused leaves the store pinning the schema the
+        // entry serves under, so the refusal is the schema's to report and
+        // the entry keeps serving.
+        Self::pin_candidate(&mut attachment.store, &candidate).map_err(
+            |failure| match failure {
+                JobFailure::Environmental(detail) => {
+                    JobFailure::Reload(ReloadError::SchemaApply(detail))
+                }
+                other => other,
+            },
+        )?;
+        // **From here the store pins the candidate**, so the controls are the
+        // candidate's before anything else can fail: a rebuild owed below pins
+        // the controls the attachment holds. A failure to read the pin back is
+        // not the schema's. It would leave the entry serving the model of a
+        // schema its store no longer pins, so it keeps its own class — the
+        // environment refusing, which untrusts the entry and owes a recovery
+        // that pins and reads the schema again, or damage, which owes a
+        // rebuild — and is never a refused apply that leaves the entry serving.
+        attachment.controls = candidate;
+        attachment.read_pinned_model()?;
+        self.dispatch_config(attachment);
+        self.heal_under_coverage(attachment, progress)?;
+        self.drain_semantic(name, attachment, progress);
+        Ok(judgment)
     }
 
     /// Deliver the config of the controls the attachment holds to every
@@ -597,19 +836,20 @@ impl ProductionEntryOps {
         let healing = progress.healing();
         let exclusions = exclusions_at(
             &attachment.registration,
-            &attachment._shadows,
+            &attachment.shadows,
             &attachment.covered_root,
         );
         // The caller pins the candidate before this walk, so every finding
         // below records the active schema fingerprint and every document is
         // judged under the declaration that fingerprint names.
-        heal_documents(
+        attachment.skipped_links = heal_documents(
             &mut attachment.store,
             &attachment.covered_root,
             &exclusions,
             self.policy,
             &healing,
-        )
+        )?;
+        Ok(())
     }
 
     /// Run one hash-authoritative heal against coverage that is already live,
@@ -826,6 +1066,60 @@ fn shadow_exclusion(placement: Placement, home: &Path, root: &Path) -> Option<Pa
     }
 }
 
+/// The advisory `shadows` raises over the vault at `root`: the vault-local
+/// fallback in use, or nothing where the home is under the data root.
+///
+/// The fallback is a directory inside the vault, so a vault kept in git
+/// commits staged shadows unless it ignores them. Whether it does is read
+/// from the vault's `.gitignore` when a status reports the advisory
+/// ([`crate::status::reported_advisories`]), so this records the placement
+/// alone.
+///
+/// The home is named vault-relative, the way a walk names every path under
+/// the root, so the advisory spells the same directory whichever spelling of
+/// the root the vault was registered under.
+fn fallback_advisory(shadows: &ShadowHome, root: &Path) -> Option<AttachmentAdvisory> {
+    placement_advisory(shadows.placement(), shadows.directory(), root)
+}
+
+/// [`fallback_advisory`] over the placement's parts, which is what a case
+/// reaches the fallback arm through on a machine with one filesystem.
+fn placement_advisory(
+    placement: Placement,
+    home: &Path,
+    root: &Path,
+) -> Option<AttachmentAdvisory> {
+    match placement {
+        Placement::DataRoot => None,
+        Placement::VaultFallback => Some(AttachmentAdvisory::TmpFallbackInUse {
+            home: home
+                .strip_prefix(root)
+                .unwrap_or(home)
+                .to_string_lossy()
+                .into_owned(),
+        }),
+    }
+}
+
+/// The first [`SKIPPED_LINKS_RETAINED`] symbolic links one walk passed over,
+/// vault-relative, in the order the walk yielded them — which is path order.
+#[derive(Debug, Default)]
+struct SkippedLinks(Vec<PathBuf>);
+
+impl SkippedLinks {
+    /// Record `link`, where fewer than the bound are recorded already.
+    fn saw(&mut self, link: &Path) {
+        if self.0.len() < SKIPPED_LINKS_RETAINED {
+            self.0.push(link.to_owned());
+        }
+    }
+
+    /// The links recorded, in the order they were seen.
+    fn links(&self) -> impl Iterator<Item = &Path> {
+        self.0.iter().map(PathBuf::as_path)
+    }
+}
+
 /// The key this entry's maintainer lock and shadow home are both taken under.
 ///
 /// One join, in one place, so that the home is keyed by the same three
@@ -875,6 +1169,7 @@ impl EntryOps for ProductionEntryOps {
         let shadows =
             ShadowHome::resolve(root, &derived.join(DATA_TMP), &key).map_err(data_dir_effect)?;
         shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
+        let shadow_advisory = fallback_advisory(&shadows, root);
         if shadows.placement() == Placement::VaultFallback {
             // Residue no key's own sweep will ever open again: what a build that
             // staged before homes were keyed left directly under the fallback
@@ -915,7 +1210,9 @@ impl EntryOps for ProductionEntryOps {
             subscription: Some(subscription),
             heal_observed: norn_fs::Batch::default(),
             _own_writes: own_writes,
-            _shadows: shadows,
+            shadows,
+            shadow_advisory,
+            skipped_links: SkippedLinks::default(),
             last_shadow_sweep: Instant::now(),
             store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
         };
@@ -941,7 +1238,7 @@ impl EntryOps for ProductionEntryOps {
             Err(failure) => Err(failure),
         }?;
         self.dispatch_config(&mut attached);
-        self.drain_semantic(&registration.name, &mut attached);
+        self.drain_semantic(&registration.name, &mut attached, progress);
         Ok(attached)
     }
 
@@ -952,37 +1249,8 @@ impl EntryOps for ProductionEntryOps {
         work: ReconcileWork,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
-        let _job = self.evidence.attributing();
-        if !attachment
-            .maintainership
-            .still_current()
-            .map_err(data_dir_effect)?
-        {
-            return Err(JobFailure::LostMaintainership);
-        }
-        // A reconcile derives document changes under the active schema. Schema
-        // watcher facts are inert; only an explicit vault reload can replace
-        // the active pin.
-        if work.batch.rescans().contains(&RescanScope::Vault) {
-            self.heal(attachment, progress)?;
-            self.drain_semantic(name, attachment);
-            return Ok(());
-        }
-        let healing = progress.healing();
-        scoped_increment(
-            &mut attachment.store,
-            &attachment.covered_root,
-            work.batch.vault_roots(),
-            self.policy,
-            &healing,
-            &exclusions_at(
-                &attachment.registration,
-                &attachment._shadows,
-                &attachment.covered_root,
-            ),
-        )?;
-        self.drain_semantic(name, attachment);
-        Ok(())
+        let ended = self.reconcile_leg(name, attachment, work, progress);
+        self.leg_ended(attachment, progress, ended)
     }
 
     fn recover(
@@ -991,65 +1259,8 @@ impl EntryOps for ProductionEntryOps {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
-        attachment.drop_controls_held_for_rung_three();
-        let _job = self.evidence.attributing();
-        self.evidence.count_recovery();
-        if !attachment
-            .maintainership
-            .still_current()
-            .map_err(data_dir_effect)?
-        {
-            return Err(JobFailure::LostMaintainership);
-        }
-        // Recovery re-installs coverage before it re-heals, so it enters the
-        // same prologue phase an attach does.
-        progress.installing_coverage();
-        let schema = Self::schema_path(&attachment.registration);
-        let (subscription, own_writes) =
-            Self::start_watch(&attachment.registration, &schema).map_err(watcher)?;
-        subscription
-            .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
-            .map_err(watcher)?;
-        let covered_root = subscription.covered_root().to_owned();
-        let candidate = ReloadCandidate::read_at(&attachment.registration, &covered_root)
-            .map_err(JobFailure::Reload)?;
-        let derived = self.derived(&attachment.registration.name);
-        let key = maintainership_key(&self.dirs, &attachment.registration.name);
-        let shadows = ShadowHome::resolve(&covered_root, &derived.join(DATA_TMP), &key)
-            .map_err(data_dir_effect)?;
-        shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
-        attachment.subscription = Some(subscription);
-        attachment._own_writes = own_writes;
-        attachment._shadows = shadows;
-        attachment.covered_root = covered_root;
-        // The first point a recovery holds both the order its new coverage
-        // proved and the store it will derive into, and the judgment is taken
-        // whatever the declaration says. A store derived under the other order
-        // holds rows under another document identity — which spellings are
-        // one row — with its finding classes filed in another key space, so
-        // nothing is pinned or derived into it and no read is served from it:
-        // it owes rung 3, which discards it and derives the vault again under
-        // the order this coverage proved, where the declaration read here
-        // lets it derive at all, and delivers that declaration's config once
-        // the rebuild has pinned it.
-        if let Some(reason) = attachment.path_order_moved() {
-            attachment.hold_for_rung_three(candidate);
-            return Err(JobFailure::StoreDamaged(reason.to_string()));
-        }
-        if candidate.undeclarable().is_some() {
-            // The same stance the attach takes: coverage is re-installed, the
-            // schema is re-read, and a declaration this build still cannot read
-            // pins nothing and derives nothing. A recovery run after the schema
-            // is corrected is what returns the vault to service.
-            attachment.controls = candidate;
-            return Ok(());
-        }
-        attachment.pin(&candidate)?;
-        attachment.controls = candidate;
-        self.dispatch_config(attachment);
-        self.heal_under_coverage(attachment, progress)?;
-        self.drain_semantic(name, attachment);
-        Ok(())
+        let ended = self.recover_leg(name, attachment, progress);
+        self.leg_ended(attachment, progress, ended)
     }
 
     fn reload(
@@ -1058,51 +1269,8 @@ impl EntryOps for ProductionEntryOps {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
-        attachment.drop_controls_held_for_rung_three();
-        let _job = self.evidence.attributing();
-        let (candidate, judgment) = Self::judge_candidate(attachment)?;
-        // A store whose rows were derived under another order than the
-        // coverage proved is neither pinned nor derived into here: it owes
-        // rung 3, which derives the vault again under the proven order and
-        // under the declaration this reload read, and delivers that
-        // declaration's config once the rebuild has pinned it.
-        if let Some(reason) = attachment.path_order_moved() {
-            attachment.hold_for_rung_three(candidate);
-            return Err(JobFailure::StoreDamaged(reason.to_string()).into());
-        }
-        if judgment.outcome == ReloadOutcome::ConfigOnly {
-            attachment.controls = candidate;
-            self.dispatch_config(attachment);
-            self.drain_semantic(name, attachment);
-            return Ok(judgment);
-        }
-
-        progress.begin_schema_reload();
-        // A pin the store refused leaves the store pinning the schema the
-        // entry serves under, so the refusal is the schema's to report and
-        // the entry keeps serving.
-        Self::pin_candidate(&mut attachment.store, &candidate).map_err(
-            |failure| match failure {
-                JobFailure::Environmental(detail) => {
-                    JobFailure::Reload(ReloadError::SchemaApply(detail))
-                }
-                other => other,
-            },
-        )?;
-        // **From here the store pins the candidate**, so the controls are the
-        // candidate's before anything else can fail: a rebuild owed below pins
-        // the controls the attachment holds. A failure to read the pin back is
-        // not the schema's. It would leave the entry serving the model of a
-        // schema its store no longer pins, so it keeps its own class — the
-        // environment refusing, which untrusts the entry and owes a recovery
-        // that pins and reads the schema again, or damage, which owes a
-        // rebuild — and is never a refused apply that leaves the entry serving.
-        attachment.controls = candidate;
-        attachment.read_pinned_model()?;
-        self.dispatch_config(attachment);
-        self.heal_under_coverage(attachment, progress)?;
-        self.drain_semantic(name, attachment);
-        Ok(judgment)
+        let ended = self.reload_leg(name, attachment, progress);
+        self.leg_ended(attachment, progress, ended)
     }
 
     /// The reload's judgment of the candidate, over the attachment as it
@@ -1149,6 +1317,23 @@ impl EntryOps for ProductionEntryOps {
             .controls
             .undeclarable()
             .map(|detail| UntrustedReason::schema_unreadable(detail.to_string()))
+    }
+
+    /// The shadow placement's advisory, where the fallback is in use, and one
+    /// advisory per link the last walk of the whole vault passed over, in
+    /// path order. Both are held on the attachment, read when its coverage
+    /// was installed and when a walk of the whole vault ran.
+    fn advisories(&self, attachment: &Self::Attachment) -> Vec<AttachmentAdvisory> {
+        attachment
+            .shadow_advisory
+            .iter()
+            .cloned()
+            .chain(attachment.skipped_links.links().map(|link| {
+                AttachmentAdvisory::SymlinkSkipped {
+                    path: link.to_string_lossy().into_owned(),
+                }
+            }))
+            .collect()
     }
 
     fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
@@ -1225,7 +1410,7 @@ impl EntryOps for ProductionEntryOps {
                     if rebuilt.config_delivery_owed {
                         self.dispatch_config(&mut rebuilt);
                     }
-                    self.drain_semantic(name, &mut rebuilt);
+                    self.drain_semantic(name, &mut rebuilt, progress);
                     rebuilt
                 })
             }
@@ -1268,7 +1453,7 @@ impl EntryOps for ProductionEntryOps {
         // that cleanup opportunity must not withdraw an otherwise healthy
         // attachment or force a full heal; try again at the next normal cadence.
         if attachment.last_shadow_sweep.elapsed() >= norn_fs::SHADOW_AGE_THRESHOLD {
-            let _ = attachment._shadows.sweep(norn_fs::SHADOW_AGE_THRESHOLD);
+            let _ = attachment.shadows.sweep(norn_fs::SHADOW_AGE_THRESHOLD);
             attachment.last_shadow_sweep = Instant::now();
         }
         // The store's own consistency is the other maintenance question, and it
@@ -1447,13 +1632,15 @@ fn drain_settled(subscription: &norn_fs::Subscription) -> (norn_fs::Batch, Optio
     (settled, None)
 }
 
+/// Heal the whole vault at `root` into `store`, and answer the symbolic links
+/// the walk passed over, as [`SkippedLinks`] records them.
 fn heal_documents(
     store: &mut Store,
     root: &Path,
     exclusions: &[PathBuf],
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
-) -> Result<(), JobFailure> {
+) -> Result<SkippedLinks, JobFailure> {
     let walk = walk(root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
     let mut account = Account::default();
@@ -1468,7 +1655,8 @@ fn heal_documents(
         progress,
         &mut account,
     )?;
-    close_job(store, root, exclusions, policy, &mut account)
+    close_job(store, root, exclusions, policy, &mut account)?;
+    Ok(account.links)
 }
 
 /// Converge the rows a scope addresses against the files a walk of it yields.
@@ -2318,9 +2506,9 @@ where
             Some(Err(error)) => return Err(effect(error)),
             Some(Ok(norn_fs::WalkFact::Skipped(skipped))) => {
                 let root = skipped.path().as_path().to_owned();
-                let stands = skipped.reason().stands();
+                let reason = skipped.reason();
                 files.next();
-                pending.passed_over(&root, stands);
+                pending.passed_over(&root, reason);
                 continue;
             }
             Some(Ok(norn_fs::WalkFact::File(file))) => {
@@ -2463,6 +2651,9 @@ struct Account {
     filed: Filed,
     withheld: Withheld,
     walked: Vec<Walked>,
+    /// The symbolic links the job's walks passed over. A walk of the whole
+    /// vault is what an attachment keeps them from.
+    links: SkippedLinks,
 }
 
 impl Account {
@@ -3131,8 +3322,14 @@ impl<'s> Pending<'s> {
     /// A root that **vanished** is a name nothing here read at all: what is at
     /// it now is a question this walk never asked, so it is absorbed and the
     /// job's prune leaves the findings beneath it standing.
-    fn passed_over(&mut self, root: &Path, stands: bool) {
-        if stands {
+    ///
+    /// A link is recorded among the job's skipped links as well, which is what
+    /// an attachment's advisories name.
+    fn passed_over(&mut self, root: &Path, reason: norn_fs::SkipReason) {
+        if let norn_fs::SkipReason::SymbolicLink(_) = reason {
+            self.account.links.saw(root);
+        }
+        if reason.stands() {
             return;
         }
         self.account.withheld.absorb(root);
@@ -3819,6 +4016,53 @@ mod tests {
                 });
             cursor = found + needle.len();
         }
+    }
+
+    /// **A home under the data root advises nothing, and the vault-local
+    /// fallback advises that it is in use**, named vault-relative. Whether
+    /// the vault ignores it is read when a status reports it, so nothing here
+    /// reads the vault's `.gitignore`.
+    #[test]
+    fn the_fallback_placement_advises_that_it_is_in_use() {
+        let f = Fixture::watcherless("fallback-advisory");
+        let root = f.vault();
+        let home = root.join(norn_fs::FALLBACK).join("key");
+        assert_eq!(
+            placement_advisory(Placement::DataRoot, &f.root.join("data/tmp"), &root),
+            None
+        );
+        assert_eq!(
+            placement_advisory(Placement::VaultFallback, &home, &root),
+            Some(AttachmentAdvisory::TmpFallbackInUse {
+                home: ".norn/tmp/key".to_string()
+            })
+        );
+    }
+
+    /// **An attach advises the links its walk of the vault passed over**,
+    /// vault-relative, in path order, and no more of them than the bound.
+    #[cfg(unix)]
+    #[test]
+    fn an_attach_advises_the_links_its_walk_passed_over_up_to_the_bound() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("advised-links");
+        fs::create_dir(f.vault().join("a")).unwrap();
+        let mut links = vec!["a/inner.md".to_owned()];
+        links.extend((0..SKIPPED_LINKS_RETAINED).map(|n| format!("link-{n:02}.md")));
+        for link in &links {
+            symlink("elsewhere.md", f.vault().join(link)).unwrap();
+        }
+        let (ops, _) = f.ops(64);
+        let attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .expect("an attach over a vault holding links");
+
+        let advised: Vec<AttachmentAdvisory> = links[..SKIPPED_LINKS_RETAINED]
+            .iter()
+            .map(|link| AttachmentAdvisory::SymlinkSkipped { path: link.clone() })
+            .collect();
+        assert_eq!(ops.advisories(&attachment), advised);
     }
 
     /// **The bar on what a walk is told about shadows.** A fallback home is
@@ -5881,6 +6125,812 @@ mod tests {
             assert_eq!(answer.neighbors.len(), 2, "{answer:?}");
             assert_eq!(answer.neighbors[0].path, "docs/beta.md");
         }
+
+        /// Hold `name`'s sidecar from writing or retracting any vector under
+        /// the running engine, so every drain with work to do fails and
+        /// records no watermark.
+        fn hold_the_sidecar(f: &Fixture, name: &VaultName) {
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            let sidecar = dirs.derived_dir(name).join("semantic.sqlite3");
+            match norn_db::connect(&sidecar).expect("connecting to the sidecar") {
+                norn_db::Attempt::Connected(connection) => connection
+                    .execute_batch(
+                        "CREATE TRIGGER held_delete BEFORE DELETE ON document_vectors
+                         BEGIN SELECT RAISE(ABORT, 'the retraction is held'); END;
+                         CREATE TRIGGER held_insert BEFORE INSERT ON document_vectors
+                         BEGIN SELECT RAISE(ABORT, 'the write is held'); END;
+                         CREATE TRIGGER held_update BEFORE UPDATE ON document_vectors
+                         BEGIN SELECT RAISE(ABORT, 'the write is held'); END;",
+                    )
+                    .expect("holding the sidecar"),
+                norn_db::Attempt::Unreadable { detail } => {
+                    panic!("the sidecar is unreadable: {detail}")
+                }
+            }
+        }
+
+        /// A `vault status` of `name`'s own standing.
+        fn engine_reported<O: EntryOps>(
+            host: &crate::Host<O>,
+            name: &VaultName,
+        ) -> (EngineSection, norn_wire::EngineStatus) {
+            let status = super::status::status_of(host, name);
+            (status.section, status.engine)
+        }
+
+        /// **A ready vault whose section enables the engine reports it
+        /// standing, caught up with the store**: the attach's own drain left
+        /// it trailing by nothing, and the section beside it is enabled.
+        #[test]
+        fn a_status_reports_an_enabled_engine_caught_up_with_the_store() {
+            let f = Fixture::new("status-engine-enabled");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("alpha.md"), "alpha alpha\n").unwrap();
+            let (_engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = ready_host(&f, ops);
+
+            assert_eq!(
+                engine_reported(&host, &name),
+                (
+                    EngineSection::enabled(),
+                    norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+                )
+            );
+        }
+
+        /// **`doctor` reports each vault's engine health as its status
+        /// reports its engine**: the delivered section beside what the slot
+        /// is doing.
+        #[test]
+        fn doctor_reports_an_enabled_engine_beside_its_section() {
+            let f = Fixture::new("doctor-engine-enabled");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            let (_engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = ready_host(&f, ops);
+
+            let (section, engine) = engine_reported(&host, &name);
+            assert_eq!(
+                host.doctor_registry(&norn_wire::DoctorRegistryParams::new())
+                    .engines,
+                [norn_wire::EngineHealth::new(name, section, engine.clone())]
+            );
+            assert!(
+                matches!(engine, norn_wire::EngineStatus::On { .. }),
+                "{engine:?}"
+            );
+        }
+
+        /// **A vault whose section asks for no engine reports none standing,
+        /// beside the section that says why**: stated nowhere, turned off,
+        /// or refused by the engine — which takes only the engine out of
+        /// service, and a roll-up names the vault for it.
+        #[test]
+        fn a_status_reports_no_engine_beside_the_section_that_asked_for_none() {
+            for (label, config, section_is, engine_is) in [
+                (
+                    "absent",
+                    None,
+                    (|section: &EngineSection| *section == EngineSection::absent())
+                        as fn(&EngineSection) -> bool,
+                    (|engine: &norn_wire::EngineStatus| *engine == norn_wire::EngineStatus::off())
+                        as fn(&norn_wire::EngineStatus) -> bool,
+                ),
+                (
+                    "disabled",
+                    Some("[engine.semantic]\nenabled = false\n"),
+                    |section| *section == EngineSection::disabled(),
+                    |engine| *engine == norn_wire::EngineStatus::off(),
+                ),
+                (
+                    "malformed",
+                    Some("[engine.semantic]\nenabled = \"yes\"\n"),
+                    |section| matches!(section, EngineSection::Malformed { .. }),
+                    |engine| matches!(engine, norn_wire::EngineStatus::SelfDisabled { .. }),
+                ),
+            ] {
+                let f = Fixture::new(&format!("status-engine-{label}"));
+                if let Some(config) = config {
+                    fs::write(f.vault().join(".norn/config.toml"), config).unwrap();
+                }
+                let (_engines, ops) = engines_and_ops(&f);
+                let (host, name, _lease) = ready_host(&f, ops);
+
+                let (section, engine) = engine_reported(&host, &name);
+                assert!(section_is(&section), "{label}: {section:?}");
+                assert!(engine_is(&engine), "{label}: {engine:?}");
+            }
+        }
+
+        /// A host serving the fixture's vault, ready, whose dispatcher polls
+        /// the watcher every few milliseconds, so an edit reaches a reconcile
+        /// leg without a case driving it.
+        fn polling_ready_host(
+            f: &Fixture,
+            ops: ProductionEntryOps,
+        ) -> (
+            crate::Host<ProductionEntryOps>,
+            VaultName,
+            crate::DemandLease<ProductionEntryOps>,
+        ) {
+            let registration = f.registration();
+            let name = registration.name.clone();
+            let host = crate::Host::new(
+                crate::RegistryRead::from_entries([registration]),
+                ops,
+                crate::LifecyclePolicy {
+                    idle_after: Duration::from_secs(60),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_millis(5),
+                },
+            )
+            .unwrap();
+            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_state(&host, &name, norn_wire::TrustState::Ready);
+            (host, name, lease)
+        }
+
+        /// Wait until `name`'s engine, as `vault status` reports it, is what
+        /// `wanted` accepts.
+        fn wait_for_engine(
+            host: &crate::Host<ProductionEntryOps>,
+            name: &VaultName,
+            wanted: impl Fn(&norn_wire::EngineStatus) -> bool,
+        ) -> norn_wire::EngineStatus {
+            wait_until("the engine a status reports", lifecycle_budget(), || {
+                let (_, engine) = engine_reported(host, name);
+                if wanted(&engine) {
+                    Observed::Met(engine)
+                } else {
+                    Observed::Pending(format!("the engine reports {engine:?}"))
+                }
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"))
+        }
+
+        /// **An engine whose drains fail reports how far it trails the store
+        /// its entry's last leg committed**, beside why the drain failed.
+        #[test]
+        fn an_engine_whose_drain_fails_reports_how_far_it_trails() {
+            let f = Fixture::new("status-engine-trailing");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (_engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = polling_ready_host(&f, ops);
+            hold_the_sidecar(&f, &name);
+
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+
+            wait_for_engine(&host, &name, |engine| {
+                matches!(
+                    engine,
+                    norn_wire::EngineStatus::On {
+                        last_drain_error: Some(_),
+                        freshness: Some(Freshness::Trailing { generations, .. }),
+                        ..
+                    } if *generations > 0
+                )
+            });
+        }
+
+        /// **A leg that commits lane-1 work and then fails leaves the engine
+        /// reported trailing that work**: the leg records where the store
+        /// stands at its end, failure included, so a status never calls an
+        /// engine caught up with a store the failed leg moved on.
+        #[cfg(unix)]
+        #[test]
+        fn a_leg_that_fails_after_committing_reports_the_engine_trailing_its_work() {
+            let f = Fixture::new("status-engine-failed-leg");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
+            let (_engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = ready_host(&f, ops);
+            assert_eq!(
+                engine_reported(&host, &name).1,
+                norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            );
+
+            let denied = f.vault().join("zz.md");
+            if !unreadable_document(&denied) {
+                return;
+            }
+            fs::write(
+                f.vault().join(".norn/schema.yaml"),
+                "version: 1\n# edited\n",
+            )
+            .unwrap();
+            let refused = host.reload(&name);
+            let (_, engine) = engine_reported(&host, &name);
+            readable_again(&denied);
+
+            assert!(
+                matches!(
+                    refused,
+                    Err(crate::ReloadRefusal::Runtime(JobFailure::Environmental(_)))
+                ),
+                "{refused:?}"
+            );
+            // The reload pinned the edited schema as one generation before
+            // its heal met the document it cannot read.
+            assert_eq!(
+                engine,
+                norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
+            );
+        }
+
+        /// Production ops whose poll reports a watcher overflow once the case
+        /// arms it, and reports nothing before then, so the reconcile the
+        /// case drives is one whole-vault rescan over the tree the case built.
+        /// Each recovery that returns is counted.
+        struct OverflowOnArm {
+            inner: ProductionEntryOps,
+            armed: Arc<std::sync::atomic::AtomicBool>,
+            recoveries: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl EntryOps for OverflowOnArm {
+            type Attachment = ProductionAttachment;
+
+            fn attach(
+                &self,
+                registration: &Registration,
+                progress: &ProgressReporter<Self::Attachment>,
+            ) -> Result<Self::Attachment, JobFailure> {
+                self.inner.attach(registration, progress)
+            }
+
+            fn reconcile(
+                &self,
+                name: &VaultName,
+                attachment: &mut Self::Attachment,
+                work: ReconcileWork,
+                progress: &ProgressReporter<Self::Attachment>,
+            ) -> Result<(), JobFailure> {
+                self.inner.reconcile(name, attachment, work, progress)
+            }
+
+            fn recover(
+                &self,
+                name: &VaultName,
+                attachment: &mut Self::Attachment,
+                progress: &ProgressReporter<Self::Attachment>,
+            ) -> Result<(), JobFailure> {
+                let recovered = self.inner.recover(name, attachment, progress);
+                self.recoveries
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                recovered
+            }
+
+            fn active_fingerprints(
+                &self,
+                attachment: &Self::Attachment,
+            ) -> Option<crate::reload::ActiveFingerprints> {
+                self.inner.active_fingerprints(attachment)
+            }
+
+            fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf> {
+                self.inner.control_root(attachment)
+            }
+
+            fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+                self.inner.active_content_model(attachment)
+            }
+
+            fn withheld_trust(&self, attachment: &Self::Attachment) -> Option<UntrustedReason> {
+                self.inner.withheld_trust(attachment)
+            }
+
+            fn semantic(&self) -> Option<&SemanticEngines> {
+                self.inner.semantic()
+            }
+
+            fn rebuild(
+                &self,
+                name: &VaultName,
+                attachment: Self::Attachment,
+                progress: &ProgressReporter<Self::Attachment>,
+            ) -> Result<Self::Attachment, JobFailure> {
+                self.inner.rebuild(name, attachment, progress)
+            }
+
+            fn poll(
+                &self,
+                name: &VaultName,
+                attachment: &mut Self::Attachment,
+            ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+                self.inner.poll(name, attachment)?;
+                Ok(self
+                    .armed
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                    .then(|| norn_fs::Batch::rescan(RescanScope::Vault)))
+            }
+
+            fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+                self.inner.detach(name, attachment);
+            }
+        }
+
+        /// A ready host over [`OverflowOnArm`] whose dispatcher polls every
+        /// few milliseconds, with the case's handles on the ops.
+        fn overflowing_ready_host(
+            f: &Fixture,
+        ) -> (
+            crate::Host<OverflowOnArm>,
+            VaultName,
+            crate::DemandLease<OverflowOnArm>,
+            Arc<std::sync::atomic::AtomicBool>,
+            Arc<std::sync::atomic::AtomicUsize>,
+        ) {
+            let (_engines, inner) = engines_and_ops(f);
+            let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let recoveries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let registration = f.registration();
+            let name = registration.name.clone();
+            let host = crate::Host::new(
+                crate::RegistryRead::from_entries([registration]),
+                OverflowOnArm {
+                    inner,
+                    armed: Arc::clone(&armed),
+                    recoveries: Arc::clone(&recoveries),
+                },
+                crate::LifecyclePolicy {
+                    idle_after: Duration::from_secs(60),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_millis(5),
+                },
+            )
+            .unwrap();
+            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_state(&host, &name, norn_wire::TrustState::Ready);
+            (host, name, lease, armed, recoveries)
+        }
+
+        /// Write `path` as a document this account cannot read, or answer
+        /// `false` where the account reads it anyway.
+        ///
+        /// A heal that reaches the document refuses environmentally. The
+        /// watcher only reports a change at the file: no backend adds a watch
+        /// for a file, so its mode cannot fail the watcher.
+        #[cfg(unix)]
+        fn unreadable_document(path: &Path) -> bool {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::write(path, "omega omega\n").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+            if fs::read(path).is_ok() {
+                eprintln!("skipped: this account reads a mode-000 file");
+                fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+                return false;
+            }
+            true
+        }
+
+        #[cfg(unix)]
+        fn readable_again(path: &Path) {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        /// Wait until `name` stands untrusted for an environmental refusal: an
+        /// overflow publishes its own untrusted reason ahead of the reconcile
+        /// it schedules, and this waits past it for the leg's failure.
+        fn wait_refused<O: EntryOps>(host: &crate::Host<O>, name: &VaultName) {
+            wait_until(
+                "an environmental refusal",
+                lifecycle_budget(),
+                || match host.inspect(name).map(|inspection| inspection.trust) {
+                    Ok(norn_wire::TrustState::Untrusted {
+                        reason: UntrustedReason::EnvironmentalRefusal { .. },
+                        ..
+                    }) => Observed::Met(()),
+                    other => Observed::Pending(format!("the state is {other:?}")),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        }
+
+        /// **A reconcile whose whole-vault rescan commits lane-1 work and
+        /// then fails leaves the engine reported trailing that work**: the
+        /// reconcile leg records where the store stands at its end.
+        #[cfg(unix)]
+        #[test]
+        fn a_reconcile_that_fails_after_committing_reports_the_engine_trailing_its_work() {
+            let f = Fixture::new("status-engine-failed-reconcile");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
+            let (host, name, _lease, armed, _) = overflowing_ready_host(&f);
+            assert_eq!(
+                engine_reported(&host, &name).1,
+                norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            );
+
+            fs::write(f.vault().join("a.md"), "beta beta\n").unwrap();
+            fs::write(f.vault().join("b.md"), "gamma gamma\n").unwrap();
+            let denied = f.vault().join("zz.md");
+            if !unreadable_document(&denied) {
+                return;
+            }
+            armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            wait_refused(&host, &name);
+            let (_, engine) = engine_reported(&host, &name);
+            readable_again(&denied);
+
+            // The rescan committed the rewritten `a.md` and the new `b.md` as
+            // one full changeset before it met the document it cannot read.
+            assert_eq!(
+                engine,
+                norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
+            );
+        }
+
+        /// **A recovery whose heal commits lane-1 work and then fails leaves
+        /// the engine reported trailing that work**: the recovery leg records
+        /// where the store stands at its end.
+        #[cfg(unix)]
+        #[test]
+        fn a_recovery_that_fails_after_committing_reports_the_engine_trailing_its_work() {
+            let f = Fixture::new("status-engine-failed-recovery");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
+            let (host, name, _lease, armed, recoveries) = overflowing_ready_host(&f);
+
+            fs::write(f.vault().join("a.md"), "beta beta\n").unwrap();
+            fs::write(f.vault().join("b.md"), "gamma gamma\n").unwrap();
+            let denied = f.vault().join("zz.md");
+            if !unreadable_document(&denied) {
+                return;
+            }
+            armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            wait_refused(&host, &name);
+            assert_eq!(
+                engine_reported(&host, &name).1,
+                norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
+            );
+
+            fs::write(f.vault().join("c.md"), "delta delta\n").unwrap();
+            fs::write(f.vault().join("d.md"), "epsilon epsilon\n").unwrap();
+            let _recovering = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_until(
+                "the demanded recovery to return",
+                lifecycle_budget(),
+                || match recoveries.load(std::sync::atomic::Ordering::SeqCst) {
+                    0 => Observed::Pending("no recovery has returned".to_owned()),
+                    _ => Observed::Met(()),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            wait_refused(&host, &name);
+            let (_, engine) = engine_reported(&host, &name);
+            readable_again(&denied);
+
+            // The recovery's heal committed the new `c.md` and `d.md` as one
+            // more full changeset before it met the document it cannot read.
+            assert_eq!(
+                engine,
+                norn_wire::EngineStatus::on(None, Some(Freshness::trailing(2)))
+            );
+        }
+
+        /// **A status and a doctor are answered while a drain holds the
+        /// engine, and report it trailing the work the leg committed**: the
+        /// leg records where the store stands before it drains, and the
+        /// engine is reported from the report its slot last left, so neither
+        /// waits behind the drain and neither calls the engine caught up with
+        /// a store that has moved on. Once the drain lands it trails by
+        /// nothing.
+        #[test]
+        fn a_status_is_answered_during_a_drain_and_reports_the_engine_trailing() {
+            let f = Fixture::new("status-engine-draining");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = polling_ready_host(&f, ops);
+            let host = Arc::new(host);
+            let (entered, drain_entered) = std::sync::mpsc::channel();
+            let (resume, drain_resumes) = std::sync::mpsc::channel::<()>();
+            engines.run_inside_next_drain(move || {
+                entered.send(()).unwrap();
+                let _ = drain_resumes.recv();
+            });
+
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+            drain_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("a drain to reach the engine");
+            let (answered, answers) = std::sync::mpsc::channel();
+            let asking = Arc::clone(&host);
+            let asked = name.clone();
+            thread::spawn(move || {
+                let status = engine_reported(&asking, &asked);
+                let doctor = asking.doctor_registry(&norn_wire::DoctorRegistryParams::new());
+                answered.send((status, doctor)).unwrap();
+            });
+            let answer = answers.recv_timeout(Duration::from_secs(15));
+            resume.send(()).unwrap();
+            let ((section, engine), doctor) =
+                answer.expect("a status and a doctor to answer while the drain held the engine");
+
+            assert_eq!(section, EngineSection::enabled());
+            assert!(
+                matches!(
+                    engine,
+                    norn_wire::EngineStatus::On {
+                        freshness: Some(Freshness::Trailing { generations, .. }),
+                        ..
+                    } if generations > 0
+                ),
+                "{engine:?}"
+            );
+            assert_eq!(
+                doctor.engines,
+                [norn_wire::EngineHealth::new(name.clone(), section, engine)]
+            );
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+        }
+
+        /// **What an entry publishes and its engine are one instant**: an
+        /// attach delivers the engine ahead of the gate hold that publishes
+        /// it, and a status taken between the two reports the entry as it
+        /// stands with no delivered section and no engine — never an entry
+        /// that has not published its attach beside an engine that stands.
+        #[test]
+        fn an_entry_that_has_not_published_its_attach_is_never_reported_beside_its_engine() {
+            let f = Fixture::new("status-engine-instant");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            let host = crate::Host::new(
+                crate::RegistryRead::from_entries([f.registration()]),
+                ops,
+                crate::LifecyclePolicy {
+                    idle_after: Duration::from_secs(60),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_secs(60),
+                },
+            )
+            .unwrap();
+            let (entered, delivery_entered) = std::sync::mpsc::channel();
+            let (resume, delivery_resumes) = std::sync::mpsc::channel::<()>();
+            engines.run_after_next_delivery(move || {
+                entered.send(()).unwrap();
+                let _ = delivery_resumes.recv();
+            });
+
+            let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+            delivery_entered
+                .recv_timeout(Duration::from_secs(15))
+                .expect("the attach to deliver the engine");
+            let status = super::status::status_of(&host, &name);
+            let delivered = engines.section(&name);
+            resume.send(()).unwrap();
+
+            assert_eq!(delivered, Some(EngineSection::enabled()));
+            assert_ne!(
+                status.published,
+                norn_wire::Published::state(norn_wire::TrustState::Ready)
+            );
+            assert_eq!(
+                (status.section, status.engine),
+                (EngineSection::undelivered(), norn_wire::EngineStatus::off())
+            );
+            wait_state(&host, &name, norn_wire::TrustState::Ready);
+            assert_eq!(
+                engine_reported(&host, &name),
+                (
+                    EngineSection::enabled(),
+                    norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+                )
+            );
+        }
+
+        /// **A drain that unwinds leaves its slot's report truthful**: the
+        /// hold writes the report as it ends, on the unwind too, so the report
+        /// carries the watermarks the drain reached rather than the ones it
+        /// started from.
+        #[test]
+        fn a_drain_that_unwinds_leaves_its_report_truthful() {
+            let f = Fixture::new("semantic-drain-unwinds");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            let before = engines.standing(&name).expect("an engine stands");
+
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+            engines.run_as_next_drain_ends(|| panic!("the drain unwound"));
+            let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ops.reconcile(
+                    &name,
+                    &mut attachment,
+                    ReconcileWork {
+                        batch: norn_fs::Batch::rescan(RescanScope::Vault),
+                    },
+                    &progress,
+                )
+            }));
+
+            assert!(unwound.is_err(), "the drain did not unwind");
+            let reached = engines.standing(&name).expect("the engine stands");
+            assert_ne!(reached, before, "the drain reached nothing");
+            let SemanticStatus::On { watermarks, .. } = engines.status(&name) else {
+                panic!("the engine is not on: {:?}", engines.status(&name));
+            };
+            assert_eq!(watermarks, reached);
+            ops.detach(&name, attachment);
+        }
+
+        /// **A reload's config delivery is reported in the instant that
+        /// publishes its fingerprints**: a status taken after the reload
+        /// delivered its section, and before the leg published, reports the
+        /// fingerprints, the section and the engine the entry served before
+        /// the reload, whichever way the section moves; one taken after the
+        /// leg reports all three moved.
+        #[test]
+        fn a_status_mid_reload_pairs_the_fingerprints_with_the_section_they_served() {
+            let off = || (EngineSection::disabled(), norn_wire::EngineStatus::off());
+            let on = || {
+                (
+                    EngineSection::enabled(),
+                    norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0))),
+                )
+            };
+            for (label, before, after, served, delivered) in [
+                (
+                    "enabling",
+                    "[engine.semantic]\nenabled = false\n",
+                    "[engine.semantic]\n",
+                    off(),
+                    on(),
+                ),
+                (
+                    "disabling",
+                    "[engine.semantic]\n",
+                    "[engine.semantic]\nenabled = false\n",
+                    on(),
+                    off(),
+                ),
+            ] {
+                let f = Fixture::new(&format!("status-engine-mid-reload-{label}"));
+                fs::write(f.vault().join(".norn/config.toml"), before).unwrap();
+                fs::write(f.vault().join("alpha.md"), "alpha alpha\n").unwrap();
+                let (engines, ops) = engines_and_ops(&f);
+                let (host, name, _lease) = ready_host(&f, ops);
+                let host = Arc::new(host);
+                let reported = |status: norn_wire::VaultStatus| {
+                    (status.fingerprints, (status.section, status.engine))
+                };
+                let (fingerprints, engine) = reported(super::status::status_of(&host, &name));
+                assert_eq!(engine, served, "{label}: before the reload");
+
+                fs::write(f.vault().join(".norn/config.toml"), after).unwrap();
+                let (entered, delivery_entered) = std::sync::mpsc::channel();
+                let (resume, delivery_resumes) = std::sync::mpsc::channel::<()>();
+                engines.run_after_next_delivery(move || {
+                    entered.send(()).unwrap();
+                    let _ = delivery_resumes.recv();
+                });
+                let reloading = Arc::clone(&host);
+                let reloaded = name.clone();
+                let reload = thread::spawn(move || reloading.reload(&reloaded));
+                delivery_entered
+                    .recv_timeout(Duration::from_secs(15))
+                    .expect("the reload to deliver the section");
+                let mid = reported(super::status::status_of(&host, &name));
+                resume.send(()).unwrap();
+                reload
+                    .join()
+                    .expect("the reload")
+                    .expect("a config-only reload");
+
+                assert_eq!(
+                    mid,
+                    (fingerprints.clone(), served.clone()),
+                    "{label}: during the reload"
+                );
+                let (moved, engine) = reported(super::status::status_of(&host, &name));
+                assert_ne!(moved, fingerprints, "{label}: the reload moved nothing");
+                assert_eq!(engine, delivered, "{label}: after the reload");
+            }
+        }
+    }
+
+    mod status {
+        //! `vault status` over a production host: the controls it serves
+        //! under, how the authored ones have drifted from them, and what its
+        //! attachment met.
+
+        use super::*;
+
+        /// Where `name` stands, as `vault status` reports it.
+        pub(super) fn status_of<O: EntryOps>(
+            host: &crate::Host<O>,
+            name: &VaultName,
+        ) -> norn_wire::VaultStatus {
+            let params = norn_wire::StatusParams::new()
+                .with_vault(norn_wire::VaultAddress::name(name.clone()));
+            match host.vault_status(&params) {
+                Ok(norn_wire::StatusReport::Vault { status, .. }) => *status,
+                other => panic!("the status of {name} answered {other:?}"),
+            }
+        }
+
+        /// What every entry adds up to.
+        fn rolled_up(host: &crate::Host<ProductionEntryOps>) -> norn_wire::RollUp {
+            match host.vault_status(&norn_wire::StatusParams::new()) {
+                Ok(norn_wire::StatusReport::RollUp { roll_up, .. }) => roll_up,
+                other => panic!("the roll-up answered {other:?}"),
+            }
+        }
+
+        /// **A ready vault reports the fingerprints it serves under and its
+        /// authored controls current**; an edit it has not reloaded reads as
+        /// a reload pending, which a roll-up names it for; and a control file
+        /// that cannot be read reads as unreadable, naming the file and the
+        /// stage. None of it moved the vault from `Ready`.
+        #[test]
+        fn a_status_reports_the_fingerprints_and_how_the_authored_controls_drifted() {
+            let f = Fixture::new("status-drift");
+            let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
+            let active = host.inspect(&name).unwrap().active_fingerprints.unwrap();
+
+            let status = status_of(&host, &name);
+            assert!(
+                spells(status.fingerprints.as_ref().expect("fingerprints"), active),
+                "{:?}",
+                status.fingerprints
+            );
+            assert_eq!(status.drift, norn_wire::Drift::current());
+
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.sample]\n").unwrap();
+            assert_eq!(
+                status_of(&host, &name).drift,
+                norn_wire::Drift::reload_pending()
+            );
+            assert!(
+                rolled_up(&host)
+                    .attention()
+                    .contains(&norn_wire::Attention::reload_pending(name.clone())),
+                "the roll-up did not name the pending reload"
+            );
+
+            fs::remove_file(f.vault().join(".norn/schema.yaml")).unwrap();
+            let norn_wire::Drift::Unreadable { failure, .. } = status_of(&host, &name).drift else {
+                panic!("a missing schema did not read as unreadable");
+            };
+            assert_eq!(failure.file, norn_wire::ControlFile::Schema);
+            assert_eq!(failure.stage, norn_wire::ReloadStage::Read);
+            assert_eq!(
+                status_of(&host, &name).published,
+                norn_wire::Published::state(norn_wire::TrustState::Ready)
+            );
+        }
+
+        /// **A vault holding links reports each one its attach's walk passed
+        /// over**, and a roll-up names the vault for them.
+        #[cfg(unix)]
+        #[test]
+        fn a_status_reports_the_links_the_attach_passed_over() {
+            let f = Fixture::new("status-links");
+            std::os::unix::fs::symlink("elsewhere.md", f.vault().join("away.md")).unwrap();
+            let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
+
+            let link = norn_wire::Advisory::symlink_skipped("away.md");
+            assert_eq!(
+                status_of(&host, &name).advisories,
+                std::slice::from_ref(&link)
+            );
+            assert_eq!(
+                rolled_up(&host).attention(),
+                [norn_wire::Attention::advisory(name, link)]
+            );
+        }
     }
 
     struct BlockingReloadConfig {
@@ -6271,7 +7321,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6330,7 +7380,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "archive.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6551,7 +7601,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6597,7 +7647,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "folder/bad\u{fffd}name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6652,7 +7702,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
             ProductionPolicy::new(2, 1).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6713,7 +7763,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "other\u{fffd}doc.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6775,7 +7825,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\dir"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6832,7 +7882,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6894,7 +7944,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -6976,7 +8026,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\u{fffd}dir"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7075,7 +8125,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "notes"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7114,7 +8164,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7155,7 +8205,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "notes"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7198,7 +8248,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7293,7 +8343,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\u{fffd}dir"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert!(
@@ -7585,7 +8635,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "fold\u{fffd}er"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7649,7 +8699,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "fold\u{fffd}er"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7702,7 +8752,7 @@ mod tests {
             &dirty,
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -7764,7 +8814,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         );
         fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
         increment.expect("a directory the reading cannot open refused the event");
@@ -8338,7 +9388,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "linked"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -8400,7 +9450,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "away/note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -8544,7 +9594,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "hidden\\dir/note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert_eq!(
@@ -8597,7 +9647,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert_eq!(
@@ -10310,7 +11360,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10350,7 +11400,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10393,7 +11443,7 @@ mod tests {
                 &dirty_path(f.vault().as_path(), "note.md"),
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
         };
@@ -10637,7 +11687,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10848,7 +11898,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10889,7 +11939,7 @@ mod tests {
             &dirty,
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10924,7 +11974,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "folder"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10969,7 +12019,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "folder"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -10995,7 +12045,7 @@ mod tests {
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(
-            attachment._shadows.placement(),
+            attachment.shadows.placement(),
             Placement::DataRoot,
             "this fixture stages outside the vault, so no host root names `.norn/tmp`"
         );
@@ -11008,7 +12058,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), ".norn"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11047,7 +12097,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "link/sub"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .expect("a dirty root behind a link to converge rather than fail the reconcile");
 
@@ -11091,7 +12141,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "link/sub/doc.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .expect("a dirty file behind a link to converge rather than fail the reconcile");
 
@@ -11279,7 +12329,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "folder"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11315,7 +12365,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11347,7 +12397,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11379,7 +12429,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\dir"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11427,7 +12477,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11444,7 +12494,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert!(stored_paths(&mut attachment.store).is_empty());
@@ -11497,7 +12547,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11516,7 +12566,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md/second.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert_eq!(
@@ -11531,7 +12581,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md/second.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert_eq!(
@@ -11578,7 +12628,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11723,7 +12773,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "NOTE.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11762,7 +12812,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "FOLDER"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11816,7 +12866,7 @@ mod tests {
                 batch.vault_roots(),
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
 
@@ -11885,7 +12935,7 @@ mod tests {
             batch.vault_roots(),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -11950,7 +13000,7 @@ mod tests {
             batch.vault_roots(),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -12012,7 +13062,7 @@ mod tests {
             batch.vault_roots(),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -12062,7 +13112,7 @@ mod tests {
                 dirty,
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
         };
@@ -12144,7 +13194,7 @@ mod tests {
                 dirty,
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
         };
@@ -12201,7 +13251,7 @@ mod tests {
             "the vault heal read the tree this case then excludes"
         );
 
-        let mut excluding = exclusions(&attachment.registration, &attachment._shadows);
+        let mut excluding = exclusions(&attachment.registration, &attachment.shadows);
         excluding.push(PathBuf::from("staging"));
         fs::write(f.vault().join("staging/note.md"), "edited").unwrap();
         scoped_increment(
@@ -12264,7 +13314,7 @@ mod tests {
                 dirty,
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
             window.finish()
@@ -12310,7 +13360,7 @@ mod tests {
                 &dirty_path(f.vault().as_path(), &format!("dir/{spelled}/note.md")),
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
             assert_eq!(
@@ -12351,7 +13401,7 @@ mod tests {
                 &dirty_path(f.vault().as_path(), blocked),
                 ProductionPolicy::new(2, 2).unwrap(),
                 &progress.healing(),
-                &exclusions(&attachment.registration, &attachment._shadows),
+                &exclusions(&attachment.registration, &attachment.shadows),
             )
             .unwrap();
             assert_eq!(
@@ -12391,7 +13441,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "UPPER.MD"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         assert!(
@@ -12422,7 +13472,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "before.md"),
             ProductionPolicy::new(8, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
         let generation_before_prune = attachment
@@ -12435,7 +13485,7 @@ mod tests {
 
         fs::remove_dir_all(f.vault().join("folder")).unwrap();
         let pruned_root = DocumentPath::new("folder").unwrap();
-        let pruned_exclusions = exclusions(&attachment.registration, &attachment._shadows);
+        let pruned_exclusions = exclusions(&attachment.registration, &attachment.shadows);
         // The leg accrues the roots its deaths owe a reading of, and the job
         // around it is what reads them; this case is that job.
         let mut account = Account::default();
@@ -12465,7 +13515,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "after.md"),
             ProductionPolicy::new(8, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment.shadows),
         )
         .unwrap();
 
@@ -12910,7 +13960,7 @@ mod tests {
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        let residue = attachment._shadows.directory().join("norn-shadow-77-3");
+        let residue = attachment.shadows.directory().join("norn-shadow-77-3");
         fs::write(&residue, "residue").unwrap();
         let aged =
             std::time::SystemTime::now() - norn_fs::SHADOW_AGE_THRESHOLD - Duration::from_secs(1);
@@ -12935,7 +13985,7 @@ mod tests {
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        let shadow_home = attachment._shadows.directory().to_owned();
+        let shadow_home = attachment.shadows.directory().to_owned();
         let displaced = shadow_home.with_extension("displaced");
         fs::rename(&shadow_home, &displaced).unwrap();
         fs::write(&shadow_home, "not a directory").unwrap();
