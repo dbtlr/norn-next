@@ -2763,6 +2763,13 @@ impl<O: EntryOps> Host<O> {
         &self.shared.ops
     }
 
+    /// Every registration this host serves at this instant, ascending by name.
+    /// The serving set is what answers it, so a vault that joined after
+    /// startup is listed and one that left is not.
+    pub(crate) fn registrations(&self) -> Vec<Registration> {
+        self.shared.entries.registrations()
+    }
+
     pub fn new(
         registry: RegistryRead,
         ops: O,
@@ -17189,6 +17196,72 @@ mod tests {
             assert_eq!(
                 host.demand(&name, AttachMode::Durable).unwrap().outcome(),
                 &Demand::UnknownVault
+            );
+        }
+    }
+
+    /// The registry requests a host answers from the set it serves: a listing
+    /// and a resolution of a directory.
+    ///
+    /// What is pinned here is the source. Both answer from the serving set at
+    /// the instant they are asked, so a vault the set gained or lost after
+    /// startup is answered for as the set now stands rather than as the
+    /// registry read at startup stood.
+    mod registry_requests {
+        use super::*;
+        use norn_wire::ListParams;
+
+        fn registration(name: &str, root: &str) -> RegistryEntry {
+            RegistryEntry::new(VaultName::new(name).unwrap(), VaultRoot::new(root).unwrap())
+        }
+
+        fn host_serving(registrations: Vec<RegistryEntry>) -> Host<Arc<FakeOps>> {
+            Host::new(
+                RegistryRead::from_entries(registrations),
+                Arc::new(FakeOps::default()),
+                LifecyclePolicy {
+                    idle_after: Duration::from_secs(60),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_secs(60),
+                },
+            )
+            .unwrap()
+        }
+
+        /// A host serving nothing lists nothing, and that is an answer.
+        #[test]
+        fn a_host_serving_nothing_lists_nothing() {
+            let host = host_serving(Vec::new());
+            assert_eq!(host.vault_list(&ListParams::new()).registrations, []);
+        }
+
+        /// A listing is every registration the set serves as it now stands,
+        /// ascending by name: one that joined after startup among them, and
+        /// one that left gone.
+        #[test]
+        fn a_listing_is_every_served_registration_in_name_order() {
+            let host = host_serving(vec![
+                registration("notes", "/tmp/norn-host-list-notes"),
+                registration("archive", "/tmp/norn-host-list-archive"),
+                registration("leaving", "/tmp/norn-host-list-leaving"),
+            ]);
+            let joined = registration("journal", "/tmp/norn-host-list-journal");
+            host.shared
+                .entries
+                .insert(joined.clone())
+                .expect("the set serves no such name");
+            host.shared
+                .entries
+                .remove(&VaultName::new("leaving").unwrap())
+                .expect("the entry holds nothing");
+
+            assert_eq!(
+                host.vault_list(&ListParams::new()).registrations,
+                [
+                    registration("archive", "/tmp/norn-host-list-archive"),
+                    joined,
+                    registration("notes", "/tmp/norn-host-list-notes"),
+                ]
             );
         }
     }

@@ -3,7 +3,9 @@ use std::path::Path;
 
 use norn_config::registry::{Entry, Registry};
 use norn_fs::{Identity, Refusal, path_identity};
-use norn_wire::{NameSet, TooFewNames, VaultName};
+use norn_wire::{ListParams, ListReport, NameSet, TooFewNames, VaultName};
+
+use crate::lifecycle::{EntryOps, Host};
 
 /// Every registry name that resolves to one filesystem root.
 ///
@@ -99,6 +101,23 @@ impl RegistryRead {
     /// The registrations themselves, ascending by name.
     pub(crate) fn into_entries(self) -> impl Iterator<Item = Entry> {
         self.entries.into_values()
+    }
+}
+
+/// The registry requests: questions about the serving set as a whole.
+///
+/// Each answers from the set this host serves at the instant it is asked,
+/// never from a fresh read of the registry file: the set is the one account of
+/// which names exist and where their roots are, so a vault that joined after
+/// startup is answered for and one that left is not.
+impl<O: EntryOps> Host<O> {
+    /// Answer a `vault list`: every registration this host serves, ascending
+    /// by name.
+    ///
+    /// Nothing refuses a listing. The set is read under its own lock and
+    /// nothing else is read, so a host serving nothing answers an empty list.
+    pub fn vault_list(&self, _params: &ListParams) -> ListReport {
+        ListReport::new(self.registrations())
     }
 }
 

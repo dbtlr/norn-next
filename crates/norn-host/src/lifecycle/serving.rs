@@ -2,9 +2,10 @@
 //!
 //! One collection answers what the host serves and at which roots. Each entry
 //! carries its own registration beside its lifecycle state, so the root a job
-//! attaches, the root a recheck classifies and the root a refusal names are one
-//! fact read from one place — there is no second account of the serving set to
-//! disagree with this one about which names exist or where their roots are.
+//! attaches, the root a recheck classifies, the root a refusal names and the
+//! registration a registry request answers with are one fact read from one
+//! place — there is no second account of the serving set to disagree with this
+//! one about which names exist or where their roots are.
 //!
 //! # Joining and leaving
 //!
@@ -85,14 +86,16 @@ pub(crate) enum ServingRefusal {
 ///
 /// The cost of an insertable set over one frozen at construction is one
 /// uncontended read lock and one refcount per lookup, and per pass over every
-/// entry one allocation plus whatever that pass copies out of the map. Two
+/// entry one allocation plus whatever that pass copies out of the map. Three
 /// passes exist. [`ServingSet::snapshot`] copies the handles — N refcount
 /// increments taking the reading and N decrements dropping it — and a
 /// dispatcher tick takes three such readings. [`ServingSet::recheck`] copies
 /// the name and root of every entry instead: two allocations each and no
 /// refcount, and it stats every one of those roots. It runs on the legs that
 /// acquire coverage and on the signals that invalidate it, never on a request
-/// path. That is the price of insertability: a pass over a set nothing can
+/// path. [`ServingSet::registrations`] copies every entry's whole registration
+/// and reads nothing else; it is what the registry requests answer from. That
+/// is the price of insertability: a pass over a set nothing can
 /// join borrows its entries in place and pays neither. A scan reads the set
 /// once and works from that reading, so a vault that joins mid-scan is served
 /// from the next pass.
@@ -148,6 +151,21 @@ impl<A: SnapshotSource> ServingSet<A> {
             .expect("serving set poisoned")
             .values()
             .cloned()
+            .collect()
+    }
+
+    /// Every registration the set serves at this instant, ascending by name.
+    ///
+    /// The registrations are copied out under the read guard and the guard
+    /// goes back before this returns, so what a caller then does with them —
+    /// a filesystem read included — stands outside the set's lock and holds
+    /// no entry alive.
+    pub(crate) fn registrations(&self) -> Vec<Registration> {
+        self.entries
+            .read()
+            .expect("serving set poisoned")
+            .values()
+            .map(|entry| entry.registration.clone())
             .collect()
     }
 
