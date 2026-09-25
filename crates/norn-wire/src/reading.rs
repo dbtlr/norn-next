@@ -77,6 +77,21 @@ pub enum Rung {
     Rerank,
 }
 
+impl Rung {
+    /// Whether this rung retrieves: finds candidates of its own, rather than
+    /// expanding the query or re-ordering what another rung found. A ladder
+    /// holds at least one retrieval rung.
+    ///
+    /// The match carries no wildcard, so a rung the ladder gains is classed
+    /// here before it compiles.
+    pub const fn retrieves(self) -> bool {
+        match self {
+            Rung::Lexical | Rung::Vector => true,
+            Rung::Expansion | Rung::Rerank => false,
+        }
+    }
+}
+
 /// Which model ran, and which build of it.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]

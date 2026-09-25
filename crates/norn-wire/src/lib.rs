@@ -229,7 +229,8 @@
 //! [`BlockRow::new`], [`TagRow::new`], [`DocumentRow::new`],
 //! [`DocumentPath::new`], [`Candidate::new`], [`CandidateHead::new`],
 //! [`FindingRow::new`],
-//! [`Sort::new`], [`RungSet::lexical`], [`RungSet::of`], [`Hit::new`],
+//! [`Sort::new`], [`RungSet::lexical`], [`RungSet::of`],
+//! [`RungSubtraction::none`], [`RungSubtraction::of`], [`Hit::new`],
 //! [`Tally::new`], [`KindTally::new`], and the `new` on each of the six read
 //! params types;
 //! [`Registration::new`], [`Published::state`], [`Published::parked`],
@@ -406,7 +407,8 @@ pub use read::describe::{
 pub use read::find::{Direction, FindParams, FindReport, Sort, SortKey};
 pub use read::get::{CollectionPage, CollectionSelector, GetParams, GetReport};
 pub use read::search::{
-    EmptyLadder, Hit, RUNG_DEPTH, RungSelection, RungSet, SearchParams, SearchReport,
+    Hit, NoRetrievalRung, RUNG_DEPTH, RungSelection, RungSet, RungSubtraction, SearchParams,
+    SearchReport,
 };
 pub use read::validate::{KindTally, ValidateParams, ValidateReport};
 pub use reading::{

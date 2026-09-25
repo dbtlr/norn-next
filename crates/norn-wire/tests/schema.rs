@@ -2098,9 +2098,19 @@ fn an_order_advertises_its_key_and_its_direction() {
     );
 }
 
-/// The rung set advertises an array of rungs holding at least one, and refers
-/// to the rung vocabulary rather than restating it. The preset spellings are a
-/// surface's rendering and are advertised nowhere here.
+/// The retrieval rungs as the schemas spell them, derived from the rung
+/// vocabulary itself.
+fn retrieval_rung_spellings() -> Vec<Value> {
+    [Rung::Lexical, Rung::Vector, Rung::Expansion, Rung::Rerank]
+        .into_iter()
+        .filter(|rung| rung.retrieves())
+        .map(|rung| serde_json::to_value(rung).expect("a rung as JSON"))
+        .collect()
+}
+
+/// The rung set advertises an array of rungs, each once, holding a retrieval
+/// rung, and refers to the rung vocabulary rather than restating it. The
+/// preset spellings are a surface's rendering and are advertised nowhere here.
 #[test]
 fn a_rung_set_advertises_the_resolved_set_and_no_preset() {
     let schema = schema_of::<RungSet>();
@@ -2111,6 +2121,11 @@ fn a_rung_set_advertises_the_resolved_set_and_no_preset() {
         "the set advertises a ladder that runs no rung: {schema}"
     );
     assert_eq!(schema["uniqueItems"].as_bool(), Some(true));
+    assert_eq!(
+        schema["contains"]["enum"].as_array(),
+        Some(&retrieval_rung_spellings()),
+        "the set advertises a ladder holding no retrieval rung: {schema}"
+    );
     assert!(
         schema["$defs"]["Rung"].is_object(),
         "a rung set carries no definition of a rung: {schema}"
@@ -2142,6 +2157,26 @@ fn a_rung_selection_advertises_two_disjoint_members_and_no_preset() {
             other => panic!("a selection advertises the member {other:?}"),
         };
         assert_eq!(fields, expected, "a selection holds another's field");
+        if tag_constant(branch, "select") == Some("enabled") {
+            let without = &schema["$defs"]["RungSubtraction"];
+            assert_eq!(
+                branch["properties"]["without"]["$ref"].as_str(),
+                Some("#/$defs/RungSubtraction")
+            );
+            assert_eq!(without["type"].as_str(), Some("array"));
+            assert_eq!(without["uniqueItems"].as_bool(), Some(true));
+            let every: Vec<Value> = without["not"]["allOf"]
+                .as_array()
+                .expect("a subtraction advertises what it may not leave out")
+                .iter()
+                .map(|clause| clause["contains"]["const"].clone())
+                .collect();
+            assert_eq!(
+                every,
+                retrieval_rung_spellings(),
+                "a subtraction advertises that it may leave out every retrieval rung: {without}"
+            );
+        }
         assert_eq!(
             branch["additionalProperties"].as_bool(),
             Some(false),

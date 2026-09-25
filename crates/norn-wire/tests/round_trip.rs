@@ -19,11 +19,11 @@ use norn_wire::{
     CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ControlFile,
     ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged, DescribeParams,
     Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow,
-    Drift, ElsewhereNamesDocuments, EmptyLadder, EngineHealth, EngineSection, EngineStatus,
-    ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind,
-    FindingRow, FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow,
-    ListParams, ListReport, MaintainerIdentity, ModelIdentity, Moved, NameSet, NoProblems,
+    Drift, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
+    ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind, FindingRow,
+    FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
+    KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams,
+    ListReport, MaintainerIdentity, ModelIdentity, Moved, NameSet, NoProblems, NoRetrievalRung,
     NonFiniteScore, NotReady, Page, PagedRows, PathRuleKind, PollBackend, Predicate, Published,
     RUNG_DEPTH, ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration,
     RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
@@ -496,7 +496,8 @@ fn rungs() -> Vec<Rung> {
 fn rung_selections() -> Vec<RungSelection> {
     vec![
         RungSelection::enabled(),
-        RungSelection::enabled_without([Rung::Vector]),
+        RungSelection::enabled_without([Rung::Vector])
+            .expect("a subtraction leaving a retrieval rung"),
         RungSelection::exactly(RungSet::of(rungs()).expect("a ladder that runs a rung")),
     ]
 }
@@ -4567,31 +4568,130 @@ fn a_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
     assert!(DescribeParams::new(vault).facets.is_empty());
 }
 
-/// A search runs at least one rung, so a set naming no rung is no ladder: it
-/// refuses where one is built and where one is read alike. Any set naming a
-/// rung is a ladder, the floor or no. The preset spellings are a surface's and
-/// never cross.
+/// A search runs at least one retrieval rung, so a set holding none is no
+/// ladder: the empty set, and a set of enhancers alone, which have no
+/// candidates to expand or re-order. Each refuses where one is built and where
+/// one is read alike. A set holding a retrieval rung is a ladder, the floor or
+/// no. The preset spellings are a surface's and never cross.
 #[test]
-fn a_rung_set_that_names_no_rung_is_no_ladder() {
-    assert_eq!(RungSet::of([]).expect_err("an empty ladder"), EmptyLadder);
+fn a_rung_set_holding_no_retrieval_rung_is_no_ladder() {
+    for enhancers in [
+        vec![],
+        vec![Rung::Rerank],
+        vec![Rung::Expansion],
+        vec![Rung::Expansion, Rung::Rerank],
+    ] {
+        assert_eq!(
+            RungSet::of(enhancers.clone()),
+            Err(NoRetrievalRung),
+            "{enhancers:?} built as a ladder"
+        );
+    }
     assert_eq!(
-        EmptyLadder::to_string(&EmptyLadder),
-        "a search runs at least one rung"
+        NoRetrievalRung::to_string(&NoRetrievalRung),
+        "a search runs at least one retrieval rung: lexical or vector"
     );
-    assert!(
-        serde_json::from_str::<RungSet>("[]").is_err(),
-        "a set naming no rung read back as a ladder"
-    );
+    for unladdered in ["[]", r#"["rerank"]"#, r#"["expansion","rerank"]"#] {
+        assert!(
+            serde_json::from_str::<RungSet>(unladdered).is_err(),
+            "`{unladdered}` read back as a ladder"
+        );
+    }
     assert_eq!(wire(&RungSet::lexical()), r#"["lexical"]"#);
-    assert_eq!(
-        serde_json::from_str::<RungSet>(r#"["vector"]"#).expect("a ladder without the floor"),
-        RungSet::of([Rung::Vector]).expect("a ladder that runs a rung")
-    );
+    for (spelled, rungs) in [
+        (r#"["vector"]"#, vec![Rung::Vector]),
+        (r#"["vector","rerank"]"#, vec![Rung::Vector, Rung::Rerank]),
+        (
+            r#"["lexical","expansion"]"#,
+            vec![Rung::Lexical, Rung::Expansion],
+        ),
+    ] {
+        assert_eq!(
+            serde_json::from_str::<RungSet>(spelled).expect("a ladder holding a retrieval rung"),
+            RungSet::of(rungs).expect("a ladder holding a retrieval rung")
+        );
+    }
     assert!(
         serde_json::from_str::<RungSet>(r#"["hybrid"]"#).is_err(),
         "a preset spelling read back as a rung"
     );
-    round_trip(&RungSet::of(rungs()).expect("a ladder that runs a rung"));
+    round_trip(&RungSet::of(rungs()).expect("a ladder holding a retrieval rung"));
+}
+
+/// A retrieval rung finds candidates of its own; an enhancer expands or
+/// re-orders what a retrieval rung found.
+#[test]
+fn the_retrieval_rungs_are_the_lexical_floor_and_vectors() {
+    let retrieving: Vec<Rung> = rungs()
+        .into_iter()
+        .filter(|rung| rung.retrieves())
+        .collect();
+    assert_eq!(retrieving, [Rung::Lexical, Rung::Vector]);
+}
+
+/// A set arrives holding each rung once, as the schema's `uniqueItems` says:
+/// a set naming a rung twice is refused on read rather than folded, in an
+/// exact selection and in a subtraction alike.
+#[test]
+fn a_rung_named_twice_is_refused_on_read() {
+    for twice in [
+        r#"["lexical","lexical"]"#,
+        r#"["lexical","vector","lexical"]"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RungSet>(twice).is_err(),
+            "`{twice}` read back as a set"
+        );
+    }
+    for twice in [
+        r#"{"select":"exactly","rungs":["lexical","lexical"]}"#,
+        r#"{"select":"enabled","without":["vector","vector"]}"#,
+        r#"{"select":"enabled","without":["rerank","vector","rerank"]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RungSelection>(twice).is_err(),
+            "`{twice}` read back as a selection"
+        );
+    }
+    assert!(
+        serde_json::from_str::<RungSelection>(
+            r#"{"select":"enabled","without":["rerank","vector"]}"#
+        )
+        .is_ok(),
+        "a subtraction naming each rung once was refused"
+    );
+}
+
+/// A subtraction leaving no retrieval rung selects no ladder whatever the vault
+/// enables, so it is refused where one is built and where one is read alike.
+/// A subtraction of one retrieval rung leaves the other.
+#[test]
+fn a_subtraction_of_every_retrieval_rung_is_refused() {
+    for every in [
+        vec![Rung::Lexical, Rung::Vector],
+        vec![Rung::Lexical, Rung::Vector, Rung::Rerank],
+    ] {
+        assert_eq!(
+            RungSelection::enabled_without(every.clone()),
+            Err(NoRetrievalRung),
+            "{every:?} built as a subtraction"
+        );
+    }
+    for every in [
+        r#"{"select":"enabled","without":["lexical","vector"]}"#,
+        r#"{"select":"enabled","without":["vector","lexical","expansion"]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RungSelection>(every).is_err(),
+            "`{every}` read back as a selection"
+        );
+    }
+    for rung in [Rung::Lexical, Rung::Vector] {
+        round_trip(
+            &RungSelection::enabled_without([rung])
+                .expect("a subtraction leaving a retrieval rung"),
+        );
+    }
 }
 
 /// A selection is the enabled set less the rungs it names, or exactly the
@@ -4609,10 +4709,10 @@ fn a_rung_selection_subtracts_from_the_enabled_set_or_names_one_exactly() {
         r#"{"select":"enabled","without":[]}"#
     );
     assert_eq!(
-        wire(&RungSelection::enabled_without([
-            Rung::Rerank,
-            Rung::Vector
-        ])),
+        wire(
+            &RungSelection::enabled_without([Rung::Rerank, Rung::Vector])
+                .expect("a subtraction leaving a retrieval rung")
+        ),
         r#"{"select":"enabled","without":["vector","rerank"]}"#
     );
     assert_eq!(
@@ -4630,6 +4730,7 @@ fn a_rung_selection_subtracts_from_the_enabled_set_or_names_one_exactly() {
     }
     for lax in [
         r#"{"select":"exactly","rungs":[]}"#,
+        r#"{"select":"exactly","rungs":["rerank"]}"#,
         r#"{"select":"hybrid"}"#,
         r#"{"select":"enabled"}"#,
     ] {
