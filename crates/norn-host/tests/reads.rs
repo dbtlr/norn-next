@@ -1172,8 +1172,12 @@ fn assert_body(answered: &BodyText, expected: &str, path: &str) {
 
 /// A document whose heading and block sit beside multibyte text: the
 /// heading's body starts at byte 15 and the block's marker at byte 26, and
-/// bytes 6 and 20 are each the second byte of an `é`.
-const CAFE: (&str, &str) = ("zz-damage/zz-cafe.md", "# Café ☕ ##\n\nCafé ☕ ^cafe\n");
+/// bytes 6 and 20 are each the second byte of an `é`. One link and one tag
+/// follow the block.
+const CAFE: (&str, &str) = (
+    "zz-damage/zz-cafe.md",
+    "# Café ☕ ##\n\nCafé ☕ ^cafe\n\n[[zz-handbook]] #brew\n",
+);
 
 /// Run `update` against the store at `database`, bound to `path`, and assert
 /// it changed exactly one row.
@@ -1259,7 +1263,8 @@ fn a_validate_that_meets_a_finding_position_below_zero_is_untrusted_and_the_entr
 /// untrusted entry, and the entry rebuilds.** A heading's body offset or a
 /// block's marker that falls inside a character, below zero or past the end
 /// of the body is a derived row that disagrees with the body it was derived
-/// from: store damage, answered as `host/entry-untrusted` under the
+/// from, and a heading's, link's or tag's position below zero is a row the
+/// store could not have written: store damage, answered as `host/entry-untrusted` under the
 /// store-damaged-rebuilding reason, never a panic or a failed read. The
 /// rebuild derives the rows again, so the same get answers after it.
 #[test]
@@ -1268,6 +1273,12 @@ fn a_get_that_meets_an_offset_its_body_cannot_hold_is_untrusted_and_the_entry_re
     let _lease = attach::attach_and_wait(&host, vault.name());
     let section = GetParams::new(address(vault.name()), a_target("zz-cafe#Café ☕"));
     let block = GetParams::new(address(vault.name()), a_target("zz-cafe#^cafe"));
+    let collection =
+        |of| GetParams::new(address(vault.name()), a_target("zz-cafe")).with_collection(of);
+    let (links, tags) = (
+        collection(CollectionSelector::Links),
+        collection(CollectionSelector::Tags),
+    );
     assert!(matches!(
         got(&host, &vault, &section),
         GetReport::Section { .. }
@@ -1276,6 +1287,12 @@ fn a_get_that_meets_an_offset_its_body_cannot_hold_is_untrusted_and_the_entry_re
         got(&host, &vault, &block),
         GetReport::Block { .. }
     ));
+    for params in [&links, &tags] {
+        assert!(matches!(
+            got(&host, &vault, params),
+            GetReport::Collection { .. }
+        ));
+    }
 
     let cases = [
         ("headings", "body_offset = 6", &section, "inside the `é`"),
@@ -1289,6 +1306,13 @@ fn a_get_that_meets_an_offset_its_body_cannot_hold_is_untrusted_and_the_entry_re
         ("blocks", "span_offset = 20", &block, "inside the `é`"),
         ("blocks", "span_offset = -1", &block, "below zero"),
         ("blocks", "span_offset = 4096", &block, "past the body"),
+        ("links", "span_offset = -1", &links, "a link below zero"),
+        (
+            "document_tags",
+            "span_offset = -1",
+            &tags,
+            "a tag below zero",
+        ),
     ];
     for (table, set, params, what) in cases {
         rewrite_a_cafe_row(&vault.database(), table, set);
