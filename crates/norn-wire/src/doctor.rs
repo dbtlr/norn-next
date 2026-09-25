@@ -18,7 +18,9 @@
 //! **The roll-up's attention reasons include what each vault's advisories
 //! raise.** An [`Advisory`](crate::Advisory) is something about a vault's
 //! serving worth telling an operator that is neither a refusal nor a move of
-//! its trust state, and a roll-up names one vault per advisory it carries.
+//! its trust state, and a roll-up names one vault per advisory it carries that
+//! [wants attention](crate::Advisory::wants_attention) — among them a
+//! vault-local shadow fallback the vault does not ignore.
 //!
 //! **The engine slot and the delivered section sit together**, as they do on
 //! a vault status: a config that enables an engine which is not standing is

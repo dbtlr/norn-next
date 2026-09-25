@@ -5884,6 +5884,32 @@ fn a_roll_up_names_what_each_status_wants_attention_for() {
     );
 }
 
+/// **A vault-local shadow fallback wants attention only where the vault does
+/// not ignore it.** Both are reported on the vault's status; the roll-up
+/// names the vault for the one whose staged shadows the vault's own tooling
+/// will pick up.
+#[test]
+fn a_fallback_wants_attention_only_where_the_vault_does_not_ignore_it() {
+    let falling_back = |gitignored| {
+        VaultStatus::new(
+            registrations().remove(0),
+            Published::state(TrustState::Ready),
+            Drift::current(),
+            EngineStatus::off(),
+            EngineSection::absent(),
+        )
+        .with_advisories([Advisory::tmp_fallback_in_use(".norn/tmp/key", gitignored)])
+    };
+    assert!(RollUp::of(&[falling_back(true)]).attention().is_empty());
+    assert_eq!(
+        RollUp::of(&[falling_back(false)]).attention(),
+        [Attention::advisory(
+            name("notes"),
+            Advisory::tmp_fallback_in_use(".norn/tmp/key", false)
+        )]
+    );
+}
+
 /// The nameless status answer is the roll-up alone: the counts and the typed
 /// attention reasons. Where one entry stands is what naming that vault
 /// reports, and nothing else carries a per-vault list.
