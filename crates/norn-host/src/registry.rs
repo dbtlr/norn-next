@@ -490,6 +490,63 @@ mod tests {
         assert_eq!(resolved(&registrations, &tree.path("nowhere/yet")), None);
     }
 
+    /// A `..` past what exists steps back into a root, and a link named
+    /// after it is judged as the directory it reaches: into another root, or
+    /// out of every root.
+    #[test]
+    fn a_link_after_a_parent_step_past_what_exists_is_judged_as_its_target() {
+        let tree = Tree::new("absent-parent-link");
+        let root = tree.dir("v/root");
+        let other = tree.dir("other");
+        tree.dir("other/r2/x");
+        tree.link("v/root/sub", &tree.path("other/r2"));
+        tree.link("v/root/out", &tree.dir("elsewhere"));
+        let registrations = [served("root", &root), served("other", &other)];
+        assert_eq!(
+            resolved(&registrations, &root.join("notyet/../sub/x")),
+            Some("other".to_owned())
+        );
+        assert_eq!(resolved(&registrations, &root.join("notyet/../out")), None);
+    }
+
+    /// An ancestor the filesystem refuses to stat — a name beneath a file, a
+    /// link that loops — is no root, and the walk goes on to the root above
+    /// it.
+    #[test]
+    fn an_ancestor_the_filesystem_refuses_is_passed_over() {
+        let tree = Tree::new("refused-ancestor");
+        let root = tree.dir("v");
+        std::fs::write(tree.path("v/file.md"), b"").unwrap();
+        tree.link("v/loop", &tree.path("v/loop"));
+        let registrations = [served("notes", &root)];
+        assert!(path_identity(&tree.path("v/file.md/sub")).is_err());
+        assert!(path_identity(&tree.path("v/loop")).is_err());
+        assert_eq!(
+            resolved(&registrations, &tree.path("v/file.md/sub")),
+            Some("notes".to_owned())
+        );
+        assert_eq!(
+            resolved(&registrations, &tree.path("v/loop/sub")),
+            Some("notes".to_owned())
+        );
+    }
+
+    /// A registered root the filesystem refuses to stat contains nothing, and
+    /// the other roots still answer.
+    #[test]
+    fn a_root_the_filesystem_refuses_contains_nothing_and_the_rest_answer() {
+        let tree = Tree::new("refused-root");
+        let root = tree.dir("vault");
+        let looping = tree.link("loop", &tree.path("loop"));
+        assert!(path_identity(&looping).is_err());
+        let registrations = [served("broken", &looping), served("notes", &root)];
+        assert_eq!(
+            resolved(&registrations, &tree.dir("vault/sub")),
+            Some("notes".to_owned())
+        );
+        assert_eq!(resolved(&registrations, &tree.path("loop/sub")), None);
+    }
+
     /// A conflict is between at least two registrations, and the floor is the
     /// name set's: a caller that collected one name or none has no conflict to
     /// raise and is told so at construction, so no later reader holds a

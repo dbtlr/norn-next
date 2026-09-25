@@ -8,9 +8,13 @@
 //! entry. No platform-name or mount-type guess is made.
 //!
 //! An absolute path is spelled once too. [`canonical_spelling`] is the one
-//! spelling two absolute paths are compared in — the directory the filesystem
-//! resolves each to, links taken — so no consumer resolves a path its own way
-//! before asking whether one lies beneath another.
+//! spelling two absolute paths are compared in — the entry the filesystem
+//! resolves each to, links taken, and the rest as spelled — so a consumer
+//! asking whether one path lies beneath another resolves neither its own way.
+//! The watcher is the one other resolution: it anchors a vault root, the
+//! parent of each link its registration is spelled through and the parent of
+//! its schema source in the filesystem's strict resolution, because a path the
+//! filesystem cannot resolve there is a refusal rather than a spelling.
 //!
 //! # Where case is folded, and what "case-insensitive" means
 //!
@@ -378,17 +382,22 @@ impl Hash for NormalizedPath {
     }
 }
 
-/// The one spelling of the absolute `path`: the directory the filesystem
-/// resolves it to, and the rest of it as spelled where the filesystem resolves
-/// only part of it.
+/// The one spelling of the absolute `path`, a directory or a file: the entry
+/// the filesystem resolves it to, and the rest of it as spelled where the
+/// filesystem resolves only part of it.
 ///
 /// The filesystem takes every symbolic link, `.`, `..` and redundant separator
 /// in the part it resolves, so a `..` after a link steps out of the link's
-/// target and two spellings of one directory come back as one. Past the last
-/// component it resolves — a directory that does not exist yet, or one this
-/// process may not search — each remaining component is kept as spelled
-/// beneath what did resolve, and a `..` there steps back over the spelling
-/// before it, because a component nothing resolves is no link to step out of.
+/// target and two spellings of one directory come back as one. A component the
+/// filesystem does not resolve — an entry that does not exist yet, one beneath
+/// a directory this process may not search, a link whose target is missing or
+/// loops, a name beneath a file, or a spelling longer than the platform's
+/// `PATH_MAX` — is kept as spelled beneath what did resolve, and so is every
+/// component under it. A dangling link is therefore spelled as the link, its
+/// target not followed. Past what resolves the filesystem gives no answer to
+/// take a `..` by, so a `..` there is taken over the spelling: it steps back
+/// over the component before it. Once that brings the spelling back to what
+/// resolved, each later component is resolved again from there, links taken.
 /// That is how a path that does not exist still has a spelling to compare
 /// rather than being refused.
 ///
@@ -398,26 +407,49 @@ impl Hash for NormalizedPath {
 /// the root's own question, answered by [`PathNormalizer::detect`] for a vault
 /// and by nothing here.
 ///
-/// Each component the filesystem does not resolve costs one more resolution
-/// of the path above it, so a path whose every component resolves costs one.
+/// A path whose every component resolves costs one resolution. Otherwise each
+/// component beneath a resolved spelling costs one resolution of a spelling no
+/// longer than `PATH_MAX`, and a component beneath one kept as spelled costs
+/// none, so the cost grows linearly with the number of components.
 #[allow(clippy::disallowed_methods)] // norn-fs owns path resolution.
 pub fn canonical_spelling(path: &Path) -> PathBuf {
     if let Ok(resolved) = fs::canonicalize(path) {
         return resolved;
     }
-    let Some(parent) = path.parent() else {
-        return path.to_owned();
-    };
-    let mut spelling = canonical_spelling(parent);
-    match path.components().next_back() {
-        Some(Component::Normal(name)) => spelling.push(name),
-        Some(Component::ParentDir) => {
-            spelling.pop();
+    // `PATH_MAX` counts the terminating NUL, so a spelling this long or longer
+    // is one the filesystem refuses to resolve.
+    let longest_resolvable = usize::try_from(libc::PATH_MAX).unwrap_or(usize::MAX);
+    let mut spelling = PathBuf::new();
+    // How many trailing components of `spelling` are kept as spelled. Beneath
+    // one of them nothing resolves, so only a spelling with none is resolved
+    // further.
+    let mut unresolved = 0_usize;
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => spelling.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // A resolved spelling has no link left in it, so its parent is
+                // the directory the filesystem's `..` reaches; past what
+                // resolves, the `..` steps back over the spelling.
+                spelling.pop();
+                unresolved = unresolved.saturating_sub(1);
+            }
+            Component::Normal(name) => {
+                spelling.push(name);
+                if unresolved > 0 {
+                    unresolved += 1;
+                    continue;
+                }
+                let resolved = (spelling.as_os_str().len() < longest_resolvable)
+                    .then(|| fs::canonicalize(&spelling).ok())
+                    .flatten();
+                match resolved {
+                    Some(resolved) => spelling = resolved,
+                    None => unresolved = 1,
+                }
+            }
         }
-        // A path with a parent ends in one of the two above: `.` is dropped
-        // from every position but a relative path's first, and a root or
-        // prefix has no parent.
-        _ => {}
     }
     spelling
 }
@@ -753,6 +785,48 @@ mod tests {
             canonical_spelling(&scratch.join("link/not/../yet/.")),
             resolved.join("yet")
         );
+    }
+
+    /// A `..` past what resolves steps back into a directory that does
+    /// resolve, and every component after it is resolved from there: a link
+    /// named after the `..` is taken to the directory it reaches.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // The tree this case arranges and judges.
+    fn a_link_after_a_parent_step_past_what_resolves_is_taken() {
+        let scratch = scratch();
+        let root = scratch.join("v/root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(scratch.join("other/r2/x")).unwrap();
+        std::os::unix::fs::symlink(scratch.join("other/r2"), root.join("sub")).unwrap();
+        let resolved = std::fs::canonicalize(scratch.join("other/r2")).unwrap();
+
+        assert_eq!(
+            canonical_spelling(&root.join("notyet/../sub/x")),
+            resolved.join("x")
+        );
+        assert_eq!(
+            canonical_spelling(&root.join("notyet/../sub/missing")),
+            resolved.join("missing")
+        );
+    }
+
+    /// A spelling far longer than any path the filesystem resolves answers
+    /// on a thread with a small stack, the part past the limit kept as
+    /// spelled beneath what resolved.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // The tree this case arranges and judges.
+    fn a_spelling_of_many_components_answers_on_a_small_stack() {
+        let scratch = scratch();
+        let resolved = std::fs::canonicalize(scratch.root()).unwrap();
+        let depth = 20_000;
+        let deep = scratch.join("a/".repeat(depth));
+        let spelling = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || canonical_spelling(&deep))
+            .unwrap()
+            .join()
+            .expect("the spelling answered without exhausting the stack");
+        assert_eq!(spelling, resolved.join("a/".repeat(depth)));
     }
 
     #[test]
