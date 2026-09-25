@@ -6330,8 +6330,8 @@ mod tests {
                 norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
             );
 
-            let denied = f.vault().join("zz");
-            if !unlistable_directory(&denied) {
+            let denied = f.vault().join("zz.md");
+            if !unreadable_document(&denied) {
                 return;
             }
             fs::write(
@@ -6341,7 +6341,7 @@ mod tests {
             .unwrap();
             let refused = host.reload(&name);
             let (_, engine) = engine_reported(&host, &name);
-            listable_again(&denied);
+            readable_again(&denied);
 
             assert!(
                 matches!(
@@ -6351,7 +6351,7 @@ mod tests {
                 "{refused:?}"
             );
             // The reload pinned the edited schema as one generation before
-            // its heal met the directory it cannot list.
+            // its heal met the document it cannot read.
             assert_eq!(
                 engine,
                 norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
@@ -6485,27 +6485,31 @@ mod tests {
             (host, name, lease, armed, recoveries)
         }
 
-        /// Make `path` a directory this account cannot list, or answer
-        /// `false` where the account lists it anyway.
+        /// Write `path` as a document this account cannot read, or answer
+        /// `false` where the account reads it anyway.
+        ///
+        /// A heal that reaches the document refuses environmentally. The
+        /// watcher only reports a change at the file: no backend adds a watch
+        /// for a file, so its mode cannot fail the watcher.
         #[cfg(unix)]
-        fn unlistable_directory(path: &Path) -> bool {
+        fn unreadable_document(path: &Path) -> bool {
             use std::os::unix::fs::PermissionsExt;
 
-            fs::create_dir(path).unwrap();
+            fs::write(path, "omega omega\n").unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
-            if fs::read_dir(path).is_ok() {
-                eprintln!("skipped: this account reads a mode-000 directory");
-                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            if fs::read(path).is_ok() {
+                eprintln!("skipped: this account reads a mode-000 file");
+                fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
                 return false;
             }
             true
         }
 
         #[cfg(unix)]
-        fn listable_again(path: &Path) {
+        fn readable_again(path: &Path) {
             use std::os::unix::fs::PermissionsExt;
 
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
         }
 
         /// Wait until `name` stands untrusted for an environmental refusal: an
@@ -6543,17 +6547,17 @@ mod tests {
 
             fs::write(f.vault().join("a.md"), "beta beta\n").unwrap();
             fs::write(f.vault().join("b.md"), "gamma gamma\n").unwrap();
-            let denied = f.vault().join("zz");
-            if !unlistable_directory(&denied) {
+            let denied = f.vault().join("zz.md");
+            if !unreadable_document(&denied) {
                 return;
             }
             armed.store(true, std::sync::atomic::Ordering::SeqCst);
             wait_refused(&host, &name);
             let (_, engine) = engine_reported(&host, &name);
-            listable_again(&denied);
+            readable_again(&denied);
 
             // The rescan committed the rewritten `a.md` and the new `b.md` as
-            // one full changeset before it met the directory it cannot list.
+            // one full changeset before it met the document it cannot read.
             assert_eq!(
                 engine,
                 norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
@@ -6573,8 +6577,8 @@ mod tests {
 
             fs::write(f.vault().join("a.md"), "beta beta\n").unwrap();
             fs::write(f.vault().join("b.md"), "gamma gamma\n").unwrap();
-            let denied = f.vault().join("zz");
-            if !unlistable_directory(&denied) {
+            let denied = f.vault().join("zz.md");
+            if !unreadable_document(&denied) {
                 return;
             }
             armed.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -6598,10 +6602,10 @@ mod tests {
             .unwrap_or_else(|failure| panic!("{failure}"));
             wait_refused(&host, &name);
             let (_, engine) = engine_reported(&host, &name);
-            listable_again(&denied);
+            readable_again(&denied);
 
             // The recovery's heal committed the new `c.md` and `d.md` as one
-            // more full changeset before it met the directory it cannot list.
+            // more full changeset before it met the document it cannot read.
             assert_eq!(
                 engine,
                 norn_wire::EngineStatus::on(None, Some(Freshness::trailing(2)))
