@@ -23,7 +23,7 @@ use norn_testkit::wait::{Budget, Observed, wait_until};
 use norn_wire::{
     AnswerAdvisory, CursorKey, CursorOrderChanged, ErrorDetail, ErrorEnvelope, Freshness,
     LadderDeclaration, ModelIdentity, Moved, Predicate, ReasonCode, Rung, RungReport,
-    RungSelection, RungSet, RungSkipReason, SearchParams, SearchReport, VaultAddress,
+    RungSelection, RungSet, RungSkipReason, SearchParams, SearchReport, TrustState, VaultAddress,
 };
 
 /// The documents every case's vault holds, by path.
@@ -429,15 +429,20 @@ fn a_fused_continuation_pages_exactly_and_is_judged_by_its_ladder() {
     let before = sidecar_state(&serving, &vault);
     std::fs::write(vault.path().join("docs/late.md"), "alpha arrives late\n")
         .expect("a document landing");
+    // The leg that derives the document drains the engine and publishes the
+    // entry ready again, and a search answers only once both have happened.
     wait_until(
-        "the engine to drain the document that landed",
+        "the engine to drain the document that landed, and the entry to serve",
         Budget::new(attach::READY_LIMIT, attach::STATE_PROBE),
         || {
             let now = sidecar_state(&serving, &vault);
-            if now != before {
+            let state = serving.host.state(vault.name());
+            if now != before && matches!(state, Ok(TrustState::Ready)) {
                 Observed::Met(())
             } else {
-                Observed::pending(format!("the sidecar stands at {now:?}"))
+                Observed::pending(format!(
+                    "the sidecar stands at {now:?}, the entry at {state:?}"
+                ))
             }
         },
     )
