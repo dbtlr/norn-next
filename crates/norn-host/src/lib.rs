@@ -77,3 +77,4 @@ pub use semantic::{
     SemanticAnswer, SemanticEngines, SemanticRefusal, SemanticStatus, compose_vector_refusal,
     freshness,
 };
+pub use status::AttachmentAdvisory;

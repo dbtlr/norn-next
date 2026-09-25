@@ -12,8 +12,8 @@ use norn_config::registry::Entry as Registration;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
 use norn_store::{ContentModel, StoreReading};
 use norn_wire::{
-    Advisory, AttachMode, ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason,
-    VaultName, WarmingPhase, WatcherLossCause,
+    AttachMode, ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, VaultName,
+    WarmingPhase, WatcherLossCause,
 };
 
 use crate::evidence::{ReadEvidence, ReadReading};
@@ -21,9 +21,10 @@ use crate::registry::{
     AliasConflict, RecordRefusal, RegistrationRefusal, RegistryRead, RegistryUnwritable,
     RetireRefusal,
 };
+use crate::status::EngineReport;
 use crate::{
-    ActiveFingerprints, AuthoredDrift, ReloadError, ReloadJudgment, ReloadOutcome, ReloadRefusal,
-    VaultInspection,
+    ActiveFingerprints, AttachmentAdvisory, AuthoredDrift, ReloadError, ReloadJudgment,
+    ReloadOutcome, ReloadRefusal, VaultInspection,
 };
 
 mod claim;
@@ -338,20 +339,22 @@ pub trait EntryOps: Send + Sync + 'static {
     fn withheld_trust(&self, _: &Self::Attachment) -> Option<UntrustedReason> {
         None
     }
-    /// What establishing this attachment met in its environment that is worth
-    /// telling an operator and is neither a refusal nor a move of its trust:
-    /// where its shadows are staged, and what its walk of the vault passed
-    /// over.
+    /// What this attachment met in its environment that is worth telling an
+    /// operator and is neither a refusal nor a move of its trust: whether its
+    /// shadows are staged in the vault-local fallback, and what its last walk
+    /// of the whole vault passed over.
     ///
-    /// Read under the gate hold that records the entry's declaration, beside
-    /// [`EntryOps::active_fingerprints`], so it is answered out of what the
-    /// attachment already holds and does no I/O of its own. The entry keeps
-    /// the reading past the release of the coverage, which is what makes it a
-    /// fact about the entry's last attachment rather than about coverage it
-    /// holds now; `vault status` and `doctor` read it there.
+    /// Read under the gate hold that publishes a leg's outcome — every leg
+    /// that establishes or replaces what the attachment serves under, and
+    /// every reconcile, whose rescan of the whole vault walks it again — so
+    /// it is answered out of what the attachment already holds and does no
+    /// I/O of its own. The entry keeps the reading past the release of the
+    /// coverage, which is what makes it a fact about the entry's last
+    /// attachment rather than about coverage it holds now; `vault status` and
+    /// `doctor` read it there.
     ///
     /// The default carries none.
-    fn advisories(&self, _: &Self::Attachment) -> Vec<Advisory> {
+    fn advisories(&self, _: &Self::Attachment) -> Vec<AttachmentAdvisory> {
         Vec::new()
     }
     /// The semantic engines these ops compose, where they compose them: what a
@@ -512,6 +515,26 @@ impl<A: SnapshotSource> ProgressReporter<A> {
     pub fn healing(&self) -> Healing<'_, A> {
         self.enter(WarmingPhase::Healing);
         Healing(self)
+    }
+
+    /// Record `reading` as where this entry's lane-1 store stands: the reading
+    /// a leg takes where its lane-1 work has committed, ahead of the drain it
+    /// relays, and `None` where that reading could not be taken.
+    ///
+    /// It is what `vault status` and `doctor` judge the engine's watermarks
+    /// against, so a status taken while the drain runs reports the engine
+    /// trailing the work the leg committed, as a search would. Recorded under
+    /// the entry gate at this job's own epoch, and only while the claim
+    /// stands there: a leg the entry moved on from has nothing to say about
+    /// the store it holds now.
+    pub fn record_store_reading(&self, reading: Option<StoreReading>) {
+        let Some(entry) = self.entry.upgrade() else {
+            return;
+        };
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        if state.claim.stands_at(self.epoch) {
+            state.store_reading = reading;
+        }
     }
 
     /// Enter Lane 1 warming after a reload candidate passes core validation.
@@ -677,13 +700,24 @@ impl From<Unserved> for Demand {
     }
 }
 
+/// An entry out of service that is still listed, observed under one hold of
+/// its gate: why it is out of service, beside its engine read in that hold.
+pub(crate) struct Held {
+    /// The registration the entry serves.
+    pub(crate) registration: Registration,
+    /// Why no request is served by it.
+    pub(crate) unserved: Unserved,
+    /// Its engine, as a status reports it.
+    pub(crate) engine: EngineReport,
+}
+
 /// What one entry in service stands at, read under one hold of its gate.
 ///
 /// `vault status` and `doctor` answer out of this, and [`Host::inspect`] and
 /// [`Host::authored_drift`] read through it, so the retained facts, the
-/// demand the entry publishes and the controls its drift is measured against
-/// come from one instant. Taking it records nothing and schedules nothing:
-/// it is an observation of the entry, not a demand on it.
+/// demand the entry publishes, the controls its drift is measured against and
+/// the engine beside them come from one instant. Taking it records nothing and
+/// schedules nothing: it is an observation of the entry, not a demand on it.
 pub(crate) struct Observation {
     /// The registration the entry serves.
     pub(crate) registration: Registration,
@@ -695,6 +729,9 @@ pub(crate) struct Observation {
     /// The operational root the active controls were read from, where the
     /// entry holds active controls.
     pub(crate) control_root: Option<std::path::PathBuf>,
+    /// The vault's engine, judged against the store reading the entry
+    /// recorded, read in the same hold of the gate.
+    pub(crate) engine: EngineReport,
 }
 
 /// The one thing a client can be told the host has gone.
@@ -778,6 +815,7 @@ impl<A: SnapshotSource> Entry<A> {
                 control_root: None,
                 last_reload_error: None,
                 advisories: Vec::new(),
+                store_reading: None,
                 recovery_required: false,
                 rebuild_required: false,
                 recovery_demands: 0,
@@ -861,7 +899,7 @@ struct EntryState<A: SnapshotSource> {
     last_reload_error: Option<ReloadError>,
     /// The advisories the entry's last attachment carried, as
     /// [`EntryOps::advisories`] read them at the last publication that
-    /// recorded its declaration.
+    /// recorded them.
     ///
     /// **A fact about the last attachment, kept past its release.** Nothing
     /// clears it when the coverage goes back, so an entry idled out still
@@ -869,7 +907,12 @@ struct EntryState<A: SnapshotSource> {
     /// a quiet host is told about a vault nobody is asking for — and the next
     /// attachment's publication replaces it. An entry that has not attached
     /// since this host started carries none.
-    advisories: Vec<Advisory>,
+    advisories: Vec<AttachmentAdvisory>,
+    /// Where the lane-1 store of the coverage the entry holds stood when the
+    /// last leg over it committed its lane-1 work, as that leg recorded it
+    /// through [`ProgressReporter::record_store_reading`]; `None` until one
+    /// has, and once the coverage goes back.
+    store_reading: Option<StoreReading>,
     recovery_required: bool,
     /// Whether the entry's derived state is damaged and owes the database-side
     /// heal rung.
@@ -1418,12 +1461,18 @@ impl<A: SnapshotSource> EntryState<A> {
 
     /// What this entry stands at, where it is in service: the observation
     /// `vault status` and the inspection doors read, taken under the hold of
-    /// the gate this is called under.
-    fn observe(&self, registration: &Registration) -> Result<Observation, Unserved> {
+    /// the gate this is called under, with its engine read out of `engines`
+    /// in that same hold.
+    fn observe(
+        &self,
+        registration: &Registration,
+        engines: Option<&crate::semantic::SemanticEngines>,
+    ) -> Result<Observation, Unserved> {
         if let Some(unserved) = self.out_of_service() {
             return Err(unserved);
         }
         Ok(Observation {
+            engine: self.engine_report(registration, engines),
             registration: registration.clone(),
             published: self.published_demand(),
             inspection: VaultInspection {
@@ -1435,6 +1484,16 @@ impl<A: SnapshotSource> EntryState<A> {
             },
             control_root: self.control_root.clone(),
         })
+    }
+
+    /// The engine of the vault `registration` names, out of `engines`,
+    /// judged against the store reading this entry recorded.
+    fn engine_report(
+        &self,
+        registration: &Registration,
+        engines: Option<&crate::semantic::SemanticEngines>,
+    ) -> EngineReport {
+        EngineReport::of(engines, &registration.name, self.store_reading.as_ref())
     }
 
     /// What a caller reads off this entry: the park it stands on, or its trust
@@ -1787,9 +1846,7 @@ fn record_demand<A: SnapshotSource>(state: &mut EntryState<A>) -> Option<u64> {
 /// account of its declaration moves with the publication that puts the
 /// coverage back, and a read taken under a later hold reads both together.
 /// The legs that call it are the ones that establish or replace what the
-/// attachment serves under — an attach, a recovery, a rebuild and a reload —
-/// which are the legs whose own work met the environment the advisories
-/// describe.
+/// attachment serves under — an attach, a recovery, a rebuild and a reload.
 fn record_active_declaration<O: EntryOps>(
     state: &mut EntryState<O::Attachment>,
     ops: &O,
@@ -1797,6 +1854,19 @@ fn record_active_declaration<O: EntryOps>(
 ) {
     state.active_fingerprints = ops.active_fingerprints(attachment);
     state.active_content_model = ops.active_content_model(attachment);
+    record_advisories(state, ops, attachment);
+}
+
+/// Record the advisories `attachment` carries as the entry's own.
+///
+/// Called under the gate hold that publishes a leg's outcome: by
+/// [`record_active_declaration`], and by a reconcile, whose rescan of the
+/// whole vault walks it again and replaces what the last walk passed over.
+fn record_advisories<O: EntryOps>(
+    state: &mut EntryState<O::Attachment>,
+    ops: &O,
+    attachment: &O::Attachment,
+) {
     state.advisories = ops.advisories(attachment);
 }
 
@@ -1920,6 +1990,7 @@ fn finish_release<O: EntryOps>(
     state.active_fingerprints = None;
     state.active_content_model = Arc::new(ContentModel::none());
     state.control_root = None;
+    state.store_reading = None;
     // The derived state a damage verdict was about is with the ops, and an
     // attach opens the database again from nothing: a requirement kept here
     // would name a store this entry no longer holds.
@@ -3508,34 +3579,33 @@ impl<O: EntryOps> Host<O> {
             .get(name)
             .ok_or(Unserved::UnknownVault)?;
         let state = entry.gate.lock().expect("entry gate poisoned");
-        state.observe(&entry.registration)
+        state.observe(&entry.registration, self.shared.ops.semantic())
     }
 
     /// What every entry the set serves stands at, ascending by name: each
-    /// one's observation, taken under one hold of its own gate, or the
-    /// registration of an entry out of service beside why.
+    /// one's observation, taken under one hold of its own gate, or an entry
+    /// out of service observed in that hold.
     ///
     /// An entry the set let go of between the snapshot and its own gate is
     /// left out, as a listing taken after the removal leaves it out. Each
     /// gate is taken on its own, so the entries are read one after another
     /// rather than at one instant.
-    pub(crate) fn observe_all(&self) -> Vec<Result<Observation, (Registration, Unserved)>> {
+    pub(crate) fn observe_all(&self) -> Vec<Result<Observation, Held>> {
+        let engines = self.shared.ops.semantic();
         self.shared
             .entries
             .snapshot()
             .into_iter()
             .filter_map(|entry| {
-                let observed = entry
-                    .gate
-                    .lock()
-                    .expect("entry gate poisoned")
-                    .observe(&entry.registration);
-                match observed {
+                let state = entry.gate.lock().expect("entry gate poisoned");
+                match state.observe(&entry.registration, engines) {
                     Ok(observation) => Some(Ok(observation)),
                     Err(Unserved::UnknownVault) => None,
-                    Err(held @ Unserved::EntryHeld) => {
-                        Some(Err((entry.registration.clone(), held)))
-                    }
+                    Err(unserved @ Unserved::EntryHeld) => Some(Err(Held {
+                        registration: entry.registration.clone(),
+                        unserved,
+                        engine: state.engine_report(&entry.registration, engines),
+                    })),
                 }
             })
             .collect()
@@ -5236,6 +5306,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             match result {
                 Ok(()) => {
                     state.pending.merge(observed);
+                    record_advisories(&mut state, &*shared.ops, &attachment);
                     state.coverage.park_by(epoch, attachment);
                     if handoff_saturated || !state.pending.is_empty() {
                         state.trust = trust_for_pending_reconcile(&state.pending);
@@ -6602,7 +6673,7 @@ mod tests {
         /// What every coverage this fake hands out answers
         /// [`EntryOps::advisories`] with, read at the publication the way an
         /// implementation reads what its attachment met.
-        advisories: Mutex<Vec<Advisory>>,
+        advisories: Mutex<Vec<AttachmentAdvisory>>,
     }
 
     /// A rendezvous two registry writes meet at, where both reach the write.
@@ -6735,7 +6806,7 @@ mod tests {
                 .then(|| UntrustedReason::schema_unreadable("this fake withholds trust"))
         }
 
-        fn advisories(&self, _: &FakeCoverage) -> Vec<Advisory> {
+        fn advisories(&self, _: &FakeCoverage) -> Vec<AttachmentAdvisory> {
             self.advisories.lock().expect("advisories poisoned").clone()
         }
 
@@ -8207,9 +8278,10 @@ mod tests {
     }
 
     /// **The status of an entry nothing has attached answers without
-    /// attaching it**: it is unattached, serves no controls, and its engine
-    /// is off — and asking recorded no demand and scheduled nothing, so it
-    /// is still unattached after the host has had time to act.
+    /// attaching it**: it is unattached, serves no controls, no engine
+    /// section has been delivered for it and its engine is off — and asking
+    /// recorded no demand and scheduled nothing, so it is still unattached
+    /// after the host has had time to act.
     #[test]
     fn the_status_of_an_unattached_entry_answers_without_attaching_it() {
         let ops = Arc::new(FakeOps::default());
@@ -8225,7 +8297,7 @@ mod tests {
         assert_eq!(status.fingerprints, None);
         assert_eq!(status.drift, norn_wire::Drift::inactive());
         assert_eq!(status.engine, norn_wire::EngineStatus::off());
-        assert_eq!(status.section, norn_wire::EngineSection::absent());
+        assert_eq!(status.section, norn_wire::EngineSection::undelivered());
         assert_eq!(status.advisories, []);
         assert!(nothing_asked_of(&host, &name), "the status asked for work");
         settle();
@@ -8447,8 +8519,7 @@ mod tests {
     /// **A roll-up counts every entry under what it publishes and names each
     /// one that wants attention, and why**: a ready entry whose links went
     /// unwalked, a parked one, an untrusted one, and one nothing has
-    /// attached. A shadow fallback the vault ignores is reported on its
-    /// status and wants no attention. Asking attached nothing.
+    /// attached. Asking attached nothing.
     #[test]
     fn a_roll_up_counts_mixed_entries_and_names_what_wants_attention() {
         let [ready, idle, parked, untrusted] =
@@ -8466,9 +8537,8 @@ mod tests {
         wait_for_state(&host, &untrusted, TrustState::untrusted(reason.clone()));
         ops.withholds_trust.store(false, Ordering::SeqCst);
 
-        let ignored = norn_wire::Advisory::tmp_fallback_in_use(".norn/tmp/key", true);
         let link = norn_wire::Advisory::symlink_skipped("away.md");
-        *ops.advisories.lock().unwrap() = vec![ignored.clone(), link.clone()];
+        *ops.advisories.lock().unwrap() = vec![linked("away.md")];
         let _ready_lease = host.demand(&ready, AttachMode::Durable).unwrap();
         wait_for_state(&host, &ready, TrustState::Ready);
         ops.advisories.lock().unwrap().clear();
@@ -8503,7 +8573,7 @@ mod tests {
                 norn_wire::Attention::untrusted(untrusted.clone(), reason),
             ]
         );
-        assert_eq!(status_of(&host, &ready).advisories, [ignored, link]);
+        assert_eq!(status_of(&host, &ready).advisories, [link]);
         assert!(nothing_asked_of(&host, &idle));
         settle();
         assert_eq!(
@@ -8521,8 +8591,9 @@ mod tests {
     }
 
     /// **`doctor` reports the roll-up `vault status` computes, a sound
-    /// registry, and each vault's engine in name order**, and asking it
-    /// attached nothing and recorded no demand.
+    /// registry, and each vault's engine in name order** — a host that
+    /// composes no engine has delivered no section for any vault, attached
+    /// or not — and asking it attached nothing and recorded no demand.
     #[test]
     fn doctor_reports_the_status_roll_up_the_registry_and_each_engine_and_asks_nothing() {
         let scratch = temp_base("doctor-sound");
@@ -8550,7 +8621,7 @@ mod tests {
             report.engines,
             [alpha, beta.clone()].map(|name| norn_wire::EngineHealth::new(
                 name,
-                norn_wire::EngineSection::absent(),
+                norn_wire::EngineSection::undelivered(),
                 norn_wire::EngineStatus::off()
             ))
         );
@@ -8559,30 +8630,89 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1, "doctor attached");
     }
 
-    /// **`doctor` warns for a vault-local shadow fallback the vault does not
-    /// ignore, and only for that one**: a fallback the vault ignores is on
-    /// its status and names the vault for nothing.
+    /// The advisory of a coverage staging shadows in the vault-local
+    /// fallback, as the fake's attachments carry it.
+    fn falling_back() -> AttachmentAdvisory {
+        AttachmentAdvisory::TmpFallbackInUse {
+            home: ".norn/tmp/key".to_string(),
+        }
+    }
+
+    /// The advisory of a walk that passed over the link at `path`.
+    fn linked(path: &str) -> AttachmentAdvisory {
+        AttachmentAdvisory::SymlinkSkipped {
+            path: path.to_string(),
+        }
+    }
+
+    /// **Whether a vault ignores its shadow fallback is read from its
+    /// `.gitignore` when `vault status` and `doctor` report it**, not frozen
+    /// at the attach: a vault whose `.gitignore` covers the fallback wants no
+    /// attention, one whose `.gitignore` does not is named for it, and
+    /// correcting the file clears the warning at the next report with no
+    /// attach in between. Both verbs report the same answer.
     #[test]
-    fn doctor_warns_for_a_fallback_the_vault_does_not_ignore_and_only_that_one() {
+    fn the_fallback_ignore_answer_is_read_when_status_and_doctor_report_it() {
+        let scratch = temp_base("status-fallback");
         let [ignoring, exposed] = ["ignoring", "exposed"].map(|name| VaultName::new(name).unwrap());
+        let (ignoring_root, exposed_root) = (
+            scratch.root().join("ignoring"),
+            scratch.root().join("exposed"),
+        );
         let ops = Arc::new(FakeOps::default());
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&ignoring, &exposed], 1);
+        let host = quiet_host_over_roots(
+            Arc::clone(&ops),
+            &[(&ignoring, &ignoring_root), (&exposed, &exposed_root)],
+        );
+        std::fs::write(ignoring_root.join(".gitignore"), "/.norn/\n").unwrap();
+        *ops.advisories.lock().unwrap() = vec![falling_back()];
         let mut leases = Vec::new();
-        for (name, gitignored) in [(&ignoring, true), (&exposed, false)] {
-            *ops.advisories.lock().unwrap() = vec![norn_wire::Advisory::tmp_fallback_in_use(
-                ".norn/tmp/key",
-                gitignored,
-            )];
+        for name in [&ignoring, &exposed] {
             leases.push(host.demand(name, AttachMode::Durable).unwrap());
             wait_for_state(&host, name, TrustState::Ready);
         }
+        let attaches = ops.attaches.load(Ordering::SeqCst);
+        let fallback =
+            |gitignored| norn_wire::Advisory::tmp_fallback_in_use(".norn/tmp/key", gitignored);
 
+        assert_eq!(status_of(&host, &ignoring).advisories, [fallback(true)]);
+        assert_eq!(status_of(&host, &exposed).advisories, [fallback(false)]);
+        let named = [norn_wire::Attention::advisory(
+            exposed.clone(),
+            fallback(false),
+        )];
+        assert_eq!(rolled_up(&host).attention(), named);
+        assert_eq!(doctored(&host).roll_up.attention(), named);
+
+        std::fs::write(exposed_root.join(".gitignore"), ".norn/tmp/\n").unwrap();
+        assert_eq!(status_of(&host, &exposed).advisories, [fallback(true)]);
+        assert!(rolled_up(&host).attention().is_empty());
+        assert!(doctored(&host).roll_up.attention().is_empty());
         assert_eq!(
-            doctored(&host).roll_up.attention(),
-            [norn_wire::Attention::advisory(
-                exposed,
-                norn_wire::Advisory::tmp_fallback_in_use(".norn/tmp/key", false)
-            )]
+            ops.attaches.load(Ordering::SeqCst),
+            attaches,
+            "the answer moved by an attach"
+        );
+    }
+
+    /// **A `.gitignore` that cannot be read reports the fallback as not
+    /// ignored**: the question went unanswered, and the answer that warns is
+    /// the one given.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_gitignore_reports_the_fallback_as_not_ignored() {
+        let scratch = temp_base("status-fallback-unreadable");
+        let root = scratch.root().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(scratch.root().join("elsewhere"), ".norn/\n").unwrap();
+        std::os::unix::fs::symlink(scratch.root().join("elsewhere"), root.join(".gitignore"))
+            .unwrap();
+        assert_eq!(
+            crate::status::reported_advisories(&[falling_back(), linked("away.md")], &root),
+            [
+                norn_wire::Advisory::tmp_fallback_in_use(".norn/tmp/key", false),
+                norn_wire::Advisory::symlink_skipped("away.md"),
+            ]
         );
     }
 
@@ -12662,7 +12792,7 @@ mod tests {
         let advisories = |host: &Host<Arc<FakeOps>>| host.inspect(&name).unwrap().advisories;
         assert_eq!(advisories(&host), [], "an entry never attached advises");
 
-        let first = vec![Advisory::symlink_skipped("away")];
+        let first = vec![linked("away")];
         *ops.advisories.lock().unwrap() = first.clone();
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -12673,11 +12803,49 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Unattached);
         assert_eq!(advisories(&host), first, "the release took the advisories");
 
-        let second = vec![Advisory::tmp_fallback_in_use(".norn/tmp/key", false)];
+        let second = vec![falling_back()];
         *ops.advisories.lock().unwrap() = second.clone();
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(advisories(&host), second);
+    }
+
+    /// **A reconcile's publication records the advisories its attachment
+    /// carries**, so what a rescan of the whole vault passed over replaces
+    /// what the attach's walk passed over without waiting for another attach.
+    #[test]
+    fn a_reconcile_records_the_advisories_its_rescan_leaves() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        *ops.advisories.lock().unwrap() = vec![linked("before.md")];
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            host.inspect(&name).unwrap().advisories,
+            [linked("before.md")]
+        );
+
+        *ops.advisories.lock().unwrap() = vec![linked("after.md")];
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_rescan_poll_batches);
+        wait_until(
+            "the rescan's reconcile to publish",
+            lifecycle_wait_budget(),
+            || {
+                let reconciles = ops.reconciles.load(Ordering::SeqCst);
+                let state = host.state(&name);
+                if reconciles >= 1 && state == answered(TrustState::Ready) {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{reconciles} reconciles, {state:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        assert_eq!(
+            host.inspect(&name).unwrap().advisories,
+            [linked("after.md")]
+        );
     }
 
     #[test]

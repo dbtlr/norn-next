@@ -419,9 +419,16 @@ impl AnswerReading {
 ///
 /// On the wire a section is an object tagged `state`:
 /// `{"state":"absent"}`, `{"state":"malformed","detail":"…"}`.
+///
+/// Four readings are of a delivered section. The fifth, `undelivered`, says
+/// the host holds no delivery for the vault — it has not attached since the
+/// host started, its attachment was released, or the host composes no engine
+/// — so nothing is known of what its config states.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum EngineSection {
+    /// No section has been delivered to the host for the vault.
+    Undelivered {},
     /// The vault's config states no engine section.
     Absent {},
     /// The section is stated and turns the engine off.
@@ -438,6 +445,11 @@ pub enum EngineSection {
 }
 
 impl EngineSection {
+    /// No section has been delivered.
+    pub const fn undelivered() -> Self {
+        EngineSection::Undelivered {}
+    }
+
     /// No engine section is stated.
     pub const fn absent() -> Self {
         EngineSection::Absent {}

@@ -214,7 +214,7 @@ pub struct VaultInspection {
     /// What the entry's last attachment met in its environment that is worth
     /// telling an operator: the advisories [`crate::EntryOps::advisories`]
     /// read at its last publication, kept past the release of its coverage.
-    pub advisories: Vec<norn_wire::Advisory>,
+    pub advisories: Vec<crate::AttachmentAdvisory>,
 }
 
 /// The authored control-file state relative to the active fingerprints.

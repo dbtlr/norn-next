@@ -511,9 +511,12 @@ fn freshnesses() -> Vec<Freshness> {
     ]
 }
 
-/// Every section reading the host retains for a vault's engine.
+/// Every section reading a status reports for a vault's engine: the four
+/// the host retains from a delivery, and the one it reports where no
+/// delivery stands.
 fn engine_sections() -> Vec<EngineSection> {
     vec![
+        EngineSection::undelivered(),
         EngineSection::absent(),
         EngineSection::disabled(),
         EngineSection::malformed("the `engine` table holds a string"),
@@ -3436,10 +3439,15 @@ fn every_rung_report_names_its_own_rung() {
     );
 }
 
-/// The section the host was delivered is four readings, and the malformed one
-/// carries its account as prose beside the tag a client branches on.
+/// The section the host was delivered is four readings, the malformed one
+/// carrying its account as prose beside the tag a client branches on, and a
+/// fifth says no section has been delivered at all.
 #[test]
 fn an_engine_section_is_an_object_tagged_state() {
+    assert_eq!(
+        wire(&EngineSection::undelivered()),
+        r#"{"state":"undelivered"}"#
+    );
     assert_eq!(wire(&EngineSection::absent()), r#"{"state":"absent"}"#);
     assert_eq!(wire(&EngineSection::disabled()), r#"{"state":"disabled"}"#);
     assert_eq!(wire(&EngineSection::enabled()), r#"{"state":"enabled"}"#);
