@@ -885,14 +885,15 @@ struct EntryState<A: SnapshotSource> {
     /// nothing and held by nothing, in the same hold that asks; kept by the
     /// removal that takes the entry out of the set, so an entry the set let go
     /// of stays out of service; and cleared only where that unregistration is
-    /// refused first, which puts the entry back in service as it stood.
+    /// refused or unwinds first, which puts the entry back in service as it
+    /// stood. `Withdrawal` is what sets and clears it.
     ///
     /// Every door a caller asks through reads this before anything else, a
     /// caller holding the entry from before the removal included. While it
-    /// stands the caller is answered as though the set served no such name,
-    /// and nothing is recorded or scheduled against the entry — so nothing in
-    /// this process comes to hold the entry, or reaches for its maintainer
-    /// lock, while the unregistration holds that lock.
+    /// stands nothing is recorded or scheduled against the entry — so nothing
+    /// in this process comes to hold the entry, or reaches for its maintainer
+    /// lock, while the unregistration holds that lock — and what the caller is
+    /// answered is [`EntryState::withdrawal_answer`]'s to decide.
     withdrawn: bool,
 }
 
@@ -1298,6 +1299,18 @@ impl<A: SnapshotSource> EntryState<A> {
         self.duplicate_root = None;
     }
 
+    /// What every door answers while an unregistration holds this entry
+    /// withdrawn from service, and nothing while the entry is in service.
+    ///
+    /// **This is the one place that answer is decided.** A demand, a retry, a
+    /// status read and a read answer with it; a reload and the inspection
+    /// doors, which answer in shapes of their own, refuse or answer nothing
+    /// wherever it is present. The entry answers as a name the set does not
+    /// serve, the same answer the set gives once the change commits.
+    fn withdrawal_answer(&self) -> Option<Demand> {
+        self.withdrawn.then_some(Demand::UnknownVault)
+    }
+
     /// What a caller reads off this entry: the park it stands on, or its trust
     /// state where nothing parks it.
     ///
@@ -1311,8 +1324,8 @@ impl<A: SnapshotSource> EntryState<A> {
     /// a park variant minted without a stance in the vocabulary does not
     /// compile rather than falling through to a label.
     fn published_demand(&self) -> Demand {
-        if self.withdrawn {
-            return Demand::UnknownVault;
+        if let Some(answer) = self.withdrawal_answer() {
+            return answer;
         }
         self.parked()
             .unwrap_or_else(|| Demand::State(self.trust.clone()))
@@ -1593,32 +1606,18 @@ fn schedule_demanded_work<A: SnapshotSource>(
     Some(schedule_demand(state, name))
 }
 
-/// Enter the window in which an entry's resources are going back.
-///
-/// Taking the attachment is the instant the entry stops being readable, and the
-/// state says so here rather than at the end of the leg. It cannot say
-/// Unattached yet: Unattached is what an entry publishes once its resources are
-/// no longer its own, and a caller that waits for it is waiting for exactly
-/// that. On every leg that returns, that instant is [`EntryOps::detach`]
-/// returning, having given the watcher, the store and the maintainer lock back.
-/// A leg that unwinds reaches no detach — its attachment was dropped on the
-/// unwinding stack, which is where an implementation's own `Drop` released it —
-/// so Unattached there says the entry holds nothing rather than that a detach
-/// ran, and [`EntryOps::discard`] is what gives back the residue no detach was
-/// there to. Warming is the state meaning attached and not readable, and the
-/// phase beside it names the leg — resources going back, nothing counted.
-///
-/// The flag, not the label, is what makes the window safe to leave the gate
-/// open across. [`Host::demand`] and [`schedule_demanded_work`] both refuse to
-/// schedule while a release is in flight, so a lease raised inside the window
-/// records itself and is answered by [`finish_release`] rather than racing the
-/// publication that ends it — and it stays answered there even where another
-/// writer overwrites the phase mid-window.
-///
-/// The reader goes here, at the start of the window, rather than where the
-/// resources reach the ops: this is the instant the entry stops being readable,
-/// and the store the handle was minted from closes inside the window. Every
-/// teardown enters here, so one site is what carries the rule for all of them.
+/// A lease answering `outcome` that holds no entry: the answer to a name the
+/// serving set does not serve, and to an entry withdrawn from service. It
+/// holds nothing, so nothing is withdrawn when it is dropped.
+fn unheld_lease<O: EntryOps>(name: &VaultName, outcome: Demand) -> DemandLease<O> {
+    DemandLease {
+        outcome,
+        name: name.clone(),
+        held: None,
+        recovery_demand: None,
+    }
+}
+
 /// Record one caller's demand on an entry, and answer the recovery demand it
 /// raised.
 ///
@@ -1641,17 +1640,6 @@ fn schedule_demanded_work<A: SnapshotSource>(
 /// is nothing standing for it to answer and no attach is re-armed: the read
 /// asked once, was told the entry is giving its resources back, and the read
 /// after it is what asks again.
-/// The lease a demand for a name the serving set does not serve answers with.
-/// It holds nothing, so nothing is withdrawn when it is dropped.
-fn unknown_vault_lease<O: EntryOps>(name: &VaultName) -> DemandLease<O> {
-    DemandLease {
-        outcome: Demand::UnknownVault,
-        name: name.clone(),
-        held: None,
-        recovery_demand: None,
-    }
-}
-
 fn record_demand<A: SnapshotSource>(state: &mut EntryState<A>) -> Option<u64> {
     state.demand_leases += 1;
     let recovery_demand = state.demand_recovery();
@@ -1679,6 +1667,32 @@ fn record_active_declaration<O: EntryOps>(
     state.active_content_model = ops.active_content_model(attachment);
 }
 
+/// Enter the window in which an entry's resources are going back.
+///
+/// Taking the attachment is the instant the entry stops being readable, and the
+/// state says so here rather than at the end of the leg. It cannot say
+/// Unattached yet: Unattached is what an entry publishes once its resources are
+/// no longer its own, and a caller that waits for it is waiting for exactly
+/// that. On every leg that returns, that instant is [`EntryOps::detach`]
+/// returning, having given the watcher, the store and the maintainer lock back.
+/// A leg that unwinds reaches no detach — its attachment was dropped on the
+/// unwinding stack, which is where an implementation's own `Drop` released it —
+/// so Unattached there says the entry holds nothing rather than that a detach
+/// ran, and [`EntryOps::discard`] is what gives back the residue no detach was
+/// there to. Warming is the state meaning attached and not readable, and the
+/// phase beside it names the leg — resources going back, nothing counted.
+///
+/// The flag, not the label, is what makes the window safe to leave the gate
+/// open across. [`Host::demand`] and [`schedule_demanded_work`] both refuse to
+/// schedule while a release is in flight, so a lease raised inside the window
+/// records itself and is answered by [`finish_release`] rather than racing the
+/// publication that ends it — and it stays answered there even where another
+/// writer overwrites the phase mid-window.
+///
+/// The reader goes here, at the start of the window, rather than where the
+/// resources reach the ops: this is the instant the entry stops being readable,
+/// and the store the handle was minted from closes inside the window. Every
+/// teardown enters here, so one site is what carries the rule for all of them.
 fn begin_release<A: SnapshotSource>(state: &mut EntryState<A>) {
     // A job that lost the attachment to this leg left its marker behind for a
     // later tick, and the resources it was scheduled against are going back:
@@ -1882,6 +1896,70 @@ fn unwind_detail(payload: &(dyn Any + Send)) -> String {
 fn attach_gate<O: EntryOps>(shared: &Shared<O>) -> MutexGuard<'_, BTreeMap<Identity, VaultName>> {
     shared
         .attach_gate
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// An entry an unregistration has withdrawn from service, put back in service
+/// when this is dropped unless the unregistration committed.
+///
+/// Dropping is every way out of the change that did not commit — a refusal
+/// and an unwinding retirement alike — so no path leaves the entry answering
+/// as withdrawn while the set still serves it.
+struct Withdrawal<'a, A: SnapshotSource> {
+    entry: &'a Entry<A>,
+    committed: bool,
+}
+
+impl<'a, A: SnapshotSource> Withdrawal<'a, A> {
+    /// Withdraw `entry` from service, in the one gate hold that finds it
+    /// holding nothing and held by nothing. An entry something holds is not
+    /// withdrawn, and answers nothing here.
+    fn begin(entry: &'a Entry<A>) -> Option<Self> {
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        if state.held_by_anything() {
+            return None;
+        }
+        state.withdrawn = true;
+        Some(Self {
+            entry,
+            committed: false,
+        })
+    }
+
+    /// Keep the entry withdrawn: the registration is gone, and the removal
+    /// that follows takes the entry out of the set as it stands.
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl<A: SnapshotSource> Drop for Withdrawal<'_, A> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        // One flag is written, whole, so a gate a panic poisoned elsewhere
+        // holds nothing this write could read half-done; recovering it keeps
+        // an unwind through here from becoming an abort.
+        self.entry
+            .gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .withdrawn = false;
+    }
+}
+
+/// Take the lock every registration change holds, recovering it where a
+/// change unwound while it stood held.
+///
+/// The lock guards no data: it orders the changes, and each change reads and
+/// writes the serving set and the registry file under their own locks. A
+/// change that unwound left nothing half written here, so its poison says only
+/// that a stack unwound past a hold, and the next change goes on.
+fn registration_gate<O: EntryOps>(shared: &Shared<O>) -> MutexGuard<'_, ()> {
+    shared
+        .registration_gate
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
 }
@@ -3017,10 +3095,7 @@ impl<O: EntryOps> Host<O> {
         registration: Registration,
     ) -> Result<(Registration, Demand), RegistrationRefusal> {
         let shared = &self.shared;
-        let _changing = shared
-            .registration_gate
-            .lock()
-            .expect("registration gate poisoned");
+        let _changing = registration_gate(shared);
         let name = registration.name.clone();
         if shared.entries.get(&name).is_some() {
             return Err(RegistrationRefusal::Serving(ServingRefusal::AlreadyServed));
@@ -3073,35 +3148,28 @@ impl<O: EntryOps> Host<O> {
     /// that were parked on a conflict with it are classified again.
     ///
     /// **A refusal puts the withdrawn entry back in service as it stood**, so
-    /// the registration that stood before still stands, park and all.
-    /// Whatever a discard did take before a refusal is derived state, which
-    /// the next attach derives again from the vault.
+    /// the registration that stood before still stands, park and all, and so
+    /// does a retirement that unwinds. Whatever a discard did take before a
+    /// refusal is derived state, which the next attach derives again from the
+    /// vault.
     pub(crate) fn unregister(
         &self,
         name: &VaultName,
         keep_state: bool,
     ) -> Result<(), RegistrationRefusal> {
         let shared = &self.shared;
-        let _changing = shared
-            .registration_gate
-            .lock()
-            .expect("registration gate poisoned");
+        let _changing = registration_gate(shared);
         let Some(entry) = shared.entries.get(name) else {
             return Err(RegistrationRefusal::UnknownVault);
         };
-        {
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
-            if state.held_by_anything() {
-                return Err(RegistrationRefusal::Serving(ServingRefusal::Held));
-            }
-            state.withdrawn = true;
-        }
+        let withdrawal =
+            Withdrawal::begin(&entry).ok_or(RegistrationRefusal::Serving(ServingRefusal::Held))?;
         let standing = shared.entries.registrations();
         if let Err(refused) = shared
             .ops
             .retire(&entry.registration, keep_state, &standing)
         {
-            entry.gate.lock().expect("entry gate poisoned").withdrawn = false;
+            drop(withdrawal);
             return Err(match refused {
                 RetireRefusal::MaintainerContended(incumbent) => {
                     RegistrationRefusal::MaintainerContended(incumbent)
@@ -3114,6 +3182,7 @@ impl<O: EntryOps> Host<O> {
                 }
             });
         }
+        withdrawal.commit();
         drop(entry);
         shared
             .entries
@@ -3271,12 +3340,15 @@ impl<O: EntryOps> Host<O> {
     pub fn inspect(&self, name: &VaultName) -> Option<VaultInspection> {
         let entry = self.shared.entries.get(name)?;
         let state = entry.gate.lock().expect("entry gate poisoned");
-        (!state.withdrawn).then(|| VaultInspection {
-            trust: state.trust.clone(),
-            active_fingerprints: state.active_fingerprints,
-            last_reload_error: state.last_reload_error.clone(),
-            reader_unavailable: state.reader_unavailable.clone(),
-        })
+        state
+            .withdrawal_answer()
+            .is_none()
+            .then(|| VaultInspection {
+                trust: state.trust.clone(),
+                active_fingerprints: state.active_fingerprints,
+                last_reload_error: state.last_reload_error.clone(),
+                reader_unavailable: state.reader_unavailable.clone(),
+            })
     }
 
     /// Compare the authored control files with the active fingerprints now.
@@ -3290,7 +3362,7 @@ impl<O: EntryOps> Host<O> {
         let entry = self.shared.entries.get(name)?;
         let (active, control_root) = {
             let state = entry.gate.lock().expect("entry gate poisoned");
-            if state.withdrawn {
+            if state.withdrawal_answer().is_some() {
                 return None;
             }
             (state.active_fingerprints, state.control_root.clone())
@@ -3373,7 +3445,7 @@ impl<O: EntryOps> Host<O> {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             // An entry withdrawn from service after the lookup above answers
             // as a lookup after its removal would have.
-            if state.withdrawn {
+            if state.withdrawal_answer().is_some() {
                 return Err(ReloadRefusal::UnknownVault);
             }
             if state.trust != TrustState::Ready
@@ -3458,7 +3530,7 @@ impl<O: EntryOps> Host<O> {
     pub fn work_in_flight(&self, name: &VaultName) -> Option<WorkInFlight> {
         let entry = self.shared.entries.get(name)?;
         let state = entry.gate.lock().expect("entry gate poisoned");
-        (!state.withdrawn).then(|| WorkInFlight {
+        state.withdrawal_answer().is_none().then(|| WorkInFlight {
             claim_held: state.claim.is_held(),
             leg_registered: state.claim.leg().is_some(),
             job_queued: state.claim.slot_taken(),
@@ -3483,7 +3555,10 @@ impl<O: EntryOps> Host<O> {
     pub fn recovery_demands(&self, name: &VaultName) -> Option<usize> {
         let entry = self.shared.entries.get(name)?;
         let state = entry.gate.lock().expect("entry gate poisoned");
-        (!state.withdrawn).then_some(state.recovery_demands)
+        state
+            .withdrawal_answer()
+            .is_none()
+            .then_some(state.recovery_demands)
     }
 
     /// Record client demand and, where necessary, start one asynchronous job
@@ -3530,7 +3605,7 @@ impl<O: EntryOps> Host<O> {
             });
         }
         let Some(entry) = self.shared.entries.get(name) else {
-            return Ok(unknown_vault_lease(name));
+            return Ok(unheld_lease(name, Demand::UnknownVault));
         };
         self.demand_entry(name, entry)
     }
@@ -3548,8 +3623,8 @@ impl<O: EntryOps> Host<O> {
         entry: Arc<Entry<O::Attachment>>,
     ) -> Result<DemandLease<O>, HostError> {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
-        if state.withdrawn {
-            return Ok(unknown_vault_lease(name));
+        if let Some(answer) = state.withdrawal_answer() {
+            return Ok(unheld_lease(name, answer));
         }
         let recovery_demand = record_demand(&mut state);
         // A release in flight is the entry's resources on their way back, and
@@ -3643,7 +3718,7 @@ impl<O: EntryOps> Host<O> {
             // A withdrawn entry answers the demand below as unknown, and keeps
             // the park it stood on for the refused unregistration that would
             // put it back in service.
-            if !state.withdrawn {
+            if state.withdrawal_answer().is_none() {
                 state.maintainer_contended = None;
             }
         }
@@ -3707,8 +3782,8 @@ impl<O: EntryOps> Host<O> {
         // An entry withdrawn from service after the lookup above answers as a
         // lookup after its removal would have, and records nothing against
         // itself.
-        if state.withdrawn {
-            return Err(ReadRefusal::NotServing(Demand::UnknownVault));
+        if let Some(answer) = state.withdrawal_answer() {
+            return Err(ReadRefusal::NotServing(answer));
         }
         let recovery_demand = record_demand(&mut state);
         // The registry's parks are not withdrawn here. Withdrawing one is
@@ -6371,6 +6446,8 @@ mod tests {
         /// Where a case arranged one, the pause every retirement takes under
         /// the maintainer lock, before it reads the registry file.
         retire_pause: Mutex<Option<Arc<RetirePause>>>,
+        /// Whether every retirement panics under the maintainer lock.
+        panic_in_retire: AtomicBool,
     }
 
     /// A rendezvous two registry writes meet at, where both reach the write.
@@ -6426,6 +6503,7 @@ mod tests {
     const DETACH_PANIC: &str = "the fake detach unwound";
     const RELOAD_PANIC: &str = "the fake reload unwound";
     const JUDGE_RELOAD_PANIC: &str = "the fake reload judgment unwound";
+    const RETIRE_PANIC: &str = "the fake retirement unwound";
 
     /// The state an entry publishes for a leg that unwound carrying `message`.
     fn unwound(message: &str) -> TrustState {
@@ -6873,6 +6951,9 @@ mod tests {
                 .clone()
             {
                 return Err(RetireRefusal::MaintainerContended(incumbent));
+            }
+            if self.panic_in_retire.load(Ordering::SeqCst) {
+                panic!("{RETIRE_PANIC}");
             }
             let pause = self.retire_pause.lock().expect("pause poisoned").clone();
             if let Some(pause) = pause {
@@ -19611,6 +19692,28 @@ mod tests {
 
             assert_eq!(refusal.detail(), &ErrorDetail::already_served(name.clone()));
             assert_eq!(recorded(&ops, &name), Some(theirs));
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// A retirement that unwinds under the maintainer lock leaves the
+        /// entry in service and the registration changes open: the vault
+        /// answers a demand, and the next unregistration goes through.
+        #[test]
+        fn a_retirement_that_unwinds_puts_the_entry_back_in_service() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            ops.panic_in_retire.store(true, Ordering::SeqCst);
+
+            let unwound = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                unregister(&host, UnregisterParams::new(name.clone()))
+            }));
+
+            assert!(unwound.is_err(), "the retirement did not unwind");
+            assert_eq!(listed(&host), std::slice::from_ref(&name));
+            attach_and_idle(&host, &name);
+            ops.panic_in_retire.store(false, Ordering::SeqCst);
+            unregister(&host, UnregisterParams::new(name.clone()))
+                .expect("the vault is unregistered after the unwound attempt");
             assert_eq!(listed(&host), Vec::<VaultName>::new());
         }
 
