@@ -791,8 +791,8 @@ the root orders by; and every candidate's minimal disambiguating suffix, one sta
 each spelling's range is the same seek stopping at its second member — so a page's links
 and candidates cost a fixed number of statements, however many there are; and the
 offset-spelling probe, two seeks of `document_fields_offset`, one at each spelling, run once
-for each key with a dated order the request sorts or compares by. **A comparison that read
-an unstated offset as zero against a stated one is advised**: an answer carries a
+for each key with a dated order the request sorts, groups or compares by. **A comparison
+that read an unstated offset as zero against a stated one is advised**: an answer carries a
 mixed-offset advisory, once per key and place, where its order, its grouping or a comparing
 part met both spellings. The advisory speaks for every value the key holds in the snapshot,
 not for the page, so it may stand beside rows that all write one spelling, and it is never
