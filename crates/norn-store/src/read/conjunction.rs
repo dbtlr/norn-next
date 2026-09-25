@@ -10,7 +10,7 @@ use super::advisory::{Compared, DateComparison};
 use super::filter::{Filter, ReadFilter};
 use super::naming::Naming;
 use super::run::StatementFailure;
-use super::{FieldOrder, Lookups, PageRefusal, Ran, ReadBound, glob, suggest};
+use super::{FieldOrder, IN_VALUES_CEILING, Lookups, PageRefusal, Ran, ReadBound, glob, suggest};
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::find::{
@@ -492,9 +492,9 @@ fn membership_bound(predicate: &Predicate) -> Result<(), PageRefusal> {
     if values.is_empty() {
         return Err(PageRefusal::EmptyMembership { key: key.clone() });
     }
-    if values.len() > ReadBound::MembershipValues.ceiling() {
+    if values.len() > IN_VALUES_CEILING {
         return Err(PageRefusal::OutOfBound {
-            bound: ReadBound::MembershipValues,
+            bound: ReadBound::MembershipValues { key: key.clone() },
             given: values.len(),
         });
     }

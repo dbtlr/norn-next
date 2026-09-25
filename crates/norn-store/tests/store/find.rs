@@ -2294,15 +2294,24 @@ fn a_count_outside_its_bound_is_refused_rather_than_clamped() {
         );
     }
     let values = |count: usize| (0..count).map(|value| format!("value-{value}"));
+    let too_many = refused(
+        &request().with_predicates([Predicate::in_any("status", values(IN_VALUES_CEILING + 1))]),
+    );
     assert_eq!(
-        refused(
-            &request()
-                .with_predicates([Predicate::in_any("status", values(IN_VALUES_CEILING + 1))])
-        ),
+        too_many,
         PageRefusal::OutOfBound {
-            bound: ReadBound::MembershipValues,
+            bound: ReadBound::MembershipValues {
+                key: "status".to_string()
+            },
             given: IN_VALUES_CEILING + 1,
         }
+    );
+    assert_eq!(
+        too_many.to_string(),
+        format!(
+            "a membership part names at most {IN_VALUES_CEILING} values, and the part on `status` named {}",
+            IN_VALUES_CEILING + 1
+        )
     );
     let most = seeded.page(&request().with_predicates([Predicate::in_any(
         "status",

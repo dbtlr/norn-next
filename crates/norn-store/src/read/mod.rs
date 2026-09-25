@@ -76,21 +76,22 @@ pub const DEFAULT_PAGE: usize = 100;
 pub const IN_VALUES_CEILING: usize = 256;
 
 /// A count a request names that the store holds to a range.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReadBound {
     /// The rows a page holds: `1..=`[`MAX_PAGE`].
     PageRows,
-    /// The values one membership part names: at most [`IN_VALUES_CEILING`].
-    /// A part naming none is refused as [`PageRefusal::EmptyMembership`].
-    MembershipValues,
+    /// The values the membership part on `key` names: at most
+    /// [`IN_VALUES_CEILING`]. A part naming none is refused as
+    /// [`PageRefusal::EmptyMembership`].
+    MembershipValues { key: String },
 }
 
 impl ReadBound {
     /// The most the count may be.
-    pub const fn ceiling(self) -> usize {
+    pub const fn ceiling(&self) -> usize {
         match self {
             ReadBound::PageRows => MAX_PAGE,
-            ReadBound::MembershipValues => IN_VALUES_CEILING,
+            ReadBound::MembershipValues { .. } => IN_VALUES_CEILING,
         }
     }
 }
@@ -287,7 +288,8 @@ pub enum PageRefusal {
     /// in-process.
     EmptyMembership { key: String },
     /// A count the request names is outside the range `bound` holds it to:
-    /// `given` rows for a page, or `given` values for one membership part.
+    /// `given` rows for a page, or `given` values for the membership part on
+    /// the key the bound names.
     OutOfBound { bound: ReadBound, given: usize },
     /// The request carries a part this build of the store does not know.
     UnknownPart { part: &'static str },
@@ -368,9 +370,9 @@ impl std::fmt::Display for PageRefusal {
                     "a page holds 1 to {} rows, and {given} were asked for",
                     bound.ceiling()
                 ),
-                ReadBound::MembershipValues => write!(
+                ReadBound::MembershipValues { key } => write!(
                     formatter,
-                    "a membership part names at most {} values, and {given} were named",
+                    "a membership part names at most {} values, and the part on `{key}` named {given}",
                     bound.ceiling()
                 ),
             },
