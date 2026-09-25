@@ -11,9 +11,10 @@
 //!   What the section *means* is the engine's own ([`norn_semantic::Settings`]).
 //!   The reading of the section itself — absent, disabled, malformed with the
 //!   engine's refusal, or enabled — is retained beside the slot at the same
-//!   delivery ([`SemanticEngines::section`]), because "no engine stands" is
-//!   answered differently for a vault that asked for none and one whose
-//!   section could not be read.
+//!   delivery ([`SemanticEngines::section`]), and a refusal that no engine
+//!   stands carries the reading taken under the same lookup as the slot it
+//!   found missing, because "no engine stands" is answered differently for a
+//!   vault that asked for none and one whose section could not be read.
 //! - **The nudge is a post-leg pull.** Every leg that ends holding a
 //!   consistent lane-1 store relays the vault's feed handle here and the
 //!   engine drains on that same worker leg — the increments, every heal
@@ -172,11 +173,11 @@ pub fn freshness(watermarks: &Watermarks, store: &StoreReading) -> Freshness {
 /// typed so that mapping stays derivable rather than parsed from prose.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SemanticRefusal {
-    /// No engine stands for this vault: no delivered section enables one,
-    /// or the vault is not attached. Which of the two is the serving
-    /// surface's to say — it composes the config and entry state this
-    /// slot-gated reading deliberately does not.
-    NoEngine,
+    /// No engine stands for this vault. `section` is the reading the last
+    /// config delivery left, taken in the same lookup that found no slot, or
+    /// `None` where no delivery stands — the vault is not attached, or was
+    /// detached since.
+    NoEngine { section: Option<EngineSection> },
     /// The engine took itself out of service; the detail is the slot's.
     SelfDisabled { detail: String },
     /// The engine is running and this answer failed.
@@ -186,7 +187,7 @@ pub enum SemanticRefusal {
 impl std::fmt::Display for SemanticRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SemanticRefusal::NoEngine => {
+            SemanticRefusal::NoEngine { .. } => {
                 write!(f, "no semantic engine stands for this vault")
             }
             SemanticRefusal::SelfDisabled { detail } => {
@@ -201,31 +202,29 @@ impl std::fmt::Display for SemanticRefusal {
 
 impl std::error::Error for SemanticRefusal {}
 
-/// The refusal a vector rung answers with, composed from what the engine said
-/// and what the host was delivered as the vault's engine section.
+/// The refusal a vector rung answers with, composed from a nearest refusal.
 ///
-/// The engine's own reading is slot-gated and deliberately says only that no
-/// engine stands; which of "the vault never enabled one" and "the vault's
-/// section could not be read" is true is a fact about the delivered section,
-/// which the engine does not hold. Composing the two here is what lets a
+/// That no engine stands says nothing a client can act on by itself; which of
+/// "the vault never enabled one" and "the vault's section could not be read"
+/// is true is a fact about the delivered section, which the refusal carries
+/// from the lookup that found no slot. Composing it here is what lets a
 /// client be told what to do about it.
 ///
 /// This is reached only where the entry is ready; a vault that is not ready
 /// refuses on its answer reading long before a rung is dispatched.
 ///
 /// Nothing calls it yet. The `search` handler is the one caller this
-/// composition has: it pairs the refusal [`SemanticEngines::nearest`] answered
-/// with the section [`SemanticEngines::section`] retained at the same
-/// delivery, and no call graph reaches this until that handler arrives.
+/// composition has, composing the refusal [`SemanticEngines::nearest`]
+/// answered, and no call graph reaches this until that handler arrives.
 ///
 /// Both matches carry no wildcard, so a refusal or a section minted without a
 /// row here does not compile.
-pub fn compose_vector_refusal(section: &EngineSection, refusal: SemanticRefusal) -> ErrorEnvelope {
+pub fn compose_vector_refusal(refusal: SemanticRefusal) -> ErrorEnvelope {
     match refusal {
-        SemanticRefusal::NoEngine => match section {
+        SemanticRefusal::NoEngine { section } => match section {
             // The vault has not asked for an engine, so there is nothing
             // unavailable — there is something to turn on.
-            EngineSection::Absent {} | EngineSection::Disabled {} => ErrorEnvelope::new(
+            Some(EngineSection::Absent {} | EngineSection::Disabled {}) => ErrorEnvelope::new(
                 "this vault answers no vector rung until its engine is enabled",
                 ErrorDetail::engine_not_enabled(
                     Rung::Vector,
@@ -234,19 +233,26 @@ pub fn compose_vector_refusal(section: &EngineSection, refusal: SemanticRefusal)
             ),
             // The vault asked for an engine and the section it asked with
             // could not be read, so the engine was never delivered.
-            EngineSection::Malformed { detail, .. } => ErrorEnvelope::new(
+            Some(EngineSection::Malformed { detail, .. }) => ErrorEnvelope::new(
                 "this vault's engine section could not be read, so no engine stands for it",
-                ErrorDetail::engine_unavailable(Rung::Vector, detail.clone()),
+                ErrorDetail::engine_unavailable(Rung::Vector, detail),
             ),
             // An enabled section with no engine behind it is a slot the
-            // delivery should have filled. Dispatch runs only against a ready
-            // entry, whose delivery has already happened, so this row is not
-            // reached by that ordering; it is answered rather than panicked on,
-            // because a wire mapping is not the place a host asserts its own
+            // delivery should have filled, and a delivery that reads an
+            // enabled section always leaves one, so a nearest refusal does not
+            // carry this pair. It is answered rather than panicked on, because
+            // a wire mapping is not the place a host asserts its own
             // invariants.
-            EngineSection::Enabled {} => ErrorEnvelope::new(
+            Some(EngineSection::Enabled {}) => ErrorEnvelope::new(
                 "this vault's engine is enabled and no engine stands for it",
                 ErrorDetail::engine_unavailable(Rung::Vector, "the engine slot is empty"),
+            ),
+            // No delivery stands at all. Dispatch runs only against a ready
+            // entry, whose delivery has already happened, so this row is not
+            // reached by that ordering; it is answered for the same reason.
+            None => ErrorEnvelope::new(
+                "no engine section has been delivered to this vault",
+                ErrorDetail::engine_unavailable(Rung::Vector, "no engine section was delivered"),
             ),
         },
         // The engine took itself out of service. What the section says is not
@@ -266,8 +272,8 @@ pub fn compose_vector_refusal(section: &EngineSection, refusal: SemanticRefusal)
 /// What the last config delivery left for one vault: the section reading it
 /// was delivered, and the slot that reading opened, where it opened one.
 ///
-/// One entry under one lock, so a reader looking both up sees a pair one
-/// delivery produced.
+/// One entry under one lock, so a reader looking both up in one lookup sees
+/// a pair one delivery produced.
 struct Delivery {
     section: EngineSection,
     slot: Option<Arc<Mutex<Slot>>>,
@@ -340,8 +346,21 @@ impl SemanticEngines {
         text: &str,
         limit: usize,
     ) -> Result<SemanticAnswer, SemanticRefusal> {
-        let Some(slot) = self.slot(vault) else {
-            return Err(SemanticRefusal::NoEngine);
+        // The slot and, where none stands, the section the refusal carries are
+        // read under one map lock, so they are one delivery's.
+        let slot = match tolerant(&self.vaults).get(vault) {
+            None => return Err(SemanticRefusal::NoEngine { section: None }),
+            Some(Delivery {
+                section,
+                slot: None,
+            }) => {
+                return Err(SemanticRefusal::NoEngine {
+                    section: Some(section.clone()),
+                });
+            }
+            Some(Delivery {
+                slot: Some(slot), ..
+            }) => slot.clone(),
         };
         let slot = tolerant(&slot);
         match &*slot {
@@ -544,21 +563,29 @@ mod composition_tests {
         sections.to_vec()
     }
 
-    /// Every refusal the engine's own reading can be. The match carries no
-    /// wildcard, so a refusal minted without a row here does not compile.
+    /// Every refusal a nearest answer can be: no engine beside each section
+    /// reading and beside no delivery, and the two refusals of an engine that
+    /// stands. The match carries no wildcard, so a refusal minted without a
+    /// row here does not compile.
     fn every_refusal() -> Vec<SemanticRefusal> {
-        let refusals = vec![
-            SemanticRefusal::NoEngine,
+        let mut refusals: Vec<SemanticRefusal> = every_section()
+            .into_iter()
+            .map(|section| SemanticRefusal::NoEngine {
+                section: Some(section),
+            })
+            .collect();
+        refusals.extend([
+            SemanticRefusal::NoEngine { section: None },
             SemanticRefusal::SelfDisabled {
                 detail: "the engine stood down".to_string(),
             },
             SemanticRefusal::Failed {
                 detail: "the answer failed".to_string(),
             },
-        ];
+        ]);
         for refusal in &refusals {
             match refusal {
-                SemanticRefusal::NoEngine
+                SemanticRefusal::NoEngine { .. }
                 | SemanticRefusal::SelfDisabled { .. }
                 | SemanticRefusal::Failed { .. } => {}
             }
@@ -566,72 +593,72 @@ mod composition_tests {
         refusals
     }
 
-    /// What one pair composes to. The pairing is written out here rather than
-    /// derived, so a composition that changes fails this table instead of
-    /// agreeing with itself.
-    fn expected(section: &EngineSection, refusal: &SemanticRefusal) -> ErrorDetail {
-        match (section, refusal) {
-            (_, SemanticRefusal::Failed { detail }) => {
+    /// What one refusal composes to. The pairing is written out here rather
+    /// than derived, so a composition that changes fails this table instead
+    /// of agreeing with itself.
+    fn expected(refusal: &SemanticRefusal) -> ErrorDetail {
+        match refusal {
+            SemanticRefusal::Failed { detail } => {
                 ErrorDetail::engine_failed(Rung::Vector, detail.clone())
             }
-            (_, SemanticRefusal::SelfDisabled { detail }) => {
+            SemanticRefusal::SelfDisabled { detail } => {
                 ErrorDetail::engine_unavailable(Rung::Vector, detail.clone())
             }
-            (EngineSection::Absent {} | EngineSection::Disabled {}, SemanticRefusal::NoEngine) => {
-                ErrorDetail::engine_not_enabled(
-                    Rung::Vector,
-                    "enable the engine section in .norn/config.toml and run vault reload",
-                )
-            }
-            (EngineSection::Malformed { detail, .. }, SemanticRefusal::NoEngine) => {
-                ErrorDetail::engine_unavailable(Rung::Vector, detail.clone())
-            }
-            (EngineSection::Enabled {}, SemanticRefusal::NoEngine) => {
-                ErrorDetail::engine_unavailable(Rung::Vector, "the engine slot is empty")
+            SemanticRefusal::NoEngine {
+                section: Some(EngineSection::Absent {} | EngineSection::Disabled {}),
+            } => ErrorDetail::engine_not_enabled(
+                Rung::Vector,
+                "enable the engine section in .norn/config.toml and run vault reload",
+            ),
+            SemanticRefusal::NoEngine {
+                section: Some(EngineSection::Malformed { detail, .. }),
+            } => ErrorDetail::engine_unavailable(Rung::Vector, detail.clone()),
+            SemanticRefusal::NoEngine {
+                section: Some(EngineSection::Enabled {}),
+            } => ErrorDetail::engine_unavailable(Rung::Vector, "the engine slot is empty"),
+            SemanticRefusal::NoEngine { section: None } => {
+                ErrorDetail::engine_unavailable(Rung::Vector, "no engine section was delivered")
             }
         }
     }
 
-    /// Every pair of a delivered section and an engine refusal composes to one
-    /// envelope, carrying the rung it is about and the detail pinned beside
-    /// it.
+    /// Every refusal composes to one envelope, carrying the rung it is about
+    /// and the detail pinned beside it.
     #[test]
-    fn every_section_and_refusal_pair_composes_to_one_envelope() {
-        for section in every_section() {
-            for refusal in every_refusal() {
-                let envelope = compose_vector_refusal(&section, refusal.clone());
-                let detail = expected(&section, &refusal);
-                assert_eq!(
-                    envelope.detail(),
-                    &detail,
-                    "{section:?} with {refusal:?} composes to another detail"
-                );
-                assert_eq!(envelope.code(), &detail.code());
-                assert!(
-                    !envelope.message().is_empty(),
-                    "{section:?} with {refusal:?} refuses without saying so in words"
-                );
-            }
+    fn every_refusal_composes_to_one_envelope() {
+        for refusal in every_refusal() {
+            let envelope = compose_vector_refusal(refusal.clone());
+            let detail = expected(&refusal);
+            assert_eq!(
+                envelope.detail(),
+                &detail,
+                "{refusal:?} composes to another detail"
+            );
+            assert_eq!(envelope.code(), &detail.code());
+            assert!(
+                !envelope.message().is_empty(),
+                "{refusal:?} refuses without saying so in words"
+            );
         }
     }
 
     /// A vault that never asked for an engine is told what to turn on; every
-    /// other pair is told what is wrong with the engine it asked for.
+    /// other refusal is told what is wrong with the engine it asked for.
     #[test]
     fn only_a_vault_that_asked_for_no_engine_is_told_to_enable_one() {
-        for section in every_section() {
-            for refusal in every_refusal() {
-                let not_enabled = compose_vector_refusal(&section, refusal.clone()).code()
-                    == &ReasonCode::EngineNotEnabled;
-                let asked_for_none = matches!(
-                    section,
-                    EngineSection::Absent {} | EngineSection::Disabled {}
-                ) && refusal == SemanticRefusal::NoEngine;
-                assert_eq!(
-                    not_enabled, asked_for_none,
-                    "{section:?} with {refusal:?} is filed under the wrong code"
-                );
-            }
+        for refusal in every_refusal() {
+            let not_enabled =
+                compose_vector_refusal(refusal.clone()).code() == &ReasonCode::EngineNotEnabled;
+            let asked_for_none = matches!(
+                refusal,
+                SemanticRefusal::NoEngine {
+                    section: Some(EngineSection::Absent {} | EngineSection::Disabled {})
+                }
+            );
+            assert_eq!(
+                not_enabled, asked_for_none,
+                "{refusal:?} is filed under the wrong code"
+            );
         }
     }
 }

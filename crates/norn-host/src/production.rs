@@ -4643,7 +4643,9 @@ mod tests {
             assert_eq!(engines.section(&name), Some(EngineSection::absent()));
             assert_eq!(
                 engines.nearest(&name, "anything", 5),
-                Err(SemanticRefusal::NoEngine)
+                Err(SemanticRefusal::NoEngine {
+                    section: Some(EngineSection::absent())
+                })
             );
         }
 
@@ -4747,7 +4749,10 @@ mod tests {
             assert_eq!(engines.section(&name), Some(EngineSection::disabled()));
             assert_eq!(
                 engines.nearest(&name, "alpha", 5),
-                Err(SemanticRefusal::NoEngine)
+                Err(SemanticRefusal::NoEngine {
+                    section: Some(EngineSection::disabled())
+                }),
+                "the refusal carries the section the disabling reload delivered"
             );
 
             // Re-enabling adopts the retained sidecar and its cursors: the
@@ -4779,7 +4784,7 @@ mod tests {
             assert_eq!(engines.section(&name), None, "a detach keeps no delivery");
             assert_eq!(
                 engines.nearest(&name, "anything", 5),
-                Err(SemanticRefusal::NoEngine)
+                Err(SemanticRefusal::NoEngine { section: None })
             );
             let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
             assert!(
@@ -4819,7 +4824,7 @@ mod tests {
             assert_eq!(engines.section(&name), None, "a discard keeps no delivery");
             assert_eq!(
                 engines.nearest(&name, "anything", 5),
-                Err(SemanticRefusal::NoEngine)
+                Err(SemanticRefusal::NoEngine { section: None })
             );
             let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
             assert!(
