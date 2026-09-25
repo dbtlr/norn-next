@@ -56,17 +56,21 @@
 //! # Where to start
 //!
 //! - [`Engine`] — open, drain, nearest; the whole surface.
+//! - [`Watermarks`] and [`SidecarRevision`] — how far the engine has drained
+//!   against the store, and which sidecar state it answers from.
 //! - [`DrainReport`] — what one drain did, and [`DrainReport::is_settled`].
 //! - [`SidecarOutcome`] — how an open ended up with its database.
 
 mod ddl;
 mod engine;
 mod error;
+mod progress;
 mod settings;
 mod sidecar;
 
 pub use engine::{DrainReport, Engine, Neighbor, VectorRow};
 pub use error::EngineError;
+pub use progress::{SidecarRevision, Watermark, Watermarks};
 pub use settings::{SectionError, Settings};
 // How an open ended up with its database, and why a rebuild happened, are the
 // open ceremony's own vocabulary: the engine is one client of that ceremony,

@@ -10,6 +10,7 @@ use norn_store::{DocumentPath, FeedCursor, FeedRead};
 
 use crate::ddl;
 use crate::error::{self, EngineError};
+use crate::progress::{self, Feed, Recorded, SidecarRevision, Watermark, Watermarks};
 use crate::sidecar;
 use norn_db::{OpenOutcome as SidecarOutcome, RebuildReason};
 
@@ -37,6 +38,10 @@ pub struct Engine {
     database: Database,
     embedder: Arc<dyn Embedder>,
     outcome: SidecarOutcome,
+    /// The sidecar's revision and watermarks as its last commit left them:
+    /// loaded at open and moved only after a transaction that wrote them
+    /// commits, so a reading never names progress the sidecar does not hold.
+    recorded: Recorded,
 }
 
 /// What one drain did, in rows.
@@ -105,10 +110,12 @@ impl Engine {
     pub fn open(path: impl AsRef<Path>, embedder: Arc<dyn Embedder>) -> Result<Self, EngineError> {
         let path = path.as_ref();
         let (connection, outcome) = sidecar::open(path, embedder.model())?;
+        let recorded = progress::read(&connection).map_err(progress::Unread::into_engine_error)?;
         Ok(Engine {
             database: Database::adopt(connection, path)?,
             embedder,
             outcome,
+            recorded,
         })
     }
 
@@ -120,6 +127,25 @@ impl Engine {
     /// The sidecar's own epoch — minted at create, moved only by a rebuild.
     pub fn epoch(&self) -> &str {
         self.database.epoch()
+    }
+
+    /// Which sidecar state this engine answers from: its epoch and the count of
+    /// committed mutations within it.
+    ///
+    /// Read through `&self` from what the last commit left, so an owner that
+    /// serializes drains against answers samples it with the answer it
+    /// describes. A drain that commits nothing leaves it where it was.
+    pub fn revision(&self) -> SidecarRevision {
+        SidecarRevision {
+            epoch: self.database.epoch().to_string(),
+            revision: self.recorded.revision,
+        }
+    }
+
+    /// How far each feed was drained against the lane-1 store — see
+    /// [`Watermark`]. Read the way [`Engine::revision`] is.
+    pub fn watermarks(&self) -> &Watermarks {
+        &self.recorded.watermarks
     }
 
     /// The model this engine embeds with. The sidecar records it — opening
@@ -140,12 +166,14 @@ impl Engine {
         let embedder = self.embedder.clone();
         drop(self.database);
         let connection = sidecar::rebuild(&path, embedder.model())?;
+        let recorded = progress::read(&connection).map_err(progress::Unread::into_engine_error)?;
         Ok(Engine {
             database: Database::adopt(connection, &path)?,
             embedder,
             outcome: SidecarOutcome::RebuiltFromZero(RebuildReason::Client {
                 detail: "discarded by its owner".to_string(),
             }),
+            recorded,
         })
     }
 
@@ -173,7 +201,18 @@ impl Engine {
     ///
     /// Every page commits its writes and its advanced cursor in one sidecar
     /// transaction: progress recorded is exactly progress written, and a
-    /// replayed page is an idempotent set of upserts and deletes. The
+    /// replayed page is an idempotent set of upserts and deletes.
+    ///
+    /// # Watermarks and the revision
+    ///
+    /// Before every page the drain reads the store's write generation, and the
+    /// page that completes a feed — the one that comes back short — records
+    /// the generation read before it as that feed's [`Watermark`], in the same
+    /// transaction as the page's own writes. A completing page that is empty
+    /// has no writes to ride with, so it commits the watermark alone, and only
+    /// where the watermark moved: a drain over a quiescent store commits
+    /// nothing. Every committing transaction takes the next sidecar revision,
+    /// so the revision moves exactly when the sidecar does. The
     /// guarantee that a hash is never written beside values it does not
     /// describe is the drain's own — the generation check carries it even
     /// against a writer interleaving through a store handle this borrow does
@@ -189,10 +228,18 @@ impl Engine {
 
         let mut cursor = self.read_cursor(ddl::meta::DOCUMENT_CURSOR)?;
         loop {
+            let observed = feed.write_generation()?;
             let page = feed.changed_documents_after(cursor.as_ref(), DRAIN_PAGE)?;
-            let Some((last, _)) = page.last() else { break };
-            let advanced = last.clone();
             let full = page.len() == DRAIN_PAGE;
+            let completed = (!full).then(|| Watermark {
+                store_epoch: store_epoch.clone(),
+                generation: observed,
+            });
+            let Some((last, _)) = page.last() else {
+                self.advance_watermark(Feed::Documents, completed)?;
+                break;
+            };
+            let advanced = last.clone();
 
             let mut writes: Vec<(String, String, Vec<u8>, usize)> = Vec::new();
             for (_, document) in &page {
@@ -234,7 +281,7 @@ impl Engine {
                 }
             }
 
-            self.commit_documents(&writes, &advanced)?;
+            self.commit_documents(&writes, &advanced, completed)?;
             cursor = Some(advanced);
             if !full {
                 break;
@@ -243,16 +290,24 @@ impl Engine {
 
         let mut cursor = self.read_cursor(ddl::meta::TOMBSTONE_CURSOR)?;
         loop {
+            let observed = feed.write_generation()?;
             let page = feed.changed_tombstones_after(cursor.as_ref(), DRAIN_PAGE)?;
-            let Some((last, _)) = page.last() else { break };
-            let advanced = last.clone();
             let full = page.len() == DRAIN_PAGE;
+            let completed = (!full).then(|| Watermark {
+                store_epoch: store_epoch.clone(),
+                generation: observed,
+            });
+            let Some((last, _)) = page.last() else {
+                self.advance_watermark(Feed::Tombstones, completed)?;
+                break;
+            };
+            let advanced = last.clone();
 
             let paths: Vec<String> = page
                 .iter()
                 .map(|(_, tombstone)| tombstone.path.as_str().to_string())
                 .collect();
-            report.retracted += self.commit_retractions(&paths, &advanced)?;
+            report.retracted += self.commit_retractions(&paths, &advanced, completed)?;
             cursor = Some(advanced);
             if !full {
                 break;
@@ -383,17 +438,21 @@ impl Engine {
         norn_db::meta::put_meta(&transaction, ddl::meta::DOCUMENT_CURSOR, "")?;
         norn_db::meta::put_meta(&transaction, ddl::meta::TOMBSTONE_CURSOR, "")?;
         norn_db::meta::put_meta(&transaction, ddl::meta::OBSERVED_STORE_EPOCH, store_epoch)?;
+        let revision = norn_db::meta::next_generation(&transaction)?;
         transaction
             .commit()
             .map_err(|error| error::sql("committing the reconcile", error))?;
+        self.recorded.revision = revision;
         Ok(dead.len() as u64)
     }
 
-    /// One page's writes and its advanced cursor, in one transaction.
+    /// One page's writes and its advanced cursor, in one transaction, with the
+    /// feed's watermark where this page completed the feed.
     fn commit_documents(
         &mut self,
         writes: &[(String, String, Vec<u8>, usize)],
         advanced: &FeedCursor,
+        completed: Option<Watermark>,
     ) -> Result<(), EngineError> {
         let model = self.embedder.model().clone();
         let transaction = self
@@ -425,18 +484,28 @@ impl Engine {
             ddl::meta::DOCUMENT_CURSOR,
             encode_cursor(advanced),
         )?;
-        transaction
-            .commit()
-            .map_err(|error| error::sql("committing a drained page", error))
+        let committed = commit_progress(
+            transaction,
+            "committing a drained page",
+            Feed::Documents,
+            completed.as_ref(),
+        )?;
+        self.recorded.revision = committed;
+        if let Some(watermark) = completed {
+            self.recorded.watermarks.set(Feed::Documents, watermark);
+        }
+        Ok(())
     }
 
-    /// One page's retractions and its advanced cursor, in one transaction. A
-    /// death retracts every model's rows at the path: the text they describe
-    /// is gone for all of them.
+    /// One page's retractions and its advanced cursor, in one transaction, with
+    /// the feed's watermark where this page completed the feed. A death
+    /// retracts every model's rows at the path: the text they describe is gone
+    /// for all of them.
     fn commit_retractions(
         &mut self,
         paths: &[String],
         advanced: &FeedCursor,
+        completed: Option<Watermark>,
     ) -> Result<u64, EngineError> {
         let transaction = self
             .database
@@ -458,10 +527,44 @@ impl Engine {
             ddl::meta::TOMBSTONE_CURSOR,
             encode_cursor(advanced),
         )?;
-        transaction
-            .commit()
-            .map_err(|error| error::sql("committing retractions", error))?;
+        let committed = commit_progress(
+            transaction,
+            "committing retractions",
+            Feed::Tombstones,
+            completed.as_ref(),
+        )?;
+        self.recorded.revision = committed;
+        if let Some(watermark) = completed {
+            self.recorded.watermarks.set(Feed::Tombstones, watermark);
+        }
         Ok(retracted)
+    }
+
+    /// Record the watermark an empty completing page observed, where it moved.
+    ///
+    /// `completed` is `None` only where the page was full, and an empty page
+    /// never is; the arm is answered rather than asserted. A watermark equal to
+    /// the recorded one commits nothing, so a drain over a quiescent store
+    /// leaves the revision where it was.
+    fn advance_watermark(
+        &mut self,
+        feed: Feed,
+        completed: Option<Watermark>,
+    ) -> Result<(), EngineError> {
+        let Some(watermark) = completed else {
+            return Ok(());
+        };
+        if self.recorded.watermarks.of(feed) == Some(&watermark) {
+            return Ok(());
+        }
+        let transaction = self
+            .database
+            .immediate_transaction("advancing a watermark")?;
+        let committed =
+            commit_progress(transaction, "advancing a watermark", feed, Some(&watermark))?;
+        self.recorded.revision = committed;
+        self.recorded.watermarks.set(feed, watermark);
+        Ok(())
     }
 
     /// The recorded `input_hash` for `path` under this engine's model.
@@ -510,6 +613,29 @@ impl Engine {
         })?;
         Ok(Some(FeedCursor::at(generation, path)))
     }
+}
+
+/// Finish a committing transaction: record `watermark` under `feed` where the
+/// transaction completed it, take the next sidecar revision, and commit as
+/// `operation`. Answers the revision the commit recorded.
+fn commit_progress(
+    transaction: norn_db::rusqlite::Transaction<'_>,
+    operation: &'static str,
+    feed: Feed,
+    watermark: Option<&Watermark>,
+) -> Result<i64, EngineError> {
+    if let Some(watermark) = watermark {
+        norn_db::meta::put_meta(
+            &transaction,
+            feed.watermark_key(),
+            progress::encode_watermark(watermark),
+        )?;
+    }
+    let revision = norn_db::meta::next_generation(&transaction)?;
+    transaction
+        .commit()
+        .map_err(|error| error::sql(operation, error))?;
+    Ok(revision)
 }
 
 /// `{generation}:{path}` — one scalar, so a position moves atomically. The

@@ -2,7 +2,10 @@
 //!
 //! One table beside the substrate's `meta`. A sidecar is a projection of
 //! lane-1 records, so its whole shape is the projection's rows plus the pinned
-//! scalars that say which build wrote them and how far the feed was consumed.
+//! scalars that say which build wrote them, how far the feed was consumed, and
+//! how many committed mutations the sidecar has seen — its revision, which is
+//! the substrate's write generation (`norn_db::meta::WRITE_GENERATION`),
+//! seeded at create and taken by every committing transaction.
 //!
 //! # A row is keyed by content and model, never by a main-database rowid
 //!
@@ -86,4 +89,15 @@ pub(crate) mod meta {
     pub(crate) const DOCUMENT_CURSOR: &str = "document_cursor";
     /// The tombstone feed position.
     pub(crate) const TOMBSTONE_CURSOR: &str = "tombstone_cursor";
+    /// How far the document feed was drained: `{generation}:{store epoch}`,
+    /// the store's write generation observed immediately before the page
+    /// that last completed the feed, with the store lifetime it is a
+    /// position in. Absent until the feed first completes. It carries its
+    /// own epoch rather than leaning on [`OBSERVED_STORE_EPOCH`], so a
+    /// reconcile that moved the observed epoch and a drain that then failed
+    /// leave a watermark that still says which lifetime it was taken in.
+    pub(crate) const DOCUMENT_WATERMARK: &str = "document_watermark";
+    /// How far the tombstone feed was drained, spelled as
+    /// [`DOCUMENT_WATERMARK`] is.
+    pub(crate) const TOMBSTONE_WATERMARK: &str = "tombstone_watermark";
 }
