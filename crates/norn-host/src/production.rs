@@ -6063,6 +6063,261 @@ mod tests {
             assert_eq!(answer.neighbors.len(), 2, "{answer:?}");
             assert_eq!(answer.neighbors[0].path, "docs/beta.md");
         }
+
+        /// Hold `name`'s sidecar from writing or retracting any vector under
+        /// the running engine, so every drain with work to do fails and
+        /// records no watermark.
+        fn hold_the_sidecar(f: &Fixture, name: &VaultName) {
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            let sidecar = dirs.derived_dir(name).join("semantic.sqlite3");
+            match norn_db::connect(&sidecar).expect("connecting to the sidecar") {
+                norn_db::Attempt::Connected(connection) => connection
+                    .execute_batch(
+                        "CREATE TRIGGER held_delete BEFORE DELETE ON document_vectors
+                         BEGIN SELECT RAISE(ABORT, 'the retraction is held'); END;
+                         CREATE TRIGGER held_insert BEFORE INSERT ON document_vectors
+                         BEGIN SELECT RAISE(ABORT, 'the write is held'); END;
+                         CREATE TRIGGER held_update BEFORE UPDATE ON document_vectors
+                         BEGIN SELECT RAISE(ABORT, 'the write is held'); END;",
+                    )
+                    .expect("holding the sidecar"),
+                norn_db::Attempt::Unreadable { detail } => {
+                    panic!("the sidecar is unreadable: {detail}")
+                }
+            }
+        }
+
+        /// A `vault status` of `name`'s own standing.
+        fn engine_reported(
+            host: &crate::Host<ProductionEntryOps>,
+            name: &VaultName,
+        ) -> (EngineSection, norn_wire::EngineStatus) {
+            let status = super::status::status_of(host, name);
+            (status.section, status.engine)
+        }
+
+        /// **A ready vault whose section enables the engine reports it
+        /// standing, caught up with the store**: the attach's own drain left
+        /// it trailing by nothing, and the section beside it is enabled.
+        #[test]
+        fn a_status_reports_an_enabled_engine_caught_up_with_the_store() {
+            let f = Fixture::new("status-engine-enabled");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("alpha.md"), "alpha alpha\n").unwrap();
+            let (_engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = ready_host(&f, ops);
+
+            assert_eq!(
+                engine_reported(&host, &name),
+                (
+                    EngineSection::enabled(),
+                    norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+                )
+            );
+        }
+
+        /// **A vault whose section asks for no engine reports none standing,
+        /// beside the section that says why**: stated nowhere, turned off,
+        /// or refused by the engine — which takes only the engine out of
+        /// service, and a roll-up names the vault for it.
+        #[test]
+        fn a_status_reports_no_engine_beside_the_section_that_asked_for_none() {
+            for (label, config, section_is, engine_is) in [
+                (
+                    "absent",
+                    None,
+                    (|section: &EngineSection| *section == EngineSection::absent())
+                        as fn(&EngineSection) -> bool,
+                    (|engine: &norn_wire::EngineStatus| *engine == norn_wire::EngineStatus::off())
+                        as fn(&norn_wire::EngineStatus) -> bool,
+                ),
+                (
+                    "disabled",
+                    Some("[engine.semantic]\nenabled = false\n"),
+                    |section| *section == EngineSection::disabled(),
+                    |engine| *engine == norn_wire::EngineStatus::off(),
+                ),
+                (
+                    "malformed",
+                    Some("[engine.semantic]\nenabled = \"yes\"\n"),
+                    |section| matches!(section, EngineSection::Malformed { .. }),
+                    |engine| matches!(engine, norn_wire::EngineStatus::SelfDisabled { .. }),
+                ),
+            ] {
+                let f = Fixture::new(&format!("status-engine-{label}"));
+                if let Some(config) = config {
+                    fs::write(f.vault().join(".norn/config.toml"), config).unwrap();
+                }
+                let (_engines, ops) = engines_and_ops(&f);
+                let (host, name, _lease) = ready_host(&f, ops);
+
+                let (section, engine) = engine_reported(&host, &name);
+                assert!(section_is(&section), "{label}: {section:?}");
+                assert!(engine_is(&engine), "{label}: {engine:?}");
+            }
+        }
+
+        /// **An engine whose drains fail reports how far it trails the store
+        /// its last drain was nudged at**, beside why the drain failed.
+        #[test]
+        fn an_engine_whose_drain_fails_reports_how_far_it_trails() {
+            let f = Fixture::new("status-engine-trailing");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+            hold_the_sidecar(&f, &name);
+
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+            let normalizer = norn_fs::PathNormalizer::detect(&f.vault()).unwrap();
+            let batch = norn_fs::Batch::vault_change(
+                normalizer.normalize(Path::new("docs/beta.md")).unwrap(),
+            );
+            ops.reconcile(
+                &name,
+                &mut attachment,
+                ReconcileWork { batch },
+                &ProgressReporter::disconnected(),
+            )
+            .expect("engine trouble never fails the leg");
+
+            let norn_wire::EngineStatus::On {
+                last_drain_error: Some(_),
+                freshness: Some(Freshness::Trailing { generations, .. }),
+                ..
+            } = norn_wire::EngineStatus::from(engines.status(&name))
+            else {
+                panic!("the engine reported {:?}", engines.status(&name));
+            };
+            assert!(generations > 0, "the engine trails by nothing");
+        }
+
+        /// **An engine whose drain fails across a store rebuild reports
+        /// rescanning**: its watermarks name the store lifetime the rebuild
+        /// ended, and no count compares two lifetimes.
+        #[test]
+        fn an_engine_whose_drain_fails_across_a_store_rebuild_reports_rescanning() {
+            let f = Fixture::new("status-engine-rescanning");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            let attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+            hold_the_sidecar(&f, &name);
+            // A document the rebuild derives and the held sidecar cannot take,
+            // so the drain that rescans the new lifetime fails part way.
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+
+            let _rebuilt = ops
+                .rebuild(&name, attachment, &ProgressReporter::disconnected())
+                .expect("the rung-3 rebuild");
+
+            let norn_wire::EngineStatus::On {
+                last_drain_error: Some(_),
+                freshness: Some(freshness),
+                ..
+            } = norn_wire::EngineStatus::from(engines.status(&name))
+            else {
+                panic!("the engine reported {:?}", engines.status(&name));
+            };
+            assert_eq!(freshness, Freshness::rescanning());
+        }
+    }
+
+    mod status {
+        //! `vault status` over a production host: the controls it serves
+        //! under, how the authored ones have drifted from them, and what its
+        //! attachment met.
+
+        use super::*;
+
+        /// Where `name` stands, as `vault status` reports it.
+        pub(super) fn status_of(
+            host: &crate::Host<ProductionEntryOps>,
+            name: &VaultName,
+        ) -> norn_wire::VaultStatus {
+            let params = norn_wire::StatusParams::new()
+                .with_vault(norn_wire::VaultAddress::name(name.clone()));
+            match host.vault_status(&params) {
+                Ok(norn_wire::StatusReport::Vault { status, .. }) => *status,
+                other => panic!("the status of {name} answered {other:?}"),
+            }
+        }
+
+        /// What every entry adds up to.
+        fn rolled_up(host: &crate::Host<ProductionEntryOps>) -> norn_wire::RollUp {
+            match host.vault_status(&norn_wire::StatusParams::new()) {
+                Ok(norn_wire::StatusReport::RollUp { roll_up, .. }) => roll_up,
+                other => panic!("the roll-up answered {other:?}"),
+            }
+        }
+
+        /// **A ready vault reports the fingerprints it serves under and its
+        /// authored controls current**; an edit it has not reloaded reads as
+        /// a reload pending, which a roll-up names it for; and a control file
+        /// that cannot be read reads as unreadable, naming the file and the
+        /// stage. None of it moved the vault from `Ready`.
+        #[test]
+        fn a_status_reports_the_fingerprints_and_how_the_authored_controls_drifted() {
+            let f = Fixture::new("status-drift");
+            let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
+            let active = host.inspect(&name).unwrap().active_fingerprints.unwrap();
+
+            let status = status_of(&host, &name);
+            assert!(
+                spells(status.fingerprints.as_ref().expect("fingerprints"), active),
+                "{:?}",
+                status.fingerprints
+            );
+            assert_eq!(status.drift, norn_wire::Drift::current());
+
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.sample]\n").unwrap();
+            assert_eq!(
+                status_of(&host, &name).drift,
+                norn_wire::Drift::reload_pending()
+            );
+            assert!(
+                rolled_up(&host)
+                    .attention()
+                    .contains(&norn_wire::Attention::reload_pending(name.clone())),
+                "the roll-up did not name the pending reload"
+            );
+
+            fs::remove_file(f.vault().join(".norn/schema.yaml")).unwrap();
+            let norn_wire::Drift::Unreadable { failure, .. } = status_of(&host, &name).drift else {
+                panic!("a missing schema did not read as unreadable");
+            };
+            assert_eq!(failure.file, norn_wire::ControlFile::Schema);
+            assert_eq!(failure.stage, norn_wire::ReloadStage::Read);
+            assert_eq!(
+                status_of(&host, &name).published,
+                norn_wire::Published::state(norn_wire::TrustState::Ready)
+            );
+        }
+
+        /// **A vault holding links reports each one its attach's walk passed
+        /// over**, and a roll-up names the vault for them.
+        #[cfg(unix)]
+        #[test]
+        fn a_status_reports_the_links_the_attach_passed_over() {
+            let f = Fixture::new("status-links");
+            std::os::unix::fs::symlink("elsewhere.md", f.vault().join("away.md")).unwrap();
+            let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
+
+            let link = norn_wire::Advisory::symlink_skipped("away.md");
+            assert_eq!(status_of(&host, &name).advisories, std::slice::from_ref(&link));
+            assert_eq!(
+                rolled_up(&host).attention(),
+                [norn_wire::Attention::advisory(name, link)]
+            );
+        }
     }
 
     struct BlockingReloadConfig {

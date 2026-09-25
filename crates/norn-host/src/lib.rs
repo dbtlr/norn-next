@@ -17,6 +17,7 @@ mod registry;
 mod reload;
 mod search;
 mod semantic;
+mod status;
 mod text;
 
 pub use derivation::DERIVATION_VERSION;

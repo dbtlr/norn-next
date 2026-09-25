@@ -21,7 +21,6 @@ use crate::registry::{
     AliasConflict, RecordRefusal, RegistrationRefusal, RegistryRead, RegistryUnwritable,
     RetireRefusal,
 };
-use crate::reload::ReloadCandidate;
 use crate::{
     ActiveFingerprints, AuthoredDrift, ReloadError, ReloadJudgment, ReloadOutcome, ReloadRefusal,
     VaultInspection,
@@ -650,6 +649,52 @@ pub enum Demand {
     EntryHeld,
     /// The mode the demand named, which this host holds no lifecycle for.
     UnsupportedMode(AttachMode),
+}
+
+/// Why a door finds no entry in service under a name: the set serves none, or
+/// an unregistration holds the one it serves.
+///
+/// These are the two demands every door answers a name with before it reads
+/// anything of an entry, typed apart from the rest so a door that has nothing
+/// else to answer — a status that reports rather than refuses everything
+/// else — holds a refusal and cannot hold a state. Each is the [`Demand`] of
+/// the same name, and renders through the one mapping that demand does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Unserved {
+    /// The set serves no entry under the name.
+    UnknownVault,
+    /// An unregistration holds the entry until the change commits or is
+    /// refused.
+    EntryHeld,
+}
+
+impl From<Unserved> for Demand {
+    fn from(unserved: Unserved) -> Self {
+        match unserved {
+            Unserved::UnknownVault => Demand::UnknownVault,
+            Unserved::EntryHeld => Demand::EntryHeld,
+        }
+    }
+}
+
+/// What one entry in service stands at, read under one hold of its gate.
+///
+/// `vault status` and `doctor` answer out of this, and [`Host::inspect`] and
+/// [`Host::authored_drift`] read through it, so the retained facts, the
+/// demand the entry publishes and the controls its drift is measured against
+/// come from one instant. Taking it records nothing and schedules nothing:
+/// it is an observation of the entry, not a demand on it.
+pub(crate) struct Observation {
+    /// The registration the entry serves.
+    pub(crate) registration: Registration,
+    /// What the entry publishes: the park it stands on first, and its trust
+    /// state where nothing parks it.
+    pub(crate) published: Demand,
+    /// The retained status facts.
+    pub(crate) inspection: VaultInspection,
+    /// The operational root the active controls were read from, where the
+    /// entry holds active controls.
+    pub(crate) control_root: Option<std::path::PathBuf>,
 }
 
 /// The one thing a client can be told the host has gone.
@@ -1345,23 +1390,51 @@ impl<A: SnapshotSource> EntryState<A> {
         self.duplicate_root = None;
     }
 
-    /// What every door answers for this entry out of service, and nothing
-    /// while it is served.
+    /// Why this entry is out of service, and nothing while it is served.
     ///
     /// **This is the one place that answer is decided.** An entry an
     /// unregistration holds answers as held until the change commits or is
     /// refused, so a refused unregistration leaves nothing a caller could
     /// have observed but a wait; an entry the set let go of answers as a name
     /// the set does not serve. Every door answers with it: a demand, a
-    /// retry, a completion, a status read and a read as this demand, a reload
-    /// as [`ReloadRefusal::Unavailable`] carrying it, and each inspection door
-    /// as its refusal.
-    fn withdrawal_answer(&self) -> Option<Demand> {
+    /// retry, a completion, a status read and a read as the demand
+    /// [`EntryState::withdrawal_answer`] makes of it, a reload as
+    /// [`ReloadRefusal::Unavailable`] carrying that demand, each inspection
+    /// door as its refusal, and `vault status` as this refusal itself.
+    fn out_of_service(&self) -> Option<Unserved> {
         match self.service {
             Service::Served => None,
-            Service::Withdrawn => Some(Demand::EntryHeld),
-            Service::Retired => Some(Demand::UnknownVault),
+            Service::Withdrawn => Some(Unserved::EntryHeld),
+            Service::Retired => Some(Unserved::UnknownVault),
         }
+    }
+
+    /// What every door that answers in demands answers for this entry out of
+    /// service — [`EntryState::out_of_service`] as the demand of the same
+    /// name — and nothing while it is served.
+    fn withdrawal_answer(&self) -> Option<Demand> {
+        self.out_of_service().map(Demand::from)
+    }
+
+    /// What this entry stands at, where it is in service: the observation
+    /// `vault status` and the inspection doors read, taken under the hold of
+    /// the gate this is called under.
+    fn observe(&self, registration: &Registration) -> Result<Observation, Unserved> {
+        if let Some(unserved) = self.out_of_service() {
+            return Err(unserved);
+        }
+        Ok(Observation {
+            registration: registration.clone(),
+            published: self.published_demand(),
+            inspection: VaultInspection {
+                trust: self.trust.clone(),
+                active_fingerprints: self.active_fingerprints,
+                last_reload_error: self.last_reload_error.clone(),
+                reader_unavailable: self.reader_unavailable.clone(),
+                advisories: self.advisories.clone(),
+            },
+            control_root: self.control_root.clone(),
+        })
     }
 
     /// What a caller reads off this entry: the park it stands on, or its trust
@@ -3391,62 +3464,81 @@ impl<O: EntryOps> Host<O> {
             .answer(name)
     }
 
-    /// The retained internal status facts for one served vault.
+    /// The retained internal status facts for one served vault: the trust
+    /// state beside the retained reload diagnostics, the read seam's refusal
+    /// and the advisories its last attachment met.
     ///
-    /// This is the seam the vault status verb Layer 3's verb charter places reads
-    /// through — the trust state beside the retained reload diagnostics, on
-    /// demand; nothing in this crate outside its own cases reaches it yet.
+    /// They are read out of the same observation of the entry — one hold of
+    /// its gate — that `vault status` answers from, so what this reports and
+    /// what a status reports are one reading.
     ///
     /// Where there is nothing in service to inspect, the refusal is the demand
     /// every door answers with: [`Demand::UnknownVault`] for a name the host
     /// does not serve, and the entry's own out-of-service answer otherwise.
     /// So does every inspection door below.
     pub fn inspect(&self, name: &VaultName) -> Result<VaultInspection, Demand> {
-        let entry = self.shared.entries.get(name).ok_or(Demand::UnknownVault)?;
-        let state = entry.gate.lock().expect("entry gate poisoned");
-        if let Some(answer) = state.withdrawal_answer() {
-            return Err(answer);
-        }
-        Ok(VaultInspection {
-            trust: state.trust.clone(),
-            active_fingerprints: state.active_fingerprints,
-            last_reload_error: state.last_reload_error.clone(),
-            reader_unavailable: state.reader_unavailable.clone(),
-            advisories: state.advisories.clone(),
-        })
+        self.observe(name)
+            .map(|observation| observation.inspection)
+            .map_err(Demand::from)
     }
 
     /// Compare the authored control files with the active fingerprints now.
     ///
-    /// The drift reading the vault status verb reports — current, reload
-    /// pending, unreadable, or inactive while the entry holds no active
-    /// fingerprints yet — computed on demand because watcher events activate
-    /// neither control file. Same consumer as [`Host::inspect`]; nothing in this
-    /// crate outside its own cases reaches it yet.
+    /// The drift reading `vault status` reports — current, reload pending,
+    /// unreadable, or inactive while the entry holds no active fingerprints
+    /// yet — computed on demand because watcher events activate neither
+    /// control file. A status measures it over the controls its own
+    /// observation of the entry read, and this answers through the same
+    /// measurement.
     pub fn authored_drift(&self, name: &VaultName) -> Result<AuthoredDrift, Demand> {
-        let entry = self.shared.entries.get(name).ok_or(Demand::UnknownVault)?;
-        let (active, control_root) = {
-            let state = entry.gate.lock().expect("entry gate poisoned");
-            if let Some(answer) = state.withdrawal_answer() {
-                return Err(answer);
-            }
-            (state.active_fingerprints, state.control_root.clone())
-        };
-        let Some(active) = active else {
-            return Ok(AuthoredDrift::Inactive);
-        };
-        Ok(
-            match ReloadCandidate::authored_fingerprints_at(
-                &entry.registration,
-                control_root
-                    .as_deref()
-                    .unwrap_or_else(|| entry.registration.root.as_path()),
-            ) {
-                Ok(authored) if authored == active => AuthoredDrift::Current,
-                Ok(_) => AuthoredDrift::ReloadPending,
-                Err(error) => AuthoredDrift::Unreadable(error),
-            },
-        )
+        let observation = self.observe(name).map_err(Demand::from)?;
+        Ok(AuthoredDrift::of(
+            &observation.registration,
+            observation.inspection.active_fingerprints,
+            observation.control_root.as_deref(),
+        ))
+    }
+
+    /// What the entry serving `name` stands at, under one hold of its gate,
+    /// or why no entry in service answers for the name.
+    pub(crate) fn observe(&self, name: &VaultName) -> Result<Observation, Unserved> {
+        let entry = self
+            .shared
+            .entries
+            .get(name)
+            .ok_or(Unserved::UnknownVault)?;
+        let state = entry.gate.lock().expect("entry gate poisoned");
+        state.observe(&entry.registration)
+    }
+
+    /// What every entry the set serves stands at, ascending by name: each
+    /// one's observation, taken under one hold of its own gate, or the
+    /// registration of an entry out of service beside why.
+    ///
+    /// An entry the set let go of between the snapshot and its own gate is
+    /// left out, as a listing taken after the removal leaves it out. Each
+    /// gate is taken on its own, so the entries are read one after another
+    /// rather than at one instant.
+    pub(crate) fn observe_all(&self) -> Vec<Result<Observation, (Registration, Unserved)>> {
+        self.shared
+            .entries
+            .snapshot()
+            .into_iter()
+            .filter_map(|entry| {
+                let observed = entry
+                    .gate
+                    .lock()
+                    .expect("entry gate poisoned")
+                    .observe(&entry.registration);
+                match observed {
+                    Ok(observation) => Some(Ok(observation)),
+                    Err(Unserved::UnknownVault) => None,
+                    Err(held @ Unserved::EntryHeld) => {
+                        Some(Err((entry.registration.clone(), held)))
+                    }
+                }
+            })
+            .collect()
     }
 
     /// Request one explicit reload and wait until the vault has its outcome:
@@ -8067,6 +8159,357 @@ mod tests {
         assert_eq!(
             read.reading().published(),
             &Demand::State(TrustState::Ready)
+        );
+    }
+
+    // ---- the `vault status` handler ----
+
+    /// The request for `name`'s own standing.
+    fn status_params(name: &VaultName) -> norn_wire::StatusParams {
+        norn_wire::StatusParams::new().with_vault(norn_wire::VaultAddress::name(name.clone()))
+    }
+
+    /// Where `name` stands, as `vault status` reports it.
+    fn status_of<O: EntryOps>(host: &Host<O>, name: &VaultName) -> norn_wire::VaultStatus {
+        match host.vault_status(&status_params(name)) {
+            Ok(norn_wire::StatusReport::Vault { status, .. }) => *status,
+            other => panic!("the status of {name} answered {other:?}"),
+        }
+    }
+
+    /// What every entry adds up to, as `vault status` naming no vault reports
+    /// it.
+    fn rolled_up<O: EntryOps>(host: &Host<O>) -> norn_wire::RollUp {
+        match host.vault_status(&norn_wire::StatusParams::new()) {
+            Ok(norn_wire::StatusReport::RollUp { roll_up, .. }) => roll_up,
+            other => panic!("the roll-up answered {other:?}"),
+        }
+    }
+
+    /// The detail `vault status` refused `params` with.
+    fn status_refused<O: EntryOps>(
+        host: &Host<O>,
+        params: &norn_wire::StatusParams,
+    ) -> ErrorDetail {
+        host.vault_status(params)
+            .expect_err("the status was answered")
+            .detail()
+            .clone()
+    }
+
+    /// Whether `name`'s entry stands as nothing asked anything of it: no
+    /// demand lease recorded, no claim on its work and no job waiting for
+    /// its slot.
+    fn nothing_asked_of<O: EntryOps>(host: &Host<O>, name: &VaultName) -> bool {
+        let entry = host.shared.entries.get(name).expect("the vault is served");
+        let state = entry.gate.lock().unwrap();
+        state.demand_leases == 0 && !state.claim.is_held() && !state.claim.slot_taken()
+    }
+
+    /// **The status of an entry nothing has attached answers without
+    /// attaching it**: it is unattached, serves no controls, and its engine
+    /// is off — and asking recorded no demand and scheduled nothing, so it
+    /// is still unattached after the host has had time to act.
+    #[test]
+    fn the_status_of_an_unattached_entry_answers_without_attaching_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+
+        let status = status_of(&host, &name);
+
+        assert_eq!(status.registration.name, name);
+        assert_eq!(
+            status.published,
+            norn_wire::Published::state(TrustState::Unattached)
+        );
+        assert_eq!(status.fingerprints, None);
+        assert_eq!(status.drift, norn_wire::Drift::inactive());
+        assert_eq!(status.engine, norn_wire::EngineStatus::off());
+        assert_eq!(status.section, norn_wire::EngineSection::absent());
+        assert_eq!(status.advisories, []);
+        assert!(nothing_asked_of(&host, &name), "the status asked for work");
+        settle();
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            0,
+            "the status attached"
+        );
+        assert_eq!(host.state(&name), answered(TrustState::Unattached));
+    }
+
+    /// **A ready entry reports ready, and its lease is the only demand on
+    /// it**: the status added none.
+    #[test]
+    fn the_status_of_a_ready_entry_reports_ready_and_adds_no_demand() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let status = status_of(&host, &name);
+
+        assert_eq!(
+            status.published,
+            norn_wire::Published::state(TrustState::Ready)
+        );
+        assert_eq!(status.last_reload_failure, None);
+        assert_eq!(status.reads_refusing, None);
+        let entry = host.shared.entries.get(&name).unwrap();
+        assert_eq!(entry.gate.lock().unwrap().demand_leases, 1);
+        drop(lease);
+    }
+
+    /// **A status holds no demand, so an idle entry it was asked about is
+    /// reaped as if it had not been asked**, whichever shape the status
+    /// took.
+    #[test]
+    fn a_status_holds_no_demand_so_an_idle_entry_is_still_reaped() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        status_of(&host, &name);
+        rolled_up(&host);
+        host.reap_idle(Instant::now()).unwrap();
+
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// **A warming entry reports the phase its work is in and the counts it
+    /// has published.**
+    #[test]
+    fn the_status_of_a_warming_entry_reports_its_phase_and_counts() {
+        let ops = Arc::new(FakeOps::default());
+        ops.heal_in_attach.store(true, Ordering::SeqCst);
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+
+        assert_eq!(
+            status_of(&host, &name).published,
+            norn_wire::Published::state(TrustState::warming(WarmingPhase::Healing, 1, Some(2)))
+        );
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **An entry whose derived state cannot be trusted reports the reason
+    /// its trust state carries**, in band.
+    #[test]
+    fn the_status_of_an_untrusted_entry_reports_its_reason() {
+        let ops = Arc::new(FakeOps::default());
+        ops.withholds_trust.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let untrusted = TrustState::untrusted(UntrustedReason::schema_unreadable(
+            "this fake withholds trust",
+        ));
+        wait_for_state(&host, &name, untrusted.clone());
+
+        assert_eq!(
+            status_of(&host, &name).published,
+            norn_wire::Published::state(untrusted)
+        );
+    }
+
+    /// **An entry parked on a contended maintainer lock reports the park in
+    /// its own code, naming the incumbent**, rather than refusing the status
+    /// or reporting the label beneath it.
+    #[test]
+    fn the_status_of_an_entry_parked_maintainer_contended_reports_the_park() {
+        let ops = Arc::new(FakeOps::default());
+        ops.contend_attach.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_park(
+            &host,
+            &name,
+            Demand::MaintainerContended(MaintainerIdentity::unknown()),
+        );
+
+        let norn_wire::Published::Parked { refusal, .. } = status_of(&host, &name).published else {
+            panic!("the parked entry did not report its park");
+        };
+        assert_eq!(
+            refusal.detail(),
+            &ErrorDetail::maintainer_contended(MaintainerIdentity::unknown())
+        );
+    }
+
+    /// **An entry parked on a duplicate root or on a root the registry
+    /// cannot read reports that park in its own code**, the detail its own
+    /// refusal carries.
+    #[cfg(unix)]
+    #[test]
+    fn the_status_of_an_entry_parked_by_the_registry_reports_the_park() {
+        for park in [Park::Identity, Park::DuplicateRoot] {
+            let scratch = temp_base("status-parked");
+            let root = scratch.root().join("root");
+            let ops = Arc::new(FakeOps::default());
+            let name = VaultName::new("notes").unwrap();
+            let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, &root)]);
+            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, &name, TrustState::Ready);
+            let parked = park_entry(&host, &name, &root, park);
+
+            let norn_wire::Published::Parked { refusal, .. } = status_of(&host, &name).published
+            else {
+                panic!("the entry parked on {park:?} did not report its park");
+            };
+            assert_eq!(refusal.detail(), &parked, "{park:?}");
+            assert!(nothing_asked_of(&host, &name), "{park:?}");
+        }
+    }
+
+    /// **The reload failure an entry retains is reported beside where it
+    /// stands**, named by the control-file failure a refused reload names it
+    /// by, and a roll-up names the vault for it.
+    #[test]
+    fn the_status_reports_the_retained_reload_failure() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        ops.reload_schema_apply_failure
+            .store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let failure = ReloadError::SchemaApply("the candidate could not be pinned".into());
+        assert_eq!(
+            host.reload(&name),
+            Err(ReloadRefusal::Core(failure.clone()))
+        );
+
+        let reported = crate::refusal::control_file_failure(&failure);
+        assert_eq!(
+            status_of(&host, &name).last_reload_failure,
+            Some(reported.clone())
+        );
+        assert!(
+            rolled_up(&host)
+                .attention()
+                .contains(&norn_wire::Attention::reload_failed(name.clone(), reported)),
+            "the roll-up did not name the failed reload"
+        );
+    }
+
+    /// **An entry serving every surface but its reads reports why its reads
+    /// refuse**, beside a trust state the refusal did not move.
+    #[test]
+    fn the_status_reports_why_an_entrys_reads_refuse() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reader_mint_fails.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let status = status_of(&host, &name);
+        assert_eq!(
+            status.published,
+            norn_wire::Published::state(TrustState::Ready)
+        );
+        assert!(status.reads_refusing.is_some(), "{status:?}");
+    }
+
+    /// **A name the host serves nothing under is refused as unknown**, and a
+    /// root is refused as the throwaway attach it asks for.
+    #[test]
+    fn a_status_refuses_an_unknown_name_and_a_root() {
+        let (host, _) = fixture_without_ambient_polling(Arc::new(FakeOps::default()));
+        let unregistered = VaultName::new("elsewhere").unwrap();
+        assert_eq!(
+            status_refused(&host, &status_params(&unregistered)),
+            ErrorDetail::unknown_vault(unregistered)
+        );
+        let root = norn_wire::VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap();
+        assert_eq!(
+            status_refused(
+                &host,
+                &norn_wire::StatusParams::new().with_vault(norn_wire::VaultAddress::root(root))
+            ),
+            ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
+        );
+    }
+
+    /// **A host serving nothing rolls up to nothing**: no vault counted and
+    /// none wanting attention.
+    #[test]
+    fn a_host_serving_nothing_rolls_up_to_nothing() {
+        let host = host_without_ambient_polling(Arc::new(FakeOps::default()), &[], 1);
+        let roll_up = rolled_up(&host);
+        assert_eq!(roll_up, norn_wire::RollUp::of(&[]));
+        assert_eq!(roll_up.vaults(), 0);
+    }
+
+    /// **A roll-up counts every entry under what it publishes and names each
+    /// one that wants attention, and why**: a ready entry whose links went
+    /// unwalked, a parked one, an untrusted one, and one nothing has
+    /// attached. A shadow fallback the vault ignores is reported on its
+    /// status and wants no attention. Asking attached nothing.
+    #[test]
+    fn a_roll_up_counts_mixed_entries_and_names_what_wants_attention() {
+        let [ready, idle, parked, untrusted] =
+            ["ready", "idle", "parked", "untrusted"].map(|name| VaultName::new(name).unwrap());
+        let ops = Arc::new(FakeOps::default());
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            &[&ready, &idle, &parked, &untrusted],
+            1,
+        );
+
+        ops.withholds_trust.store(true, Ordering::SeqCst);
+        let _untrusted_lease = host.demand(&untrusted, AttachMode::Durable).unwrap();
+        let reason = UntrustedReason::schema_unreadable("this fake withholds trust");
+        wait_for_state(&host, &untrusted, TrustState::untrusted(reason.clone()));
+        ops.withholds_trust.store(false, Ordering::SeqCst);
+
+        let ignored = norn_wire::Advisory::tmp_fallback_in_use(".norn/tmp/key", true);
+        let link = norn_wire::Advisory::symlink_skipped("away.md");
+        *ops.advisories.lock().unwrap() = vec![ignored.clone(), link.clone()];
+        let _ready_lease = host.demand(&ready, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &ready, TrustState::Ready);
+        ops.advisories.lock().unwrap().clear();
+
+        let _parked_lease = host.demand(&parked, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &parked, TrustState::Ready);
+        let conflict = conflict_over(&parked);
+        refuse_conflict(&host.shared, &conflict);
+        let attaches = ops.attaches.load(Ordering::SeqCst);
+
+        let roll_up = rolled_up(&host);
+
+        assert_eq!(
+            (
+                roll_up.vaults(),
+                roll_up.ready(),
+                roll_up.warming(),
+                roll_up.untrusted(),
+                roll_up.parked(),
+                roll_up.unattached()
+            ),
+            (4, 1, 0, 1, 1, 1)
+        );
+        assert_eq!(
+            roll_up.attention(),
+            [
+                norn_wire::Attention::parked(
+                    parked.clone(),
+                    norn_wire::ReasonCode::HostDuplicateRoot
+                ),
+                norn_wire::Attention::advisory(ready.clone(), link.clone()),
+                norn_wire::Attention::untrusted(untrusted.clone(), reason),
+            ]
+        );
+        assert_eq!(status_of(&host, &ready).advisories, [ignored, link]);
+        assert!(nothing_asked_of(&host, &idle));
+        settle();
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            attaches,
+            "the roll-up attached"
         );
     }
 
@@ -19732,6 +20175,9 @@ mod tests {
                     host.state(&name)
                         .map_err(|refusal| refusal.detail().clone()),
                     listed(&host),
+                    host.vault_status(&status_params(&name))
+                        .map_err(|refusal| refusal.detail().clone()),
+                    rolled_up(&host),
                     entry.gate.lock().unwrap().held_by_anything(),
                 );
                 drop(lease);
@@ -19742,7 +20188,22 @@ mod tests {
                 )
             });
 
-            let (demands, read, reload, state, listing, held) = answers;
+            let (demands, read, reload, state, listing, status, roll_up, held) = answers;
+            assert_eq!(
+                status.map(|_| ()),
+                Err(ErrorDetail::entry_held(name.clone())),
+                "a status of the held entry answered"
+            );
+            // The roll-up counts the held entry as the listing names it,
+            // published under the refusal every request against it meets.
+            assert_eq!((roll_up.vaults(), roll_up.parked()), (1, 1));
+            assert_eq!(
+                roll_up.attention(),
+                [norn_wire::Attention::parked(
+                    name.clone(),
+                    norn_wire::ReasonCode::HostEntryHeld
+                )]
+            );
             assert_eq!(demands, [const { Demand::EntryHeld }; 5]);
             assert!(
                 matches!(read, Some(ReadRefusal::NotServing(Demand::EntryHeld))),
@@ -19762,6 +20223,11 @@ mod tests {
                     .detail(),
                 &ErrorDetail::unknown_vault(name.clone())
             );
+            assert_eq!(
+                status_refused(&host, &status_params(&name)),
+                ErrorDetail::unknown_vault(name.clone())
+            );
+            assert_eq!(rolled_up(&host).vaults(), 0);
             settle();
             assert_eq!(
                 ops.attaches.load(Ordering::SeqCst),

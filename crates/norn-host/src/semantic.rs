@@ -475,6 +475,22 @@ impl SemanticEngines {
             .map(|delivery| delivery.section.clone())
     }
 
+    /// The section reading the last delivery left for `vault` and what its
+    /// slot is doing, taken from one delivery: the map lock is held across
+    /// finding both, and the slot is read under its own lock after it.
+    ///
+    /// `vault status` and `doctor` report a vault's engine through this, so
+    /// the two readings a status sets beside each other describe one
+    /// delivery rather than a delivery and the one that replaced it.
+    pub(crate) fn reading(&self, vault: &VaultName) -> (Option<EngineSection>, SemanticStatus) {
+        let (section, slot) = match tolerant(&self.vaults).get(vault) {
+            None => return (None, SemanticStatus::Off),
+            Some(delivery) => (delivery.section.clone(), delivery.slot.clone()),
+        };
+        let status = slot.map_or(SemanticStatus::Off, |slot| read_slot(&tolerant(&slot)));
+        (Some(section), status)
+    }
+
     /// The `limit` nearest paths to `text` in `vault` with the reading they
     /// were taken under, or the typed refusal.
     ///

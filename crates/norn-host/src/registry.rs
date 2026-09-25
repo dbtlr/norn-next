@@ -6,7 +6,7 @@ use std::path::Path;
 use norn_config::registry::{Entry, Registry, VaultRoot};
 use norn_fs::{Identity, Refusal, canonical_spelling, path_identity, readable_directory};
 use norn_wire::{
-    ErrorEnvelope, ListParams, ListReport, MaintainerIdentity, NameSet, Published, RegisterParams,
+    ErrorEnvelope, ListParams, ListReport, MaintainerIdentity, NameSet, RegisterParams,
     RegisterReport, ResolveParams, ResolveReport, TooFewNames, UnregisterParams, UnregisterReport,
     VaultName,
 };
@@ -176,10 +176,7 @@ impl<O: EntryOps> Host<O> {
         let (admitted, published) = self
             .register(params.registration.clone())
             .map_err(|refusal| refusal.answer(name))?;
-        Ok(RegisterReport::new(
-            admitted,
-            Published::of(published.answer(name)),
-        ))
+        Ok(RegisterReport::new(admitted, published.published(name)))
     }
 
     /// Answer a `vault unregister`: the name removed, and whether its derived

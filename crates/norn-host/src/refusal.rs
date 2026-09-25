@@ -51,11 +51,11 @@ use norn_semantic::EngineError;
 use norn_store::{PageRefusal, ReadBound, StoreError};
 use norn_wire::{
     AnswerShape, AttachMode, ControlFile, ControlFileFailure, ErrorDetail, ErrorEnvelope,
-    MaintainerIdentity, ReadFailure, ReloadFailure, RequestBound, RequestPart, TrustState,
-    UntrustedReason, VaultName,
+    MaintainerIdentity, Published, ReadFailure, ReloadFailure, RequestBound, RequestPart,
+    TrustState, UntrustedReason, VaultName,
 };
 
-use crate::lifecycle::{Demand, HostError, JobFailure, ReadRefusal, ServingRefusal};
+use crate::lifecycle::{Demand, HostError, JobFailure, ReadRefusal, ServingRefusal, Unserved};
 use crate::registry::{AliasConflict, RegistrationRefusal, ResolveRefusal};
 use crate::reload::{ReloadError, ReloadFile, ReloadRefusal, ReloadStage};
 
@@ -83,15 +83,59 @@ impl Demand {
                 ErrorDetail::duplicate_root(conflict.aliases().clone()),
             )),
             Demand::IdentityRefused(refusal) => Err(root_refused(refusal)),
-            Demand::UnknownVault => Err(unknown_vault(name)),
-            Demand::EntryHeld => Err(ErrorEnvelope::new(
+            Demand::UnknownVault => Err(Unserved::UnknownVault.answer(name)),
+            Demand::EntryHeld => Err(Unserved::EntryHeld.answer(name)),
+            Demand::UnsupportedMode(mode) => Err(unsupported_attach_mode(mode)),
+        }
+    }
+}
+
+impl Demand {
+    /// This demand as what the entry publishes, for the vault `name` it was
+    /// read for: the trust state where it is one, and the refusal it is
+    /// otherwise.
+    ///
+    /// **Every trust state is published as a state**, an untrusted one
+    /// included. [`Demand::answer`] files an untrusted state as a refusal,
+    /// because a caller polling it does not walk out of it; what an entry
+    /// publishes is a different question, and the wire keeps a state and a
+    /// park apart because an untrusted entry and a parked one are the two an
+    /// operator acts on differently. Every other demand is a refusal, and is
+    /// published as the envelope [`Demand::answer`] renders it as.
+    ///
+    /// `vault status`, the roll-up it computes and `vault register`'s report
+    /// publish through this. The match carries no wildcard, so a demand
+    /// minted without a stance here does not compile.
+    pub(crate) fn published(self, name: &VaultName) -> Published {
+        match self {
+            Demand::State(state) => Published::state(state),
+            refused @ (Demand::MaintainerContended(_)
+            | Demand::DuplicateRoot(_)
+            | Demand::IdentityRefused(_)
+            | Demand::UnknownVault
+            | Demand::EntryHeld
+            | Demand::UnsupportedMode(_)) => Published::of(refused.answer(name)),
+        }
+    }
+}
+
+impl Unserved {
+    /// This refusal in the wire vocabulary, echoing the name that was asked
+    /// for: there is no entry in service to read a name off.
+    ///
+    /// [`Demand::answer`] renders the demands of the same names through this,
+    /// so a door that holds the refusal typed apart and a door that holds it
+    /// as a demand answer one envelope.
+    pub(crate) fn answer(self, name: &VaultName) -> ErrorEnvelope {
+        match self {
+            Unserved::UnknownVault => unknown_vault(name),
+            Unserved::EntryHeld => ErrorEnvelope::new(
                 format!(
                     "`{name}` is being unregistered, so it is not served until that change \
                      commits or is refused"
                 ),
                 ErrorDetail::entry_held(name.clone()),
-            )),
-            Demand::UnsupportedMode(mode) => Err(unsupported_attach_mode(mode)),
+            ),
         }
     }
 }
@@ -340,11 +384,9 @@ fn reload_failed(failure: ReloadFailure) -> ErrorEnvelope {
 /// A core reload error as the wire control-file failure it is: which file,
 /// which boundary, and the reader's own account of it.
 ///
-/// The reload refusals here are its first caller. Its second is the `vault
-/// status` handler, one of the vault namespace handlers, which is not built
-/// yet; it lands in this crate and reports the same failure as an entry's
-/// last reload failure, so the visibility is `pub(crate)` rather than private
-/// to this module.
+/// The reload refusals here are its first caller. `vault status` is its
+/// second: it reports the same failure as an entry's last reload failure, and
+/// as the reading of a control file its drift could not read.
 pub(crate) fn control_file_failure(error: &ReloadError) -> ControlFileFailure {
     let file = match error.file() {
         ReloadFile::Schema => ControlFile::Schema,
