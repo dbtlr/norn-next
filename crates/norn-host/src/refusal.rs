@@ -114,14 +114,16 @@ impl ServingRefusal {
     /// are `host/…` and both echo the name: what a caller does about either
     /// one is addressed to that name.
     ///
-    /// Nothing calls it yet. The serving set is changed by the registry verbs
-    /// — `vault register` and `vault unregister` — and this is the rendering
-    /// those verbs refuse through. Their handlers land in this crate
-    /// (NORN-231), which is why the visibility is `pub(crate)`: the mapping
+    /// A dormant carrier for the vault namespace handlers. The serving set is
+    /// changed by the registry verbs — `vault register` and `vault
+    /// unregister` — and this is the rendering those verbs refuse through;
+    /// their handlers are not built, so nothing calls it yet. They land in
+    /// this crate, which is why the visibility is `pub(crate)`: the mapping
     /// waits for the handler beside it rather than for a surface above it.
     #[allow(
         dead_code,
-        reason = "the registry verbs that refuse through this mapping land in NORN-231"
+        reason = "a dormant carrier: the vault namespace's registry verbs, not yet built, \
+                  refuse through this mapping"
     )]
     pub(crate) fn answer(self, name: &VaultName) -> ErrorEnvelope {
         match self {
@@ -155,11 +157,12 @@ impl ReloadRefusal {
     /// It carries no code and no detail: no reload outcome was learned, so
     /// there is nothing about the vault to report.
     ///
-    /// Nothing calls it yet. The `vault reload` handler is the one caller this
-    /// mapping has, and it lands above this layer (NORN-230); the mapping
-    /// lands here because the vocabulary an answer is spelled in is not a
-    /// surface's to choose, so the handler that arrives renders this rather
-    /// than minting refusals of its own.
+    /// A dormant carrier for the vault namespace handlers: the `vault reload`
+    /// handler is the one caller this mapping has, and it is not built, so
+    /// nothing outside this module's tests calls it yet. The mapping lives
+    /// here because the vocabulary an answer is spelled in is not a surface's
+    /// to choose, so the handler that arrives renders this rather than
+    /// minting refusals of its own.
     pub fn answer(self, name: &VaultName) -> Result<ErrorEnvelope, HostError> {
         Ok(match self {
             ReloadRefusal::UnknownVault => ErrorEnvelope::new(
@@ -226,10 +229,11 @@ fn reload_failed(failure: ReloadFailure) -> ErrorEnvelope {
 /// A core reload error as the wire control-file failure it is: which file,
 /// which boundary, and the reader's own account of it.
 ///
-/// The reload refusals here are its first caller; its second is the `vault
-/// status` handler, which lands in this crate (NORN-231) and reports the same
-/// failure as an entry's last reload failure, so the visibility is
-/// `pub(crate)` rather than private to this module.
+/// The reload refusals here are its first caller. Its second is the `vault
+/// status` handler, one of the vault namespace handlers, which is not built
+/// yet; it lands in this crate and reports the same failure as an entry's
+/// last reload failure, so the visibility is `pub(crate)` rather than private
+/// to this module.
 pub(crate) fn control_file_failure(error: &ReloadError) -> ControlFileFailure {
     let file = match error.file() {
         ReloadFile::Schema => ControlFile::Schema,
