@@ -126,12 +126,8 @@ use statement::{Spelled, compose};
 /// document a get answers. An implementation converts those rows to
 /// `norn-text`'s headings and hands back what `norn_text::resolve_section`
 /// and `norn_text::BodyScan::block_extent` answer, the matched heading's index
-/// included.
-///
-/// **This seam is a dormant carrier** for the host's get handler (NORN-230),
-/// which implements it over `norn-text`: no handler calls [`Snapshot::get`]
-/// yet, so the call graph reaches no implementation outside the store's own
-/// suite, which hands a get the same `norn-text` reading.
+/// included. The host's get handler implements it so, and the store's own
+/// suite hands a get the same `norn-text` reading.
 pub trait DocumentText {
     /// The section `anchor` names among `headings` — the document's headings
     /// in document order — in `body`, taking the first heading the anchor
