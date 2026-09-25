@@ -71,10 +71,9 @@ use norn_store::{
 use norn_wire::{
     AnswerAdvisory, Cursor, CursorKey, ErrorDetail, ErrorEnvelope, FindParams, LadderDeclaration,
     ModelIdentity, Page, RUNG_DEPTH, Rung, RungReport, RungSelection, RungSet, Score, SearchParams,
-    SearchReport, Unsatisfied,
+    SearchReport, Unsatisfied, VaultName,
 };
 
-use crate::address::registered_name;
 use crate::lifecycle::{EntryOps, Host, ReadSource, SnapshotSource};
 use crate::read::{Answered, BuildRefused, Built};
 use crate::semantic::{SemanticAnswer, VectorRefusal, freshness};
@@ -141,34 +140,47 @@ fn no_runtime(rung: Rung) -> ErrorEnvelope {
     )
 }
 
-/// Whether `selection` names the vector rung, and so samples it.
-fn samples_vector(selection: &RungSelection) -> bool {
+/// A selection naming no rung that has no runtime here: the only selection
+/// [`samples_vector`] and [`resolve`] take, so no ladder is resolved holding
+/// a rung nothing would run.
+#[derive(Clone, Copy, Debug)]
+struct WithRuntime<'a>(&'a RungSelection);
+
+/// `selection`, where every rung it names has a runtime here, or the refusal
+/// an exact set naming one that has none meets, which it meets before any
+/// engine is sampled. The enabled set holds no such rung.
+fn with_runtime(selection: &RungSelection) -> Result<WithRuntime<'_>, ErrorEnvelope> {
     match selection {
+        RungSelection::Enabled { .. } => Ok(WithRuntime(selection)),
+        RungSelection::Exactly { rungs, .. } => match rungs
+            .rungs()
+            .iter()
+            .find(|rung| !matches!(rung, Rung::Lexical | Rung::Vector))
+        {
+            Some(rung) => Err(no_runtime(*rung)),
+            None => Ok(WithRuntime(selection)),
+        },
+    }
+}
+
+/// Whether `selection` names the vector rung, and so samples it.
+fn samples_vector(selection: WithRuntime<'_>) -> bool {
+    match selection.0 {
         RungSelection::Enabled { without, .. } => !without.rungs().contains(&Rung::Vector),
         RungSelection::Exactly { rungs, .. } => rungs.rungs().contains(&Rung::Vector),
     }
 }
 
-/// The refusal an exact set naming a rung no runtime answers meets, which it
-/// meets before any engine is sampled.
-fn refused_without_runtime(selection: &RungSelection) -> Option<ErrorEnvelope> {
-    match selection {
-        RungSelection::Enabled { .. } => None,
-        RungSelection::Exactly { rungs, .. } => rungs
-            .rungs()
-            .iter()
-            .find(|rung| !matches!(rung, Rung::Lexical | Rung::Vector))
-            .map(|rung| no_runtime(*rung)),
-    }
-}
-
 /// Resolve `selection` against the vector rung's one sample.
 ///
-/// A rung beyond the lexical floor and vectors has no runtime here and is in
-/// no enabled set; an exact set naming one is refused by
-/// [`refused_without_runtime`] before this is reached.
-fn resolve(selection: &RungSelection, vector: &VectorSample) -> Result<Resolved, ErrorEnvelope> {
-    match selection {
+/// A host that composes no semantic engine samples the rung as not enabled
+/// ([`VectorRefusal::not_composed`]) whatever the vault's engine section says,
+/// because no section was delivered to an engine: the enabled selection then
+/// leaves the rung out silently, and an exact set naming it is refused
+/// `engine/not-enabled`, told to serve the vault from a host that composes the
+/// engine.
+fn resolve(selection: WithRuntime<'_>, vector: &VectorSample) -> Result<Resolved, ErrorEnvelope> {
+    match selection.0 {
         RungSelection::Exactly { rungs, .. } => {
             if rungs.rungs().contains(&Rung::Vector) {
                 match vector {
@@ -179,9 +191,6 @@ fn resolve(selection: &RungSelection, vector: &VectorSample) -> Result<Resolved,
                         return Err(VectorRefusal::not_composed().envelope());
                     }
                 }
-            }
-            if let Some(refused) = refused_without_runtime(selection) {
-                return Err(refused);
             }
             Ok(Resolved {
                 ladder: rungs.clone(),
@@ -394,18 +403,16 @@ where
         &self,
         params: &SearchParams,
     ) -> Result<Answered<SearchReport, SearchCost>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |snapshot, declared| {
-            if let Some(refused) = refused_without_runtime(&params.rungs) {
-                return Err(BuildRefused::Answered(refused));
-            }
+        self.answer_read(&params.vault, |vault, snapshot, declared| {
+            let selection = with_runtime(&params.rungs).map_err(BuildRefused::Answered)?;
             let limit = page_limit(params.limit)?;
             let mut cost = SearchCost::default();
-            let vector = if samples_vector(&params.rungs) {
-                self.sample_vector(snapshot, params, declared, &mut cost)?
+            let vector = if samples_vector(selection) {
+                self.sample_vector(vault, snapshot, params, declared, &mut cost)?
             } else {
                 VectorSample::Unsampled
             };
-            let resolved = resolve(&params.rungs, &vector).map_err(BuildRefused::Answered)?;
+            let resolved = resolve(selection, &vector).map_err(BuildRefused::Answered)?;
             let VectorSample::Answered(answered) = vector else {
                 return lexical_answer(snapshot, params, declared, resolved, cost);
             };
@@ -428,15 +435,16 @@ where
         })
     }
 
-    /// Sample the vector rung of the vault `params` addresses: whether an
-    /// engine stands and, where one does, its answer over the documents the
-    /// conjunction admits on `snapshot`.
+    /// Sample the vector rung of `vault`, the vault `params` addresses:
+    /// whether an engine stands and, where one does, its answer over the
+    /// documents the conjunction admits on `snapshot`.
     ///
     /// Whether an engine stands is read first, so a vault whose engine is not
     /// running pays no candidate pages; the answer then samples the slot again,
     /// under its lock, and that sample is the one the selection resolves by.
     fn sample_vector(
         &self,
+        vault: &VaultName,
         snapshot: &Snapshot,
         params: &SearchParams,
         declared: &ContentModel,
@@ -445,7 +453,6 @@ where
         let Some(engines) = self.ops().semantic() else {
             return Ok(VectorSample::Refused(VectorRefusal::not_composed()));
         };
-        let vault = registered_name(&params.vault).map_err(BuildRefused::Answered)?;
         if let Err(refusal) = engines.standing(vault) {
             return Ok(VectorSample::Refused(VectorRefusal::of(refusal)));
         }
@@ -720,6 +727,10 @@ mod tests {
         })
     }
 
+    fn runs(selection: &RungSelection) -> WithRuntime<'_> {
+        with_runtime(selection).expect("a selection every rung of which has a runtime")
+    }
+
     fn lexical_without_vector() -> RungSelection {
         RungSelection::enabled_without([Rung::Vector]).expect("a selection")
     }
@@ -745,20 +756,20 @@ mod tests {
         };
         assert_eq!(
             resolve(
-                &RungSelection::enabled(),
+                runs(&RungSelection::enabled()),
                 &VectorSample::Refused(not_enabled())
             ),
             Ok(lexical)
         );
-        assert!(!samples_vector(&lexical_without_vector()));
+        assert!(!samples_vector(runs(&lexical_without_vector())));
         assert_eq!(
-            resolve(&lexical_without_vector(), &VectorSample::Unsampled)
+            resolve(runs(&lexical_without_vector()), &VectorSample::Unsampled)
                 .map(|resolved| resolved.ladder),
             Ok(RungSet::lexical())
         );
         assert_eq!(
             resolve(
-                &RungSelection::enabled(),
+                runs(&RungSelection::enabled()),
                 &VectorSample::Refused(unavailable())
             ),
             Ok(Resolved {
@@ -770,8 +781,11 @@ mod tests {
             })
         );
         assert_eq!(
-            resolve(&RungSelection::enabled(), &VectorSample::Refused(failed()))
-                .map_err(|envelope| envelope.code().clone()),
+            resolve(
+                runs(&RungSelection::enabled()),
+                &VectorSample::Refused(failed())
+            )
+            .map_err(|envelope| envelope.code().clone()),
             Err(ReasonCode::EngineFailed)
         );
     }
@@ -788,8 +802,11 @@ mod tests {
             (failed(), ReasonCode::EngineFailed),
         ] {
             assert_eq!(
-                resolve(&vector_without_lexical(), &VectorSample::Refused(sample))
-                    .map_err(|envelope| envelope.code().clone()),
+                resolve(
+                    runs(&vector_without_lexical()),
+                    &VectorSample::Refused(sample)
+                )
+                .map_err(|envelope| envelope.code().clone()),
                 Err(code)
             );
         }
@@ -797,7 +814,8 @@ mod tests {
 
     /// **An exact set is refused by any rung it names that cannot answer**:
     /// the vector rung by its sample's composition, and a rung no runtime
-    /// answers as not enabled before any engine is sampled.
+    /// answers as not enabled before any engine is sampled, so no selection
+    /// naming one reaches resolution.
     #[test]
     fn an_exact_set_is_refused_by_a_rung_that_cannot_answer() {
         for (sample, code) in [
@@ -807,7 +825,7 @@ mod tests {
             (VectorRefusal::not_composed(), ReasonCode::EngineNotEnabled),
         ] {
             assert_eq!(
-                resolve(&vector_alone(), &VectorSample::Refused(sample))
+                resolve(runs(&vector_alone()), &VectorSample::Refused(sample))
                     .map_err(|envelope| envelope.code().clone()),
                 Err(code)
             );
@@ -816,7 +834,7 @@ mod tests {
             let selection = RungSelection::exactly(
                 RungSet::of([Rung::Lexical, rung]).expect("a set holding the floor"),
             );
-            let refused = refused_without_runtime(&selection).expect("a refusal");
+            let refused = with_runtime(&selection).expect_err("a refusal");
             assert_eq!(refused.code(), &ReasonCode::EngineNotEnabled);
             assert_eq!(
                 refused.detail(),
@@ -825,12 +843,7 @@ mod tests {
                     "no runtime for this rung ships in this build, so no vault enables it"
                 )
             );
-            assert_eq!(
-                resolve(&selection, &VectorSample::Unsampled)
-                    .map_err(|envelope| envelope.code().clone()),
-                Err(ReasonCode::EngineNotEnabled)
-            );
         }
-        assert_eq!(refused_without_runtime(&vector_alone()), None);
+        assert!(with_runtime(&vector_alone()).is_ok());
     }
 }
