@@ -485,6 +485,41 @@ fn lexical_answer(
     })
 }
 
+/// The ladder an answer holding the vector rung ran: the lexical floor where
+/// `lexical_ran`, and the vector rung, naming the model that derived its
+/// vectors and how far that derivation trails `snapshot`'s store reading. It
+/// is not repeatable.
+///
+/// It is built from the rungs that ran, so no rung is declared that did not
+/// run and none that ran is left out. A ladder holding the vector rung holds a
+/// retrieval rung, in ladder order, so the declaration is never malformed;
+/// were it, the vector rung's answer could not be declared, which is refused
+/// `engine/failed` like any other vector answer that cannot be told.
+fn declaration(
+    lexical_ran: bool,
+    answer: &SemanticAnswer,
+    snapshot: &Snapshot,
+) -> Result<LadderDeclaration, BuildRefused> {
+    let vector = RungReport::vector(
+        ModelIdentity::new(answer.model.id(), answer.model.version()),
+        freshness(&answer.watermarks, snapshot.reading()),
+    );
+    let rungs = if lexical_ran {
+        vec![RungReport::lexical(), vector]
+    } else {
+        vec![vector]
+    };
+    LadderDeclaration::new(rungs, false).map_err(|malformed| {
+        BuildRefused::Answered(
+            VectorRefusal::Failed {
+                message: "this vault's engine failed to answer the vector rung".to_string(),
+                detail: format!("the answer declared no ladder: {malformed}"),
+            }
+            .envelope(),
+        )
+    })
+}
+
 /// What a ladder holding the vector rung is ranked from.
 struct RankedInputs {
     resolved: Resolved,
@@ -508,37 +543,43 @@ fn ranked_answer(
         admitted,
         limit,
     } = inputs;
-    let ladder = resolved.ladder;
     let sidecar = wire_sidecar(&answer.sidecar)
         .map_err(|refusal| BuildRefused::Answered(refusal.envelope()))?;
+    // Judged before either arm, so an answer holding a neighbor with no
+    // relevance score is refused whether the rung answers alone or fused.
+    let vector = vector_scale(&answer.neighbors)
+        .map_err(|refusal| BuildRefused::Answered(refusal.envelope()))?;
+    let lexical_ran = resolved.ladder.rungs().contains(&Rung::Lexical);
+    let declaration = declaration(lexical_ran, &answer, snapshot)?;
+    let ladder = declaration.rung_set();
     let mut advisories = Vec::new();
     let mut depth_reached = Vec::new();
-    let (unsatisfied, ranked) = if ladder.rungs().contains(&Rung::Lexical) {
+    let (unsatisfied, ranked) = if lexical_ran {
         let searched = snapshot.search(&lexical_candidates(params), declared)?;
         if searched.next.is_some() {
             depth_reached.push(AnswerAdvisory::rung_depth_reached(Rung::Lexical));
         }
         advisories.extend(searched.advisories.iter().cloned());
         // Every lexical hit satisfies the conjunction the candidates are drawn
-        // by, on the same snapshot, so each one has a candidate to hydrate.
+        // by, on the same snapshot, so each one is admitted and has a
+        // candidate to hydrate. A hit that had none could not be hydrated, so
+        // it is left out of the fusion rather than answered.
         let lexical: Vec<String> = searched
             .hits
             .iter()
             .map(|hit| hit.path.as_str().to_string())
-            .filter(|path| admitted.by_path.contains_key(path))
+            .filter(|path| {
+                let admits = admitted.by_path.contains_key(path);
+                debug_assert!(admits, "the lexical hit `{path}` is not admitted");
+                admits
+            })
             .collect();
-        let vector: Vec<String> = answer
-            .neighbors
-            .iter()
-            .map(|neighbor| neighbor.path.clone())
-            .collect();
+        let vector: Vec<String> = vector.into_iter().map(|hit| hit.path).collect();
         cost.lexical = Some(searched.work);
         (searched.unsatisfied, fused(&[lexical, vector]))
     } else {
         advisories.extend(admitted.advisories.iter().cloned());
-        let ranked = vector_scale(&answer.neighbors)
-            .map_err(|refusal| BuildRefused::Answered(refusal.envelope()))?;
-        (admitted.unsatisfied.clone(), ranked)
+        (admitted.unsatisfied.clone(), vector)
     };
     if answer.work.rows_scored > u64::from(RUNG_DEPTH) {
         depth_reached.push(AnswerAdvisory::rung_depth_reached(Rung::Vector));
@@ -586,21 +627,6 @@ fn ranked_answer(
         _ => None,
     };
     let hydrated = snapshot.hydrate_hits(&scored, &params.columns, declared)?;
-
-    let mut rungs = Vec::new();
-    for rung in ladder.rungs() {
-        match rung {
-            Rung::Lexical => rungs.push(RungReport::lexical()),
-            Rung::Vector => rungs.push(RungReport::vector(
-                ModelIdentity::new(answer.model.id(), answer.model.version()),
-                freshness(&answer.watermarks, snapshot.reading()),
-            )),
-            // Resolution admits no other rung into a ladder.
-            _ => {}
-        }
-    }
-    let declaration = LadderDeclaration::new(rungs, false)
-        .expect("a resolved ladder holds a retrieval rung, each rung once, in ladder order");
 
     let mut unsatisfied = unsatisfied;
     unsatisfied.extend(hydrated.unsatisfied);

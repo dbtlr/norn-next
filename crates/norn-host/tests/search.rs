@@ -499,6 +499,44 @@ fn on_the_sidecar<T>(
     }
 }
 
+/// **A non-finite vector score refuses `engine/failed` on every ladder that
+/// holds the vector rung**: a relevance score is a finite number, so an answer
+/// holding a neighbor the engine scored NaN or infinite has failed, whether
+/// the rung answers alone or fused. A row's embedding is overwritten with
+/// NaN, then with infinity, under the running engine.
+#[test]
+fn a_non_finite_vector_score_refuses_engine_failed_on_every_ladder() {
+    let (_sandbox, vault) = a_vault("search-non-finite", Some("[engine.semantic]\n"));
+    let serving = serve(&vault);
+    let dimensions: i64 = on_the_sidecar(&vault, |sidecar| {
+        sidecar.query_row(
+            "SELECT dimensions FROM document_vectors WHERE path = 'docs/lone.md'",
+            [],
+            |row| row.get(0),
+        )
+    });
+    // Little-endian f32 words: a quiet NaN, and positive infinity.
+    for word in ["0000c07f", "0000807f"] {
+        let embedding = word.repeat(usize::try_from(dimensions).expect("a dimension count"));
+        on_the_sidecar(&vault, |sidecar| {
+            sidecar.execute_batch(&format!(
+                "UPDATE document_vectors SET embedding = x'{embedding}' WHERE path = 'docs/lone.md'"
+            ))
+        });
+        for selection in [exactly([Rung::Vector]), RungSelection::enabled()] {
+            let refusal = refused(
+                &serving,
+                &searching(&vault, "alpha").with_rungs(selection.clone()),
+            );
+            assert_eq!(
+                refusal.code(),
+                &ReasonCode::EngineFailed,
+                "{word} under {selection:?}: {refusal:?}"
+            );
+        }
+    }
+}
+
 /// The rungs `answer` is advised reached their depth, in the order advised.
 fn depth_reached(answer: &Answered<SearchReport, SearchCost>) -> Vec<Rung> {
     answer
