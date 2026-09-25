@@ -111,7 +111,7 @@ mod scratch;
 
 pub use exclusion::{Excluded, ExclusionError, Exclusions};
 pub use hash::{ContentHash, hashed_from};
-pub use identity::{Identity, PostState, path_identity};
+pub use identity::{Identity, PostState, path_identity, readable_directory};
 pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
 pub use path::{
     CaseSensitivity, NormalizedPath, NormalizerError, PathError, PathNormalizer, canonical_spelling,
@@ -121,7 +121,7 @@ pub use read::{
 };
 pub use refusal::Refusal;
 pub use shadow::{
-    FALLBACK, MaintainershipKey, Placement, SHADOW_AGE_THRESHOLD, ShadowHome, Swept,
+    FALLBACK, MaintainershipKey, Placement, SHADOW_AGE_THRESHOLD, ShadowHome, Swept, discard_homes,
     is_shadow_name, sweep_fallback_root, sweep_fallback_tree,
 };
 pub use walk::{

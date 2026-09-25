@@ -88,6 +88,8 @@
 //! What is left is empty directories: a key's home outlives the key, because
 //! nothing may remove a directory it cannot prove is a home rather than a vault
 //! subtree. An empty directory under [`FALLBACK`] is inert and costs an inode.
+//! The one proof is the key's own lock: [`discard_homes`], under it, takes a
+//! maintainership's homes at its end.
 //!
 //! The sweeps are exported here because they have to be: no other crate may
 //! touch vault mechanism files, so no other crate could implement one — and a
@@ -418,6 +420,62 @@ pub fn sweep_fallback_tree(vault_root: &Path) -> Result<Swept, Refusal> {
         }
     }
     Ok(swept)
+}
+
+/// Discard every home `key` resolves to: `data_tmp`, the temporary directory
+/// inside the derived directory the key names, and the key's own directory
+/// under [`FALLBACK`] beneath `vault_root`.
+///
+/// **Only under a freshly taken maintainer lock for `key`, for a
+/// maintainership that is ending.** That is the premise the total attach-time
+/// [sweep](ShadowHome::sweep) rests on, and it licenses the same thing here:
+/// every shadow in either home goes whatever its age, and then the home
+/// itself, where that leaves it empty. A home still holding anything the
+/// shadow predicate does not accept keeps it and stands, because a name this
+/// crate did not hand out is somebody's. A home that is not there is already
+/// discarded.
+///
+/// Both placements are taken because the device comparison that chose between
+/// them reads one moment: an attach made under another arrangement of mounts
+/// resolved the other home, under the same key. The directories above the
+/// fallback home are shared with every other key and stand.
+pub fn discard_homes(
+    vault_root: &Path,
+    data_tmp: &Path,
+    key: &MaintainershipKey,
+) -> Result<(), Refusal> {
+    discard_home(data_tmp)?;
+    discard_home(&vault_root.join(FALLBACK).join(key.as_path()))
+}
+
+/// Take every shadow in `home`, and then `home` itself where nothing else is
+/// left in it.
+#[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns the shadow home.
+fn discard_home(home: &Path) -> Result<(), Refusal> {
+    let mut swept = Swept {
+        removed: 0,
+        left: 0,
+    };
+    match sweep_entries(home, Duration::ZERO, &mut swept) {
+        Ok(_) => {}
+        Err(Refusal::Environment {
+            kind: std::io::ErrorKind::NotFound,
+            ..
+        }) => return Ok(()),
+        Err(refusal) => return Err(refusal),
+    }
+    match std::fs::remove_dir(home) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(environment("removing", home, &error)),
+    }
 }
 
 /// Remove the shadows at least `older_than` old directly inside `directory`,
@@ -909,6 +967,60 @@ mod tests {
         assert!(
             scratch.exists(home.directory()),
             "a home directory was removed"
+        );
+    }
+
+    /// Discarding a maintainership's homes takes both of them and every shadow
+    /// in them, and leaves another key's home, the directories above the
+    /// fallback home, and anything the predicate does not accept standing.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the homes and what they hold.
+    fn discarding_a_keys_homes_takes_both_and_leaves_what_is_not_its() {
+        let scratch = Scratch::new("shadow-discard-homes");
+        let vault = scratch.directory("other-vault");
+        let data_tmp = scratch.path("data/vaults/notes/tmp");
+        let ours = key();
+        let theirs =
+            MaintainershipKey::new("norn-dev", "notes", "1111111111111111").expect("a key");
+        let fallback = ShadowHome::resolve_where(&vault, &data_tmp, &ours, false)
+            .expect("the key's fallback home");
+        let data_root = ShadowHome::resolve_where(&vault, &data_tmp, &ours, true)
+            .expect("the key's data-root home");
+        let other = ShadowHome::resolve_where(&vault, &data_tmp, &theirs, false)
+            .expect("another key's fallback home");
+        for home in [&fallback, &data_root, &other] {
+            std::fs::write(home.next_shadow(), b"staged").expect("a shadow");
+        }
+        let kept = scratch.directory("kept/vault");
+        let kept_tmp = scratch.directory("kept/tmp");
+        let kept_home = ShadowHome::resolve_where(&kept, &kept_tmp, &ours, false)
+            .expect("a home holding somebody's file");
+        std::fs::write(kept_home.directory().join("notes.md"), b"somebody's").unwrap();
+
+        discard_homes(&vault, &data_tmp, &ours).expect("the homes are discarded");
+        discard_homes(&kept, &kept_tmp, &ours).expect("a home holding a file stands");
+        discard_homes(&vault, &data_tmp, &ours).expect("an absent home is discarded");
+
+        assert!(
+            !scratch.exists(fallback.directory()),
+            "the fallback home stood"
+        );
+        assert!(
+            !scratch.exists(data_root.directory()),
+            "the data-root home stood"
+        );
+        assert!(
+            scratch.exists(fallback.directory().parent().expect("a parent")),
+            "a directory shared with other keys was removed"
+        );
+        assert_eq!(
+            std::fs::read_dir(other.directory()).unwrap().count(),
+            1,
+            "another key's home was touched"
+        );
+        assert!(
+            scratch.exists(&kept_home.directory().join("notes.md")),
+            "a file the predicate does not accept was removed"
         );
     }
 
