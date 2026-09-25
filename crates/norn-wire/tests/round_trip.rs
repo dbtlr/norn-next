@@ -2792,6 +2792,26 @@ fn a_continuation_reports_every_part_in_one_fixed_order() {
     );
 }
 
+/// **A refused continuation's two document orders travel as one pair.** Both
+/// orders are named, or neither is: a pair missing one order does not parse.
+#[test]
+fn a_changed_orders_document_orders_are_one_pair() {
+    let changed = CursorOrderChanged::minted_raw(None).in_orders(
+        Sort::new(SortKey::field("due"), Direction::Ascending),
+        Sort::new(SortKey::field("due"), Direction::Descending),
+    );
+    let pinned = r#"{"minted_under":null,"current":null,"orders":{"cursor":{"key":{"by":"field","key":"due"},"direction":"ascending"},"request":{"key":{"by":"field","key":"due"},"direction":"descending"}}}"#;
+    assert_eq!(
+        serde_json::to_string(&changed).expect("the change serializes"),
+        pinned
+    );
+    let half = r#"{"minted_under":null,"current":null,"orders":{"cursor":{"key":{"by":"path"},"direction":"ascending"}}}"#;
+    assert!(
+        serde_json::from_str::<CursorOrderChanged>(half).is_err(),
+        "a pair naming one order parsed"
+    );
+}
+
 /// A cursor minted under one order and continued under another refuses: the
 /// rows its key names a position in are in a sequence that no longer exists.
 /// An establishment that reads no fingerprint at all is not walking that

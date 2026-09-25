@@ -394,20 +394,19 @@ pub enum Moved {
 
 /// A continuation whose order no longer exists.
 ///
-/// The cursor was minted under one schema fingerprint and is being continued
-/// under another, or under none at all, so the sequence its key names a
-/// position in is not the sequence the answer would walk. The page is refused
-/// rather than answered from a position that means something else, and the two
-/// fingerprints say which order was asked for and which one stands.
+/// The cursor names a position in an order the request does not read: an
+/// order taken under another schema's fingerprint, or another sort key or
+/// direction. The sequence its key names a position in is not the sequence the
+/// answer would walk, so the page is refused rather than answered from a
+/// position that means something else.
 ///
-/// An answer that judges a cursor against the order its request names also
-/// refuses a raw cursor continued in a typed order, and a cursor whose key is
-/// not a position in the request's order at all; `minted_under` is `null` for a
-/// cursor minted in an order no schema gives. A document cursor names the sort
-/// key and direction it was minted in, so a page of documents also refuses one
-/// continued in another key or direction, and says both: `minted_in` and
-/// `current_in` are the two document orders, and `null` where the rows are not
-/// documents.
+/// The detail says which order was asked for and which one stands. The two
+/// fingerprints name the schema each order is taken under: `minted_under` is
+/// `null` for a cursor minted in an order no schema gives, and `current` where
+/// the order that stands is raw. A page of documents also names the two
+/// orders themselves in `orders`, since a document cursor records the sort key
+/// and direction its page was read in; `orders` is `null` where the cursor
+/// records no such order.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct CursorOrderChanged {
@@ -417,12 +416,9 @@ pub struct CursorOrderChanged {
     /// The fingerprint the establishment reads now, and `null` where the order
     /// that stands is raw.
     pub current: Option<String>,
-    /// The document order the cursor was minted in, and `null` where the
-    /// cursor is not a document row's.
-    pub minted_in: Option<Sort>,
-    /// The document order the page would be read in now, and `null` where the
-    /// rows are not documents.
-    pub current_in: Option<Sort>,
+    /// The order the cursor's page was read in and the order the request's
+    /// page is read in, and `null` where the cursor records no order.
+    pub orders: Option<DocumentOrders>,
 }
 
 impl CursorOrderChanged {
@@ -431,8 +427,7 @@ impl CursorOrderChanged {
         CursorOrderChanged {
             minted_under: Some(minted_under.into()),
             current,
-            minted_in: None,
-            current_in: None,
+            orders: None,
         }
     }
 
@@ -441,20 +436,40 @@ impl CursorOrderChanged {
         CursorOrderChanged {
             minted_under: None,
             current,
-            minted_in: None,
-            current_in: None,
+            orders: None,
         }
     }
 
-    /// This change, between pages of documents minted in `minted_in` and read
-    /// now in `current_in`.
+    /// This change, between a page of documents read in `cursor` and one the
+    /// request reads in `request`.
     #[must_use]
-    pub fn in_orders(self, minted_in: Sort, current_in: Sort) -> Self {
+    pub fn in_orders(self, cursor: Sort, request: Sort) -> Self {
         CursorOrderChanged {
-            minted_in: Some(minted_in),
-            current_in: Some(current_in),
+            orders: Some(DocumentOrders::new(cursor, request)),
             ..self
         }
+    }
+}
+
+/// The two document orders a refused continuation stands between.
+///
+/// On the wire the pair is an object of two orders:
+/// `{"cursor":{"key":{"by":"field","key":"due"},"direction":"ascending"},"request":{"key":{"by":"field","key":"due"},"direction":"descending"}}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct DocumentOrders {
+    /// The order the cursor's page was read in.
+    pub cursor: Sort,
+    /// The order the request's page is read in: the request's sort, or the
+    /// path ascending where its sort key is outside the field universe.
+    pub request: Sort,
+}
+
+impl DocumentOrders {
+    /// A cursor's page read in `cursor`, continued by a request whose page is
+    /// read in `request`.
+    pub const fn new(cursor: Sort, request: Sort) -> Self {
+        DocumentOrders { cursor, request }
     }
 }
 

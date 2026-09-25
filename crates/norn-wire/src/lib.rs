@@ -206,7 +206,7 @@
 //! [`EngineSection::malformed`], whose variant is the one part of a plain enum
 //! that extends by gaining a field,
 //! [`Cursor::new`], [`Page::new`], [`Snapshot::new`],
-//! [`CursorOrderChanged::new`], [`Score::new`],
+//! [`CursorOrderChanged::new`], [`DocumentOrders::new`], [`Score::new`],
 //! [`AnswerReading::new`], [`LadderDeclaration::new`],
 //! [`ModelIdentity::new`], [`Freshness::trailing`], [`Freshness::rescanning`],
 //! [`VaultAnswer::new`],
@@ -363,7 +363,8 @@ pub use address::{
     absolute_path,
 };
 pub use cursor::{
-    Cursor, CursorKey, CursorOrderChanged, FacetKind, Moved, NonFiniteScore, Page, Score, Snapshot,
+    Cursor, CursorKey, CursorOrderChanged, DocumentOrders, FacetKind, Moved, NonFiniteScore, Page,
+    Score, Snapshot,
 };
 pub use demand::AttachMode;
 pub use doctor::{

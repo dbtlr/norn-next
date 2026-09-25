@@ -1478,10 +1478,27 @@ fn a_changed_order_is_advertised_as_the_type_the_continuation_answers_with() {
     );
     assert_eq!(
         property_names(&schema["$defs"]["CursorOrderChanged"]),
-        ["minted_under", "current", "minted_in", "current_in"]
-            .into_iter()
-            .collect()
+        ["minted_under", "current", "orders"].into_iter().collect()
     );
+    let orders =
+        serde_json::to_string(&schema["$defs"]["CursorOrderChanged"]["properties"]["orders"])
+            .expect("the orders property serializes");
+    assert!(
+        orders.contains("#/$defs/DocumentOrders") && orders.contains("null"),
+        "the two orders are one nullable pair: {orders}"
+    );
+    let pair = &schema["$defs"]["DocumentOrders"];
+    assert_eq!(
+        property_names(pair),
+        ["cursor", "request"].into_iter().collect()
+    );
+    for order in ["cursor", "request"] {
+        assert_eq!(
+            pair["properties"][order]["$ref"].as_str(),
+            Some("#/$defs/Sort"),
+            "each order of the pair is the order a request names"
+        );
+    }
 }
 
 /// The registry-write refusal advertises its account as prose beside the code,
