@@ -19690,6 +19690,97 @@ mod tests {
             );
         }
 
+        /// **A `vault reload` asked while an unregistration holds the vault
+        /// answers `host/entry-held`**, in either mode, as every other door
+        /// answers it, and runs nothing.
+        #[test]
+        fn vault_reload_answers_held_while_an_unregistration_holds_the_lock() {
+            let ops = Arc::new(FakeOps::default());
+            ops.reload_supported.store(true, Ordering::SeqCst);
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let pause = RetirePause::new();
+            *ops.retire_pause.lock().unwrap() = Some(Arc::clone(&pause));
+
+            let (answers, unregistered) = thread::scope(|scope| {
+                let unregistering =
+                    scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
+                pause.entered.wait();
+                let answers = [false, true]
+                    .map(|dry_run| reload_refused(&host, &reload_params(&name, dry_run)));
+                pause.resume.wait();
+                (
+                    answers,
+                    unregistering.join().expect("the unregistration ran"),
+                )
+            });
+
+            let held = ErrorDetail::entry_held(name.clone());
+            assert_eq!(answers, [held.clone(), held]);
+            unregistered.expect("the idle vault is unregistered");
+            assert!(
+                !ops.reload_started.load(Ordering::SeqCst),
+                "a held vault ran a reload"
+            );
+        }
+
+        /// **A reload whose vault is unregistered while its job waits in the
+        /// channel answers `host/unknown-vault`**, in either mode. The reload
+        /// queues behind another vault's reload on the one worker; a refusal
+        /// moves the entry past the job, which leaves the entry holding
+        /// nothing, and the vault is unregistered. The worker that then picks
+        /// the job up finds no entry to run it over and drops it unanswered,
+        /// and the asker is told the name is no longer served.
+        #[cfg(unix)]
+        #[test]
+        fn a_reload_whose_vault_is_unregistered_while_it_is_queued_answers_unknown_vault() {
+            for dry_run in [false, true] {
+                let scratch = temp_base("reload-unregistered-while-queued");
+                let queued = VaultName::new("queued").unwrap();
+                let holding = VaultName::new("holding").unwrap();
+                let ops = Arc::new(FakeOps::default());
+                ops.reload_supported.store(true, Ordering::SeqCst);
+                let host = one_worker_host_over(&ops, scratch.root(), &[&queued, &holding]);
+                ops.block_reload.store(true, Ordering::SeqCst);
+                let held = reload_on_a_thread(&host, &holding, dry_run);
+                wait_for_flag("reload_started", &ops.reload_started);
+
+                let unanswered = reload_on_a_thread(&host, &queued, dry_run);
+                let entry = host.shared.entries.get(&queued).unwrap();
+                wait_until(
+                    "the queued vault's reload to wait in the channel",
+                    lifecycle_wait_budget(),
+                    || {
+                        if entry.gate.lock().unwrap().claim.slot_taken() {
+                            Observed::Met(())
+                        } else {
+                            Observed::pending("the queued vault's slot is free")
+                        }
+                    },
+                )
+                .unwrap_or_else(|failure| panic!("{failure}"));
+                refuse_identity_error(&host.shared, &queued, "the root cannot be read".into());
+                drop(entry);
+                unregister(&host, UnregisterParams::new(queued.clone()).keeping_state())
+                    .expect("the entry holding nothing is unregistered");
+                ops.reload_release.store(true, Ordering::SeqCst);
+
+                let answered = unanswered
+                    .join()
+                    .unwrap()
+                    .expect("a live host answered the reload it dropped with no code")
+                    .expect_err("the reload of an unregistered vault was answered as run");
+                assert_eq!(
+                    answered.detail(),
+                    &ErrorDetail::unknown_vault(queued.clone()),
+                    "dry run: {dry_run}"
+                );
+                held.join()
+                    .unwrap()
+                    .expect("the host is running")
+                    .expect("the reload holding the worker");
+            }
+        }
+
         /// The two inspection doors behind `induced-failure` answer the entry
         /// as held while an unregistration holds it, as the others do.
         #[cfg(feature = "induced-failure")]
