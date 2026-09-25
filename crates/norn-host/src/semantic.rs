@@ -68,7 +68,8 @@ use norn_semantic::{
 };
 use norn_store::{FeedRead, StoreReading};
 use norn_wire::{
-    EngineSection, ErrorDetail, ErrorEnvelope, Freshness, Rung, RungSkipReason, VaultName,
+    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Freshness, Rung, RungSkipReason,
+    VaultName,
 };
 
 use crate::refusal::engine_refusal_told;
@@ -96,6 +97,10 @@ enum Slot {
         /// did not write are still owed by the cursor, and the next nudge
         /// re-attempts them.
         last_drain_error: Option<String>,
+        /// The lane-1 store's reading when the most recent drain was nudged,
+        /// and `None` until one has been, or where that reading could not be
+        /// taken. See [`SemanticStatus::On`].
+        nudged_at: Option<StoreReading>,
     },
     /// The engine took itself out of service: its section was refused, its
     /// sidecar could not open, a rebuild after damage failed, or a panic
@@ -120,6 +125,18 @@ pub enum SemanticStatus {
         /// How far each feed was drained; judged against a store reading by
         /// [`freshness`].
         watermarks: Watermarks,
+        /// The lane-1 store's epoch and write generation when the most recent
+        /// drain was nudged, and `None` until one has been.
+        ///
+        /// **Between legs this is the store's current reading.** Lane 1 is
+        /// written by legs alone, and every leg that ends holding a
+        /// consistent store nudges a drain as its last act, so the store
+        /// stands where the last nudge read it until the next leg writes. A
+        /// leg that fails part way leaves no nudge, and the reading then
+        /// trails the store until the recovery that follows it nudges again.
+        /// It is what a status reading judges the watermarks against, and it
+        /// needs no reader of the store to take.
+        nudged_at: Option<StoreReading>,
     },
     SelfDisabled {
         detail: String,
@@ -154,7 +171,9 @@ pub struct SemanticAnswer {
 /// that completed after the hold was established, trails by nothing.
 ///
 /// The `search` handler composes it with the store reading of the hold its
-/// answer is taken under; the `status` handler is its other caller.
+/// answer is taken under; the report `vault status` and `doctor` give a
+/// vault's engine is its other caller, with the store reading the engine's
+/// last drain was nudged at.
 pub fn freshness(watermarks: &Watermarks, store: &StoreReading) -> Freshness {
     let lag = |watermark: &Option<Watermark>| match watermark {
         Some(watermark) if watermark.store_epoch == store.epoch() => {
@@ -378,6 +397,59 @@ fn tolerant<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     lock.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// What `slot` is doing, as a status read reports it.
+fn read_slot(slot: &Slot) -> SemanticStatus {
+    match slot {
+        Slot::Running {
+            engine: Some(engine),
+            last_drain_error,
+            nudged_at,
+        } => SemanticStatus::On {
+            last_drain_error: last_drain_error.clone(),
+            sidecar: engine.revision(),
+            watermarks: engine.watermarks().clone(),
+            nudged_at: nudged_at.clone(),
+        },
+        Slot::Running { engine: None, .. } => SemanticStatus::SelfDisabled {
+            detail: ABANDONED.to_string(),
+        },
+        Slot::SelfDisabled { detail } => SemanticStatus::SelfDisabled {
+            detail: detail.clone(),
+        },
+    }
+}
+
+impl From<SemanticStatus> for EngineStatus {
+    /// A vault's engine slot as `vault status` and `doctor` report it.
+    ///
+    /// A standing engine's freshness is [`freshness`] — the judgment a
+    /// search's vector rung reports — of its watermarks against the store
+    /// reading its last drain was nudged at: the worse of the two feeds'
+    /// lags, and rescanning where a watermark names another store lifetime.
+    /// It is `None` until a drain has been nudged and the engine has
+    /// recorded a watermark, which is the wire's own reading of an engine
+    /// that has reported none. The match carries no wildcard, so a status
+    /// minted without a report does not compile.
+    fn from(status: SemanticStatus) -> Self {
+        match status {
+            SemanticStatus::Off => EngineStatus::off(),
+            SemanticStatus::On {
+                last_drain_error,
+                watermarks,
+                nudged_at,
+                sidecar: _,
+            } => {
+                let reported = watermarks.documents.is_some() || watermarks.tombstones.is_some();
+                let freshness = nudged_at
+                    .filter(|_| reported)
+                    .map(|store| freshness(&watermarks, &store));
+                EngineStatus::on(last_drain_error, freshness)
+            }
+            SemanticStatus::SelfDisabled { detail } => EngineStatus::self_disabled(detail),
+        }
+    }
+}
+
 impl SemanticEngines {
     pub fn new(dirs: ConfigDirs) -> Arc<Self> {
         Arc::new(SemanticEngines {
@@ -391,22 +463,7 @@ impl SemanticEngines {
         let Some(slot) = self.slot(vault) else {
             return SemanticStatus::Off;
         };
-        match &*tolerant(&slot) {
-            Slot::Running {
-                engine: Some(engine),
-                last_drain_error,
-            } => SemanticStatus::On {
-                last_drain_error: last_drain_error.clone(),
-                sidecar: engine.revision(),
-                watermarks: engine.watermarks().clone(),
-            },
-            Slot::Running { engine: None, .. } => SemanticStatus::SelfDisabled {
-                detail: ABANDONED.to_string(),
-            },
-            Slot::SelfDisabled { detail } => SemanticStatus::SelfDisabled {
-                detail: detail.clone(),
-            },
-        }
+        read_slot(&tolerant(&slot))
     }
 
     /// The section reading the last config delivery handed `vault`, or `None`
@@ -525,10 +582,20 @@ impl SemanticEngines {
         let Slot::Running {
             engine,
             last_drain_error,
+            nudged_at,
         } = &mut *slot
         else {
             return;
         };
+        // The store's reading as this nudge finds it. The leg that nudged has
+        // committed its lane-1 work and the drain writes the sidecar alone,
+        // so this is where the store stands until the next leg writes. A
+        // reading that cannot be taken is not one to judge against, and the
+        // drain below meets whatever refused it.
+        *nudged_at = feed
+            .write_generation()
+            .ok()
+            .map(|generation| StoreReading::of(feed.epoch(), generation));
         let Some(running) = engine.as_mut() else {
             *slot = Slot::SelfDisabled {
                 detail: ABANDONED.to_string(),
@@ -650,6 +717,7 @@ impl EngineConfigReceiver for SemanticEngines {
             Ok(engine) => Slot::Running {
                 engine: Some(Box::new(engine)),
                 last_drain_error: None,
+                nudged_at: None,
             },
             Err(error) => Slot::SelfDisabled {
                 detail: format!("the sidecar did not open: {}", engine_refusal_told(&error)),
@@ -787,11 +855,11 @@ mod composition_tests {
 
 #[cfg(test)]
 mod freshness_tests {
-    use norn_semantic::{Watermark, Watermarks};
+    use norn_semantic::{SidecarRevision, Watermark, Watermarks};
     use norn_store::StoreReading;
-    use norn_wire::Freshness;
+    use norn_wire::{EngineStatus, Freshness};
 
-    use super::freshness;
+    use super::{SemanticStatus, freshness};
 
     fn at(store_epoch: &str, generation: i64) -> Option<Watermark> {
         Some(Watermark {
@@ -855,6 +923,71 @@ mod freshness_tests {
         assert_eq!(
             freshness(&marks(at("store", 12), at("store", 11)), &store),
             Freshness::trailing(0)
+        );
+    }
+
+    /// A standing engine reported with its watermarks and the store reading
+    /// its last drain was nudged at.
+    fn on(watermarks: Watermarks, nudged_at: Option<StoreReading>) -> SemanticStatus {
+        SemanticStatus::On {
+            last_drain_error: Some("the last drain refused".to_string()),
+            sidecar: SidecarRevision {
+                epoch: "sidecar".to_string(),
+                revision: 3,
+            },
+            watermarks,
+            nudged_at,
+        }
+    }
+
+    /// **A standing engine is reported with how far it trails the store its
+    /// last drain was nudged at**: the worse feed's lag, and rescanning where
+    /// a watermark names another store lifetime — the judgment a search's
+    /// vector rung reports.
+    #[test]
+    fn a_standing_engine_reports_its_lag_behind_the_store_it_was_nudged_at() {
+        let nudged = Some(StoreReading::of("store", 10));
+        assert_eq!(
+            EngineStatus::from(on(marks(at("store", 7), at("store", 9)), nudged.clone())),
+            EngineStatus::on(
+                Some("the last drain refused".to_string()),
+                Some(Freshness::trailing(3))
+            )
+        );
+        assert_eq!(
+            EngineStatus::from(on(marks(at("old", 10), at("store", 10)), nudged)),
+            EngineStatus::on(
+                Some("the last drain refused".to_string()),
+                Some(Freshness::rescanning())
+            )
+        );
+    }
+
+    /// **An engine that has reported no watermark, or has not been nudged,
+    /// reports no freshness**: there is nothing yet to judge.
+    #[test]
+    fn an_engine_with_no_watermark_or_no_nudge_reports_no_freshness() {
+        for status in [
+            on(Watermarks::default(), Some(StoreReading::of("store", 10))),
+            on(marks(at("store", 10), at("store", 10)), None),
+        ] {
+            assert_eq!(
+                EngineStatus::from(status),
+                EngineStatus::on(Some("the last drain refused".to_string()), None)
+            );
+        }
+    }
+
+    /// No engine standing and an engine out of service are reported as
+    /// themselves.
+    #[test]
+    fn an_engine_off_or_self_disabled_is_reported_as_itself() {
+        assert_eq!(EngineStatus::from(SemanticStatus::Off), EngineStatus::off());
+        assert_eq!(
+            EngineStatus::from(SemanticStatus::SelfDisabled {
+                detail: "the sidecar did not open".to_string()
+            }),
+            EngineStatus::self_disabled("the sidecar did not open")
         );
     }
 }

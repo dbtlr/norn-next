@@ -5560,6 +5560,7 @@ mod tests {
                 last_drain_error: None,
                 sidecar,
                 watermarks,
+                nudged_at,
             } = engines.status(&name)
             else {
                 panic!("the engine is not on: {:?}", engines.status(&name));
@@ -5591,6 +5592,11 @@ mod tests {
             assert_eq!(
                 freshness(&answer.watermarks, &store),
                 Freshness::trailing(0)
+            );
+            assert_eq!(
+                nudged_at,
+                Some(store),
+                "the attach's nudge read the store where the attach left it"
             );
         }
 
