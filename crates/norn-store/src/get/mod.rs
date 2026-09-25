@@ -494,8 +494,15 @@ impl Snapshot {
             .collect::<Result<_, StoreError>>()?;
         let body = self.body_of(named.document, lookups)?;
         for heading in &headings {
-            held_offset(&body, heading.span.byte_offset, "a heading's offset")?;
-            held_offset(&body, heading.body_offset, "a heading's body offset")?;
+            let at = held_offset(&body, heading.span.byte_offset, "a heading's offset")?;
+            let body_at = held_offset(&body, heading.body_offset, "a heading's body offset")?;
+            if body_at < at {
+                return Err(StoreError::Damaged {
+                    what: format!(
+                        "the store holds a heading at {at} whose body starts before it, at {body_at}"
+                    ),
+                });
+            }
         }
         let Some(at) = text.section(&headings, &body, anchor) else {
             return Ok((

@@ -1298,8 +1298,8 @@ fn a_validate_that_meets_a_finding_position_below_zero_is_untrusted_and_the_entr
 /// **A get that meets a stored offset its body cannot hold is refused as an
 /// untrusted entry, and the entry rebuilds.** A heading's body offset or a
 /// block's marker that falls inside a character, below zero or past the end
-/// of the body is a derived row that disagrees with the body it was derived
-/// from, and a heading's, link's or tag's position below zero is a row the
+/// of the body, or a heading whose body starts before it, is a derived row that
+/// disagrees with the body it was derived from, and a heading's, link's or tag's position below zero is a row the
 /// store could not have written: store damage, answered as `host/entry-untrusted` under the
 /// store-damaged-rebuilding reason, never a panic or a failed read. The
 /// rebuild derives the rows again, so the same get answers after it.
@@ -1338,6 +1338,12 @@ fn a_get_that_meets_an_offset_its_body_cannot_hold_is_untrusted_and_the_entry_re
             "span_offset = -1",
             &section,
             "a heading below zero",
+        ),
+        (
+            "headings",
+            "span_offset = 15, body_offset = 0",
+            &section,
+            "a body starting before its heading",
         ),
         ("blocks", "span_offset = 20", &block, "inside the `é`"),
         ("blocks", "span_offset = -1", &block, "below zero"),
