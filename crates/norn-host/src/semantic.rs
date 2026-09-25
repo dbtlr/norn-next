@@ -204,11 +204,12 @@ impl std::error::Error for SemanticRefusal {}
 
 /// The refusal a vector rung answers with, composed from a nearest refusal.
 ///
-/// That no engine stands says nothing a client can act on by itself; which of
-/// "the vault never enabled one" and "the vault's section could not be read"
-/// is true is a fact about the delivered section, which the refusal carries
-/// from the lookup that found no slot. Composing it here is what lets a
-/// client be told what to do about it.
+/// That no engine stands says nothing a client can act on by itself; whether
+/// the vault never enabled one is a fact about the delivered section, which
+/// the refusal carries from the lookup that found no slot. Composing it here
+/// is what lets a client be told what to do about it. A section that could not
+/// be read is delivered beside a self-disabled slot, so it answers as
+/// [`SemanticRefusal::SelfDisabled`] rather than through this lookup.
 ///
 /// This is reached only where the entry is ready; a vault that is not ready
 /// refuses on its answer reading long before a rung is dispatched.
@@ -231,8 +232,10 @@ pub fn compose_vector_refusal(refusal: SemanticRefusal) -> ErrorEnvelope {
                     "enable the engine section in .norn/config.toml and run vault reload",
                 ),
             ),
-            // The vault asked for an engine and the section it asked with
-            // could not be read, so the engine was never delivered.
+            // A malformed section is delivered beside a self-disabled slot,
+            // so a nearest refusal does not carry it with no engine; the row
+            // answers what the section says, for the same reason as the
+            // enabled row below.
             Some(EngineSection::Malformed { detail, .. }) => ErrorEnvelope::new(
                 "this vault's engine section could not be read, so no engine stands for it",
                 ErrorDetail::engine_unavailable(Rung::Vector, detail),
