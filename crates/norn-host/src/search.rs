@@ -1,0 +1,810 @@
+//! `search`: the ladder a request selects, resolved against what the host
+//! holds for the vault when it answers, run over one snapshot, and fused.
+//!
+//! **A search answers through the read seam.** It takes one hold on a ready
+//! entry, so a vault that is not ready is refused with the ordinary
+//! answer-reading refusal before any rung runs, and every rung reads the
+//! vault's store through the one snapshot that hold established.
+//!
+//! # Resolving the selection
+//!
+//! The vault's enabled set holds the lexical floor always, and the vector rung
+//! where the engine section the host was delivered enables one. Expansion and
+//! re-ranking have no runtime here, so no enabled set holds them and an exact
+//! set naming one is refused `engine/not-enabled` before any engine is
+//! sampled. The vector rung is sampled once, under the engine slot's lock,
+//! together with its answer ([`SemanticEngines::nearest_among`]), and the
+//! selection is resolved against that one sample:
+//!
+//! - An exact set naming the vector rung is refused where the sample refuses,
+//!   with the one composition every vector refusal goes through
+//!   ([`VectorRefusal`]).
+//! - The enabled selection leaves the rung out silently where the enabled set
+//!   does not hold it, leaves it out advised as skipped where it is enabled and
+//!   no engine stands for it, and is refused where an engine stands and the
+//!   answer failed.
+//! - A resolution left holding no retrieval rung is refused with the code of
+//!   the vector rung that failed it, never answered empty.
+//!
+//! # The ladders
+//!
+//! **The lexical floor alone is the store's page**: the request's floor, bound
+//! and cursor are the lexical rung's own, so [`Snapshot::search`] answers it as
+//! it stands, and the answer declares `[lexical]`, repeatable.
+//!
+//! **A ladder holding the vector rung is ranked here.** Each retrieval rung
+//! contributes at most [`RUNG_DEPTH`] candidates, and an answer whose rung
+//! reached that depth is advised so. The lexical rung contributes its first
+//! page at that depth, unfloored. The vector rung is scored over the documents
+//! the request's conjunction admits on the snapshot — drawn by paging the
+//! store's candidates, a find's pages — so a document the conjunction does not
+//! admit is never scored, and the engine's scan holds at most the depth's rows
+//! at any vault size. The candidates are also what reconciles the sidecar with
+//! the snapshot: a vector row whose path the snapshot does not hold — the
+//! sidecar ahead of the snapshot or behind it — is never scored, so no answer
+//! names a document its snapshot lacks.
+//!
+//! A two-rung ladder is fused by reciprocal rank: a document's score is the
+//! sum over the rungs that ranked it of `1 / (RRF_K + rank)`, its rank in
+//! each counted from one. A one-rung ladder keeps its rung's scale, the vector
+//! rung's score being the engine's. Either way the hits are ordered by score
+//! descending then path in byte order, the request's floor applies to that
+//! final scale, and a page of the request's bound is cut from that order.
+//!
+//! **The cursor names the ladder and the sidecar state.** A page's cursor is a
+//! hit cursor over the resolved ladder, carrying the snapshot's reading and
+//! the sidecar revision sampled with the answer; it is judged by the store's
+//! one ranked-cursor judgment, so a continuation under a moved sidecar reports
+//! that the sidecar moved and one ranked by another ladder is refused.
+//!
+//! **Every answer declares its ladder.** A ladder holding the vector rung
+//! names the model that derived its vectors and how far that derivation
+//! trails the snapshot's store reading ([`freshness`]), and it is not
+//! repeatable: its order depends on state that drains underneath it.
+
+use std::collections::BTreeMap;
+
+use norn_semantic::{NearestWork, Neighbor};
+use norn_store::{
+    Candidate, ContentModel, LexicalQuery, MAX_PAGE, PageRefusal, SearchWork, Snapshot, page_limit,
+};
+use norn_wire::{
+    AnswerAdvisory, Cursor, CursorKey, ErrorDetail, ErrorEnvelope, FindParams, LadderDeclaration,
+    ModelIdentity, Page, RUNG_DEPTH, Rung, RungReport, RungSelection, RungSet, Score, SearchParams,
+    SearchReport, Unsatisfied,
+};
+
+use crate::address::registered_name;
+use crate::lifecycle::{EntryOps, Host, ReadSource, SnapshotSource};
+use crate::read::{Answered, BuildRefused, Built};
+use crate::semantic::{SemanticAnswer, VectorRefusal, freshness};
+
+/// The constant of reciprocal-rank fusion: a document ranked `rank` by a rung,
+/// counted from one, scores `1 / (RRF_K + rank)` from that rung.
+///
+/// An authored threshold ([ADR
+/// 0007](../../../docs/decisions/0007-authored-measurement-thresholds.md)),
+/// changed only by a reviewed edit: it sets how far a rung's head outweighs
+/// its tail, and a fused score read under another constant is on another
+/// scale.
+pub const RRF_K: u32 = 60;
+
+/// What one search read, by rung.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SearchCost {
+    /// What the lexical rung's page read, where the ladder held it.
+    pub lexical: Option<SearchWork>,
+    /// The candidate pages the vector rung was restricted by, and the
+    /// candidates they held, where the rung was sampled.
+    pub candidate_pages: u64,
+    pub candidates: u64,
+    /// What the vector rung's scan read, scored and held, where it answered.
+    pub vector: Option<NearestWork>,
+}
+
+/// The documents a request's conjunction admits on one snapshot, by path,
+/// with what reading the conjunction reported.
+struct Admitted {
+    by_path: BTreeMap<String, Candidate>,
+    unsatisfied: Vec<Unsatisfied>,
+    advisories: Vec<AnswerAdvisory>,
+    snapshot: norn_wire::Snapshot,
+}
+
+/// What the host found of the vector rung when it sampled the vault.
+enum VectorSample {
+    /// The selection does not name the rung, so it was not sampled.
+    Unsampled,
+    /// An engine stands and answered, over the documents the conjunction
+    /// admits.
+    Answered(Box<(SemanticAnswer, Admitted)>),
+    /// The rung cannot answer, and why.
+    Refused(VectorRefusal),
+}
+
+/// The ladder a selection resolved to, and the rung it skipped, where it
+/// skipped one.
+#[derive(Debug, PartialEq)]
+struct Resolved {
+    ladder: RungSet,
+    skipped: Option<AnswerAdvisory>,
+}
+
+/// The refusal an exact set naming `rung` meets where no runtime answers it.
+fn no_runtime(rung: Rung) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        "this vault answers no rung that no runtime answers",
+        ErrorDetail::engine_not_enabled(
+            rung,
+            "no runtime for this rung ships in this build, so no vault enables it",
+        ),
+    )
+}
+
+/// Whether `selection` names the vector rung, and so samples it.
+fn samples_vector(selection: &RungSelection) -> bool {
+    match selection {
+        RungSelection::Enabled { without, .. } => !without.rungs().contains(&Rung::Vector),
+        RungSelection::Exactly { rungs, .. } => rungs.rungs().contains(&Rung::Vector),
+    }
+}
+
+/// The refusal an exact set naming a rung no runtime answers meets, which it
+/// meets before any engine is sampled.
+fn refused_without_runtime(selection: &RungSelection) -> Option<ErrorEnvelope> {
+    match selection {
+        RungSelection::Enabled { .. } => None,
+        RungSelection::Exactly { rungs, .. } => rungs
+            .rungs()
+            .iter()
+            .find(|rung| !matches!(rung, Rung::Lexical | Rung::Vector))
+            .map(|rung| no_runtime(*rung)),
+    }
+}
+
+/// Resolve `selection` against the vector rung's one sample.
+///
+/// A rung beyond the lexical floor and vectors has no runtime here and is in
+/// no enabled set; an exact set naming one is refused by
+/// [`refused_without_runtime`] before this is reached.
+fn resolve(selection: &RungSelection, vector: &VectorSample) -> Result<Resolved, ErrorEnvelope> {
+    match selection {
+        RungSelection::Exactly { rungs, .. } => {
+            if rungs.rungs().contains(&Rung::Vector) {
+                match vector {
+                    VectorSample::Answered(_) => {}
+                    VectorSample::Refused(refusal) => return Err(refusal.clone().envelope()),
+                    // A selection naming the rung samples it.
+                    VectorSample::Unsampled => {
+                        return Err(VectorRefusal::not_composed().envelope());
+                    }
+                }
+            }
+            if let Some(refused) = refused_without_runtime(selection) {
+                return Err(refused);
+            }
+            Ok(Resolved {
+                ladder: rungs.clone(),
+                skipped: None,
+            })
+        }
+        RungSelection::Enabled { without, .. } => {
+            let mut ladder = Vec::new();
+            if !without.rungs().contains(&Rung::Lexical) {
+                ladder.push(Rung::Lexical);
+            }
+            let mut skipped = None;
+            let mut left_out = None;
+            match vector {
+                VectorSample::Unsampled => {}
+                VectorSample::Answered(_) => ladder.push(Rung::Vector),
+                VectorSample::Refused(refusal) => match refusal {
+                    VectorRefusal::NotEnabled { .. } => left_out = Some(refusal),
+                    VectorRefusal::Unavailable { .. } => {
+                        skipped = refusal
+                            .skip_reason()
+                            .map(|reason| AnswerAdvisory::rung_skipped(Rung::Vector, reason));
+                        left_out = Some(refusal);
+                    }
+                    VectorRefusal::Failed { .. } => return Err(refusal.clone().envelope()),
+                },
+            }
+            match RungSet::of(ladder) {
+                Ok(ladder) => Ok(Resolved { ladder, skipped }),
+                // The subtraction left out the lexical floor, and the vector
+                // rung did not join: refused with the vector rung's own code.
+                Err(_) => Err(left_out
+                    .cloned()
+                    .unwrap_or_else(VectorRefusal::not_composed)
+                    .envelope()),
+            }
+        }
+    }
+}
+
+/// One scored document of a ranking: its path and its score on the ladder's
+/// scale.
+#[derive(Clone, Debug, PartialEq)]
+struct Ranked {
+    path: String,
+    score: f64,
+}
+
+/// Order `ranked` by score descending, then path in byte order.
+fn order(ranked: &mut [Ranked]) {
+    ranked.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+}
+
+/// The reciprocal-rank fusion of `rankings`, each a rung's documents best
+/// first, in ladder order: every document's score is the sum over the rungs
+/// that ranked it of `1 / (RRF_K + rank)`, summed in ladder order.
+fn fused(rankings: &[Vec<String>]) -> Vec<Ranked> {
+    let mut scores: BTreeMap<&str, f64> = BTreeMap::new();
+    for ranking in rankings {
+        for (at, path) in ranking.iter().enumerate() {
+            let rank = at as f64 + 1.0;
+            *scores.entry(path.as_str()).or_insert(0.0) += 1.0 / (f64::from(RRF_K) + rank);
+        }
+    }
+    let mut ranked: Vec<Ranked> = scores
+        .into_iter()
+        .map(|(path, score)| Ranked {
+            path: path.to_string(),
+            score,
+        })
+        .collect();
+    order(&mut ranked);
+    ranked
+}
+
+/// The vector rung's neighbors on their own scale, ordered, or the refusal
+/// that the engine scored a document with no relevance score.
+fn vector_scale(neighbors: &[Neighbor]) -> Result<Vec<Ranked>, VectorRefusal> {
+    let mut ranked = Vec::with_capacity(neighbors.len());
+    for neighbor in neighbors {
+        let score = f64::from(neighbor.score);
+        if !score.is_finite() {
+            return Err(VectorRefusal::Failed {
+                message: "this vault's engine failed to answer the vector rung".to_string(),
+                detail: format!(
+                    "the engine scored `{}` {score}, which is no relevance score",
+                    neighbor.path
+                ),
+            });
+        }
+        ranked.push(Ranked {
+            path: neighbor.path.clone(),
+            score,
+        });
+    }
+    order(&mut ranked);
+    Ok(ranked)
+}
+
+/// The sidecar state an answer read, as a cursor carries it, or the refusal
+/// that the engine reported a revision below zero, which names no state.
+fn wire_sidecar(
+    sidecar: &norn_semantic::SidecarRevision,
+) -> Result<norn_wire::SidecarRevision, VectorRefusal> {
+    let revision = u64::try_from(sidecar.revision).map_err(|_| VectorRefusal::Failed {
+        message: "this vault's engine failed to answer the vector rung".to_string(),
+        detail: format!(
+            "the sidecar reported revision {}, which names no state",
+            sidecar.revision
+        ),
+    })?;
+    Ok(norn_wire::SidecarRevision::new(
+        sidecar.epoch.clone(),
+        revision,
+    ))
+}
+
+/// One page of `ranked`, which is in ranking order: the documents scored at or
+/// above `floor`, after the position `resume` names, at most `limit` of them,
+/// and whether a document stands after the page.
+fn page_of(
+    ranked: Vec<Ranked>,
+    floor: Option<Score>,
+    resume: Option<(f64, &str)>,
+    limit: usize,
+) -> (Vec<Ranked>, bool) {
+    let mut kept = ranked
+        .into_iter()
+        .filter(|hit| floor.is_none_or(|floor| hit.score >= floor.get()))
+        .filter(|hit| match resume {
+            None => true,
+            Some((score, path)) => {
+                hit.score < score || (hit.score == score && hit.path.as_str() > path)
+            }
+        });
+    let page: Vec<Ranked> = kept.by_ref().take(limit).collect();
+    let more = kept.next().is_some();
+    (page, more)
+}
+
+/// The lexical rung's request for `params`: the request's own floor, bound and
+/// cursor, where the lexical floor is the whole ladder.
+fn lexical_page(params: &SearchParams) -> LexicalQuery {
+    let mut query = LexicalQuery::new(params.query.clone())
+        .with_predicates(params.predicates.clone())
+        .with_columns(params.columns.clone());
+    query.min_score = params.min_score;
+    query.limit = params.limit;
+    query.after = params.after.clone();
+    query
+}
+
+/// The lexical rung's candidates for a fused ladder: its first page at the
+/// rung's depth, unfloored, hydrating nothing.
+fn lexical_candidates(params: &SearchParams) -> LexicalQuery {
+    LexicalQuery::new(params.query.clone())
+        .with_predicates(params.predicates.clone())
+        .with_limit(RUNG_DEPTH)
+}
+
+/// Every document `params`' conjunction admits on `snapshot`, drawn a page of
+/// the store's candidates at a time, and how many pages that took.
+fn admitted(
+    snapshot: &Snapshot,
+    params: &SearchParams,
+    declared: &ContentModel,
+) -> Result<(Admitted, u64), PageRefusal> {
+    let request = FindParams::new(params.vault.clone())
+        .with_predicates(params.predicates.clone())
+        .with_limit(MAX_PAGE as u32);
+    let first = snapshot.search_candidates(&request, declared)?;
+    let mut pages = 1;
+    let mut admitted = Admitted {
+        by_path: BTreeMap::new(),
+        unsatisfied: first.unsatisfied,
+        advisories: first.advisories,
+        snapshot: first.snapshot,
+    };
+    let mut page = first.candidates;
+    let mut next = first.next;
+    loop {
+        for candidate in page {
+            admitted
+                .by_path
+                .insert(candidate.path().to_string(), candidate);
+        }
+        let Some(after) = next else {
+            break;
+        };
+        let continued = snapshot.search_candidates(&request.clone().with_after(after), declared)?;
+        pages += 1;
+        page = continued.candidates;
+        next = continued.next;
+    }
+    Ok((admitted, pages))
+}
+
+impl<O> Host<O>
+where
+    O: EntryOps,
+    <O::Attachment as SnapshotSource>::Reader: ReadSource<Snapshot = Snapshot>,
+{
+    /// Answer a `search`: one page of the hits the ladder `params` selects
+    /// ranks for its query, from the vault it addresses.
+    pub fn search(
+        &self,
+        params: &SearchParams,
+    ) -> Result<Answered<SearchReport, SearchCost>, ErrorEnvelope> {
+        self.answer_read(&params.vault, |snapshot, declared| {
+            if let Some(refused) = refused_without_runtime(&params.rungs) {
+                return Err(BuildRefused::Answered(refused));
+            }
+            let limit = page_limit(params.limit)?;
+            let mut cost = SearchCost::default();
+            let vector = if samples_vector(&params.rungs) {
+                self.sample_vector(snapshot, params, declared, &mut cost)?
+            } else {
+                VectorSample::Unsampled
+            };
+            let resolved = resolve(&params.rungs, &vector).map_err(BuildRefused::Answered)?;
+            let VectorSample::Answered(answered) = vector else {
+                return lexical_answer(snapshot, params, declared, resolved, cost);
+            };
+            if !resolved.ladder.rungs().contains(&Rung::Vector) {
+                return lexical_answer(snapshot, params, declared, resolved, cost);
+            }
+            let (answer, admitted) = *answered;
+            ranked_answer(
+                snapshot,
+                params,
+                declared,
+                RankedInputs {
+                    resolved,
+                    answer,
+                    admitted,
+                    limit,
+                },
+                cost,
+            )
+        })
+    }
+
+    /// Sample the vector rung of the vault `params` addresses: whether an
+    /// engine stands and, where one does, its answer over the documents the
+    /// conjunction admits on `snapshot`.
+    ///
+    /// Whether an engine stands is read first, so a vault whose engine is not
+    /// running pays no candidate pages; the answer then samples the slot again,
+    /// under its lock, and that sample is the one the selection resolves by.
+    fn sample_vector(
+        &self,
+        snapshot: &Snapshot,
+        params: &SearchParams,
+        declared: &ContentModel,
+        cost: &mut SearchCost,
+    ) -> Result<VectorSample, BuildRefused> {
+        let Some(engines) = self.ops().semantic() else {
+            return Ok(VectorSample::Refused(VectorRefusal::not_composed()));
+        };
+        let vault = registered_name(&params.vault).map_err(BuildRefused::Answered)?;
+        if let Err(refusal) = engines.standing(vault) {
+            return Ok(VectorSample::Refused(VectorRefusal::of(refusal)));
+        }
+        let (admitted, pages) = admitted(snapshot, params, declared)?;
+        cost.candidate_pages = pages;
+        cost.candidates = admitted.by_path.len() as u64;
+        match engines.nearest_among(vault, &params.query, RUNG_DEPTH as usize, |path| {
+            admitted.by_path.contains_key(path)
+        }) {
+            Ok(answer) => {
+                cost.vector = Some(answer.work);
+                Ok(VectorSample::Answered(Box::new((answer, admitted))))
+            }
+            Err(refusal) => Ok(VectorSample::Refused(VectorRefusal::of(refusal))),
+        }
+    }
+}
+
+/// The lexical floor alone: the store's page, advised of the rung the
+/// resolution skipped.
+fn lexical_answer(
+    snapshot: &Snapshot,
+    params: &SearchParams,
+    declared: &ContentModel,
+    resolved: Resolved,
+    mut cost: SearchCost,
+) -> Result<Built<SearchReport, SearchCost>, BuildRefused> {
+    let searched = snapshot.search(&lexical_page(params), declared)?;
+    cost.lexical = Some(searched.work);
+    let (unsatisfied, mut advisories, report) = searched.into_report();
+    advisories.extend(resolved.skipped);
+    Ok(Built {
+        unsatisfied,
+        advisories,
+        report,
+        work: cost,
+    })
+}
+
+/// What a ladder holding the vector rung is ranked from.
+struct RankedInputs {
+    resolved: Resolved,
+    answer: SemanticAnswer,
+    admitted: Admitted,
+    limit: usize,
+}
+
+/// A ladder holding the vector rung: each rung's candidates to its depth,
+/// fused where the ladder holds two, paged, and hydrated.
+fn ranked_answer(
+    snapshot: &Snapshot,
+    params: &SearchParams,
+    declared: &ContentModel,
+    inputs: RankedInputs,
+    mut cost: SearchCost,
+) -> Result<Built<SearchReport, SearchCost>, BuildRefused> {
+    let RankedInputs {
+        resolved,
+        answer,
+        admitted,
+        limit,
+    } = inputs;
+    let ladder = resolved.ladder;
+    let sidecar = wire_sidecar(&answer.sidecar)
+        .map_err(|refusal| BuildRefused::Answered(refusal.envelope()))?;
+    let mut advisories = Vec::new();
+    let mut depth_reached = Vec::new();
+    let (unsatisfied, ranked) = if ladder.rungs().contains(&Rung::Lexical) {
+        let searched = snapshot.search(&lexical_candidates(params), declared)?;
+        if searched.next.is_some() {
+            depth_reached.push(AnswerAdvisory::rung_depth_reached(Rung::Lexical));
+        }
+        advisories.extend(searched.advisories.iter().cloned());
+        // Every lexical hit satisfies the conjunction the candidates are drawn
+        // by, on the same snapshot, so each one has a candidate to hydrate.
+        let lexical: Vec<String> = searched
+            .hits
+            .iter()
+            .map(|hit| hit.path.as_str().to_string())
+            .filter(|path| admitted.by_path.contains_key(path))
+            .collect();
+        let vector: Vec<String> = answer
+            .neighbors
+            .iter()
+            .map(|neighbor| neighbor.path.clone())
+            .collect();
+        cost.lexical = Some(searched.work);
+        (searched.unsatisfied, fused(&[lexical, vector]))
+    } else {
+        advisories.extend(admitted.advisories.iter().cloned());
+        let ranked = vector_scale(&answer.neighbors)
+            .map_err(|refusal| BuildRefused::Answered(refusal.envelope()))?;
+        (admitted.unsatisfied.clone(), ranked)
+    };
+    if answer.work.rows_scored > u64::from(RUNG_DEPTH) {
+        depth_reached.push(AnswerAdvisory::rung_depth_reached(Rung::Vector));
+    }
+
+    let (resume, moved) = match &params.after {
+        None => (None, Vec::new()),
+        Some(cursor) => {
+            let resume = snapshot.judge_hit_cursor(cursor, &ladder, Some(sidecar.clone()))?;
+            (
+                Some((resume.score.get(), resume.path.to_string())),
+                resume.moved,
+            )
+        }
+    };
+    let (page, more) = page_of(
+        ranked,
+        params.min_score,
+        resume.as_ref().map(|(score, path)| (*score, path.as_str())),
+        limit,
+    );
+    let scored: Vec<(Candidate, Score)> = page
+        .iter()
+        .filter_map(|hit| {
+            let candidate = admitted.by_path.get(&hit.path)?.clone();
+            Some(Score::new(hit.score).map(|score| (candidate, score)))
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|_| {
+            BuildRefused::Answered(
+                VectorRefusal::Failed {
+                    message: "this vault's engine failed to answer the vector rung".to_string(),
+                    detail: "a fused score is no relevance score".to_string(),
+                }
+                .envelope(),
+            )
+        })?;
+    let mut sidecar_reading = admitted.snapshot.clone();
+    sidecar_reading.sidecar_revision = Some(sidecar);
+    let next = match (more, scored.last()) {
+        (true, Some((candidate, score))) => Some(Cursor::new(
+            sidecar_reading,
+            CursorKey::hit(ladder.clone(), *score, candidate.path()),
+        )),
+        _ => None,
+    };
+    let hydrated = snapshot.hydrate_hits(&scored, &params.columns, declared)?;
+
+    let mut rungs = Vec::new();
+    for rung in ladder.rungs() {
+        match rung {
+            Rung::Lexical => rungs.push(RungReport::lexical()),
+            Rung::Vector => rungs.push(RungReport::vector(
+                ModelIdentity::new(answer.model.id(), answer.model.version()),
+                freshness(&answer.watermarks, snapshot.reading()),
+            )),
+            // Resolution admits no other rung into a ladder.
+            _ => {}
+        }
+    }
+    let declaration = LadderDeclaration::new(rungs, false)
+        .expect("a resolved ladder holds a retrieval rung, each rung once, in ladder order");
+
+    let mut unsatisfied = unsatisfied;
+    unsatisfied.extend(hydrated.unsatisfied);
+    advisories.extend(resolved.skipped);
+    advisories.extend(depth_reached);
+    Ok(Built {
+        unsatisfied,
+        advisories,
+        report: SearchReport::new(declaration, Page::new(hydrated.hits, next, moved)),
+        work: cost,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use norn_wire::{EngineSection, ReasonCode, RungSkipReason};
+
+    use super::*;
+    use crate::semantic::SemanticRefusal;
+
+    fn paths(ranked: &[Ranked]) -> Vec<&str> {
+        ranked.iter().map(|hit| hit.path.as_str()).collect()
+    }
+
+    fn named(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|path| path.to_string()).collect()
+    }
+
+    /// **Reciprocal rank, summed over the rungs that ranked a document, with
+    /// the path breaking a tie.** A document both rungs ranked outranks one
+    /// either ranked alone; two documents each ranked first by one rung score
+    /// alike and stand in path order.
+    #[test]
+    fn a_fused_score_is_the_reciprocal_rank_summed_over_the_rungs() {
+        let ranked = fused(&[named(&["b.md", "both.md"]), named(&["a.md", "both.md"])]);
+        assert_eq!(paths(&ranked), ["both.md", "a.md", "b.md"]);
+        let k = f64::from(RRF_K);
+        assert_eq!(ranked[0].score, 1.0 / (k + 2.0) + 1.0 / (k + 2.0));
+        assert_eq!(ranked[1].score, 1.0 / (k + 1.0));
+        assert_eq!(ranked[1].score, ranked[2].score);
+    }
+
+    /// **A page of a ranking is cut after its cursor's position and under its
+    /// floor**, and drained a page at a time it is the ranking whole, each
+    /// document once.
+    #[test]
+    fn a_ranking_drained_a_page_at_a_time_is_the_ranking_whole() {
+        let ranked = fused(&[
+            named(&["a.md", "b.md", "c.md", "d.md"]),
+            named(&["d.md", "e.md", "a.md"]),
+        ]);
+        let mut drained = Vec::new();
+        let mut resume: Option<(f64, String)> = None;
+        loop {
+            let (page, more) = page_of(
+                ranked.clone(),
+                None,
+                resume.as_ref().map(|(score, path)| (*score, path.as_str())),
+                2,
+            );
+            let last = page.last().cloned();
+            drained.extend(page);
+            match (more, last) {
+                (true, Some(last)) => resume = Some((last.score, last.path)),
+                _ => break,
+            }
+        }
+        assert_eq!(drained, ranked);
+
+        let floor = Score::new(ranked[1].score).expect("a score");
+        let (floored, more) = page_of(ranked.clone(), Some(floor), None, 10);
+        assert_eq!(floored, ranked[..2]);
+        assert!(!more);
+    }
+
+    fn unavailable() -> VectorRefusal {
+        VectorRefusal::of(SemanticRefusal::SelfDisabled {
+            detail: "the sidecar did not open".to_string(),
+        })
+    }
+
+    fn not_enabled() -> VectorRefusal {
+        VectorRefusal::of(SemanticRefusal::NoEngine {
+            section: Some(EngineSection::absent()),
+        })
+    }
+
+    fn failed() -> VectorRefusal {
+        VectorRefusal::of(SemanticRefusal::Failed {
+            detail: "the answer failed".to_string(),
+        })
+    }
+
+    fn lexical_without_vector() -> RungSelection {
+        RungSelection::enabled_without([Rung::Vector]).expect("a selection")
+    }
+
+    fn vector_alone() -> RungSelection {
+        RungSelection::exactly(RungSet::of([Rung::Vector]).expect("a set"))
+    }
+
+    fn vector_without_lexical() -> RungSelection {
+        RungSelection::enabled_without([Rung::Lexical]).expect("a selection")
+    }
+
+    /// **The enabled selection resolves by the vector rung's one sample**: a
+    /// rung the enabled set does not hold is left out silently, an enabled rung
+    /// no engine stands for is left out and advised as skipped with its reason,
+    /// and an answer that failed refuses. A rung the request subtracted is not
+    /// sampled at all.
+    #[test]
+    fn the_enabled_selection_resolves_by_the_one_sample() {
+        let lexical = Resolved {
+            ladder: RungSet::lexical(),
+            skipped: None,
+        };
+        assert_eq!(
+            resolve(
+                &RungSelection::enabled(),
+                &VectorSample::Refused(not_enabled())
+            ),
+            Ok(lexical)
+        );
+        assert!(!samples_vector(&lexical_without_vector()));
+        assert_eq!(
+            resolve(&lexical_without_vector(), &VectorSample::Unsampled)
+                .map(|resolved| resolved.ladder),
+            Ok(RungSet::lexical())
+        );
+        assert_eq!(
+            resolve(
+                &RungSelection::enabled(),
+                &VectorSample::Refused(unavailable())
+            ),
+            Ok(Resolved {
+                ladder: RungSet::lexical(),
+                skipped: Some(AnswerAdvisory::rung_skipped(
+                    Rung::Vector,
+                    RungSkipReason::unavailable("the sidecar did not open")
+                )),
+            })
+        );
+        assert_eq!(
+            resolve(&RungSelection::enabled(), &VectorSample::Refused(failed()))
+                .map_err(|envelope| envelope.code().clone()),
+            Err(ReasonCode::EngineFailed)
+        );
+    }
+
+    /// **A resolution left holding no retrieval rung is refused with the
+    /// vector rung's own code**, never answered empty: the lexical floor
+    /// subtracted and the vector rung not enabled refuses `engine/not-enabled`,
+    /// and not available refuses `engine/unavailable`.
+    #[test]
+    fn a_resolution_holding_no_retrieval_rung_is_refused_with_that_rungs_code() {
+        for (sample, code) in [
+            (not_enabled(), ReasonCode::EngineNotEnabled),
+            (unavailable(), ReasonCode::EngineUnavailable),
+            (failed(), ReasonCode::EngineFailed),
+        ] {
+            assert_eq!(
+                resolve(&vector_without_lexical(), &VectorSample::Refused(sample))
+                    .map_err(|envelope| envelope.code().clone()),
+                Err(code)
+            );
+        }
+    }
+
+    /// **An exact set is refused by any rung it names that cannot answer**:
+    /// the vector rung by its sample's composition, and a rung no runtime
+    /// answers as not enabled before any engine is sampled.
+    #[test]
+    fn an_exact_set_is_refused_by_a_rung_that_cannot_answer() {
+        for (sample, code) in [
+            (not_enabled(), ReasonCode::EngineNotEnabled),
+            (unavailable(), ReasonCode::EngineUnavailable),
+            (failed(), ReasonCode::EngineFailed),
+            (VectorRefusal::not_composed(), ReasonCode::EngineNotEnabled),
+        ] {
+            assert_eq!(
+                resolve(&vector_alone(), &VectorSample::Refused(sample))
+                    .map_err(|envelope| envelope.code().clone()),
+                Err(code)
+            );
+        }
+        for rung in [Rung::Expansion, Rung::Rerank] {
+            let selection = RungSelection::exactly(
+                RungSet::of([Rung::Lexical, rung]).expect("a set holding the floor"),
+            );
+            let refused = refused_without_runtime(&selection).expect("a refusal");
+            assert_eq!(refused.code(), &ReasonCode::EngineNotEnabled);
+            assert_eq!(
+                refused.detail(),
+                &ErrorDetail::engine_not_enabled(
+                    rung,
+                    "no runtime for this rung ships in this build, so no vault enables it"
+                )
+            );
+            assert_eq!(
+                resolve(&selection, &VectorSample::Unsampled)
+                    .map_err(|envelope| envelope.code().clone()),
+                Err(ReasonCode::EngineNotEnabled)
+            );
+        }
+        assert_eq!(refused_without_runtime(&vector_alone()), None);
+    }
+}

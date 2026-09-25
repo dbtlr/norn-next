@@ -25,7 +25,6 @@ pub mod read;
 use std::ffi::OsStr;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-#[cfg(feature = "induced-failure")]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -35,7 +34,7 @@ use norn_config::registry::{Entry, VaultRoot};
 use norn_fixtures::Profile;
 use norn_host::{
     AttachMode, DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy,
-    RegistryRead,
+    RegistryRead, SemanticEngines,
 };
 #[cfg(feature = "induced-failure")]
 use norn_host::{EvidenceReading, JobEvidence};
@@ -283,6 +282,31 @@ impl Vault {
     /// real-watcher lease for as long as it serves. More than one name over the
     /// one root is a registry in conflict, which the host parks.
     pub fn host_under(&self, names: impl IntoIterator<Item = VaultName>) -> ServingHost {
+        self.serve(names, |ops| ops)
+    }
+
+    /// A host serving this vault that composes the semantic engines, and the
+    /// engines it composes.
+    pub fn host_with_semantic(&self) -> (ServingHost, Arc<SemanticEngines>) {
+        let engines = SemanticEngines::new(self.dirs());
+        let host = self.serve([self.name.clone()], |ops| {
+            ops.with_semantic(Arc::clone(&engines))
+        });
+        (host, engines)
+    }
+
+    /// Where the semantic engine's sidecar sits, beside the derived store.
+    pub fn sidecar(&self) -> PathBuf {
+        self.dirs().derived_dir(&self.name).join("semantic.sqlite3")
+    }
+
+    /// A host serving this vault's root under each of `names`, over the
+    /// production ops `compose` makes of the plain ones.
+    fn serve(
+        &self,
+        names: impl IntoIterator<Item = VaultName>,
+        compose: impl FnOnce(ProductionEntryOps) -> ProductionEntryOps,
+    ) -> ServingHost {
         let root = VaultRoot::new(&self.vault).expect("vault root");
         let registry = RegistryRead::from_entries(
             names.into_iter().map(|name| Entry::new(name, root.clone())),
@@ -292,7 +316,7 @@ impl Vault {
         // the attach the host runs and there is no later moment that is still
         // ahead of it.
         let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
-        let ops = ProductionEntryOps::new(self.dirs(), policy);
+        let ops = compose(ProductionEntryOps::new(self.dirs(), policy));
         // The host takes the ops by value, so the account is taken here or not
         // at all. Reading an account is behind `induced-failure`, so a build
         // without it composes the same host and carries no account.

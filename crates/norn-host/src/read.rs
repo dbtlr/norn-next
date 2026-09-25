@@ -41,6 +41,20 @@ pub(crate) struct Built<R, W> {
     pub(crate) work: W,
 }
 
+/// Why a read builder answered nothing: the store refused the request, or the
+/// builder refused it with an envelope of its own — a search's rung the vault
+/// cannot run.
+pub(crate) enum BuildRefused {
+    Page(PageRefusal),
+    Answered(ErrorEnvelope),
+}
+
+impl From<PageRefusal> for BuildRefused {
+    fn from(refusal: PageRefusal) -> Self {
+        BuildRefused::Page(refusal)
+    }
+}
+
 /// A read verb's answer, and what reading it cost.
 ///
 /// The answer is what crosses the wire. The two readings beside it are the
@@ -94,11 +108,12 @@ where
     /// snapshot a builder ran on is given back before the answer leaves. A
     /// builder refused for damage is answered through
     /// [`Host::withdraw_for_read_damage`] while the hold stands, after the
-    /// builder returned, so no statement runs under the gate that publishes.
+    /// builder returned, so no statement runs under the gate that publishes. A
+    /// builder's own envelope leaves as it is.
     pub(crate) fn answer_read<R, W>(
         &self,
         address: &norn_wire::VaultAddress,
-        build: impl FnOnce(&Snapshot, &ContentModel) -> Result<Built<R, W>, PageRefusal>,
+        build: impl FnOnce(&Snapshot, &ContentModel) -> Result<Built<R, W>, BuildRefused>,
     ) -> Result<Answered<R, W>, ErrorEnvelope> {
         let name = registered_name(address)?;
         let hold = self
@@ -107,7 +122,8 @@ where
         let reading = hold.reading().answer_reading(name)?;
         let built = match build(hold.snapshot(), hold.content_model()) {
             Ok(built) => built,
-            Err(refusal) => {
+            Err(BuildRefused::Answered(envelope)) => return Err(envelope),
+            Err(BuildRefused::Page(refusal)) => {
                 return Err(match page_refusal(refusal) {
                     PageRefused::Answered(envelope) => envelope,
                     PageRefused::Damaged(detail) => {
