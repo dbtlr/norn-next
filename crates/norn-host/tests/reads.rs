@@ -1024,8 +1024,8 @@ fn a_get_of_an_unknown_target_refuses_as_unknown() {
 
 /// **A part a verb could not apply reaches the answer through the host.** A
 /// get of a section or a block its document does not carry answers the
-/// document's record with exactly that part unsatisfied; a find reports a
-/// predicate key outside the field universe; a validate reports a `resolves`
+/// document's record with exactly that part unsatisfied; a find and a count
+/// each report a predicate key outside the field universe; a validate reports a `resolves`
 /// part as not applicable. Each is answered under the reading of its
 /// snapshot, never refused.
 #[test]
@@ -1065,6 +1065,19 @@ fn a_part_a_verb_could_not_apply_is_answered_unsatisfied() {
         ),
         "{:?}",
         found.answer.unsatisfied
+    );
+
+    let counted = host
+        .count(&a_count(vault.name()).with_predicates([Predicate::missing("zz-no-such-key")]))
+        .expect("a count over an unknown key answers");
+    assert_read_from_its_snapshot(&counted.answer.reading, &vault);
+    assert!(
+        matches!(
+            counted.answer.unsatisfied.as_slice(),
+            [Unsatisfied::UnknownPredicateKey { key, .. }] if key == "zz-no-such-key"
+        ),
+        "{:?}",
+        counted.answer.unsatisfied
     );
 
     let resolving = a_target("zz-handbook");
