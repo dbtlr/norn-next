@@ -46,8 +46,8 @@
 //! # Locking, and the guarantee it leans on
 //!
 //! The outer map lock covers lookup, delivery bookkeeping and teardown only
-//! — never an engine open, a drain, or an answer — so one vault's work never
-//! holds another vault's. Within one vault, a slot's own lock serializes its
+//! — never an engine open, a sidecar close, a drain, or an answer — so one
+//! vault's work never holds another vault's. Within one vault, a slot's own lock serializes its
 //! drains and its answers against each other, and a drain holds it for the
 //! whole drain. The report beside each slot has a lock of its own, written
 //! while the slot's lock is held and read without it, so a status taken
@@ -727,8 +727,12 @@ impl SemanticEngines {
     /// vault holds no open sidecar connection and answers nothing. The
     /// sidecar file is retained state: the next delivery adopts it, cursors
     /// intact.
+    ///
+    /// The delivery is dropped once the map lock is released, so a sidecar
+    /// connection its slot closes is never closed under that lock.
     pub(crate) fn detach(&self, vault: &VaultName) {
-        tolerant(&self.vaults).remove(vault);
+        let detached = tolerant(&self.vaults).remove(vault);
+        drop(detached);
     }
 
     fn slot(&self, vault: &VaultName) -> Option<Arc<EngineSlot>> {
@@ -738,14 +742,19 @@ impl SemanticEngines {
     }
 
     /// Record what a delivery left for `vault`.
+    ///
+    /// The delivery it replaces is dropped once the map lock is released, so
+    /// a sidecar connection the replaced slot closes is never closed under
+    /// that lock.
     fn deliver(&self, vault: &VaultName, section: EngineSection, slot: Option<Slot>) {
-        tolerant(&self.vaults).insert(
+        let replaced = tolerant(&self.vaults).insert(
             vault.clone(),
             Delivery {
                 section,
                 slot: slot.map(EngineSlot::new),
             },
         );
+        drop(replaced);
     }
 }
 
