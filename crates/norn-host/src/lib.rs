@@ -16,6 +16,7 @@ mod refusal;
 mod registry;
 mod reload;
 mod semantic;
+mod text;
 
 pub use derivation::DERIVATION_VERSION;
 /// **The harness-reachable readers of a host's own account.** Every job writes

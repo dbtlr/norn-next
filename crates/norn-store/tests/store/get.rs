@@ -45,9 +45,10 @@ fn ignoring(globs: &[&str]) -> ContentModel {
     })
 }
 
-/// The document reader a host hands a get: `norn-text`'s one section
-/// resolver, taking the first heading an anchor matches, and its one block
-/// reading.
+/// The document reader this suite hands a get, mirroring the host's reader,
+/// which is private to the host, across the test boundary: `norn-text`'s one
+/// section resolver, taking the first heading an anchor matches, and its one
+/// block reading.
 struct Text;
 
 impl DocumentText for Text {

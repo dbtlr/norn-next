@@ -52,10 +52,8 @@ induced-failure = ["norn-db/induced-failure"]
 #
 # `norn-text` is a development dependency alone: a get reads a document's
 # sections and blocks through the reader its caller hands it (`DocumentText`),
-# and the suite hands it one over `norn-text`. That reader is a dormant carrier
-# for the host's get handler (NORN-230), which implements it over `norn-text`;
-# no handler calls a get yet, so the suite's is the only implementation. The
-# store itself parses nothing, so the normal edge stays absent.
+# and the suite hands it one over `norn-text`, as the host's get handler does.
+# The store itself parses nothing, so the normal edge stays absent.
 [dev-dependencies]
 norn-store = { path = ".", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }

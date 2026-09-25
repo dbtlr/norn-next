@@ -126,12 +126,15 @@ use statement::{Spelled, compose};
 /// document a get answers. An implementation converts those rows to
 /// `norn-text`'s headings and hands back what `norn_text::resolve_section`
 /// and `norn_text::BodyScan::block_extent` answer, the matched heading's index
-/// included.
+/// included. The host's get handler implements it so, and the store's own
+/// suite hands a get the same `norn-text` reading.
 ///
-/// **This seam is a dormant carrier** for the host's get handler (NORN-230),
-/// which implements it over `norn-text`: no handler calls [`Snapshot::get`]
-/// yet, so the call graph reaches no implementation outside the store's own
-/// suite, which hands a get the same `norn-text` reading.
+/// **Every offset a reader is handed is a position in the body it is handed
+/// with**: each heading's offset and body offset and each block marker is at
+/// or before the body's end and on a character boundary. A get checks the
+/// stored offsets against the body before it calls the reader and refuses the
+/// read as damage where one names no position, so no reader slices a body at
+/// an offset its bytes cannot hold.
 pub trait DocumentText {
     /// The section `anchor` names among `headings` — the document's headings
     /// in document order — in `body`, taking the first heading the anchor
@@ -490,6 +493,17 @@ impl Snapshot {
             .into_iter()
             .collect::<Result<_, StoreError>>()?;
         let body = self.body_of(named.document, lookups)?;
+        for heading in &headings {
+            let at = held_offset(&body, heading.span.byte_offset, "a heading's offset")?;
+            let body_at = held_offset(&body, heading.body_offset, "a heading's body offset")?;
+            if body_at < at {
+                return Err(StoreError::Damaged {
+                    what: format!(
+                        "the store holds a heading at {at} whose body starts before it, at {body_at}"
+                    ),
+                });
+            }
+        }
         let Some(at) = text.section(&headings, &body, anchor) else {
             return Ok((
                 GetReport::record(DocumentRow::new(named.wire)),
@@ -543,7 +557,7 @@ impl Snapshot {
             None => BodyText::new("", 0).expect("an empty head heads an empty whole"),
             Some(span) => {
                 let body = self.body_of(named.document, lookups)?;
-                let marker = usize::try_from(span.byte_offset).unwrap_or(usize::MAX);
+                let marker = held_offset(&body, span.byte_offset, "a block's marker")?;
                 let range = text.block(&body, marker);
                 let held = body
                     .get(range.clone())
@@ -735,7 +749,9 @@ impl Snapshot {
                 rows,
             });
             self.run_statement(record, ran, finding_base)
-                .map_err(|problem| error::sql("reading a page of findings", problem))
+                .map_err(|problem| error::sql("reading a page of findings", problem))?
+                .into_iter()
+                .collect()
         })?;
         let next = page
             .next
@@ -753,6 +769,22 @@ impl Snapshot {
         let rows = self.finding_rows(&mut lookups.ran, page.rows)?;
         Ok(Page::new(rows, next, moved))
     }
+}
+
+/// `offset` as a position in `body`: at or before its end, on a character
+/// boundary. The headings and the blocks are read out of the body when it is
+/// derived, so a stored offset that names no position in it is a row that
+/// disagrees with the body it was derived from, which is damage.
+fn held_offset(body: &str, offset: u64, what: &str) -> Result<usize, StoreError> {
+    usize::try_from(offset)
+        .ok()
+        .filter(|&at| body.is_char_boundary(at))
+        .ok_or_else(|| StoreError::Damaged {
+            what: format!(
+                "the store holds {what} at {offset}, which is no position in a body of {} bytes",
+                body.len()
+            ),
+        })
 }
 
 /// The document reader named bytes or a heading the document does not hold.

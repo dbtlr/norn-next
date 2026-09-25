@@ -2359,8 +2359,14 @@ pub(crate) fn probe_parameters(probe: &SuffixProbe) -> impl Params {
 fn stored_document(row: &Row<'_>, first: usize) -> Reading<StoredDocument> {
     let path: String = row.get(first)?;
     let content_hash: String = row.get(first + 1)?;
-    let byte_length: u64 = row.get(first + 2)?;
-    let body_offset: u64 = row.get(first + 3)?;
+    let byte_length = match position(row.get(first + 2)?, "documents.byte_length") {
+        Ok(byte_length) => byte_length,
+        Err(damaged) => return Ok(Err(damaged)),
+    };
+    let body_offset = match position(row.get(first + 3)?, "documents.body_offset") {
+        Ok(body_offset) => body_offset,
+        Err(damaged) => return Ok(Err(damaged)),
+    };
     let frontmatter: Option<String> = row.get(first + 4)?;
     let frontmatter_diagnostic_count: u32 = row.get(first + 5)?;
     let generation: i64 = row.get(first + 6)?;
@@ -2411,7 +2417,10 @@ fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
     let severity: String = row.get(2)?;
     let path: String = row.get(3)?;
     let target: Option<String> = row.get(4)?;
-    let span = optional_span(row, 5)?;
+    let span = match optional_span(row, 5, "findings")? {
+        Ok(span) => span,
+        Err(damaged) => return Ok(Err(damaged)),
+    };
     let candidates_total: u64 = row.get(8)?;
     let message: String = row.get(9)?;
     let detail: Option<String> = row.get(10)?;
@@ -2465,6 +2474,10 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
     let Some(family) = LinkFamily::from_str(&written) else {
         return Ok(Err(unreadable("links.family", &written)));
     };
+    let span = match stored_span(row, 7, "links")? {
+        Ok(span) => span,
+        Err(damaged) => return Ok(Err(damaged)),
+    };
     Ok(Ok(LinkFact {
         family,
         embed: row.get(1)?,
@@ -2473,34 +2486,30 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
         title: row.get(4)?,
         anchor: row.get(5)?,
         block_ref: row.get(6)?,
-        span: Span {
-            line: row.get(7)?,
-            column: row.get(8)?,
-            byte_offset: row.get(9)?,
-        },
+        span,
     }))
 }
 
 pub(crate) fn stored_heading(row: &Row<'_>) -> Reading<HeadingFact> {
-    Ok(Ok(HeadingFact {
-        text: row.get(0)?,
-        slug: row.get(1)?,
-        level: row.get(2)?,
-        span: Span {
-            line: row.get(3)?,
-            column: row.get(4)?,
-            byte_offset: row.get(5)?,
-        },
-        body_offset: row.get(6)?,
-        inside_container: row.get(7)?,
+    let (text, slug, level, inside_container) =
+        (row.get(0)?, row.get(1)?, row.get(2)?, row.get(7)?);
+    let span = stored_span(row, 3, "headings")?;
+    let body_offset = position(row.get(6)?, "headings.body_offset");
+    Ok(span.and_then(|span| {
+        body_offset.map(|body_offset| HeadingFact {
+            level,
+            text,
+            slug,
+            span,
+            body_offset,
+            inside_container,
+        })
     }))
 }
 
 pub(crate) fn stored_block(row: &Row<'_>) -> Reading<BlockFact> {
-    Ok(Ok(BlockFact {
-        block_id: row.get(0)?,
-        span: optional_span(row, 1)?,
-    }))
+    let block_id = row.get(0)?;
+    Ok(optional_span(row, 1, "blocks")?.map(|span| BlockFact { block_id, span }))
 }
 
 fn stored_field(row: &Row<'_>) -> Reading<FieldRow> {
@@ -2538,30 +2547,51 @@ pub(crate) fn stored_tag(row: &Row<'_>) -> Reading<TagFact> {
     let Some(source) = TagSource::from_str(&written) else {
         return Ok(Err(unreadable("document_tags.source", &written)));
     };
-    Ok(Ok(TagFact {
-        name: row.get(0)?,
-        source,
-        span: optional_span(row, 2)?,
-    }))
+    let name = row.get(0)?;
+    Ok(optional_span(row, 2, "document_tags")?.map(|span| TagFact { name, source, span }))
 }
 
-/// A span read from three nullable columns.
+/// A span read from the three columns at `first` of a `table` row.
+fn stored_span(row: &Row<'_>, first: usize, table: &str) -> Reading<Span> {
+    Ok(written_span(
+        table,
+        row.get(first)?,
+        row.get(first + 1)?,
+        row.get(first + 2)?,
+    ))
+}
+
+/// A span read from three nullable columns at `first` of a `table` row.
 ///
 /// The columns are written together and a `CHECK` refuses a row where only some
 /// of them are set, so "any one absent means no span" reads every row that can
 /// exist rather than repairing a half-recorded position.
-fn optional_span(row: &Row<'_>, first: usize) -> rusqlite::Result<Option<Span>> {
-    let line: Option<u64> = row.get(first)?;
-    let column: Option<u64> = row.get(first + 1)?;
-    let byte_offset: Option<u64> = row.get(first + 2)?;
-    Ok(match (line, column, byte_offset) {
-        (Some(line), Some(column), Some(byte_offset)) => Some(Span {
-            line,
-            column,
-            byte_offset,
-        }),
-        _ => None,
+pub(crate) fn optional_span(row: &Row<'_>, first: usize, table: &str) -> Reading<Option<Span>> {
+    let line: Option<i64> = row.get(first)?;
+    let column: Option<i64> = row.get(first + 1)?;
+    let byte_offset: Option<i64> = row.get(first + 2)?;
+    let (Some(line), Some(column), Some(byte_offset)) = (line, column, byte_offset) else {
+        return Ok(Ok(None));
+    };
+    Ok(written_span(table, line, column, byte_offset).map(Some))
+}
+
+/// The span a `table` row holds as `line`, `column` and `byte_offset`.
+fn written_span(table: &str, line: i64, column: i64, byte_offset: i64) -> Result<Span, StoreError> {
+    let at = |written: i64, column: &str| position(written, &format!("{table}.{column}"));
+    Ok(Span {
+        line: at(line, "span_line")?,
+        column: at(column, "span_column")?,
+        byte_offset: at(byte_offset, "span_offset")?,
     })
+}
+
+/// A position — a line, a column, a byte offset, a byte length — as `column`
+/// holds it. Every stored position is read here. This crate writes every
+/// position at or above zero, so one below it is a row this crate did not
+/// write: [`StoreError::Damaged`], never a failed statement.
+fn position(written: i64, column: &str) -> Result<u64, StoreError> {
+    u64::try_from(written).map_err(|_| unreadable(column, &written.to_string()))
 }
 
 /// A stored value outside the vocabulary its column holds. Damaged rather than

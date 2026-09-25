@@ -16,15 +16,20 @@
 //! trust state and the store generation an answer names describe the instant
 //! its rows were read at.
 
-use norn_store::{ContentModel, CountWork, PageRefusal, Snapshot, SnapshotCounters};
+use norn_store::{
+    ContentModel, CountWork, Counted, DescribeWork, Described, FindWork, Found, GetWork, Gotten,
+    PageRefusal, Snapshot, SnapshotCounters, ValidateWork, Validated,
+};
 use norn_wire::{
-    AnswerAdvisory, AnswerReading, CountParams, CountReport, ErrorDetail, ErrorEnvelope,
-    ReadFailure, Unsatisfied, VaultAnswer, VaultName,
+    AnswerAdvisory, AnswerReading, CountParams, CountReport, DescribeParams, DescribeReport,
+    ErrorDetail, ErrorEnvelope, FindParams, FindReport, GetParams, GetReport, ReadFailure,
+    Unsatisfied, ValidateParams, ValidateReport, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
 use crate::lifecycle::{EntryOps, HoldReading, Host, ReadSource, SnapshotSource};
 use crate::refusal::{PageRefused, page_refusal};
+use crate::text::TextLayer;
 
 /// What a read builder answered on one snapshot: the parts of the request it
 /// could not apply, what the parts it applied assumed, the verb's report, and
@@ -126,15 +131,124 @@ where
         params: &CountParams,
     ) -> Result<Answered<CountReport, CountWork>, ErrorEnvelope> {
         self.answer_read(&params.vault, |snapshot, declared| {
-            let counted = snapshot.count(params, declared)?;
-            let work = counted.work;
-            let (unsatisfied, advisories, report) = counted.into_report();
-            Ok(Built {
-                unsatisfied,
-                advisories,
-                report,
-                work,
-            })
+            Ok(snapshot.count(params, declared)?.into())
         })
+    }
+
+    /// Answer a `find`: one page of the documents `params` asks for, from the
+    /// vault it addresses, with what its order and conjunction assumed.
+    pub fn find(
+        &self,
+        params: &FindParams,
+    ) -> Result<Answered<FindReport, FindWork>, ErrorEnvelope> {
+        self.answer_read(&params.vault, |snapshot, declared| {
+            Ok(snapshot.find(params, declared)?.into())
+        })
+    }
+
+    /// Answer a `validate`: one page of the findings `params` asks for, or
+    /// their tally, from the vault it addresses.
+    pub fn validate(
+        &self,
+        params: &ValidateParams,
+    ) -> Result<Answered<ValidateReport, ValidateWork>, ErrorEnvelope> {
+        self.answer_read(&params.vault, |snapshot, declared| {
+            Ok(snapshot.validate(params, declared)?.into())
+        })
+    }
+
+    /// Answer a `describe`: one page of the facets `params` asks for, from
+    /// the vault it addresses.
+    pub fn describe(
+        &self,
+        params: &DescribeParams,
+    ) -> Result<Answered<DescribeReport, DescribeWork>, ErrorEnvelope> {
+        self.answer_read(&params.vault, |snapshot, declared| {
+            Ok(snapshot.describe(params, declared)?.into())
+        })
+    }
+
+    /// Answer a `get`: the one document `params.target` names in the vault
+    /// it addresses, as its record, the section or block its anchor names, or
+    /// one page of one of its collections.
+    ///
+    /// A section and a block are cut by `norn-text` from the body the
+    /// snapshot holds of the document, so the text answered is the text the
+    /// snapshot derived.
+    pub fn get(&self, params: &GetParams) -> Result<Answered<GetReport, GetWork>, ErrorEnvelope> {
+        self.answer_read(&params.vault, |snapshot, declared| {
+            Ok(snapshot.get(params, declared, &TextLayer)?.into())
+        })
+    }
+}
+
+// ---- what each store builder answered, as the seam wraps it ----
+//
+// A count, a find and a validate each report the parts they could not apply
+// and what the parts they applied assumed. A describe applies every part it
+// takes and compares no dates, so it carries neither; a get compares no dates,
+// so it carries no advisory.
+
+impl From<Counted> for Built<CountReport, CountWork> {
+    fn from(counted: Counted) -> Self {
+        let work = counted.work;
+        let (unsatisfied, advisories, report) = counted.into_report();
+        Built {
+            unsatisfied,
+            advisories,
+            report,
+            work,
+        }
+    }
+}
+
+impl From<Found> for Built<FindReport, FindWork> {
+    fn from(found: Found) -> Self {
+        let work = found.work;
+        let (unsatisfied, advisories, report) = found.into_report();
+        Built {
+            unsatisfied,
+            advisories,
+            report,
+            work,
+        }
+    }
+}
+
+impl From<Validated> for Built<ValidateReport, ValidateWork> {
+    fn from(validated: Validated) -> Self {
+        let work = validated.work;
+        let (unsatisfied, advisories, report) = validated.into_report();
+        Built {
+            unsatisfied,
+            advisories,
+            report,
+            work,
+        }
+    }
+}
+
+impl From<Described> for Built<DescribeReport, DescribeWork> {
+    fn from(described: Described) -> Self {
+        let work = described.work;
+        Built {
+            unsatisfied: Vec::new(),
+            advisories: Vec::new(),
+            report: described.into_report(),
+            work,
+        }
+    }
+}
+
+impl From<Gotten> for Built<GetReport, GetWork> {
+    fn from(gotten: Gotten) -> Self {
+        let work = gotten.work;
+        let (unsatisfied, report) = gotten.into_report();
+        Built {
+            unsatisfied,
+            advisories: Vec::new(),
+            report,
+            work,
+        }
     }
 }
