@@ -12,8 +12,10 @@
 //! derived again — stays the client's decision to make.
 //!
 //! A client maps these onto its own vocabulary. The driver type crosses no
-//! public signature above this crate, which is what keeps SQLite result codes
-//! out of every API but this one.
+//! public signature above this crate, so no SQLite result code does either:
+//! what crosses upward is SQLite's static description of the code a refusal
+//! carried, which names no file, so a client can say what kind of refusal it
+//! met without the driver's message.
 
 use std::fmt;
 use std::path::PathBuf;

@@ -275,12 +275,19 @@ fn a_store_schema_refused_at_a_statement_names_the_statement() {
         "a read-only database was typed as damage: {error:?}"
     );
     let StoreError::Sql {
-        operation, message, ..
+        operation,
+        condition,
+        message,
     } = &error
     else {
         panic!("a refused creation reported {error:?} rather than a refused operation");
     };
     assert!(operation.contains("store schema"), "{operation}");
+    assert_eq!(
+        *condition,
+        Some("attempt to write a readonly database"),
+        "the refusal lost SQLite's description of its result code"
+    );
     assert!(
         message.contains(&first),
         "the refusal names no statement: {message}"
