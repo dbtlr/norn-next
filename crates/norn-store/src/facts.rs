@@ -455,7 +455,8 @@ impl std::fmt::Display for DerivationVersion {
 /// One key the link index holds a stored link under, as it reads back.
 ///
 /// Derived at the write from the link and the path of the document holding
-/// it, so it is not a fact a caller hands over: see [`crate::ddl::facts`].
+/// it, so it is not a fact a caller hands over: the `link_keys` table in
+/// [`crate::ddl`] states what each key is.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredLinkKey {
     /// The position of the link this is a key of among the document's links.

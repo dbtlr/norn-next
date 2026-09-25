@@ -105,10 +105,19 @@
 //!   stands is none of these: it is a part that can be applied and matches no
 //!   document, and it is answered as that — an empty page, not a report.
 //! - **A resolution target that is not a suffix address** names no document.
+//! - **A links-to target that names several documents or none** names no one
+//!   document a link could reach: it is reported, beside the head of an
+//!   ambiguous one, and the page is empty.
 //! - **A match part whose query the full-text engine cannot parse** is
 //!   malformed. Whether it parses is asked before the page runs, by one probe
 //!   of the full-text index; a malformed query's part is reported with the
 //!   engine's words, and the page is empty, as a malformed glob's is.
+//!
+//! A `links_to` part resolves its own target to one document through the one
+//! resolver, then matches the documents holding a link whose resolution is
+//! exactly that document, sought on the link index at the keys the document is
+//! named by ([`ReadFilter::LinksTo`]): a link naming two or more documents is a
+//! backlink of none of them.
 //!
 //! A `resolves` part enumerates the target's ambiguity class through the one
 //! resolver, [`crate::resolve::TargetClass`]: both reductions of a dotted leaf, over the raw
