@@ -18,9 +18,6 @@ use norn_wire::{
     AnswerAdvisory, AnswerReading, CountParams, CountReport, ErrorEnvelope, Unsatisfied,
     VaultAnswer, VaultName,
 };
-use schemars::JsonSchema;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 use crate::address::registered_name;
 use crate::lifecycle::{EntryOps, HoldReading, Host, ReadSource, SnapshotSource};
@@ -43,7 +40,7 @@ pub(crate) struct Built<R, W> {
 /// kind, and `snapshot` is what the snapshot the answer was read from cost —
 /// the one snapshot the hold established and every statement run on it.
 #[derive(Debug)]
-pub struct Answered<R: JsonSchema + Serialize + DeserializeOwned, W> {
+pub struct Answered<R, W> {
     /// The verb's answer, under the reading it was taken at.
     pub answer: VaultAnswer<R>,
     /// What the builder read to answer it.
@@ -92,10 +89,7 @@ where
         &self,
         address: &norn_wire::VaultAddress,
         build: impl FnOnce(&Snapshot, &ContentModel) -> Result<Built<R, W>, PageRefusal>,
-    ) -> Result<Answered<R, W>, ErrorEnvelope>
-    where
-        R: JsonSchema + Serialize + DeserializeOwned,
-    {
+    ) -> Result<Answered<R, W>, ErrorEnvelope> {
         let name = registered_name(address)?;
         let hold = self
             .begin_read(name)

@@ -316,7 +316,7 @@ pub enum ComparedBy {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(bound(serialize = "R: Serialize", deserialize = "R: DeserializeOwned"))]
 #[non_exhaustive]
-pub struct VaultAnswer<R: JsonSchema + Serialize + DeserializeOwned> {
+pub struct VaultAnswer<R> {
     /// What the answer was answered under.
     pub reading: AnswerReading,
     /// The parts of the request that could not be applied. Empty when the
@@ -329,7 +329,7 @@ pub struct VaultAnswer<R: JsonSchema + Serialize + DeserializeOwned> {
     pub report: R,
 }
 
-impl<R: JsonSchema + Serialize + DeserializeOwned> VaultAnswer<R> {
+impl<R> VaultAnswer<R> {
     /// The answer `report`, taken under `reading`, with `unsatisfied` parts of
     /// the request not applied and no advisory.
     pub fn new(reading: AnswerReading, unsatisfied: Vec<Unsatisfied>, report: R) -> Self {
