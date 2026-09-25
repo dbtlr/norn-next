@@ -464,12 +464,12 @@ impl SemanticEngines {
         })
     }
 
-    /// Whether an engine stands for `vault` here and now, or the refusal a
-    /// nearest answer would meet instead, read through the lookup a nearest
-    /// answer takes. A reading and not a reservation: the answer that follows
-    /// samples the slot again.
-    pub(crate) fn standing(&self, vault: &VaultName) -> Result<(), SemanticRefusal> {
-        self.with_engine(vault, |_| Ok(()))
+    /// Whether an engine stands for `vault` here and now and, where one does,
+    /// how far it had drained each feed; or the refusal a nearest answer would
+    /// meet instead, read through the lookup a nearest answer takes. A reading
+    /// and not a reservation: the answer that follows samples the slot again.
+    pub(crate) fn standing(&self, vault: &VaultName) -> Result<Watermarks, SemanticRefusal> {
+        self.with_engine(vault, |engine| Ok(engine.watermarks().clone()))
     }
 
     /// Run `answer` against `vault`'s running engine under the slot's lock, or

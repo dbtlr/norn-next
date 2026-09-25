@@ -64,9 +64,9 @@
 //! trails the snapshot's store reading ([`freshness`]), and it is not
 //! repeatable: its order depends on state that drains underneath it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use norn_semantic::{NearestWork, Neighbor};
+use norn_semantic::{NearestWork, Neighbor, Watermark, Watermarks};
 use norn_store::{
     Candidate, ContentModel, LexicalQuery, MAX_PAGE, PageRefusal, SearchWork, Snapshot, page_limit,
 };
@@ -90,17 +90,39 @@ use crate::semantic::{SemanticAnswer, VectorRefusal, freshness};
 /// scale.
 pub const RRF_K: u32 = 60;
 
+/// The most rows an unfiltered search's vector rung holds beyond its depth,
+/// for the rows its sidecar holds that the answer's snapshot may lack.
+///
+/// An authored threshold ([ADR
+/// 0007](../../../docs/decisions/0007-authored-measurement-thresholds.md)),
+/// changed only by a reviewed edit. It is the rung's own depth: at the cap the
+/// scan holds twice [`RUNG_DEPTH`] scored rows — a path and a score each, tens
+/// of kilobytes — and an engine trailing its store by as many feed rows as the
+/// rung ranks, a mass delete among them, still delivers the depth. A lag past
+/// it costs the answer candidates, advised in band, and never costs memory
+/// that grows with the lag.
+pub const VECTOR_MARGIN_CAP: u32 = RUNG_DEPTH;
+
 /// What one search read, by rung.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SearchCost {
     /// What the lexical rung's page read, where the ladder held it.
     pub lexical: Option<SearchWork>,
     /// The candidate pages the vector rung was restricted by, where the rung
-    /// was sampled, and zero where it was not.
+    /// was sampled on a filtered search, and zero where it was not.
     pub candidate_pages: u64,
     /// The candidates those pages held: the documents the conjunction admits,
-    /// where the rung was sampled, and zero where it was not.
+    /// where the rung was sampled on a filtered search, and zero where it was
+    /// not.
     pub candidates: u64,
+    /// The rows the vector rung's scan held beyond its depth, where the rung
+    /// was sampled on an unfiltered search: the engine's drain lag in feed
+    /// rows, capped at [`VECTOR_MARGIN_CAP`]. Zero on a filtered search.
+    pub margin: u64,
+    /// The paths an unfiltered search asked its snapshot whether it holds:
+    /// the vector rung's rows and the lexical rung's hits, each once. Zero on
+    /// a filtered search.
+    pub paths_checked: u64,
     /// What the vector rung's scan read, scored and held, where it answered.
     pub vector: Option<NearestWork>,
 }
@@ -114,13 +136,24 @@ struct Admitted {
     snapshot: norn_wire::Snapshot,
 }
 
+/// What the vector rung's scan was restricted by.
+enum Restriction {
+    /// A filtered search: the documents its conjunction admits, drawn whole
+    /// before the scan, which scores no other.
+    Admitted(Admitted),
+    /// An unfiltered search: nothing. The scan held the rung's depth and
+    /// `margin` rows more, and each row it kept is checked against the
+    /// snapshot after it.
+    Unfiltered { margin: usize },
+}
+
 /// What the host found of the vector rung when it sampled the vault.
 enum VectorSample {
     /// The selection does not name the rung, so it was not sampled.
     Unsampled,
-    /// An engine stands and answered, over the documents the conjunction
-    /// admits.
-    Answered(Box<(SemanticAnswer, Admitted)>),
+    /// An engine stands and answered, restricted as the request's conjunction
+    /// restricts it.
+    Answered(Box<(SemanticAnswer, Restriction)>),
     /// The rung cannot answer, and why.
     Refused(VectorRefusal),
 }
@@ -396,6 +429,33 @@ fn admitted(
     Ok((admitted, pages))
 }
 
+/// The rows an unfiltered search's vector rung holds beyond its depth: how
+/// far the engine's drain trails `snapshot` in feed rows — the documents
+/// changed and the deaths recorded past each feed's watermark, however many
+/// write generations stamped them — capped at [`VECTOR_MARGIN_CAP`].
+///
+/// A feed whose watermark was taken in another store lifetime, or that has
+/// completed no drain, trails by a count nothing can read, so the margin is
+/// the cap. The count is bounded at one past the cap, so it costs at most
+/// that many rows of each feed.
+fn margin(snapshot: &Snapshot, watermarks: &Watermarks) -> Result<usize, PageRefusal> {
+    let cap = VECTOR_MARGIN_CAP as usize;
+    let past = |watermark: &Option<Watermark>| match watermark {
+        Some(watermark) if watermark.store_epoch == snapshot.reading().epoch() => {
+            Some(watermark.generation)
+        }
+        Some(_) | None => None,
+    };
+    let (Some(documents), Some(tombstones)) =
+        (past(&watermarks.documents), past(&watermarks.tombstones))
+    else {
+        return Ok(cap);
+    };
+    let rows = snapshot.feed_rows_after(documents, tombstones, u64::from(VECTOR_MARGIN_CAP) + 1)?;
+    let lag = rows.documents.saturating_add(rows.tombstones);
+    Ok(usize::try_from(lag).map_or(cap, |lag| lag.min(cap)))
+}
+
 impl<O> Host<O>
 where
     O: EntryOps,
@@ -423,7 +483,7 @@ where
             if !resolved.ladder.rungs().contains(&Rung::Vector) {
                 return lexical_answer(snapshot, params, declared, resolved, cost);
             }
-            let (answer, admitted) = *answered;
+            let (answer, restriction) = *answered;
             ranked_answer(
                 snapshot,
                 params,
@@ -431,7 +491,7 @@ where
                 RankedInputs {
                     resolved,
                     answer,
-                    admitted,
+                    restriction,
                     limit,
                 },
                 cost,
@@ -440,12 +500,19 @@ where
     }
 
     /// Sample the vector rung of `vault`, the vault `params` addresses:
-    /// whether an engine stands and, where one does, its answer over the
-    /// documents the conjunction admits on `snapshot`.
+    /// whether an engine stands and, where one does, its answer.
     ///
-    /// Whether an engine stands is read first, so a vault whose engine is not
-    /// running pays no candidate pages; the answer then samples the slot again,
-    /// under its lock, and that sample is the one the selection resolves by.
+    /// Whether an engine stands is read first, with how far it had drained,
+    /// so a vault whose engine is not running pays for no restriction; the
+    /// answer then samples the slot again, under its lock, and that sample is
+    /// the one the selection resolves by.
+    ///
+    /// **A filtered search scores only what its conjunction admits**: the
+    /// admitted set is drawn whole from `snapshot` first, and the scan holds
+    /// at most the rung's depth. **An unfiltered search takes no admitted-set
+    /// pass**: the scan holds the depth and a margin — the drain lag in feed
+    /// rows, capped ([`margin`]) — so rows the sidecar holds for documents the
+    /// snapshot lacks leave the depth standing once they are dropped.
     fn sample_vector(
         &self,
         vault: &VaultName,
@@ -457,18 +524,31 @@ where
         let Some(engines) = self.ops().semantic() else {
             return Ok(VectorSample::Refused(VectorRefusal::not_composed()));
         };
-        if let Err(refusal) = engines.standing(vault) {
-            return Ok(VectorSample::Refused(VectorRefusal::of(refusal)));
-        }
-        let (admitted, pages) = admitted(snapshot, params, declared)?;
-        cost.candidate_pages = pages;
-        cost.candidates = admitted.by_path.len() as u64;
-        match engines.nearest_among(vault, &params.query, RUNG_DEPTH as usize, |path| {
-            admitted.by_path.contains_key(path)
-        }) {
-            Ok(answer) => {
+        let watermarks = match engines.standing(vault) {
+            Ok(watermarks) => watermarks,
+            Err(refusal) => return Ok(VectorSample::Refused(VectorRefusal::of(refusal))),
+        };
+        let depth = RUNG_DEPTH as usize;
+        let answered = if params.predicates.is_empty() {
+            let margin = margin(snapshot, &watermarks)?;
+            cost.margin = margin as u64;
+            engines
+                .nearest_among(vault, &params.query, depth + margin, |_| true)
+                .map(|answer| (answer, Restriction::Unfiltered { margin }))
+        } else {
+            let (admitted, pages) = admitted(snapshot, params, declared)?;
+            cost.candidate_pages = pages;
+            cost.candidates = admitted.by_path.len() as u64;
+            engines
+                .nearest_among(vault, &params.query, depth, |path| {
+                    admitted.by_path.contains_key(path)
+                })
+                .map(|answer| (answer, Restriction::Admitted(admitted)))
+        };
+        match answered {
+            Ok((answer, restriction)) => {
                 cost.vector = Some(answer.work);
-                Ok(VectorSample::Answered(Box::new((answer, admitted))))
+                Ok(VectorSample::Answered(Box::new((answer, restriction))))
             }
             Err(refusal) => Ok(VectorSample::Refused(VectorRefusal::of(refusal))),
         }
@@ -535,8 +615,93 @@ fn declaration(
 struct RankedInputs {
     resolved: Resolved,
     answer: SemanticAnswer,
-    admitted: Admitted,
+    restriction: Restriction,
     limit: usize,
+}
+
+/// The vector rung's contribution to a ranking: its hits on its own scale,
+/// best first, at most the rung's depth of them; the documents the ranking
+/// may name, by path; and what the answer is advised of the rung's depth.
+struct Restricted {
+    vector: Vec<Ranked>,
+    admitted: Admitted,
+    depth: Option<AnswerAdvisory>,
+}
+
+/// Restrict the vector rung's hits, `vector`, as `restriction` says, beside
+/// the lexical rung's hits `lexical`.
+///
+/// A filtered search's hits are all admitted already, and the rung reached
+/// its depth where it scored more rows than the depth.
+///
+/// An unfiltered search asks `snapshot` which of the vector rung's rows and
+/// the lexical rung's hits it holds — one seek per path, so the check costs
+/// the depth and the margin and never the vault — and drops each vector row
+/// whose path it does not hold, then keeps at most the depth. The scan cut
+/// rows where it scored more than it held; so the rung reached its depth
+/// where more survived than the depth, or the depth survived and the scan cut
+/// rows, and it fell short of its depth where fewer survived and the scan cut
+/// rows it never checked.
+fn restricted(
+    snapshot: &Snapshot,
+    restriction: Restriction,
+    vector: Vec<Ranked>,
+    lexical: &[String],
+    work: &NearestWork,
+    cost: &mut SearchCost,
+) -> Result<Restricted, PageRefusal> {
+    let depth = RUNG_DEPTH as usize;
+    let margin = match restriction {
+        Restriction::Admitted(admitted) => {
+            return Ok(Restricted {
+                vector,
+                admitted,
+                depth: (work.rows_scored > u64::from(RUNG_DEPTH))
+                    .then(|| AnswerAdvisory::rung_depth_reached(Rung::Vector)),
+            });
+        }
+        Restriction::Unfiltered { margin } => margin,
+    };
+    let asked: BTreeSet<&str> = vector
+        .iter()
+        .map(|hit| hit.path.as_str())
+        .chain(lexical.iter().map(String::as_str))
+        .collect();
+    cost.paths_checked = asked.len() as u64;
+    let held = snapshot.held_candidates(&asked.into_iter().collect::<Vec<_>>())?;
+    let by_path: BTreeMap<String, Candidate> = held
+        .candidates
+        .into_iter()
+        .map(|candidate| (candidate.path().to_string(), candidate))
+        .collect();
+    let mut vector: Vec<Ranked> = vector
+        .into_iter()
+        .filter(|hit| by_path.contains_key(&hit.path))
+        .collect();
+    let survived = vector.len();
+    vector.truncate(depth);
+    let cut = work.rows_scored > (depth + margin) as u64;
+    let advised = if survived > depth || (survived == depth && cut) {
+        Some(AnswerAdvisory::rung_depth_reached(Rung::Vector))
+    } else if cut {
+        // Fewer than the depth survived, so the count fits the depth's type.
+        Some(AnswerAdvisory::rung_short_of_depth(
+            Rung::Vector,
+            u32::try_from(survived).unwrap_or(RUNG_DEPTH),
+        ))
+    } else {
+        None
+    };
+    Ok(Restricted {
+        vector,
+        admitted: Admitted {
+            by_path,
+            unsatisfied: Vec::new(),
+            advisories: Vec::new(),
+            snapshot: held.snapshot,
+        },
+        depth: advised,
+    })
 }
 
 /// A ladder holding the vector rung: each rung's candidates to its depth,
@@ -551,7 +716,7 @@ fn ranked_answer(
     let RankedInputs {
         resolved,
         answer,
-        admitted,
+        restriction,
         limit,
     } = inputs;
     let sidecar = wire_sidecar(&answer.sidecar)
@@ -565,36 +730,56 @@ fn ranked_answer(
     let ladder = declaration.rung_set();
     let mut advisories = Vec::new();
     let mut depth_reached = Vec::new();
-    let (unsatisfied, ranked) = if lexical_ran {
-        let searched = snapshot.search(&lexical_candidates(params), declared)?;
-        if searched.next.is_some() {
-            depth_reached.push(AnswerAdvisory::rung_depth_reached(Rung::Lexical));
-        }
-        advisories.extend(searched.advisories.iter().cloned());
-        // Every lexical hit satisfies the conjunction the candidates are drawn
-        // by, on the same snapshot, so each one is admitted and has a
-        // candidate to hydrate. A hit that had none could not be hydrated, so
-        // it is left out of the fusion rather than answered.
-        let lexical: Vec<String> = searched
-            .hits
-            .iter()
-            .map(|hit| hit.path.as_str().to_string())
-            .filter(|path| {
-                let admits = admitted.by_path.contains_key(path);
-                debug_assert!(admits, "the lexical hit `{path}` is not admitted");
-                admits
-            })
-            .collect();
-        let vector: Vec<String> = vector.into_iter().map(|hit| hit.path).collect();
-        cost.lexical = Some(searched.work);
-        (searched.unsatisfied, fused(&[lexical, vector]))
+    let searched = if lexical_ran {
+        Some(snapshot.search(&lexical_candidates(params), declared)?)
     } else {
-        advisories.extend(admitted.advisories.iter().cloned());
-        (admitted.unsatisfied.clone(), vector)
+        None
     };
-    if answer.work.rows_scored > u64::from(RUNG_DEPTH) {
-        depth_reached.push(AnswerAdvisory::rung_depth_reached(Rung::Vector));
-    }
+    let lexical: Vec<String> = searched
+        .iter()
+        .flat_map(|searched| searched.hits.iter())
+        .map(|hit| hit.path.as_str().to_string())
+        .collect();
+    let Restricted {
+        vector,
+        admitted,
+        depth: vector_depth,
+    } = restricted(
+        snapshot,
+        restriction,
+        vector,
+        &lexical,
+        &answer.work,
+        &mut cost,
+    )?;
+    let (unsatisfied, ranked) = match searched {
+        Some(searched) => {
+            if searched.next.is_some() {
+                depth_reached.push(AnswerAdvisory::rung_depth_reached(Rung::Lexical));
+            }
+            advisories.extend(searched.advisories.iter().cloned());
+            // Every lexical hit satisfies the conjunction on the same
+            // snapshot, so each one is admitted — or, unfiltered, held — and
+            // has a candidate to hydrate. A hit that had none could not be
+            // hydrated, so it is left out of the fusion rather than answered.
+            let lexical: Vec<String> = lexical
+                .into_iter()
+                .filter(|path| {
+                    let admits = admitted.by_path.contains_key(path);
+                    debug_assert!(admits, "the lexical hit `{path}` is not admitted");
+                    admits
+                })
+                .collect();
+            let vector: Vec<String> = vector.into_iter().map(|hit| hit.path).collect();
+            cost.lexical = Some(searched.work);
+            (searched.unsatisfied, fused(&[lexical, vector]))
+        }
+        None => {
+            advisories.extend(admitted.advisories.iter().cloned());
+            (admitted.unsatisfied.clone(), vector)
+        }
+    };
+    depth_reached.extend(vector_depth);
 
     let (resume, moved) = match &params.after {
         None => (None, Vec::new()),

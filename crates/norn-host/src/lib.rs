@@ -71,7 +71,7 @@ pub use reload::{
     ActiveFingerprints, AuthoredDrift, ConfigFingerprint, EngineConfigReceiver, ReloadError,
     ReloadFile, ReloadOutcome, ReloadRefusal, ReloadStage, VaultInspection,
 };
-pub use search::{RRF_K, SearchCost};
+pub use search::{RRF_K, SearchCost, VECTOR_MARGIN_CAP};
 pub use semantic::{
     SemanticAnswer, SemanticEngines, SemanticRefusal, SemanticStatus, compose_vector_refusal,
     freshness,

@@ -669,10 +669,8 @@ fn a_sidecar_row_the_snapshot_lacks_is_never_answered() {
         )
     });
 
-    let vector_answer = answered(
-        &serving,
-        &searching(&vault, "alpha").with_rungs(exactly([Rung::Vector])),
-    );
+    let vector_request = searching(&vault, "alpha").with_rungs(exactly([Rung::Vector]));
+    let vector_answer = answered(&serving, &vector_request);
     let vector = paths(&vector_answer);
     assert!(
         !vector.iter().any(|path| path == "docs/ghost.md"),
@@ -682,8 +680,20 @@ fn a_sidecar_row_the_snapshot_lacks_is_never_answered() {
         !vector.iter().any(|path| path == "docs/mixed.md"),
         "{vector:?}"
     );
+    // Unfiltered, the scan scores every row the sidecar holds, the ghost
+    // among them, and the snapshot check drops it.
     let work = vector_answer.work.vector.expect("the vector rung ran");
     assert_eq!(work.rows_read, DOCUMENTS.len() as u64);
+    assert_eq!(work.rows_scored, DOCUMENTS.len() as u64);
+    assert_eq!(vector_answer.work.candidate_pages, 0);
+    assert_eq!(vector_answer.work.paths_checked, DOCUMENTS.len() as u64);
+    // Filtered, the ghost is never scored at all, and the answer is the same.
+    let filtered = answered(
+        &serving,
+        &vector_request.clone().with_predicates([every_document()]),
+    );
+    assert_eq!(scored(&filtered), scored(&vector_answer));
+    let work = filtered.work.vector.expect("the vector rung ran");
     assert_eq!(work.rows_scored, DOCUMENTS.len() as u64 - 1);
 
     let lexical = paths(&answered(
@@ -706,6 +716,13 @@ fn a_sidecar_row_the_snapshot_lacks_is_never_answered() {
     expected.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let fused = scored(&answered(&serving, &searching(&vault, "alpha")));
     assert_eq!(fused, expected);
+    assert_eq!(
+        scored(&answered(
+            &serving,
+            &searching(&vault, "alpha").with_predicates([every_document()])
+        )),
+        expected
+    );
     assert!(fused.contains(&(
         "docs/mixed.md".to_string(),
         1.0 / (f64::from(RRF_K) + mixed_rank as f64)
@@ -741,4 +758,198 @@ fn a_host_composing_no_engine_answers_no_vector_rung() {
             "serve the vault from a host that composes the semantic engine"
         )
     );
+}
+
+/// A part every document in these vaults satisfies: it admits them all, and
+/// it makes the search a filtered one.
+fn every_document() -> Predicate {
+    Predicate::path("**")
+}
+
+/// **An unfiltered search takes no admitted-set pass, and its vector rung
+/// holds at most its depth and its margin at any vault size.** Over a vault
+/// just past the depth and one past twice it, the hybrid and the vector
+/// ladders run no candidate page, the scan reads every row and holds at most
+/// the depth, the margin being nothing on a vault the engine has drained, and
+/// the answer — its hits, its cursor, its advisories — is the one the filtered
+/// path gives under a part that admits every document, which does run its
+/// candidate pages.
+#[test]
+fn an_unfiltered_search_takes_no_admitted_pass_and_answers_as_the_filtered_one() {
+    let depth = u64::from(norn_wire::RUNG_DEPTH);
+    for documents in [depth as usize + 16, 2 * depth as usize + 16] {
+        let (_sandbox, vault) =
+            a_vault_of_alphas(&format!("search-unfiltered-{documents}"), documents);
+        let serving = serve(&vault);
+        for selection in [RungSelection::enabled(), exactly([Rung::Vector])] {
+            let request = searching(&vault, "alpha")
+                .with_rungs(selection.clone())
+                .with_limit(50);
+            let unfiltered = answered(&serving, &request);
+            assert_eq!(unfiltered.work.candidate_pages, 0, "{selection:?}");
+            assert_eq!(unfiltered.work.candidates, 0, "{selection:?}");
+            assert_eq!(unfiltered.work.margin, 0, "{selection:?}");
+            let work = unfiltered.work.vector.expect("the vector rung ran");
+            assert_eq!(work.rows_read, documents as u64);
+            assert!(
+                work.peak_held <= depth + unfiltered.work.margin,
+                "{documents} documents under {selection:?}: {work:?}"
+            );
+
+            let filtered = answered(
+                &serving,
+                &request.clone().with_predicates([every_document()]),
+            );
+            assert!(
+                filtered.work.candidate_pages > 0,
+                "a filtered search ran no candidate page"
+            );
+            assert_eq!(filtered.work.candidates, documents as u64);
+            assert_eq!(
+                unfiltered.answer.report, filtered.answer.report,
+                "{documents} documents under {selection:?}"
+            );
+            assert_eq!(unfiltered.answer.advisories, filtered.answer.advisories);
+            assert_eq!(unfiltered.answer.unsatisfied, filtered.answer.unsatisfied);
+        }
+    }
+}
+
+/// How many documents `serving`'s store holds, as a count answers it.
+fn documents_held(serving: &Serving, vault: &attach::Vault) -> Result<u64, String> {
+    let counted = serving
+        .host
+        .count(&norn_wire::CountParams::new(VaultAddress::name(
+            vault.name().clone(),
+        )))
+        .map_err(|refusal| format!("{refusal:?}"))?;
+    Ok(counted
+        .answer
+        .report
+        .rows
+        .iter()
+        .map(|tally| tally.count)
+        .sum())
+}
+
+/// Delete `deleted` from `vault` and wait until its store holds `remaining`
+/// documents and the entry serves again, the engine's drain having failed.
+fn delete_undrained(serving: &Serving, vault: &attach::Vault, deleted: &[String], remaining: u64) {
+    for path in deleted {
+        std::fs::remove_file(vault.path().join(path)).expect("a document removed");
+    }
+    wait_until(
+        "the deletions to land in the store and the entry to serve",
+        Budget::new(attach::READY_LIMIT, attach::STATE_PROBE),
+        || {
+            let held = documents_held(serving, vault);
+            let state = serving.host.state(vault.name());
+            let drain_failed = matches!(
+                serving.engines.status(vault.name()),
+                SemanticStatus::On {
+                    last_drain_error: Some(_),
+                    ..
+                }
+            );
+            if held == Ok(remaining) && matches!(state, Ok(TrustState::Ready)) && drain_failed {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!(
+                    "the store holds {held:?}, the entry is {state:?}, the drain failed: \
+                     {drain_failed}"
+                ))
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+}
+
+/// The rungs `answer` is advised fell short of their depth, and how many
+/// candidates each delivered.
+fn short_of_depth(answer: &Answered<SearchReport, SearchCost>) -> Vec<(Rung, u32)> {
+    answer
+        .answer
+        .advisories
+        .iter()
+        .filter_map(|advisory| match advisory {
+            AnswerAdvisory::RungShortOfDepth {
+                rung, delivered, ..
+            } => Some((*rung, *delivered)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A mass delete the engine has not drained costs the vector rung its
+/// margin, never its depth, while the lag stays within the cap; past the cap
+/// the rung delivers fewer and the answer says how many.** The sidecar is held
+/// from retracting anything, and the documents the vector rung ranks first
+/// are deleted. With fewer deaths undrained than the cap, the rung's margin is
+/// those deaths counted in feed rows — the watcher records them in far fewer
+/// write generations — and it still delivers the depth, none of it a deleted
+/// path, advised of no shortfall. With more undrained than the cap, the margin
+/// is the cap, the scan holds the depth and the cap, and the rung delivers
+/// the depth less the deaths past the cap, none of them deleted, advised so on
+/// the vector ladder and the hybrid one alike.
+#[test]
+fn an_undrained_mass_delete_costs_the_vector_rung_its_margin_until_the_cap() {
+    let depth = norn_wire::RUNG_DEPTH as usize;
+    let cap = norn_host::VECTOR_MARGIN_CAP as usize;
+    let within = depth / 2 + 88;
+    let beyond = cap + 16;
+    let documents = beyond + depth + 40;
+    let (_sandbox, vault) = a_vault_of_alphas("search-mass-delete", documents);
+    let serving = serve(&vault);
+    let vector = searching(&vault, "alpha")
+        .with_rungs(exactly([Rung::Vector]))
+        .with_limit(norn_wire::RUNG_DEPTH);
+    let ranked = paths(&answered(&serving, &vector));
+    assert_eq!(ranked.len(), depth);
+    on_the_sidecar(&vault, |sidecar| {
+        sidecar.execute_batch(
+            "CREATE TRIGGER held BEFORE DELETE ON document_vectors
+             BEGIN SELECT RAISE(ABORT, 'the retraction is held'); END;",
+        )
+    });
+
+    let first: Vec<String> = ranked[..within].to_vec();
+    delete_undrained(&serving, &vault, &first, (documents - within) as u64);
+    let answer = answered(&serving, &vector);
+    let delivered = paths(&answer);
+    assert_eq!(
+        delivered.len(),
+        depth,
+        "the rung delivered short of its depth"
+    );
+    assert!(
+        !delivered.iter().any(|path| first.contains(path)),
+        "the rung answered a deleted document"
+    );
+    assert_eq!(answer.work.margin, within as u64);
+    let work = answer.work.vector.expect("the vector rung ran");
+    assert!(work.peak_held <= (depth + within) as u64, "{work:?}");
+    assert!(
+        short_of_depth(&answer).is_empty(),
+        "{:?}",
+        answer.answer.advisories
+    );
+
+    let second: Vec<String> = delivered[..beyond - within].to_vec();
+    delete_undrained(&serving, &vault, &second, (documents - beyond) as u64);
+    let answer = answered(&serving, &vector);
+    let delivered = paths(&answer);
+    let expected = depth + cap - beyond;
+    assert_eq!(delivered.len(), expected);
+    assert!(
+        !delivered
+            .iter()
+            .any(|path| first.contains(path) || second.contains(path)),
+        "the rung answered a deleted document"
+    );
+    assert_eq!(answer.work.margin, cap as u64);
+    let work = answer.work.vector.expect("the vector rung ran");
+    assert_eq!(work.peak_held, (depth + cap) as u64);
+    assert_eq!(short_of_depth(&answer), [(Rung::Vector, expected as u32)]);
+    let hybrid = answered(&serving, &searching(&vault, "alpha").with_limit(1));
+    assert_eq!(short_of_depth(&hybrid), [(Rung::Vector, expected as u32)]);
 }
