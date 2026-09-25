@@ -441,6 +441,12 @@ pub fn sweep_fallback_tree(vault_root: &Path) -> Result<Swept, Refusal> {
 /// crate did not hand out is somebody's. A home that is not there is already
 /// discarded.
 ///
+/// **A shadow left behind is a refusal.** A shadow the filesystem will not
+/// remove — the home refuses the removal, or the name is a directory — ends
+/// the discard with a [`DiscardRefusal`] naming the home it stands in, so a
+/// discard that answers `Ok` left no shadow of the key's in either home. A
+/// shadow already gone when its removal is asked is discarded.
+///
 /// **Only a directory standing at a home's own path is a home, and it is
 /// swept through the handle that proved it.** Each home is opened without
 /// following a link at its own name before either is touched: a link standing
@@ -463,7 +469,7 @@ pub fn discard_homes(
     data_tmp: &Path,
     key: &MaintainershipKey,
     standing_roots: &[&Path],
-) -> Result<(), Refusal> {
+) -> Result<(), DiscardRefusal> {
     let fallback = vault_root.join(FALLBACK).join(key.as_path());
     // A root the filesystem does not answer for has no identity a home could
     // share, so it spares nothing.
@@ -471,16 +477,33 @@ pub fn discard_homes(
         .iter()
         .filter_map(|root| name_identity(root).ok().flatten())
         .collect::<Vec<_>>();
-    let homes = [data_tmp, fallback.as_path()]
-        .into_iter()
-        .map(|home| Ok(open_home(home, &standing)?.map(|directory| (home, directory))))
-        .collect::<Result<Vec<_>, Refusal>>()?;
+    let homes = [
+        (Placement::DataRoot, data_tmp),
+        (Placement::VaultFallback, fallback.as_path()),
+    ]
+    .into_iter()
+    .map(|(placement, home)| {
+        open_home(home, &standing)
+            .map(|opened| opened.map(|directory| (placement, home, directory)))
+            .map_err(|refusal| DiscardRefusal { placement, refusal })
+    })
+    .collect::<Result<Vec<_>, DiscardRefusal>>()?;
     #[cfg(test)]
     tests::run_before_sweep();
-    for (home, directory) in homes.into_iter().flatten() {
-        discard_home(home, &directory)?;
+    for (placement, home, directory) in homes.into_iter().flatten() {
+        discard_home(home, &directory).map_err(|refusal| DiscardRefusal { placement, refusal })?;
     }
     Ok(())
+}
+
+/// A [`discard_homes`] that refused: which of the key's homes it refused in,
+/// and what refused it there.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiscardRefusal {
+    /// The home the refusal was met in.
+    pub placement: Placement,
+    /// What refused the discard there.
+    pub refusal: Refusal,
 }
 
 /// The directory standing at `home`'s own path, opened without following a
@@ -501,8 +524,10 @@ fn open_home(home: &Path, standing: &[Identity]) -> Result<Option<OwnedFd>, Refu
 /// `home` itself where nothing else is left in it.
 ///
 /// Only names [`is_shadow_name`] accepts are removed, each relative to
-/// `directory` and as a file: a directory carrying a shadow's name refuses the
-/// removal and stands.
+/// `directory` and as a file. A removal the filesystem refuses — a directory
+/// carrying a shadow's name among them — is the refusal this answers with; a
+/// name already gone is not. So a home this leaves standing holds only names
+/// the predicate does not accept, which are somebody's and stay.
 #[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns the shadow home.
 fn discard_home(home: &Path, directory: &OwnedFd) -> Result<(), Refusal> {
     let entries =
@@ -511,11 +536,15 @@ fn discard_home(home: &Path, directory: &OwnedFd) -> Result<(), Refusal> {
         let entry = entry.map_err(|errno| environment_errno("reading", home, errno))?;
         let name = OsStr::from_bytes(entry.file_name().to_bytes());
         if is_shadow_name(name) {
-            // A shadow another sweep took first, or a name the filesystem
-            // refuses to remove, is left to the next one.
-            let _ = unlinkat(directory, entry.file_name(), AtFlags::empty());
+            match unlinkat(directory, entry.file_name(), AtFlags::empty()) {
+                // A shadow another sweep took first is already discarded.
+                Ok(()) | Err(Errno::NOENT) => {}
+                Err(errno) => return Err(environment_errno("removing", home, errno)),
+            }
         }
     }
+    // Every shadow is gone by here, so a home that is not empty holds names
+    // that are somebody's, and it stands for them.
     match std::fs::remove_dir(home) {
         Ok(()) => Ok(()),
         Err(error)
@@ -1084,6 +1113,85 @@ mod tests {
             scratch.exists(&kept_home.directory().join("notes.md")),
             "a file the predicate does not accept was removed"
         );
+    }
+
+    /// A shadow a read-only home keeps refuses the discard, naming the home
+    /// it stands in, and the shadow stands.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the home and its mode.
+    fn a_shadow_a_read_only_home_keeps_refuses_the_discard() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new("shadow-discard-read-only");
+        let vault = scratch.directory("vault");
+        let data_tmp = scratch.path("data/vaults/notes/tmp");
+        let ours = key();
+        let fallback = ShadowHome::resolve_where(&vault, &data_tmp, &ours, false)
+            .expect("the key's fallback home");
+        let staged = fallback.next_shadow();
+        std::fs::write(&staged, b"staged").unwrap();
+        let mode = |bits| std::fs::Permissions::from_mode(bits);
+        std::fs::set_permissions(fallback.directory(), mode(0o555)).unwrap();
+        let probe = fallback.directory().join("permission-probe");
+        if std::fs::write(&probe, b"").is_ok() {
+            // Permission bits do not bind this process, so the refusal this
+            // case is about cannot be arranged.
+            std::fs::remove_file(&probe).unwrap();
+            std::fs::set_permissions(fallback.directory(), mode(0o755)).unwrap();
+            return;
+        }
+
+        let refused = discard_homes(&vault, &data_tmp, &ours, &[]);
+        std::fs::set_permissions(fallback.directory(), mode(0o755)).unwrap();
+
+        let refused = refused.expect_err("a discard that left a shadow answered Ok");
+        assert_eq!(refused.placement, Placement::VaultFallback);
+        assert!(
+            matches!(
+                refused.refusal,
+                Refusal::Environment {
+                    operation: "removing",
+                    kind: std::io::ErrorKind::PermissionDenied,
+                    ..
+                }
+            ),
+            "{:?}",
+            refused.refusal
+        );
+        assert!(scratch.exists(&staged), "the shadow went");
+    }
+
+    /// A directory carrying a shadow's name is a shadow the discard cannot
+    /// remove, so it refuses the discard, naming the home, and stands.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the directory named like a shadow.
+    fn a_directory_named_like_a_shadow_refuses_the_discard() {
+        let scratch = Scratch::new("shadow-discard-directory");
+        let vault = scratch.directory("vault");
+        let data_tmp = scratch.path("data/vaults/notes/tmp");
+        let ours = key();
+        let data_root = ShadowHome::resolve_where(&vault, &data_tmp, &ours, true)
+            .expect("the key's data-root home");
+        let named = data_root.next_shadow();
+        std::fs::create_dir(&named).unwrap();
+
+        let refused = discard_homes(&vault, &data_tmp, &ours, &[])
+            .expect_err("a discard that left a shadow's name answered Ok");
+
+        assert_eq!(refused.placement, Placement::DataRoot);
+        assert!(
+            matches!(
+                refused.refusal,
+                Refusal::Environment {
+                    operation: "removing",
+                    ..
+                }
+            ),
+            "{:?}",
+            refused.refusal
+        );
+        assert!(scratch.exists(&named), "the directory went");
     }
 
     /// A link standing where a home would be is not a home: the discard

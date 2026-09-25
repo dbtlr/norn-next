@@ -585,29 +585,47 @@ pub(crate) fn engine_refusal_told(error: &EngineError) -> String {
 
 /// A refusal met in the host's own data directory in words, naming no file.
 ///
-/// The maintainer lock and the shadow home sit beside the derived database,
-/// so a path any of them names is a path to the directory that database is
-/// in. The account keeps the act that failed and what the operating system
-/// said, and drops every path.
+/// The maintainer lock and the data-root shadow home sit beside the derived
+/// database, so a path any of them names is a path to the directory that
+/// database is in. The account keeps the act that failed and what the
+/// operating system said, and drops every path.
+pub(crate) fn data_dir_refusal_told(error: &norn_fs::Refusal) -> String {
+    fs_refusal_told_in("the data directory", error)
+}
+
+/// A refusal discarding a vault's shadow homes in words, naming no file, and
+/// naming the place the home that refused sits: the data directory for the
+/// data-root home, and the vault root for the fallback home beneath it.
+pub(crate) fn shadow_discard_refusal_told(error: &norn_fs::DiscardRefusal) -> String {
+    match error.placement {
+        norn_fs::Placement::DataRoot => data_dir_refusal_told(&error.refusal),
+        norn_fs::Placement::VaultFallback => {
+            fs_refusal_told_in("the shadow home under the vault root", &error.refusal)
+        }
+    }
+}
+
+/// A filesystem refusal met in `place` in words: the act that failed and what
+/// the operating system said, and no path.
 ///
 /// The match carries no wildcard, so a variant minted in the filesystem crate
 /// takes its stance on what it tells here.
-pub(crate) fn data_dir_refusal_told(error: &norn_fs::Refusal) -> String {
+fn fs_refusal_told_in(place: &str, error: &norn_fs::Refusal) -> String {
     match error {
         norn_fs::Refusal::Environment {
             operation, kind, ..
-        } => format!("{operation} in the data directory failed: {kind}"),
+        } => format!("{operation} in {place} failed: {kind}"),
         norn_fs::Refusal::LockFileReplaced { attempts, .. } => {
             format!("the lock file was replaced on each of {attempts} attempts to lock it")
         }
         norn_fs::Refusal::Drifted { .. } | norn_fs::Refusal::Republished { .. } => {
-            "a file in the data directory changed under the host".to_string()
+            format!("a file in {place} changed under the host")
         }
         norn_fs::Refusal::DestinationExists { .. } => {
-            "a file in the data directory already exists".to_string()
+            format!("a file in {place} already exists")
         }
         norn_fs::Refusal::SymlinkDestination { .. } => {
-            "a file in the data directory is a symbolic link".to_string()
+            format!("a file in {place} is a symbolic link")
         }
     }
 }

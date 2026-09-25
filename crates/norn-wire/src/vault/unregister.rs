@@ -14,8 +14,11 @@
 //! the unregistration finds the vault idle until the change commits or is
 //! refused, and `vault list` and `vault resolve` go on naming it until it
 //! commits. After a commit the name is `host/unknown-vault`; after a refusal
-//! the vault is served as it was, so a refused unregistration changes nothing
-//! a caller can observe.
+//! the registration, the listing and the vault's serving state stand as they
+//! were. A refusal met after the discard began — the registry file refusing
+//! the write, or a later discard step refusing — may leave derived state
+//! discarded; the next attach derives it again under a new store epoch, which
+//! cursors report as a change.
 //!
 //! **A park is no refusal.** An entry standing on a park that nothing holds
 //! is unregistered, and the park leaves with it; a name parked beside it on
@@ -27,8 +30,9 @@
 //! where another process maintains the derived state,
 //! `host/registry-unwritable` where the registry file could not be read or
 //! replaced, and `host/entry-untrusted` carrying the environmental-refusal
-//! reason where the data directory refused the maintainer lock or the
-//! discard. After any of them the registration that stood before still
+//! reason where the data directory refused the maintainer lock, or where the
+//! discard was refused — in the data directory, or in the shadow home under
+//! the vault root. After any of them the registration that stood before still
 //! stands.
 
 use schemars::JsonSchema;

@@ -454,7 +454,7 @@ impl ProductionEntryOps {
             &maintainership_key(&self.dirs, name),
             spared,
         )
-        .map_err(|refused| crate::refusal::data_dir_refusal_told(&refused))
+        .map_err(|refused| crate::refusal::shadow_discard_refusal_told(&refused))
     }
 
     /// Resolve the registry's single backend selection directly to the fs
@@ -13593,6 +13593,61 @@ mod tests {
                 "the derived database stood"
             );
             assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// A shadow the fallback home keeps because the home refuses its
+        /// removal refuses the unregistration: nothing reports the state
+        /// discarded, the refusal names the home under the vault root without
+        /// its path, and the registration stands.
+        #[cfg(unix)]
+        #[test]
+        fn a_shadow_a_read_only_fallback_home_keeps_refuses_the_unregistration() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let f = Fixture::new("unregister-read-only-home");
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            attach_and_idle(&host);
+            let key = dirs.derived_key(&notes());
+            let home = f
+                .vault()
+                .join(norn_fs::FALLBACK)
+                .join(key.channel())
+                .join(key.vault())
+                .join(key.data_base());
+            fs::create_dir_all(&home).unwrap();
+            let shadow = home.join("norn-shadow-99999-1");
+            fs::write(&shadow, b"staged bytes").unwrap();
+            fs::set_permissions(&home, fs::Permissions::from_mode(0o555)).unwrap();
+            let probe = home.join("permission-probe");
+            if fs::write(&probe, b"").is_ok() {
+                // Permission bits do not bind this process, so the refusal
+                // this case is about cannot be arranged.
+                fs::remove_file(&probe).unwrap();
+                fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+                eprintln!("skipped: permission bits do not bind this process");
+                return;
+            }
+
+            let answer = unregister_once_idle(&host, &UnregisterParams::new(notes()));
+            fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let refusal = answer.expect_err("an unregistration that left a shadow went through");
+            match refusal.detail() {
+                norn_wire::ErrorDetail::EntryUntrusted {
+                    reason: norn_wire::UntrustedReason::EnvironmentalRefusal { detail, .. },
+                    ..
+                } => assert!(
+                    detail.contains("shadow home under the vault root"),
+                    "the refusal names another place: {detail}"
+                ),
+                other => panic!("the refusal is not environmental: {other:?}"),
+            }
+            assert_names_no_path(&refusal, &f);
+            assert!(fs::metadata(&shadow).is_ok(), "the shadow went");
+            assert!(recorded(&dirs, &notes()).is_some());
+            assert_eq!(listed(&host), [notes()]);
         }
 
         /// Another registered vault whose root stands at this vault's
