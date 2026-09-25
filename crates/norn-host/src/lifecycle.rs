@@ -293,7 +293,7 @@ pub trait EntryOps: Send + Sync + 'static {
     /// [`EntryOps::active_fingerprints`], so the model an entry keeps is the
     /// one its last pinning leg pinned. It is handed out rather than built
     /// here: this runs under the entry gate, and the model is built where the
-    /// schema is read, outside it.
+    /// leg reads the pin back off the store, outside it.
     ///
     /// The default declares nothing, which is the declaration of a store that
     /// pins no schema.

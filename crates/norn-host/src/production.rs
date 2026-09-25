@@ -163,6 +163,14 @@ pub struct ProductionAttachment {
     /// [`ProductionAttachment::drop_controls_held_for_rung_three`]
     /// asserts.
     held_for_rung_three: Option<ReloadCandidate>,
+    /// The content model of the schema the store pins, built off the pin by
+    /// the one construction every deriving act builds its declaration by, so
+    /// a read compiles against the bytes its store pins rather than against
+    /// the controls a leg holds beside them.
+    ///
+    /// Taken again wherever the store's pin can have moved: where the store
+    /// is opened or reopened, and after every pin.
+    pinned_model: Arc<ContentModel>,
     /// Whether the engines are owed the config `controls` carries.
     ///
     /// It is set only where a leg holds controls it could not pin because
@@ -201,6 +209,24 @@ pub struct ProductionAttachment {
 type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
 
 impl ProductionAttachment {
+    /// Pin `candidate`'s schema into the store and take the content model
+    /// back off the pin it wrote.
+    fn pin(&mut self, candidate: &ReloadCandidate) -> Result<(), JobFailure> {
+        ProductionEntryOps::pin_candidate(&mut self.store, candidate)?;
+        self.read_pinned_model()
+    }
+
+    /// Take the content model of the schema the store pins, as a deriving
+    /// act reads it.
+    fn read_pinned_model(&mut self) -> Result<(), JobFailure> {
+        self.pinned_model = Arc::clone(
+            Declaration::read(&mut self.store)?
+                .model
+                .shared_content_model(),
+        );
+        Ok(())
+    }
+
     /// The case behaviour the installed coverage proved for `covered_root`,
     /// or `None` where no coverage stands.
     ///
@@ -601,6 +627,7 @@ impl ProductionEntryOps {
                 return Err(store_effect(error));
             }
         }
+        attachment.read_pinned_model()?;
         attachment.store_verification_due = Instant::now() + STORE_VERIFICATION_INTERVAL;
         // Controls a leg held for this rung are the ones the rebuilt store is
         // pinned and derived under.
@@ -615,6 +642,7 @@ impl ProductionEntryOps {
             return Ok(attachment);
         }
         Self::pin_candidate(&mut attachment.store, &attachment.controls)?;
+        attachment.read_pinned_model()?;
         let derived = self
             .heal_under_coverage(&mut attachment, progress)
             .and_then(|()| {
@@ -792,6 +820,7 @@ impl EntryOps for ProductionEntryOps {
             covered_root,
             controls: candidate.clone(),
             held_for_rung_three: None,
+            pinned_model: Arc::new(ContentModel::none()),
             config_delivery_owed: false,
             maintainership,
             store,
@@ -802,6 +831,7 @@ impl EntryOps for ProductionEntryOps {
             last_shadow_sweep: Instant::now(),
             store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
         };
+        attachment.read_pinned_model()?;
         if candidate.undeclarable().is_some() {
             // Nothing is pinned and nothing is derived under a declaration this
             // build cannot read. The attachment stands so the vault is
@@ -810,7 +840,7 @@ impl EntryOps for ProductionEntryOps {
             // controls the attachment holds.
             return Ok(attachment);
         }
-        Self::pin_candidate(&mut attachment.store, &candidate)?;
+        attachment.pin(&candidate)?;
         // The open resolves damage it can see in the store schema, and the heal
         // is where damage in the pages under it is met: a corrupt page an open
         // never read is met by the first read that does. Rung 3 runs here
@@ -918,7 +948,7 @@ impl EntryOps for ProductionEntryOps {
             attachment.controls = candidate;
             return Ok(());
         }
-        Self::pin_candidate(&mut attachment.store, &candidate)?;
+        attachment.pin(&candidate)?;
         attachment.controls = candidate;
         self.dispatch_config(attachment);
         self.heal_under_coverage(attachment, progress)?;
@@ -966,14 +996,14 @@ impl EntryOps for ProductionEntryOps {
         }
 
         progress.begin_schema_reload();
-        Self::pin_candidate(&mut attachment.store, &candidate).map_err(
-            |failure| match failure {
+        attachment
+            .pin(&candidate)
+            .map_err(|failure| match failure {
                 JobFailure::Environmental(detail) => {
                     JobFailure::Reload(ReloadError::SchemaApply(detail))
                 }
                 other => other,
-            },
-        )?;
+            })?;
         attachment.controls = candidate;
         self.dispatch_config(attachment);
         self.heal_under_coverage(attachment, progress)?;
@@ -988,13 +1018,11 @@ impl EntryOps for ProductionEntryOps {
         Some(attachment.controls.fingerprints())
     }
 
-    /// The model the controls the attachment holds declare, built when those
-    /// controls were read. Every leg that pins a schema pins the controls it
-    /// then holds, so this is the declaration the store pins; a leg holding an
-    /// undeclarable schema pins nothing, and the trust withheld over it is
-    /// what keeps a read off the model declaring nothing it holds instead.
+    /// The model built off the store's own pin, the way every deriving act
+    /// builds the declaration it judges under, so a read and a derivation
+    /// read one declaration out of one set of bytes.
     fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
-        Arc::clone(attachment.controls.content_model())
+        Arc::clone(&attachment.pinned_model)
     }
 
     fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf> {

@@ -1795,10 +1795,12 @@ through a reader, and an acquired request establishes exactly one — and the re
 request carries names the trust state and the store generation at that snapshot; a semantic
 rung reads its engine's sidecar instead and carries its own freshness in that same reading.
 The content model a builder compiles the request against is the entry's record of the schema
-its store pins, taken in the gate hold that establishes the snapshot: every leg that pins a
-schema records the model in the hold that publishes it, and no read is served between the
-pin and that hold, so a request is never compiled against a declaration its snapshot does not
-pin.
+its store pins, taken in the gate hold that establishes the snapshot. The attachment builds
+that model off the store's own pin, the way every deriving act builds the declaration it
+judges under, so a read and a derivation read one declaration out of one set of bytes; every
+leg that pins a schema records the model in the hold that publishes it, and no read is served
+between the pin and that hold, so a request is never compiled against a declaration its
+snapshot does not pin.
 The guarantee is one of transaction ownership: the reader is a second connection beside the
 writer, so no write consumes the snapshot a request read and no later write executes inside
 the request's snapshot transaction; and the snapshot is ended by the handle that opened it,

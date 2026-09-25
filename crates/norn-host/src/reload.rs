@@ -2,16 +2,13 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use norn_config::schema::VaultSchema;
 use norn_config::vault::{VaultConfig, VaultConfigError};
 use norn_config::{IN_VAULT_CONFIG_PATH, IN_VAULT_SCHEMA_PATH};
 use norn_fs::{ContentHash, Refusal};
-use norn_store::ContentModel;
 use norn_wire::{TrustState, VaultName};
 
-use crate::derivation::content_model;
 use crate::{JobFailure, Registration};
 
 /// A registered engine boundary that receives one vault's optional parsed
@@ -154,20 +151,12 @@ pub enum AuthoredDrift {
 /// declaration it already has, while an attach has no such declaration to fall
 /// back on and publishes the cause over live coverage rather than hiding the
 /// vault behind a refusal.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ReloadCandidate {
     schema_bytes: Vec<u8>,
     config: VaultConfig,
     fingerprints: ActiveFingerprints,
     undeclarable: Option<String>,
-    /// What the schema declares, as the store reads it, named by the
-    /// fingerprint the schema is pinned under — and a model declaring nothing
-    /// where the declaration is undeclarable, which nothing is derived or read
-    /// under because the attachment's trust is withheld over it.
-    ///
-    /// Shared because a read carries it for its whole length: the entry keeps
-    /// the one the attachment serves under, and every hold clones it.
-    content_model: Arc<ContentModel>,
 }
 
 impl ReloadCandidate {
@@ -201,7 +190,9 @@ impl ReloadCandidate {
         // this path, so every caller reads one declaration out of one set of
         // bytes. What it means for that reading to fail is the caller's to
         // decide, which is why it is carried rather than raised.
-        let declaration = VaultSchema::parse(schema.bytes());
+        let undeclarable = VaultSchema::parse(schema.bytes())
+            .err()
+            .map(|error| error.to_string());
 
         let config =
             norn_fs::read_if_present_and_hash(covered_root, Path::new(IN_VAULT_CONFIG_PATH))
@@ -209,20 +200,12 @@ impl ReloadCandidate {
         let parsed = VaultConfig::parse(config.as_ref().map(norn_fs::ReadAndHash::bytes))
             .map_err(ReloadError::ConfigParse)?;
         let fingerprints = fingerprints(&schema, config.as_ref());
-        let (content_model, undeclarable) = match declaration {
-            Ok(declared) => (
-                content_model(&declared, fingerprints.schema.to_string()),
-                None,
-            ),
-            Err(error) => (ContentModel::none(), Some(error.to_string())),
-        };
         let (schema_bytes, _) = schema.into_parts();
         Ok(Self {
             schema_bytes,
             config: parsed,
             fingerprints,
             undeclarable,
-            content_model: Arc::new(content_model),
         })
     }
 
@@ -242,12 +225,6 @@ impl ReloadCandidate {
 
     pub(crate) fn fingerprints(&self) -> ActiveFingerprints {
         self.fingerprints
-    }
-
-    /// The content model the schema declares, named by the fingerprint a pin
-    /// of this candidate pins it under.
-    pub(crate) fn content_model(&self) -> &Arc<ContentModel> {
-        &self.content_model
     }
 }
 
