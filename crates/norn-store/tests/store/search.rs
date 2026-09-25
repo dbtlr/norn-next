@@ -19,8 +19,9 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan, ScanTarget};
 use norn_wire::{
-    Column, Cursor, CursorKey, Direction, FieldValue, FindParams, FindingKind, Moved, PagedRows,
-    Predicate, ResolutionTarget, Score, Sort, SortKey, Unsatisfied, VaultAddress, VaultName,
+    Column, Cursor, CursorKey, CursorOrderChanged, Direction, FieldValue, FindParams, FindingKind,
+    LadderDeclaration, Moved, PagedRows, Predicate, ResolutionTarget, Rung, RungSet, Score, Sort,
+    SortKey, Unsatisfied, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -591,7 +592,11 @@ fn a_cursor_that_is_no_position_among_hits_is_refused() {
             paged: PagedRows::Hit,
         }
     );
-    let hit = CursorKey::hit(Score::new(1.0).expect("a score"), "notes/lantern.md");
+    let hit = CursorKey::hit(
+        RungSet::lexical(),
+        Score::new(1.0).expect("a score"),
+        "notes/lantern.md",
+    );
     let typed = searching("lantern").with_after(Cursor::new(
         norn_wire::Snapshot::new(
             reading.epoch.clone(),
@@ -609,8 +614,76 @@ fn a_cursor_that_is_no_position_among_hits_is_refused() {
         },
         "a hit cursor carrying a fingerprint was not refused as not taken"
     );
-    let raw = searching("lantern").with_after(Cursor::new(reading, hit));
+    let fused = CursorKey::hit(
+        RungSet::of([Rung::Lexical, Rung::Vector]).expect("a ladder"),
+        Score::new(1.0).expect("a score"),
+        "notes/lantern.md",
+    );
+    let typed_and_fused = searching("lantern").with_after(Cursor::new(
+        norn_wire::Snapshot::new(
+            reading.epoch.clone(),
+            reading.generation,
+            Some(SEARCH_SCHEMA.to_string()),
+            None,
+        ),
+        fused,
+    ));
+    assert_eq!(
+        searching_store.refusal(&typed_and_fused),
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Hit,
+            paged: PagedRows::Hit,
+        },
+        "a fingerprinted hit cursor under another ladder was judged by its ladder before its fingerprint"
+    );
+    let raw = searching("lantern").with_after(Cursor::new(reading.clone(), hit));
     assert!(searching_store.search(&raw).moved.is_empty());
+}
+
+/// **A hit cursor ranked by another ladder is refused, naming both**: this
+/// rung ranks by the lexical ladder alone, and a score and a path from a fused
+/// ranking are a position on another scale.
+#[test]
+fn a_hit_cursor_ranked_by_another_ladder_is_refused_naming_both() {
+    let searching_store = Searching::new("search-cursor-ladder");
+    let reading = searching_store.search(&searching("lantern")).snapshot;
+    let fused = RungSet::of([Rung::Lexical, Rung::Vector]).expect("a ladder");
+    let continued = searching("lantern").with_after(Cursor::new(
+        reading,
+        CursorKey::hit(
+            fused.clone(),
+            Score::new(1.0).expect("a score"),
+            "notes/lantern.md",
+        ),
+    ));
+    let refusal = searching_store.refusal(&continued);
+    assert_eq!(
+        refusal,
+        PageRefusal::OrderChanged(
+            CursorOrderChanged::minted_raw(None).in_ladders(fused, RungSet::lexical())
+        )
+    );
+    assert_eq!(
+        refusal.to_string(),
+        "the cursor was ranked by the ladder [lexical, vector], and the request ranks by the ladder [lexical]"
+    );
+}
+
+/// **A lexical page declares the lexical floor as its ladder, and the cursor
+/// it mints names the rung set that declaration names**, so the ladder a
+/// report declares and the ladder its continuation is judged by are one fact.
+#[test]
+fn a_page_declares_the_lexical_ladder_its_cursor_names() {
+    let searching_store = Searching::new("search-ladder-declared");
+    let searched = searching_store.search(&searching("lantern").with_limit(1));
+    let next = searched.next.clone().expect("a next page");
+    let (_, _, report) = searched.into_report();
+    assert_eq!(report.ladder, LadderDeclaration::lexical());
+    assert_eq!(report.page.next.as_ref(), Some(&next));
+    let CursorKey::Hit { ladder, .. } = next.key() else {
+        panic!("a search minted a cursor that is no hit's: {next:?}");
+    };
+    assert_eq!(ladder, &report.ladder.rung_set());
 }
 
 /// **A document edited is searched as it now reads, on a snapshot established

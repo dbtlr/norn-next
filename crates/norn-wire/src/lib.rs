@@ -32,18 +32,21 @@
 //! [`Pattern`] grammar a schema's path and tag sets are written in too, and
 //! the [`ResolutionTarget`] one
 //! document is addressed by. What a read answers with is spelled here as
-//! well: the [`AnswerReading`] every answer carries — its [`TrustState`], its
-//! establishment, and the [`LadderDeclaration`] of [`RungReport`]s a search
-//! ran — the [`Unsatisfied`] parts of a request that could not be applied, the
-//! [`AnswerAdvisory`] saying what an applied part assumed and the
-//! [`ComparedBy`] place it compared in, and
+//! well: the [`AnswerReading`] every answer carries — its [`TrustState`] and
+//! its establishment — the [`Unsatisfied`] parts of a request that could not be applied, the
+//! [`AnswerAdvisory`] saying what an applied part assumed or where it stopped,
+//! with the [`ComparedBy`] place a comparison compared in, the
+//! [`RungSkipReason`] a rung was left out for, and the [`RUNG_DEPTH`] a rung
+//! stops at, and
 //! the [`Cursor`] a page continues from, with the [`Snapshot`] a continuation
 //! is judged against, what [`Moved`] under it, and the [`CursorKey`] each
 //! paged row type stops at.
 //!
 //! The six read verbs are spelled here as one params type and one report type
 //! each: [`FindParams`] answering [`FindReport`], [`SearchParams`] answering
-//! [`SearchReport`] over the [`RungSet`] it ran and the [`Hit`]s it ranked,
+//! [`SearchReport`] over the [`RungSelection`] it asks for, declaring the
+//! [`LadderDeclaration`] of [`RungReport`]s it ran beside the [`Hit`]s it
+//! ranked,
 //! [`GetParams`] answering [`GetReport`], [`CountParams`] answering
 //! [`CountReport`] of [`Tally`]s, [`ValidateParams`] answering
 //! [`ValidateReport`], and [`DescribeParams`] answering [`DescribeReport`] of
@@ -205,11 +208,16 @@
 //! [`VaultAddress::name`], [`VaultAddress::root`],
 //! the constructor on each [`Predicate`], [`Anchor`], [`CursorKey`],
 //! [`Unsatisfied`], [`AnswerAdvisory`], [`ReloadFailure`] and [`RungReport`] variant,
-//! [`EngineSection::malformed`], whose variant is the one part of a plain enum
-//! that extends by gaining a field,
-//! [`Cursor::new`], [`Page::new`], [`Snapshot::new`],
-//! [`CursorOrderChanged::new`], [`DocumentOrders::new`], [`Score::new`],
-//! [`AnswerReading::new`], [`LadderDeclaration::new`],
+//! [`EngineSection::malformed`] and the constructors on each
+//! [`RungSelection`] variant, whose variants are the parts of a plain enum
+//! that extend by gaining a field,
+//! [`Cursor::new`], [`Page::new`], [`Snapshot::new`], [`SidecarRevision::new`],
+//! [`CursorOrderChanged::new`], [`CursorOrderChanged::in_orders`],
+//! [`CursorOrderChanged::in_ladders`],
+//! [`Score::new`],
+//! [`RungSkipReason::unavailable`],
+//! [`AnswerReading::new`],
+//! [`LadderDeclaration::new`], [`LadderDeclaration::lexical`], [`SearchReport::new`],
 //! [`ModelIdentity::new`], [`Freshness::trailing`], [`Freshness::rescanning`],
 //! [`VaultAnswer::new`], [`VaultAnswer::with_advisories`],
 //! [`MaintainerIdentity::named`] and
@@ -222,7 +230,8 @@
 //! [`BlockRow::new`], [`TagRow::new`], [`DocumentRow::new`],
 //! [`DocumentPath::new`], [`Candidate::new`], [`CandidateHead::new`],
 //! [`FindingRow::new`],
-//! [`Sort::new`], [`RungSet::lexical`], [`RungSet::of`], [`Hit::new`],
+//! [`Sort::new`], [`RungSet::lexical`], [`RungSet::of`],
+//! [`RungSubtraction::none`], [`RungSubtraction::of`], [`Hit::new`],
 //! [`Tally::new`], [`KindTally::new`], and the `new` on each of the six read
 //! params types;
 //! [`Registration::new`], [`Published::state`], [`Published::parked`],
@@ -242,13 +251,14 @@
 //! different questions. `#[non_exhaustive]` keeps a member's arrival from
 //! breaking a caller that only reads; a plain enum makes that arrival break
 //! every caller that *composes*, which is what a vocabulary wants when no
-//! reader can carry on without deciding. [`EngineSection`] and
-//! [`FindingScope`] are the two members of that class: a section composes with
-//! an engine's own refusal to say what a client should do, and a scope decides
-//! whether a finding is withheld from a document row. A composer of either
-//! that has not made the decision should fail to compile rather than fall into
-//! a default arm, so neither carries the attribute and a new member is a
-//! deliberate break at every composition site. The two rules compose rather
+//! reader can carry on without deciding. [`EngineSection`],
+//! [`FindingScope`] and [`RungSelection`] are the three members of that
+//! class: a section composes with an engine's own refusal to say what a client
+//! should do, a scope decides whether a finding is withheld from a document
+//! row, and a selection is resolved to the ladder a search runs. A composer of
+//! any of them that has not made the decision should fail to compile rather
+//! than fall into a default arm, so none carries the attribute and a new
+//! member is a deliberate break at every composition site. The two rules compose rather
 //! than exclude: [`EngineSection::Malformed`] carries a payload, so the
 //! variant is `#[non_exhaustive]` in its own right and grows by gaining a
 //! field, while the enum around it stays plain and grows by breaking every
@@ -268,7 +278,10 @@
 //! string it does not know fails the read instead: there is no
 //! `#[serde(other)]` catch-all anywhere in the vocabulary, because a variant
 //! nobody can interpret is a refusal to parse rather than a value to pass on
-//! degraded.
+//! degraded. [`RungSelection`] is the one request shape that refuses a field
+//! it does not know: its two selections hold disjoint fields, and a field of
+//! the other one dropped on the way in would read a request that both names a
+//! set and subtracts from one as a request that does only one of them.
 //!
 //! # The code grammar, and what is not a code
 //!
@@ -365,8 +378,8 @@ pub use address::{
     absolute_path,
 };
 pub use cursor::{
-    Cursor, CursorKey, CursorOrderChanged, DocumentOrders, FacetKind, Moved, NonFiniteScore, Page,
-    PagedRows, Score, Snapshot,
+    Cursor, CursorKey, CursorOrderChanged, FacetKind, HitResume, Moved, NonFiniteScore, OrderPair,
+    Page, PagedRows, Score, SidecarRevision, Snapshot,
 };
 pub use demand::AttachMode;
 pub use doctor::{
@@ -387,17 +400,21 @@ pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint
 pub use glob::{CaseFold, Pattern, PatternError};
 pub use name::{IllegalVaultName, VaultName};
 pub use predicate::Predicate;
-pub use product::{AnswerAdvisory, ComparedBy, Unsatisfied, VaultAnswer};
+pub use product::{AnswerAdvisory, ComparedBy, RungSkipReason, Unsatisfied, VaultAnswer};
 pub use read::count::{CountParams, CountReport, GroupKey, Tally};
 pub use read::describe::{
     ContainerKind, DescribeParams, DescribeReport, Facet, FieldType, PathRuleKind, TagStance,
 };
 pub use read::find::{Direction, FindParams, FindReport, Sort, SortKey};
 pub use read::get::{CollectionPage, CollectionSelector, GetParams, GetReport};
-pub use read::search::{EmptyLadder, Hit, RungSet, SearchParams, SearchReport};
+pub use read::search::{
+    Hit, NoRetrievalRung, RUNG_DEPTH, RungSelection, RungSet, RungSubtraction, SearchParams,
+    SearchReport,
+};
 pub use read::validate::{KindTally, ValidateParams, ValidateReport};
 pub use reading::{
-    AnswerReading, EngineSection, Freshness, LadderDeclaration, ModelIdentity, Rung, RungReport,
+    AnswerReading, EngineSection, Freshness, LadderDeclaration, MalformedLadder, ModelIdentity,
+    Rung, RungReport,
 };
 pub use reload::{ControlFile, ControlFileFailure, ReloadFailure, ReloadStage};
 pub use status::{

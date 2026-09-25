@@ -40,7 +40,8 @@ fn schema_of<T: schemars::JsonSchema>() -> Value {
 /// A paged report is an alias for `Page` over the row it carries, so `Page` is
 /// the title it advertises, and `Page` advertises that one title whatever its
 /// row is. Those rows name the row type as well: the title alone would hold
-/// `find` and `search` equal.
+/// `find` and `count` equal. A search report holds its page beside the ladder
+/// that ranked it, so it is a type of its own rather than a page.
 struct Spelling {
     verb: Verb,
     params_type: &'static str,
@@ -66,8 +67,8 @@ fn verb_table() -> Vec<Spelling> {
         Spelling {
             verb: Verb::Search,
             params_type: "SearchParams",
-            report_type: "Page",
-            report_rows: Some("Hit"),
+            report_type: "SearchReport",
+            report_rows: None,
             params: schema_of::<SearchParams>(),
             report: schema_of::<SearchReport>(),
         },

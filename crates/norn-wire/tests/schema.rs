@@ -19,14 +19,15 @@ use norn_wire::{
     EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind,
     FieldType, FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
     Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally,
-    LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, Moved, NameSet,
-    NotReady, Page, PagedRows, PathRuleKind, PollBackend, Predicate, Published, ReadFailure,
-    ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
-    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace, RequestBound, RequestPart,
-    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport,
-    RungSet, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity,
-    Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
-    TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams,
+    LadderDeclaration, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity,
+    Moved, NameSet, NotReady, Page, PagedRows, PathRuleKind, PollBackend, Predicate, Published,
+    ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem,
+    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace,
+    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
+    RollUp, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource, Score,
+    SearchParams, SearchReport, SetParams, SetReport, Severity, SidecarRevision, Snapshot, Sort,
+    SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TrustState,
+    UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams,
     ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb,
     WarmingPhase, WatcherLossCause,
 };
@@ -147,12 +148,15 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<AnswerReading>(),
         schema_of::<Rung>(),
         schema_of::<RungReport>(),
+        schema_of::<LadderDeclaration>(),
         schema_of::<Freshness>(),
         schema_of::<Score>(),
+        schema_of::<SidecarRevision>(),
         schema_of::<EngineSection>(),
         schema_of::<Unsatisfied>(),
         schema_of::<ComparedBy>(),
         schema_of::<AnswerAdvisory>(),
+        schema_of::<RungSkipReason>(),
         schema_of::<VaultAnswer<String>>(),
         schema_of::<NotReady>(),
         schema_of::<ControlFileFailure>(),
@@ -179,6 +183,7 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<SortKey>(),
         schema_of::<Sort>(),
         schema_of::<RungSet>(),
+        schema_of::<RungSelection>(),
         schema_of::<Hit>(),
         schema_of::<CollectionSelector>(),
         schema_of::<CollectionPage>(),
@@ -1141,7 +1146,12 @@ fn a_cursor_key_advertises_its_row_tag() {
         .expect("the hit branch");
     assert_eq!(
         property_names(hit),
-        ["row", "score", "path"].into_iter().collect()
+        ["row", "ladder", "score", "path"].into_iter().collect()
+    );
+    assert_eq!(
+        hit["properties"]["ladder"]["$ref"].as_str(),
+        Some("#/$defs/RungSet"),
+        "a hit key names the ladder it was ranked by as a rung set: {hit}"
     );
     assert_eq!(
         hit["properties"]["score"]["$ref"].as_str(),
@@ -1257,7 +1267,8 @@ fn a_page_advertises_its_rows_its_continuation_and_what_moved() {
 }
 
 /// The snapshot advertises the four parts a continuation is judged against,
-/// under the snake_case names the wire uses.
+/// under the snake_case names the wire uses, and the sidecar part is the pair
+/// of the sidecar's own epoch and its revision within it.
 #[test]
 fn a_snapshot_advertises_the_parts_a_continuation_is_judged_against() {
     let schema = schema_of::<Snapshot>();
@@ -1272,28 +1283,86 @@ fn a_snapshot_advertises_the_parts_a_continuation_is_judged_against() {
         .into_iter()
         .collect()
     );
+    assert_eq!(
+        property_names(&schema_of::<SidecarRevision>()),
+        ["epoch", "revision"].into_iter().collect()
+    );
+    assert!(
+        schema.to_string().contains("#/$defs/SidecarRevision"),
+        "the snapshot's sidecar part is not the epoch-qualified pair: {schema}"
+    );
 }
 
 // ── The answer reading and the read product ──────────────────────────────
 
-/// A reading advertises the four parts a consumer judges an answer by, and
-/// refers to the trust vocabulary rather than restating it.
+/// A reading advertises the three parts every answer is judged by, and refers
+/// to the trust vocabulary rather than restating it.
 #[test]
 fn a_reading_advertises_the_parts_an_answer_is_judged_by() {
     let schema = schema_of::<AnswerReading>();
     assert_eq!(
         property_names(&schema),
-        ["trust", "epoch", "generation", "ladder"]
-            .into_iter()
-            .collect()
+        ["trust", "epoch", "generation"].into_iter().collect()
     );
     assert_eq!(
         schema["properties"]["trust"]["$ref"].as_str(),
         Some("#/$defs/TrustState")
     );
+}
+
+/// A search report advertises the ladder that ranked it and the page of hits,
+/// both required, so a surface validating a search answer refuses one that
+/// declares no ladder.
+#[test]
+fn a_search_report_advertises_its_ladder_and_its_page() {
+    let schema = schema_of::<SearchReport>();
+    assert_eq!(
+        property_names(&schema),
+        ["ladder", "page"].into_iter().collect()
+    );
+    let required: BTreeSet<&str> = schema["required"]
+        .as_array()
+        .expect("the report's required list")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(required, ["ladder", "page"].into_iter().collect());
+    assert_eq!(
+        schema["properties"]["ladder"]["$ref"].as_str(),
+        Some("#/$defs/LadderDeclaration")
+    );
+    let page = &schema["properties"]["page"]["$ref"];
+    let page = page
+        .as_str()
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        .unwrap_or_else(|| panic!("the report's page is no definition: {schema}"));
+    assert_eq!(
+        property_names(&schema["$defs"][page]),
+        ["rows", "next", "moved"].into_iter().collect()
+    );
     assert!(
-        schema["$defs"]["RungReport"].is_object(),
-        "the reading carries no definition of a rung report: {schema}"
+        schema["$defs"]["Hit"].is_object(),
+        "the report carries no definition of a hit: {schema}"
+    );
+}
+
+/// A ladder declaration advertises its rungs as reports holding a retrieval
+/// rung, which implies at least one, so a surface validating a search answer
+/// refuses a ladder of enhancers alone.
+#[test]
+fn a_ladder_declaration_advertises_a_retrieval_rung() {
+    let schema = schema_of::<LadderDeclaration>();
+    assert_eq!(
+        property_names(&schema),
+        ["rungs", "repeatable"].into_iter().collect()
+    );
+    let rungs = &schema["properties"]["rungs"];
+    assert_eq!(rungs["minItems"].as_u64(), Some(1));
+    assert_eq!(rungs["items"]["$ref"].as_str(), Some("#/$defs/RungReport"));
+    assert_eq!(
+        rungs["contains"]["properties"]["rung"]["enum"].as_array(),
+        Some(&retrieval_rung_spellings()),
+        "the declaration advertises a ladder holding no retrieval rung: {schema}"
     );
 }
 
@@ -1423,13 +1492,39 @@ fn an_unsatisfied_part_advertises_its_part_tag() {
     );
 }
 
-/// An answer advisory advertises its tag, and where a mixed-offset comparison
-/// was made as the flat strings the vocabulary holds.
+/// An answer advisory advertises its tag, where a mixed-offset comparison
+/// was made as the flat strings the vocabulary holds, and why a rung was left
+/// out as the refusal code a search naming it exactly meets.
 #[test]
 fn an_answer_advisory_advertises_its_tag_and_where_it_compared() {
+    let schema = schema_of::<AnswerAdvisory>();
     assert_eq!(
-        sorted(tag_constants(&schema_of::<AnswerAdvisory>(), "advisory")),
-        sorted(["mixed_offset"])
+        sorted(tag_constants(&schema, "advisory")),
+        sorted(["mixed_offset", "rung_skipped", "rung_depth_reached"])
+    );
+    let skipped = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "advisory") == Some("rung_skipped"))
+        .expect("the rung-skipped branch");
+    assert_eq!(
+        property_names(skipped),
+        ["advisory", "rung", "reason"].into_iter().collect()
+    );
+    assert_eq!(
+        skipped["properties"]["reason"]["$ref"].as_str(),
+        Some("#/$defs/RungSkipReason")
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<RungSkipReason>(), "code")),
+        sorted(["engine/unavailable"])
+    );
+    let reached = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "advisory") == Some("rung_depth_reached"))
+        .expect("the rung-depth-reached branch");
+    assert_eq!(
+        property_names(reached),
+        ["advisory", "rung"].into_iter().collect()
     );
     let compared_by = schema_of::<ComparedBy>();
     assert_eq!(
@@ -1570,20 +1665,32 @@ fn a_changed_order_is_advertised_as_the_type_the_continuation_answers_with() {
         serde_json::to_string(&schema["$defs"]["CursorOrderChanged"]["properties"]["orders"])
             .expect("the orders property serializes");
     assert!(
-        orders.contains("#/$defs/DocumentOrders") && orders.contains("null"),
+        orders.contains("#/$defs/OrderPair") && orders.contains("null"),
         "the two orders are one nullable pair: {orders}"
     );
-    let pair = &schema["$defs"]["DocumentOrders"];
+    let pair = &schema["$defs"]["OrderPair"];
     assert_eq!(
-        property_names(pair),
-        ["cursor", "request"].into_iter().collect()
+        sorted(tag_constants(pair, "row")),
+        sorted(["document", "hit"]),
+        "a pair is tagged with the row kind its orders are orders of"
     );
-    for order in ["cursor", "request"] {
+    for branch in branches(pair) {
+        let (row, half) = match tag_constant(branch, "row") {
+            Some("document") => ("document", "#/$defs/Sort"),
+            Some("hit") => ("hit", "#/$defs/RungSet"),
+            other => panic!("a pair advertises the row kind {other:?}"),
+        };
         assert_eq!(
-            pair["properties"][order]["$ref"].as_str(),
-            Some("#/$defs/Sort"),
-            "each order of the pair is the order a request names"
+            property_names(branch),
+            ["row", "cursor", "request"].into_iter().collect()
         );
+        for order in ["cursor", "request"] {
+            assert_eq!(
+                branch["properties"][order]["$ref"].as_str(),
+                Some(half),
+                "each half of a {row} pair is the order a {row} cursor names"
+            );
+        }
     }
 }
 
@@ -2034,21 +2141,33 @@ fn an_order_advertises_its_key_and_its_direction() {
     );
 }
 
-/// The rung set advertises the resolved set and refers to the rung vocabulary
-/// rather than restating it. The preset spellings are a surface's rendering
-/// and are advertised nowhere here.
+/// The retrieval rungs as the schemas spell them, derived from the rung
+/// vocabulary itself.
+fn retrieval_rung_spellings() -> Vec<Value> {
+    [Rung::Lexical, Rung::Vector, Rung::Expansion, Rung::Rerank]
+        .into_iter()
+        .filter(|rung| rung.retrieves())
+        .map(|rung| serde_json::to_value(rung).expect("a rung as JSON"))
+        .collect()
+}
+
+/// The rung set advertises an array of rungs, each once, holding a retrieval
+/// rung, and refers to the rung vocabulary rather than restating it. The
+/// preset spellings are a surface's rendering and are advertised nowhere here.
 #[test]
 fn a_rung_set_advertises_the_resolved_set_and_no_preset() {
     let schema = schema_of::<RungSet>();
-    assert_eq!(property_names(&schema), ["rungs"].into_iter().collect());
+    assert_eq!(schema["type"].as_str(), Some("array"));
     assert_eq!(
-        schema["properties"]["rungs"]["type"].as_str(),
-        Some("array")
-    );
-    assert_eq!(
-        schema["properties"]["rungs"]["minItems"].as_u64(),
+        schema["minItems"].as_u64(),
         Some(1),
         "the set advertises a ladder that runs no rung: {schema}"
+    );
+    assert_eq!(schema["uniqueItems"].as_bool(), Some(true));
+    assert_eq!(
+        schema["contains"]["enum"].as_array(),
+        Some(&retrieval_rung_spellings()),
+        "the set advertises a ladder holding no retrieval rung: {schema}"
     );
     assert!(
         schema["$defs"]["Rung"].is_object(),
@@ -2058,6 +2177,59 @@ fn a_rung_set_advertises_the_resolved_set_and_no_preset() {
         assert!(
             !schema.to_string().contains(preset),
             "the set advertises the preset spelling `{preset}`"
+        );
+    }
+}
+
+/// A selection advertises its two members under the `select` tag, each holding
+/// its own field and refusing every other, so a surface validating a request
+/// refuses one that both names a set and subtracts from one. No preset is
+/// advertised.
+#[test]
+fn a_rung_selection_advertises_two_disjoint_members_and_no_preset() {
+    let schema = schema_of::<RungSelection>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "select")),
+        sorted(["enabled", "exactly"])
+    );
+    for branch in branches(&schema) {
+        let fields: BTreeSet<&str> = property_names(branch);
+        let expected: BTreeSet<&str> = match tag_constant(branch, "select") {
+            Some("enabled") => ["select", "without"].into_iter().collect(),
+            Some("exactly") => ["select", "rungs"].into_iter().collect(),
+            other => panic!("a selection advertises the member {other:?}"),
+        };
+        assert_eq!(fields, expected, "a selection holds another's field");
+        if tag_constant(branch, "select") == Some("enabled") {
+            let without = &schema["$defs"]["RungSubtraction"];
+            assert_eq!(
+                branch["properties"]["without"]["$ref"].as_str(),
+                Some("#/$defs/RungSubtraction")
+            );
+            assert_eq!(without["type"].as_str(), Some("array"));
+            assert_eq!(without["uniqueItems"].as_bool(), Some(true));
+            let every: Vec<Value> = without["not"]["allOf"]
+                .as_array()
+                .expect("a subtraction advertises what it may not leave out")
+                .iter()
+                .map(|clause| clause["contains"]["const"].clone())
+                .collect();
+            assert_eq!(
+                every,
+                retrieval_rung_spellings(),
+                "a subtraction advertises that it may leave out every retrieval rung: {without}"
+            );
+        }
+        assert_eq!(
+            branch["additionalProperties"].as_bool(),
+            Some(false),
+            "a selection advertises that it drops a field it does not hold: {branch}"
+        );
+    }
+    for preset in ["hybrid", "semantic"] {
+        assert!(
+            !schema.to_string().contains(preset),
+            "the selection advertises the preset spelling `{preset}`"
         );
     }
 }
@@ -2236,13 +2408,13 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
     );
 }
 
-/// Every paged read report is a page of its own row type, so a surface
-/// publishing a verb publishes the continuation with the rows.
+/// Every paged read report but search's is a page of its own row type, so a
+/// surface publishing a verb publishes the continuation with the rows. A
+/// search report holds its page beside the ladder that ranked it.
 #[test]
 fn every_paged_read_report_is_a_page_of_its_row() {
     for (report, row) in [
         (schema_of::<FindReport>(), "DocumentRow"),
-        (schema_of::<SearchReport>(), "Hit"),
         (schema_of::<CountReport>(), "Tally"),
         (schema_of::<DescribeReport>(), "Facet"),
     ] {

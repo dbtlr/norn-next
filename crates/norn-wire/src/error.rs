@@ -356,7 +356,8 @@ pub enum ReasonCode {
     /// `vault/cursor-order-changed` — the cursor names no position in the
     /// order the request reads: it was minted under one order and continued
     /// under another — another schema's order, another key, or another
-    /// direction. The detail is the two orders.
+    /// direction, or for a hit's cursor a ranking by another ladder. The
+    /// detail is the two orders.
     #[serde(rename = "vault/cursor-order-changed")]
     VaultCursorOrderChanged,
     /// `vault/unreadable-bound` — a value a comparing part names — an

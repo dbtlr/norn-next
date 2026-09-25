@@ -19,21 +19,22 @@ use norn_wire::{
     CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ControlFile,
     ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged, DescribeParams,
     Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow,
-    Drift, ElsewhereNamesDocuments, EmptyLadder, EngineHealth, EngineSection, EngineStatus,
-    ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind,
-    FindingRow, FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow,
-    ListParams, ListReport, MaintainerIdentity, ModelIdentity, Moved, NameSet, NoProblems,
-    NonFiniteScore, NotReady, Page, PagedRows, PathRuleKind, PollBackend, Predicate, Published,
-    ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem,
-    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace,
-    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
-    RollUp, Rung, RungReport, RungSet, SchemaSource, Score, SearchParams, SetParams, SetReport,
-    Severity, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind,
-    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
-    UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
-    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    Drift, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
+    ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind, FindingRow,
+    FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
+    KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams,
+    ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet, NoProblems,
+    NoRetrievalRung, NonFiniteScore, NotReady, Page, PagedRows, PathRuleKind, PollBackend,
+    Predicate, Published, ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration,
+    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
+    ReloadStage, Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
+    ResolveReport, RollUp, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
+    Score, SearchParams, SearchReport, SetParams, SetReport, Severity, SidecarRevision, Snapshot,
+    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
+    TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
+    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
+    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer,
+    VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -269,6 +270,9 @@ fn error_details() -> Vec<ErrorDetail> {
                 of: CollectionSelector::Tags,
             },
         ),
+        ErrorDetail::cursor_order_changed(
+            CursorOrderChanged::minted_raw(None).in_ladders(RungSet::lexical(), fused_ladder()),
+        ),
     ]);
     details.extend(
         not_ready_states()
@@ -418,6 +422,16 @@ fn score(value: f64) -> Score {
     Score::new(value).expect("a finite relevance score")
 }
 
+/// The sidecar state at `revision` within the sidecar epoch `sidecar-1`.
+fn sidecar(revision: u64) -> SidecarRevision {
+    SidecarRevision::new("sidecar-1", revision)
+}
+
+/// A ladder above the floor: the lexical and vector rungs fused.
+fn fused_ladder() -> RungSet {
+    RungSet::of([Rung::Lexical, Rung::Vector]).expect("a ladder that runs a rung")
+}
+
 /// Every paged row type, with one key per shape its order takes.
 fn cursor_keys() -> Vec<CursorKey> {
     let mut keys = vec![
@@ -431,7 +445,8 @@ fn cursor_keys() -> Vec<CursorKey> {
             None,
             "notes/a.md",
         ),
-        CursorKey::hit(score(0.5), "notes/a.md"),
+        CursorKey::hit(RungSet::lexical(), score(0.5), "notes/a.md"),
+        CursorKey::hit(fused_ladder(), score(0.5), "notes/a.md"),
         CursorKey::tally([Some("note".to_string()), None]),
         CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", 7),
     ];
@@ -459,7 +474,7 @@ fn cursors() -> Vec<Cursor> {
         .into_iter()
         .map(|key| {
             Cursor::new(
-                Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4)),
+                Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(4))),
                 key,
             )
         })
@@ -474,6 +489,17 @@ fn cursors() -> Vec<Cursor> {
 /// Every rung a ladder declares.
 fn rungs() -> Vec<Rung> {
     vec![Rung::Lexical, Rung::Vector, Rung::Expansion, Rung::Rerank]
+}
+
+/// Every selection a search asks for its rungs by: the enabled set whole, the
+/// enabled set less a rung, and an exact set.
+fn rung_selections() -> Vec<RungSelection> {
+    vec![
+        RungSelection::enabled(),
+        RungSelection::enabled_without([Rung::Vector])
+            .expect("a subtraction leaving a retrieval rung"),
+        RungSelection::exactly(RungSet::of(rungs()).expect("a ladder that runs a rung")),
+    ]
 }
 
 /// Every freshness a stateful rung reports.
@@ -509,22 +535,34 @@ fn rung_reports() -> Vec<RungReport> {
     reports
 }
 
-/// Every reading an answer is taken under, with and without a ladder.
+/// Every reading an answer is taken under.
 fn answer_readings() -> Vec<AnswerReading> {
+    vec![AnswerReading::new(TrustState::Ready, "epoch-1", 12)]
+}
+
+/// A ladder a search declares: the floor alone, every rung at once, and a
+/// ladder of vectors without the floor.
+fn ladder_declarations() -> Vec<LadderDeclaration> {
     vec![
-        AnswerReading::new(TrustState::Ready, "epoch-1", 12, None),
-        AnswerReading::new(
-            TrustState::Ready,
-            "epoch-1",
-            12,
-            Some(LadderDeclaration::new(rung_reports(), false)),
-        ),
-        AnswerReading::new(
-            TrustState::Ready,
-            "epoch-1",
-            12,
-            Some(LadderDeclaration::new(vec![RungReport::lexical()], true)),
-        ),
+        LadderDeclaration::lexical(),
+        LadderDeclaration::new(
+            vec![
+                RungReport::lexical(),
+                RungReport::vector(ModelIdentity::new("stub", "1"), Freshness::trailing(3)),
+                RungReport::expansion(ModelIdentity::new("stub", "1")),
+                RungReport::rerank(ModelIdentity::new("stub", "1")),
+            ],
+            false,
+        )
+        .expect("a ladder in ladder order holding a retrieval rung"),
+        LadderDeclaration::new(
+            vec![RungReport::vector(
+                ModelIdentity::new("stub", "1"),
+                Freshness::rescanning(),
+            )],
+            false,
+        )
+        .expect("a ladder in ladder order holding a retrieval rung"),
     ]
 }
 
@@ -560,6 +598,11 @@ fn answer_advisories() -> Vec<AnswerAdvisory> {
         AnswerAdvisory::mixed_offset("due", ComparedBy::Sort),
         AnswerAdvisory::mixed_offset("due", ComparedBy::Group),
         AnswerAdvisory::mixed_offset("due", ComparedBy::Predicate),
+        AnswerAdvisory::rung_skipped(
+            Rung::Vector,
+            RungSkipReason::unavailable("the engine slot is empty"),
+        ),
+        AnswerAdvisory::rung_depth_reached(Rung::Vector),
     ]
 }
 
@@ -1108,6 +1151,14 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .collect::<BTreeSet<_>>(),
         advertised::<Unsatisfied>(Some("part")),
         "the parts built here are not the parts the vocabulary holds"
+    );
+    assert_eq!(
+        rung_selections()
+            .iter()
+            .map(|selection| tag_string(selection, "select"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<RungSelection>(Some("select")),
+        "the selections built here are not the selections the vocabulary holds"
     );
     assert_eq!(
         answer_advisories()
@@ -1774,7 +1825,11 @@ fn a_cursor_key_names_the_rows_it_is_a_position_among() {
             PagedRows::Document,
         ),
         (
-            CursorKey::hit(Score::new(0.5).expect("a finite score"), "notes/a.md"),
+            CursorKey::hit(
+                RungSet::lexical(),
+                Score::new(0.5).expect("a finite score"),
+                "notes/a.md",
+            ),
             PagedRows::Hit,
         ),
         (
@@ -2694,7 +2749,7 @@ fn a_hit_cursor_carries_its_score_bit_for_bit() {
     for value in spread.into_iter().filter(|value| value.is_finite()) {
         let cursor = Cursor::new(
             Snapshot::new("epoch-1", 3, None, None),
-            CursorKey::hit(score(value), "notes/a.md"),
+            CursorKey::hit(RungSet::lexical(), score(value), "notes/a.md"),
         );
         let json = wire(&cursor);
         let back: Cursor = serde_json::from_str(&json).unwrap_or_else(|error| {
@@ -2820,7 +2875,7 @@ fn a_score_that_is_not_finite_is_no_score() {
     }
     let overflowing = concat!(
         r#"{"snapshot":{"epoch":"e","generation":1,"schema_fingerprint":null,"#,
-        r#""sidecar_revision":null},"key":{"row":"hit","score":1e400,"path":"a.md"}}"#
+        r#""sidecar_revision":null},"key":{"row":"hit","ladder":["lexical"],"score":1e400,"path":"a.md"}}"#
     );
     assert!(
         serde_json::from_str::<Cursor>(&opaque(overflowing.as_bytes())).is_err(),
@@ -2878,7 +2933,7 @@ fn norn_wire_test_base64(bytes: &[u8]) -> String {
 /// The cursor every continuation rule below is read against.
 fn minted() -> Cursor {
     Cursor::new(
-        Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4)),
+        Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(4))),
         CursorKey::ordinal(CollectionSelector::Headings, 1),
     )
 }
@@ -2886,20 +2941,19 @@ fn minted() -> Cursor {
 /// An establishment that has not moved at all reports nothing.
 #[test]
 fn an_unmoved_establishment_reports_nothing() {
-    let exact = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4));
+    let exact = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(4)));
     assert_eq!(minted().continuation(&exact), Ok(vec![]));
 }
 
 /// A database that is not the one the cursor was minted from reports `epoch`,
 /// and the generation beside it is not reported: a rebuild restarts the write
-/// count, so a count read against another database compares nothing.
+/// count, so a count read against another database compares nothing. A
+/// sidecar whose own epoch and revision have not moved is not reported: its
+/// epoch is its own, not the store's.
 #[test]
 fn a_rebuilt_database_reports_the_epoch_and_not_the_generation() {
-    let rebuilt = Snapshot::new("epoch-2", 3, Some("fp-1".to_string()), Some(4));
-    assert_eq!(
-        minted().continuation(&rebuilt),
-        Ok(vec![Moved::Epoch, Moved::SidecarRevision])
-    );
+    let rebuilt = Snapshot::new("epoch-2", 3, Some("fp-1".to_string()), Some(sidecar(4)));
+    assert_eq!(minted().continuation(&rebuilt), Ok(vec![Moved::Epoch]));
 }
 
 /// A generation that differs inside one epoch reports `generation` whichever
@@ -2909,7 +2963,12 @@ fn a_rebuilt_database_reports_the_epoch_and_not_the_generation() {
 #[test]
 fn a_generation_that_differs_in_either_direction_reports_the_generation() {
     for generation in [13, 11] {
-        let written = Snapshot::new("epoch-1", generation, Some("fp-1".to_string()), Some(4));
+        let written = Snapshot::new(
+            "epoch-1",
+            generation,
+            Some("fp-1".to_string()),
+            Some(sidecar(4)),
+        );
         assert_eq!(
             minted().continuation(&written),
             Ok(vec![Moved::Generation]),
@@ -2919,20 +2978,32 @@ fn a_generation_that_differs_in_either_direction_reports_the_generation() {
 }
 
 /// A sidecar at another revision reports `sidecar_revision`, and so does one
-/// at the same number under another epoch: the revision is epoch-qualified, so
-/// two epochs share no scale for it to be compared on.
+/// at the same revision under another sidecar epoch: a rebuilt sidecar counts
+/// its revisions again from the start, so two sidecar epochs share no scale
+/// for a revision to be compared on. A sidecar gone from the answer has moved
+/// too.
 #[test]
 fn a_sidecar_moves_with_its_revision_and_with_its_epoch() {
-    let drained = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(5));
+    let drained = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(5)));
     assert_eq!(
         minted().continuation(&drained),
         Ok(vec![Moved::SidecarRevision])
     );
-    let requalified = Snapshot::new("epoch-2", 12, Some("fp-1".to_string()), Some(4));
+    let rebuilt = Snapshot::new(
+        "epoch-1",
+        12,
+        Some("fp-1".to_string()),
+        Some(SidecarRevision::new("sidecar-2", 4)),
+    );
     assert_eq!(
-        minted().continuation(&requalified),
-        Ok(vec![Moved::Epoch, Moved::SidecarRevision]),
-        "a revision another database qualifies was read as the same revision"
+        minted().continuation(&rebuilt),
+        Ok(vec![Moved::SidecarRevision]),
+        "an equal revision under another sidecar epoch was read as the same state"
+    );
+    let gone = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), None);
+    assert_eq!(
+        minted().continuation(&gone),
+        Ok(vec![Moved::SidecarRevision])
     );
 }
 
@@ -2945,13 +3016,13 @@ fn a_cursor_that_read_no_sidecar_reports_nothing_about_one() {
         Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), None),
         CursorKey::ordinal(CollectionSelector::Headings, 1),
     );
-    for revision in [None, Some(4)] {
+    for revision in [None, Some(sidecar(4))] {
         assert_eq!(
             without.continuation(&Snapshot::new(
                 "epoch-1",
                 12,
                 Some("fp-1".to_string()),
-                revision
+                revision.clone()
             )),
             Ok(vec![]),
             "a cursor that read no sidecar reported one at {revision:?}"
@@ -2962,36 +3033,145 @@ fn a_cursor_that_read_no_sidecar_reports_nothing_about_one() {
 /// Everything at once, in the fixed order the list promises.
 #[test]
 fn a_continuation_reports_every_part_in_one_fixed_order() {
-    let inside = Snapshot::new("epoch-1", 99, Some("fp-1".to_string()), Some(5));
+    let inside = Snapshot::new("epoch-1", 99, Some("fp-1".to_string()), Some(sidecar(5)));
     assert_eq!(
         minted().continuation(&inside),
         Ok(vec![Moved::Generation, Moved::SidecarRevision])
     );
-    let rebuilt = Snapshot::new("epoch-2", 99, Some("fp-1".to_string()), Some(5));
+    let rebuilt = Snapshot::new(
+        "epoch-2",
+        99,
+        Some("fp-1".to_string()),
+        Some(SidecarRevision::new("sidecar-2", 4)),
+    );
     assert_eq!(
         minted().continuation(&rebuilt),
         Ok(vec![Moved::Epoch, Moved::SidecarRevision])
     );
 }
 
-/// **A refused continuation's two document orders travel as one pair.** Both
-/// orders are named, or neither is: a pair missing one order does not parse.
+/// **A refused continuation names at most one pair of orders, of one row
+/// kind**, tagged `row` as the cursor key is: two document orders, or two
+/// ladders. Both halves are named, or neither is: a pair missing one does not
+/// parse.
 #[test]
-fn a_changed_orders_document_orders_are_one_pair() {
-    let changed = CursorOrderChanged::minted_raw(None).in_orders(
+fn a_changed_orders_pair_is_one_pair_of_one_row_kind() {
+    let documents = CursorOrderChanged::minted_raw(None).in_orders(
         Sort::new(SortKey::field("due"), Direction::Ascending),
         Sort::new(SortKey::field("due"), Direction::Descending),
     );
-    let pinned = r#"{"minted_under":null,"current":null,"orders":{"cursor":{"key":{"by":"field","key":"due"},"direction":"ascending"},"request":{"key":{"by":"field","key":"due"},"direction":"descending"}}}"#;
     assert_eq!(
-        serde_json::to_string(&changed).expect("the change serializes"),
-        pinned
+        wire(&documents),
+        concat!(
+            r#"{"minted_under":null,"current":null,"orders":{"row":"document","#,
+            r#""cursor":{"key":{"by":"field","key":"due"},"direction":"ascending"},"#,
+            r#""request":{"key":{"by":"field","key":"due"},"direction":"descending"}}}"#
+        )
     );
-    let half = r#"{"minted_under":null,"current":null,"orders":{"cursor":{"key":{"by":"path"},"direction":"ascending"}}}"#;
-    assert!(
-        serde_json::from_str::<CursorOrderChanged>(half).is_err(),
-        "a pair naming one order parsed"
+    let hits = CursorOrderChanged::minted_raw(None).in_ladders(RungSet::lexical(), fused_ladder());
+    assert_eq!(
+        wire(&hits),
+        concat!(
+            r#"{"minted_under":null,"current":null,"orders":{"row":"hit","#,
+            r#""cursor":["lexical"],"request":["lexical","vector"]}}"#
+        )
     );
+    for changed in [&documents, &hits] {
+        round_trip(changed);
+    }
+    assert_eq!(
+        documents
+            .clone()
+            .in_ladders(RungSet::lexical(), fused_ladder()),
+        hits,
+        "a change named a second pair beside the first"
+    );
+    for half in [
+        r#"{"minted_under":null,"current":null,"orders":{"row":"document","cursor":{"key":{"by":"path"},"direction":"ascending"}}}"#,
+        r#"{"minted_under":null,"current":null,"orders":{"row":"hit","cursor":["lexical"]}}"#,
+        r#"{"minted_under":null,"current":null,"orders":{"row":"hit","cursor":{"key":{"by":"path"},"direction":"ascending"},"request":{"key":{"by":"path"},"direction":"ascending"}}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<CursorOrderChanged>(half).is_err(),
+            "`{half}` parsed as a pair"
+        );
+    }
+}
+
+/// A hit cursor is a position in the ranking its ladder makes, on that
+/// ladder's scale. Continued under another ladder it is refused, naming both
+/// ladders; continued under its own it resumes at its score and path and is
+/// judged as any continuation is, and a refusal on its fingerprint names both
+/// ladders too.
+#[test]
+fn a_hit_cursor_continued_under_another_ladder_is_refused_naming_both() {
+    let snapshot = || Snapshot::new("epoch-1", 12, None, Some(sidecar(4)));
+    let lexical = Cursor::new(
+        snapshot(),
+        CursorKey::hit(RungSet::lexical(), score(0.5), "notes/a.md"),
+    );
+    assert_eq!(
+        lexical.ranked_continuation(&snapshot(), &fused_ladder()),
+        Some(Err(
+            CursorOrderChanged::minted_raw(None).in_ladders(RungSet::lexical(), fused_ladder())
+        ))
+    );
+    let resumed = |now: &Snapshot| {
+        let resume = lexical
+            .ranked_continuation(now, &RungSet::lexical())
+            .expect("a hit cursor continues a ranking")
+            .expect("a hit cursor continued under its own ladder");
+        (resume.score, resume.path.to_string(), resume.moved)
+    };
+    assert_eq!(
+        resumed(&snapshot()),
+        (score(0.5), "notes/a.md".to_string(), vec![])
+    );
+    let drained = Snapshot::new("epoch-1", 13, None, Some(sidecar(5)));
+    assert_eq!(
+        resumed(&drained),
+        (
+            score(0.5),
+            "notes/a.md".to_string(),
+            vec![Moved::Generation, Moved::SidecarRevision]
+        )
+    );
+
+    let typed = Cursor::new(
+        Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), None),
+        CursorKey::hit(fused_ladder(), score(0.5), "notes/a.md"),
+    );
+    let unfingerprinted = Snapshot::new("epoch-1", 12, None, None);
+    assert_eq!(
+        typed.ranked_continuation(&unfingerprinted, &fused_ladder()),
+        Some(Err(
+            CursorOrderChanged::new("fp-1", None).in_ladders(fused_ladder(), fused_ladder())
+        ))
+    );
+    assert_eq!(
+        typed.ranked_continuation(&unfingerprinted, &RungSet::lexical()),
+        Some(Err(
+            CursorOrderChanged::new("fp-1", None).in_ladders(fused_ladder(), RungSet::lexical())
+        ))
+    );
+}
+
+/// A cursor that is no hit's names no position in any ranking, so a ranked
+/// continuation of it is no continuation at all rather than one judged
+/// without a ladder.
+#[test]
+fn a_cursor_that_is_no_hits_is_no_ranked_continuation() {
+    let now = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(4)));
+    for key in cursor_keys()
+        .into_iter()
+        .filter(|key| !matches!(key, CursorKey::Hit { .. }))
+    {
+        assert_eq!(
+            Cursor::new(now.clone(), key.clone()).ranked_continuation(&now, &RungSet::lexical()),
+            None,
+            "the cursor keyed {key:?} continued a ranking"
+        );
+    }
 }
 
 /// A cursor minted under one order and continued under another refuses: the
@@ -3064,12 +3244,12 @@ fn a_page_carries_its_rows_its_continuation_and_what_moved() {
 /// the snake_case names the rest of the vocabulary uses.
 #[test]
 fn a_snapshot_is_the_reading_an_answer_was_established_under() {
-    let snapshot = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(4));
+    let snapshot = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(4)));
     assert_eq!(
         wire(&snapshot),
         concat!(
             r#"{"epoch":"epoch-1","generation":12,"#,
-            r#""schema_fingerprint":"fp-1","sidecar_revision":4}"#
+            r#""schema_fingerprint":"fp-1","sidecar_revision":{"epoch":"sidecar-1","revision":4}}"#
         )
     );
     round_trip(&snapshot);
@@ -3093,18 +3273,105 @@ fn every_answer_reading_survives_the_round_trip() {
     }
 }
 
-/// A reading is the trust state, the database, how far its writes had got, and
-/// the ladder where a model ran. A `null` ladder is an answer no model
-/// contributed to.
+/// A reading is the trust state, the database, and how far its writes had
+/// got. The ladder a search ran is the search report's, not the reading's, so
+/// it has one home.
 #[test]
-fn a_reading_carries_the_trust_state_the_database_and_the_ladder() {
+fn a_reading_carries_the_trust_state_and_the_database() {
     assert_eq!(
-        wire(&AnswerReading::new(TrustState::Ready, "epoch-1", 12, None)),
+        wire(&AnswerReading::new(TrustState::Ready, "epoch-1", 12)),
+        r#"{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12}"#
+    );
+}
+
+/// A search report is the ladder that ranked it and the page of hits, each in
+/// a field of its own. There is no search report without a ladder: the lexical
+/// floor alone is declared as `[lexical]`, repeatable, and a report arriving
+/// without one does not parse.
+#[test]
+fn a_search_report_declares_its_ladder_beside_its_page() {
+    let report = SearchReport::new(
+        LadderDeclaration::lexical(),
+        Page::new(vec![Hit::new(path("notes/a.md"), score(0.5))], None, vec![]),
+    );
+    assert_eq!(
+        wire(&report),
         concat!(
-            r#"{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12,"#,
-            r#""ladder":null}"#
+            r#"{"ladder":{"rungs":[{"rung":"lexical"}],"repeatable":true},"#,
+            r#""page":{"rows":[{"path":"notes/a.md","score":0.5}],"next":null,"moved":[]}}"#
         )
     );
+    for ladder in ladder_declarations() {
+        round_trip(&SearchReport::new(ladder, Page::new(vec![], None, vec![])));
+    }
+    assert!(
+        serde_json::from_str::<SearchReport>(r#"{"page":{"rows":[],"next":null,"moved":[]}}"#)
+            .is_err(),
+        "a search report declaring no ladder parsed"
+    );
+    assert_eq!(
+        LadderDeclaration::lexical(),
+        LadderDeclaration::new(vec![RungReport::lexical()], true).expect("the floor alone")
+    );
+}
+
+/// A declaration names the rungs that ran in ladder order, each once, and
+/// holds a retrieval rung; one that does not is refused where it is built and
+/// where it is read alike. The rung set a hit cursor names is derived from the
+/// declaration, never built beside it.
+#[test]
+fn a_ladder_declaration_is_a_ladder_in_ladder_order() {
+    let model = || ModelIdentity::new("stub", "1");
+    let vector = || RungReport::vector(model(), Freshness::trailing(0));
+    for (rungs, refusal) in [
+        (vec![], MalformedLadder::NoRetrievalRung),
+        (
+            vec![RungReport::rerank(model())],
+            MalformedLadder::NoRetrievalRung,
+        ),
+        (
+            vec![RungReport::expansion(model()), RungReport::rerank(model())],
+            MalformedLadder::NoRetrievalRung,
+        ),
+        (
+            vec![RungReport::lexical(), RungReport::lexical()],
+            MalformedLadder::OutOfLadderOrder,
+        ),
+        (
+            vec![vector(), RungReport::lexical()],
+            MalformedLadder::OutOfLadderOrder,
+        ),
+        (
+            vec![RungReport::lexical(), vector(), vector()],
+            MalformedLadder::OutOfLadderOrder,
+        ),
+    ] {
+        let named: Vec<Rung> = rungs.iter().map(RungReport::rung).collect();
+        assert_eq!(
+            LadderDeclaration::new(rungs.clone(), true),
+            Err(refusal),
+            "{named:?} declared as a ladder"
+        );
+    }
+    for malformed in [
+        r#"{"rungs":[],"repeatable":true}"#,
+        r#"{"rungs":[{"rung":"rerank","model":{"id":"stub","version":"1"}}],"repeatable":true}"#,
+        r#"{"rungs":[{"rung":"lexical"},{"rung":"lexical"}],"repeatable":true}"#,
+        r#"{"rungs":[{"rung":"vector","model":{"id":"stub","version":"1"},"freshness":{"state":"rescanning"}},{"rung":"lexical"}],"repeatable":true}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<LadderDeclaration>(malformed).is_err(),
+            "`{malformed}` read back as a ladder"
+        );
+    }
+    assert_eq!(LadderDeclaration::lexical().rung_set(), RungSet::lexical());
+    for ladder in ladder_declarations() {
+        let declared: Vec<Rung> = ladder.rungs().iter().map(RungReport::rung).collect();
+        assert_eq!(
+            ladder.rung_set(),
+            RungSet::of(declared).expect("a declared ladder holds a retrieval rung")
+        );
+    }
 }
 
 /// A report carries what its rung has and nothing it does not: the floor
@@ -3238,6 +3505,34 @@ fn an_unsatisfied_part_is_an_object_tagged_part() {
     );
 }
 
+/// A rung left out of the enabled set is advised with the rung and the reason,
+/// and the reason carries, as its `code`, the refusal code a search naming the
+/// rung exactly meets. A rung that reached its depth is advised with the rung
+/// alone: the depth is every rung's one `RUNG_DEPTH`, which the advisory does
+/// not repeat.
+#[test]
+fn a_rung_advisory_names_the_rung_and_why() {
+    let reason = RungSkipReason::unavailable("the engine slot is empty");
+    assert_eq!(reason.code(), ReasonCode::EngineUnavailable);
+    assert_eq!(
+        tag_string(&reason, "code"),
+        flat_string(&ReasonCode::EngineUnavailable),
+        "a skip reason is spelled as another code than the refusal it stands for"
+    );
+    assert_eq!(
+        wire(&AnswerAdvisory::rung_skipped(Rung::Vector, reason)),
+        r#"{"advisory":"rung_skipped","rung":"vector","reason":{"code":"engine/unavailable","detail":"the engine slot is empty"}}"#
+    );
+    assert!(
+        serde_json::from_str::<RungSkipReason>(r#"{"code":"engine/failed","detail":"x"}"#).is_err(),
+        "a reason nobody skips a rung for read back as one"
+    );
+    assert_eq!(
+        wire(&AnswerAdvisory::rung_depth_reached(Rung::Vector)),
+        r#"{"advisory":"rung_depth_reached","rung":"vector"}"#
+    );
+}
+
 /// An answer advisory is an object tagged `advisory`, naming the key whose
 /// values a comparison assumed something about and where the request compared
 /// them.
@@ -3270,7 +3565,7 @@ fn an_answer_advisory_is_an_object_tagged_advisory() {
 /// carrying one is still complete.
 #[test]
 fn a_vault_answer_is_complete_exactly_when_nothing_was_left_unapplied() {
-    let reading = || AnswerReading::new(TrustState::Ready, "epoch-1", 12, None);
+    let reading = || AnswerReading::new(TrustState::Ready, "epoch-1", 12);
     let whole: VaultAnswer<u64> = VaultAnswer::new(reading(), vec![], 3);
     assert!(whole.is_complete());
     assert!(whole.advisories.is_empty());
@@ -3278,7 +3573,7 @@ fn a_vault_answer_is_complete_exactly_when_nothing_was_left_unapplied() {
     round_trip(&whole);
     assert_eq!(
         wire(&whole),
-        r#"{"reading":{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12,"ladder":null},"unsatisfied":[],"advisories":[],"report":3}"#
+        r#"{"reading":{"trust":{"state":"ready"},"epoch":"epoch-1","generation":12},"unsatisfied":[],"advisories":[],"report":3}"#
     );
 
     let advised: VaultAnswer<u64> =
@@ -4310,10 +4605,15 @@ fn every_read_params_shape_survives_the_round_trip() {
             .with_after(cursors().remove(0)),
     );
     round_trip(&SearchParams::new(vault.clone(), "norn"));
+    for selection in rung_selections() {
+        round_trip(&SearchParams::new(vault.clone(), "norn").with_rungs(selection));
+    }
     round_trip(
         &SearchParams::new(vault.clone(), "norn")
             .with_predicates(predicates())
-            .with_rungs(RungSet::of(rungs()).expect("a ladder that runs a rung"))
+            .with_rungs(RungSelection::exactly(
+                RungSet::of(rungs()).expect("a ladder that runs a rung"),
+            ))
             .with_min_score(score(0.25))
             .with_columns(columns())
             .with_limit(20)
@@ -4357,7 +4657,8 @@ fn every_read_params_shape_survives_the_round_trip() {
 /// Each params type is built by naming what a request cannot be built without,
 /// and every other part has a stated default. A `find` that named only its
 /// vault is every document, ordered by path, projecting the path alone; a
-/// `search` that named only its vault and its query runs the lexical floor.
+/// `search` that named only its vault and its query selects the vault's
+/// enabled set whole.
 #[test]
 fn a_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
     let vault = VaultAddress::name(name("notes"));
@@ -4371,7 +4672,7 @@ fn a_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
 
     let search = SearchParams::new(vault.clone(), "norn");
     assert_eq!(search.query, "norn");
-    assert_eq!(search.rungs, RungSet::lexical());
+    assert_eq!(search.rungs, RungSelection::enabled());
     assert_eq!(search.min_score, None);
 
     let validate = ValidateParams::new(vault.clone());
@@ -4385,26 +4686,177 @@ fn a_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
     assert!(DescribeParams::new(vault).facets.is_empty());
 }
 
-/// A search runs at least the lexical floor, so a set naming no rung is no
-/// ladder: it refuses where one is built and where one is read alike. The
-/// preset spellings are a surface's and never cross.
+/// A search runs at least one retrieval rung, so a set holding none is no
+/// ladder: the empty set, and a set of enhancers alone, which have no
+/// candidates to expand or re-order. Each refuses where one is built and where
+/// one is read alike. A set holding a retrieval rung is a ladder, the floor or
+/// no. The preset spellings are a surface's and never cross.
 #[test]
-fn a_rung_set_that_names_no_rung_is_no_ladder() {
-    assert_eq!(RungSet::of([]).expect_err("an empty ladder"), EmptyLadder);
+fn a_rung_set_holding_no_retrieval_rung_is_no_ladder() {
+    for enhancers in [
+        vec![],
+        vec![Rung::Rerank],
+        vec![Rung::Expansion],
+        vec![Rung::Expansion, Rung::Rerank],
+    ] {
+        assert_eq!(
+            RungSet::of(enhancers.clone()),
+            Err(NoRetrievalRung),
+            "{enhancers:?} built as a ladder"
+        );
+    }
     assert_eq!(
-        EmptyLadder::to_string(&EmptyLadder),
-        "a search runs at least the lexical floor"
+        NoRetrievalRung::to_string(&NoRetrievalRung),
+        "a search runs at least one retrieval rung: lexical or vector"
     );
+    for unladdered in ["[]", r#"["rerank"]"#, r#"["expansion","rerank"]"#] {
+        assert!(
+            serde_json::from_str::<RungSet>(unladdered).is_err(),
+            "`{unladdered}` read back as a ladder"
+        );
+    }
+    assert_eq!(wire(&RungSet::lexical()), r#"["lexical"]"#);
+    for (spelled, rungs) in [
+        (r#"["vector"]"#, vec![Rung::Vector]),
+        (r#"["vector","rerank"]"#, vec![Rung::Vector, Rung::Rerank]),
+        (
+            r#"["lexical","expansion"]"#,
+            vec![Rung::Lexical, Rung::Expansion],
+        ),
+    ] {
+        assert_eq!(
+            serde_json::from_str::<RungSet>(spelled).expect("a ladder holding a retrieval rung"),
+            RungSet::of(rungs).expect("a ladder holding a retrieval rung")
+        );
+    }
     assert!(
-        serde_json::from_str::<RungSet>(r#"{"rungs":[]}"#).is_err(),
-        "a set naming no rung read back as a ladder"
-    );
-    assert_eq!(wire(&RungSet::lexical()), r#"{"rungs":["lexical"]}"#);
-    assert!(
-        serde_json::from_str::<RungSet>(r#"{"rungs":["hybrid"]}"#).is_err(),
+        serde_json::from_str::<RungSet>(r#"["hybrid"]"#).is_err(),
         "a preset spelling read back as a rung"
     );
-    round_trip(&RungSet::of(rungs()).expect("a ladder that runs a rung"));
+    round_trip(&RungSet::of(rungs()).expect("a ladder holding a retrieval rung"));
+}
+
+/// A retrieval rung finds candidates of its own; an enhancer expands or
+/// re-orders what a retrieval rung found.
+#[test]
+fn the_retrieval_rungs_are_the_lexical_floor_and_vectors() {
+    let retrieving: Vec<Rung> = rungs()
+        .into_iter()
+        .filter(|rung| rung.retrieves())
+        .collect();
+    assert_eq!(retrieving, [Rung::Lexical, Rung::Vector]);
+}
+
+/// A set arrives holding each rung once, as the schema's `uniqueItems` says:
+/// a set naming a rung twice is refused on read rather than folded, in an
+/// exact selection and in a subtraction alike.
+#[test]
+fn a_rung_named_twice_is_refused_on_read() {
+    for twice in [
+        r#"["lexical","lexical"]"#,
+        r#"["lexical","vector","lexical"]"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RungSet>(twice).is_err(),
+            "`{twice}` read back as a set"
+        );
+    }
+    for twice in [
+        r#"{"select":"exactly","rungs":["lexical","lexical"]}"#,
+        r#"{"select":"enabled","without":["vector","vector"]}"#,
+        r#"{"select":"enabled","without":["rerank","vector","rerank"]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RungSelection>(twice).is_err(),
+            "`{twice}` read back as a selection"
+        );
+    }
+    assert!(
+        serde_json::from_str::<RungSelection>(
+            r#"{"select":"enabled","without":["rerank","vector"]}"#
+        )
+        .is_ok(),
+        "a subtraction naming each rung once was refused"
+    );
+}
+
+/// A subtraction leaving no retrieval rung selects no ladder whatever the vault
+/// enables, so it is refused where one is built and where one is read alike.
+/// A subtraction of one retrieval rung leaves the other.
+#[test]
+fn a_subtraction_of_every_retrieval_rung_is_refused() {
+    for every in [
+        vec![Rung::Lexical, Rung::Vector],
+        vec![Rung::Lexical, Rung::Vector, Rung::Rerank],
+    ] {
+        assert_eq!(
+            RungSelection::enabled_without(every.clone()),
+            Err(NoRetrievalRung),
+            "{every:?} built as a subtraction"
+        );
+    }
+    for every in [
+        r#"{"select":"enabled","without":["lexical","vector"]}"#,
+        r#"{"select":"enabled","without":["vector","lexical","expansion"]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RungSelection>(every).is_err(),
+            "`{every}` read back as a selection"
+        );
+    }
+    for rung in [Rung::Lexical, Rung::Vector] {
+        round_trip(
+            &RungSelection::enabled_without([rung])
+                .expect("a subtraction leaving a retrieval rung"),
+        );
+    }
+}
+
+/// A selection is the enabled set less the rungs it names, or exactly the
+/// rungs it names, each an object tagged `select`. A request that both names a
+/// set and subtracts from one has no spelling: each selection refuses the
+/// other's field rather than dropping it, and an exact set naming no rung is
+/// no ladder.
+#[test]
+fn a_rung_selection_subtracts_from_the_enabled_set_or_names_one_exactly() {
+    for selection in rung_selections() {
+        round_trip(&selection);
+    }
+    assert_eq!(
+        wire(&RungSelection::enabled()),
+        r#"{"select":"enabled","without":[]}"#
+    );
+    assert_eq!(
+        wire(
+            &RungSelection::enabled_without([Rung::Rerank, Rung::Vector])
+                .expect("a subtraction leaving a retrieval rung")
+        ),
+        r#"{"select":"enabled","without":["vector","rerank"]}"#
+    );
+    assert_eq!(
+        wire(&RungSelection::exactly(RungSet::lexical())),
+        r#"{"select":"exactly","rungs":["lexical"]}"#
+    );
+    for combined in [
+        r#"{"select":"exactly","rungs":["lexical"],"without":["vector"]}"#,
+        r#"{"select":"enabled","without":["vector"],"rungs":["lexical"]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RungSelection>(combined).is_err(),
+            "`{combined}` read back as a selection"
+        );
+    }
+    for lax in [
+        r#"{"select":"exactly","rungs":[]}"#,
+        r#"{"select":"exactly","rungs":["rerank"]}"#,
+        r#"{"select":"hybrid"}"#,
+        r#"{"select":"enabled"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RungSelection>(lax).is_err(),
+            "`{lax}` read back as a selection"
+        );
+    }
 }
 
 /// The set carries the rungs in ladder order whatever order a caller named
@@ -4413,7 +4865,7 @@ fn a_rung_set_that_names_no_rung_is_no_ladder() {
 fn a_rung_set_is_the_resolved_set_in_ladder_order() {
     let named = RungSet::of([Rung::Rerank, Rung::Lexical, Rung::Rerank, Rung::Vector])
         .expect("a ladder that runs a rung");
-    assert_eq!(wire(&named), r#"{"rungs":["lexical","vector","rerank"]}"#);
+    assert_eq!(wire(&named), r#"["lexical","vector","rerank"]"#);
 }
 
 /// A get report is an object tagged `shape`, and the collection shape names
@@ -4698,7 +5150,7 @@ const PINNED_PREDICATES: &str = r##"[{"op":"eq","key":"type","value":"note"},{"o
 const PINNED_COLUMNS: &str = r##"[{"col":"path"},{"col":"field","key":"due"},{"col":"body"},{"col":"links"},{"col":"headings"},{"col":"blocks"},{"col":"tags"},{"col":"findings"},{"col":"fields"}]"##;
 
 /// The opaque cursor every pinned request continues from.
-const PINNED_AFTER: &str = r##"eyJzbmFwc2hvdCI6eyJlcG9jaCI6ImVwb2NoLTEiLCJnZW5lcmF0aW9uIjoxMiwic2NoZW1hX2ZpbmdlcnByaW50IjoiZnAtMSIsInNpZGVjYXJfcmV2aXNpb24iOjR9LCJrZXkiOnsicm93IjoiZG9jdW1lbnQiLCJvcmRlciI6eyJrZXkiOnsiYnkiOiJmaWVsZCIsImtleSI6ImR1ZSJ9LCJkaXJlY3Rpb24iOiJkZXNjZW5kaW5nIn0sInNvcnQiOiIyMDI2LTAxLTAxIiwicGF0aCI6Im5vdGVzL2EubWQifX0"##;
+const PINNED_AFTER: &str = r##"eyJzbmFwc2hvdCI6eyJlcG9jaCI6ImVwb2NoLTEiLCJnZW5lcmF0aW9uIjoxMiwic2NoZW1hX2ZpbmdlcnByaW50IjoiZnAtMSIsInNpZGVjYXJfcmV2aXNpb24iOnsiZXBvY2giOiJzaWRlY2FyLTEiLCJyZXZpc2lvbiI6NH19LCJrZXkiOnsicm93IjoiZG9jdW1lbnQiLCJvcmRlciI6eyJrZXkiOnsiYnkiOiJmaWVsZCIsImtleSI6ImR1ZSJ9LCJkaXJlY3Rpb24iOiJkZXNjZW5kaW5nIn0sInNvcnQiOiIyMDI2LTAxLTAxIiwicGF0aCI6Im5vdGVzL2EubWQifX0"##;
 
 /// **A setter that does nothing is a setter nothing else catches.** A `with_`
 /// method that dropped its argument still type-checks, still hands back a
@@ -4737,7 +5189,9 @@ fn every_find_setter_lands_in_the_bytes() {
 fn every_search_setter_lands_in_the_bytes() {
     let request = SearchParams::new(VaultAddress::name(name("notes")), "norn")
         .with_predicates(predicates())
-        .with_rungs(RungSet::of(rungs()).expect("a ladder that runs a rung"))
+        .with_rungs(RungSelection::exactly(
+            RungSet::of(rungs()).expect("a ladder that runs a rung"),
+        ))
         .with_min_score(score(0.25))
         .with_columns(columns())
         .with_limit(20)
@@ -4749,7 +5203,7 @@ fn every_search_setter_lands_in_the_bytes() {
             PINNED_VAULT,
             r##","query":"norn","predicates":"##,
             PINNED_PREDICATES,
-            r##","rungs":{"rungs":["lexical","vector","expansion","rerank"]},"min_score":0.25,"columns":"##,
+            r##","rungs":{"select":"exactly","rungs":["lexical","vector","expansion","rerank"]},"min_score":0.25,"columns":"##,
             PINNED_COLUMNS,
             r##","limit":20,"after":""##,
             PINNED_AFTER,

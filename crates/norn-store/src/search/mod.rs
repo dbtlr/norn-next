@@ -7,8 +7,8 @@
 //! lexical rung and no other**: the full-text index is maintained inside the
 //! write that derives a document, so a lexical answer is transactional with
 //! derivation and runs no model. The rungs above it are answered by engines
-//! over their own state, and whatever else a request's rung set names is the
-//! host's to run and fuse. So the builder reads a [`LexicalQuery`], which names
+//! over their own state, and whatever else the ladder a request's selection
+//! resolves to holds is the host's to run and fuse. So the builder reads a [`LexicalQuery`], which names
 //! no rung set: the host builds one for the lexical rung, and the floor, the
 //! bound and the cursor it carries are that rung's own.
 //!
@@ -40,13 +40,15 @@
 //! hit, and hits are ordered by score descending, then by path in byte order.
 //! A floor admits the hits scored at or above it, on the same scale. A page
 //! holds at most its bound of hits and reads one past it to learn a next page
-//! exists; the cursor it mints names the last hit's score and path, and a
-//! continuation resumes after that position, comparing the score it carries
-//! with each match's score exactly as it was computed. On the snapshot that
-//! minted the cursor that computation is the one the page ran, so a drain a
-//! page at a time is the whole ranking; a continuation answered from another
-//! snapshot reports what moved, and resumes after the same `(score, path)` in a
-//! ranking the corpus may have moved under.
+//! exists; the cursor it mints names the lexical ladder and the last hit's
+//! score and path, and a continuation resumes after that position, comparing
+//! the score it carries with each match's score exactly as it was computed. On
+//! the snapshot that minted the cursor that computation is the one the page
+//! ran, so a drain a page at a time is the whole ranking; a continuation
+//! answered from another snapshot reports what moved, and resumes after the
+//! same `(score, path)` in a ranking the corpus may have moved under. A cursor
+//! naming another ladder is a position in another ranking, on another scale,
+//! and is refused as an order that changed.
 //!
 //! **Ranking costs the matched set.** The full-text index hands back every
 //! document matching the query; each is tested against the conjunction, every
@@ -81,8 +83,8 @@ mod words;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    AnswerAdvisory, Column, Cursor, CursorKey, Hit, Moved, Page, PagedRows, Predicate, Score,
-    SearchReport, Unsatisfied,
+    AnswerAdvisory, Column, Cursor, CursorKey, Hit, LadderDeclaration, Moved, Page, Predicate,
+    RungSet, Score, SearchReport, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -98,10 +100,11 @@ pub use statement::{SEARCH_STATEMENTS, SearchStatement};
 /// reads.
 ///
 /// **It names the lexical rung and no other.** A `search` on the wire,
-/// [`norn_wire::SearchParams`], names a rung set, and its floor, its bound and
-/// its cursor are over the answer that set makes: where the set is the lexical
-/// floor alone that answer is this rung's page, and where it names a rung above
-/// the floor it is the host's fusion of every rung's hits. So the host builds
+/// [`norn_wire::SearchParams`], selects its rungs, the host resolves that
+/// selection to a ladder, and the request's floor, bound and cursor are over
+/// the answer that ladder makes: where the ladder is the lexical floor alone
+/// that answer is this rung's page, and where it holds another rung it is the
+/// host's fusion of every rung's hits. So the host builds
 /// this request for the lexical rung itself, and **its floor, its cursor and its
 /// bound are the lexical rung's own**: a floor on the BM25 scale this rung
 /// scores on, a cursor this rung minted, and a bound on this rung's page — never
@@ -192,6 +195,9 @@ pub struct Searched {
     /// What the parts that were applied assumed: a mixed-offset comparison,
     /// once per key, in the order the request names the parts.
     pub advisories: Vec<AnswerAdvisory>,
+    /// The ladder the page was ranked by: the lexical floor alone. The
+    /// cursor the page mints names the rung set this declaration names.
+    pub ladder: LadderDeclaration,
     /// The reading the page was answered from, as a cursor carries it. The
     /// ranking is no schema's order, so it names no fingerprint.
     pub snapshot: norn_wire::Snapshot,
@@ -206,7 +212,7 @@ impl Searched {
         (
             self.unsatisfied,
             self.advisories,
-            Page::new(self.hits, self.next, self.moved),
+            SearchReport::new(self.ladder, Page::new(self.hits, self.next, self.moved)),
         )
     }
 }
@@ -279,9 +285,11 @@ impl Snapshot {
     /// value or more than [`crate::IN_VALUES_CEILING`], a declaration read from
     /// another schema than the snapshot pins, a part or a projected column
     /// this build of the store does not know, and a bound that does not read
-    /// as its key's declared type. And refused as a cursor that names no position among
-    /// hits ([`PageRefusal::CursorNotTaken`]): another kind of row's, or a
-    /// hit's carrying a schema fingerprint, which no ranking mints.
+    /// as its key's declared type. And refused as a cursor that names no
+    /// position among hits ([`PageRefusal::CursorNotTaken`]): another kind of
+    /// row's, or a hit's carrying a schema fingerprint, which no ranking mints;
+    /// and as an order that changed ([`PageRefusal::OrderChanged`]) where a
+    /// hit cursor was ranked by another ladder, naming both.
     pub fn search(
         &self,
         request: &LexicalQuery,
@@ -331,10 +339,12 @@ impl Snapshot {
             declared,
             lookups,
         )?;
+        let ladder = LadderDeclaration::lexical();
+        let ranked_by = ladder.rung_set();
         let (resume, moved) = match &request.after {
             None => (None, Vec::new()),
             Some(cursor) => {
-                let (at, moved) = self.judge_hit(cursor, lookups)?;
+                let (at, moved) = self.judge_hit(cursor, &ranked_by, lookups)?;
                 (Some(at), moved)
             }
         };
@@ -364,7 +374,13 @@ impl Snapshot {
         };
         let snapshot = self.reading_facts(None, lookups)?;
         let next = next
-            .map(|last| Ok::<_, StoreError>(CursorKey::hit(score_of(last.score)?, last.path)))
+            .map(|last| {
+                Ok::<_, StoreError>(CursorKey::hit(
+                    ranked_by.clone(),
+                    score_of(last.score)?,
+                    last.path,
+                ))
+            })
             .transpose()?
             .map(|key| Cursor::new(snapshot.clone(), key));
         // A query holding no word runs no lexical page, so its conjunction
@@ -395,6 +411,7 @@ impl Snapshot {
             moved,
             unsatisfied,
             advisories,
+            ladder,
             snapshot,
             work,
         })
@@ -403,19 +420,18 @@ impl Snapshot {
     /// Judge the cursor a search continues: where it resumes — the score and
     /// the path of the hit it stopped after — and what moved since.
     ///
-    /// A ranking is no schema's order and no page of hits mints a cursor
-    /// carrying a fingerprint, so one carrying a fingerprint names no position
-    /// among hits and is refused as not taken.
+    /// A cursor that is no hit's, or a hit's carrying a fingerprint, names no
+    /// position among hits and is refused as not taken; this rung ranks by
+    /// `ranked_by` — the lexical ladder alone — so a hit cursor minted under
+    /// any other ladder is refused as an order that changed, naming both.
     fn judge_hit(
         &self,
         cursor: &Cursor,
+        ranked_by: &RungSet,
         lookups: &mut Lookups,
     ) -> Result<((f64, String), Vec<Moved>), PageRefusal> {
-        let CursorKey::Hit { score, path, .. } = cursor.key() else {
-            return Err(PageRefusal::cursor_not_taken(cursor, PagedRows::Hit));
-        };
-        let moved = self.judge_unordered_reading(cursor, PagedRows::Hit, lookups)?;
-        Ok(((score.get(), path.clone()), moved))
+        let resume = self.judge_ranked_reading(cursor, ranked_by, lookups)?;
+        Ok(((resume.score.get(), resume.path.to_string()), resume.moved))
     }
 
     /// One page of ranked hits: at most `page.rows` of them, and the hit the

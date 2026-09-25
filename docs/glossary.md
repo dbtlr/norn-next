@@ -58,11 +58,11 @@ _Avoid_: Candidate (unqualified)
 The set of vault documents satisfying the same resolution target when that target does not identify exactly one document.
 
 **Answer reading**:
-The trust state and store generation a vault report was answered under, carried on the report so a consumer judges the answer without a second request. When a model contributed, it also names each model and, for a model that holds derived state, how far that state trailed the store; a model applied at request time holds none and reports no lag.
+The trust state and store generation a vault report was answered under, carried on the report so a consumer judges the answer without a second request. Every search answer also declares the search ladder it ran, the lexical floor alone included, so no consumer infers a ladder from an absence: each rung that ran, each model and, for a model that holds derived state, how far that state trailed the store; a model applied at request time holds none and reports no lag.
 _Avoid_: Reading (unqualified; a walk refusal that stands is also a reading)
 
 **Search ladder**:
-The ordered rungs a ranked search may answer from: a model-free lexical floor, then model-backed rungs a vault enables. A request may run fewer rungs than the vault enables.
+The ordered rungs a ranked search may answer from: a model-free lexical floor, then model-backed rungs a vault enables. The lexical floor and vectors are retrieval rungs, which find candidates of their own; expansion and re-ranking act on retrieval, expanding the query for or re-ordering what a retrieval rung found. Every ladder holds at least one retrieval rung. A request may run fewer rungs than the vault enables.
 
 **Field universe**:
 The exact set of field names a vault can be asked about: the keys its vault schema declares united with the keys its documents actually carry.

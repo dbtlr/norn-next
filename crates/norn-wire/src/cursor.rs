@@ -41,10 +41,13 @@
 //!   it forward; a generation that moved backwards inside one epoch is a
 //!   database that is not the one the cursor named, and hiding that is worse
 //!   than reporting it.
-//! - The cursor carries a sidecar revision, and either the epoch differs or
-//!   the snapshot's revision differs: `sidecar_revision` is reported. The
-//!   revision is epoch-qualified, so it compares nothing across two epochs and
-//!   is reported moved wherever the epoch moved.
+//! - The cursor carries a sidecar revision, and the snapshot's is absent or
+//!   differs in the sidecar's epoch or in the revision within it:
+//!   `sidecar_revision` is reported. The pair is the identity, because a
+//!   sidecar rebuilt under a new epoch counts its revisions again from the
+//!   start, so an equal revision under another sidecar epoch is another state.
+//!   The sidecar's epoch is its own and not the store's: a store rebuilt under
+//!   a sidecar that has not moved reports `epoch` alone.
 //! - The cursor carries a schema fingerprint and the snapshot's is absent or
 //!   different: the continuation is refused as an order that changed.
 //!
@@ -61,10 +64,13 @@
 //! key names the sort key and direction its page was read in, so such an
 //! answer refuses a document cursor continued in another key or direction
 //! too: the fingerprint says which schema an order is taken under, and the key
-//! says which order it is. Hits, facets, findings and a collection's ordinals
-//! are in no schema's order and no page of them mints a fingerprint, so an
-//! answer paging them refuses a cursor carrying one as naming no position
-//! among its rows rather than as an order that changed.
+//! says which order it is. A hit key names the ladder its page was ranked by,
+//! and [`Cursor::ranked_continuation`] refuses a hit cursor continued under
+//! another ladder: each ladder ranks on its own scale, so a score and a path
+//! taken from one ranking name no position in another. Hits, facets, findings
+//! and a collection's ordinals are in no schema's order and no page of them
+//! mints a fingerprint, so an answer paging them refuses a cursor carrying one
+//! as naming no position among its rows rather than as an order that changed.
 //!
 //! **Two asymmetries follow from those rules.** A cursor minted without a
 //! sidecar revision and continued where a sidecar now answers reports nothing
@@ -84,6 +90,7 @@ use crate::base64url;
 use crate::finding::FindingKind;
 use crate::read::find::Sort;
 use crate::read::get::CollectionSelector;
+use crate::read::search::RungSet;
 
 /// What a facet row is a facet of.
 ///
@@ -213,7 +220,8 @@ impl<'de> Deserialize<'de> for Score {
 /// Where one page of rows stopped, as the parts that row's order sorts by.
 ///
 /// On the wire a key is an object tagged `row`:
-/// `{"row":"document","order":{"key":{"by":"field","key":"due"},"direction":"ascending"},"sort":"2026-01-01","path":"notes/a.md"}`.
+/// `{"row":"document","order":{"key":{"by":"field","key":"due"},"direction":"ascending"},"sort":"2026-01-01","path":"notes/a.md"}`,
+/// `{"row":"hit","ladder":["lexical"],"score":0.5,"path":"notes/a.md"}`.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "row", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -237,9 +245,14 @@ pub enum CursorKey {
         /// The document's path.
         path: String,
     },
-    /// A ranked hit: relevance descending, then the path.
+    /// A ranked hit: the ladder the page was ranked by, then relevance
+    /// descending, then the path.
     #[non_exhaustive]
     Hit {
+        /// The rungs the answer ran, which is the ladder its selection resolved
+        /// to. The score is on this ladder's scale, and the score and the path
+        /// are a position in this ladder's ranking and in no other.
+        ladder: RungSet,
         /// The hit's relevance score.
         score: Score,
         /// The document's path.
@@ -298,9 +311,11 @@ impl CursorKey {
         }
     }
 
-    /// A ranked hit stopped at `path`, scored `score`.
-    pub fn hit(score: Score, path: impl Into<String>) -> Self {
+    /// A ranked hit of a page ranked by `ladder`, stopped at `path`, scored
+    /// `score`.
+    pub fn hit(ladder: RungSet, score: Score, path: impl Into<String>) -> Self {
         CursorKey::Hit {
+            ladder,
             score,
             path: path.into(),
         }
@@ -377,6 +392,39 @@ pub enum PagedRows {
     },
 }
 
+/// Which sidecar state an answer read: the sidecar's own epoch, and how many
+/// commits the sidecar had made within that epoch.
+///
+/// On the wire an object of the two: `{"epoch":"sidecar-1","revision":4}`.
+/// The pair, never the bare revision, is the identity: a sidecar rebuilt under
+/// a new epoch counts its revisions again from the start, so a revision
+/// compared across two epochs compares nothing.
+///
+/// The revision is the sidecar's own commit count and never the store
+/// generation the sidecar has consumed up to: two answers at one store
+/// generation may read a sidecar at two revisions, and one sidecar revision
+/// may stand across many store generations. How far a sidecar trails the
+/// store is a rung's freshness, not this.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct SidecarRevision {
+    /// The sidecar's own epoch, which is not the store's.
+    pub epoch: String,
+    /// How many commits the sidecar had made within that epoch: its own
+    /// count, and never the store generation it has consumed.
+    pub revision: u64,
+}
+
+impl SidecarRevision {
+    /// The sidecar state at `revision` within the sidecar epoch `epoch`.
+    pub fn new(epoch: impl Into<String>, revision: u64) -> Self {
+        SidecarRevision {
+            epoch: epoch.into(),
+            revision,
+        }
+    }
+}
+
 /// What a cursor was minted under, and what an establishment reads now.
 ///
 /// On the wire a snapshot is a plain object: the database the answer came
@@ -394,9 +442,10 @@ pub struct Snapshot {
     /// The fingerprint of the schema the order was taken under, and `null`
     /// where the order was raw.
     pub schema_fingerprint: Option<String>,
-    /// The sidecar's epoch-qualified revision, and `null` where the answer
-    /// read no sidecar.
-    pub sidecar_revision: Option<u64>,
+    /// The sidecar state the answer read, and `null` where the answer read no
+    /// sidecar. A cursor carrying `null` reports nothing about a sidecar
+    /// whatever its continuation reads.
+    pub sidecar_revision: Option<SidecarRevision>,
 }
 
 impl Snapshot {
@@ -405,7 +454,7 @@ impl Snapshot {
         epoch: impl Into<String>,
         generation: u64,
         schema_fingerprint: Option<String>,
-        sidecar_revision: Option<u64>,
+        sidecar_revision: Option<SidecarRevision>,
     ) -> Self {
         Snapshot {
             epoch: epoch.into(),
@@ -431,26 +480,29 @@ pub enum Moved {
     /// Writes landed in the same database after the cursor was minted, or the
     /// count they landed under is behind the one the cursor named.
     Generation,
-    /// The sidecar the answer reads is at another revision, or at a revision
-    /// another database qualifies.
+    /// The cursor read a sidecar, and the answer reads it at another
+    /// revision, under another sidecar epoch, or not at all. A sidecar the
+    /// answer reads where the cursor read none is not reported: the cursor's
+    /// position was taken without one, so there is no revision it moved from.
     SidecarRevision,
 }
 
 /// A continuation whose order no longer exists.
 ///
 /// The cursor names a position in an order the request does not read: an
-/// order taken under another schema's fingerprint, or another sort key or
-/// direction. The sequence its key names a position in is not the sequence the
-/// answer would walk, so the page is refused rather than answered from a
-/// position that means something else.
+/// order taken under another schema's fingerprint, another sort key or
+/// direction, or a ranking by another ladder. The sequence its key names a
+/// position in is not the sequence the answer would walk, so the page is
+/// refused rather than answered from a position that means something else.
 ///
 /// The detail says which order was asked for and which one stands. The two
 /// fingerprints name the schema each order is taken under: `minted_under` is
 /// `null` for a cursor minted in an order no schema gives, and `current` where
-/// the order that stands is raw. A page of documents also names the two
-/// orders themselves in `orders`, since a document cursor records the sort key
-/// and direction its page was read in; `orders` is `null` where the cursor
-/// records no such order.
+/// the order that stands is raw. Where the cursor records the order its page
+/// was read in, `orders` names that order and the request's, as one pair of
+/// one row kind: a document cursor records the sort key and direction its page
+/// was read in, and a hit cursor records the ladder its page was ranked by.
+/// `orders` is `null` where the cursor records no such order.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct CursorOrderChanged {
@@ -461,8 +513,11 @@ pub struct CursorOrderChanged {
     /// that stands is raw.
     pub current: Option<String>,
     /// The order the cursor's page was read in and the order the request's
-    /// page is read in, and `null` where the cursor records no order.
-    pub orders: Option<DocumentOrders>,
+    /// page is read in, of the one row kind the cursor is a position among,
+    /// and `null` where the cursor records no order.
+    // Boxed so the refusal every continuation may return stays small; the
+    // bytes are the pair's either way.
+    pub orders: Option<Box<OrderPair>>,
 }
 
 impl CursorOrderChanged {
@@ -485,36 +540,70 @@ impl CursorOrderChanged {
     }
 
     /// This change, between a page of documents read in `cursor` and one the
-    /// request reads in `request`.
+    /// request reads in `request`. It replaces any pair already named.
     #[must_use]
     pub fn in_orders(self, cursor: Sort, request: Sort) -> Self {
         CursorOrderChanged {
-            orders: Some(DocumentOrders::new(cursor, request)),
+            orders: Some(Box::new(OrderPair::Document { cursor, request })),
+            ..self
+        }
+    }
+
+    /// This change, between a page of hits ranked by `cursor` and one the
+    /// request ranks by `request`. It replaces any pair already named.
+    #[must_use]
+    pub fn in_ladders(self, cursor: RungSet, request: RungSet) -> Self {
+        CursorOrderChanged {
+            orders: Some(Box::new(OrderPair::Hit { cursor, request })),
             ..self
         }
     }
 }
 
-/// The two document orders a refused continuation stands between.
+/// The two orders a refused continuation stands between: the cursor's and the
+/// request's, of one row kind.
 ///
-/// On the wire the pair is an object of two orders:
-/// `{"cursor":{"key":{"by":"field","key":"due"},"direction":"ascending"},"request":{"key":{"by":"field","key":"due"},"direction":"descending"}}`.
+/// On the wire an object tagged `row`, as the cursor key it is taken from is:
+/// `{"row":"document","cursor":{"key":{"by":"path"},"direction":"ascending"},"request":{"key":{"by":"field","key":"due"},"direction":"descending"}}`,
+/// `{"row":"hit","cursor":["lexical"],"request":["lexical","vector"]}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "row", rename_all = "snake_case")]
 #[non_exhaustive]
-pub struct DocumentOrders {
-    /// The order the cursor's page was read in.
-    pub cursor: Sort,
-    /// The order the request's page is read in: the request's sort, or the
-    /// path ascending where its sort key is outside the field universe.
-    pub request: Sort,
+pub enum OrderPair {
+    /// Two document orders.
+    #[non_exhaustive]
+    Document {
+        /// The order the cursor's page was read in.
+        cursor: Sort,
+        /// The order the request's page is read in: the request's sort, or
+        /// the path ascending where its sort key is outside the field
+        /// universe.
+        request: Sort,
+    },
+    /// Two ladders a page of hits is ranked by.
+    #[non_exhaustive]
+    Hit {
+        /// The ladder the cursor's page was ranked by.
+        cursor: RungSet,
+        /// The ladder the request's page is ranked by: the one its selection
+        /// resolved to when it was answered.
+        request: RungSet,
+    },
 }
 
-impl DocumentOrders {
-    /// A cursor's page read in `cursor`, continued by a request whose page is
-    /// read in `request`.
-    pub const fn new(cursor: Sort, request: Sort) -> Self {
-        DocumentOrders { cursor, request }
-    }
+/// Where a hit cursor resumes the ranking it was minted in, and what moved
+/// under it: what [`Cursor::ranked_continuation`] answers for a cursor it
+/// continues. It is a judgment in process and never crosses the wire.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct HitResume<'a> {
+    /// The score of the hit the page stopped after.
+    pub score: Score,
+    /// The path of the hit the page stopped after.
+    pub path: &'a str,
+    /// What moved between the cursor being minted and the reading it is
+    /// continued against.
+    pub moved: Vec<Moved>,
 }
 
 /// Where a page stopped.
@@ -566,12 +655,55 @@ impl Cursor {
         } else if self.snapshot.generation != now.generation {
             moved.push(Moved::Generation);
         }
-        if self.snapshot.sidecar_revision.is_some()
-            && (epoch_moved || self.snapshot.sidecar_revision != now.sidecar_revision)
+        if let Some(minted) = &self.snapshot.sidecar_revision
+            && now.sidecar_revision.as_ref() != Some(minted)
         {
             moved.push(Moved::SidecarRevision);
         }
         Ok(moved)
+    }
+
+    /// Where this cursor resumes a page of hits ranked by `ladder` — the
+    /// score and the path of the hit it stopped after — and what has moved
+    /// between its minting and `now`, or the refusal that the order it names
+    /// no longer exists; `None` where the cursor is no hit's, which names no
+    /// position in any ranking.
+    ///
+    /// A hit cursor minted under another ladder is refused: its score and path
+    /// are a position in that ladder's ranking, on that ladder's scale, and in
+    /// no other. Every refusal of a hit cursor names both ladders, beside the
+    /// two fingerprints.
+    pub fn ranked_continuation(
+        &self,
+        now: &Snapshot,
+        ladder: &RungSet,
+    ) -> Option<Result<HitResume<'_>, CursorOrderChanged>> {
+        let CursorKey::Hit {
+            ladder: minted,
+            score,
+            path,
+        } = &self.key
+        else {
+            return None;
+        };
+        let in_ladders =
+            |changed: CursorOrderChanged| changed.in_ladders(minted.clone(), ladder.clone());
+        if minted != ladder {
+            let current = now.schema_fingerprint.clone();
+            return Some(Err(in_ladders(match &self.snapshot.schema_fingerprint {
+                Some(minted_under) => CursorOrderChanged::new(minted_under, current),
+                None => CursorOrderChanged::minted_raw(current),
+            })));
+        }
+        Some(
+            self.continuation(now)
+                .map(|moved| HitResume {
+                    score: *score,
+                    path,
+                    moved,
+                })
+                .map_err(in_ladders),
+        )
     }
 }
 

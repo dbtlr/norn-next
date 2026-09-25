@@ -16,12 +16,20 @@
 //! typo in one flag indistinguishable from a vault that cannot be read.
 //!
 //! **An advisory is not an unsatisfied part.** An [`AnswerAdvisory`] says what
-//! a part that *was* applied had to assume to answer: the part decided the
-//! answer's order or membership, and the answer is complete, but a comparison
-//! it made read something the vault's text leaves open. It sits beside the
+//! a part that *was* applied had to assume, or where it stopped, to answer:
+//! the part decided the answer, and the answer is complete, but something it
+//! decided with is worth a consumer's knowing — a comparison that read what
+//! the vault's text leaves open, a rung the enabled set holds that no engine
+//! stood for, a rung whose candidates reached its depth. It sits beside the
 //! unsatisfied parts rather than among them, so an answer carrying one is
 //! still [`VaultAnswer::is_complete`], and on the answer rather than inside a
-//! verb's report, so every verb that compares values says it one way.
+//! verb's report, so every verb says one kind of advisory one way.
+//!
+//! **A rung that stopped at its depth is advised, not unsatisfied.** The
+//! request asked for no depth: the depth is the rung's own, the rung ran, and
+//! the ladder ranked every candidate the rung handed it. Nothing the request
+//! named went unapplied, so there is no part to report; what the consumer
+//! learns is that the rung had more to hand than its depth let it.
 //!
 //! **A suggestion is advice, never a decision.** `did_you_mean` is drawn from
 //! the vault's field universe by the handler that met the unknown key. How
@@ -32,8 +40,9 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::error::ReasonCode;
 use crate::finding_row::CandidateHead;
-use crate::reading::AnswerReading;
+use crate::reading::{AnswerReading, Rung};
 use crate::target::ResolutionTarget;
 
 /// One part of a request that could not be applied to the answer.
@@ -253,7 +262,8 @@ impl Unsatisfied {
     }
 }
 
-/// Something a part of the request that was applied had to assume to answer.
+/// Something a part of the request that was applied had to assume, or where
+/// it stopped, to answer.
 ///
 /// On the wire an advisory is an object tagged `advisory`:
 /// `{"advisory":"mixed_offset","key":"due","compared_by":"sort"}`.
@@ -278,6 +288,29 @@ pub enum AnswerAdvisory {
         /// Where the request compared them.
         compared_by: ComparedBy,
     },
+    /// A search selected the vault's enabled set, a rung that set holds had
+    /// no engine standing for it, and the answer ran the rest of the set
+    /// without it. A rung is left out and advised only while a retrieval rung
+    /// remains to answer from: where leaving it out would leave none, the
+    /// search is refused with the reason's code naming that rung, never
+    /// answered empty. A search naming that rung exactly is refused for the
+    /// same reason.
+    #[non_exhaustive]
+    RungSkipped {
+        /// The rung left out.
+        rung: Rung,
+        /// Why it was left out.
+        reason: RungSkipReason,
+    },
+    /// A rung's candidates reached the rung's depth, so the ladder ranked
+    /// the candidates that rung found within that depth and none beyond it.
+    /// The depth is one number for every rung, `RUNG_DEPTH` in the
+    /// vocabulary, so the advisory names the rung alone.
+    #[non_exhaustive]
+    RungDepthReached {
+        /// The rung whose candidates reached its depth.
+        rung: Rung,
+    },
 }
 
 impl AnswerAdvisory {
@@ -287,6 +320,52 @@ impl AnswerAdvisory {
         AnswerAdvisory::MixedOffset {
             key: key.into(),
             compared_by,
+        }
+    }
+
+    /// The enabled set's `rung` was left out, for `reason`.
+    pub const fn rung_skipped(rung: Rung, reason: RungSkipReason) -> Self {
+        AnswerAdvisory::RungSkipped { rung, reason }
+    }
+
+    /// `rung`'s candidates reached its depth.
+    pub const fn rung_depth_reached(rung: Rung) -> Self {
+        AnswerAdvisory::RungDepthReached { rung }
+    }
+}
+
+/// Why a rung the enabled set holds was left out of an answer: the refusal a
+/// search naming that rung exactly meets instead.
+///
+/// On the wire an object tagged `code` with that refusal's code, as an error
+/// detail is: `{"code":"engine/unavailable","detail":"the engine slot is empty"}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "code")]
+#[non_exhaustive]
+pub enum RungSkipReason {
+    /// The rung is enabled and no engine stands for it here and now.
+    #[serde(rename = "engine/unavailable")]
+    #[non_exhaustive]
+    Unavailable {
+        /// Why no engine stands for it, in words, for a person reading a
+        /// message or a log. Clients never match on it.
+        detail: String,
+    },
+}
+
+impl RungSkipReason {
+    /// No engine stands for the rung, described by `detail`.
+    pub fn unavailable(detail: impl Into<String>) -> Self {
+        RungSkipReason::Unavailable {
+            detail: detail.into(),
+        }
+    }
+
+    /// The code a search naming the rung exactly is refused with, which is
+    /// the code this reason is spelled as.
+    pub const fn code(&self) -> ReasonCode {
+        match self {
+            RungSkipReason::Unavailable { .. } => ReasonCode::EngineUnavailable,
         }
     }
 }
@@ -311,8 +390,8 @@ pub enum ComparedBy {
 }
 
 /// What a read verb answers with: the reading it was taken under, the parts of
-/// the request that were not applied, what the parts that were applied had to
-/// assume, and the verb's own report.
+/// the request that were not applied, what the parts that were applied are
+/// advised of, and the verb's own report.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(bound(serialize = "R: Serialize", deserialize = "R: DeserializeOwned"))]
 #[non_exhaustive]
@@ -322,8 +401,12 @@ pub struct VaultAnswer<R> {
     /// The parts of the request that could not be applied. Empty when the
     /// whole request was.
     pub unsatisfied: Vec<Unsatisfied>,
-    /// What the parts that were applied had to assume to answer. Empty when
-    /// they assumed nothing.
+    /// What the parts that were applied are advised of: what one had to
+    /// assume, such as a comparison of dates across offset spellings, and
+    /// where one stopped or what it left out, such as a rung skipped from the
+    /// enabled set or a rung whose candidates reached its depth. Each was
+    /// applied and the answer is complete. Empty when there is nothing to
+    /// advise.
     pub advisories: Vec<AnswerAdvisory>,
     /// The verb's own report.
     pub report: R,
