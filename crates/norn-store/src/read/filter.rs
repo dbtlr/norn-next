@@ -5,6 +5,7 @@ use norn_db::rusqlite::types::Value;
 
 use super::FieldOrder;
 use crate::path::SuffixKey;
+use crate::resolve;
 
 /// Every filter shape a page statement narrows by, named.
 ///
@@ -228,10 +229,10 @@ impl Filter {
                 for _ in &self.values {
                     next();
                 }
-                let ranges = (self.values.len() - crate::resolve::EXCLUSION_PARAMETERS) / 2;
+                let ranges = (self.values.len() - resolve::EXCLUSION_PARAMETERS) / 2;
                 format!(
                     "{id} IN (SELECT dr.id FROM documents AS dr WHERE {})",
-                    crate::resolve::predicate("dr", key, ranges, first)
+                    resolve::predicate("dr", key, ranges, first)
                 )
             }
             ReadFilter::Tag => {
@@ -245,31 +246,29 @@ impl Filter {
                     .map(|_| next())
                     .collect();
                 let (ignored, order, path, document) = (next(), next(), next(), next());
-                let (link_key, suffix_key, path_match) = match key {
-                    SuffixKey::Raw => ("key", "suffix_key", "dp.path = lp.key"),
-                    SuffixKey::Folded => (
-                        "folded_key",
-                        "folded_suffix_key",
-                        "dp.path = lp.folded_key COLLATE NOCASE",
-                    ),
-                };
-                let admits = crate::resolve::ADMITS_FUNCTION;
+                let link_key = resolve::link_key_column(key);
                 format!(
                     "{id} IN (SELECT lk.document FROM link_keys AS lk
                      WHERE lk.{link_key} IN ({listed})
-                       AND (lk.segments IS NULL
-                            OR {admits}({ignored}, lk.segments, {order}, {path}))
+                       AND (lk.segments IS NULL OR {named_admitted})
                        AND NOT EXISTS (SELECT 1 FROM link_keys AS lo, documents AS dl
                            WHERE lo.link = lk.link AND lo.segments IS NOT NULL
-                             AND dl.{suffix_key} >= lo.{link_key}
-                             AND dl.{suffix_key}
-                                 < substr(lo.{link_key}, 1, length(lo.{link_key}) - 1) || '0'
-                             AND dl.id <> {document}
-                             AND {admits}({ignored}, lo.segments, {order}, dl.path))
+                             AND {other_in_class}
+                             AND dl.id <> {document})
                        AND NOT EXISTS (SELECT 1 FROM link_keys AS lp, documents AS dp
                            WHERE lp.link = lk.link AND lp.segments IS NULL
-                             AND {path_match} AND dp.id <> {document}))",
+                             AND {other_at_path} AND dp.id <> {document}))",
                     listed = listed.join(", "),
+                    named_admitted = resolve::admits(&ignored, "lk.segments", &order, &path),
+                    other_in_class = resolve::link_key_class(
+                        "dl",
+                        key,
+                        &format!("lo.{link_key}"),
+                        "lo.segments",
+                        &ignored,
+                        &order,
+                    ),
+                    other_at_path = resolve::link_key_path("dp", key, &format!("lp.{link_key}")),
                 )
             }
             ReadFilter::Finding => {
