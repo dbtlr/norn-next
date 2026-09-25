@@ -36,10 +36,10 @@ use std::fmt;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::error::NameSet;
+use crate::error::{NameSet, ReasonCode};
 use crate::name::VaultName;
 use crate::reading::EngineSection;
-use crate::status::{EngineStatus, RollUp};
+use crate::status::{Attention, EngineStatus, RollUp};
 
 /// What a `doctor` request carries: nothing.
 ///
@@ -165,6 +165,24 @@ impl RegistrySanity {
         }
         Ok(RegistrySanity::Problems { problems })
     }
+
+    /// Whether a problem this reading names is the cause `attention` names:
+    /// a park on a duplicate root, for a name a duplicate root here names.
+    fn owns(&self, attention: &Attention) -> bool {
+        let RegistrySanity::Problems { problems } = self else {
+            return false;
+        };
+        let Attention::Parked { name, code } = attention else {
+            return false;
+        };
+        *code == ReasonCode::HostDuplicateRoot
+            && problems.iter().any(|problem| match problem {
+                RegistryProblem::DuplicateRoot { aliases } => aliases.names().contains(name),
+                RegistryProblem::RootUnreadable { .. } | RegistryProblem::RootMissing { .. } => {
+                    false
+                }
+            })
+    }
 }
 
 impl JsonSchema for RegistrySanity {
@@ -277,7 +295,8 @@ impl EngineHealth {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct DoctorRegistryReport {
-    /// What every entry this installation serves adds up to.
+    /// What every entry this installation serves adds up to, less the
+    /// attention a registry problem here names the cause of.
     pub roll_up: RollUp,
     /// Whether the registry itself is in order.
     pub registry: RegistrySanity,
@@ -291,6 +310,11 @@ impl DoctorRegistryReport {
     /// and the health of each `engines` entry, ascending by name. The field
     /// says a producer emits the engines in name order, so the constructor is
     /// what makes this one a producer that does.
+    ///
+    /// **One cause is named once.** A duplicate root is a registry problem,
+    /// so the park it raises on each name the problem names is left out of
+    /// the roll-up's attention; a duplicate-root park on a name no problem
+    /// here names is kept. The counts are the roll-up's own.
     pub fn new(
         roll_up: RollUp,
         registry: RegistrySanity,
@@ -298,6 +322,7 @@ impl DoctorRegistryReport {
     ) -> Self {
         let mut engines: Vec<EngineHealth> = engines.into_iter().collect();
         engines.sort_by(|left, right| left.name.cmp(&right.name));
+        let roll_up = roll_up.retaining_attention(|attention| !registry.owns(attention));
         DoctorRegistryReport {
             roll_up,
             registry,

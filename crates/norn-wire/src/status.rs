@@ -560,7 +560,23 @@ impl VaultStatus {
         }
     }
 
+    /// Whether `reason` is the environmental refusal telling this entry's
+    /// last reload failure: the untrusted state an entry publishes for a
+    /// control file its leg could not read or apply carries that failure's
+    /// own words.
+    fn tells_last_reload_failure(&self, reason: &UntrustedReason) -> bool {
+        matches!(
+            (reason, &self.last_reload_failure),
+            (UntrustedReason::EnvironmentalRefusal { detail }, Some(failure))
+                if *detail == failure.detail
+        )
+    }
+
     /// Everything about this entry a roll-up names as wanting attention.
+    ///
+    /// **One cause is named once.** An untrusted state telling the last
+    /// reload failure is that failure, and is named as the reload failure
+    /// alone, which says which control file refused and where.
     fn attention(&self) -> Vec<Attention> {
         let mut attention = Vec::new();
         match &self.published {
@@ -572,7 +588,7 @@ impl VaultStatus {
             }
             Published::State {
                 state: TrustState::Untrusted { reason },
-            } => {
+            } if !self.tells_last_reload_failure(reason) => {
                 attention.push(Attention::untrusted(
                     self.registration.name.clone(),
                     reason.clone(),
@@ -713,6 +729,13 @@ impl RollUp {
     /// Every vault that wants attention, and what about it.
     pub fn attention(&self) -> &[Attention] {
         &self.attention
+    }
+
+    /// This roll-up, keeping only the attention reasons `keep` accepts. The
+    /// counts are unchanged.
+    pub(crate) fn retaining_attention(mut self, keep: impl FnMut(&Attention) -> bool) -> Self {
+        self.attention.retain(keep);
+        self
     }
 }
 

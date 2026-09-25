@@ -227,11 +227,13 @@ impl<O: EntryOps> Host<O> {
     ///
     /// **One reading of every entry answers all three.** The statuses are
     /// the ones a roll-up is computed from, so the roll-up here is the one
-    /// `vault status` naming no vault answers, the engines are read off the
-    /// same statuses, and the sanity pass reads the roots of the same
+    /// `vault status` naming no vault answers, less the duplicate-root parks
+    /// the sanity pass names as registry problems, the engines are read off
+    /// the same statuses, and the sanity pass reads the roots of the same
     /// registrations. Per-vault standing is not restated: the roll-up's
     /// attention reasons are what `doctor` reports of it, the advisories
-    /// each vault's last attachment met among them.
+    /// each vault's last attachment met among them, and one cause is named
+    /// once ([`DoctorRegistryReport::new`]).
     ///
     /// Nothing refuses it, and nothing it does changes a registration, an
     /// entry or a vault: the statuses are observations that record no demand

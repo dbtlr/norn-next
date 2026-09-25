@@ -8260,6 +8260,44 @@ mod tests {
         );
     }
 
+    /// **A reload that fails untrusting the entry is named once**: the
+    /// untrusted state it publishes tells the reload failure it retains, and
+    /// the roll-up and `doctor` name the reload failure alone.
+    #[test]
+    fn a_reload_failure_that_untrusts_the_entry_is_named_once() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        ops.reload_schema_apply_failure
+            .store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let failure = ReloadError::SchemaApply("the candidate could not be pinned".into());
+        assert_eq!(
+            host.reload(&name),
+            Err(ReloadRefusal::Core(failure.clone()))
+        );
+
+        assert!(
+            matches!(
+                status_of(&host, &name).published,
+                norn_wire::Published::State {
+                    state: TrustState::Untrusted { .. },
+                    ..
+                }
+            ),
+            "the failed reload left the entry trusted"
+        );
+        let named = [norn_wire::Attention::reload_failed(
+            name.clone(),
+            crate::refusal::control_file_failure(&failure),
+        )];
+        assert_eq!(rolled_up(&host).attention(), named);
+        assert_eq!(doctored(&host).roll_up.attention(), named);
+    }
+
     // ---- the `vault status` handler ----
 
     /// The request for `name`'s own standing.
@@ -8805,14 +8843,42 @@ mod tests {
         )
         .unwrap();
 
+        for name in [&alpha, &beta] {
+            drop(host.demand(name, AttachMode::Durable).unwrap());
+            wait_for_park(
+                &host,
+                name,
+                Demand::DuplicateRoot(a_conflict([alpha.clone(), beta.clone()])),
+            );
+        }
+        let doctor = doctored(&host);
         assert_eq!(
-            doctored(&host).registry,
+            doctor.registry,
             norn_wire::RegistrySanity::problems([
                 norn_wire::RegistryProblem::duplicate_root(colliding(&alpha, &beta)),
                 norn_wire::RegistryProblem::root_missing(gone),
             ])
             .unwrap()
         );
+        // The duplicate root is named once, as the registry's problem: the
+        // park it raises on both names is `vault status`'s to name.
+        let duplicate_parks = |attention: &[norn_wire::Attention]| {
+            attention
+                .iter()
+                .filter(|reason| {
+                    [&alpha, &beta].into_iter().any(|name| {
+                        **reason
+                            == norn_wire::Attention::parked(
+                                name.clone(),
+                                norn_wire::ReasonCode::HostDuplicateRoot,
+                            )
+                    })
+                })
+                .count()
+        };
+        assert_eq!(duplicate_parks(rolled_up(&host).attention()), 2);
+        assert_eq!(duplicate_parks(doctor.roll_up.attention()), 0);
+        assert_eq!(doctor.roll_up.parked(), rolled_up(&host).parked());
     }
 
     // ---- the `vault reload` handler ----
