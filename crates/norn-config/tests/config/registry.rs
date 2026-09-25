@@ -283,6 +283,36 @@ fn an_entry_displaced_by_insert_carries_nothing_of_its_predecessor() {
     assert!(text.contains("/home/person/fresh"), "{text}");
 }
 
+/// An edit is the entry going on rather than a new one arriving: the fields
+/// it changes are written, and the keys this build does not model stay.
+#[test]
+fn an_amended_entry_keeps_the_keys_this_build_does_not_model() {
+    let scratch = Scratch::new("amendment");
+    let dirs = scratch.dirs();
+    scratch.place(
+        &scratch.registry_file(),
+        "version = 1\n\n[vaults.notes]\nroot = \"/home/person/notes\"\npoll_backend = \"poll\"\nfuture_field = \"kept\"\n",
+    );
+
+    registry::mutate(dirs, |registry| {
+        registry.amend(entry("notes", "/home/person/moved"));
+        Ok(())
+    })
+    .expect("an amendment");
+
+    let text = scratch.text_at(&scratch.registry_file());
+    assert!(text.contains("future_field = \"kept\""), "{text}");
+    assert!(text.contains("/home/person/moved"), "{text}");
+    assert!(
+        !text.contains("poll_backend"),
+        "a field the amendment cleared was kept: {text}"
+    );
+    assert_eq!(
+        registry::read(dirs).expect("a registry").get(&name("notes")),
+        Some(&entry("notes", "/home/person/moved"))
+    );
+}
+
 /// The other direction, which was already right and stays that way: an entry
 /// that is renamed rather than replaced leaves its unknown keys behind with
 /// the name it had.

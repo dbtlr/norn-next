@@ -71,6 +71,19 @@ impl<T: JsonSchema + Serialize + DeserializeOwned> Change<T> {
     pub const fn clear() -> Self {
         Change::Clear {}
     }
+
+    /// What the field holds once this edit is made to `field`: `field` as it
+    /// stands for a keep, the value for a set, and nothing for a clear.
+    pub fn applied_to(&self, field: Option<T>) -> Option<T>
+    where
+        T: Clone,
+    {
+        match self {
+            Change::Keep {} => field,
+            Change::Set { value } => Some(value.clone()),
+            Change::Clear {} => None,
+        }
+    }
 }
 
 impl<T: JsonSchema + Serialize + DeserializeOwned> Default for Change<T> {
@@ -110,6 +123,15 @@ impl<T: JsonSchema + Serialize + DeserializeOwned> Replace<T> {
     /// Put `value` in the field.
     pub const fn set(value: T) -> Self {
         Replace::Set { value }
+    }
+
+    /// The value this edit puts in the field, and nothing where it keeps the
+    /// field as it stands.
+    pub const fn value(&self) -> Option<&T> {
+        match self {
+            Replace::Keep {} => None,
+            Replace::Set { value } => Some(value),
+        }
     }
 }
 
@@ -191,5 +213,42 @@ impl SetReport {
             registration,
             published,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend() -> Option<PollBackend> {
+        Some(PollBackend::Poll)
+    }
+
+    /// A keep leaves the field as it stands, whatever it holds.
+    #[test]
+    fn a_kept_field_stands_as_it_was() {
+        assert_eq!(Change::keep().applied_to(backend()), backend());
+        assert_eq!(Change::<PollBackend>::keep().applied_to(None), None);
+    }
+
+    /// A set puts its value in the field, over a value or over nothing.
+    #[test]
+    fn a_set_field_holds_the_value() {
+        assert_eq!(Change::set(PollBackend::Poll).applied_to(None), backend());
+    }
+
+    /// A clear empties the field, which falls back to its default.
+    #[test]
+    fn a_cleared_field_holds_nothing() {
+        assert_eq!(Change::<PollBackend>::clear().applied_to(backend()), None);
+    }
+
+    /// A replacement names the value it puts in the field, and a keep names
+    /// none.
+    #[test]
+    fn a_replacement_names_its_value_and_a_keep_names_none() {
+        let root = VaultRoot::new("/srv/vaults/notes").unwrap();
+        assert_eq!(Replace::set(root.clone()).value(), Some(&root));
+        assert_eq!(Replace::<VaultRoot>::keep().value(), None);
     }
 }
