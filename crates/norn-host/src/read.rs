@@ -6,7 +6,10 @@
 //! a [`VaultAnswer`] carrying the reading the hold was taken under. Every
 //! refusal on that path leaves as `norn-wire`'s one envelope: the address's,
 //! the hold's through [`ReadRefusal::answer`](crate::ReadRefusal::answer), and
-//! the builder's through [`page_refusal`].
+//! the builder's through [`page_refusal`]. A builder whose store finds its
+//! derived data damaged is the one refusal the entry answers for: the damage
+//! is published on the entry, which owes the rebuild that resolves it, and the
+//! read is refused with what the entry then publishes.
 //!
 //! **The answer carries the reading of the snapshot it was read from.** The
 //! reading and the snapshot come out of one hold of the entry gate, so the
@@ -21,7 +24,7 @@ use norn_wire::{
 
 use crate::address::registered_name;
 use crate::lifecycle::{EntryOps, HoldReading, Host, ReadSource, SnapshotSource};
-use crate::refusal::page_refusal;
+use crate::refusal::{PageRefused, page_refusal};
 
 /// What a read builder answered on one snapshot: the parts of the request it
 /// could not apply, what the parts it applied assumed, the verb's report, and
@@ -88,7 +91,10 @@ where
     /// that snapshot pins, and wrap what it built under the hold's reading.
     ///
     /// The hold is ended when this returns, whichever way it returns, so the
-    /// snapshot a builder ran on is given back before the answer leaves.
+    /// snapshot a builder ran on is given back before the answer leaves. A
+    /// builder refused for damage is answered through
+    /// [`Host::withdraw_for_read_damage`] while the hold stands, after the
+    /// builder returned, so no statement runs under the gate that publishes.
     pub(crate) fn answer_read<R, W>(
         &self,
         address: &norn_wire::VaultAddress,
@@ -99,7 +105,17 @@ where
             .begin_read(name)
             .map_err(|refusal| refusal.answer(name))?;
         let reading = hold.reading().answer_reading(name)?;
-        let built = build(hold.snapshot(), hold.content_model()).map_err(page_refusal)?;
+        let built = match build(hold.snapshot(), hold.content_model()) {
+            Ok(built) => built,
+            Err(refusal) => {
+                return Err(match page_refusal(refusal) {
+                    PageRefused::Answered(envelope) => envelope,
+                    PageRefused::Damaged(detail) => {
+                        self.withdraw_for_read_damage(&hold, detail).answer(name)
+                    }
+                });
+            }
+        };
         Ok(Answered {
             answer: VaultAnswer::new(reading, built.unsatisfied, built.report)
                 .with_advisories(built.advisories),

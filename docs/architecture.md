@@ -1712,6 +1712,14 @@ it found, refused as `host/entry-untrusted` with its reason, only where no work 
 A park keeps its own code. Where the demand is serving, the refusal is reader-unavailable,
 which is an entry serving every surface but this one.
 
+**A read whose store finds its derived data damaged is answered by the entry.** After the
+builder returns, one hold of the entry gate withdraws trust under the store-damaged-rebuilding
+reason, owes and schedules the rebuild, and reads the demand it published, so the read is
+refused as `host/entry-untrusted` with that reason and never as `host/read-failed`. Where a
+leg holds the entry, or a job is scheduled against it, the read publishes nothing, because
+that leg publishes over the entry when it ends: the read is refused as reader-unavailable and
+the next read to meet the damage over a free entry publishes it.
+
 A read's hold is a demand lease, and it does what a lease does: it holds the entry's idle
 interval open for as long as the read runs and restarts it when the hold drops, it clears
 the idle deadline, it withdraws an idle detach that is scheduled and not yet in flight, and

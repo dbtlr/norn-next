@@ -3368,6 +3368,61 @@ impl<O: EntryOps> Host<O> {
         })
     }
 
+    /// Answer a read whose store found its derived data damaged: publish the
+    /// damage the way a job leg that meets it does, schedule the rebuild that
+    /// resolves it, and refuse the read with what the entry then publishes.
+    ///
+    /// It runs after the builder returned, so no statement runs under the
+    /// gate it takes. The publication and the refusal come out of that one
+    /// hold, so the read answers the demand it published.
+    ///
+    /// **The entry publishes the damage only where nothing else holds it**:
+    /// it still serves `Ready` on the handle this read ran on, no claim is
+    /// held and no job is scheduled against it. A leg that is running holds
+    /// the entry's coverage and publishes over it when it ends, so damage
+    /// written beneath it would be overwritten or left owing a rebuild no one
+    /// schedules. There the read publishes nothing and is refused as the read
+    /// seam being down; the damage stands in the store, and the next read to
+    /// meet it over a free entry publishes it. An entry that already moved
+    /// off the handle this read ran on answers with what it publishes now.
+    pub(crate) fn withdraw_for_read_damage(
+        &self,
+        hold: &ReadHold<O>,
+        detail: String,
+    ) -> ReadRefusal {
+        let entry = &hold.entry;
+        let name = entry.name();
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        let published = state.published_demand();
+        let on_this_handle = state
+            .reader
+            .as_ref()
+            .is_some_and(|standing| Arc::ptr_eq(standing, &hold.reader));
+        if published != Demand::State(TrustState::Ready) {
+            return ReadRefusal::NotServing(published);
+        }
+        if !on_this_handle {
+            return ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "this entry's reads moved to another handle while this read ran",
+            ));
+        }
+        if state.claim.is_held() || state.detach_in_flight || !state.coverage.in_hand() {
+            return ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "the store found its derived data damaged while other work held this entry",
+            ));
+        }
+        state.require_rebuild();
+        state.trust = trust_withdrawn_for_damage(detail);
+        schedule_demand(&mut state, name);
+        let published = state.published_demand();
+        drop(state);
+        // The dispatch's one failure is the worker pool being gone, which is
+        // the host coming down; the published demand answers the read either
+        // way.
+        let _ = dispatch_pending(&self.shared, entry);
+        ReadRefusal::NotServing(published)
+    }
+
     /// What this host's reads have cost: how many were served, what they ran
     /// under the entry gate, and what they waited for the handles they share.
     pub fn read_evidence(&self) -> ReadReading {
@@ -10862,6 +10917,88 @@ mod tests {
         );
         ops.rebuild_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A read whose store finds its derived data damaged publishes the
+    /// damage, schedules the rebuild, and is refused with what it published.**
+    /// The refusal and the published state are one reading: the entry says
+    /// its store is damaged and being rebuilt, and the rebuild that says so is
+    /// the next leg the entry runs, with no recovery beside it.
+    #[test]
+    fn a_read_that_meets_damage_publishes_it_and_schedules_the_rebuild() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        let refusal = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+        let damaged = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+            "the store is damaged",
+        ));
+        assert_eq!(
+            refusal,
+            ReadRefusal::NotServing(Demand::State(damaged.clone())),
+            "the read was refused with another demand than the damage it published"
+        );
+        assert_eq!(
+            host.state(&name),
+            answered(damaged.clone()),
+            "the entry publishes another state than the read was refused with"
+        );
+        drop(hold);
+
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            0,
+            "the damage a read met was answered by the ladder that cannot resolve it"
+        );
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A read that meets damage while a leg holds the entry publishes
+    /// nothing.** The leg holds the entry's coverage and publishes over it
+    /// when it ends, so the read is refused as the read seam being down and
+    /// the entry goes on standing where the leg left it, owing nothing.
+    #[test]
+    fn a_read_that_meets_damage_under_a_held_claim_publishes_nothing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        let entry = host.shared.entries.get(&name).unwrap();
+        let epoch = {
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            state.claim.begin_poll(epoch);
+            epoch
+        };
+        let refusal = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "a read under a held claim was refused with {refusal:?}"
+        );
+        {
+            let mut state = entry.gate.lock().unwrap();
+            assert_eq!(state.trust, TrustState::Ready);
+            assert!(
+                !state.owes_a_rung(),
+                "the read left a rung owed under a leg"
+            );
+            state.claim.end_poll(epoch);
+        }
+        drop(hold);
+        assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -299,24 +299,36 @@ impl ReadRefusal {
     }
 }
 
+/// A store read refusal as the read seam answers it.
+#[derive(Debug)]
+pub(crate) enum PageRefused {
+    /// The refusal the read answers with.
+    Answered(ErrorEnvelope),
+    /// The store found its derived data damaged, told without the driver's
+    /// words. The read seam publishes that damage on the entry, which then
+    /// owes the rebuild that resolves it, and answers with what the entry
+    /// publishes: `host/entry-untrusted` under the store-damaged-rebuilding
+    /// reason, never `host/read-failed`.
+    Damaged(String),
+}
+
 /// A store read refusal in the wire vocabulary.
 ///
-/// Total by its match, which reads only the variant and carries no wildcard:
-/// a refusal minted in the store without an arm here, or the enum turned
-/// `#[non_exhaustive]`, does not compile. Each arm carries the variant's own
-/// facts into the detail its code spells, and the message is the store's
-/// account in words — except a statement's, whose account is told through
-/// [`store_refusal_told`] so it names no file.
+/// Total by its match, which reads only the variants and carries no wildcard:
+/// a refusal or store error minted in the store without an arm here, or
+/// either enum turned `#[non_exhaustive]`, does not compile. Each arm carries
+/// the variant's own facts into the detail its code spells, and the message is
+/// the store's account in words, except a store error's, whose account is
+/// told through [`store_refusal_told`] so it names no file.
 ///
 /// A refusal a request earns is filed under a `request/` code, and one the
 /// vault's own state earns under `vault/`. A store that finds its derived data
-/// damaged answers the entry as untrusted while that data is discarded and
-/// rebuilt; every other statement the store refused is a failed read, matched
-/// variant by variant so a store error minted without a code does not
-/// compile. [`PageRefusal::DeclarationNotPinned`] is a failed read too, and a
-/// host defect: a hold hands a builder the content model its snapshot pins, so
-/// a read through a hold never meets it.
-pub(crate) fn page_refusal(refusal: PageRefusal) -> ErrorEnvelope {
+/// damaged is [`PageRefused::Damaged`], which the read seam answers from the
+/// entry. Every other statement the store refused is a failed read, and so is
+/// [`PageRefusal::DeclarationNotPinned`], which is a host defect: a hold hands
+/// a builder the content model its snapshot pins, so a read through a hold
+/// never meets it.
+pub(crate) fn page_refusal(refusal: PageRefusal) -> PageRefused {
     let message = refusal.to_string();
     let detail = match refusal {
         PageRefusal::UnreadableBound { key, value } => ErrorDetail::unreadable_bound(key, value),
@@ -355,12 +367,8 @@ pub(crate) fn page_refusal(refusal: PageRefusal) -> ErrorEnvelope {
         PageRefusal::PartNotTaken { part, answer } => {
             ErrorDetail::part_not_taken(part, Some(answer))
         }
-        PageRefusal::Store(StoreError::Damaged { what }) => {
-            return ErrorEnvelope::new(
-                "this vault's derived data is damaged, so the read is refused while it is \
-                 discarded and rebuilt",
-                ErrorDetail::entry_untrusted(UntrustedReason::store_damaged_rebuilding(what)),
-            );
+        PageRefusal::Store(error @ StoreError::Damaged { .. }) => {
+            return PageRefused::Damaged(store_refusal_told(&error));
         }
         PageRefusal::Store(
             error @ (StoreError::Path { .. }
@@ -371,13 +379,13 @@ pub(crate) fn page_refusal(refusal: PageRefusal) -> ErrorEnvelope {
             | StoreError::KeySpace { .. }
             | StoreError::Entry { .. }),
         ) => {
-            return ErrorEnvelope::new(
+            return PageRefused::Answered(ErrorEnvelope::new(
                 "the store refused a statement this read ran",
                 ErrorDetail::read_failed(ReadFailure::statement(), store_refusal_told(&error)),
-            );
+            ));
         }
     };
-    ErrorEnvelope::new(message, detail)
+    PageRefused::Answered(ErrorEnvelope::new(message, detail))
 }
 
 /// A store refusal in words, naming no file.
@@ -1119,10 +1127,10 @@ mod page_refusal_tests {
     use norn_store::{MAX_PAGE, PageRefusal, ReadBound, StoreError, TargetAmbiguity};
     use norn_wire::{
         AnswerShape, CandidateHead, CursorOrderChanged, ErrorDetail, Hint, PagedRows, ReadFailure,
-        ReasonCode, RequestBound, RequestPart, ResolutionTarget, UntrustedReason,
+        ReasonCode, RequestBound, RequestPart, ResolutionTarget,
     };
 
-    use super::page_refusal;
+    use super::{ErrorEnvelope, PageRefused, page_refusal};
 
     /// What a store read refusal is, apart from what it carries.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1324,13 +1332,6 @@ mod page_refusal_tests {
                 ErrorDetail::part_not_taken(RequestPart::Column, Some(AnswerShape::Section)),
             ),
             (
-                PageRefusal::Store(StoreError::Damaged {
-                    what: "a row".to_string(),
-                }),
-                ReasonCode::HostEntryUntrusted,
-                ErrorDetail::entry_untrusted(UntrustedReason::store_damaged_rebuilding("a row")),
-            ),
-            (
                 PageRefusal::Store(StoreError::Sql {
                     operation: "reading a page",
                     message: "disk I/O error".to_string(),
@@ -1341,12 +1342,29 @@ mod page_refusal_tests {
         ]
     }
 
+    /// Every store read refusal the store finds its derived data damaged for:
+    /// the read seam answers it from the entry rather than as a failed read.
+    fn every_damage() -> Vec<PageRefusal> {
+        vec![PageRefusal::Store(StoreError::Damaged {
+            what: "reading a page met a database that is not readable: /data/notes/store.db"
+                .to_string(),
+        })]
+    }
+
+    /// The envelope a refusal the read answers as it stands is told with.
+    fn answered(refusal: PageRefusal) -> ErrorEnvelope {
+        match page_refusal(refusal) {
+            PageRefused::Answered(envelope) => envelope,
+            PageRefused::Damaged(detail) => panic!("answered from the entry as damage: {detail}"),
+        }
+    }
+
     /// Every store read refusal reaches exactly one code, carrying the facts
     /// its variant carries, and says so in words.
     #[test]
     fn every_store_read_refusal_reaches_its_code_and_detail() {
         for (refusal, code, detail) in every_refusal() {
-            let envelope = page_refusal(refusal.clone());
+            let envelope = answered(refusal.clone());
             assert_eq!(
                 envelope.code(),
                 &code,
@@ -1373,7 +1391,11 @@ mod page_refusal_tests {
     /// new variant is filed under is pinned rather than merely compiled.
     #[test]
     fn every_store_read_refusal_shape_is_sampled() {
-        let sampled: Vec<Shape> = every_refusal().iter().map(|(r, _, _)| shape(r)).collect();
+        let sampled: Vec<Shape> = every_refusal()
+            .iter()
+            .map(|(r, _, _)| shape(r))
+            .chain(every_damage().iter().map(shape))
+            .collect();
         for expected in every_shape() {
             assert!(
                 sampled.contains(&expected),
@@ -1382,11 +1404,27 @@ mod page_refusal_tests {
         }
     }
 
+    /// A store that finds its derived data damaged is never a failed read:
+    /// it is handed to the read seam as damage, told without the driver's
+    /// words, so the entry publishes it and owes the rebuild.
+    #[test]
+    fn damage_is_answered_from_the_entry_and_names_no_file() {
+        for refusal in every_damage() {
+            let PageRefused::Damaged(detail) = page_refusal(refusal.clone()) else {
+                panic!("{refusal:?} is answered as it stands rather than from the entry");
+            };
+            assert!(
+                !detail.contains("store.db") && !detail.contains("/data"),
+                "the damage names the database file: {detail}"
+            );
+        }
+    }
+
     /// A statement the store refused is told without the database's path, so
     /// a refusal handed to a caller holding no hold names no file to open.
     #[test]
     fn a_refused_statement_names_no_file() {
-        let envelope = page_refusal(PageRefusal::Store(StoreError::Lifecycle {
+        let envelope = answered(PageRefusal::Store(StoreError::Lifecycle {
             operation: "opening the derived database",
             path: std::path::PathBuf::from("/data/notes/store.sqlite3"),
             message: "denied".to_string(),

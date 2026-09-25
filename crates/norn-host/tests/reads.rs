@@ -446,3 +446,98 @@ fn a_read_after_a_recovery_compiles_against_the_schema_the_recovery_pinned() {
     .unwrap_or_else(|failure| panic!("{failure}"));
     assert_eq!(answered.answer.reading.trust, TrustState::Ready);
 }
+
+/// Make every page of the `documents` table and its indexes unreadable, the
+/// way a corrupt file is: the write-ahead log is folded into the database
+/// first, so the file holds every page, and then each page's type byte is
+/// overwritten with one no b-tree page carries.
+fn damage_the_documents_table(database: &Path) {
+    let (pages, page_size) = match norn_db::connect(database).expect("connecting to the store") {
+        norn_db::Attempt::Connected(connection) => {
+            connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                .expect("fold the log into the database");
+            let page_size: u64 = connection
+                .query_row("PRAGMA page_size", [], |row| row.get(0))
+                .expect("the page size");
+            let mut statement = connection
+                .prepare(
+                    "SELECT pageno FROM dbstat WHERE name IN \
+                     (SELECT name FROM sqlite_schema WHERE tbl_name = 'documents')",
+                )
+                .expect("the pages of the documents table");
+            let pages: Vec<u64> = statement
+                .query_map([], |row| row.get(0))
+                .expect("read the pages")
+                .collect::<Result<_, _>>()
+                .expect("a page number");
+            (pages, page_size)
+        }
+        norn_db::Attempt::Unreadable { detail } => panic!("the store is unreadable: {detail}"),
+    };
+    assert!(
+        !pages.is_empty() && !pages.contains(&1),
+        "the documents table stands on pages {pages:?}"
+    );
+    let mut bytes = std::fs::read(database).expect("read the database file");
+    for page in pages {
+        let at = usize::try_from((page - 1) * page_size).expect("an offset in memory");
+        bytes[at] = 0x00;
+    }
+    std::fs::write(database, bytes).expect("write the damaged database");
+}
+
+/// **A count whose store finds its derived data damaged is refused as an
+/// untrusted entry, and the entry rebuilds.** The damage is the store's own
+/// verdict on a corrupt page the count read, so the answer is
+/// `host/entry-untrusted` under the store-damaged-rebuilding reason, never a
+/// failed read; the entry publishes that and runs rung 3, which discards the
+/// damaged database and derives the vault into a new one that answers.
+#[test]
+fn a_count_that_meets_damage_is_untrusted_and_the_entry_rebuilds() {
+    let (_sandbox, vault) = a_vault("host-reads-count-damaged");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let damaged_epoch = vault.store().epoch().to_string();
+
+    damage_the_documents_table(&vault.database());
+
+    let refused = wait_until(
+        "a count to meet the damage over an entry nothing else holds",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.count(&a_count(vault.name())) {
+            Err(refused) if refused.code() == &ReasonCode::HostReaderUnavailable => {
+                Observed::pending(format!("the count was refused with {refused:?}"))
+            }
+            Err(refused) => Observed::Met(refused),
+            Ok(answered) => panic!("a damaged store answered a count: {answered:?}"),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        refused.detail(),
+        &ErrorDetail::entry_untrusted(UntrustedReason::store_damaged_rebuilding(
+            "the store is damaged"
+        )),
+        "{refused:?}"
+    );
+
+    let answered = wait_until(
+        "the rebuild to put the entry back into service",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.count(&a_count(vault.name())) {
+            Ok(answered) => Observed::Met(answered),
+            Err(refused) if refused.code() == &ReasonCode::HostReadFailed => {
+                panic!("a count over a rebuilding entry failed as a read: {refused:?}")
+            }
+            Err(refused) => Observed::pending(format!("the count was refused with {refused:?}")),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(answered.answer.reading.trust, TrustState::Ready);
+    assert_ne!(
+        answered.answer.reading.epoch.to_string(),
+        damaged_epoch,
+        "the count answered from the database the damage was met in"
+    );
+}
