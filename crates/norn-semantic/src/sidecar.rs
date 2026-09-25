@@ -22,6 +22,7 @@ use norn_embed::Model;
 
 use crate::ddl;
 use crate::error::EngineError;
+use crate::progress::{self, Unread};
 
 /// Open, or create, the sidecar at `path` for `model`.
 pub(crate) fn open(
@@ -68,11 +69,15 @@ impl norn_db::Client for SidecarClient<'_> {
             ddl::meta::ENGINE_MODEL_VERSION,
             self.model.version(),
         )?;
+        // The revision starts at zero: a created sidecar has committed no
+        // mutation of its own yet.
+        norn_db::meta::put_meta(transaction, norn_db::meta::WRITE_GENERATION, 0_i64)?;
         Ok(())
     }
 
     /// A shape this build wrote, holding another model's rows and cursors, is
-    /// rebuilt from zero.
+    /// rebuilt from zero, and so is one whose recorded progress — the revision
+    /// and the two watermarks — will not read, or records no revision.
     ///
     /// The cursors are model-blind — the drained feed is drained for whichever
     /// model was embedding — so adopting them under a new model would skip
@@ -94,20 +99,24 @@ impl norn_db::Client for SidecarClient<'_> {
             Reading::Damaged(detail) => return Ok(Adoption::Rebuild { detail }),
             Reading::Refused(error) => return Err(error),
         };
-        if recorded_id.as_deref() == Some(self.model.id())
-            && recorded_version.as_deref() == Some(self.model.version())
+        if recorded_id.as_deref() != Some(self.model.id())
+            || recorded_version.as_deref() != Some(self.model.version())
         {
-            return Ok(Adoption::Keep);
+            return Ok(Adoption::Rebuild {
+                detail: format!(
+                    "the sidecar was written for model {}/{} and this engine embeds with {}/{}",
+                    recorded_id.as_deref().unwrap_or("nothing"),
+                    recorded_version.as_deref().unwrap_or("nothing"),
+                    self.model.id(),
+                    self.model.version(),
+                ),
+            });
         }
-        Ok(Adoption::Rebuild {
-            detail: format!(
-                "the sidecar was written for model {}/{} and this engine embeds with {}/{}",
-                recorded_id.as_deref().unwrap_or("nothing"),
-                recorded_version.as_deref().unwrap_or("nothing"),
-                self.model.id(),
-                self.model.version(),
-            ),
-        })
+        match progress::read(connection) {
+            Ok(_) => Ok(Adoption::Keep),
+            Err(Unread::Damaged(detail)) => Ok(Adoption::Rebuild { detail }),
+            Err(Unread::Refused(error)) => Err(error.into()),
+        }
     }
 }
 

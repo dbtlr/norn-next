@@ -169,6 +169,13 @@ _Avoid_: Event queue, event bus
 **Store epoch**:
 The identity a derived database carries from creation to discard. Progress recorded against one epoch is not valid in the next.
 
+**Watermark**:
+How far an engine has drained one feed: how many writes the store had committed when the engine last read that feed to its end, qualified by the store epoch that count was taken in. Freshness is how many committed writes a reader's view of the store holds past the watermark.
+_Avoid_: Cursor (a cursor is a feed position, not a store generation)
+
+**Sidecar revision**:
+Which sidecar state an answer came from: a count of committed sidecar mutations, qualified by the sidecar's own epoch. It identifies state; it says nothing about freshness.
+
 **Progressive revalidation**:
 Converging derived state after a contract change by re-deriving only what the change invalidates rather than rebuilding the whole.
 

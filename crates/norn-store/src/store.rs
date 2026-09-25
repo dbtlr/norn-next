@@ -356,15 +356,21 @@ fn establish_on(
     database.open_snapshot()?;
     counters.count_snapshot();
     counters.count_statement();
-    let write_generation =
-        norn_db::meta::get_meta::<i64>(database.connection(), norn_db::meta::WRITE_GENERATION)?
-            .ok_or_else(|| StoreError::Damaged {
-                what: "the database records no write generation, so no read can say what it read"
-                    .to_string(),
-            })?;
+    let write_generation = last_write_generation(database.connection())?;
     Ok(StoreReading {
         epoch: epoch.to_string(),
         write_generation,
+    })
+}
+
+/// The last write generation committed to the database on `connection`.
+///
+/// A store records its counter at create, so one that records none is damaged:
+/// no reading of it can say what it read.
+pub(crate) fn last_write_generation(connection: &Connection) -> Result<i64, StoreError> {
+    meta::get_meta::<i64>(connection, meta::WRITE_GENERATION)?.ok_or_else(|| StoreError::Damaged {
+        what: "the database records no write generation, so no read can say what it read"
+            .to_string(),
     })
 }
 

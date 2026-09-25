@@ -32,5 +32,10 @@ toml = { workspace = true }
 # called and when it goes away. The edge is a development one, and the
 # allowlist does not describe it: dev edges cycle by construction and the
 # architecture gate reads and discards them.
+#
+# `norn-store` is named again with `induced-failure` on, because the engine
+# suite places a store write between two of a drain's feed reads through that
+# fenced seam, and an integration suite reaches it only as an external crate.
 [dev-dependencies]
+norn-store = { path = "../norn-store", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }

@@ -1090,6 +1090,18 @@ impl<'a> Request<'a> {
         )
     }
 
+    /// The last write generation committed to this store.
+    ///
+    /// Every write that takes a generation moves it, whether or not the write
+    /// changes a row either feed presents, so a consumer that records this
+    /// value beside a feed's completion records how far the store had got
+    /// rather than how far its feed rows reached. A store records its counter at create;
+    /// one that records none is damaged, because no reading of it can say what
+    /// it read.
+    pub fn write_generation(&self) -> Result<i64, StoreError> {
+        crate::store::last_write_generation(self.store.connection())
+    }
+
     /// The pinned vault-schema projection, if a schema has been pinned.
     pub fn vault_schema_pin(&self) -> Result<Option<VaultSchemaPin>, StoreError> {
         let connection = self.store.connection();

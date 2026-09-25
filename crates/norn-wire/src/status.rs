@@ -33,14 +33,15 @@
 //! one of them could not say so.
 //!
 //! **Two readings here are typed before anything produces them.** No call
-//! graph reaches an [`Advisory`] yet: the host retains the shadow home's
-//! placement at attach, and that retention lands with NORN-231, which is what
-//! `doctor` and the vault-local temporary directory work read this seam
-//! through. `freshness` on a standing [`EngineStatus`] is `None` for the same
-//! kind of reason: the engine reports a watermark once the five engine seams
-//! land with NORN-230. Both are spelled now because the shape a status answer
-//! takes is not a handler's to choose, so the handlers that arrive render
-//! these rather than minting readings of their own.
+//! graph reaches an [`Advisory`] yet: the host does not retain the shadow
+//! home's placement at attach, and that retention is what `doctor` and the
+//! vault-local temporary directory read this seam through. `freshness` on a
+//! standing [`EngineStatus`] is `None` for the same
+//! kind of reason: the host holds the engine's watermarks, and the `status`
+//! handler that judges them against a store reading is what renders one. Both
+//! are spelled now because the shape a status answer takes is not a handler's
+//! to choose, so the handlers that arrive render these rather than minting
+//! readings of their own.
 //!
 //! **A roll-up is derived on the writing side and checked on the reading
 //! side.** [`RollUp::of`] computes the counts and the attention from a list of

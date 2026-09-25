@@ -18,13 +18,16 @@
 //! **The seam is deliberately small.** It names *where* a store operation can be
 //! made to fail, and *how* — a busy database, a full disk, a corrupt or refusing
 //! creation, or the end of the process — and never what the store does next,
-//! which is the code under test.
+//! which is the code under test. One arrangement places a write rather than a
+//! failure: a write committed right after a feed page is read, which is the
+//! interleaving a lane-2 consumer's read order has to answer for and the one
+//! timing cannot place.
 //!
 //! # The whole file is behind a feature
 //!
 //! `induced-failure` gates the module declaration in `lib.rs` and forwards to
 //! `norn-db`'s feature of the same name, so a shipped build carries none of this
-//! and none of the reads into it: the call sites in `store.rs`, `increment.rs`
+//! and none of the reads into it: the call sites in `store.rs`, `increment.rs`, `feed.rs`
 //! and the substrate are gated on the same feature and compile to nothing
 //! without it. Nothing above this crate reaches a store's database, so a store's
 //! own crate is where the arming surface a suite calls has to live. The
@@ -65,9 +68,10 @@ use crate::store::Store;
 /// reach: the out-of-band executor here, the busy-injection a pinned-scalar
 /// read checks on every call, the two tears the increment checks — between two
 /// entries and at a changeset's own boundaries — the page cap an open applies,
-/// and the damage the store schema's statement list meets.
+/// the damage the store schema's statement list meets, and the write a feed
+/// page read checks for.
 ///
-/// **Two of the arrangements are per-thread and the rest are per-process**, and
+/// **Three of the arrangements are per-thread and the rest are per-process**, and
 /// the split is not incidental. A tear armed and met on one thread is the
 /// store's own suite arranging its own call. An arrangement a *host* has to
 /// meet is armed by a suite thread and fires on a worker thread the host owns,
@@ -304,6 +308,25 @@ pub mod induced_failure {
         arm_the_store_schema(database, rusqlite::ffi::SQLITE_READONLY);
     }
 
+    /// Run `write` against the store the moment this thread has read `pages`
+    /// more feed pages through [`crate::FeedRead`], before the consumer reads
+    /// anything else.
+    ///
+    /// **A write that commits between two of a consumer's reads is an
+    /// interleaving rather than a failure, and timing cannot place one.** The
+    /// feed-read handle borrows its store exclusively, so a writer on another
+    /// handle lands wherever the scheduler puts it. This arm lands it right
+    /// after a page is read, which is where the order of a consumer's reads
+    /// decides what the consumer records as covered. `write` runs on the
+    /// handle's own store, so it is an ordinary committed write. Per-thread and
+    /// one-shot; a count of zero fires after the next page, as one does.
+    pub fn write_after_feed_pages(pages: u64, write: impl FnOnce(&mut Store) + 'static) {
+        super::WRITE_AFTER_FEED_PAGES.set(Some((
+            pages.max(1),
+            Box::new(write) as Box<dyn FnOnce(&mut Store)>,
+        )));
+    }
+
     fn arm_the_store_schema(database: &std::path::Path, code: i32) {
         *super::ARMED_STORE_SCHEMA
             .lock()
@@ -313,7 +336,7 @@ pub mod induced_failure {
 
     /// Disarm every process-wide arrangement above — the page cap, the store
     /// schema's armed condition, and the two tears — plus the calling
-    /// thread's busy one-shot.
+    /// thread's busy one-shot and its armed feed-page write.
     ///
     /// The per-thread tears are absent by design: nothing survives the abort
     /// they arm. The busy one-shot is per-thread too but arms an error rather
@@ -327,6 +350,7 @@ pub mod induced_failure {
     pub fn disarm() {
         norn_db::faults::set_page_cap(0);
         norn_db::faults::clear_the_meta_read_arm();
+        super::WRITE_AFTER_FEED_PAGES.set(None);
         *super::ARMED_STORE_SCHEMA
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
@@ -341,6 +365,33 @@ std::thread_local! {
     /// clears it, because nothing runs after the abort it arms.
     static TEAR_CHANGESET_AFTER: std::cell::Cell<Option<u64>> =
         const { std::cell::Cell::new(None) };
+
+    /// How many more feed pages this thread reads before the armed write runs,
+    /// and the write. Set only by [`induced_failure::write_after_feed_pages`]
+    /// and taken by the page read it fires after.
+    static WRITE_AFTER_FEED_PAGES: std::cell::RefCell<Option<FeedPageWrite>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The countdown and the write a feed-page arm holds.
+type FeedPageWrite = (u64, Box<dyn FnOnce(&mut Store)>);
+
+/// Run the armed feed-page write where this page read is the one it waits for.
+///
+/// The arm is taken out of the thread-local before the write runs, so the
+/// write is free to read the store however it likes.
+pub(crate) fn write_if_the_feed_page_is_armed(store: &mut Store) {
+    let due = WRITE_AFTER_FEED_PAGES.with_borrow_mut(|armed| {
+        let (remaining, _) = armed.as_mut()?;
+        *remaining -= 1;
+        if *remaining > 0 {
+            return None;
+        }
+        armed.take().map(|(_, write)| write)
+    });
+    if let Some(write) = due {
+        write(store);
+    }
 }
 
 /// The value the process-wide tears hold while nothing is armed. A count no run
