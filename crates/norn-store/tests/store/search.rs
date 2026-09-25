@@ -932,6 +932,349 @@ fn a_hit_carries_the_row_its_columns_name() {
     );
 }
 
+// ---- what a ranking above the floor draws on ----
+
+/// A find of `predicates` over the fixture's vault, a page of `limit`
+/// documents at a time.
+fn candidates_of(predicates: Vec<Predicate>, limit: u32) -> FindParams {
+    FindParams::new(VaultAddress::name(
+        VaultName::new("search").expect("a vault name"),
+    ))
+    .with_predicates(predicates)
+    .with_limit(limit)
+}
+
+/// Every candidate `params` admits, drained a page at a time, and the reports
+/// of its first page.
+fn every_candidate(
+    snapshot: &Snapshot,
+    params: FindParams,
+) -> (Vec<norn_store::Candidate>, Vec<Unsatisfied>) {
+    let first = snapshot
+        .search_candidates(&params, &declared())
+        .unwrap_or_else(|refusal| panic!("the candidates of {params:?}: {refusal}"));
+    let unsatisfied = first.unsatisfied.clone();
+    let mut every = first.candidates;
+    let mut next = first.next;
+    while let Some(cursor) = next {
+        let page = snapshot
+            .search_candidates(&params.clone().with_after(cursor), &declared())
+            .expect("a continued page of candidates");
+        every.extend(page.candidates);
+        next = page.next;
+    }
+    (every, unsatisfied)
+}
+
+/// **A search's candidates are the documents its conjunction admits, in a
+/// find's path order, as a search reads the conjunction.** A tag part narrows them to the
+/// one document carrying the tag; a `resolves` part is not applicable to a
+/// search, so it is reported and filters nothing, where a find of the same
+/// part answers the documents its target resolves to; and a page at a time
+/// drains every document once.
+#[test]
+fn a_search_admits_as_candidates_what_its_conjunction_admits() {
+    let searching_store = Searching::new("search-candidates");
+    let snapshot = searching_store.snapshot();
+    let paths = |candidates: &[norn_store::Candidate]| {
+        candidates
+            .iter()
+            .map(|candidate| candidate.path().to_string())
+            .collect::<Vec<String>>()
+    };
+
+    let (every, unsatisfied) = every_candidate(&snapshot, candidates_of(Vec::new(), 3));
+    let (whole, _) = every_candidate(&snapshot, candidates_of(Vec::new(), 1024));
+    assert_eq!(
+        paths(&every),
+        paths(&whole),
+        "a drain a page at a time is not the path order one page reads"
+    );
+    let distinct: std::collections::BTreeSet<String> = paths(&every).into_iter().collect();
+    assert_eq!(
+        (every.len(), distinct.len()),
+        (14, 14),
+        "a drain is not every document once"
+    );
+    assert!(unsatisfied.is_empty());
+
+    let (tagged, _) = every_candidate(&snapshot, candidates_of(vec![Predicate::tag("draft")], 3));
+    assert_eq!(paths(&tagged), ["notes/lantern.md"]);
+
+    let target = ResolutionTarget::new("lantern").expect("a target");
+    let (resolved, unsatisfied) = every_candidate(
+        &snapshot,
+        candidates_of(vec![Predicate::resolves(target.clone())], 1024),
+    );
+    assert_eq!(paths(&resolved), paths(&every));
+    assert_eq!(
+        unsatisfied,
+        vec![Unsatisfied::resolves_not_applicable(target.clone())]
+    );
+    let found = snapshot
+        .find(
+            &candidates_of(vec![Predicate::resolves(target)], 1024),
+            &declared(),
+        )
+        .expect("a find of the same part");
+    assert_eq!(
+        found
+            .rows
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["notes/lantern.md"],
+        "the find the negative control runs does not answer the part"
+    );
+}
+
+/// **A ranked hit is hydrated as a find's row is**: in the order it is handed
+/// in, at the score it is handed with, carrying the columns it names; a key
+/// outside the field universe is reported; a hit naming no column hydrates
+/// nothing.
+#[test]
+fn a_ranked_hit_carries_the_row_its_columns_name() {
+    let searching_store = Searching::new("search-hydrate-hits");
+    let snapshot = searching_store.snapshot();
+    let (every, _) = every_candidate(&snapshot, candidates_of(Vec::new(), 1024));
+    let at = |path: &str| {
+        every
+            .iter()
+            .find(|candidate| candidate.path() == path)
+            .cloned()
+            .expect("a candidate at the path")
+    };
+    let ranked = vec![
+        (at("notes/walk.md"), Score::new(2.0).expect("a score")),
+        (at("notes/lantern.md"), Score::new(1.0).expect("a score")),
+    ];
+
+    let bare = snapshot
+        .hydrate_hits(&ranked, &[], &declared())
+        .expect("hits naming no column");
+    assert_eq!(bare.work.documents_hydrated, 0);
+    assert!(bare.hits.iter().all(|hit| hit.document.is_none()));
+    assert_eq!(
+        bare.hits
+            .iter()
+            .map(|hit| (hit.path.as_str(), hit.score.get()))
+            .collect::<Vec<_>>(),
+        [("notes/walk.md", 2.0), ("notes/lantern.md", 1.0)]
+    );
+
+    let projected = snapshot
+        .hydrate_hits(
+            &ranked,
+            &[Column::field("status"), Column::field("stat")],
+            &declared(),
+        )
+        .expect("hits naming columns");
+    assert_eq!(projected.work.documents_hydrated, 2);
+    let status = |at: usize| {
+        projected.hits[at]
+            .document
+            .as_ref()
+            .and_then(|row| row.fields.as_ref())
+            .and_then(|fields| fields.get("status"))
+            .cloned()
+    };
+    assert_eq!(status(0), Some(FieldValue::scalar("closed")));
+    assert_eq!(status(1), Some(FieldValue::scalar("open")));
+    assert_eq!(
+        projected.unsatisfied,
+        vec![Unsatisfied::unknown_projection_key(
+            "stat",
+            vec!["status".to_string()]
+        )]
+    );
+}
+
+/// **A fused ranking's cursor is judged as a lexical page's is, beside the
+/// sidecar state its answer read**: the same state reports nothing moved,
+/// another reports the sidecar moved, and a cursor ranked by another ladder is
+/// refused naming both.
+#[test]
+fn a_hit_cursor_is_judged_beside_the_sidecar_state_its_answer_read() {
+    let searching_store = Searching::new("search-judge-sidecar");
+    let mut reading = searching_store.search(&searching("lantern")).snapshot;
+    let snapshot = searching_store.snapshot();
+    let minted = norn_wire::SidecarRevision::new("sidecar", 4);
+    reading.sidecar_revision = Some(minted.clone());
+    let fused = RungSet::of([Rung::Lexical, Rung::Vector]).expect("a ladder");
+    let cursor = Cursor::new(
+        reading,
+        CursorKey::hit(
+            fused.clone(),
+            Score::new(0.5).expect("a score"),
+            "notes/lantern.md",
+        ),
+    );
+
+    let same = snapshot
+        .judge_hit_cursor(&cursor, &fused, Some(minted))
+        .expect("a continuation under the same sidecar state");
+    assert_eq!(same.path, "notes/lantern.md");
+    assert!(same.moved.is_empty());
+    let moved = snapshot
+        .judge_hit_cursor(
+            &cursor,
+            &fused,
+            Some(norn_wire::SidecarRevision::new("sidecar", 5)),
+        )
+        .expect("a continuation under a moved sidecar");
+    assert_eq!(moved.moved, vec![Moved::SidecarRevision]);
+    assert_eq!(
+        snapshot.judge_hit_cursor(&cursor, &RungSet::lexical(), None),
+        Err(PageRefusal::OrderChanged(
+            CursorOrderChanged::minted_raw(None).in_ladders(fused, RungSet::lexical())
+        ))
+    );
+}
+
+/// The paths `held` answers, in its order.
+fn held_paths(held: &norn_store::Held) -> Vec<&str> {
+    held.candidates
+        .iter()
+        .map(|candidate| candidate.path())
+        .collect()
+}
+
+/// **A snapshot answers which of a set of paths it holds, each once, in path
+/// byte order, as candidates its hits are hydrated by.** A path the snapshot
+/// holds no document at — one never written, one differing from a held path
+/// in ASCII case alone, one a death retracted after the snapshot's writes
+/// were read — is left out; a path named twice is answered once; a question
+/// naming no path answers nothing and runs no statement. The reading is the
+/// snapshot's, naming no fingerprint.
+#[test]
+fn a_snapshot_answers_which_of_a_set_of_paths_it_holds() {
+    let mut searching_store = Searching::new("search-held");
+    let snapshot = searching_store.snapshot();
+    let held = snapshot
+        .held_candidates(&[
+            "notes/walk.md",
+            "notes/nowhere.md",
+            "notes/LANTERN.md",
+            "notes/Twin.md",
+            "notes/walk.md",
+            "notes/lantern.md",
+        ])
+        .expect("the held paths");
+    assert_eq!(
+        held_paths(&held),
+        ["notes/Twin.md", "notes/lantern.md", "notes/walk.md"]
+    );
+    assert_eq!(held.snapshot.schema_fingerprint, None);
+    assert_eq!(
+        held.snapshot.generation,
+        u64::try_from(snapshot.reading().write_generation()).expect("a generation")
+    );
+    let ranked: Vec<(norn_store::Candidate, Score)> = held
+        .candidates
+        .iter()
+        .cloned()
+        .map(|candidate| (candidate, Score::new(1.0).expect("a score")))
+        .collect();
+    let hydrated = snapshot
+        .hydrate_hits(&ranked, &[Column::field("status")], &declared())
+        .expect("the held documents hydrated");
+    assert_eq!(hydrated.work.documents_hydrated, 3);
+
+    let none = snapshot.held_candidates(&[]).expect("no path");
+    assert!(none.candidates.is_empty());
+    assert!(
+        snapshot
+            .held_candidates_plans(&[])
+            .expect("no plan")
+            .is_empty()
+    );
+    drop(snapshot);
+
+    let mut request = searching_store.store.begin_request();
+    crate::common::record_death(
+        &mut request,
+        &crate::common::path("notes/walk.md"),
+        norn_store::Provenance::WatcherRemoval,
+    );
+    request.finish();
+    let after = searching_store.snapshot();
+    assert_eq!(
+        held_paths(
+            &after
+                .held_candidates(&["notes/walk.md", "notes/lantern.md"])
+                .expect("the held paths")
+        ),
+        ["notes/lantern.md"]
+    );
+}
+
+/// **The feed rows past a pair of generations are counted in rows, each feed
+/// to the bound.** Past the snapshot's own generation nothing stands; past
+/// the generation read before a write that derives three documents and one
+/// that records five deaths, the documents feed holds three rows and the
+/// death feed five, though the deaths took one generation; a bound below a
+/// feed's rows counts that feed to the bound; and each feed is counted past
+/// its own generation.
+#[test]
+fn the_feed_rows_past_a_generation_are_counted_in_rows_to_a_bound() {
+    let mut searching_store = Searching::new("search-feed-rows");
+    let before = searching_store.snapshot().reading().write_generation();
+    assert_eq!(
+        searching_store
+            .snapshot()
+            .feed_rows_after(before, before, 100)
+            .expect("the feed rows"),
+        norn_store::FeedRows::default()
+    );
+
+    write_documents(
+        &mut searching_store.store.begin_request(),
+        &bulk(3, |at| format!("fresh body {at}\n")),
+    );
+    let deaths: Vec<norn_store::Change> = (0..5)
+        .map(|at| norn_store::Change::Death {
+            path: crate::common::path(&format!("filler/{at}.md")),
+            provenance: norn_store::Provenance::WatcherRemoval,
+        })
+        .collect();
+    searching_store
+        .store
+        .begin_request()
+        .apply_increment(norn_store::IncrementProvenance::Derived, deaths, &[])
+        .expect("five deaths in one write");
+    let snapshot = searching_store.snapshot();
+    let now = snapshot.reading().write_generation();
+    assert_eq!(now, before + 2, "the deaths took more than one generation");
+
+    let counted = |documents_after, tombstones_after, bound| {
+        snapshot
+            .feed_rows_after(documents_after, tombstones_after, bound)
+            .expect("the feed rows")
+    };
+    assert_eq!(
+        counted(before, before, 100),
+        norn_store::FeedRows {
+            documents: 3,
+            tombstones: 5
+        }
+    );
+    assert_eq!(
+        counted(before, before, 4),
+        norn_store::FeedRows {
+            documents: 3,
+            tombstones: 4
+        }
+    );
+    assert_eq!(
+        counted(now, before, 100),
+        norn_store::FeedRows {
+            documents: 0,
+            tombstones: 5
+        }
+    );
+    assert_eq!(counted(now, now, 100), norn_store::FeedRows::default());
+}
+
 // ---- the plan bars ----
 
 /// The plan the store reported for one statement, in the harness's shape.
@@ -988,6 +1331,10 @@ fn statement_barred_by(statement: SearchStatement) -> &'static str {
         SearchStatement::LexicalPage => {
             "a_lexical_page_is_driven_by_the_full_text_index_and_sorts_what_it_matched"
         }
+        SearchStatement::HeldPaths => "the_held_paths_reach_each_document_by_one_seek_of_its_path",
+        SearchStatement::FeedRowsAfter => {
+            "the_feed_rows_are_counted_over_a_range_of_each_feeds_index"
+        }
     }
 }
 
@@ -996,7 +1343,11 @@ fn statement_barred_by(statement: SearchStatement) -> &'static str {
 /// exactly once.
 #[test]
 fn the_search_bars_cover_every_statement_once() {
-    let judged = [SearchStatement::LexicalPage];
+    let judged = [
+        SearchStatement::LexicalPage,
+        SearchStatement::HeldPaths,
+        SearchStatement::FeedRowsAfter,
+    ];
     let mut slots: Vec<usize> = judged.iter().map(|statement| statement.slot()).collect();
     slots.sort_unstable();
     assert_eq!(slots, (0..SEARCH_STATEMENTS).collect::<Vec<usize>>());
@@ -1007,10 +1358,143 @@ fn the_search_bars_cover_every_statement_once() {
         judged.into_iter().map(statement_barred_by).collect();
     assert_eq!(
         bars,
-        ["a_lexical_page_is_driven_by_the_full_text_index_and_sorts_what_it_matched"]
-            .into_iter()
-            .collect()
+        [
+            "a_lexical_page_is_driven_by_the_full_text_index_and_sorts_what_it_matched",
+            "the_held_paths_reach_each_document_by_one_seek_of_its_path",
+            "the_feed_rows_are_counted_over_a_range_of_each_feeds_index",
+        ]
+        .into_iter()
+        .collect()
     );
+}
+
+/// The plan of the one statement `plans` holds, which is `statement`.
+fn only_plan(plans: &[SearchPlan], statement: SearchStatement) -> QueryPlan {
+    let [emitted] = plans else {
+        panic!("the question ran another number of statements than one: {plans:?}");
+    };
+    assert_eq!(emitted.statement, ReadStatement::Search(statement));
+    assert!(emitted.filters.is_empty());
+    plan(emitted)
+}
+
+/// Judge the held paths' plan: the path list is the outer loop, read as a
+/// constrained virtual table, and each path reaches its document by a seek of
+/// `documents_path` at the path; nothing is read end to end and nothing is
+/// sorted.
+fn judge_held(plan: &QueryPlan) {
+    plan.assert_no_full_scan();
+    plan.assert_no_temp_btree();
+    let list: Vec<&PlanRow> = plan
+        .rows()
+        .iter()
+        .filter(|row| row.detail.split_whitespace().nth(1) == Some("j"))
+        .collect();
+    assert!(
+        matches!(
+            list.as_slice(),
+            [row] if matches!(row.scan_target(), Some(ScanTarget::VirtualTable { .. }))
+        ),
+        "the path list is not read once as the table function it is: {:?}\nemitted SQL: {}",
+        plan.rows(),
+        plan.sql()
+    );
+    let documents = rows_of(plan, "d");
+    documents.assert_searches_through("documents", Access::Index("documents_path"));
+    documents.assert_search_constraint("documents", "(path=?)");
+    let at = |alias: &str| {
+        plan.rows()
+            .iter()
+            .position(|row| row.detail.split_whitespace().nth(1) == Some(alias))
+            .unwrap_or_else(|| panic!("no row reads `{alias}`: {:?}", plan.rows()))
+    };
+    assert!(
+        at("j") < at("d"),
+        "the path list is not the outer loop: {:?}\nemitted SQL: {}",
+        plan.rows(),
+        plan.sql()
+    );
+}
+
+/// **The held paths reach each document by one seek of its path**, so the
+/// question costs the paths it names and never the vault, whether it names
+/// one path, several, or paths the snapshot does not hold.
+///
+/// Controls: the documents read end to end, and read before the path list.
+/// Each fails.
+#[test]
+fn the_held_paths_reach_each_document_by_one_seek_of_its_path() {
+    let searching_store = Searching::new("search-held-plan");
+    let snapshot = searching_store.snapshot();
+    let statement = SearchStatement::HeldPaths;
+    for paths in [
+        vec!["notes/walk.md"],
+        vec!["notes/walk.md", "notes/lantern.md", "notes/nowhere.md"],
+    ] {
+        let plans = snapshot
+            .held_candidates_plans(&paths)
+            .expect("the held paths' plans");
+        judge_held(&only_plan(&plans, statement));
+    }
+    let plans = snapshot
+        .held_candidates_plans(&["notes/walk.md"])
+        .expect("the held paths' plans");
+    let emitted = only_plan(&plans, statement);
+    failure_of("the documents read end to end", || {
+        judge_held(&rewritten(&emitted, |detail| {
+            if detail.starts_with("SEARCH d ") {
+                "SCAN d".to_string()
+            } else {
+                detail.to_string()
+            }
+        }))
+    });
+    failure_of("the documents read before the path list", || {
+        judge_held(&reordered(&emitted, |rows| {
+            rows.iter().rev().cloned().collect()
+        }))
+    });
+}
+
+/// Judge the feed rows' plan: each feed is read through its change-feed index
+/// as a range past the generation, and nothing is read end to end or sorted.
+fn judge_feed_rows(plan: &QueryPlan) {
+    plan.assert_no_full_scan();
+    plan.assert_no_temp_btree();
+    for (alias, table, index) in [
+        ("d", "documents", "documents_change_feed"),
+        ("t", "tombstones", "tombstones_change_feed"),
+    ] {
+        let reads = rows_of(plan, alias);
+        reads.assert_searches_through(table, Access::Index(index));
+        reads.assert_search_constraint(table, "(generation>?)");
+    }
+}
+
+/// **The feed rows are counted over a range of each feed's index**, past the
+/// generation it is asked about and stopped at the bound, so the count costs
+/// at most twice the bound whatever the feeds hold.
+///
+/// Control: the death feed read end to end. It fails.
+#[test]
+fn the_feed_rows_are_counted_over_a_range_of_each_feeds_index() {
+    let searching_store = Searching::new("search-feed-rows-plan");
+    let snapshot = searching_store.snapshot();
+    let generation = snapshot.reading().write_generation();
+    let plans = snapshot
+        .feed_rows_after_plans(generation, generation - 1, 8)
+        .expect("the feed rows' plans");
+    let emitted = only_plan(&plans, SearchStatement::FeedRowsAfter);
+    judge_feed_rows(&emitted);
+    failure_of("the death feed read end to end", || {
+        judge_feed_rows(&rewritten(&emitted, |detail| {
+            if detail.starts_with("SEARCH t ") {
+                "SCAN t".to_string()
+            } else {
+                detail.to_string()
+            }
+        }))
+    });
 }
 
 /// Judge a lexical page's plan.
@@ -1425,6 +1909,22 @@ fn no_statement_a_search_runs_reads_a_documents_payload() {
             }
         }
     }
+    let snapshot = searching_store.snapshot();
+    let generation = snapshot.reading().write_generation();
+    for emitted in snapshot
+        .held_candidates_plans(&["notes/walk.md", "notes/nowhere.md"])
+        .expect("the held paths' plans")
+        .into_iter()
+        .chain(
+            snapshot
+                .feed_rows_after_plans(generation, generation, 8)
+                .expect("the feed rows' plans"),
+        )
+    {
+        reached.push(emitted.statement);
+        reads_of(&emitted.plan).assert_reads_none_of(DOCUMENT_PAYLOAD);
+    }
+    drop(snapshot);
     for statement in SearchStatement::all() {
         assert!(
             reached.contains(&ReadStatement::Search(statement)),

@@ -1500,7 +1500,12 @@ fn an_answer_advisory_advertises_its_tag_and_where_it_compared() {
     let schema = schema_of::<AnswerAdvisory>();
     assert_eq!(
         sorted(tag_constants(&schema, "advisory")),
-        sorted(["mixed_offset", "rung_skipped", "rung_depth_reached"])
+        sorted([
+            "mixed_offset",
+            "rung_skipped",
+            "rung_depth_reached",
+            "rung_short_of_depth"
+        ])
     );
     let skipped = branches(&schema)
         .iter()
@@ -1525,6 +1530,14 @@ fn an_answer_advisory_advertises_its_tag_and_where_it_compared() {
     assert_eq!(
         property_names(reached),
         ["advisory", "rung"].into_iter().collect()
+    );
+    let short = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "advisory") == Some("rung_short_of_depth"))
+        .expect("the rung-short-of-depth branch");
+    assert_eq!(
+        property_names(short),
+        ["advisory", "rung", "delivered"].into_iter().collect()
     );
     let compared_by = schema_of::<ComparedBy>();
     assert_eq!(

@@ -67,7 +67,9 @@ use crate::reading::{LadderDeclaration, Rung, retrieval_rungs};
 ///
 /// A rung finds its candidates up to this depth and no further, so an answer
 /// ranks none beyond it, and one whose rung reached it is advised as having
-/// done so ([`AnswerAdvisory::RungDepthReached`](crate::AnswerAdvisory::RungDepthReached)).
+/// done so ([`AnswerAdvisory::RungDepthReached`](crate::AnswerAdvisory::RungDepthReached));
+/// one whose rung delivered fewer with more beyond what it read is advised
+/// how many it delivered ([`AnswerAdvisory::RungShortOfDepth`](crate::AnswerAdvisory::RungShortOfDepth)).
 /// It is the most rows one page holds, so one rung's candidates are one page
 /// of that rung.
 pub const RUNG_DEPTH: u32 = 1024;

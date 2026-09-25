@@ -41,6 +41,20 @@ pub(crate) struct Built<R, W> {
     pub(crate) work: W,
 }
 
+/// Why a read builder answered nothing: the store refused the request, or the
+/// builder refused it with an envelope of its own — a search's rung the vault
+/// cannot run.
+pub(crate) enum BuildRefused {
+    Page(PageRefusal),
+    Answered(ErrorEnvelope),
+}
+
+impl From<PageRefusal> for BuildRefused {
+    fn from(refusal: PageRefusal) -> Self {
+        BuildRefused::Page(refusal)
+    }
+}
+
 /// A read verb's answer, and what reading it cost.
 ///
 /// The answer is what crosses the wire. The two readings beside it are the
@@ -87,27 +101,30 @@ where
     <O::Attachment as SnapshotSource>::Reader: ReadSource<Snapshot = Snapshot>,
 {
     /// Answer one read verb: resolve `address`, take a hold on the vault it
-    /// names, run `build` on the hold's snapshot against the content model
-    /// that snapshot pins, and wrap what it built under the hold's reading.
+    /// names, run `build` on that name, the hold's snapshot and the content
+    /// model that snapshot pins, and wrap what it built under the hold's
+    /// reading.
     ///
     /// The hold is ended when this returns, whichever way it returns, so the
     /// snapshot a builder ran on is given back before the answer leaves. A
     /// builder refused for damage is answered through
     /// [`Host::withdraw_for_read_damage`] while the hold stands, after the
-    /// builder returned, so no statement runs under the gate that publishes.
+    /// builder returned, so no statement runs under the gate that publishes. A
+    /// builder's own envelope leaves as it is.
     pub(crate) fn answer_read<R, W>(
         &self,
         address: &norn_wire::VaultAddress,
-        build: impl FnOnce(&Snapshot, &ContentModel) -> Result<Built<R, W>, PageRefusal>,
+        build: impl FnOnce(&VaultName, &Snapshot, &ContentModel) -> Result<Built<R, W>, BuildRefused>,
     ) -> Result<Answered<R, W>, ErrorEnvelope> {
         let name = registered_name(address)?;
         let hold = self
             .begin_read(name)
             .map_err(|refusal| refusal.answer(name))?;
         let reading = hold.reading().answer_reading(name)?;
-        let built = match build(hold.snapshot(), hold.content_model()) {
+        let built = match build(name, hold.snapshot(), hold.content_model()) {
             Ok(built) => built,
-            Err(refusal) => {
+            Err(BuildRefused::Answered(envelope)) => return Err(envelope),
+            Err(BuildRefused::Page(refusal)) => {
                 return Err(match page_refusal(refusal) {
                     PageRefused::Answered(envelope) => envelope,
                     PageRefused::Damaged(detail) => {
@@ -130,7 +147,7 @@ where
         &self,
         params: &CountParams,
     ) -> Result<Answered<CountReport, CountWork>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |snapshot, declared| {
+        self.answer_read(&params.vault, |_, snapshot, declared| {
             Ok(snapshot.count(params, declared)?.into())
         })
     }
@@ -141,7 +158,7 @@ where
         &self,
         params: &FindParams,
     ) -> Result<Answered<FindReport, FindWork>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |snapshot, declared| {
+        self.answer_read(&params.vault, |_, snapshot, declared| {
             Ok(snapshot.find(params, declared)?.into())
         })
     }
@@ -152,7 +169,7 @@ where
         &self,
         params: &ValidateParams,
     ) -> Result<Answered<ValidateReport, ValidateWork>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |snapshot, declared| {
+        self.answer_read(&params.vault, |_, snapshot, declared| {
             Ok(snapshot.validate(params, declared)?.into())
         })
     }
@@ -163,7 +180,7 @@ where
         &self,
         params: &DescribeParams,
     ) -> Result<Answered<DescribeReport, DescribeWork>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |snapshot, declared| {
+        self.answer_read(&params.vault, |_, snapshot, declared| {
             Ok(snapshot.describe(params, declared)?.into())
         })
     }
@@ -176,7 +193,7 @@ where
     /// snapshot holds of the document, so the text answered is the text the
     /// snapshot derived.
     pub fn get(&self, params: &GetParams) -> Result<Answered<GetReport, GetWork>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |snapshot, declared| {
+        self.answer_read(&params.vault, |_, snapshot, declared| {
             Ok(snapshot.get(params, declared, &TextLayer)?.into())
         })
     }

@@ -30,9 +30,9 @@
 //! - **Answers come from the slot, gated by the slot alone.** A nearest or
 //!   status read needs the engine and its sidecar, never the vault's store,
 //!   so it runs on the caller's thread and answers whenever a slot stands —
-//!   the vault's trust label does not gate it. Composing trust over semantic
-//!   answers is the serving surface's judgment, made where that surface is
-//!   built.
+//!   the vault's trust label does not gate the capability. The `search` verb
+//!   composes it through the read seam, so a search's vector rung answers only
+//!   for a ready entry, beside the snapshot its hold established.
 //! - **An answer carries its own reading.** A nearest answer is sampled under
 //!   the slot's lock together with the model it ran, the sidecar revision it
 //!   was taken from and the engine's watermarks, so no drain lands between
@@ -63,9 +63,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use norn_config::ConfigDirs;
 use norn_config::vault::EngineConfig;
 use norn_embed::{Model, StubEmbedder};
-use norn_semantic::{Engine, Neighbor, Settings, SidecarRevision, Watermark, Watermarks};
+use norn_semantic::{
+    Engine, NearestWork, Neighbor, Settings, SidecarRevision, Watermark, Watermarks,
+};
 use norn_store::{FeedRead, StoreReading};
-use norn_wire::{EngineSection, ErrorDetail, ErrorEnvelope, Freshness, Rung, VaultName};
+use norn_wire::{
+    EngineSection, ErrorDetail, ErrorEnvelope, Freshness, Rung, RungSkipReason, VaultName,
+};
 
 use crate::refusal::engine_refusal_told;
 use crate::reload::EngineConfigReceiver;
@@ -134,6 +138,8 @@ pub struct SemanticAnswer {
     pub sidecar: SidecarRevision,
     /// How far each feed had been drained when the rows were read.
     pub watermarks: Watermarks,
+    /// What the scan read, scored and held.
+    pub work: NearestWork,
 }
 
 /// How far an engine's derived state trails `store`, the reading the caller's
@@ -147,8 +153,8 @@ pub struct SemanticAnswer {
 /// is worse than any count. A watermark past the reading, recorded by a drain
 /// that completed after the hold was established, trails by nothing.
 ///
-/// Nothing calls it yet: the `search` and `status` handlers are its callers,
-/// and they compose it with the hold reading each answer is taken under.
+/// The `search` handler composes it with the store reading of the hold its
+/// answer is taken under; the `status` handler is its other caller.
 pub fn freshness(watermarks: &Watermarks, store: &StoreReading) -> Freshness {
     let lag = |watermark: &Option<Watermark>| match watermark {
         Some(watermark) if watermark.store_epoch == store.epoch() => {
@@ -203,73 +209,149 @@ impl std::fmt::Display for SemanticRefusal {
 
 impl std::error::Error for SemanticRefusal {}
 
-/// The refusal a vector rung answers with, composed from a nearest refusal.
+/// The refusal a vector rung answers with, composed from a nearest refusal:
+/// the one composition every vector refusal a search meets goes through,
+/// rendered as its envelope.
 ///
-/// That no engine stands says nothing a client can act on by itself; whether
-/// the vault never enabled one is a fact about the delivered section, which
-/// the refusal carries from the lookup that found no slot. Composing it here
-/// is what lets a client be told what to do about it. A section that could not
-/// be read is delivered beside a self-disabled slot, so it answers as
-/// [`SemanticRefusal::SelfDisabled`] rather than through this lookup.
-///
-/// This is reached only where the entry is ready; a vault that is not ready
-/// refuses on its answer reading long before a rung is dispatched.
-///
-/// Nothing calls it yet. The `search` handler is the one caller this
-/// composition has, composing the refusal [`SemanticEngines::nearest`]
-/// answered, and no call graph reaches this until that handler arrives.
-///
-/// Both matches carry no wildcard, so a refusal or a section minted without a
-/// row here does not compile.
+/// That no engine stands is answered by the delivered section it was found
+/// beside: a vault whose section is absent or disabled is told what to enable
+/// (`engine/not-enabled`), and every other reading, and an engine that took
+/// itself out of service, is `engine/unavailable` carrying the section's own
+/// error or the engine's retained diagnostic. An engine that stands and
+/// failed its answer is `engine/failed`.
 pub fn compose_vector_refusal(refusal: SemanticRefusal) -> ErrorEnvelope {
-    match refusal {
-        SemanticRefusal::NoEngine { section } => match section {
-            // The vault has not asked for an engine, so there is nothing
-            // unavailable — there is something to turn on.
-            Some(EngineSection::Absent {} | EngineSection::Disabled {}) => ErrorEnvelope::new(
-                "this vault answers no vector rung until its engine is enabled",
-                ErrorDetail::engine_not_enabled(
-                    Rung::Vector,
-                    "enable the engine section in .norn/config.toml and run vault reload",
-                ),
+    VectorRefusal::of(refusal).envelope()
+}
+
+/// What a nearest refusal means for the vector rung of a search: the vault's
+/// enabled set does not hold the rung, it holds it and no engine stands for
+/// it, or an engine stands and the answer failed.
+///
+/// It is the one product a search's vector rung is refused through, whichever
+/// selection named the rung: a selection naming the rung exactly is refused
+/// with [`VectorRefusal::envelope`], and the enabled selection leaves a rung
+/// its set does not hold out silently, skips an unavailable one with
+/// [`VectorRefusal::skip_reason`], and is refused by a failed one. The entry is
+/// ready wherever this is reached: the read seam refuses a vault that is not
+/// with the ordinary answer-reading refusal before any rung runs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum VectorRefusal {
+    /// The vault's enabled set does not hold the vector rung.
+    NotEnabled { message: String, detail: String },
+    /// The enabled set holds it, and no engine stands for it here and now.
+    Unavailable { message: String, detail: String },
+    /// An engine stands, and this answer failed.
+    Failed { message: String, detail: String },
+}
+
+impl VectorRefusal {
+    /// What `refusal` means for the vector rung.
+    ///
+    /// That no engine stands says nothing a client can act on by itself;
+    /// whether the vault never enabled one is a fact about the delivered
+    /// section, which the refusal carries from the lookup that found no slot.
+    /// Composing it here is what lets a client be told what to do about it. A
+    /// section that could not be read is delivered beside a self-disabled
+    /// slot, so it answers as [`SemanticRefusal::SelfDisabled`], carrying the
+    /// section's own error, rather than through this lookup.
+    ///
+    /// Both matches carry no wildcard, so a refusal or a section minted
+    /// without a row here does not compile.
+    pub(crate) fn of(refusal: SemanticRefusal) -> Self {
+        match refusal {
+            SemanticRefusal::NoEngine { section } => match section {
+                // The vault has not asked for an engine, so there is nothing
+                // unavailable — there is something to turn on.
+                Some(EngineSection::Absent {} | EngineSection::Disabled {}) => {
+                    VectorRefusal::NotEnabled {
+                        message: "this vault answers no vector rung until its engine is enabled"
+                            .to_string(),
+                        detail:
+                            "enable the engine section in .norn/config.toml and run vault reload"
+                                .to_string(),
+                    }
+                }
+                // A malformed section is delivered beside a self-disabled
+                // slot, so a nearest refusal does not carry it with no engine;
+                // the row answers what the section says, for the same reason
+                // as the enabled row below.
+                Some(EngineSection::Malformed { detail, .. }) => VectorRefusal::Unavailable {
+                    message:
+                        "this vault's engine section could not be read, so no engine stands for it"
+                            .to_string(),
+                    detail,
+                },
+                // An enabled section with no engine behind it is a slot the
+                // delivery should have filled, and a delivery that reads an
+                // enabled section always leaves one, so a nearest refusal does
+                // not carry this pair. It is answered rather than panicked on,
+                // because a wire mapping is not the place a host asserts its
+                // own invariants.
+                Some(EngineSection::Enabled {}) => VectorRefusal::Unavailable {
+                    message: "this vault's engine is enabled and no engine stands for it"
+                        .to_string(),
+                    detail: "the engine slot is empty".to_string(),
+                },
+                // No delivery stands at all. A ready entry's delivery has
+                // already happened, so a search does not reach this row; it is
+                // answered for the same reason.
+                None => VectorRefusal::Unavailable {
+                    message: "no engine section has been delivered to this vault".to_string(),
+                    detail: "no engine section was delivered".to_string(),
+                },
+            },
+            // The engine took itself out of service. What the section says is
+            // not the fact any more: the engine was delivered and stood down.
+            SemanticRefusal::SelfDisabled { detail } => VectorRefusal::Unavailable {
+                message: "this vault's engine is out of service, so it answers no vector rung"
+                    .to_string(),
+                detail,
+            },
+            // The engine stands and this answer failed.
+            SemanticRefusal::Failed { detail } => VectorRefusal::Failed {
+                message: "this vault's engine failed to answer the vector rung".to_string(),
+                detail,
+            },
+        }
+    }
+
+    /// The vector rung of a host that composes no semantic engine: no vault it
+    /// serves can enable one, so the enabled set holds no vector rung.
+    pub(crate) fn not_composed() -> Self {
+        VectorRefusal::NotEnabled {
+            message: "this host answers no vector rung: it composes no semantic engine".to_string(),
+            detail: "serve the vault from a host that composes the semantic engine".to_string(),
+        }
+    }
+
+    /// The refusal a search naming the vector rung meets.
+    pub(crate) fn envelope(self) -> ErrorEnvelope {
+        match self {
+            VectorRefusal::NotEnabled { message, detail } => ErrorEnvelope::new(
+                message,
+                ErrorDetail::engine_not_enabled(Rung::Vector, detail),
             ),
-            // A malformed section is delivered beside a self-disabled slot,
-            // so a nearest refusal does not carry it with no engine; the row
-            // answers what the section says, for the same reason as the
-            // enabled row below.
-            Some(EngineSection::Malformed { detail, .. }) => ErrorEnvelope::new(
-                "this vault's engine section could not be read, so no engine stands for it",
+            VectorRefusal::Unavailable { message, detail } => ErrorEnvelope::new(
+                message,
                 ErrorDetail::engine_unavailable(Rung::Vector, detail),
             ),
-            // An enabled section with no engine behind it is a slot the
-            // delivery should have filled, and a delivery that reads an
-            // enabled section always leaves one, so a nearest refusal does not
-            // carry this pair. It is answered rather than panicked on, because
-            // a wire mapping is not the place a host asserts its own
-            // invariants.
-            Some(EngineSection::Enabled {}) => ErrorEnvelope::new(
-                "this vault's engine is enabled and no engine stands for it",
-                ErrorDetail::engine_unavailable(Rung::Vector, "the engine slot is empty"),
-            ),
-            // No delivery stands at all. Dispatch runs only against a ready
-            // entry, whose delivery has already happened, so this row is not
-            // reached by that ordering; it is answered for the same reason.
-            None => ErrorEnvelope::new(
-                "no engine section has been delivered to this vault",
-                ErrorDetail::engine_unavailable(Rung::Vector, "no engine section was delivered"),
-            ),
-        },
-        // The engine took itself out of service. What the section says is not
-        // the fact any more: the engine was delivered and stood down.
-        SemanticRefusal::SelfDisabled { detail } => ErrorEnvelope::new(
-            "this vault's engine is out of service, so it answers no vector rung",
-            ErrorDetail::engine_unavailable(Rung::Vector, detail),
-        ),
-        // The engine stands and this answer failed.
-        SemanticRefusal::Failed { detail } => ErrorEnvelope::new(
-            "this vault's engine failed to answer the vector rung",
-            ErrorDetail::engine_failed(Rung::Vector, detail),
-        ),
+            VectorRefusal::Failed { message, detail } => {
+                ErrorEnvelope::new(message, ErrorDetail::engine_failed(Rung::Vector, detail))
+            }
+        }
+    }
+
+    /// Why the enabled selection skips the rung, where it skips it: only an
+    /// enabled rung no engine stands for is skipped. A rung the enabled set
+    /// does not hold is not in the selection to skip, and a failed answer is
+    /// refused rather than skipped.
+    pub(crate) fn skip_reason(&self) -> Option<RungSkipReason> {
+        match self {
+            VectorRefusal::Unavailable { detail, .. } => {
+                Some(RungSkipReason::unavailable(detail.clone()))
+            }
+            VectorRefusal::NotEnabled { .. } | VectorRefusal::Failed { .. } => None,
+        }
     }
 }
 
@@ -339,17 +421,64 @@ impl SemanticEngines {
     /// The `limit` nearest paths to `text` in `vault` with the reading they
     /// were taken under, or the typed refusal.
     ///
-    /// Answers whenever a slot stands: the slot, not the vault's trust
-    /// label, is the gate. Runs on the caller's thread against the engine
-    /// and its sidecar alone — never the vault's store — and serializes with
-    /// the same vault's drains on the slot's lock, which is held across the
-    /// rows and the reading alike.
+    /// [`SemanticEngines::nearest_among`] over every row the engine holds.
     pub fn nearest(
         &self,
         vault: &VaultName,
         text: &str,
         limit: usize,
     ) -> Result<SemanticAnswer, SemanticRefusal> {
+        self.nearest_among(vault, text, limit, |_| true)
+    }
+
+    /// The `limit` nearest paths to `text` among those `admits`, in `vault`,
+    /// with the reading they were taken under, or the typed refusal.
+    ///
+    /// Answers whenever a slot stands: the slot is this capability's gate, and
+    /// a caller composing it over a vault's store — the `search` verb, through
+    /// the read seam — gates it by that vault's trust label itself. Runs on the
+    /// caller's thread against the engine and its sidecar alone — never the
+    /// vault's store — and serializes with the same vault's drains on the
+    /// slot's lock, which is held across the rows and the reading alike. The
+    /// scan holds at most `limit` scored rows ([`Engine::nearest_among`]).
+    pub fn nearest_among(
+        &self,
+        vault: &VaultName,
+        text: &str,
+        limit: usize,
+        admits: impl Fn(&str) -> bool,
+    ) -> Result<SemanticAnswer, SemanticRefusal> {
+        self.with_engine(vault, |engine| {
+            let nearest = engine.nearest_among(text, limit, admits).map_err(|error| {
+                SemanticRefusal::Failed {
+                    detail: engine_refusal_told(&error),
+                }
+            })?;
+            Ok(SemanticAnswer {
+                neighbors: nearest.neighbors,
+                model: engine.model().clone(),
+                sidecar: engine.revision(),
+                watermarks: engine.watermarks().clone(),
+                work: nearest.work,
+            })
+        })
+    }
+
+    /// Whether an engine stands for `vault` here and now and, where one does,
+    /// how far it had drained each feed; or the refusal a nearest answer would
+    /// meet instead, read through the lookup a nearest answer takes. A reading
+    /// and not a reservation: the answer that follows samples the slot again.
+    pub(crate) fn standing(&self, vault: &VaultName) -> Result<Watermarks, SemanticRefusal> {
+        self.with_engine(vault, |engine| Ok(engine.watermarks().clone()))
+    }
+
+    /// Run `answer` against `vault`'s running engine under the slot's lock, or
+    /// answer the refusal that no engine runs.
+    fn with_engine<T>(
+        &self,
+        vault: &VaultName,
+        answer: impl FnOnce(&Engine) -> Result<T, SemanticRefusal>,
+    ) -> Result<T, SemanticRefusal> {
         // The slot and, where none stands, the section the refusal carries are
         // read under one map lock, so they are one delivery's.
         let slot = match tolerant(&self.vaults).get(vault) {
@@ -371,20 +500,7 @@ impl SemanticEngines {
             Slot::Running {
                 engine: Some(engine),
                 ..
-            } => {
-                let neighbors =
-                    engine
-                        .nearest(text, limit)
-                        .map_err(|error| SemanticRefusal::Failed {
-                            detail: engine_refusal_told(&error),
-                        })?;
-                Ok(SemanticAnswer {
-                    neighbors,
-                    model: engine.model().clone(),
-                    sidecar: engine.revision(),
-                    watermarks: engine.watermarks().clone(),
-                })
-            }
+            } => answer(engine),
             Slot::Running { engine: None, .. } => Err(SemanticRefusal::SelfDisabled {
                 detail: ABANDONED.to_string(),
             }),

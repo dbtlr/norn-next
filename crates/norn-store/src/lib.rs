@@ -148,7 +148,7 @@ pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenanc
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use read::{
     DEFAULT_PAGE, FieldOrder, IN_VALUES_CEILING, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
-    ReadStatement, TargetAmbiguity,
+    ReadStatement, TargetAmbiguity, page_limit,
 };
 // The open ceremony's own vocabulary, which is this crate's too: a store is
 // one client of that ceremony, and the rung a disagreement names is the same
@@ -163,7 +163,8 @@ pub use request::{
 };
 pub use resolve::{AmbiguityIgnore, TargetClass};
 pub use search::{
-    LexicalQuery, SEARCH_STATEMENTS, SearchPlan, SearchStatement, SearchWork, Searched,
+    Candidate, Candidates, FeedRows, Held, HitRows, LexicalQuery, SEARCH_STATEMENTS, SearchPlan,
+    SearchStatement, SearchWork, Searched,
 };
 pub use store::{
     ConnectionTurn, ReaderMint, RecordedStoreSchema, Snapshot, SnapshotAttempt, SnapshotReader,

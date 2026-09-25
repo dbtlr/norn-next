@@ -78,8 +78,11 @@
 //! hydration a find's rows are read through, so a hit costs the columns it
 //! names; a request naming none carries no row and hydrates nothing.
 
+mod candidates;
 mod statement;
 mod words;
+
+pub use candidates::{Candidate, Candidates, FeedRows, Held, HitRows};
 
 use norn_db::EmittedPlan;
 use norn_wire::{
@@ -430,7 +433,7 @@ impl Snapshot {
         ranked_by: &RungSet,
         lookups: &mut Lookups,
     ) -> Result<((f64, String), Vec<Moved>), PageRefusal> {
-        let resume = self.judge_ranked_reading(cursor, ranked_by, lookups)?;
+        let resume = self.judge_ranked_reading(cursor, ranked_by, None, lookups)?;
         Ok(((resume.score.get(), resume.path.to_string()), resume.moved))
     }
 

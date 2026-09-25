@@ -1,5 +1,6 @@
 //! The engine: drain the feed, keep the sidecar converged, answer nearest.
 
+use std::collections::BinaryHeap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -98,12 +99,64 @@ pub struct VectorRow {
     pub values: Vec<f32>,
 }
 
-/// One nearest answer: a path and its score, higher meaning nearer.
+/// One nearest answer: a path and its score, higher meaning nearer. A score
+/// an answer carries is finite: a scan that scores a row otherwise refuses.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Neighbor {
     pub path: String,
     pub score: f32,
 }
+
+/// The nearest paths one answer found, nearest first, and what it read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Nearest {
+    pub neighbors: Vec<Neighbor>,
+    pub work: NearestWork,
+}
+
+/// What one nearest answer read, in rows.
+///
+/// A reading for the caller and the suites: what a scan costs grows with the
+/// rows it reads, and what it holds is bounded by its limit.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NearestWork {
+    /// Rows of the engine's model the scan read.
+    pub rows_read: u64,
+    /// Rows among those the answer admitted, decoded and scored.
+    pub rows_scored: u64,
+    /// The most scored rows the answer held at once: never more than its
+    /// limit.
+    pub peak_held: u64,
+}
+
+/// A scored row in the bounded heap an answer keeps, ordered so the worst row
+/// kept is the greatest: a lower score, or at an equal score a later path.
+#[derive(Debug)]
+struct Ranked(Neighbor);
+
+impl Ord for Ranked {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .0
+            .score
+            .total_cmp(&self.0.score)
+            .then_with(|| self.0.path.cmp(&other.0.path))
+    }
+}
+
+impl PartialOrd for Ranked {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Ranked {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for Ranked {}
 
 impl Engine {
     /// Open, or create, the sidecar at `path`, embedding through `embedder`.
@@ -352,15 +405,39 @@ impl Engine {
 
     /// The `limit` nearest paths to `text`, under this engine's model.
     ///
-    /// The score is the dot product against the query's embedding, and the
-    /// order is total: score descending under `total_cmp` — which ranks a
-    /// non-finite score a model produced by its sign, a positive one above
-    /// every finite score and a negative one below, deterministically rather
-    /// than hidden — then path ascending, so equal scores answer the same
-    /// way on every run. A scan of the model's rows is the floor
-    /// implementation — the index that makes this sublinear is a storage
-    /// mechanic that arrives with the need that proves it.
+    /// [`Engine::nearest_among`] over every row the engine holds.
     pub fn nearest(&self, text: &str, limit: usize) -> Result<Vec<Neighbor>, EngineError> {
+        Ok(self.nearest_among(text, limit, |_| true)?.neighbors)
+    }
+
+    /// The `limit` nearest paths to `text` among the rows whose path `admits`,
+    /// under this engine's model, and what the answer read.
+    ///
+    /// The score is the dot product against the query's embedding, and the
+    /// order is total: score descending, then path ascending, so equal scores
+    /// answer the same way on every run.
+    ///
+    /// **Every score the scan computes is judged finite.** A row scored NaN
+    /// or infinite refuses the answer ([`EngineError::NonFiniteScore`]) the
+    /// moment it is scored, whether or not it would be kept: a negative NaN or
+    /// infinity ranks below every finite score, so a scan scoring more rows
+    /// than its limit would otherwise push it out unseen. What the answer
+    /// holds is therefore finite, and so is every score it answers.
+    ///
+    /// **The scan streams, and holds at most `limit` scored rows.** Each row
+    /// of the model is read, tested against `admits`, decoded and scored one
+    /// at a time, and kept only while it is among the best `limit` scored so
+    /// far — a heap whose top is the worst row kept — so what an answer holds
+    /// is bounded by its limit at any vault size, and a row `admits` refuses
+    /// is never decoded or scored. The scan reads every row of the model: the
+    /// index that makes it sublinear is a storage mechanic that arrives with
+    /// the need that proves it.
+    pub fn nearest_among(
+        &self,
+        text: &str,
+        limit: usize,
+        admits: impl Fn(&str) -> bool,
+    ) -> Result<Nearest, EngineError> {
         let query = self
             .embedder
             .embed(text)
@@ -376,21 +453,54 @@ impl Engine {
                 produced: query.dimensions(),
             });
         }
-        let mut scored: Vec<Neighbor> = self
-            .projection()?
-            .into_iter()
-            .map(|row| Neighbor {
-                score: dot(query.values(), &row.values),
-                path: row.path,
+        let model = self.embedder.model().clone();
+        let connection = self.database.connection();
+        let mut statement = connection
+            .prepare_cached(
+                "SELECT path, dimensions, embedding FROM document_vectors
+                 WHERE model_id = ?1 AND model_version = ?2",
+            )
+            .map_err(|error| error::sql("preparing the nearest scan", error))?;
+        let rows = statement
+            .query_map(params![model.id(), model.version()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
             })
-            .collect();
-        scored.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| a.path.cmp(&b.path))
-        });
-        scored.truncate(limit);
-        Ok(scored)
+            .map_err(|error| error::sql("scanning the model's rows", error))?;
+        let mut work = NearestWork::default();
+        let mut kept: BinaryHeap<Ranked> = BinaryHeap::with_capacity(limit.min(DRAIN_PAGE));
+        for row in rows {
+            let (path, dimensions, blob) =
+                row.map_err(|error| error::sql("reading a scanned row", error))?;
+            work.rows_read += 1;
+            if limit == 0 || !admits(&path) {
+                continue;
+            }
+            let score = dot(query.values(), &decode(&blob, dimensions)?);
+            work.rows_scored += 1;
+            if !score.is_finite() {
+                return Err(EngineError::NonFiniteScore { path, score });
+            }
+            let ranked = Ranked(Neighbor { path, score });
+            if kept.len() < limit {
+                kept.push(ranked);
+            } else if kept.peek().is_some_and(|worst| ranked < *worst) {
+                kept.pop();
+                kept.push(ranked);
+            }
+            work.peak_held = work.peak_held.max(kept.len() as u64);
+        }
+        Ok(Nearest {
+            neighbors: kept
+                .into_sorted_vec()
+                .into_iter()
+                .map(|ranked| ranked.0)
+                .collect(),
+            work,
+        })
     }
 
     /// Remove rows whose paths the store no longer holds, reset both cursors,

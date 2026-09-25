@@ -322,6 +322,14 @@ pub trait EntryOps: Send + Sync + 'static {
     fn withheld_trust(&self, _: &Self::Attachment) -> Option<UntrustedReason> {
         None
     }
+    /// The semantic engines these ops compose, where they compose them: what a
+    /// search's vector rung is answered through.
+    ///
+    /// The default composes none, so a search's enabled set holds the lexical
+    /// floor alone.
+    fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
+        None
+    }
     /// Discard damaged derived state and build it from the vault again — heal
     /// rung 3, reached where an implementation reported
     /// [`JobFailure::StoreDamaged`].
@@ -2750,6 +2758,11 @@ impl<O: EntryOps> Drop for Host<O> {
 }
 
 impl<O: EntryOps> Host<O> {
+    /// The effect seam this host drives.
+    pub(crate) fn ops(&self) -> &O {
+        &self.shared.ops
+    }
+
     pub fn new(
         registry: RegistryRead,
         ops: O,
