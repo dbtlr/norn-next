@@ -235,9 +235,12 @@ impl<O: EntryOps> Host<O> {
     ///
     /// Nothing refuses it, and nothing it does changes a registration, an
     /// entry or a vault: the statuses are observations that record no demand
-    /// and schedule nothing. **This is the one place `doctor` reads a root**
-    /// — the sanity pass states each served root once and lists each that
-    /// resolves — and no lock is held while it does.
+    /// and schedule nothing. **The sanity pass is `doctor`'s one reading of
+    /// a root's identity** — it states each served root once and lists each
+    /// that resolves — and no lock is held while it does. The statuses read
+    /// inside the vaults as a status does: the two control files of an entry
+    /// serving active fingerprints, and the `.gitignore` of one whose last
+    /// attachment staged shadows in the vault-local fallback.
     pub fn doctor_registry(&self, _params: &DoctorRegistryParams) -> DoctorRegistryReport {
         let statuses = self.statuses();
         let registry = sanity(statuses.iter().map(|status| {

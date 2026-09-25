@@ -27,10 +27,11 @@
 //!   never fails the leg: lane 2's contract is eventual consistency, so
 //!   engine trouble is retained as the slot's own diagnostic, and sidecar
 //!   damage resolves by the engine's rebuild floor right here.
-//! - **Answers come from the slot, gated by the slot alone.** A nearest or
-//!   status read needs the engine and its sidecar, never the vault's store,
-//!   so it runs on the caller's thread and answers whenever a slot stands —
-//!   the vault's trust label does not gate the capability. The `search` verb
+//! - **Answers come from the slot, gated by the slot alone.** A nearest
+//!   answer needs the engine and its sidecar, never the vault's store, so it
+//!   runs on the caller's thread and answers whenever a slot stands — the
+//!   vault's trust label does not gate the capability. A status reads the
+//!   report kept beside the slot rather than the slot itself. The `search` verb
 //!   composes it through the read seam, so a search's vector rung answers only
 //!   for a ready entry, beside the snapshot its hold established.
 //! - **An answer carries its own reading.** A nearest answer is sampled under
@@ -45,7 +46,11 @@
 //! The outer map lock covers lookup, delivery bookkeeping and teardown only
 //! — never an engine open, a drain, or an answer — so one vault's work never
 //! holds another vault's. Within one vault, a slot's own lock serializes its
-//! drains and its answers against each other. Slot replacement at delivery
+//! drains and its answers against each other, and a drain holds it for the
+//! whole drain. The report beside each slot has a lock of its own, written
+//! while the slot's lock is held and read without it, so a status taken
+//! during a drain reads the slot as it stood before that drain rather than
+//! waiting for it to end ([`EngineSlot`]). Slot replacement at delivery
 //! is sound because the lifecycle admits one leg per vault at a time (the
 //! entry's custody claim); a lifecycle that relaxed that would need delivery
 //! to mutate in place rather than replace.
@@ -155,8 +160,8 @@ pub struct SemanticAnswer {
 /// that completed after the hold was established, trails by nothing.
 ///
 /// The `search` handler composes it with the store reading of the hold its
-/// answer is taken under; [`engine_status`], the report `vault status` and
-/// `doctor` give a vault's engine, is its other caller, with the store reading
+/// answer is taken under; the report `vault status` and `doctor` give a
+/// vault's engine is its other caller, with the store reading
 /// the vault's entry recorded where its last leg's lane-1 work committed.
 pub fn freshness(watermarks: &Watermarks, store: &StoreReading) -> Freshness {
     let lag = |watermark: &Option<Watermark>| match watermark {

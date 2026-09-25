@@ -16,7 +16,7 @@
 //!
 //! **An untrusted entry is reported as a state.** A lease or a read refuses
 //! an untrusted entry; a status renders the same instant's untrusted state as
-//! the state it is, because it is what an operator asks a status about.
+//! the state it is, carrying its reason.
 //!
 //! **It reports the published demand whole.** An entry on a park reports the
 //! park in its own code, in band, rather than being refused: the park is what
@@ -48,7 +48,7 @@ use crate::semantic::{SemanticEngines, engine_status};
 ///
 /// **The shadow fallback is kept as its placement alone.** Whether the vault
 /// ignores it is a fact about the vault's `.gitignore` as it is now, so it is
-/// read when the advisory is reported ([`reported_advisories`]): a vault whose
+/// read when `vault status` or `doctor` reports the advisory: a vault whose
 /// `.gitignore` is corrected reports the fallback as ignored at the next
 /// status, with no attach in between.
 #[derive(Clone, Debug, Eq, PartialEq)]

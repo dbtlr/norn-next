@@ -66,7 +66,8 @@ const ANCHORS: &[&str] = &["", "/", "**/"];
 /// this module states.
 ///
 /// A vault root with no `.gitignore` covers nothing, and answers `false`, and
-/// so does one longer than [`GITIGNORE_BOUND`]. A `.gitignore` that is there
+/// so does one longer than 64 KiB, which is not read past that bound. A
+/// `.gitignore` that is there
 /// and cannot be read — a link, a directory, a pipe, a machine that refuses the
 /// read — is the refusal, and the caller decides what an unanswered question
 /// means; the file is read through the same anchored, link-refusing open every
