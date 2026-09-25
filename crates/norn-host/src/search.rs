@@ -51,7 +51,9 @@
 //!   depth and a margin more rows: the engine's drain lag counted in feed rows
 //!   on the snapshot — the documents changed and the deaths recorded past each
 //!   feed's watermark, however few write generations stamped them — capped at
-//!   [`VECTOR_MARGIN_CAP`], and the cap where no lag can be read. Each row the
+//!   [`VECTOR_MARGIN_CAP`], and the cap where no lag can be read: a watermark
+//!   from another store lifetime or past the snapshot, or a feed never
+//!   drained. Each row the
 //!   scan kept, and each lexical hit, is then checked against the snapshot by
 //!   path, one seek each; a row the snapshot lacks is dropped, and at most the
 //!   depth of the rest are ranked. So what the search holds is bounded by the
@@ -439,14 +441,20 @@ fn admitted(
 /// changed and the deaths recorded past each feed's watermark, however many
 /// write generations stamped them — capped at [`VECTOR_MARGIN_CAP`].
 ///
-/// A feed whose watermark was taken in another store lifetime, or that has
-/// completed no drain, trails by a count nothing can read, so the margin is
-/// the cap. The count is bounded at one past the cap, so it costs at most
-/// that many rows of each feed.
+/// A feed whose watermark was taken in another store lifetime, past the
+/// snapshot's write generation — a drain that finished after the snapshot was
+/// taken, over rows the snapshot cannot count — or that has completed no
+/// drain, trails by a count nothing can read, so the margin is the cap. The
+/// count is bounded at one past the cap, so it costs at most that many rows
+/// of each feed.
 fn margin(snapshot: &Snapshot, watermarks: &Watermarks) -> Result<usize, PageRefusal> {
     let cap = VECTOR_MARGIN_CAP as usize;
+    let reading = snapshot.reading();
     let past = |watermark: &Option<Watermark>| match watermark {
-        Some(watermark) if watermark.store_epoch == snapshot.reading().epoch() => {
+        Some(watermark)
+            if watermark.store_epoch == reading.epoch()
+                && watermark.generation <= reading.write_generation() =>
+        {
             Some(watermark.generation)
         }
         Some(_) | None => None,
@@ -961,6 +969,26 @@ mod tests {
             generation: now,
         });
         assert_eq!(margin(&snapshot, &elsewhere), Ok(cap));
+    }
+
+    /// **A watermark past the snapshot is a lag nothing can read.** A drain
+    /// that finished after the hold's snapshot was taken leaves a watermark
+    /// past that snapshot's write generation; the rows it drained past the
+    /// snapshot are not counted on it, so the margin is the cap, for either
+    /// feed.
+    #[test]
+    fn a_watermark_past_the_snapshot_is_the_cap() {
+        let cap = VECTOR_MARGIN_CAP as usize;
+        let lagging = Lagging::new("search-margin-ahead", 40, 30);
+        let snapshot = lagging.snapshot();
+        let now = snapshot.reading().write_generation();
+        assert_eq!(margin(&snapshot, &lagging.marks(now + 1)), Ok(cap));
+        let mut documents_ahead = lagging.marks(now);
+        documents_ahead.documents = lagging.marks(now + 1).documents;
+        assert_eq!(margin(&snapshot, &documents_ahead), Ok(cap));
+        let mut tombstones_ahead = lagging.marks(now);
+        tombstones_ahead.tombstones = lagging.marks(now + 1).tombstones;
+        assert_eq!(margin(&snapshot, &tombstones_ahead), Ok(cap));
     }
 
     fn paths(ranked: &[Ranked]) -> Vec<&str> {
