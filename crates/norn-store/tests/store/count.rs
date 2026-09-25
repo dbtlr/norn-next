@@ -18,8 +18,8 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    Column, CountParams, Cursor, CursorKey, FindParams, GroupKey, Predicate, ResolutionTarget,
-    Tally, Unsatisfied, VaultAddress, VaultName,
+    Column, CountParams, Cursor, CursorKey, Direction, FindParams, GroupKey, Predicate,
+    ResolutionTarget, Sort, SortKey, Tally, Unsatisfied, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -779,7 +779,11 @@ fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
             .expect_err("the cursor is refused")
     };
     for key in [
-        CursorKey::document(None, "a.md"),
+        CursorKey::document(
+            Sort::new(SortKey::path(), Direction::Ascending),
+            None,
+            "a.md",
+        ),
         CursorKey::tally([None, None]),
         CursorKey::tally([Some("nine".to_string())]),
     ] {

@@ -57,7 +57,11 @@
 //! minted under no fingerprint was ordered rawly, and a raw order does not
 //! change with the schema, so these rules never refuse such a cursor; an
 //! answer that also judges a cursor against the order its request names
-//! refuses it where that order is typed ([`CursorOrderChanged`]).
+//! refuses it where that order is typed ([`CursorOrderChanged`]). A document
+//! key names the sort key and direction its page was read in, so such an
+//! answer refuses a document cursor continued in another key or direction
+//! too: the fingerprint says which schema an order is taken under, and the key
+//! says which order it is.
 //!
 //! **Two asymmetries follow from those rules.** A cursor minted without a
 //! sidecar revision and continued where a sidecar now answers reports nothing
@@ -75,6 +79,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::base64url;
 use crate::finding::FindingKind;
+use crate::read::find::Sort;
 use crate::read::get::CollectionSelector;
 
 /// What a facet row is a facet of.
@@ -205,14 +210,22 @@ impl<'de> Deserialize<'de> for Score {
 /// Where one page of rows stopped, as the parts that row's order sorts by.
 ///
 /// On the wire a key is an object tagged `row`:
-/// `{"row":"document","sort":"2026-01-01","path":"notes/a.md"}`.
+/// `{"row":"document","order":{"key":{"by":"field","key":"due"},"direction":"ascending"},"sort":"2026-01-01","path":"notes/a.md"}`.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "row", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CursorKey {
-    /// A document row: the sort field's value, then the path.
+    /// A document row: the order the page was read in, then the sort field's
+    /// value, then the path.
     #[non_exhaustive]
     Document {
+        /// The order the page was read in: the sort key and direction the
+        /// answer ordered its rows by. That is the request's order, except
+        /// where the answer read the rows in another one — a sort key the
+        /// vault knows nothing of orders by path, ascending — and then it is
+        /// the order the rows were actually read in. The value and the path
+        /// are a position in this order and in no other.
+        order: Sort,
         /// The sort field's value as its string sort key, and `null` for a
         /// document that does not carry the sort field. A document missing it
         /// orders before every document that has it under an ascending sort,
@@ -272,9 +285,11 @@ pub enum CursorKey {
 }
 
 impl CursorKey {
-    /// A document row stopped at `path`, whose sort field held `sort`.
-    pub fn document(sort: Option<String>, path: impl Into<String>) -> Self {
+    /// A document row of a page read in `order`, stopped at `path`, whose
+    /// sort field held `sort`.
+    pub fn document(order: Sort, sort: Option<String>, path: impl Into<String>) -> Self {
         CursorKey::Document {
+            order,
             sort,
             path: path.into(),
         }
@@ -388,7 +403,11 @@ pub enum Moved {
 /// An answer that judges a cursor against the order its request names also
 /// refuses a raw cursor continued in a typed order, and a cursor whose key is
 /// not a position in the request's order at all; `minted_under` is `null` for a
-/// cursor minted in an order no schema gives.
+/// cursor minted in an order no schema gives. A document cursor names the sort
+/// key and direction it was minted in, so a page of documents also refuses one
+/// continued in another key or direction, and says both: `minted_in` and
+/// `current_in` are the two document orders, and `null` where the rows are not
+/// documents.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct CursorOrderChanged {
@@ -398,6 +417,12 @@ pub struct CursorOrderChanged {
     /// The fingerprint the establishment reads now, and `null` where the order
     /// that stands is raw.
     pub current: Option<String>,
+    /// The document order the cursor was minted in, and `null` where the
+    /// cursor is not a document row's.
+    pub minted_in: Option<Sort>,
+    /// The document order the page would be read in now, and `null` where the
+    /// rows are not documents.
+    pub current_in: Option<Sort>,
 }
 
 impl CursorOrderChanged {
@@ -406,6 +431,8 @@ impl CursorOrderChanged {
         CursorOrderChanged {
             minted_under: Some(minted_under.into()),
             current,
+            minted_in: None,
+            current_in: None,
         }
     }
 
@@ -414,6 +441,19 @@ impl CursorOrderChanged {
         CursorOrderChanged {
             minted_under: None,
             current,
+            minted_in: None,
+            current_in: None,
+        }
+    }
+
+    /// This change, between pages of documents minted in `minted_in` and read
+    /// now in `current_in`.
+    #[must_use]
+    pub fn in_orders(self, minted_in: Sort, current_in: Sort) -> Self {
+        CursorOrderChanged {
+            minted_in: Some(minted_in),
+            current_in: Some(current_in),
+            ..self
         }
     }
 }

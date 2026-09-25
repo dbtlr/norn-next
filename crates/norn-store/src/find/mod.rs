@@ -144,22 +144,21 @@
 //! statement, and a section a page never reached is never explained.
 //!
 //! **A cursor names the order it was minted in, and is judged against the
-//! request's.** A page ordered by a typed field is minted under the active
-//! schema fingerprint, and one ordered any other way under none. A store with
-//! no schema pinned mints every cursor under none: its declaration declares
-//! nothing, so no key has a typed order there. A continuation whose cursor is
-//! detectably not a position in the request's order is refused with the wire's
-//! [`norn_wire::CursorOrderChanged`]: a typed order's cursor minted under
-//! another fingerprint or under none, a raw or path order's minted under one,
-//! and a path order's carrying a sort value. A raw continuation survives a
-//! re-pin that leaves its key untyped, since the raw order has not moved. A
-//! cursor names neither its sort key nor its direction, so the cursor's
-//! encoding cannot say which order it was minted in, and two gaps follow. Two
-//! raw field orders are not told apart, and a path order's cursor continued in
-//! a raw field order reads as a position in the missing section. And a cursor
-//! of any order, typed, raw or path, continued in the same order reversed
-//! reads as a position in the reversed order, so an ascending cursor replayed
-//! descending is answered rather than refused.
+//! request's.** It names the sort key and direction the page was read in —
+//! the path ascending where the request's sort key is outside the field
+//! universe, since that is the order such a page reads. A page ordered by a
+//! typed field is minted under the active schema fingerprint, and one ordered
+//! any other way under none. A store with no schema pinned mints every cursor
+//! under none: its declaration declares nothing, so no key has a typed order
+//! there. A continuation whose cursor is not a position in the request's order
+//! is refused with the wire's [`norn_wire::CursorOrderChanged`], naming both
+//! orders and both fingerprints: a cursor naming another sort key or
+//! direction — among them a path-order cursor minted while its request's key
+//! was unknown, continued once the key is known — a typed order's cursor
+//! minted under another fingerprint or under none, a raw or path order's
+//! minted under one, and a path order's carrying a sort value. A raw
+//! continuation survives a re-pin that leaves its key untyped, since the raw
+//! order has not moved.
 
 mod hydrate;
 mod statement;
@@ -168,7 +167,7 @@ use std::collections::BTreeSet;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    Column, Cursor, CursorKey, Direction, DocumentRow, FindParams, FindReport, Moved, Page,
+    Column, Cursor, CursorKey, Direction, DocumentRow, FindParams, FindReport, Moved, Page, Sort,
     SortKey, Unsatisfied,
 };
 
@@ -306,6 +305,21 @@ impl PageOrder<'_> {
             PageOrder::Path(_) => None,
             PageOrder::Field { order, .. } => Some(order),
         }
+    }
+
+    /// The order as a cursor names it: the key the page sorts by and the
+    /// direction it runs. A page whose sort key is outside the field universe
+    /// runs in the path order, and this names that order, not the request's.
+    fn wire(self) -> Sort {
+        let (key, direction) = match self {
+            PageOrder::Path(direction) => (SortKey::path(), direction),
+            PageOrder::Field { key, direction, .. } => (SortKey::field(key), direction),
+        };
+        let direction = match direction {
+            PageDirection::Ascending => Direction::Ascending,
+            PageDirection::Descending => Direction::Descending,
+        };
+        Sort::new(key, direction)
     }
 }
 
@@ -480,8 +494,12 @@ impl Snapshot {
         let (keys, next) = self.page_keys(&compiled, limit, resume.as_ref(), lookups, &mut work)?;
         let order = compiled.field_order();
         let snapshot = self.reading_facts(order, lookups)?;
-        let next =
-            next.map(|at| Cursor::new(snapshot.clone(), CursorKey::document(at.sort, at.path)));
+        let next = next.map(|at| {
+            Cursor::new(
+                snapshot.clone(),
+                CursorKey::document(compiled.order.wire(), at.sort, at.path),
+            )
+        });
         let unsatisfied = self.resolve(compiled.reports, declared, lookups)?;
         let rows = self.hydrate_rows(&keys, &projection, &fields, declared, lookups, &mut work)?;
         work.statements = self.counters().statements_executed() - started;
@@ -498,40 +516,44 @@ impl Snapshot {
     /// Judge the cursor a request continues against the request's `order` on
     /// this snapshot: where it resumes, and what moved since.
     ///
-    /// **A cursor is refused wherever it is detectably not a position in
-    /// `order`.** Its fingerprint is the order's: the active fingerprint for a
-    /// typed order, and none for a raw or a path order — so a raw cursor
-    /// continued in a typed order, a typed one continued in a raw or a path
-    /// order, and a typed one minted under a fingerprint the snapshot no longer
-    /// reads are refused. A path order's cursor carries no sort value, so one
-    /// carrying a value is refused too. A field order's cursor carrying no sort
-    /// value stands in its missing section.
-    ///
-    /// **A cursor names neither its sort key nor its direction**, so two gaps
-    /// are answered from a position in an order the cursor was not minted in.
-    /// The key: a cursor minted in one key's raw order and continued in
-    /// another key's, or a path order's cursor continued in a raw field order,
-    /// where it reads as a position in the missing section. The direction: a
-    /// cursor of any order continued in the same order reversed, where an
-    /// ascending cursor replayed descending resumes from its position read the
-    /// other way. Both gaps are the wire's, and NORN-244 closes them by naming
-    /// the order's key and direction in the cursor.
+    /// **A cursor is refused wherever it is not a position in `order`.** It
+    /// names the sort key and direction its page was read in, and one naming
+    /// another than `order` is refused — the same key reversed, another key,
+    /// and a path order a sort key outside the field universe fell back to,
+    /// continued once that key is known. Its fingerprint is the order's: the
+    /// active fingerprint for a typed order, and none for a raw or a path order
+    /// — so a raw cursor continued in a typed order, a typed one continued in a
+    /// raw order, and a typed one minted under a fingerprint the snapshot no
+    /// longer reads are refused. A path order's cursor carries no sort value,
+    /// so one carrying a value is refused too. A field order's cursor carrying
+    /// no sort value stands in its missing section. Every refusal names both
+    /// fingerprints and both orders.
     fn judge(
         &self,
         cursor: &Cursor,
         order: PageOrder<'_>,
         lookups: &mut Lookups,
     ) -> Result<(Option<FindPosition>, Vec<Moved>), PageRefusal> {
-        let CursorKey::Document { sort, path, .. } = cursor.key() else {
+        let CursorKey::Document {
+            order: minted_in,
+            sort,
+            path,
+            ..
+        } = cursor.key()
+        else {
             return Err(PageRefusal::NotADocumentCursor);
         };
-        let path_ordered = matches!(order, PageOrder::Path(_));
-        let moved = self.judge_reading(
-            cursor,
-            order.field_order(),
-            path_ordered && sort.is_some(),
-            lookups,
-        )?;
+        let current_in = order.wire();
+        let misplaced =
+            *minted_in != current_in || (matches!(order, PageOrder::Path(_)) && sort.is_some());
+        let moved = self
+            .judge_reading(cursor, order.field_order(), misplaced, lookups)
+            .map_err(|refusal| match refusal {
+                PageRefusal::OrderChanged(changed) => PageRefusal::OrderChanged(
+                    changed.in_orders(minted_in.clone(), current_in.clone()),
+                ),
+                refusal => refusal,
+            })?;
         Ok((
             Some(FindPosition {
                 sort: sort.clone(),

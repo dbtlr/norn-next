@@ -25,8 +25,8 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    ContainerKind, Cursor, CursorKey, DescribeParams, Facet, FacetKind, FieldType, PathRuleKind,
-    Pattern, TagStance, VaultAddress, VaultName,
+    ContainerKind, Cursor, CursorKey, DescribeParams, Direction, Facet, FacetKind, FieldType,
+    PathRuleKind, Pattern, Sort, SortKey, TagStance, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -496,7 +496,11 @@ fn a_cursor_that_is_no_facets_position_is_refused() {
     let describing_store = Describing::new("describe-cursor-refused");
     let reading = describing_store.describe(&describing()).snapshot;
     for key in [
-        CursorKey::document(None, "a.md"),
+        CursorKey::document(
+            Sort::new(SortKey::path(), Direction::Ascending),
+            None,
+            "a.md",
+        ),
         CursorKey::tally([Some("draft".to_string())]),
     ] {
         assert_eq!(

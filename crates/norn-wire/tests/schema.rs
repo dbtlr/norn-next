@@ -1106,7 +1106,12 @@ fn a_cursor_key_advertises_its_row_tag() {
         .expect("the document branch");
     assert_eq!(
         property_names(document),
-        ["row", "sort", "path"].into_iter().collect()
+        ["row", "order", "sort", "path"].into_iter().collect()
+    );
+    assert_eq!(
+        document["properties"]["order"]["$ref"].as_str(),
+        Some("#/$defs/Sort"),
+        "a document key names the order it was minted in as the order a request names"
     );
     let ordinal = branches(&schema)
         .iter()
@@ -1454,7 +1459,7 @@ fn a_not_ready_state_and_a_reload_failure_advertise_their_tags() {
 }
 
 /// A changed order is carried whole: the detail refers to the continuation's
-/// own type rather than re-spelling its two fields, so a client that holds the
+/// own type rather than re-spelling its fields, so a client that holds the
 /// struct holds what the refusal carries.
 #[test]
 fn a_changed_order_is_advertised_as_the_type_the_continuation_answers_with() {
@@ -1473,7 +1478,9 @@ fn a_changed_order_is_advertised_as_the_type_the_continuation_answers_with() {
     );
     assert_eq!(
         property_names(&schema["$defs"]["CursorOrderChanged"]),
-        ["minted_under", "current"].into_iter().collect()
+        ["minted_under", "current", "minted_in", "current_in"]
+            .into_iter()
+            .collect()
     );
 }
 

@@ -224,6 +224,10 @@ fn error_details() -> Vec<ErrorDetail> {
         )),
         ErrorDetail::cursor_order_changed(CursorOrderChanged::new("fp-1", None)),
         ErrorDetail::cursor_order_changed(CursorOrderChanged::minted_raw(Some("fp-2".to_string()))),
+        ErrorDetail::cursor_order_changed(CursorOrderChanged::minted_raw(None).in_orders(
+            Sort::new(SortKey::path(), Direction::Ascending),
+            Sort::new(SortKey::field("due"), Direction::Descending),
+        )),
     ]);
     details.extend(
         not_ready_states()
@@ -376,8 +380,16 @@ fn score(value: f64) -> Score {
 /// Every paged row type, with one key per shape its order takes.
 fn cursor_keys() -> Vec<CursorKey> {
     let mut keys = vec![
-        CursorKey::document(Some("2026-01-01".to_string()), "notes/a.md"),
-        CursorKey::document(None, "notes/a.md"),
+        CursorKey::document(
+            Sort::new(SortKey::field("due"), Direction::Descending),
+            Some("2026-01-01".to_string()),
+            "notes/a.md",
+        ),
+        CursorKey::document(
+            Sort::new(SortKey::path(), Direction::Ascending),
+            None,
+            "notes/a.md",
+        ),
         CursorKey::hit(score(0.5), "notes/a.md"),
         CursorKey::tally([Some("note".to_string()), None]),
         CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", 7),
@@ -4442,7 +4454,7 @@ const PINNED_PREDICATES: &str = r##"[{"op":"eq","key":"type","value":"note"},{"o
 const PINNED_COLUMNS: &str = r##"[{"col":"path"},{"col":"field","key":"due"},{"col":"body"},{"col":"links"},{"col":"headings"},{"col":"blocks"},{"col":"tags"},{"col":"findings"},{"col":"fields"}]"##;
 
 /// The opaque cursor every pinned request continues from.
-const PINNED_AFTER: &str = r##"eyJzbmFwc2hvdCI6eyJlcG9jaCI6ImVwb2NoLTEiLCJnZW5lcmF0aW9uIjoxMiwic2NoZW1hX2ZpbmdlcnByaW50IjoiZnAtMSIsInNpZGVjYXJfcmV2aXNpb24iOjR9LCJrZXkiOnsicm93IjoiZG9jdW1lbnQiLCJzb3J0IjoiMjAyNi0wMS0wMSIsInBhdGgiOiJub3Rlcy9hLm1kIn19"##;
+const PINNED_AFTER: &str = r##"eyJzbmFwc2hvdCI6eyJlcG9jaCI6ImVwb2NoLTEiLCJnZW5lcmF0aW9uIjoxMiwic2NoZW1hX2ZpbmdlcnByaW50IjoiZnAtMSIsInNpZGVjYXJfcmV2aXNpb24iOjR9LCJrZXkiOnsicm93IjoiZG9jdW1lbnQiLCJvcmRlciI6eyJrZXkiOnsiYnkiOiJmaWVsZCIsImtleSI6ImR1ZSJ9LCJkaXJlY3Rpb24iOiJkZXNjZW5kaW5nIn0sInNvcnQiOiIyMDI2LTAxLTAxIiwicGF0aCI6Im5vdGVzL2EubWQifX0"##;
 
 /// **A setter that does nothing is a setter nothing else catches.** A `with_`
 /// method that dropped its argument still type-checks, still hands back a
