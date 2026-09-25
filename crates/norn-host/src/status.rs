@@ -7,8 +7,9 @@
 //! its engine's report, all one instant — and then reads what lies outside
 //! the host: the two authored control files of an entry serving active
 //! fingerprints, judged against the fingerprints taken in that instant, and
-//! the vault's `.gitignore` where the entry's last attachment staged shadows
-//! in the vault-local fallback. It holds no reader, records no demand lease,
+//! the vault's `.gitignore`, with whether one stands along the fallback home,
+//! where the entry's last attachment staged shadows in the vault-local
+//! fallback. It holds no reader, records no demand lease,
 //! schedules nothing, attaches nothing, reads nothing of the derived store,
 //! and carries no answer reading. So it answers for an unattached entry as
 //! readily as for a ready one, and an entry about to be detached for idleness
