@@ -742,7 +742,9 @@ impl Snapshot {
                 rows,
             });
             self.run_statement(record, ran, finding_base)
-                .map_err(|problem| error::sql("reading a page of findings", problem))
+                .map_err(|problem| error::sql("reading a page of findings", problem))?
+                .into_iter()
+                .collect()
         })?;
         let next = page
             .next

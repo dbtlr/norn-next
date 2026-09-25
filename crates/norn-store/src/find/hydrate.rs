@@ -307,7 +307,9 @@ impl Snapshot {
         );
         let mut bases = self
             .run_statement(record, head, finding_base)
-            .map_err(|problem| error::sql(OPERATION, problem))?;
+            .map_err(|problem| error::sql(OPERATION, problem))?
+            .into_iter()
+            .collect::<Result<Vec<_>, StoreError>>()?;
         work.finding_rows += bases.len() as u64;
         // The index hands each path's findings back in `(kind, id)` order and
         // the paths in the order they were named; the statement states

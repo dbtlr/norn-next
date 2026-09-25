@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use norn_db::rusqlite::{self, Row};
+use norn_db::rusqlite::Row;
 use norn_wire::{
     Candidate, CandidateHead, FindingKind, FindingRow, Hint, ResolutionTarget, Severity,
 };
@@ -33,7 +33,7 @@ use crate::error::{self, StoreError};
 use crate::facts::Span;
 use crate::find::{FindStatement, compose_finding_candidates, compose_finding_classes};
 use crate::path::ClassKey;
-use crate::request::unreadable;
+use crate::request::{Reading, optional_span, unreadable};
 use crate::store::Snapshot;
 
 /// A finding's own columns, in the order [`finding_base`] reads them, under
@@ -60,20 +60,16 @@ pub(crate) struct FindingBase {
 }
 
 /// One row of a statement selecting [`FINDING_ROW_COLUMNS`] first.
-pub(crate) fn finding_base(row: &Row<'_>) -> rusqlite::Result<FindingBase> {
-    let span = match (
-        row.get::<_, Option<u64>>(5)?,
-        row.get::<_, Option<u64>>(6)?,
-        row.get::<_, Option<u64>>(7)?,
-    ) {
-        (Some(line), Some(column), Some(byte_offset)) => Some(Span {
-            line,
-            column,
-            byte_offset,
-        }),
-        _ => None,
+///
+/// The span is read through [`optional_span`], the reader every stored
+/// position is read through, so a position this crate could not have written
+/// is [`StoreError::Damaged`] rather than a failed statement.
+pub(crate) fn finding_base(row: &Row<'_>) -> Reading<FindingBase> {
+    let span = match optional_span(row, 5, "findings")? {
+        Ok(span) => span,
+        Err(damaged) => return Ok(Err(damaged)),
     };
-    Ok(FindingBase {
+    Ok(Ok(FindingBase {
         id: row.get(0)?,
         kind: row.get(1)?,
         severity: row.get(2)?,
@@ -83,7 +79,7 @@ pub(crate) fn finding_base(row: &Row<'_>) -> rusqlite::Result<FindingBase> {
         candidates_total: row.get(8)?,
         message: row.get(9)?,
         generation: row.get(10)?,
-    })
+    }))
 }
 
 impl Snapshot {

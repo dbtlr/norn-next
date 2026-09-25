@@ -212,6 +212,42 @@ fn a_value_outside_a_closed_vocabulary_is_damage() {
     }
 }
 
+/// **A document row's stored position below zero is damage.** A document's
+/// body offset and byte length are read through the one position reader, so
+/// a value this crate never writes is refused as damage rather than failing
+/// the statement.
+#[test]
+fn a_document_position_below_zero_is_damage() {
+    for (arrange, column) in [
+        (
+            "UPDATE documents SET body_offset = -1",
+            "documents.body_offset",
+        ),
+        (
+            "UPDATE documents SET byte_length = -1",
+            "documents.byte_length",
+        ),
+    ] {
+        let scratch = Scratch::new("document-position");
+        let mut store = scratch.open();
+        let subject = path("docs/norn/glossary.md");
+        write_document(
+            &mut store.begin_request(),
+            &document(subject.as_str(), "hash-1", "the only body\n"),
+        );
+        induced_failure::execute_out_of_band(&mut store, arrange)
+            .expect("writing a position nothing writes");
+        let error = store
+            .begin_request()
+            .stored_document(&subject)
+            .expect_err("a document row below zero");
+        let StoreError::Damaged { what } = &error else {
+            panic!("`{column}` below zero was reported as {error:?}");
+        };
+        assert!(what.contains(column), "{what}");
+    }
+}
+
 /// **The pillar disjointness is checked rather than trusted.** Nothing
 /// structural holds a tombstone away from a live path — the
 /// `tombstones_clear_on_derive` trigger is one maintainer on one write path —

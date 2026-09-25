@@ -2359,8 +2359,14 @@ pub(crate) fn probe_parameters(probe: &SuffixProbe) -> impl Params {
 fn stored_document(row: &Row<'_>, first: usize) -> Reading<StoredDocument> {
     let path: String = row.get(first)?;
     let content_hash: String = row.get(first + 1)?;
-    let byte_length: u64 = row.get(first + 2)?;
-    let body_offset: u64 = row.get(first + 3)?;
+    let byte_length = match position(row.get(first + 2)?, "documents.byte_length") {
+        Ok(byte_length) => byte_length,
+        Err(damaged) => return Ok(Err(damaged)),
+    };
+    let body_offset = match position(row.get(first + 3)?, "documents.body_offset") {
+        Ok(body_offset) => body_offset,
+        Err(damaged) => return Ok(Err(damaged)),
+    };
     let frontmatter: Option<String> = row.get(first + 4)?;
     let frontmatter_diagnostic_count: u32 = row.get(first + 5)?;
     let generation: i64 = row.get(first + 6)?;
@@ -2560,7 +2566,7 @@ fn stored_span(row: &Row<'_>, first: usize, table: &str) -> Reading<Span> {
 /// The columns are written together and a `CHECK` refuses a row where only some
 /// of them are set, so "any one absent means no span" reads every row that can
 /// exist rather than repairing a half-recorded position.
-fn optional_span(row: &Row<'_>, first: usize, table: &str) -> Reading<Option<Span>> {
+pub(crate) fn optional_span(row: &Row<'_>, first: usize, table: &str) -> Reading<Option<Span>> {
     let line: Option<i64> = row.get(first)?;
     let column: Option<i64> = row.get(first + 1)?;
     let byte_offset: Option<i64> = row.get(first + 2)?;
@@ -2580,9 +2586,10 @@ fn written_span(table: &str, line: i64, column: i64, byte_offset: i64) -> Result
     })
 }
 
-/// A position — a line, a column, a byte offset — as `column` holds it. This
-/// crate writes every position at or above zero, so one below it is a row
-/// this crate did not write.
+/// A position — a line, a column, a byte offset, a byte length — as `column`
+/// holds it. Every stored position is read here. This crate writes every
+/// position at or above zero, so one below it is a row this crate did not
+/// write: [`StoreError::Damaged`], never a failed statement.
 fn position(written: i64, column: &str) -> Result<u64, StoreError> {
     u64::try_from(written).map_err(|_| unreadable(column, &written.to_string()))
 }

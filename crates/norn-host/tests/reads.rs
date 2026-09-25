@@ -1175,27 +1175,84 @@ fn assert_body(answered: &BodyText, expected: &str, path: &str) {
 /// bytes 6 and 20 are each the second byte of an `é`.
 const CAFE: (&str, &str) = ("zz-damage/zz-cafe.md", "# Café ☕ ##\n\nCafé ☕ ^cafe\n");
 
-/// Rewrite one of [`CAFE`]'s derived rows in the store at `database` with
-/// `set`, a `table` row the document owns.
-fn rewrite_a_cafe_row(database: &Path, table: &str, set: &str) {
+/// Run `update` against the store at `database`, bound to `path`, and assert
+/// it changed exactly one row.
+fn rewrite_one_row(database: &Path, update: &str, path: &str) {
     match norn_db::connect(database).expect("connecting to the store") {
         norn_db::Attempt::Connected(connection) => {
             let changed = connection
-                .execute(
-                    &format!(
-                        "UPDATE {table} SET {set} WHERE document = \
-                         (SELECT id FROM documents WHERE path = ?1)"
-                    ),
-                    [CAFE.0],
-                )
+                .execute(update, [path])
                 .expect("rewrite a derived row");
-            assert_eq!(
-                changed, 1,
-                "`{table}` holds another count of rows for the document"
-            );
+            assert_eq!(changed, 1, "`{update}` changed another count of rows");
         }
         norn_db::Attempt::Unreadable { detail } => panic!("the store is unreadable: {detail}"),
     }
+}
+
+/// Rewrite one of [`CAFE`]'s derived rows in the store at `database` with
+/// `set`, a `table` row the document owns.
+fn rewrite_a_cafe_row(database: &Path, table: &str, set: &str) {
+    rewrite_one_row(
+        database,
+        &format!(
+            "UPDATE {table} SET {set} WHERE document = \
+             (SELECT id FROM documents WHERE path = ?1)"
+        ),
+        CAFE.0,
+    );
+}
+
+/// Assert `read` is refused as an untrusted entry under the
+/// store-damaged-rebuilding reason, and answers once the entry rebuilds —
+/// never failing as a read on the way.
+fn assert_untrusted_until_rebuilt<T>(
+    what: &str,
+    read: impl Fn() -> Result<T, norn_wire::ErrorEnvelope>,
+) {
+    let Err(refused) = read() else {
+        panic!("{what}: a read answered over damage");
+    };
+    assert_eq!(
+        refused.detail(),
+        &ErrorDetail::entry_untrusted(UntrustedReason::store_damaged_rebuilding(
+            "the store is damaged"
+        )),
+        "{what}: {refused:?}"
+    );
+    wait_until(
+        "the rebuild to put the entry back into service",
+        attach::state_budget(attach::READY_LIMIT),
+        || match read() {
+            Ok(answered) => Observed::Met(answered),
+            Err(refused) if refused.code() == &ReasonCode::HostReadFailed => {
+                panic!("{what}: a read over a rebuilding entry failed as a read: {refused:?}")
+            }
+            Err(refused) => Observed::pending(format!("the read was refused with {refused:?}")),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+}
+
+/// **A validate that meets a finding's stored position below zero is refused
+/// as an untrusted entry, and the entry rebuilds.** Every read verb reads a
+/// finding's span through the store's one position reader, so a position the
+/// store could not have written is store damage, never a failed read.
+#[test]
+fn a_validate_that_meets_a_finding_position_below_zero_is_untrusted_and_the_entry_rebuilds() {
+    let (_sandbox, vault, host) = a_verb_vault("host-reads-validate-position-damage", &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let params =
+        ValidateParams::new(address(vault.name())).with_kinds([FindingKind::FrontmatterUnclosed]);
+    host.validate(&params)
+        .expect("an attached vault answers a validate");
+
+    rewrite_one_row(
+        &vault.database(),
+        "UPDATE findings SET span_line = 1, span_column = 1, span_offset = -1 \
+         WHERE path = ?1",
+        "zz-broken/zz-unclosed.md",
+    );
+    assert_untrusted_until_rebuilt("a finding below zero", || host.validate(&params));
 }
 
 /// **A get that meets a stored offset its body cannot hold is refused as an
@@ -1235,27 +1292,6 @@ fn a_get_that_meets_an_offset_its_body_cannot_hold_is_untrusted_and_the_entry_re
     ];
     for (table, set, params, what) in cases {
         rewrite_a_cafe_row(&vault.database(), table, set);
-        let refused = host
-            .get(params)
-            .expect_err("a get answered over an offset its body cannot hold");
-        assert_eq!(
-            refused.detail(),
-            &ErrorDetail::entry_untrusted(UntrustedReason::store_damaged_rebuilding(
-                "the store is damaged"
-            )),
-            "{table} {what}: {refused:?}"
-        );
-        wait_until(
-            "the rebuild to put the entry back into service",
-            attach::state_budget(attach::READY_LIMIT),
-            || match host.get(params) {
-                Ok(answered) => Observed::Met(answered),
-                Err(refused) if refused.code() == &ReasonCode::HostReadFailed => {
-                    panic!("a get over a rebuilding entry failed as a read: {refused:?}")
-                }
-                Err(refused) => Observed::pending(format!("the get was refused with {refused:?}")),
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_untrusted_until_rebuilt(&format!("{table} {what}"), || host.get(params));
     }
 }

@@ -368,7 +368,9 @@ impl Snapshot {
                 let section =
                     Ran::new(ValidateStatement::KindPage, composed).narrowed_by(shapes.clone());
                 self.run_statement(record, section, finding_base)
-                    .map_err(|problem| error::sql("reading a page of findings", problem))
+                    .map_err(|problem| error::sql("reading a page of findings", problem))?
+                    .into_iter()
+                    .collect()
             },
         )?;
         work.rows_read = page.read;
