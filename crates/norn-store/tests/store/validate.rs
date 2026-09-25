@@ -29,7 +29,7 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    Cursor, CursorKey, Direction, FindingKind, FindingRow, Hint, KindTally, Predicate,
+    Cursor, CursorKey, Direction, FindingKind, FindingRow, Hint, KindTally, PagedRows, Predicate,
     ResolutionTarget, Severity, Sort, SortKey, Unsatisfied, ValidateParams, ValidateReport,
     VaultAddress, VaultName,
 };
@@ -708,11 +708,18 @@ fn a_cursor_that_is_no_position_among_the_findings_is_refused() {
                 &declared()
             )
             .expect_err("the cursor is refused"),
-        PageRefusal::NotAFindingCursor
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Document,
+            paged: PagedRows::Finding,
+        }
     );
     assert_eq!(
-        PageRefusal::NotAFindingCursor.to_string(),
-        "the cursor names no position among this validate's findings"
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Document,
+            paged: PagedRows::Finding,
+        }
+        .to_string(),
+        "the cursor names a position among documents, and the request pages findings"
     );
 }
 

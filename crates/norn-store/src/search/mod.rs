@@ -81,8 +81,8 @@ mod words;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    AnswerAdvisory, Column, Cursor, CursorKey, Hit, Moved, Page, Predicate, Score, SearchReport,
-    Unsatisfied,
+    AnswerAdvisory, Column, Cursor, CursorKey, Hit, Moved, Page, PagedRows, Predicate, Score,
+    SearchReport, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -280,7 +280,7 @@ impl Snapshot {
     /// another schema than the snapshot pins, a part or a projected column
     /// this build of the store does not know, and a bound that does not read
     /// as its key's declared type. And refused as a cursor that names no position among
-    /// hits ([`PageRefusal::NotAHitCursor`]), or one minted under a schema
+    /// hits ([`PageRefusal::CursorNotTaken`]), or one minted under a schema
     /// fingerprint, which no ranking is ([`PageRefusal::OrderChanged`]).
     pub fn search(
         &self,
@@ -411,7 +411,7 @@ impl Snapshot {
         lookups: &mut Lookups,
     ) -> Result<((f64, String), Vec<Moved>), PageRefusal> {
         let CursorKey::Hit { score, path, .. } = cursor.key() else {
-            return Err(PageRefusal::NotAHitCursor);
+            return Err(PageRefusal::cursor_not_taken(cursor, PagedRows::Hit));
         };
         let moved = self.judge_reading(cursor, None, false, lookups)?;
         Ok(((score.get(), path.clone()), moved))

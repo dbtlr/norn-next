@@ -50,7 +50,8 @@ mod statement;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    ContainerKind, Cursor, CursorKey, DescribeParams, DescribeReport, Facet, FacetKind, Moved, Page,
+    ContainerKind, Cursor, CursorKey, DescribeParams, DescribeReport, Facet, FacetKind, Moved,
+    Page, PagedRows,
 };
 
 use crate::error::{self, StoreError};
@@ -139,7 +140,7 @@ impl Snapshot {
     /// Refused as every read is refused: a page bound outside
     /// `1..=`[`crate::MAX_PAGE`], and a declaration read from another schema
     /// than the snapshot pins. And refused as a cursor that names no position
-    /// among facets ([`PageRefusal::NotAFacetCursor`]).
+    /// among facets ([`PageRefusal::CursorNotTaken`]).
     pub fn describe(
         &self,
         params: &DescribeParams,
@@ -187,7 +188,7 @@ impl Snapshot {
             None => (None, Vec::new()),
             Some(cursor) => {
                 let CursorKey::Facet { kind, key, .. } = cursor.key() else {
-                    return Err(PageRefusal::NotAFacetCursor);
+                    return Err(PageRefusal::cursor_not_taken(cursor, PagedRows::Facet));
                 };
                 let moved = self.judge_reading(cursor, None, false, lookups)?;
                 (Some((*kind, key.as_str())), moved)

@@ -19,8 +19,8 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan, ScanTarget};
 use norn_wire::{
-    Column, Cursor, CursorKey, Direction, FieldValue, FindParams, FindingKind, Moved, Predicate,
-    ResolutionTarget, Score, Sort, SortKey, Unsatisfied, VaultAddress, VaultName,
+    Column, Cursor, CursorKey, Direction, FieldValue, FindParams, FindingKind, Moved, PagedRows,
+    Predicate, ResolutionTarget, Score, Sort, SortKey, Unsatisfied, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -586,7 +586,10 @@ fn a_cursor_that_is_no_position_among_hits_is_refused() {
     ));
     assert_eq!(
         searching_store.refusal(&document),
-        PageRefusal::NotAHitCursor
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Document,
+            paged: PagedRows::Hit,
+        }
     );
     let hit = CursorKey::hit(Score::new(1.0).expect("a score"), "notes/lantern.md");
     let typed = searching("lantern").with_after(Cursor::new(

@@ -12,8 +12,9 @@ use norn_store::{
 };
 use norn_wire::{
     BlockRow, CollectionSelector, Column, Cursor, CursorKey, CursorOrderChanged, Direction,
-    FieldValue, FindParams, FindingKind, LinkHealth, Moved, Predicate, Snapshot as WireSnapshot,
-    Sort, SortKey, TagRow, Unsatisfied, ValidateParams, VaultAddress, VaultName,
+    FieldValue, FindParams, FindingKind, LinkHealth, Moved, PagedRows, Predicate,
+    Snapshot as WireSnapshot, Sort, SortKey, TagRow, Unsatisfied, ValidateParams, VaultAddress,
+    VaultName,
 };
 
 use crate::common::{Scratch, ambiguity, document, unread_block, violation, write_documents};
@@ -435,10 +436,6 @@ fn an_order_change_names_what_changed() {
             "the cursor was minted in an order under the schema `schema-1`, and the request \
              reads one under the schema `schema-2`",
         ),
-        (
-            CursorOrderChanged::minted_raw(None).in_orders(path.clone(), path),
-            "the cursor names no position in the path ascending, the order the request reads",
-        ),
     ] {
         assert_eq!(PageRefusal::OrderChanged(changed).to_string(), account);
     }
@@ -530,8 +527,9 @@ fn a_cursor_is_judged_by_the_order_its_page_was_read_in() {
 }
 
 /// **A path order's cursor carries no sort value.** One that carries a value
-/// is no position in the path order, though it names that order and its
-/// fingerprint, and it is refused.
+/// names the request's order and its fingerprint, and is no position among
+/// the documents the request pages: it is refused as such, not as an order
+/// change.
 #[test]
 fn a_path_order_cursor_carrying_a_sort_value_is_refused() {
     let seeded = Seeded::new("find-cursor-path-value");
@@ -549,9 +547,18 @@ fn a_path_order_cursor_carrying_a_sort_value_is_refused() {
             .snapshot()
             .find(&by_path.clone().with_after(forged), &declared())
             .expect_err("a path order's cursor carrying a sort value"),
-        PageRefusal::OrderChanged(
-            CursorOrderChanged::minted_raw(None).in_orders(order_of(&by_path), order_of(&by_path))
-        )
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Document,
+            paged: PagedRows::Document,
+        }
+    );
+    assert_eq!(
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Document,
+            paged: PagedRows::Document,
+        }
+        .to_string(),
+        "the cursor names no position among the documents the request pages"
     );
 }
 
@@ -644,7 +651,12 @@ fn a_cursor_among_other_rows_is_refused() {
             .snapshot()
             .find(&request().with_after(cursor), &declared())
             .expect_err("an ordinal cursor"),
-        PageRefusal::NotADocumentCursor
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Collection {
+                of: CollectionSelector::Headings
+            },
+            paged: PagedRows::Document,
+        }
     );
 }
 

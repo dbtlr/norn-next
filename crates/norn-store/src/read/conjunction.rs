@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use norn_db::rusqlite::types::Value;
-use norn_wire::{Pattern, Predicate, Unsatisfied};
+use norn_wire::{Pattern, Predicate, RequestPart, Unsatisfied};
 
 use super::advisory::{Compared, DateComparison};
 use super::filter::{Filter, ReadFilter};
@@ -354,7 +354,7 @@ impl Snapshot {
                 ],
             ),
             _ => Err(PageRefusal::UnknownPart {
-                part: "a predicate",
+                part: RequestPart::unknown("a predicate"),
             }),
         }
     }

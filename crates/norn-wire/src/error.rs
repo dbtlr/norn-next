@@ -347,8 +347,7 @@ pub enum ReasonCode {
     /// `vault/cursor-order-changed` — the cursor names no position in the
     /// order the request reads: it was minted under one order and continued
     /// under another — another schema's order, another key, or another
-    /// direction — or it names no position in its own order, as a forged
-    /// path cursor carrying a sort value does. The detail is the two orders.
+    /// direction. The detail is the two orders.
     #[serde(rename = "vault/cursor-order-changed")]
     VaultCursorOrderChanged,
     /// `vault/unreadable-bound` — a value a comparing part names — an
@@ -380,9 +379,10 @@ pub enum ReasonCode {
     /// row, or among another collection of a document, or among the same
     /// kind of row by a shape the request does not read — a tally's cursor
     /// of another grouping width or with a member naming no place in its
-    /// key's order, or a finding's cursor minted at another document than
-    /// the one a get pages. The detail is the rows the cursor names a
-    /// position among and the rows the request pages.
+    /// key's order, a finding's cursor minted at another document than the
+    /// one a get pages, or a path order's document cursor carrying a sort
+    /// value. The detail is the rows the cursor names a position among and
+    /// the rows the request pages.
     #[serde(rename = "request/cursor-not-taken")]
     RequestCursorNotTaken,
     /// `engine/not-enabled` — the vault has not enabled the rung the request
