@@ -22,8 +22,8 @@ use norn_host::{Demand, ReadRefusal, ReloadRefusal};
 use norn_testkit::process::Sandbox;
 use norn_testkit::wait::{Observed, wait_until};
 use norn_wire::{
-    AttachMode, CountParams, ErrorDetail, GroupKey, NotReady, ReasonCode, TrustState, VaultAddress,
-    VaultName, VaultRoot,
+    AttachMode, CountParams, ErrorDetail, GroupKey, NotReady, ReasonCode, TrustState,
+    UntrustedReason, VaultAddress, VaultName, VaultRoot,
 };
 
 /// The generated profile every case here attaches.
@@ -397,4 +397,52 @@ fn a_count_by_root_is_an_unsupported_attach() {
         refused.detail(),
         &ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
     );
+}
+
+/// A count over `name` grouping by the typed key `created`, which compiles
+/// only against a declaration that types it.
+fn a_count_by_created(name: &VaultName) -> CountParams {
+    a_count(name).with_by([GroupKey::field("created")])
+}
+
+/// **A recovery that pins a corrected schema hands a read the declaration it
+/// pinned.** The attach reads a schema this build cannot declare, pins nothing
+/// and publishes it as untrusted; the schema is corrected; the read's own
+/// demand runs the recovery that pins it. The count that follows groups by a
+/// key only that schema types, so it answers once the recovery has published —
+/// and is never refused as compiled under another declaration than the one its
+/// snapshot pins.
+#[test]
+fn a_read_after_a_recovery_compiles_against_the_schema_the_recovery_pinned() {
+    let (_sandbox, vault) = a_vault("host-reads-recovered-declaration");
+    let schema = vault.path().join(".norn/schema.yaml");
+    std::fs::write(&schema, b"\tinvalid: yaml\n").expect("write an unreadable schema");
+    let host = vault.host();
+    let _lease = host
+        .demand(vault.name(), AttachMode::Durable)
+        .expect("request attachment");
+    let reason = attach::wait_for_withdrawn_trust(&host, vault.name(), attach::READY_LIMIT);
+    assert!(
+        matches!(reason, UntrustedReason::SchemaUnreadable { .. }),
+        "the attach withheld trust for another reason: {reason:?}"
+    );
+
+    std::fs::write(
+        &schema,
+        b"version: 1\nfields:\n  created:\n    type: date\n",
+    )
+    .expect("correct the vault schema");
+    let answered = wait_until(
+        "a count grouping by a typed key to answer after the recovery",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.count(&a_count_by_created(vault.name())) {
+            Ok(answered) => Observed::Met(answered),
+            Err(refused) if refused.code() == &ReasonCode::HostReadFailed => {
+                panic!("the count was compiled against another declaration: {refused:?}")
+            }
+            Err(refused) => Observed::pending(format!("the count was refused with {refused:?}")),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(answered.answer.reading.trust, TrustState::Ready);
 }
