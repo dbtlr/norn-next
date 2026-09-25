@@ -13,10 +13,10 @@
 //! trust state and the store generation an answer names describe the instant
 //! its rows were read at.
 
-use norn_store::{ContentModel, CountWork, PageRefusal, Snapshot, SnapshotCounters, StoreError};
+use norn_store::{ContentModel, CountWork, PageRefusal, Snapshot, SnapshotCounters};
 use norn_wire::{
-    AnswerAdvisory, AnswerReading, CountParams, CountReport, ErrorEnvelope, Unsatisfied,
-    VaultAnswer, VaultName,
+    AnswerAdvisory, AnswerReading, CountParams, CountReport, ErrorDetail, ErrorEnvelope,
+    ReadFailure, Unsatisfied, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -56,14 +56,18 @@ impl HoldReading {
     /// A hold is taken only under a published demand that serves, so the
     /// demand answers with its state; one that did not would be refused with
     /// its own envelope, through the mapping every demand renders through. A
-    /// write generation below zero names no position in any database, and is
-    /// refused as the damaged store it is.
+    /// write generation below zero names no position in any database, so the
+    /// statement that read it is refused under `host/read-failed`.
     pub(crate) fn answer_reading(&self, name: &VaultName) -> Result<AnswerReading, ErrorEnvelope> {
         let trust = self.published().clone().answer(name)?;
         let generation = u64::try_from(self.store().write_generation()).map_err(|_| {
-            page_refusal(PageRefusal::Store(StoreError::Damaged {
-                what: "the store's write generation is below zero".to_string(),
-            }))
+            ErrorEnvelope::new(
+                "the store answered this read a write generation below zero",
+                ErrorDetail::read_failed(
+                    ReadFailure::statement(),
+                    "the store's write generation is below zero",
+                ),
+            )
         })?;
         Ok(AnswerReading::new(
             trust,

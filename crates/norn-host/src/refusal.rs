@@ -94,13 +94,13 @@ impl Demand {
     }
 }
 
-/// The envelope a demand for an attach mode this host has no lifecycle for is
-/// refused with — whether the demand named the mode, or the address a request
+/// The envelope a request for an attach mode this host has no lifecycle for is
+/// refused with — whether a demand named the mode, or the address a request
 /// named its vault by asked for it.
 pub(crate) fn unsupported_attach_mode(mode: AttachMode) -> ErrorEnvelope {
     ErrorEnvelope::new(
-        "this host attaches registered vaults durably and holds no lifecycle for the mode \
-         this demand named",
+        "this host attaches registered vaults durably and holds no lifecycle for the attach \
+         mode this request asks for",
         ErrorDetail::unsupported_attach_mode(mode),
     )
 }
