@@ -11,7 +11,7 @@ use norn_fs::{ContentHash, Refusal};
 use norn_wire::{ErrorEnvelope, ReloadParams, ReloadReport, TrustState, VaultName};
 
 use crate::address::registered_name;
-use crate::lifecycle::{EntryOps, Host, HostError};
+use crate::lifecycle::{Demand, EntryOps, Host, HostError};
 use crate::{JobFailure, Registration};
 
 /// A registered engine boundary that receives one vault's optional parsed
@@ -139,8 +139,10 @@ impl<O: EntryOps> Host<O> {
     /// the outcome and fingerprints that activation would. A runtime failure
     /// either meets gets the same policy, and a reload the host drops without
     /// an answer — moved past before it ran, or lost with a leg that unwound —
-    /// answers where the entry stands once it is dropped. Every refusal renders
-    /// through [`ReloadRefusal::answer`].
+    /// answers where the entry stands once it is dropped. Where the entry
+    /// stands is its published demand, so an entry standing on a park is
+    /// refused with the park's own code, as `vault status` answers it. Every
+    /// refusal renders through [`ReloadRefusal::answer`].
     ///
     /// `Err(HostError)` is a host shutting down or whose job channel is gone,
     /// which is transport death and carries no code: nothing about the vault
@@ -178,7 +180,11 @@ impl<O: EntryOps> Host<O> {
 pub enum ReloadRefusal {
     UnknownVault,
     Unsupported,
-    Unavailable(TrustState),
+    /// The entry is not reloadable right now, and this is where it stands:
+    /// its published demand, the park it stands on first and its trust state
+    /// where nothing parks it — the one reading `vault status` and a demand
+    /// lease answer the same entry with.
+    Unavailable(Demand),
     Core(ReloadError),
     Runtime(JobFailure),
     HostStopped,

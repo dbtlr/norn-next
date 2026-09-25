@@ -3034,6 +3034,12 @@ impl<O: EntryOps> Host<O> {
     /// answer. The entry must be `Ready`, hold its coverage, and have nothing
     /// working over it.
     ///
+    /// Where the entry stands is [`EntryState::published_demand`] on every
+    /// path that tells the asker so — the refusal at admission, a leg that
+    /// does not run or no longer stands, and a reload dropped unanswered — so
+    /// a park answers in its own code, as `vault status` and a demand lease
+    /// answer it, rather than as the label beneath it.
+    ///
     /// A leg that runs answers the asker itself. A reload that is dropped
     /// with no answer sent is one the host moved past, and the asker is told
     /// where the entry stands, read once every sender of its reply is gone:
@@ -3061,7 +3067,7 @@ impl<O: EntryOps> Host<O> {
                 || state.claim.is_held()
                 || state.detach_in_flight
             {
-                return Err(ReloadRefusal::Unavailable(state.trust.clone()));
+                return Err(ReloadRefusal::Unavailable(state.published_demand()));
             }
             state
                 .claim
@@ -3074,7 +3080,7 @@ impl<O: EntryOps> Host<O> {
     }
 
     /// What the asker of a reload the host dropped unanswered is told: where
-    /// the entry stands now, a vault the serving set no longer holds, or a
+    /// the entry stands now — its published demand, park first — a vault the serving set no longer holds, or a
     /// host that is shutting down.
     fn unanswered_reload(&self, name: &VaultName) -> ReloadRefusal {
         if self.shared.shutting_down.load(Ordering::SeqCst) {
@@ -3086,8 +3092,7 @@ impl<O: EntryOps> Host<O> {
                     .gate
                     .lock()
                     .expect("entry gate poisoned")
-                    .trust
-                    .clone(),
+                    .published_demand(),
             ),
             None => ReloadRefusal::UnknownVault,
         }
@@ -4997,8 +5002,8 @@ enum ReloadStep {
 /// else the leg starts from under the same hold.
 ///
 /// A claim no longer standing at `epoch`, or coverage already out, is a leg
-/// that does not run: the asker is told where the entry stands and `None`
-/// comes back. A reload and its dry run both begin here.
+/// that does not run: the asker is told where the entry stands — its
+/// published demand, park first — and `None` comes back. A reload and its dry run both begin here.
 fn begin_reload_leg<'entry, A: SnapshotSource>(
     entry: &'entry Entry<A>,
     epoch: u64,
@@ -5006,12 +5011,12 @@ fn begin_reload_leg<'entry, A: SnapshotSource>(
 ) -> Option<(MutexGuard<'entry, EntryState<A>>, A)> {
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     if !state.claim.stands_at(epoch) {
-        let _ = reply.send(Err(ReloadRefusal::Unavailable(state.trust.clone())));
+        let _ = reply.send(Err(ReloadRefusal::Unavailable(state.published_demand())));
         return None;
     }
     let Some(attachment) = state.coverage.take(epoch) else {
         state.claim.release();
-        let _ = reply.send(Err(ReloadRefusal::Unavailable(state.trust.clone())));
+        let _ = reply.send(Err(ReloadRefusal::Unavailable(state.published_demand())));
         return None;
     };
     state.pin_for_leg(Leg::Job(epoch));
@@ -5035,7 +5040,8 @@ enum ReloadLegEnd<'entry, A: SnapshotSource> {
 /// The claim this leg ran under may have been taken away while it ran, so the
 /// work it did is not what stands over the entry any more; or a release may
 /// have opened over it. Either way the asker is told where the entry stands
-/// now, read off the gate under the same hold, which is the value
+/// now — its published demand, park first — read off the gate under the same
+/// hold, which is the value
 /// [`begin_reload_leg`] reports for the same condition. A reload and its dry
 /// run both end here.
 fn end_reload_leg<'entry, A: SnapshotSource>(
@@ -5047,9 +5053,9 @@ fn end_reload_leg<'entry, A: SnapshotSource>(
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     state.unpin_leg(Leg::Job(epoch));
     if !state.claim.stands_at(epoch) || state.detach_in_flight {
-        let trust = state.trust.clone();
+        let stands = state.published_demand();
         drop(state);
-        let _ = reply.send(Err(ReloadRefusal::Unavailable(trust)));
+        let _ = reply.send(Err(ReloadRefusal::Unavailable(stands)));
         return ReloadLegEnd::Superseded(attachment);
     }
     ReloadLegEnd::Standing(state, attachment)
@@ -7181,17 +7187,13 @@ mod tests {
         assert_eq!(host.state(&name), answered(TrustState::Ready));
     }
 
-    /// A reload whose claim is taken away while it runs reports where the
-    /// entry stands, not a state the send site invented. The claim goes with
-    /// an identity park, so what the asker is told is the park's own refusal —
-    /// the same value the status surface answers with — rather than
-    /// `Unattached`, which would say the entry holds nothing at all.
+    /// A reload-shaped leg whose claim is taken away by `park` while it runs,
+    /// on a host of its own, in the mode `dry_run` names: what its asker is
+    /// told, beside the detail the park's own refusal carries.
     #[cfg(unix)]
-    #[test]
-    fn a_reload_whose_claim_was_taken_away_reports_the_trust_the_entry_stands_at() {
+    fn a_leg_superseded_by(park: Park, dry_run: bool) -> (ReloadRefusal, ErrorDetail) {
         let scratch = temp_base("reload-claim-superseded");
-        let base = scratch.root();
-        let root = base.join("root");
+        let root = scratch.root().join("root");
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.block_reload.store(true, Ordering::SeqCst);
@@ -7200,27 +7202,47 @@ mod tests {
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
-        let reloading = Arc::clone(&host);
-        let reload_name = name.clone();
-        let reload = thread::spawn(move || reloading.reload(&reload_name));
+        let asking = Arc::clone(&host);
+        let asked = name.clone();
+        let answer = thread::spawn(move || {
+            if dry_run {
+                asking.judge_reload(&asked)
+            } else {
+                asking.reload(&asked)
+            }
+        });
         wait_for_flag("reload_started", &ops.reload_started);
 
-        refuse_root_identity(&root);
-        park_on_current_classification(&host.shared, &name);
-        let park = entry_park(host.as_ref(), &name);
-        let Some(Demand::IdentityRefused(detail)) = park.clone() else {
-            panic!("the entry stands on no identity park: {park:?}");
-        };
+        let parked = park_entry(&host, &name, &root, park);
         ops.reload_release.store(true, Ordering::SeqCst);
-
-        assert_eq!(
-            reload.join().unwrap(),
-            Err(ReloadRefusal::Unavailable(TrustState::untrusted(
-                UntrustedReason::environmental_refusal(detail)
-            ))),
-            "the reload reported a state the send site invented"
-        );
+        let refusal = answer
+            .join()
+            .unwrap()
+            .expect_err("the leg answered a judgment its claim no longer stood for");
         drop(host);
+        (refusal, parked)
+    }
+
+    /// A reload whose claim is taken away while it runs reports where the
+    /// entry stands, not a state the send site invented. The claim goes with a
+    /// park, so what the asker is told is the park's own refusal — the same
+    /// value the status surface answers with — rather than the `Unattached` or
+    /// releasing label beneath it, which would say the entry holds nothing yet.
+    #[cfg(unix)]
+    #[test]
+    fn a_reload_whose_claim_was_taken_away_reports_where_the_entry_stands() {
+        for park in [Park::Identity, Park::DuplicateRoot] {
+            let (refusal, parked) = a_leg_superseded_by(park, false);
+            let name = VaultName::new("notes").unwrap();
+            assert_eq!(
+                refusal
+                    .answer(&name)
+                    .expect("a live host answers with a code")
+                    .detail(),
+                &parked,
+                "{park:?}: the reload reported a state the send site invented"
+            );
+        }
     }
 
     #[test]
@@ -7243,7 +7265,7 @@ mod tests {
 
         assert_eq!(
             reload.join().unwrap(),
-            Err(ReloadRefusal::Unavailable(releasing()))
+            Err(ReloadRefusal::Unavailable(Demand::State(releasing())))
         );
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
@@ -7253,43 +7275,23 @@ mod tests {
     }
 
     /// A dry run whose claim is taken away while it reads reports where the
-    /// entry stands, as the reload it judges for does: the identity park's own
-    /// refusal, not the judgment it reached over a claim that no longer stands.
+    /// entry stands, as the reload it judges for does: the park's own refusal,
+    /// not the judgment it reached over a claim that no longer stands.
     #[cfg(unix)]
     #[test]
-    fn a_dry_run_whose_claim_was_taken_away_reports_the_trust_the_entry_stands_at() {
-        let scratch = temp_base("dry-run-claim-superseded");
-        let base = scratch.root();
-        let root = base.join("root");
-        let ops = Arc::new(FakeOps::default());
-        ops.reload_supported.store(true, Ordering::SeqCst);
-        ops.block_reload.store(true, Ordering::SeqCst);
-        let name = VaultName::new("notes").unwrap();
-        let host = Arc::new(host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
-        wait_for_state(&host, &name, TrustState::Ready);
-
-        let judging = Arc::clone(&host);
-        let judge_name = name.clone();
-        let judgment = thread::spawn(move || judging.judge_reload(&judge_name));
-        wait_for_flag("reload_started", &ops.reload_started);
-
-        refuse_root_identity(&root);
-        park_on_current_classification(&host.shared, &name);
-        let park = entry_park(host.as_ref(), &name);
-        let Some(Demand::IdentityRefused(detail)) = park.clone() else {
-            panic!("the entry stands on no identity park: {park:?}");
-        };
-        ops.reload_release.store(true, Ordering::SeqCst);
-
-        assert_eq!(
-            judgment.join().unwrap(),
-            Err(ReloadRefusal::Unavailable(TrustState::untrusted(
-                UntrustedReason::environmental_refusal(detail)
-            ))),
-            "the dry run answered a judgment its claim no longer stood for"
-        );
-        drop(host);
+    fn a_dry_run_whose_claim_was_taken_away_reports_where_the_entry_stands() {
+        for park in [Park::Identity, Park::DuplicateRoot] {
+            let (refusal, parked) = a_leg_superseded_by(park, true);
+            let name = VaultName::new("notes").unwrap();
+            assert_eq!(
+                refusal
+                    .answer(&name)
+                    .expect("a live host answers with a code")
+                    .detail(),
+                &parked,
+                "{park:?}: the dry run reported a state the send site invented"
+            );
+        }
     }
 
     /// A release opened over a dry run closes where the dry run's leg ends, as
@@ -7316,7 +7318,7 @@ mod tests {
 
         assert_eq!(
             judgment.join().unwrap(),
-            Err(ReloadRefusal::Unavailable(releasing()))
+            Err(ReloadRefusal::Unavailable(Demand::State(releasing())))
         );
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
@@ -7530,6 +7532,84 @@ mod tests {
         }
     }
 
+    /// **An entry parked on a duplicate root refuses with the park's own code,
+    /// naming the aliases**, in either mode — the answer `vault status` gives
+    /// for the same entry, not the `Unattached` label the park stands over.
+    #[test]
+    fn vault_reload_refuses_an_entry_parked_on_a_duplicate_root_with_its_aliases() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let conflict = conflict_over(&name);
+        refuse_conflict(&host.shared, &conflict);
+        wait_for_published_label(&host, &name, TrustState::Unattached);
+
+        let parked = ErrorDetail::duplicate_root(conflict.aliases().clone());
+        assert_eq!(
+            host.state(&name)
+                .map_err(|refused| refused.detail().clone()),
+            Err(parked.clone())
+        );
+        for dry_run in [false, true] {
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                parked,
+                "dry run: {dry_run}"
+            );
+        }
+    }
+
+    /// **An entry parked on a contended maintainer lock refuses with the
+    /// park's own code, naming the incumbent**, in either mode.
+    #[test]
+    fn vault_reload_refuses_an_entry_parked_maintainer_contended_with_the_incumbent() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.contend_attach.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_park(
+            &host,
+            &name,
+            Demand::MaintainerContended(MaintainerIdentity::unknown()),
+        );
+
+        let parked = ErrorDetail::maintainer_contended(MaintainerIdentity::unknown());
+        for dry_run in [false, true] {
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                parked,
+                "dry run: {dry_run}"
+            );
+        }
+    }
+
+    /// **An entry parked on a root the registry cannot read refuses with the
+    /// park's own code**, in either mode.
+    #[cfg(unix)]
+    #[test]
+    fn vault_reload_refuses_an_entry_parked_on_its_root_identity_with_the_refusal() {
+        let scratch = temp_base("reload-identity-parked");
+        let root = scratch.root().join("root");
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let name = VaultName::new("notes").unwrap();
+        let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let parked = park_entry(&host, &name, &root, Park::Identity);
+        for dry_run in [false, true] {
+            assert_eq!(
+                reload_refused(&host, &reload_params(&name, dry_run)),
+                parked,
+                "dry run: {dry_run}"
+            );
+        }
+    }
+
     /// **A `Ready` entry something is already working over refuses busy**,
     /// and a dry run is refused behind that work as an activation is.
     #[test]
@@ -7720,37 +7800,61 @@ mod tests {
         thread::spawn(move || host.vault_reload(&params))
     }
 
-    /// Park `name` on its root's identity refusal, and return the refusal the
-    /// entry then stands at as a reload answers it.
+    /// A park a case stands an entry on, raised the way the host raises it.
     #[cfg(unix)]
-    fn park_on_identity(
+    #[derive(Clone, Copy, Debug)]
+    enum Park {
+        /// The registry cannot read the entry's root.
+        Identity,
+        /// The entry's name and one registration the host does not hold reach
+        /// one root.
+        DuplicateRoot,
+    }
+
+    /// Park `name` on `park`, and return the detail the park's own refusal
+    /// carries — the one `vault status` answers the parked entry with.
+    #[cfg(unix)]
+    fn park_entry(
         host: &Host<Arc<FakeOps>>,
         name: &VaultName,
         root: &std::path::Path,
+        park: Park,
     ) -> ErrorDetail {
-        refuse_root_identity(root);
-        park_on_current_classification(&host.shared, name);
-        let Some(Demand::IdentityRefused(detail)) = entry_park(host, name) else {
-            panic!("the entry stands on no identity park");
-        };
-        ReloadRefusal::Unavailable(TrustState::untrusted(
-            UntrustedReason::environmental_refusal(detail),
-        ))
-        .answer(name)
-        .expect("an unavailable entry is answered with a code")
-        .detail()
-        .clone()
+        match park {
+            Park::Identity => {
+                refuse_root_identity(root);
+                park_on_current_classification(&host.shared, name);
+                let Some(Demand::IdentityRefused(detail)) = entry_park(host, name) else {
+                    panic!("the entry stands on no identity park");
+                };
+                ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(detail))
+            }
+            Park::DuplicateRoot => {
+                let conflict = conflict_over(name);
+                refuse_conflict(&host.shared, &conflict);
+                ErrorDetail::duplicate_root(conflict.aliases().clone())
+            }
+        }
+    }
+
+    /// Every park a case stands an entry on, paired with each reload mode.
+    #[cfg(unix)]
+    fn every_park_in_either_mode() -> impl Iterator<Item = (Park, bool)> {
+        [Park::Identity, Park::DuplicateRoot]
+            .into_iter()
+            .flat_map(|park| [(park, false), (park, true)])
     }
 
     /// **A reload the entry moves past while it waits in the channel is
     /// answered with where the entry stands**, in either mode, rather than as
-    /// a stopped host. The reload queues behind another vault's reload on the
-    /// one worker, an identity park moves the entry past it, and the worker
-    /// that then picks it up runs nothing of it.
+    /// a stopped host: the park that moved the entry past it, in that park's
+    /// own code. The reload queues behind another vault's reload on the one
+    /// worker, a park moves the entry past it, and the worker that then picks
+    /// it up runs nothing of it.
     #[cfg(unix)]
     #[test]
-    fn a_reload_moved_past_in_the_channel_answers_the_trust_the_entry_stands_at() {
-        for dry_run in [false, true] {
+    fn a_reload_moved_past_in_the_channel_answers_where_the_entry_stands() {
+        for (park, dry_run) in every_park_in_either_mode() {
             let scratch = temp_base("reload-moved-past-in-channel");
             let queued = VaultName::new("queued").unwrap();
             let holding = VaultName::new("holding").unwrap();
@@ -7775,7 +7879,7 @@ mod tests {
                 },
             )
             .unwrap_or_else(|failure| panic!("{failure}"));
-            let refused = park_on_identity(&host, &queued, &scratch.root().join("queued"));
+            let refused = park_entry(&host, &queued, &scratch.root().join("queued"), park);
             ops.reload_release.store(true, Ordering::SeqCst);
 
             let answered = moved_past
@@ -7783,7 +7887,7 @@ mod tests {
                 .unwrap()
                 .expect("a live host answered the reload it moved past with no code")
                 .expect_err("the reload the entry moved past was answered as run");
-            assert_eq!(answered.detail(), &refused, "dry run: {dry_run}");
+            assert_eq!(answered.detail(), &refused, "{park:?}, dry run: {dry_run}");
             held.join()
                 .unwrap()
                 .expect("the host is running")
@@ -7793,13 +7897,13 @@ mod tests {
 
     /// **A reload the entry moves past before any worker takes it is answered
     /// with where the entry stands**, in either mode. The channel is full, so
-    /// the reload waits on its marker for a later dispatch; an identity park
-    /// moves the entry past the marker, and the asker is answered then rather
-    /// than behind the work still holding the channel.
+    /// the reload waits on its marker for a later dispatch; a park moves the
+    /// entry past the marker, and the asker is answered then, in the park's
+    /// own code, rather than behind the work still holding the channel.
     #[cfg(unix)]
     #[test]
-    fn a_reload_moved_past_on_its_marker_answers_the_trust_the_entry_stands_at() {
-        for dry_run in [false, true] {
+    fn a_reload_moved_past_on_its_marker_answers_where_the_entry_stands() {
+        for (park, dry_run) in every_park_in_either_mode() {
             let scratch = temp_base("reload-moved-past-on-marker");
             let queued = VaultName::new("queued").unwrap();
             let holding = VaultName::new("holding").unwrap();
@@ -7839,14 +7943,14 @@ mod tests {
                 },
             )
             .unwrap_or_else(|failure| panic!("{failure}"));
-            let refused = park_on_identity(&host, &queued, &scratch.root().join("queued"));
+            let refused = park_entry(&host, &queued, &scratch.root().join("queued"), park);
 
             let answered = moved_past
                 .join()
                 .unwrap()
                 .expect("a live host answered the reload it moved past with no code")
                 .expect_err("the reload the entry moved past was answered as run");
-            assert_eq!(answered.detail(), &refused, "dry run: {dry_run}");
+            assert_eq!(answered.detail(), &refused, "{park:?}, dry run: {dry_run}");
             ops.reload_release.store(true, Ordering::SeqCst);
             for asked in [held, filled] {
                 asked

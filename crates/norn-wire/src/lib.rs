@@ -305,8 +305,9 @@
 //! them, which is a fact about what the vault holds rather than about how it
 //! is served. What a
 //! reload is refused with *before* it runs — a name the registry does not
-//! hold, an entry holding nothing to reload yet, an entry whose derived state
-//! cannot be trusted — is a fact about the host's serving and stays `host/…`.
+//! hold, an entry standing on a park, an entry holding nothing to reload yet,
+//! an entry whose derived state cannot be trusted — is a fact about the host's
+//! serving and stays `host/…`.
 //! `engine/…` is a fact about the vault's engine: a rung not enabled, an
 //! engine that does not stand, an answer that failed.
 //!
