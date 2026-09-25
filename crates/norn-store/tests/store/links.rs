@@ -514,9 +514,24 @@ fn a_link_addressed_elsewhere_or_to_an_absent_attachment_is_not_judged() {
 
 /// **The root's case behaviour is the resolution's**: where the root tells
 /// spellings apart, `[[GLOSSARY]]` and `../NOTES/Glossary.md` name nothing;
-/// where it folds ASCII case, each names `notes/glossary.md`.
+/// where it folds ASCII case, each names `notes/glossary.md`, and a lowercase
+/// path names the document standing at its uppercase spelling.
 #[test]
 fn a_folding_root_resolves_every_case_spelling_of_either_family() {
+    for (order, expected) in [
+        (Sensitive, names(LinkHealth::Broken, &[])),
+        (Folding, names(LinkHealth::Healthy, &["Notes/Glossary.md"])),
+    ] {
+        let upper = Linked::holding(
+            &format!("links-case-upper-{order:?}"),
+            order,
+            &[
+                holding("Notes/Glossary.md", Vec::new()),
+                holding("src/e.md", vec![markdown("../notes/glossary.md")]),
+            ],
+        );
+        assert_eq!(reading(&upper.links("src/e.md")[0]), expected, "{order:?}");
+    }
     let sensitive = Linked::new("links-case-sensitive", Sensitive, 0);
     for row in sensitive.links("src/d.md") {
         assert_eq!(reading(&row), names(LinkHealth::Broken, &[]), "{row:?}");
