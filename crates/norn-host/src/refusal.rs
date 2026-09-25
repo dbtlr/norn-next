@@ -118,7 +118,7 @@ fn root_refused(refusal: String) -> ErrorEnvelope {
 /// echoing the name that was asked for.
 fn unknown_vault(name: &VaultName) -> ErrorEnvelope {
     ErrorEnvelope::new(
-        format!("no vault is registered under the name `{name}`"),
+        format!("this host serves no vault under the name `{name}`"),
         ErrorDetail::unknown_vault(name.clone()),
     )
 }
