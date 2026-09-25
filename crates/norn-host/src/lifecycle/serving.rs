@@ -121,11 +121,12 @@ impl<A: SnapshotSource> ServingSet<A> {
         }
     }
 
-    /// How many classifications have run against this set.
+    /// How many passes that stat every served root have run against this set.
     ///
-    /// A caller reads this to hold a path to the stats it spends: the counter
-    /// moves once per [`ServingSet::recheck`] and once per
+    /// A caller reads this to hold a path to the root stats it spends: the
+    /// counter moves once per [`ServingSet::recheck`] and once per
     /// [`ServingSet::containing`], and each of those stats every served root.
+    /// It counts those stats alone, not the other reads a pass takes.
     ///
     /// The set is this crate's own, so a bar outside it reads this through
     /// `Host::classifications`, which is the narrowest surface that reaches it.
@@ -176,17 +177,21 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// judged by [`containing`] against every registration the set serves at
     /// this instant.
     ///
-    /// The registrations are copied out through [`ServingSet::registrations`],
-    /// so the stats the judgement takes stand outside the set's lock. Those
-    /// stats reach every served root, which is a classification's cost, so the
-    /// pass is counted as one.
+    /// The registrations are copied out through [`ServingSet::registrations`]
+    /// and keyed by the name the set keys them by, so the stats the judgement
+    /// takes stand outside the set's lock. Those stats reach every served
+    /// root, which is a classification's cost, so the pass is counted as one.
     pub(crate) fn containing(
         &self,
         directory: &Path,
     ) -> Result<Option<Registration>, ResolveRefusal> {
-        let registrations = self.registrations();
+        let registrations = self
+            .registrations()
+            .into_iter()
+            .map(|registration| (registration.name.clone(), registration))
+            .collect();
         self.classifications.fetch_add(1, Ordering::SeqCst);
-        containing(registrations, directory)
+        containing(&registrations, directory)
     }
 
     /// Classify `name`'s root against every other root the set serves.

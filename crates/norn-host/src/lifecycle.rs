@@ -2978,13 +2978,16 @@ impl<O: EntryOps> Host<O> {
         answer.recv().unwrap_or(Err(ReloadRefusal::HostStopped))
     }
 
-    /// How many classifications this host has run against its serving set.
+    /// How many passes that stat every served root this host has run against
+    /// its serving set: each classification a recheck runs, and each
+    /// resolution of a directory.
     ///
-    /// One classification stats every root the host serves, so this is the whole
-    /// filesystem cost the registry itself carries: a path that moves the
-    /// counter spent those stats, and a path that leaves it standing spent none.
-    /// It is cumulative, so what one act cost is the difference between a
-    /// reading before it and one after.
+    /// The count is of root stats alone: a path that moves the counter spent a
+    /// stat of every served root, and a path that leaves it standing spent
+    /// none. What a resolution spends beyond those — the resolution of the
+    /// directory it is asked about and a stat of each ancestor it walks — is
+    /// not counted here. It is cumulative, so what one act cost is the
+    /// difference between a reading before it and one after.
     ///
     /// **Behind `induced-failure`, with the rest of the harness-reachable
     /// surface.** Nothing a client asks for is answered from this number: it
@@ -17220,7 +17223,7 @@ mod tests {
         use super::*;
         use norn_wire::{Directory, ListParams, ResolveParams, ResolveReport};
 
-        fn registration(name: &str, root: &str) -> RegistryEntry {
+        fn registration(name: &str, root: &std::path::Path) -> RegistryEntry {
             RegistryEntry::new(VaultName::new(name).unwrap(), VaultRoot::new(root).unwrap())
         }
 
@@ -17267,16 +17270,30 @@ mod tests {
         /// classification it costs.
         #[test]
         fn a_resolution_is_counted_as_a_classification() {
-            let host = host_serving(vec![registration(
-                "notes",
-                "/tmp/norn-host-resolve-counted",
-            )]);
+            let scratch = temp_base("resolve-counted");
+            let root = scratch.root().join("notes");
+            std::fs::create_dir_all(root.join("sub")).unwrap();
+            let notes = registration("notes", &root);
+            let host = host_serving(vec![notes.clone()]);
             let before = host.shared.entries.classifications();
-            host.vault_resolve(&ResolveParams::new(
-                Directory::new("/tmp/norn-host-resolve-counted/sub").unwrap(),
-            ))
-            .expect("a directory under one root resolves");
+            assert_eq!(
+                host.vault_resolve(&ResolveParams::new(
+                    Directory::new(root.join("sub")).unwrap()
+                )),
+                Ok(ResolveReport::registered(notes))
+            );
             assert_eq!(host.shared.entries.classifications(), before + 1);
+        }
+
+        /// A listing reads the set and nothing else, so it spends no
+        /// classification.
+        #[test]
+        fn a_listing_is_not_counted_as_a_classification() {
+            let scratch = temp_base("list-uncounted");
+            let host = host_serving(vec![registration("notes", &scratch.root().join("notes"))]);
+            let before = host.shared.entries.classifications();
+            assert_eq!(host.vault_list(&ListParams::new()).registrations.len(), 1);
+            assert_eq!(host.shared.entries.classifications(), before);
         }
 
         /// A resolution over a root two served names reach is refused through
@@ -17321,12 +17338,14 @@ mod tests {
         /// one that left gone.
         #[test]
         fn a_listing_is_every_served_registration_in_name_order() {
+            let scratch = temp_base("list-order");
+            let root = |name: &str| scratch.root().join(name);
             let host = host_serving(vec![
-                registration("notes", "/tmp/norn-host-list-notes"),
-                registration("archive", "/tmp/norn-host-list-archive"),
-                registration("leaving", "/tmp/norn-host-list-leaving"),
+                registration("notes", &root("notes")),
+                registration("archive", &root("archive")),
+                registration("leaving", &root("leaving")),
             ]);
-            let joined = registration("journal", "/tmp/norn-host-list-journal");
+            let joined = registration("journal", &root("journal"));
             host.shared
                 .entries
                 .insert(joined.clone())
@@ -17339,9 +17358,9 @@ mod tests {
             assert_eq!(
                 host.vault_list(&ListParams::new()).registrations,
                 [
-                    registration("archive", "/tmp/norn-host-list-archive"),
+                    registration("archive", &root("archive")),
                     joined,
-                    registration("notes", "/tmp/norn-host-list-notes"),
+                    registration("notes", &root("notes")),
                 ]
             );
         }

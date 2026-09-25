@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::path::Path;
 
 use norn_config::registry::{Entry, Registry};
@@ -156,6 +157,9 @@ pub(crate) enum ResolveRefusal {
 /// contains `directory`, none where no root contains it, or the refusal where
 /// that root is reached by more than one of them.
 ///
+/// The registrations are keyed by name, so each name is one candidate and the
+/// names a refusal gathers are distinct.
+///
 /// **Containment is judged on filesystem identity**, the one notion by which
 /// the host decides two roots are one: a root contains the directory when the
 /// directory's resolved spelling, or one of its ancestors, is the directory
@@ -172,22 +176,23 @@ pub(crate) enum ResolveRefusal {
 /// A directory that does not exist is judged on the spelling
 /// [`canonical_spelling`] gives it: its components past what resolves have no
 /// identity and contain nothing, and the ancestors that do resolve are walked
-/// like any other. A root the filesystem answers for with nothing, or refuses
-/// to answer for, contains nothing, which is how a recheck classifies it too.
+/// like any other. A root or an ancestor the filesystem answers for with
+/// nothing, or refuses to answer for, is no root here, which is how a recheck
+/// classifies a root too.
 ///
 /// The cost is one stat per registered root, one resolution of the directory,
 /// and one stat per ancestor walked until one is a root — none of them taken
 /// under the serving set's lock, and none where nothing is registered.
 pub(crate) fn containing(
-    registrations: impl IntoIterator<Item = Entry>,
+    registrations: &BTreeMap<VaultName, Entry>,
     directory: &Path,
 ) -> Result<Option<Entry>, ResolveRefusal> {
-    let mut roots = BTreeMap::<Identity, Vec<Entry>>::new();
-    for registration in registrations {
-        if let Ok(Some(identity)) = path_identity(registration.root.as_path()) {
-            roots.entry(identity).or_default().push(registration);
-        }
-    }
+    let Ok(mut roots) = roots_by_identity(
+        registrations
+            .iter()
+            .map(|(name, registration)| (name, registration.root.as_path())),
+        |_, _| Ok::<(), Infallible>(()),
+    );
     if roots.is_empty() {
         return Ok(None);
     }
@@ -196,17 +201,43 @@ pub(crate) fn containing(
         let Ok(Some(identity)) = path_identity(ancestor) else {
             continue;
         };
-        let Some(mut reaching) = roots.remove(&identity) else {
+        let Some(reaching) = roots.remove(&identity) else {
             continue;
         };
-        if reaching.len() == 1 {
-            return Ok(reaching.pop());
-        }
-        let conflict = AliasConflict::new(reaching.into_iter().map(|entry| entry.name))
-            .expect("the serving set keys its registrations by name, so these names are distinct");
-        return Err(ResolveRefusal::AmbiguousRoot(conflict));
+        return match AliasConflict::new(reaching.iter().cloned()) {
+            Ok(conflict) => Err(ResolveRefusal::AmbiguousRoot(conflict)),
+            // One name reaches the root, so its registration is the answer.
+            Err(_) => Ok(reaching
+                .first()
+                .and_then(|name| registrations.get(name))
+                .cloned()),
+        };
     }
     Ok(None)
+}
+
+/// The served `roots` grouped by the filesystem identity each resolves to,
+/// with every name whose root reaches that identity: one stat per root.
+///
+/// A root the filesystem answers for with nothing is registrable rather than
+/// resolved and joins no group. A root the filesystem refuses to answer for is
+/// handed to `refused` with its name, which either passes over it — the root
+/// joins no group — or ends the grouping with the error it returns.
+fn roots_by_identity<'a, E>(
+    roots: impl IntoIterator<Item = (&'a VaultName, &'a Path)>,
+    mut refused: impl FnMut(&VaultName, Refusal) -> Result<(), E>,
+) -> Result<BTreeMap<Identity, BTreeSet<VaultName>>, E> {
+    let mut identities = BTreeMap::<Identity, BTreeSet<VaultName>>::new();
+    for (name, root) in roots {
+        match path_identity(root) {
+            Ok(Some(identity)) => {
+                identities.entry(identity).or_default().insert(name.clone());
+            }
+            Ok(None) => {}
+            Err(refusal) => refused(name, refusal)?,
+        }
+    }
+    Ok(identities)
 }
 
 /// Classify every root the host serves against the others, answering for
@@ -221,21 +252,16 @@ pub(crate) fn recheck<'a>(
     roots: impl IntoIterator<Item = (&'a VaultName, &'a Path)>,
     requested: &VaultName,
 ) -> Result<RootReading, Refusal> {
-    let mut identities = BTreeMap::<Identity, BTreeSet<VaultName>>::new();
-    let mut resolved = None;
-    for (name, root) in roots {
-        match path_identity(root) {
-            Ok(Some(identity)) => {
-                if name == requested {
-                    resolved = Some(identity);
-                }
-                identities.entry(identity).or_default().insert(name.clone());
-            }
-            Ok(None) => {}
-            Err(refusal) if name == requested => return Err(refusal),
-            Err(_) => {}
+    let identities = roots_by_identity(roots, |name, refusal| {
+        if name == requested {
+            Err(refusal)
+        } else {
+            Ok(())
         }
-    }
+    })?;
+    let resolved = identities
+        .iter()
+        .find_map(|(identity, names)| names.contains(requested).then_some(*identity));
     Ok(RootReading {
         identity: resolved,
         conflict: conflicts_from_identities(identities).remove(requested),
@@ -314,10 +340,18 @@ mod tests {
         Entry::new(VaultName::new(name).unwrap(), VaultRoot::new(root).unwrap())
     }
 
+    /// `registrations` keyed by name, as the serving set holds them.
+    fn by_name(registrations: &[Entry]) -> BTreeMap<VaultName, Entry> {
+        registrations
+            .iter()
+            .map(|registration| (registration.name.clone(), registration.clone()))
+            .collect()
+    }
+
     /// The name of the one registration `directory` resolves to among
     /// `registrations`, or nothing.
     fn resolved(registrations: &[Entry], directory: &Path) -> Option<String> {
-        containing(registrations.iter().cloned(), directory)
+        containing(&by_name(registrations), directory)
             .expect("the resolution names one registration or none")
             .map(|registration| registration.name.to_string())
     }
@@ -402,7 +436,7 @@ mod tests {
             served("alpha", &shared),
         ];
         assert_eq!(
-            containing(registrations, &tree.dir("shared/sub")),
+            containing(&by_name(&registrations), &tree.dir("shared/sub")),
             Err(ResolveRefusal::AmbiguousRoot(
                 AliasConflict::new([
                     VaultName::new("alpha").unwrap(),
