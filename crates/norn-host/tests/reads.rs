@@ -18,9 +18,10 @@ mod attach;
 
 use std::path::Path;
 
-use norn_host::{Demand, ReadRefusal};
+use norn_host::{Demand, ReadRefusal, ReloadRefusal};
 use norn_testkit::process::Sandbox;
-use norn_wire::TrustState;
+use norn_testkit::wait::{Observed, wait_until};
+use norn_wire::{CountParams, GroupKey, TrustState, VaultAddress};
 
 /// The generated profile every case here attaches.
 const PROFILE: &str = "tiny";
@@ -183,4 +184,74 @@ fn reads_over_one_entry_each_run_one_statement_under_the_gate() {
         reading.reader_waits, 0,
         "reads that never overlapped waited for the handle anyway"
     );
+}
+
+/// **A hold carries the declaration its snapshot pins, across a reload that
+/// changes it.** The model is taken in the gate hold that establishes the
+/// snapshot, so a builder handed both compiles against the schema the
+/// snapshot's store pins — before the reload and after it — and is never
+/// refused as compiled under another.
+#[test]
+fn a_hold_carries_the_declaration_its_snapshot_pins_across_a_schema_reload() {
+    let (_sandbox, vault) = a_vault("host-reads-declaration");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let pinned = |store: &mut norn_store::Store| {
+        store
+            .begin_request()
+            .vault_schema_pin()
+            .expect("reading the pin")
+            .expect("an attachment pins the vault schema")
+            .fingerprint
+    };
+    let before = pinned(&mut vault.store());
+    {
+        let hold = host
+            .begin_read(vault.name())
+            .expect("an attached vault answers a read");
+        assert_eq!(hold.content_model().schema(), Some(before.as_str()));
+        hold.snapshot()
+            .count(
+                &CountParams::new(VaultAddress::name(vault.name().clone())),
+                hold.content_model(),
+            )
+            .expect("a count compiled against the hold's declaration");
+    }
+
+    std::fs::write(
+        vault.path().join(".norn/schema.yaml"),
+        b"version: 1\nfields:\n  created:\n    type: date\n",
+    )
+    .expect("rewrite the vault schema");
+    wait_until(
+        "the reload to activate the rewritten schema",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.reload(vault.name()) {
+            Ok(()) => Observed::Met(()),
+            Err(ReloadRefusal::Unavailable(trust)) => {
+                Observed::pending(format!("the entry is {trust:?}"))
+            }
+            Err(refused) => panic!("the reload was refused: {refused:?}"),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+
+    let after = pinned(&mut vault.store());
+    assert_ne!(after, before, "the reload pinned the schema it replaced");
+    let hold = host
+        .begin_read(vault.name())
+        .expect("a reloaded vault answers a read");
+    assert_eq!(
+        hold.content_model().schema(),
+        Some(after.as_str()),
+        "the hold carries a declaration its snapshot does not pin"
+    );
+    hold.snapshot()
+        .count(
+            &CountParams::new(VaultAddress::name(vault.name().clone()))
+                .with_by([GroupKey::field("created")]),
+            hold.content_model(),
+        )
+        .expect("a count grouping by a typed key compiled against the hold's declaration");
 }

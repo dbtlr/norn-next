@@ -877,7 +877,7 @@ impl Declared {
 /// A raw value that does not read as its declared type has no sort key, which
 /// is the store's `NULL`: the document still carries the value, and a typed
 /// order has nothing to place it by.
-fn content_model(schema: &VaultSchema, fingerprint: String) -> ContentModel {
+pub(crate) fn content_model(schema: &VaultSchema, fingerprint: String) -> ContentModel {
     let declared = schema.fields().fold(
         ContentModel::under(fingerprint),
         |declared, (key, field)| {

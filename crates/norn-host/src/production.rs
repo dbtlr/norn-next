@@ -13,9 +13,9 @@ use norn_fs::{
     Subscription, WatchError, try_acquire, walk, walk_subtree, watch, watch_polling,
 };
 use norn_store::{
-    Change, DerivedFinding, DirectoryPrefix, DocumentPath, FindingFacts, IncrementProvenance,
-    Provenance, RebuildReason, SchemaPin, Store, StoreError, StoredDocument, StoredPathOrder,
-    SubjectScope,
+    Change, ContentModel, DerivedFinding, DirectoryPrefix, DocumentPath, FindingFacts,
+    IncrementProvenance, Provenance, RebuildReason, SchemaPin, Store, StoreError, StoredDocument,
+    StoredPathOrder, SubjectScope,
 };
 use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, UntrustedReason, VaultName};
 
@@ -999,6 +999,15 @@ impl EntryOps for ProductionEntryOps {
         attachment: &Self::Attachment,
     ) -> Option<crate::ActiveFingerprints> {
         Some(attachment.controls.fingerprints())
+    }
+
+    /// The model the controls the attachment holds declare, built when those
+    /// controls were read. Every leg that pins a schema pins the controls it
+    /// then holds, so this is the declaration the store pins; a leg holding an
+    /// undeclarable schema pins nothing, and the trust withheld over it is
+    /// what keeps a read off the model declaring nothing it holds instead.
+    fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+        Arc::clone(attachment.controls.content_model())
     }
 
     fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf> {

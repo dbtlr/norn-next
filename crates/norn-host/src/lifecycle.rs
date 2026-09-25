@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use norn_config::registry::Entry as Registration;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
-use norn_store::StoreReading;
+use norn_store::{ContentModel, StoreReading};
 use norn_wire::{
     AttachMode, ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, VaultName,
     WarmingPhase, WatcherLossCause,
@@ -285,6 +285,20 @@ pub trait EntryOps: Send + Sync + 'static {
     /// The root authored control reads must use for this attachment.
     fn control_root(&self, _: &Self::Attachment) -> Option<std::path::PathBuf> {
         None
+    }
+    /// The content model of the schema this attachment's store pins, which
+    /// every read answered over this coverage compiles against.
+    ///
+    /// Read under the gate hold that publishes a leg's outcome, beside
+    /// [`EntryOps::active_fingerprints`], so the model an entry keeps is the
+    /// one its last pinning leg pinned. It is handed out rather than built
+    /// here: this runs under the entry gate, and the model is built where the
+    /// schema is read, outside it.
+    ///
+    /// The default declares nothing, which is the declaration of a store that
+    /// pins no schema.
+    fn active_content_model(&self, _: &Self::Attachment) -> Arc<ContentModel> {
+        Arc::new(ContentModel::none())
     }
     /// Why nothing may be derived under this attachment, where the attachment
     /// itself stands.
@@ -614,6 +628,7 @@ impl<A: SnapshotSource> Entry<A> {
                 reader_unavailable: None,
                 pending: Batch::default(),
                 active_fingerprints: None,
+                active_content_model: Arc::new(ContentModel::none()),
                 control_root: None,
                 last_reload_error: None,
                 recovery_required: false,
@@ -679,6 +694,18 @@ struct EntryState<A: SnapshotSource> {
     pending: Batch,
     /// The core fingerprints active in the attached runtime.
     active_fingerprints: Option<ActiveFingerprints>,
+    /// The content model of the schema the entry's store pins, which a read
+    /// compiles its request against.
+    ///
+    /// **Every leg that pins a schema publishes through a gate hold that
+    /// records this model**, and no read is served between that pin and that
+    /// hold: a reload that changes the schema closes the entry's reader and
+    /// publishes warming before it pins, and a recovery or a rebuild runs over
+    /// an entry that owes a rung, which publishes no `Ready` until its leg's
+    /// own gate hold. So a read that establishes its snapshot under the gate
+    /// and takes this model under the same hold compiles against the
+    /// declaration its snapshot pins.
+    active_content_model: Arc<ContentModel>,
     /// The operational root the active controls were read from.
     control_root: Option<std::path::PathBuf>,
     /// The last typed core error from reading, parsing, or applying vault
@@ -1501,6 +1528,21 @@ fn record_demand<A: SnapshotSource>(state: &mut EntryState<A>) -> Option<u64> {
     recovery_demand
 }
 
+/// Record the declaration `attachment` serves under — its active control-file
+/// fingerprints and the content model its store pins — as the entry's own.
+///
+/// Called under the gate hold that publishes a leg's outcome, so the entry's
+/// account of its declaration moves with the publication that puts the
+/// coverage back, and a read taken under a later hold reads both together.
+fn record_active_declaration<O: EntryOps>(
+    state: &mut EntryState<O::Attachment>,
+    ops: &O,
+    attachment: &O::Attachment,
+) {
+    state.active_fingerprints = ops.active_fingerprints(attachment);
+    state.active_content_model = ops.active_content_model(attachment);
+}
+
 fn begin_release<A: SnapshotSource>(state: &mut EntryState<A>) {
     // A job that lost the attachment to this leg left its marker behind for a
     // later tick, and the resources it was scheduled against are going back:
@@ -1593,6 +1635,7 @@ fn finish_release<O: EntryOps>(
     state.detach_in_flight = false;
     state.pending = Batch::default();
     state.active_fingerprints = None;
+    state.active_content_model = Arc::new(ContentModel::none());
     state.control_root = None;
     // The derived state a damage verdict was about is with the ops, and an
     // attach opens the database again from nothing: a requirement kept here
@@ -2315,6 +2358,9 @@ pub struct ReadHold<O: EntryOps> {
     /// snapshot stands from the hold's making to the hold's end.
     snapshot: Option<<<O::Attachment as SnapshotSource>::Reader as ReadSource>::Snapshot>,
     reading: HoldReading,
+    /// The content model the snapshot's store pins, taken under the gate hold
+    /// that established the snapshot.
+    content_model: Arc<ContentModel>,
     /// The demand this read holds on the entry for its own length. Declared
     /// last because fields drop in declaration order: the pin goes back in
     /// this type's own drop, under the gate, and the lease takes the gate
@@ -2376,6 +2422,17 @@ impl<O: EntryOps> ReadHold<O> {
         self.snapshot
             .as_ref()
             .expect("a hold holds its snapshot until it is dropped")
+    }
+
+    /// The content model a read builder compiles its request against: the
+    /// declaration of the schema the snapshot's store pins.
+    ///
+    /// It is the entry's own, taken in the gate hold that established the
+    /// snapshot, so a builder handed both compiles against the declaration
+    /// the snapshot pins and never refuses the request as compiled under
+    /// another.
+    pub fn content_model(&self) -> &ContentModel {
+        &self.content_model
     }
 }
 
@@ -3278,6 +3335,9 @@ impl<O: EntryOps> Host<O> {
                 (turn, published)
             }
         };
+        // The model is the entry's under this same hold, so it and the
+        // snapshot established below describe one declaration.
+        let content_model = Arc::clone(&state.active_content_model);
         // The establishment is accounted where it returns, for the reason the
         // mint above is: it ran under this hold either way, and the refusal
         // below is a path that paid for it.
@@ -3303,6 +3363,7 @@ impl<O: EntryOps> Host<O> {
                 published,
                 store: established.reading,
             },
+            content_model,
             _lease: lease.into_lease(),
         })
     }
@@ -3907,7 +3968,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             match result {
                 Ok((attachment, observed, handoff_saturated)) => {
                     state.pending.merge(observed);
-                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    record_active_declaration(&mut state, &*shared.ops, &attachment);
                     state.control_root = shared.ops.control_root(&attachment);
                     state.last_reload_error = None;
                     let withheld = shared.ops.withheld_trust(&attachment);
@@ -4119,7 +4180,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             match result {
                 Ok(()) => {
                     state.pending.merge(observed);
-                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    record_active_declaration(&mut state, &*shared.ops, &attachment);
                     state.last_reload_error = None;
                     let withheld = shared.ops.withheld_trust(&attachment);
                     // The handle is minted again where the slot is empty: a
@@ -4282,7 +4343,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Ok(attachment) => {
                     state.claim.release();
                     state.pending.merge(observed);
-                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    record_active_declaration(&mut state, &*shared.ops, &attachment);
                     let withheld = shared.ops.withheld_trust(&attachment);
                     // The store inside this coverage is not the store the
                     // entry's reader was minted from, so the handle is minted
@@ -4814,7 +4875,7 @@ fn run_reload_job<O: EntryOps>(
 
     let response = match result {
         Ok(outcome) => {
-            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            record_active_declaration(&mut state, &*shared.ops, &attachment);
             state.last_reload_error = None;
             state.clear_rung_requirements();
             match outcome {
@@ -4835,7 +4896,7 @@ fn run_reload_job<O: EntryOps>(
             Ok(())
         }
         Err(JobFailure::Reload(error)) => {
-            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            record_active_declaration(&mut state, &*shared.ops, &attachment);
             state.park_coverage(epoch, attachment);
             let ready = state.trust == TrustState::Ready;
             let detail = state.record_reload_error(error.clone());
@@ -4879,7 +4940,7 @@ fn run_reload_job<O: EntryOps>(
         Err(JobFailure::WatcherTerminal(error)) => {
             let failure = JobFailure::WatcherTerminal(error.clone());
             let reclassify = root_moved(&error);
-            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            record_active_declaration(&mut state, &*shared.ops, &attachment);
             state.park_coverage(epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
@@ -4894,7 +4955,7 @@ fn run_reload_job<O: EntryOps>(
         }
         Err(JobFailure::Environmental(detail)) => {
             let failure = JobFailure::Environmental(detail.clone());
-            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            record_active_declaration(&mut state, &*shared.ops, &attachment);
             state.park_coverage(epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
@@ -4903,7 +4964,7 @@ fn run_reload_job<O: EntryOps>(
         }
         Err(JobFailure::StoreDamaged(detail)) => {
             let failure = JobFailure::StoreDamaged(detail.clone());
-            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            record_active_declaration(&mut state, &*shared.ops, &attachment);
             // The schema half of this reload may have closed the handle before
             // the damage was met, so the slot is answered for here rather than
             // left empty with nothing beside it. The entry publishes a
