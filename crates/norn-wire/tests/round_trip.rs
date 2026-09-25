@@ -5973,6 +5973,55 @@ fn doctor_names_a_duplicate_root_once_among_the_registry_problems() {
     );
 }
 
+/// **`doctor` names a root it cannot read once, among the registry's
+/// problems**: the park the entry raises when it cannot read its root's
+/// identity is left out of the roll-up's attention for each name a missing or
+/// unreadable root names, and kept for a name no such problem names. The
+/// counts are the roll-up's own.
+#[test]
+fn doctor_names_an_unreadable_root_once_among_the_registry_problems() {
+    let parked_on_identity = |vault: &str| {
+        VaultStatus::new(
+            Registration::new(name(vault), vault_roots().remove(1)),
+            Published::parked(ErrorEnvelope::new(
+                "the registry cannot read this vault's root",
+                ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(
+                    "the root cannot be read",
+                )),
+            )),
+            Drift::reload_pending(),
+            EngineStatus::off(),
+            EngineSection::absent(),
+        )
+    };
+    let statuses = [
+        parked_on_identity("alpha"),
+        parked_on_identity("beta"),
+        parked_on_identity("gamma"),
+    ];
+    let roll_up = RollUp::of(&statuses);
+    let report = DoctorRegistryReport::new(
+        roll_up.clone(),
+        RegistrySanity::problems([
+            RegistryProblem::root_missing(name("alpha")),
+            RegistryProblem::root_unreadable(name("beta"), "permission denied"),
+        ])
+        .expect("problems that name one"),
+        [],
+    );
+
+    assert_eq!(report.roll_up.parked(), roll_up.parked());
+    assert_eq!(
+        report.roll_up.attention(),
+        [
+            Attention::reload_pending(name("alpha")),
+            Attention::reload_pending(name("beta")),
+            Attention::parked(name("gamma"), ReasonCode::HostEntryUntrusted),
+            Attention::reload_pending(name("gamma")),
+        ]
+    );
+}
+
 /// **A vault-local shadow fallback wants attention only where the vault does
 /// not ignore it.** Both are reported on the vault's status; the roll-up
 /// names the vault for the one whose staged shadows the vault's own tooling

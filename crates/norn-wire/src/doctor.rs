@@ -167,7 +167,9 @@ impl RegistrySanity {
     }
 
     /// Whether a problem this reading names is the cause `attention` names:
-    /// a park on a duplicate root, for a name a duplicate root here names.
+    /// a park on a duplicate root, for a name a duplicate root here names, or
+    /// the park an entry raises when it cannot read its root's identity, for
+    /// a name whose root is missing or unreadable here.
     fn owns(&self, attention: &Attention) -> bool {
         let RegistrySanity::Problems { problems } = self else {
             return false;
@@ -175,13 +177,15 @@ impl RegistrySanity {
         let Attention::Parked { name, code } = attention else {
             return false;
         };
-        *code == ReasonCode::HostDuplicateRoot
-            && problems.iter().any(|problem| match problem {
-                RegistryProblem::DuplicateRoot { aliases } => aliases.names().contains(name),
-                RegistryProblem::RootUnreadable { .. } | RegistryProblem::RootMissing { .. } => {
-                    false
-                }
-            })
+        problems.iter().any(|problem| match problem {
+            RegistryProblem::DuplicateRoot { aliases } => {
+                *code == ReasonCode::HostDuplicateRoot && aliases.names().contains(name)
+            }
+            RegistryProblem::RootUnreadable { name: named, .. }
+            | RegistryProblem::RootMissing { name: named } => {
+                *code == ReasonCode::HostEntryUntrusted && named == name
+            }
+        })
     }
 }
 
@@ -314,7 +318,10 @@ impl DoctorRegistryReport {
     /// **One cause is named once.** A duplicate root is a registry problem,
     /// so the park it raises on each name the problem names is left out of
     /// the roll-up's attention; a duplicate-root park on a name no problem
-    /// here names is kept. The counts are the roll-up's own.
+    /// here names is kept. A missing or unreadable root is one too, so the
+    /// park an entry raises when it cannot read its root's identity is left
+    /// out for each name such a problem names, and kept for any other name.
+    /// The counts are the roll-up's own.
     pub fn new(
         roll_up: RollUp,
         registry: RegistrySanity,
