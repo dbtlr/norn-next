@@ -13167,7 +13167,16 @@ mod tests {
         /// A production host over `f`'s directories, started from a registry
         /// file that records nothing.
         fn empty_host(f: &Fixture) -> (crate::Host<ProductionEntryOps>, ConfigDirs) {
-            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            empty_host_over(&f.root.join("config"), &f.root.join("data"))
+        }
+
+        /// A production host over the config base `config` and the data base
+        /// `data`, started from a registry file that records nothing.
+        fn empty_host_over(
+            config: &Path,
+            data: &Path,
+        ) -> (crate::Host<ProductionEntryOps>, ConfigDirs) {
+            let dirs = ConfigDirs::new(config, data).unwrap();
             let host = crate::Host::new(
                 crate::RegistryRead::from_entries([]),
                 ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(2, 2).unwrap()),
@@ -13312,6 +13321,51 @@ mod tests {
             assert_eq!(report, UnregisterReport::new(notes(), false));
             assert!(fs::metadata(dirs.derived_dir(&notes()).join("store.sqlite3")).is_ok());
             assert_eq!(recorded(&dirs, &notes()), None);
+        }
+
+        /// A registry file whose directory cannot be made refuses the
+        /// registration, and the serving set does not change.
+        #[test]
+        fn a_registry_file_that_cannot_be_written_leaves_the_set_as_it_stood() {
+            let f = Fixture::watcherless("register-unwritable");
+            let config = f.root.join("config-is-a-file");
+            fs::write(&config, b"").unwrap();
+            let (host, _) = empty_host_over(&config, &f.root.join("data"));
+
+            let refusal =
+                register(&host, &f.vault()).expect_err("a registration the file refused went in");
+
+            assert_eq!(refusal.code(), &ReasonCode::HostRegistryUnwritable);
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// A data directory in which the maintainer lock cannot be taken
+        /// refuses the unregistration as the environment refusing the work,
+        /// and the registration stands in the file and the set.
+        #[test]
+        fn a_data_directory_refusing_the_lock_leaves_the_registration_standing() {
+            let f = Fixture::watcherless("unregister-unclaimed");
+            let data = f.root.join("data-is-a-file");
+            fs::write(&data, b"").unwrap();
+            let (host, dirs) = empty_host_over(&f.root.join("config"), &data);
+            register(&host, &f.vault()).expect("the vault is registered");
+
+            let refusal = host
+                .vault_unregister(&UnregisterParams::new(notes()))
+                .expect_err("an unregistration without the lock went through");
+
+            assert!(
+                matches!(
+                    refusal.detail(),
+                    norn_wire::ErrorDetail::EntryUntrusted {
+                        reason: norn_wire::UntrustedReason::EnvironmentalRefusal { .. },
+                        ..
+                    }
+                ),
+                "{refusal:?}"
+            );
+            assert!(recorded(&dirs, &notes()).is_some());
+            assert_eq!(listed(&host), [notes()]);
         }
 
         /// Another holder of the vault's maintainer lock refuses the change,

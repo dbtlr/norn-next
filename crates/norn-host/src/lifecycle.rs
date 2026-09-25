@@ -396,6 +396,10 @@ pub trait EntryOps: Send + Sync + 'static {
     /// implementation whose detach gives residue back can give the same residue
     /// back here.
     ///
+    /// What this gives back is what the ops hold for a live vault, never the
+    /// derived state on disk: that outlives every attachment and is
+    /// [`EntryOps::retire`]'s to discard.
+    ///
     /// The default keeps nothing beside an attachment, and does nothing.
     fn discard(&self, _: &VaultName) {}
     /// Write one change to the registry file this host was started from.
