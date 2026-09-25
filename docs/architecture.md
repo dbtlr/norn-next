@@ -1734,7 +1734,10 @@ entry holds. The mint is fallible and cannot panic — an unwind under that gate
 and its blocking open is the priced cost of a hold every other holder of the entry waits
 behind. A mint that fails changes no trust label and publishes no refusal of its own: the
 reason is retained beside the entry's published demand, the way a reload's diagnostic and an
-engine's are, and a read refuses with it as reader-unavailable's detail. The vault status
+engine's are, and a read refuses with it as reader-unavailable's detail. Every store refusal
+the host tells a caller is told from the refusal's typed facts and never from the driver's
+words, which can name the database file, so no refusal hands a caller a path to open its own
+connection by. The vault status
 verb reports it beside trust and engine state; that verb is not built, and what the host
 retains for it today is the trust label, the active fingerprints and the last reload error.
 A mint may fail at a publication that is not serving, and then the read renders that demand

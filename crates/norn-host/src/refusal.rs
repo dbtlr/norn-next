@@ -383,19 +383,40 @@ pub(crate) fn page_refusal(refusal: PageRefusal) -> ErrorEnvelope {
 /// A store refusal in words, naming no file.
 ///
 /// A refusal told here reaches a caller holding no hold — a read's refusal
-/// detail, the vault inspection — while `StoreError` renders its
-/// file-lifecycle refusals with the derived database's path in them. A caller
-/// reading that path opens its own connection over the same database and
-/// answers from it under no adjudication, which is the escape the reader type
-/// carries no route to. So the path is dropped and the account keeps what a
-/// caller can act on: what was being done, and what the driver said. The path
-/// stays on the `StoreError` itself, where a log line that needs it reads it.
+/// detail, the vault inspection. A caller reading the derived database's path
+/// opens its own connection over the same database and answers from it under
+/// no adjudication, which is the escape the reader type carries no route to.
+///
+/// **The account is built from the refusal's typed facts and never from the
+/// driver's words.** The driver writes the database's path into its own
+/// account of an open it could not make, and nothing bounds where else it
+/// might, so a message is not redacted but left out: a redaction can only
+/// strike the spellings it knows, and the driver may spell a path another way
+/// or name a sidecar beside it. What is kept is what a caller can act on —
+/// the act that failed, the store's damage verdict, and the store's own
+/// bounds and fingerprints. The whole account stays on the `StoreError`,
+/// where a log line that needs it reads it.
+///
+/// The match carries no wildcard, so a variant minted in the store takes its
+/// stance on what it tells here.
 pub(crate) fn store_refusal_told(error: &StoreError) -> String {
     match error {
-        StoreError::Lifecycle {
-            operation, message, ..
-        } => format!("{operation} failed: {message}"),
-        named => named.to_string(),
+        StoreError::Path { problem, .. } => {
+            format!("a path handed to the store is not a document path: {problem}")
+        }
+        StoreError::Sql { operation, .. } | StoreError::Lifecycle { operation, .. } => {
+            format!("{operation} failed")
+        }
+        StoreError::Damaged { .. } => "the store is damaged".to_string(),
+        StoreError::Bound { what, limit, given } => {
+            format!("{what} holds at most {limit}, and {given} were given")
+        }
+        // Rendered from schema fingerprints, a path order and the store's own
+        // static words, none of which is a path.
+        StoreError::UnpinnedDeclaration { .. } | StoreError::KeySpace { .. } => error.to_string(),
+        StoreError::Entry { index, problem, .. } => {
+            format!("changeset entry {index}: {}", store_refusal_told(problem))
+        }
     }
 }
 
@@ -1315,14 +1336,7 @@ mod page_refusal_tests {
                     message: "disk I/O error".to_string(),
                 }),
                 ReasonCode::HostReadFailed,
-                ErrorDetail::read_failed(
-                    ReadFailure::statement(),
-                    StoreError::Sql {
-                        operation: "reading a page",
-                        message: "disk I/O error".to_string(),
-                    }
-                    .to_string(),
-                ),
+                ErrorDetail::read_failed(ReadFailure::statement(), "reading a page failed"),
             ),
         ]
     }

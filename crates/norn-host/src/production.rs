@@ -3202,9 +3202,9 @@ mod tests {
     /// is rendered into the vault inspection and into a read's refusal detail,
     /// both of which answer a caller holding no hold. The store's own rendering
     /// of a file-lifecycle refusal carries the derived database's path; what
-    /// crosses into the read seam keeps the act and the driver's message and
-    /// drops the path, because a caller holding it opens its own connection
-    /// over the same database and answers from it under no adjudication.
+    /// crosses into the read seam keeps the act and drops the path, because a
+    /// caller holding it opens its own connection over the same database and
+    /// answers from it under no adjudication.
     #[test]
     fn a_reader_refusal_carries_what_failed_and_never_the_database_file() {
         let derived = PathBuf::from("/machine-local/derived/a-vault");
@@ -3229,10 +3229,80 @@ mod tests {
             detail.contains("opening the database read-only failed"),
             "the refusal dropped the act that failed: {detail}"
         );
+    }
+
+    /// **No store refusal the host sends names a file, whatever the driver
+    /// said.** The driver writes the database's path into its own account of
+    /// an open it could not make, so a store under a directory spelled with
+    /// spaces, a backtick, a quote and an emoji is made unreadable and its
+    /// read handle opened: the refusal that open leaves, told as the read
+    /// seam's reason, as a refused statement, and nested inside a changeset
+    /// entry's refusal, names neither the directory nor the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_reader_open_names_no_file_the_driver_named() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new("norn-host-refusal-names-no-file");
+        let unusual = "a dir `with` \"quotes\" and 🌲 spaces";
+        let database = scratch.join(unusual).join("store.sqlite3");
+        let store = Store::open(
+            &database,
+            StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .expect("a store under an unusually spelled directory");
+        fs::set_permissions(&database, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&database).is_ok() {
+            eprintln!("skipped: this account reads a mode-000 file");
+            fs::set_permissions(&database, fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        let Err(refused) = store.open_reader().reader else {
+            panic!("an unreadable database minted a read handle");
+        };
+        fs::set_permissions(&database, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(
-            detail.contains("write-ahead logging"),
-            "the refusal dropped what the driver said: {detail}"
+            refused.to_string().contains(unusual),
+            "the store's own account names no path, so this case proves nothing: {refused}"
         );
+
+        let nested = StoreError::Entry {
+            index: 3,
+            path: database.to_string_lossy().into_owned(),
+            problem: Box::new(refused.clone()),
+        };
+        let told = [
+            reader_unavailable(&refused).detail().to_string(),
+            reader_unavailable(&nested).detail().to_string(),
+            format!(
+                "{:?}",
+                crate::refusal::page_refusal(norn_store::PageRefusal::Store(refused.clone()))
+            ),
+            format!(
+                "{:?}",
+                crate::refusal::page_refusal(norn_store::PageRefusal::Store(nested))
+            ),
+        ];
+        let named = [
+            scratch.root().to_string_lossy().into_owned(),
+            unusual.to_string(),
+            "a dir".to_string(),
+            "🌲".to_string(),
+            "store.sqlite3".to_string(),
+        ];
+        for told in told {
+            assert!(
+                told.contains("opening the database read-only failed"),
+                "the refusal dropped the act that failed: {told}"
+            );
+            for named in &named {
+                assert!(
+                    !told.contains(named.as_str()),
+                    "the refusal names `{named}`: {told}"
+                );
+            }
+        }
     }
 
     /// **The maintainer lock is the last thing an attachment gives back**, and
