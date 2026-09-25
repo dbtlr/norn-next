@@ -1,4 +1,5 @@
-//! Typed input and diagnostics for one vault reload candidate.
+//! Typed input and diagnostics for one vault reload candidate, and the
+//! `vault reload` handler that answers through them.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -7,8 +8,10 @@ use norn_config::schema::VaultSchema;
 use norn_config::vault::{VaultConfig, VaultConfigError};
 use norn_config::{IN_VAULT_CONFIG_PATH, IN_VAULT_SCHEMA_PATH};
 use norn_fs::{ContentHash, Refusal};
-use norn_wire::{TrustState, VaultName};
+use norn_wire::{ErrorEnvelope, ReloadParams, ReloadReport, TrustState, VaultName};
 
+use crate::address::registered_name;
+use crate::lifecycle::{EntryOps, Host, HostError};
 use crate::{JobFailure, Registration};
 
 /// A registered engine boundary that receives one vault's optional parsed
@@ -123,6 +126,50 @@ impl From<ReloadOutcome> for norn_wire::ReloadOutcome {
 pub struct ReloadJudgment {
     pub outcome: ReloadOutcome,
     pub fingerprints: ActiveFingerprints,
+}
+
+impl<O: EntryOps> Host<O> {
+    /// Answer a `vault reload`: validate the vault's schema-and-config
+    /// candidate and activate it, or with `dry_run` validate it and activate
+    /// nothing.
+    ///
+    /// Both are admitted and run as one reload is, so a dry run is refused
+    /// whenever an activation asked at the same moment would be — among them
+    /// `vault/reload-busy` while something works over the vault — and answers
+    /// the outcome and fingerprints that activation would. A runtime failure
+    /// either meets gets the same policy, and a leg that unwinds answers the
+    /// reading its unwind published. Every refusal renders through
+    /// [`ReloadRefusal::answer`].
+    ///
+    /// `Err(HostError)` is a host shutting down or whose job channel is gone,
+    /// which is transport death and carries no code: nothing about the vault
+    /// was learned.
+    pub fn vault_reload(
+        &self,
+        params: &ReloadParams,
+    ) -> Result<Result<ReloadReport, ErrorEnvelope>, HostError> {
+        let name = match registered_name(&params.vault) {
+            Ok(name) => name,
+            Err(refused) => return Ok(Err(refused)),
+        };
+        let judged = if params.dry_run {
+            self.judge_reload(name)
+        } else {
+            self.reload(name)
+        };
+        match judged {
+            Ok(judgment) => {
+                let report =
+                    ReloadReport::new(judgment.outcome.into(), judgment.fingerprints.into());
+                Ok(Ok(if params.dry_run {
+                    report.validated()
+                } else {
+                    report
+                }))
+            }
+            Err(refusal) => refusal.answer(name).map(Err),
+        }
+    }
 }
 
 /// Why one internal reload request did not return a Ready vault.

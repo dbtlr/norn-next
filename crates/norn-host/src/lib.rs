@@ -18,7 +18,6 @@ mod reload;
 mod search;
 mod semantic;
 mod text;
-mod vault;
 
 pub use derivation::DERIVATION_VERSION;
 /// **The harness-reachable readers of a host's own account.** Every job writes
