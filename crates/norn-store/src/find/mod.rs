@@ -256,6 +256,13 @@ impl FoundKey {
     }
 }
 
+/// A page a find ran, and the keys of the documents its rows are of, in the
+/// rows' order.
+pub(crate) struct FoundPage {
+    pub(crate) found: Found,
+    pub(crate) keys: Vec<FoundKey>,
+}
+
 /// What [`Snapshot::find`] answers: a page of rows, where the next begins, and
 /// what the request could not apply.
 #[derive(Clone, Debug, PartialEq)]
@@ -462,7 +469,13 @@ impl Snapshot {
     /// of the store does not know; and a bound that does not read as its key's
     /// declared type.
     pub fn find(&self, params: &FindParams, declared: &ContentModel) -> Result<Found, PageRefusal> {
-        self.run_find(params, declared, &mut Lookups::default())
+        self.run_find(
+            params,
+            declared,
+            ResolvesPart::Answered,
+            &mut Lookups::default(),
+        )
+        .map(|paged| paged.found)
     }
 
     /// Every statement [`Snapshot::find`] runs for `params`, in the order it
@@ -484,7 +497,7 @@ impl Snapshot {
         declared: &ContentModel,
     ) -> Result<Vec<FindPlan>, PageRefusal> {
         let mut lookups = Lookups::default();
-        self.run_find(params, declared, &mut lookups)?;
+        self.run_find(params, declared, ResolvesPart::Answered, &mut lookups)?;
         Ok(self.explained(lookups.ran, |statement, filters, plan| {
             let ReadStatement::Find(statement) = statement else {
                 unreachable!("a find runs only the statements find names")
@@ -498,17 +511,21 @@ impl Snapshot {
     }
 
     /// The find [`Snapshot::find`] answers and [`Snapshot::find_plans`]
-    /// explains, recording every statement it runs in `lookups`.
-    fn run_find(
+    /// explains, recording every statement it runs in `lookups`, with the keys
+    /// of the page's documents beside it. `resolves` is how a `resolves` part
+    /// of the conjunction is read: answered by a find, and not applicable to a
+    /// search's candidates.
+    pub(crate) fn run_find(
         &self,
         params: &FindParams,
         declared: &ContentModel,
+        resolves: ResolvesPart,
         lookups: &mut Lookups,
-    ) -> Result<Found, PageRefusal> {
+    ) -> Result<FoundPage, PageRefusal> {
         let started = self.counters().statements_executed();
         let limit = page_limit(params.limit)?;
         let projection = Projection::of(&params.columns)?;
-        let mut compiled = self.compile(params, declared, lookups)?;
+        let mut compiled = self.compile(params, declared, resolves, lookups)?;
         let (resume, moved) = match &params.after {
             None => (None, Vec::new()),
             Some(cursor) => self.judge(cursor, compiled.order, lookups)?,
@@ -529,14 +546,17 @@ impl Snapshot {
         let unsatisfied = self.resolve(compiled.reports, declared, lookups)?;
         let rows = self.hydrate_rows(&keys, &projection, &fields, declared, lookups, &mut work)?;
         work.statements = self.counters().statements_executed() - started;
-        Ok(Found {
-            rows,
-            next,
-            moved,
-            unsatisfied,
-            advisories,
-            snapshot,
-            work,
+        Ok(FoundPage {
+            found: Found {
+                rows,
+                next,
+                moved,
+                unsatisfied,
+                advisories,
+                snapshot,
+                work,
+            },
+            keys,
         })
     }
 
@@ -661,6 +681,7 @@ impl Snapshot {
         &self,
         params: &'a FindParams,
         declared: &ContentModel,
+        resolves: ResolvesPart,
         lookups: &mut Lookups,
     ) -> Result<Compiled<'a>, PageRefusal> {
         self.declaration_pinned(declared, lookups)?;
@@ -699,12 +720,8 @@ impl Snapshot {
                 }
             }
         };
-        let conjunction = self.compile_conjunction(
-            &params.predicates,
-            ResolvesPart::Answered,
-            declared,
-            lookups,
-        )?;
+        let conjunction =
+            self.compile_conjunction(&params.predicates, resolves, declared, lookups)?;
         let sorted_date = match order {
             PageOrder::Field { key, .. } => {
                 DateComparison::of_dated(key, Compared::Order, declared)

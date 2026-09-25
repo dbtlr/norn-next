@@ -932,6 +932,205 @@ fn a_hit_carries_the_row_its_columns_name() {
     );
 }
 
+// ---- what a ranking above the floor draws on ----
+
+/// A find of `predicates` over the fixture's vault, a page of `limit`
+/// documents at a time.
+fn candidates_of(predicates: Vec<Predicate>, limit: u32) -> FindParams {
+    FindParams::new(VaultAddress::name(
+        VaultName::new("search").expect("a vault name"),
+    ))
+    .with_predicates(predicates)
+    .with_limit(limit)
+}
+
+/// Every candidate `params` admits, drained a page at a time, and the reports
+/// of its first page.
+fn every_candidate(
+    snapshot: &Snapshot,
+    params: FindParams,
+) -> (Vec<norn_store::Candidate>, Vec<Unsatisfied>) {
+    let first = snapshot
+        .search_candidates(&params, &declared())
+        .unwrap_or_else(|refusal| panic!("the candidates of {params:?}: {refusal}"));
+    let unsatisfied = first.unsatisfied.clone();
+    let mut every = first.candidates;
+    let mut next = first.next;
+    while let Some(cursor) = next {
+        let page = snapshot
+            .search_candidates(&params.clone().with_after(cursor), &declared())
+            .expect("a continued page of candidates");
+        every.extend(page.candidates);
+        next = page.next;
+    }
+    (every, unsatisfied)
+}
+
+/// **A search's candidates are the documents its conjunction admits, in a
+/// find's path order, as a search reads the conjunction.** A tag part narrows them to the
+/// one document carrying the tag; a `resolves` part is not applicable to a
+/// search, so it is reported and filters nothing, where a find of the same
+/// part answers the documents its target resolves to; and a page at a time
+/// drains every document once.
+#[test]
+fn a_search_admits_as_candidates_what_its_conjunction_admits() {
+    let searching_store = Searching::new("search-candidates");
+    let snapshot = searching_store.snapshot();
+    let paths = |candidates: &[norn_store::Candidate]| {
+        candidates
+            .iter()
+            .map(|candidate| candidate.path().to_string())
+            .collect::<Vec<String>>()
+    };
+
+    let (every, unsatisfied) = every_candidate(&snapshot, candidates_of(Vec::new(), 3));
+    let (whole, _) = every_candidate(&snapshot, candidates_of(Vec::new(), 1024));
+    assert_eq!(
+        paths(&every),
+        paths(&whole),
+        "a drain a page at a time is not the path order one page reads"
+    );
+    let distinct: std::collections::BTreeSet<String> = paths(&every).into_iter().collect();
+    assert_eq!(
+        (every.len(), distinct.len()),
+        (14, 14),
+        "a drain is not every document once"
+    );
+    assert!(unsatisfied.is_empty());
+
+    let (tagged, _) = every_candidate(&snapshot, candidates_of(vec![Predicate::tag("draft")], 3));
+    assert_eq!(paths(&tagged), ["notes/lantern.md"]);
+
+    let target = ResolutionTarget::new("lantern").expect("a target");
+    let (resolved, unsatisfied) = every_candidate(
+        &snapshot,
+        candidates_of(vec![Predicate::resolves(target.clone())], 1024),
+    );
+    assert_eq!(paths(&resolved), paths(&every));
+    assert_eq!(
+        unsatisfied,
+        vec![Unsatisfied::resolves_not_applicable(target.clone())]
+    );
+    let found = snapshot
+        .find(
+            &candidates_of(vec![Predicate::resolves(target)], 1024),
+            &declared(),
+        )
+        .expect("a find of the same part");
+    assert_eq!(
+        found
+            .rows
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["notes/lantern.md"],
+        "the find the negative control runs does not answer the part"
+    );
+}
+
+/// **A ranked hit is hydrated as a find's row is**: in the order it is handed
+/// in, at the score it is handed with, carrying the columns it names; a key
+/// outside the field universe is reported; a hit naming no column hydrates
+/// nothing.
+#[test]
+fn a_ranked_hit_carries_the_row_its_columns_name() {
+    let searching_store = Searching::new("search-hydrate-hits");
+    let snapshot = searching_store.snapshot();
+    let (every, _) = every_candidate(&snapshot, candidates_of(Vec::new(), 1024));
+    let at = |path: &str| {
+        every
+            .iter()
+            .find(|candidate| candidate.path() == path)
+            .cloned()
+            .expect("a candidate at the path")
+    };
+    let ranked = vec![
+        (at("notes/walk.md"), Score::new(2.0).expect("a score")),
+        (at("notes/lantern.md"), Score::new(1.0).expect("a score")),
+    ];
+
+    let bare = snapshot
+        .hydrate_hits(&ranked, &[], &declared())
+        .expect("hits naming no column");
+    assert_eq!(bare.work.documents_hydrated, 0);
+    assert!(bare.hits.iter().all(|hit| hit.document.is_none()));
+    assert_eq!(
+        bare.hits
+            .iter()
+            .map(|hit| (hit.path.as_str(), hit.score.get()))
+            .collect::<Vec<_>>(),
+        [("notes/walk.md", 2.0), ("notes/lantern.md", 1.0)]
+    );
+
+    let projected = snapshot
+        .hydrate_hits(
+            &ranked,
+            &[Column::field("status"), Column::field("stat")],
+            &declared(),
+        )
+        .expect("hits naming columns");
+    assert_eq!(projected.work.documents_hydrated, 2);
+    let status = |at: usize| {
+        projected.hits[at]
+            .document
+            .as_ref()
+            .and_then(|row| row.fields.as_ref())
+            .and_then(|fields| fields.get("status"))
+            .cloned()
+    };
+    assert_eq!(status(0), Some(FieldValue::scalar("closed")));
+    assert_eq!(status(1), Some(FieldValue::scalar("open")));
+    assert_eq!(
+        projected.unsatisfied,
+        vec![Unsatisfied::unknown_projection_key(
+            "stat",
+            vec!["status".to_string()]
+        )]
+    );
+}
+
+/// **A fused ranking's cursor is judged as a lexical page's is, beside the
+/// sidecar state its answer read**: the same state reports nothing moved,
+/// another reports the sidecar moved, and a cursor ranked by another ladder is
+/// refused naming both.
+#[test]
+fn a_hit_cursor_is_judged_beside_the_sidecar_state_its_answer_read() {
+    let searching_store = Searching::new("search-judge-sidecar");
+    let mut reading = searching_store.search(&searching("lantern")).snapshot;
+    let snapshot = searching_store.snapshot();
+    let minted = norn_wire::SidecarRevision::new("sidecar", 4);
+    reading.sidecar_revision = Some(minted.clone());
+    let fused = RungSet::of([Rung::Lexical, Rung::Vector]).expect("a ladder");
+    let cursor = Cursor::new(
+        reading,
+        CursorKey::hit(
+            fused.clone(),
+            Score::new(0.5).expect("a score"),
+            "notes/lantern.md",
+        ),
+    );
+
+    let same = snapshot
+        .judge_hit_cursor(&cursor, &fused, Some(minted))
+        .expect("a continuation under the same sidecar state");
+    assert_eq!(same.path, "notes/lantern.md");
+    assert!(same.moved.is_empty());
+    let moved = snapshot
+        .judge_hit_cursor(
+            &cursor,
+            &fused,
+            Some(norn_wire::SidecarRevision::new("sidecar", 5)),
+        )
+        .expect("a continuation under a moved sidecar");
+    assert_eq!(moved.moved, vec![Moved::SidecarRevision]);
+    assert_eq!(
+        snapshot.judge_hit_cursor(&cursor, &RungSet::lexical(), None),
+        Err(PageRefusal::OrderChanged(
+            CursorOrderChanged::minted_raw(None).in_ladders(fused, RungSet::lexical())
+        ))
+    );
+}
+
 // ---- the plan bars ----
 
 /// The plan the store reported for one statement, in the harness's shape.

@@ -498,7 +498,7 @@ impl From<StoreError> for PageRefusal {
 
 /// The page bound a request names, or [`DEFAULT_PAGE`] where it names none;
 /// a bound outside `1..=`[`MAX_PAGE`] is refused.
-pub(crate) fn page_limit(limit: Option<u32>) -> Result<usize, PageRefusal> {
+pub fn page_limit(limit: Option<u32>) -> Result<usize, PageRefusal> {
     let Some(limit) = limit else {
         return Ok(DEFAULT_PAGE);
     };

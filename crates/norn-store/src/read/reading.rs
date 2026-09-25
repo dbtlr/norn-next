@@ -2,7 +2,9 @@
 //! of the reading a cursor was minted under against it.
 
 use norn_db::rusqlite::types::Value;
-use norn_wire::{Cursor, CursorOrderChanged, HitResume, Moved, PagedRows, RungSet};
+use norn_wire::{
+    Cursor, CursorOrderChanged, HitResume, Moved, PagedRows, RungSet, SidecarRevision,
+};
 
 use super::{FieldOrder, Lookups, PageRefusal, Ran};
 use crate::ddl;
@@ -60,7 +62,8 @@ impl Snapshot {
     }
 
     /// Judge a cursor continuing a page of hits ranked by `ladder` against the
-    /// reading that page answers from on this snapshot: where it resumes and
+    /// reading that page answers from on this snapshot, beside the sidecar
+    /// state `sidecar` the answer read where it read one: where it resumes and
     /// what moved since.
     ///
     /// A cursor that is no hit's names no position among hits, and a ranking
@@ -72,13 +75,15 @@ impl Snapshot {
         &self,
         cursor: &'c Cursor,
         ladder: &RungSet,
+        sidecar: Option<SidecarRevision>,
         lookups: &mut Lookups,
     ) -> Result<HitResume<'c>, PageRefusal> {
         let not_taken = || PageRefusal::cursor_not_taken(cursor, PagedRows::Hit);
         if cursor.snapshot().schema_fingerprint.is_some() {
             return Err(not_taken());
         }
-        let now = self.reading_facts(None, lookups)?;
+        let mut now = self.reading_facts(None, lookups)?;
+        now.sidecar_revision = sidecar;
         cursor
             .ranked_continuation(&now, ladder)
             .ok_or_else(not_taken)?
