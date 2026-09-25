@@ -1071,6 +1071,10 @@ impl EntryOps for ProductionEntryOps {
             .map(|detail| UntrustedReason::schema_unreadable(detail.to_string()))
     }
 
+    fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
+        self.semantic.as_deref()
+    }
+
     fn poll(
         &self,
         _: &VaultName,

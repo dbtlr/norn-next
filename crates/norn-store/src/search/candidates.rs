@@ -47,6 +47,9 @@ pub struct Candidates {
     pub unsatisfied: Vec<Unsatisfied>,
     /// What the parts that were applied assumed.
     pub advisories: Vec<AnswerAdvisory>,
+    /// The reading the page was answered from, as a cursor carries it. A path
+    /// order is no schema's, so it names no fingerprint.
+    pub snapshot: norn_wire::Snapshot,
     /// What the page read.
     pub work: FindWork,
 }
@@ -91,6 +94,7 @@ impl Snapshot {
             next: paged.found.next,
             unsatisfied: paged.found.unsatisfied,
             advisories: paged.found.advisories,
+            snapshot: paged.found.snapshot,
             work: paged.found.work,
         })
     }
