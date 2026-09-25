@@ -1910,9 +1910,9 @@ runtime failure a dry run meets — damaged derived state, a moved path order, a
 maintainership — is a fact about the entry rather than the candidate, and gets the policy an
 activation applies to it: withdrawn trust and an owed rung, or a release. A reload of either
 mode that the entry is not in a state to run answers with where the entry stands: its
-published demand, the park first, rendered by the one mapping `vault status` and a demand
-lease answer through. A parked entry therefore answers in the park's own code, not the
-label beneath it. That holds at admission, at a leg that no longer stands, and for a reload
+published demand, rendered by the one mapping `vault status` and a demand lease answer
+through. An entry an unregistration holds answers as held, a vault unregistered answers as
+unknown, and a parked entry answers in the park's own code, not the label beneath it. That holds at admission, at a leg that no longer stands, and for a reload
 the host drops without an answer, whether moved past before a worker ran it or lost with a
 leg that unwound; for an unwound leg with no park, the entry stands at the untrusted reading
 the unwind publishes. A turn that unwinds after handing the reload on leaves the answer to

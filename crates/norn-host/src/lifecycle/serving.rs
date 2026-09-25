@@ -40,7 +40,7 @@ use std::collections::BTreeSet;
 
 use norn_fs::Identity;
 
-use super::{Entry, SnapshotSource};
+use super::{Entry, Service, SnapshotSource};
 use crate::registry::{ResolveRefusal, RootReading, containing, reaching, recheck};
 
 /// Why the serving set stands unchanged.
@@ -316,12 +316,11 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// and kept every door off the entry from then on, so its answer is the
     /// one that binds and this refuses nothing.
     ///
-    /// **The entry is withdrawn under that same gate hold, where it was not
-    /// already.** A caller that read the entry out of the set before this took
-    /// it out still holds it, and every door such a caller asks through reads
-    /// the withdrawal first — so what it is answered is the name being
-    /// unknown, never work scheduled against an entry the set no longer
-    /// serves.
+    /// **The entry is retired under that same gate hold.** A caller that read
+    /// the entry out of the set before this took it out still holds it, and
+    /// every door such a caller asks through reads the entry's service first
+    /// — so what it is answered is the name being unknown, never work
+    /// scheduled against an entry the set no longer serves.
     ///
     /// A name the set does not serve is already not served, and removing it
     /// changes nothing. Whether the name was served is the caller's to ask
@@ -338,10 +337,10 @@ impl<A: SnapshotSource> ServingSet<A> {
         };
         {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            if !state.withdrawn && state.held_by_anything() {
+            if state.service == Service::Served && state.held_by_anything() {
                 return Err(ServingRefusal::Held);
             }
-            state.withdrawn = true;
+            state.service = Service::Retired;
             self.retired_epoch
                 .fetch_max(state.claim.epoch(), Ordering::SeqCst);
         }

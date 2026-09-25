@@ -4398,7 +4398,7 @@ mod tests {
         assert_eq!(host.inspect(&name), standing);
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::ReloadPending)
+            Ok(crate::AuthoredDrift::ReloadPending)
         );
         assert_eq!(receiver.seen.lock().unwrap().len(), delivered);
         assert_eq!(host.state(&name), answered(norn_wire::TrustState::Ready));
@@ -4411,7 +4411,7 @@ mod tests {
         assert_ne!(host.inspect(&name), standing);
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::Current)
+            Ok(crate::AuthoredDrift::Current)
         );
         assert!(receiver.seen.lock().unwrap().len() > delivered);
     }
@@ -4733,7 +4733,7 @@ mod tests {
     ) -> norn_wire::UntrustedReason {
         wait_until("an untrusted entry", lifecycle_budget(), || {
             match host.inspect(name).map(|inspection| inspection.trust) {
-                Some(norn_wire::TrustState::Untrusted { reason, .. }) => Observed::Met(reason),
+                Ok(norn_wire::TrustState::Untrusted { reason, .. }) => Observed::Met(reason),
                 other => Observed::Pending(format!("the state is {other:?}")),
             }
         })
@@ -5219,18 +5219,18 @@ mod tests {
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::Current)
+            Ok(crate::AuthoredDrift::Current)
         );
 
         fs::write(f.vault().join(".norn/config.toml"), "[engine.broken\n").unwrap();
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::ReloadPending),
+            Ok(crate::AuthoredDrift::ReloadPending),
             "the drift query parsed invalid TOML instead of comparing bytes"
         );
 
         fs::remove_file(f.vault().join(".norn/schema.yaml")).unwrap();
-        let Some(crate::AuthoredDrift::Unreadable(error)) = host.authored_drift(&name) else {
+        let Ok(crate::AuthoredDrift::Unreadable(error)) = host.authored_drift(&name) else {
             panic!("a missing schema was not reported as unreadable");
         };
         assert_eq!(error.file(), crate::ReloadFile::Schema);
@@ -5279,13 +5279,13 @@ mod tests {
 
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::Current)
+            Ok(crate::AuthoredDrift::Current)
         );
         host.reload(&name)
             .expect("config-only reload from covered root");
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::Current)
+            Ok(crate::AuthoredDrift::Current)
         );
     }
 
@@ -5310,14 +5310,14 @@ mod tests {
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::Current)
+            Ok(crate::AuthoredDrift::Current)
         );
 
         fs::create_dir(f.vault().join(".norn/config.toml")).unwrap();
 
         assert!(matches!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::Unreadable(
+            Ok(crate::AuthoredDrift::Unreadable(
                 crate::ReloadError::ConfigRead(_)
             ))
         ));

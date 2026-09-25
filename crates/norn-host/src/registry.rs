@@ -196,10 +196,14 @@ impl<O: EntryOps> Host<O> {
     ///
     /// Otherwise, under that lock, the registry file is read, the derived
     /// database, its sidecars and the shadow homes are discarded unless
-    /// `keep_state` keeps them, the file is written, and the entry leaves the
-    /// serving set; the lock goes back after all of it. The maintainer lock
-    /// file is never removed, and nothing in the vault's own tree but its
-    /// shadow home is touched. A data directory that refuses the lock or the
+    /// `keep_state` keeps them, and the file is written; the lock goes back
+    /// then, and the entry leaves the serving set after it. The maintainer
+    /// lock file is never removed, and nothing in the vault's own tree but
+    /// its shadow homes is touched. From the moment the entry is found idle
+    /// until the change commits or is refused, every request that asks the
+    /// entry for anything is refused `host/entry-held`, while `vault list`
+    /// and `vault resolve` still name the vault; after the commit the name is
+    /// `host/unknown-vault`. A data directory that refuses the lock or the
     /// discard is refused `host/entry-untrusted` under the
     /// environmental-refusal reason, and a registry file that cannot be read
     /// or written is refused `host/registry-unwritable` — one that cannot be

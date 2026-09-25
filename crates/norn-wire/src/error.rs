@@ -23,8 +23,9 @@
 //! learn to check the code before believing it.
 //!
 //! **The registry codes are raised by the host's registry handlers.**
-//! `host/registry-unwritable` answers a registration change whose write of the
-//! registry file refused, raised by the register and unregister handlers.
+//! `host/registry-unwritable` answers a registration change whose read or
+//! write of the registry file refused, raised by the register and unregister
+//! handlers.
 //! `vault/ambiguous-root`, which answers a `vault resolve` ask over a
 //! directory whose most specific containing root more than one registration
 //! reaches, is raised by the resolve handler. Both are spelled here because
@@ -298,7 +299,9 @@ pub enum ReasonCode {
     #[serde(rename = "host/already-served")]
     HostAlreadyServed,
     /// `host/entry-held` — the entry is holding something, or something is
-    /// holding it, so it was not taken out of service. The detail is the name.
+    /// holding it: a request to take it out of service was refused, or an
+    /// unregistration under way holds it and it is not served until that
+    /// change commits or is refused. The detail is the name.
     #[serde(rename = "host/entry-held")]
     HostEntryHeld,
     /// `host/entry-not-ready` — the entry holds nothing the request can be
@@ -309,10 +312,10 @@ pub enum ReasonCode {
     /// not. The detail is the account the act that failed produced.
     #[serde(rename = "host/reader-unavailable")]
     HostReaderUnavailable,
-    /// `host/registry-unwritable` — the registry file could not be written,
-    /// so the registration change was not made and the registration that
-    /// stood before it still stands. The detail is the write's own account of
-    /// what refused.
+    /// `host/registry-unwritable` — the registry file could not be read by
+    /// this build or could not be written, so the registration change was not
+    /// made and the registration that stood before it still stands. The
+    /// detail is the act that refused and what refused it.
     #[serde(rename = "host/registry-unwritable")]
     HostRegistryUnwritable,
     /// `host/read-failed` — the store answered a read with no rows: its file,
@@ -595,11 +598,11 @@ pub enum ErrorDetail {
         detail: String,
     },
     /// The detail of `host/registry-unwritable`: why the registry file could
-    /// not be written.
+    /// not be read or written.
     #[serde(rename = "host/registry-unwritable")]
     #[non_exhaustive]
     RegistryUnwritable {
-        /// The write's own account of what refused, in words, for a person
+        /// The act that refused and what refused it, in words, for a person
         /// reading a message or a log. Clients never match on it.
         detail: String,
     },

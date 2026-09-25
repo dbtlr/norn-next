@@ -6,7 +6,16 @@
 //! processes agree who maintains a vault's derived state, so unlinking one
 //! would let a second process take maintainership of state a first is still
 //! holding. What `state_discarded` reports is the derived database, its
-//! sidecars and the shadow home.
+//! sidecars and the vault's shadow homes — the one in the data directory and
+//! the one under the vault root, wherever either stands.
+//!
+//! **While the change runs the vault answers as held.** Every request that
+//! asks the vault for anything is refused `host/entry-held` from the moment
+//! the unregistration finds the vault idle until the change commits or is
+//! refused, and `vault list` and `vault resolve` go on naming it until it
+//! commits. After a commit the name is `host/unknown-vault`; after a refusal
+//! the vault is served as it was, so a refused unregistration changes nothing
+//! a caller can observe.
 //!
 //! **A park is no refusal.** An entry standing on a park that nothing holds
 //! is unregistered, and the park leaves with it; a name parked beside it on
@@ -34,8 +43,8 @@ pub struct UnregisterParams {
     /// The registration to remove.
     pub name: VaultName,
     /// Whether to leave the vault's derived state on disk. `false` discards
-    /// the derived database, its sidecars and the shadow home; `true` keeps
-    /// all three where they are.
+    /// the derived database, its sidecars and the shadow homes; `true` keeps
+    /// all of them where they are.
     pub keep_state: bool,
 }
 
@@ -62,7 +71,7 @@ impl UnregisterParams {
 pub struct UnregisterReport {
     /// The registration that was removed.
     pub name: VaultName,
-    /// Whether the vault's derived database, its sidecars and its shadow home
+    /// Whether the vault's derived database, its sidecars and its shadow homes
     /// were discarded. The maintainer lock file is never unlinked, and the
     /// vault's own documents are never touched.
     pub state_discarded: bool,

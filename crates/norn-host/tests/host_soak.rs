@@ -1216,9 +1216,11 @@ fn run_load(root: &Path) {
                 "the host stops working on the vault it just finished loading",
                 Budget::new(QUIESCENCE, QUIET_PROBE),
                 || match host.work_in_flight(vault.name()) {
-                    Some(in_flight) if in_flight.is_quiet() => Observed::Met(()),
-                    Some(in_flight) => Observed::pending(format!("{in_flight:?}")),
-                    None => Observed::pending("the host no longer serves the vault"),
+                    Ok(in_flight) if in_flight.is_quiet() => Observed::Met(()),
+                    Ok(in_flight) => Observed::pending(format!("{in_flight:?}")),
+                    Err(answer) => {
+                        Observed::pending(format!("the vault is not served: {answer:?}"))
+                    }
                 },
             )
             .expect("the host goes quiet inside the quiescent bound");

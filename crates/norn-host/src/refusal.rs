@@ -63,9 +63,10 @@ impl Demand {
     /// This demand in the wire vocabulary: the trust state it answers `name`
     /// with, or the refusal it is.
     ///
-    /// `name` is the name that was asked for, and [`Demand::UnknownVault`] is
-    /// the only demand that echoes it: a demand for a vault the registry does
-    /// not hold has no entry to read a name off, so the ask is all the refusal
+    /// `name` is the name that was asked for, and [`Demand::UnknownVault`] and
+    /// [`Demand::EntryHeld`] are the demands that echo it: a demand for a
+    /// vault the host does not serve, or for one an unregistration holds, has
+    /// no entry in service to read a name off, so the ask is all the refusal
     /// has to name. Every other demand answers out of what it carries and
     /// reads nothing from `name`. A caller holding the entry's lease answers
     /// through [`DemandLease::answer`](crate::DemandLease::answer), which is
@@ -83,6 +84,13 @@ impl Demand {
             )),
             Demand::IdentityRefused(refusal) => Err(root_refused(refusal)),
             Demand::UnknownVault => Err(unknown_vault(name)),
+            Demand::EntryHeld => Err(ErrorEnvelope::new(
+                format!(
+                    "`{name}` is being unregistered, so it is not served until that change \
+                     commits or is refused"
+                ),
+                ErrorDetail::entry_held(name.clone()),
+            )),
             Demand::UnsupportedMode(mode) => Err(unsupported_attach_mode(mode)),
         }
     }
@@ -249,11 +257,12 @@ impl ReloadRefusal {
     ///
     /// Every reload outcome is a fact about the vault, so every one of them is
     /// `vault/…` — except where the host answers before a reload is a thing
-    /// that happened at all: a name the registry does not hold
-    /// (`host/unknown-vault`), and an entry that is not reloadable because of
-    /// where it stands. That entry answers with its published demand rendered
+    /// that happened at all: an entry that is not reloadable because of where
+    /// it stands. That entry answers with its published demand rendered
     /// through [`Demand::answer`], the mapping `vault status` and a demand
-    /// lease answer through: a park in its own code (`host/duplicate-root`,
+    /// lease answer through: a name the host does not serve in
+    /// `host/unknown-vault`, an entry an unregistration holds in
+    /// `host/entry-held`, a park in its own code (`host/duplicate-root`,
     /// `host/maintainer-contended`, or `host/entry-untrusted` for a root the
     /// registry cannot read), an entry whose derived state cannot be trusted
     /// in `host/entry-untrusted`, an entry that holds nothing to reload yet in
@@ -270,7 +279,6 @@ impl ReloadRefusal {
     /// not a surface's to choose.
     pub fn answer(self, name: &VaultName) -> Result<ErrorEnvelope, HostError> {
         Ok(match self {
-            ReloadRefusal::UnknownVault => unknown_vault(name),
             ReloadRefusal::Unavailable(demand) => match demand.answer(name) {
                 Err(envelope) => envelope,
                 Ok(state) => unavailable(state),
@@ -670,6 +678,7 @@ mod tests {
         DuplicateRoot,
         IdentityRefused,
         UnknownVault,
+        EntryHeld,
         UnsupportedMode,
     }
 
@@ -683,7 +692,8 @@ mod tests {
                 Shape::MaintainerContended => Some(Shape::DuplicateRoot),
                 Shape::DuplicateRoot => Some(Shape::IdentityRefused),
                 Shape::IdentityRefused => Some(Shape::UnknownVault),
-                Shape::UnknownVault => Some(Shape::UnsupportedMode),
+                Shape::UnknownVault => Some(Shape::EntryHeld),
+                Shape::EntryHeld => Some(Shape::UnsupportedMode),
                 Shape::UnsupportedMode => None,
             }
         }
@@ -714,6 +724,7 @@ mod tests {
             Demand::DuplicateRoot(_) => Shape::DuplicateRoot,
             Demand::IdentityRefused(_) => Shape::IdentityRefused,
             Demand::UnknownVault => Shape::UnknownVault,
+            Demand::EntryHeld => Shape::EntryHeld,
             Demand::UnsupportedMode(_) => Shape::UnsupportedMode,
         }
     }
@@ -794,6 +805,7 @@ mod tests {
                 Demand::UnknownVault,
                 Some(ErrorDetail::unknown_vault(asked())),
             ),
+            (Demand::EntryHeld, Some(ErrorDetail::entry_held(asked()))),
             (
                 Demand::UnsupportedMode(AttachMode::Throwaway),
                 Some(ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)),
@@ -1006,7 +1018,6 @@ mod reload_tests {
     /// in the walk below fails the census rather than passing unexercised.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Shape {
-        UnknownVault,
         Unsupported,
         Unavailable,
         Core,
@@ -1017,7 +1028,6 @@ mod reload_tests {
     impl Shape {
         const fn after(self) -> Option<Shape> {
             match self {
-                Shape::UnknownVault => Some(Shape::Unsupported),
                 Shape::Unsupported => Some(Shape::Unavailable),
                 Shape::Unavailable => Some(Shape::Core),
                 Shape::Core => Some(Shape::Runtime),
@@ -1028,7 +1038,7 @@ mod reload_tests {
     }
 
     fn every_shape() -> Vec<Shape> {
-        let mut shapes = vec![Shape::UnknownVault];
+        let mut shapes = vec![Shape::Unsupported];
         while let Some(next) = shapes.last().expect("the walk starts at a shape").after() {
             assert!(!shapes.contains(&next), "{next:?} is reached twice");
             shapes.push(next);
@@ -1040,7 +1050,6 @@ mod reload_tests {
     /// or store error variant minted without a shape does not compile.
     fn shape(refusal: &ReloadRefusal) -> Shape {
         match refusal {
-            ReloadRefusal::UnknownVault => Shape::UnknownVault,
             ReloadRefusal::Unsupported => Shape::Unsupported,
             ReloadRefusal::Unavailable(_) => Shape::Unavailable,
             ReloadRefusal::Core(_) => Shape::Core,
@@ -1055,8 +1064,12 @@ mod reload_tests {
         let unreadable = || ReloadError::SchemaParse("line 3 is not a mapping".to_string());
         vec![
             (
-                ReloadRefusal::UnknownVault,
+                ReloadRefusal::Unavailable(Demand::UnknownVault),
                 Some(ErrorDetail::unknown_vault(name("notes"))),
+            ),
+            (
+                ReloadRefusal::Unavailable(Demand::EntryHeld),
+                Some(ErrorDetail::entry_held(name("notes"))),
             ),
             (
                 ReloadRefusal::Unsupported,
