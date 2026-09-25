@@ -55,7 +55,9 @@ use norn_wire::{
     TrustState, UntrustedReason, VaultName,
 };
 
-use crate::lifecycle::{Demand, HostError, JobFailure, ReadRefusal, ServingRefusal, Unserved};
+use crate::lifecycle::{
+    Demand, HostError, JobFailure, ReadRefusal, ServingRefusal, StandingPark, Unserved,
+};
 use crate::registry::{AliasConflict, RegistrationRefusal, ResolveRefusal};
 use crate::reload::{ReloadError, ReloadFile, ReloadRefusal, ReloadStage};
 
@@ -65,7 +67,7 @@ impl Demand {
     ///
     /// `name` is the name that was asked for, and [`Demand::UnknownVault`] and
     /// [`Demand::EntryHeld`] are the demands that echo it: a demand for a
-    /// vault the host does not serve, or for one an unregistration holds, has
+    /// vault the host does not serve, or for one a registration change holds, has
     /// no entry in service to read a name off, so the ask is all the refusal
     /// has to name. Every other demand answers out of what it carries and
     /// reads nothing from `name`. A caller holding the entry's lease answers
@@ -89,8 +91,8 @@ impl Demand {
     /// operator acts on differently. Every other demand is a refusal, and is
     /// published as the envelope [`Demand::answer`] renders it as.
     ///
-    /// `vault status`, the roll-up it computes and `vault register`'s report
-    /// publish through this.
+    /// `vault status`, the roll-up it computes, and `vault register`'s and
+    /// `vault set`'s reports publish through this.
     pub(crate) fn published(self, name: &VaultName) -> Published {
         match self.state_or_park(name) {
             Ok(state) => Published::state(state),
@@ -106,13 +108,13 @@ impl Demand {
     fn state_or_park(self, name: &VaultName) -> Result<TrustState, ErrorEnvelope> {
         match self {
             Demand::State(state) => Ok(state),
-            Demand::MaintainerContended(incumbent) => Err(maintainer_contended(incumbent)),
-            Demand::DuplicateRoot(conflict) => Err(ErrorEnvelope::new(
-                "more than one registered name resolves to this vault's root, so none of them \
-                 is served",
-                ErrorDetail::duplicate_root(conflict.aliases().clone()),
-            )),
-            Demand::IdentityRefused(refusal) => Err(root_refused(refusal)),
+            Demand::MaintainerContended(incumbent) => {
+                Err(StandingPark::MaintainerContended(incumbent).answer())
+            }
+            Demand::DuplicateRoot(conflict) => Err(StandingPark::DuplicateRoot(conflict).answer()),
+            Demand::IdentityRefused(refusal) => {
+                Err(StandingPark::IdentityRefused(refusal).answer())
+            }
             Demand::UnknownVault => Err(Unserved::UnknownVault.answer(name)),
             Demand::EntryHeld => Err(Unserved::EntryHeld.answer(name)),
             Demand::UnsupportedMode(mode) => Err(unsupported_attach_mode(mode)),
@@ -132,11 +134,30 @@ impl Unserved {
             Unserved::UnknownVault => unknown_vault(name),
             Unserved::EntryHeld => ErrorEnvelope::new(
                 format!(
-                    "`{name}` is being unregistered, so it is not served until that change \
-                     commits or is refused"
+                    "a registration change holds `{name}`, so it is not served until that \
+                     change commits or is refused; ask again"
                 ),
                 ErrorDetail::entry_held(name.clone()),
             ),
+        }
+    }
+}
+
+impl StandingPark {
+    /// This park in the wire vocabulary.
+    ///
+    /// [`Demand::answer`] and [`Demand::published`] render the demands of the
+    /// same names through this, so an edit refused under a park, a demand
+    /// answered by one and a status reporting one read one envelope.
+    pub(crate) fn answer(self) -> ErrorEnvelope {
+        match self {
+            StandingPark::MaintainerContended(incumbent) => maintainer_contended(incumbent),
+            StandingPark::DuplicateRoot(conflict) => ErrorEnvelope::new(
+                "more than one registered name resolves to this vault's root, so none of them \
+                 is served",
+                ErrorDetail::duplicate_root(conflict.aliases().clone()),
+            ),
+            StandingPark::IdentityRefused(refusal) => root_refused(refusal),
         }
     }
 }
@@ -187,8 +208,8 @@ impl ServingRefusal {
     /// are `host/…` and both echo the name: what a caller does about either
     /// one is addressed to that name.
     ///
-    /// The registry verbs — `vault register` and `vault unregister` — refuse
-    /// through this, by way of [`RegistrationRefusal::answer`].
+    /// The registry verbs — `vault register`, `vault unregister` and `vault
+    /// set` — refuse through this, by way of [`RegistrationRefusal::answer`].
     pub(crate) fn answer(self, name: &VaultName) -> ErrorEnvelope {
         match self {
             ServingRefusal::AlreadyServed => ErrorEnvelope::new(
@@ -216,12 +237,13 @@ impl RegistrationRefusal {
     /// renders as the name being taken, and the three facts a registration
     /// change shares with a demand — another maintainer, a root the registry
     /// cannot read, a name nothing is served under — render as a demand
-    /// renders them. The data directory refusing
-    /// the retirement is the environment refusing the work, which is the
-    /// reason `host/entry-untrusted` already names.
+    /// renders them, as does a park an edit is refused under. The data
+    /// directory refusing the retirement is the environment refusing the
+    /// work, which is the reason `host/entry-untrusted` already names.
     pub(crate) fn answer(self, name: &VaultName) -> ErrorEnvelope {
         match self {
             RegistrationRefusal::Serving(refusal) => refusal.answer(name),
+            RegistrationRefusal::Parked(park) => park.answer(),
             RegistrationRefusal::UnknownVault => unknown_vault(name),
             RegistrationRefusal::AlreadyRecorded => ErrorEnvelope::new(
                 format!(
@@ -306,7 +328,7 @@ impl ReloadRefusal {
     /// it stands. That entry answers with its published demand rendered
     /// through [`Demand::answer`], the mapping `vault status` and a demand
     /// lease answer through: a name the host does not serve in
-    /// `host/unknown-vault`, an entry an unregistration holds in
+    /// `host/unknown-vault`, an entry a registration change holds in
     /// `host/entry-held`, a park in its own code (`host/duplicate-root`,
     /// `host/maintainer-contended`, or `host/entry-untrusted` for a root the
     /// registry cannot read), an entry whose derived state cannot be trusted

@@ -8,11 +8,11 @@ use norn_fs::{Identity, Refusal, canonical_spelling, path_identity, readable_dir
 use norn_wire::{
     DoctorRegistryParams, DoctorRegistryReport, EngineHealth, ErrorEnvelope, ListParams,
     ListReport, MaintainerIdentity, NameSet, RegisterParams, RegisterReport, RegistryProblem,
-    RegistrySanity, ResolveParams, ResolveReport, RollUp, TooFewNames, UnregisterParams,
-    UnregisterReport, VaultName,
+    RegistrySanity, ResolveParams, ResolveReport, RollUp, SetParams, SetReport, TooFewNames,
+    UnregisterParams, UnregisterReport, VaultName,
 };
 
-use crate::lifecycle::{EntryOps, Host, ServingRefusal};
+use crate::lifecycle::{EntryOps, Host, ServingRefusal, StandingPark};
 
 /// Every registry name that resolves to one filesystem root.
 ///
@@ -118,8 +118,9 @@ impl RegistryRead {
 /// never from a fresh read of the registry file: the set is seeded from that
 /// file at startup and is the one account of which names exist and where their
 /// roots are after that, so a vault that joined after startup is answered for
-/// and one that left is not. A change writes the file first and the set after,
-/// and a change the file refused leaves the set as it stood.
+/// and one that left is not. A change — a register, an unregister or a set —
+/// writes the file first and the set after, and a change the file refused
+/// leaves the set as it stood.
 impl<O: EntryOps> Host<O> {
     /// Answer a `vault list`: every registration this host serves, ascending
     /// by name.
@@ -260,6 +261,55 @@ impl<O: EntryOps> Host<O> {
         });
         DoctorRegistryReport::new(RollUp::of(&statuses), registry, engines)
     }
+
+    /// Answer a `vault set`: the registration as it now stands, and what its
+    /// entry publishes after the edit.
+    ///
+    /// A field the edit keeps stands as it was, a field it sets holds the
+    /// value, and a field it clears falls back to its default. **A root the
+    /// edit moves is pre-checked as a register checks one**: taken at its
+    /// [`canonical_spelling`], refused `host/entry-untrusted` under the
+    /// environmental-refusal reason where it is no readable directory, and
+    /// refused `host/duplicate-root` naming every other served vault that
+    /// already reaches it. A root reaching the directory the vault stands at
+    /// already is no duplicate of itself. An edit that changes nothing
+    /// answers the registration as it stands, and writes nothing.
+    ///
+    /// A name the host serves nothing under is refused `host/unknown-vault`,
+    /// and an entry something holds is refused `host/entry-held`; the
+    /// operator asks again once it is idle. **An entry standing on a park is
+    /// refused in the park's own code**, and the park stands: an edit never
+    /// withdraws a park unseen.
+    ///
+    /// Otherwise the change takes the path an unregistration takes. The entry
+    /// is withdrawn, and from then until the change commits or is refused
+    /// every request that asks the entry for anything is refused
+    /// `host/entry-held`, while `vault list` and `vault resolve` go on naming
+    /// the registration as it stood. The registry file is written first —
+    /// the entry's replacement is only served once the file records the
+    /// edit, and a file that refuses leaves the entry that stood in service,
+    /// the file and the set unchanged. **A root move retires the derived
+    /// state the old root left**, under the vault's maintainer lock as
+    /// `vault unregister` retires it, so nothing the old root held is served
+    /// from the new one: another process holding that lock is refused
+    /// `host/maintainer-contended`, and a data directory that refuses the
+    /// lock or the discard is refused `host/entry-untrusted` under the
+    /// environmental-refusal reason. A registry file that cannot be read or
+    /// written is refused `host/registry-unwritable`. After any refusal the
+    /// registration that stood before still stands, served by the entry that
+    /// stood.
+    ///
+    /// Nothing is attached here. The edited registration is served by an
+    /// entry that joins unattached, and the demand that follows attaches it
+    /// under the registration as edited — its root, its schema source and
+    /// its watch backend. The new entry holds nothing the old one's
+    /// attachments recorded, so `vault status` reports its engine section
+    /// undelivered and its advisories empty until that attach publishes them.
+    pub fn vault_set(&self, params: &SetParams) -> Result<SetReport, ErrorEnvelope> {
+        let name = &params.name;
+        let (registration, published) = self.set(params).map_err(|refusal| refusal.answer(name))?;
+        Ok(SetReport::new(registration, published.published(name)))
+    }
 }
 
 /// Whether the registry is in order over the served `roots`, given ascending
@@ -357,12 +407,13 @@ impl fmt::Display for RegistryUnwritable {
 
 impl std::error::Error for RegistryUnwritable {}
 
-/// Why a vault's registration was not retired, and how far the retirement
-/// got.
+/// Why a vault's registration was not retired or amended, and how far the
+/// change got.
 ///
-/// In each case the registry file still records the vault. Where the lock
-/// was not taken nothing ran; past it, what a refusal may have taken is
-/// derived state alone.
+/// In each case the registry file still records the registration that stood.
+/// Where the lock was not taken nothing ran; past it, what a refusal may have
+/// taken is derived state alone. An amendment that leaves the root standing
+/// takes no lock and discards nothing, so it refuses only as unrecorded.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RetireRefusal {
     /// Another process holds the vault's maintainer lock. Nothing ran.
@@ -378,6 +429,22 @@ pub enum RetireRefusal {
     Unrecorded(RegistryUnwritable),
 }
 
+impl From<RetireRefusal> for RegistrationRefusal {
+    fn from(refused: RetireRefusal) -> Self {
+        match refused {
+            RetireRefusal::MaintainerContended(incumbent) => {
+                RegistrationRefusal::MaintainerContended(incumbent)
+            }
+            RetireRefusal::Unclaimed(refusal) | RetireRefusal::Undiscarded(refusal) => {
+                RegistrationRefusal::StateRefused(refusal)
+            }
+            RetireRefusal::Unrecorded(unwritable) => {
+                RegistrationRefusal::RegistryUnwritable(unwritable)
+            }
+        }
+    }
+}
+
 /// Why a registration change left the registration that stood before it
 /// standing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -385,6 +452,8 @@ pub(crate) enum RegistrationRefusal {
     /// The serving set refused the change: the name is served already, or the
     /// entry holds something or is held.
     Serving(ServingRefusal),
+    /// The entry stands on this park, and an edit does not withdraw one.
+    Parked(StandingPark),
     /// The set serves no entry under the name.
     UnknownVault,
     /// The registry file already records the name.
@@ -404,21 +473,30 @@ pub(crate) enum RegistrationRefusal {
     RegistryUnwritable(RegistryUnwritable),
 }
 
-/// `registration` as admitted: its root at its [`canonical_spelling`], with the
-/// identity of the directory that spelling names.
+/// `registration` as admitted: its root at its [`canonical_root`], with the
+/// identity [`readable_root`] reads for it.
+pub(crate) fn admitted(mut registration: Entry) -> Result<(Entry, Identity), RegistrationRefusal> {
+    registration.root = canonical_root(&registration.root)?;
+    let identity = readable_root(&registration.root)?;
+    Ok((registration, identity))
+}
+
+/// `root` at its [`canonical_spelling`]: a spelling that resolves through a
+/// link is taken as the directory the link reaches, so no root taken here has
+/// a link as its last component.
+pub(crate) fn canonical_root(root: &VaultRoot) -> Result<VaultRoot, RegistrationRefusal> {
+    VaultRoot::new(canonical_spelling(root.as_path()))
+        .map_err(|illegal| RegistrationRefusal::RootRefused(illegal.to_string()))
+}
+
+/// The identity of the directory `root` names, where it is a readable one.
 ///
 /// **Only a readable directory is admitted.** A root is read by listing it, so
 /// nothing at the spelling, something other than a directory, and a directory
 /// this process may not list are each refused with the environment's account.
-/// A spelling that resolves through a link is admitted as the directory the
-/// link reaches, so no admitted root has a link as its last component.
-pub(crate) fn admitted(mut registration: Entry) -> Result<(Entry, Identity), RegistrationRefusal> {
-    let spelling = canonical_spelling(registration.root.as_path());
-    let identity = readable_directory(&spelling)
-        .map_err(|refusal| RegistrationRefusal::RootRefused(refusal.to_string()))?;
-    registration.root = VaultRoot::new(&spelling)
-        .map_err(|illegal| RegistrationRefusal::RootRefused(illegal.to_string()))?;
-    Ok((registration, identity))
+pub(crate) fn readable_root(root: &VaultRoot) -> Result<Identity, RegistrationRefusal> {
+    readable_directory(root.as_path())
+        .map_err(|refusal| RegistrationRefusal::RootRefused(refusal.to_string()))
 }
 
 /// Every name among the served `roots` whose root reaches `identity`.

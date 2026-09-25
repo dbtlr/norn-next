@@ -10,7 +10,8 @@
 //! # Joining and leaving
 //!
 //! [`ServingSet::insert`] and [`ServingSet::remove`] are how a vault joins and
-//! leaves. Startup takes the first: [`Host::new`] inserts one entry per
+//! leaves, and [`ServingSet::replace`] is how an edited registration takes
+//! its name's place. Startup takes the first: [`Host::new`] inserts one entry per
 //! registration it was built from, so a vault gained later joins the set
 //! exactly the way every vault in it joined.
 //!
@@ -18,14 +19,16 @@
 //! the lifecycle's own move rather than this module's: a set knows which roots
 //! it holds, and whether two of them are one root is a filesystem reading taken
 //! against the entries a refusal then acts on. The registration verbs —
-//! [`Host::vault_register`] and [`Host::vault_unregister`] — land on that
-//! move and on [`ServingSet::remove`], each under the one lock every
-//! registration change holds, so no insertion or removal but startup's runs
-//! outside it.
+//! [`Host::vault_register`], [`Host::vault_unregister`] and
+//! [`Host::vault_set`] — land on that move, on [`ServingSet::remove`] and on
+//! [`ServingSet::replace`], each under the one lock every registration change
+//! holds, so no insertion, removal or replacement but startup's runs outside
+//! it.
 //!
 //! [`Host::new`]: crate::Host::new
 //! [`Host::vault_register`]: crate::Host::vault_register
 //! [`Host::vault_unregister`]: crate::Host::vault_unregister
+//! [`Host::vault_set`]: crate::Host::vault_set
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -116,13 +119,13 @@ pub(crate) struct ServingSet<A: SnapshotSource> {
     /// root, so this counts the set's whole filesystem cost, and a path that
     /// leaves it unmoved spent no stat on the registry.
     classifications: AtomicUsize,
-    /// The highest epoch any entry this set removed stood at, which is where
-    /// an entry joining it starts.
+    /// The highest epoch any entry this set removed or replaced stood at,
+    /// which is where an entry joining it starts.
     ///
     /// A job is queued at the epoch its entry stood at, and the entry moves
-    /// past it before the job's queue slot is given up — so a removed entry,
-    /// which holds no slot, stands past every job it left queued. Written and
-    /// read under the set's write lock.
+    /// past it before the job's queue slot is given up — so a removed or
+    /// replaced entry, which holds no slot, stands past every job it left
+    /// queued. Written and read under the set's write lock.
     retired_epoch: AtomicU64,
 }
 
@@ -347,6 +350,44 @@ impl<A: SnapshotSource> ServingSet<A> {
         let removed = entries.remove(name);
         drop(entries);
         drop(removed);
+        Ok(())
+    }
+
+    /// Serve `registration` from now under its name, in place of the entry
+    /// serving that name, where that entry holds nothing and nothing holds
+    /// it.
+    ///
+    /// The predicate is [`ServingSet::remove`]'s, read the same way, and an
+    /// entry a registration change has already withdrawn is replaced as it
+    /// stands. **The replaced entry stays withdrawn**: a caller that read it
+    /// out of the set before this took it out is answered as held, and
+    /// reaches the new entry by asking again. The new entry joins as
+    /// [`ServingSet::insert`] joins one, at the highest epoch a removed or
+    /// replaced entry stood at — this one's included — so no job the
+    /// replaced entry left queued reaches it.
+    ///
+    /// A name the set does not serve has nothing to replace, and the entry
+    /// joins as a new one.
+    pub(crate) fn replace(&self, registration: Registration) -> Result<(), ServingRefusal> {
+        let mut entries = self.entries.write().expect("serving set poisoned");
+        if let Some(entry) = entries.get(&registration.name) {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            if state.service == Service::Served && state.held_by_anything() {
+                return Err(ServingRefusal::Held);
+            }
+            state.service = Service::Withdrawn;
+            self.retired_epoch
+                .fetch_max(state.claim.epoch(), Ordering::SeqCst);
+        }
+        let replaced = entries.insert(
+            registration.name.clone(),
+            Arc::new(Entry::unattached(
+                registration,
+                self.retired_epoch.load(Ordering::SeqCst),
+            )),
+        );
+        drop(entries);
+        drop(replaced);
         Ok(())
     }
 }

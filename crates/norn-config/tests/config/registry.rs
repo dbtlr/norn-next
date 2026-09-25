@@ -308,7 +308,9 @@ fn an_amended_entry_keeps_the_keys_this_build_does_not_model() {
         "a field the amendment cleared was kept: {text}"
     );
     assert_eq!(
-        registry::read(dirs).expect("a registry").get(&name("notes")),
+        registry::read(dirs)
+            .expect("a registry")
+            .get(&name("notes")),
         Some(&entry("notes", "/home/person/moved"))
     );
 }
