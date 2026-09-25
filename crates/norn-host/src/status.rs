@@ -207,16 +207,17 @@ impl<O: EntryOps> Host<O> {
     }
 
     /// The status of an entry out of service that is still listed: published
-    /// under the refusal every request against it meets, beside the engine
-    /// read in the same hold of its gate, and with nothing else of it read —
-    /// its gate answered that it is out of service, and that is all a status
-    /// asks of it.
+    /// under the refusal every request against it meets, with no delivered
+    /// engine section and no engine — an entry out of service holds no
+    /// coverage, so no delivery stands for it ([`Held`]) — and with nothing
+    /// else of it read: its gate answered that it is out of service, and that
+    /// is all a status asks of it.
     fn unserved_status(held: Held) -> VaultStatus {
         let Held {
             registration,
             unserved,
-            engine,
         } = held;
+        let engine = EngineReport::of(None, None);
         let published = Demand::from(unserved).published(&registration.name);
         VaultStatus::new(
             registration,

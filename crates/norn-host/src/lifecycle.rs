@@ -703,14 +703,17 @@ impl From<Unserved> for Demand {
 }
 
 /// An entry out of service that is still listed, observed under one hold of
-/// its gate: why it is out of service, beside its engine read in that hold.
+/// its gate: why it is out of service.
+///
+/// It carries no engine. An entry is taken out of service only while nothing
+/// holds it — no coverage among the rest — and no door attaches it while it
+/// is out, while its engine delivery is committed with coverage and goes back
+/// with it; so an entry out of service holds no delivery to report.
 pub(crate) struct Held {
     /// The registration the entry serves.
     pub(crate) registration: Registration,
     /// Why no request is served by it.
     pub(crate) unserved: Unserved,
-    /// Its engine, as a status reports it.
-    pub(crate) engine: EngineReport,
 }
 
 /// What one entry in service stands at, read under one hold of its gate.
@@ -3607,7 +3610,6 @@ impl<O: EntryOps> Host<O> {
                     Err(unserved @ Unserved::EntryHeld) => Some(Err(Held {
                         registration: entry.registration.clone(),
                         unserved,
-                        engine: state.engine_report(),
                     })),
                 }
             })
@@ -20575,7 +20577,7 @@ mod tests {
                     listed(&host),
                     host.vault_status(&status_params(&name))
                         .map_err(|refusal| refusal.detail().clone()),
-                    doctored(&host).roll_up,
+                    doctored(&host),
                     entry.gate.lock().unwrap().held_by_anything(),
                 );
                 drop(lease);
@@ -20586,7 +20588,17 @@ mod tests {
                 )
             });
 
-            let (demands, read, reload, state, listing, status, roll_up, held) = answers;
+            let (demands, read, reload, state, listing, status, doctor, held) = answers;
+            let roll_up = doctor.roll_up;
+            assert_eq!(
+                doctor.engines,
+                [norn_wire::EngineHealth::new(
+                    name.clone(),
+                    norn_wire::EngineSection::undelivered(),
+                    norn_wire::EngineStatus::off()
+                )],
+                "a held entry holds no delivery"
+            );
             assert_eq!(
                 status.map(|_| ()),
                 Err(ErrorDetail::entry_held(name.clone())),
