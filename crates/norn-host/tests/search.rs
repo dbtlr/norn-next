@@ -40,10 +40,21 @@ const DOCUMENTS: &[(&str, &str)] = &[
 /// A sandbox and a vault holding [`DOCUMENTS`], its engine configured by
 /// `config` where it names one.
 fn a_vault(label: &str, config: Option<&str>) -> (Sandbox, attach::Vault) {
+    a_vault_holding(label, DOCUMENTS, config)
+}
+
+/// A sandbox and a vault holding `documents`, by path, its engine configured
+/// by `config` where it names one.
+fn a_vault_holding<P: AsRef<str>, B: AsRef<str>>(
+    label: &str,
+    documents: &[(P, B)],
+    config: Option<&str>,
+) -> (Sandbox, attach::Vault) {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let root = sandbox.work_dir().join("attached");
     let vault = root.join("vault");
-    for (path, body) in DOCUMENTS {
+    for (path, body) in documents {
+        let (path, body) = (path.as_ref(), body.as_ref());
         let at = vault.join(path);
         std::fs::create_dir_all(at.parent().expect("a parent")).expect("a document directory");
         std::fs::write(at, body).expect("a document");
@@ -456,14 +467,9 @@ fn an_engine_that_fails_its_answer_refuses_engine_failed() {
         serving.engines.status(vault.name()),
         SemanticStatus::On { .. }
     ));
-    match norn_db::connect(&vault.sidecar()).expect("connecting to the sidecar") {
-        norn_db::Attempt::Connected(connection) => {
-            connection
-                .execute("UPDATE document_vectors SET embedding = x'00'", [])
-                .expect("damaging the sidecar's rows");
-        }
-        norn_db::Attempt::Unreadable { detail } => panic!("the sidecar is unreadable: {detail}"),
-    }
+    on_the_sidecar(&vault, |sidecar| {
+        sidecar.execute_batch("UPDATE document_vectors SET embedding = x'00'")
+    });
 
     for selection in [exactly([Rung::Vector]), RungSelection::enabled()] {
         let refusal = refused(&serving, &searching(&vault, "alpha").with_rungs(selection));
@@ -476,5 +482,220 @@ fn an_engine_that_fails_its_answer_refuses_engine_failed() {
     assert!(
         !paths(&lexical).is_empty(),
         "the lexical floor stands beside it"
+    );
+}
+
+/// Run `statements` on `vault`'s sidecar under the running engine, and what
+/// they answered.
+fn on_the_sidecar<T>(
+    vault: &attach::Vault,
+    statements: impl FnOnce(&norn_db::rusqlite::Connection) -> Result<T, norn_db::rusqlite::Error>,
+) -> T {
+    match norn_db::connect(&vault.sidecar()).expect("connecting to the sidecar") {
+        norn_db::Attempt::Connected(connection) => {
+            statements(&connection).expect("the statements on the sidecar")
+        }
+        norn_db::Attempt::Unreadable { detail } => panic!("the sidecar is unreadable: {detail}"),
+    }
+}
+
+/// The rungs `answer` is advised reached their depth, in the order advised.
+fn depth_reached(answer: &Answered<SearchReport, SearchCost>) -> Vec<Rung> {
+    answer
+        .answer
+        .advisories
+        .iter()
+        .filter_map(|advisory| match advisory {
+            AnswerAdvisory::RungDepthReached { rung, .. } => Some(*rung),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A vault of `documents` documents, each holding the word `alpha`, so every
+/// one is a lexical hit and every one is admitted.
+fn a_vault_of_alphas(label: &str, documents: usize) -> (Sandbox, attach::Vault) {
+    let documents: Vec<(String, String)> = (0..documents)
+        .map(|at| (format!("d/{at:05}.md"), format!("alpha w{at}\n")))
+        .collect();
+    a_vault_holding(label, &documents, Some("[engine.semantic]\n"))
+}
+
+/// **A rung is advised that it reached its depth only when it had more than
+/// `RUNG_DEPTH` candidates, and the vector rung holds no more than that.** At
+/// exactly the depth, neither the fused ladder nor the vector rung alone is
+/// advised; one document past it, the fused answer is advised for both rungs
+/// in ladder order and the vector rung alone for itself, and the vector
+/// rung's scan held the depth's rows while scoring every admitted document.
+#[test]
+fn a_rung_is_advised_at_its_depth_only_past_it() {
+    let depth = norn_wire::RUNG_DEPTH as usize;
+    for (documents, fused_advised, vector_advised) in [
+        (depth, vec![], vec![]),
+        (
+            depth + 1,
+            vec![Rung::Lexical, Rung::Vector],
+            vec![Rung::Vector],
+        ),
+    ] {
+        let (_sandbox, vault) = a_vault_of_alphas(&format!("search-depth-{documents}"), documents);
+        let serving = serve(&vault);
+        let fused = answered(&serving, &searching(&vault, "alpha").with_limit(1));
+        let vector = answered(
+            &serving,
+            &searching(&vault, "alpha")
+                .with_rungs(exactly([Rung::Vector]))
+                .with_limit(1),
+        );
+        assert_eq!(
+            depth_reached(&fused),
+            fused_advised,
+            "{documents} documents"
+        );
+        assert_eq!(
+            depth_reached(&vector),
+            vector_advised,
+            "{documents} documents"
+        );
+        for answer in [&fused, &vector] {
+            let work = answer.work.vector.expect("the vector rung ran");
+            assert_eq!(work.rows_scored, documents as u64);
+            assert_eq!(work.peak_held, depth as u64, "{documents} documents");
+        }
+    }
+}
+
+/// The paths and scores of `answer`'s page, in page order.
+fn scored(answer: &Answered<SearchReport, SearchCost>) -> Vec<(String, f64)> {
+    answer
+        .answer
+        .report
+        .page
+        .rows
+        .iter()
+        .map(|hit| (hit.path.as_str().to_string(), hit.score.get()))
+        .collect()
+}
+
+/// **The request's floor applies to the scale the answer is ranked on.** A
+/// floor taken from the third fused score keeps exactly the fused hits at or
+/// above it; a floor taken from the vector rung's second score, under the
+/// vector rung alone, keeps exactly the hits the engine scored at or above
+/// it. Each floor leaves hits out, so it is seen to apply.
+#[test]
+fn the_floor_applies_to_the_answers_own_scale() {
+    let (_sandbox, vault) = a_vault("search-floor", Some("[engine.semantic]\n"));
+    let serving = serve(&vault);
+    for (selection, at) in [(RungSelection::enabled(), 2), (exactly([Rung::Vector]), 1)] {
+        let request = searching(&vault, "alpha").with_rungs(selection.clone());
+        let whole = scored(&answered(&serving, &request));
+        let floor = whole[at].1;
+        let mut floored = request.clone();
+        floored.min_score = Some(norn_wire::Score::new(floor).expect("a score"));
+        let kept = scored(&answered(&serving, &floored));
+        let expected: Vec<(String, f64)> = whole
+            .iter()
+            .filter(|(_, score)| *score >= floor)
+            .cloned()
+            .collect();
+        assert_eq!(kept, expected, "{selection:?}");
+        assert!(
+            kept.len() > at && kept.len() < whole.len(),
+            "{selection:?}: {whole:?}"
+        );
+    }
+}
+
+/// **The candidates reconcile the sidecar with the snapshot.** A vector row
+/// for a path the snapshot does not hold — the sidecar ahead of it — is never
+/// scored or answered, alone or fused; a document whose row the sidecar no
+/// longer holds — the sidecar behind — is answered on the fused ladder by the
+/// lexical rung alone. The fused scores are the reciprocal-rank sum of each
+/// rung's own answer, so a row the vector rung scored and no answer shows
+/// would move them.
+#[test]
+fn a_sidecar_row_the_snapshot_lacks_is_never_answered() {
+    let (_sandbox, vault) = a_vault("search-reconciled", Some("[engine.semantic]\n"));
+    let serving = serve(&vault);
+    on_the_sidecar(&vault, |sidecar| {
+        sidecar.execute_batch(
+            "INSERT INTO document_vectors
+               SELECT 'docs/ghost.md', model_id, model_version, input_hash, dimensions, embedding
+               FROM document_vectors WHERE path = 'docs/alpha.md';
+             DELETE FROM document_vectors WHERE path = 'docs/mixed.md';",
+        )
+    });
+
+    let vector_answer = answered(
+        &serving,
+        &searching(&vault, "alpha").with_rungs(exactly([Rung::Vector])),
+    );
+    let vector = paths(&vector_answer);
+    assert!(
+        !vector.iter().any(|path| path == "docs/ghost.md"),
+        "{vector:?}"
+    );
+    assert!(
+        !vector.iter().any(|path| path == "docs/mixed.md"),
+        "{vector:?}"
+    );
+    let work = vector_answer.work.vector.expect("the vector rung ran");
+    assert_eq!(work.rows_read, DOCUMENTS.len() as u64);
+    assert_eq!(work.rows_scored, DOCUMENTS.len() as u64 - 1);
+
+    let lexical = paths(&answered(
+        &serving,
+        &searching(&vault, "alpha").with_rungs(exactly([Rung::Lexical])),
+    ));
+    let mixed_rank = lexical
+        .iter()
+        .position(|path| path == "docs/mixed.md")
+        .expect("the lexical rung ranks the document the sidecar lost")
+        + 1;
+    let mut expected: BTreeMap<String, f64> = BTreeMap::new();
+    for ranking in [&lexical, &vector] {
+        for (at, path) in ranking.iter().enumerate() {
+            *expected.entry(path.clone()).or_insert(0.0) +=
+                1.0 / (f64::from(RRF_K) + at as f64 + 1.0);
+        }
+    }
+    let mut expected: Vec<(String, f64)> = expected.into_iter().collect();
+    expected.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let fused = scored(&answered(&serving, &searching(&vault, "alpha")));
+    assert_eq!(fused, expected);
+    assert!(fused.contains(&(
+        "docs/mixed.md".to_string(),
+        1.0 / (f64::from(RRF_K) + mixed_rank as f64)
+    )));
+}
+
+/// **A host that composes no engine answers no vector rung, over a vault
+/// whose section enables one**: nothing was delivered to it, so the vault's
+/// enabled set holds the lexical floor alone. A bare search answers the floor
+/// with nothing skipped and pays for no candidates; an exact set naming
+/// vectors is refused as not enabled, told to serve the vault from a host
+/// that composes the engine.
+#[test]
+fn a_host_composing_no_engine_answers_no_vector_rung() {
+    let (_sandbox, vault) = a_vault("search-not-composed", Some("[engine.semantic]\n"));
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let bare = host
+        .search(&searching(&vault, "alpha"))
+        .expect("the lexical floor answers");
+    assert_eq!(bare.answer.report.ladder, LadderDeclaration::lexical());
+    assert!(skipped(&bare).is_empty(), "{:?}", bare.answer.advisories);
+    assert_eq!(bare.work.candidate_pages, 0);
+
+    let refusal = host
+        .search(&searching(&vault, "alpha").with_rungs(exactly([Rung::Vector])))
+        .expect_err("a refused search");
+    assert_eq!(
+        refusal.detail(),
+        &ErrorDetail::engine_not_enabled(
+            Rung::Vector,
+            "serve the vault from a host that composes the semantic engine"
+        )
     );
 }
