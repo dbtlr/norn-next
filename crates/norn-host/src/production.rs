@@ -1360,14 +1360,20 @@ impl EntryOps for ProductionEntryOps {
         // A vault that is no longer served holds no engine: the slot goes
         // back before the sidecar it would read from is discarded.
         self.discard(name);
-        let standing = standing
-            .iter()
-            .map(|registration| registration.root.as_path())
-            .collect::<Vec<_>>();
         let retired = norn_config::registry::mutate(&self.dirs, |registry| {
-            if !keep_state && let Err(refused) = self.discard_state(registration, &standing) {
+            // A root the file records is somebody's vault whether or not
+            // this host serves it, so the file's registrations are spared
+            // beside the served ones.
+            let spared = standing
+                .iter()
+                .chain(registry.entries())
+                .map(|registration| registration.root.as_path())
+                .collect::<Vec<_>>();
+            if !keep_state && let Err(refused) = self.discard_state(registration, &spared) {
                 return Ok(Err(refused));
             }
+            #[cfg(test)]
+            tests::run_inside_retirement();
             registry.remove(name);
             Ok(Ok(()))
         });
@@ -3449,6 +3455,21 @@ mod tests {
     use norn_testkit::wait::{Budget, Observed, wait_until};
     use std::fs;
     use std::thread;
+
+    thread_local! {
+        /// What a case arranged to run inside a retirement's registry change,
+        /// after the discard and before the file is written.
+        static INSIDE_RETIREMENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
+
+    /// Run what a case on this thread arranged to happen inside a
+    /// retirement's registry change, once.
+    pub(super) fn run_inside_retirement() {
+        if let Some(arranged) = INSIDE_RETIREMENT.with(|slot| slot.borrow_mut().take()) {
+            arranged();
+        }
+    }
 
     /// **The read seam's refusal names no file.** The reason a refused mint or
     /// establishment leaves is retained beside the entry's published demand and
@@ -13583,6 +13604,75 @@ mod tests {
                 "a registered vault's root was removed"
             );
             assert_eq!(listed(&host), [other]);
+        }
+
+        /// The maintainer lock a retirement takes is held across the discard
+        /// and the registry write: another holder trying it from inside the
+        /// registry change finds it held, by this process.
+        #[test]
+        fn a_retirement_holds_the_maintainer_lock_through_the_discard_and_the_write() {
+            let f = Fixture::watcherless("retire-holds-the-lock");
+            let (ops, name) = f.ops(2);
+            let lock = ops.derived(&name).join(MAINTAINER_LOCK_FILE);
+            let tried = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let reported = std::sync::Arc::clone(&tried);
+            INSIDE_RETIREMENT.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    *reported.lock().unwrap() = Some(match norn_fs::try_acquire(&lock) {
+                        Ok(Acquisition::Contended { incumbent }) => Ok(incumbent),
+                        Ok(Acquisition::Acquired(_)) => Err("taken".to_string()),
+                        Err(refused) => Err(refused.to_string()),
+                    });
+                }));
+            });
+
+            ops.retire(&f.registration(), false, &[])
+                .expect("the vault is retired");
+
+            let tried = tried.lock().unwrap().take();
+            assert!(
+                matches!(
+                    &tried,
+                    Some(Ok(norn_fs::Incumbent::Named { pid, .. })) if *pid == std::process::id()
+                ),
+                "the lock was not held inside the registry change: {tried:?}"
+            );
+        }
+
+        /// A root another writer recorded in the registry file since the host
+        /// started, standing at this vault's fallback home, keeps its root
+        /// too: the host does not serve it, and the file says it is somebody's
+        /// vault.
+        #[test]
+        fn a_root_the_registry_file_records_at_the_fallback_home_is_left_standing() {
+            let f = Fixture::watcherless("unregister-fallback-recorded-root");
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            let key = dirs.derived_key(&notes());
+            let home = f
+                .vault()
+                .join(norn_fs::FALLBACK)
+                .join(key.channel())
+                .join(key.vault())
+                .join(key.data_base());
+            fs::create_dir_all(&home).unwrap();
+            norn_config::registry::mutate(&dirs, |registry| {
+                registry.insert(Registration::new(
+                    VaultName::new("theirs").unwrap(),
+                    VaultRoot::new(&home).unwrap(),
+                ));
+                Ok(())
+            })
+            .expect("another writer records its vault");
+
+            unregister_once_idle(&host, &UnregisterParams::new(notes()))
+                .expect("the vault is unregistered");
+
+            assert!(
+                fs::metadata(&home).is_ok(),
+                "a root the registry file records was removed"
+            );
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
         }
 
         /// A demand racing an unregistration of the same idle vault is either

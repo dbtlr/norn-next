@@ -273,8 +273,11 @@ pub fn read(dirs: &ConfigDirs) -> Result<Registry, ConfigError> {
 /// replaced, so no second writer's read can begin inside this one's window.
 /// **A lost update is not possible**, rather than unlikely: the whole
 /// read-modify-write is one critical section. The wait for the lock is
-/// unbounded — the thing being waited for is another writer's rewrite of a
-/// small file.
+/// unbounded, and it lasts as long as the other writer's `apply` runs: a
+/// rewrite of a small file, and for a host unregistering a vault the discard
+/// of that vault's derived state that runs inside `apply` between the read and
+/// the write — the removal of two databases and the journal files beside
+/// them, and a sweep of the top level of each of the two shadow homes.
 ///
 /// A refusal from `apply` leaves the file untouched, and so does a mutation
 /// that changes nothing: bytes identical to the ones read are not written back.
