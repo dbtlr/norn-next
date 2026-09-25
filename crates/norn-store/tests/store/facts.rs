@@ -12,7 +12,7 @@ use crate::common::{
 use norn_store::{
     BlockFact, Change, ContentModel, DocumentFacts, FrontmatterValue, HeadingFact,
     IncrementProvenance, LinkFact, LinkFamily, Provenance, StoreError, StoredLinkKey, TagFact,
-    TagSource, ddl,
+    TagSource, ddl, induced_failure,
 };
 
 /// One of every fact shape, written and read back unchanged — including the
@@ -315,6 +315,39 @@ fn a_link_key_carries_segments_exactly_where_it_is_a_suffix_key() {
         declared.contains("CHECK ((segments IS NULL) = (substr(key, -1) <> '/'))"),
         "{declared}"
     );
+}
+
+/// **A link key belongs to its link's document**: the document a key is held
+/// beside is the one holding the link it is a key of, so a key moved onto
+/// another document, or written for another document's link, is refused at
+/// rest, while a key left on its own link's document is kept.
+#[test]
+fn a_link_key_is_held_beside_its_links_own_document() {
+    let scratch = Scratch::new("link-key-document");
+    let mut store = scratch.open();
+    let mut holder = document("a.md", "hash-a", "a body\n");
+    holder.links = vec![link(LinkFamily::Wikilink, None, "b")];
+    let other = document("b.md", "hash-b", "a body\n");
+    let mut request = store.begin_request();
+    write_document(&mut request, &holder);
+    write_document(&mut request, &other);
+    request.finish();
+    let other_document = "(SELECT id FROM documents WHERE path = 'b.md')";
+    induced_failure::execute_out_of_band(&mut store, "UPDATE link_keys SET document = document")
+        .expect("a key on its own link's document is kept");
+    induced_failure::execute_out_of_band(
+        &mut store,
+        &format!("UPDATE link_keys SET document = {other_document}"),
+    )
+    .expect_err("a key moved onto another document is kept");
+    induced_failure::execute_out_of_band(
+        &mut store,
+        &format!(
+            "INSERT INTO link_keys (link, document, key, folded_key, segments)
+             SELECT link, {other_document}, 'c/', 'c/', 1 FROM link_keys"
+        ),
+    )
+    .expect_err("a key written for another document's link is kept");
 }
 
 /// Ordinals are dense and ascending because the store assigns them from the

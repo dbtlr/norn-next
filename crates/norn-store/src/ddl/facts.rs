@@ -91,7 +91,10 @@
 //! so a re-derivation's delete of a document's link rows cascades to their keys
 //! through it, and a document's death reaches them the same way. `document`
 //! is the link row's own document, copied beside the key so a seek reads the
-//! holding document off the index without visiting the link.
+//! holding document off the index without visiting the link, and the foreign
+//! key is the pair — the link and its document, which `links_id_document`
+//! makes a key of `links` — so a key held beside any other document is refused
+//! at rest.
 
 //! # `headings` is addressed two ways
 //!
@@ -168,13 +171,15 @@ const STATEMENTS: &[&str] = &[
     span_offset INTEGER NOT NULL
 )",
     "CREATE UNIQUE INDEX links_document_ordinal ON links(document, ordinal)",
+    "CREATE UNIQUE INDEX links_id_document ON links(id, document)",
     "CREATE TABLE link_keys (
     id         INTEGER PRIMARY KEY,
-    link       INTEGER NOT NULL REFERENCES links(id) ON DELETE CASCADE,
+    link       INTEGER NOT NULL,
     document   INTEGER NOT NULL,
     key        TEXT    NOT NULL,
     folded_key TEXT    NOT NULL,
     segments   INTEGER,
+    FOREIGN KEY (link, document) REFERENCES links(id, document) ON DELETE CASCADE,
     CHECK ((segments IS NULL) = (substr(key, -1) <> '/'))
 )",
     "CREATE UNIQUE INDEX link_keys_link ON link_keys(link, key)",
