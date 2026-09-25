@@ -1150,7 +1150,7 @@ impl EntryOps for ProductionEntryOps {
                 Err(JobFailure::LostMaintainership)
             }
             Err(refusal) => {
-                let failure = effect(refusal);
+                let failure = data_dir_effect(refusal);
                 release(attachment);
                 Err(failure)
             }
@@ -3439,6 +3439,69 @@ mod tests {
         ];
         for told in told {
             for named in path_spellings(&scratch, unusual) {
+                assert!(
+                    !told.contains(named.as_str()),
+                    "the refusal names `{named}`: {told}"
+                );
+            }
+        }
+    }
+
+    /// **A rebuild refused in the host's own data directory reaches a caller
+    /// naming no file.** The data directory is unusually spelled, and the
+    /// derived directory under it is made unreadable after the attach, so the
+    /// rebuild cannot confirm the maintainer lock it holds: the failure, and
+    /// the untrusted state the entry publishes for it, say the environment
+    /// refused and name neither the directory nor the lock.
+    #[cfg(unix)]
+    #[test]
+    fn a_rebuild_refused_in_the_data_directory_names_no_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = Fixture::new("rebuild-data-dir-names-no-file");
+        let unusual = "odd `name` \"quoted\" and 🌲 spaced";
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join(unusual)).unwrap();
+        let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(64, 2).unwrap());
+        let name = f.registration().name;
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        let derived = ops.derived(&name);
+        let mode = fs::metadata(&derived).unwrap().permissions().mode();
+        fs::set_permissions(&derived, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::metadata(derived.join("maintainer.lock")).is_ok() {
+            fs::set_permissions(&derived, fs::Permissions::from_mode(mode)).unwrap();
+            eprintln!("skipped: this account reads a mode-000 directory");
+            ops.detach(&name, attachment);
+            return;
+        }
+        let refused = ops.rebuild(&name, attachment, &progress);
+        fs::set_permissions(&derived, fs::Permissions::from_mode(mode)).unwrap();
+
+        let detail = match refused {
+            Err(JobFailure::Environmental(detail)) => detail,
+            Err(other) => {
+                panic!("an unconfirmable lock is not the environment refusing: {other:?}")
+            }
+            Ok(rebuilt) => {
+                ops.detach(&name, rebuilt);
+                panic!("a rebuild confirmed a lock in an unreadable directory");
+            }
+        };
+        let told = [
+            detail.clone(),
+            format!(
+                "{:?}",
+                answered(norn_wire::TrustState::untrusted(
+                    UntrustedReason::environmental_refusal(detail.clone())
+                ))
+            ),
+        ];
+        for told in told {
+            for named in path_spellings(&f.root, unusual)
+                .into_iter()
+                .chain(["maintainer.lock".to_string()])
+            {
                 assert!(
                     !told.contains(named.as_str()),
                     "the refusal names `{named}`: {told}"
