@@ -8513,6 +8513,121 @@ mod tests {
         );
     }
 
+    // ---- `doctor`'s registry half ----
+
+    /// What `doctor`'s registry half answers over `host`.
+    fn doctored<O: EntryOps>(host: &Host<O>) -> norn_wire::DoctorRegistryReport {
+        host.doctor_registry(&norn_wire::DoctorRegistryParams::new())
+    }
+
+    /// **`doctor` reports the roll-up `vault status` computes, a sound
+    /// registry, and each vault's engine in name order**, and asking it
+    /// attached nothing and recorded no demand.
+    #[test]
+    fn doctor_reports_the_status_roll_up_the_registry_and_each_engine_and_asks_nothing() {
+        let scratch = temp_base("doctor-sound");
+        let [alpha, beta] = ["alpha", "beta"].map(|name| VaultName::new(name).unwrap());
+        let ops = Arc::new(FakeOps::default());
+        let host = quiet_host_over_roots(
+            Arc::clone(&ops),
+            &[
+                (&beta, &scratch.root().join("beta")),
+                (&alpha, &scratch.root().join("alpha")),
+            ],
+        );
+        let _lease = host.demand(&alpha, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &alpha, TrustState::Ready);
+
+        let report = doctored(&host);
+
+        assert_eq!(report.roll_up, rolled_up(&host));
+        assert_eq!(
+            (report.roll_up.ready(), report.roll_up.unattached()),
+            (1, 1)
+        );
+        assert_eq!(report.registry, norn_wire::RegistrySanity::sound());
+        assert_eq!(
+            report.engines,
+            [alpha, beta.clone()].map(|name| norn_wire::EngineHealth::new(
+                name,
+                norn_wire::EngineSection::absent(),
+                norn_wire::EngineStatus::off()
+            ))
+        );
+        assert!(nothing_asked_of(&host, &beta));
+        settle();
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1, "doctor attached");
+    }
+
+    /// **`doctor` warns for a vault-local shadow fallback the vault does not
+    /// ignore, and only for that one**: a fallback the vault ignores is on
+    /// its status and names the vault for nothing.
+    #[test]
+    fn doctor_warns_for_a_fallback_the_vault_does_not_ignore_and_only_that_one() {
+        let [ignoring, exposed] = ["ignoring", "exposed"].map(|name| VaultName::new(name).unwrap());
+        let ops = Arc::new(FakeOps::default());
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&ignoring, &exposed], 1);
+        let mut leases = Vec::new();
+        for (name, gitignored) in [(&ignoring, true), (&exposed, false)] {
+            *ops.advisories.lock().unwrap() = vec![norn_wire::Advisory::tmp_fallback_in_use(
+                ".norn/tmp/key",
+                gitignored,
+            )];
+            leases.push(host.demand(name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, name, TrustState::Ready);
+        }
+
+        assert_eq!(
+            doctored(&host).roll_up.attention(),
+            [norn_wire::Attention::advisory(
+                exposed,
+                norn_wire::Advisory::tmp_fallback_in_use(".norn/tmp/key", false)
+            )]
+        );
+    }
+
+    /// **`doctor` names every registration whose root is missing or reached
+    /// by another registration too**, in name order, from the one pass over
+    /// the served roots.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_names_a_missing_root_and_a_root_two_registrations_reach() {
+        let scratch = temp_base("doctor-problems");
+        let shared = scratch.root().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let alias = scratch.root().join("alias");
+        std::os::unix::fs::symlink(&shared, &alias).unwrap();
+        let [alpha, beta, gone] =
+            ["alpha", "beta", "gone"].map(|name| VaultName::new(name).unwrap());
+        let registry = RegistryRead::from_entries([
+            RegistryEntry::new(alpha.clone(), VaultRoot::new(&shared).unwrap()),
+            RegistryEntry::new(beta.clone(), VaultRoot::new(&alias).unwrap()),
+            RegistryEntry::new(
+                gone.clone(),
+                VaultRoot::new(scratch.root().join("gone")).unwrap(),
+            ),
+        ]);
+        let host = Host::new(
+            registry,
+            Arc::new(FakeOps::default()),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            doctored(&host).registry,
+            norn_wire::RegistrySanity::problems([
+                norn_wire::RegistryProblem::duplicate_root(colliding(&alpha, &beta)),
+                norn_wire::RegistryProblem::root_missing(gone),
+            ])
+            .unwrap()
+        );
+    }
+
     // ---- the `vault reload` handler ----
 
     /// A `vault reload` of `name`, activating or dry.
@@ -20177,7 +20292,7 @@ mod tests {
                     listed(&host),
                     host.vault_status(&status_params(&name))
                         .map_err(|refusal| refusal.detail().clone()),
-                    rolled_up(&host),
+                    doctored(&host).roll_up,
                     entry.gate.lock().unwrap().held_by_anything(),
                 );
                 drop(lease);
@@ -20194,8 +20309,9 @@ mod tests {
                 Err(ErrorDetail::entry_held(name.clone())),
                 "a status of the held entry answered"
             );
-            // The roll-up counts the held entry as the listing names it,
-            // published under the refusal every request against it meets.
+            // The roll-up — `doctor`'s, which is `vault status`'s — counts
+            // the held entry as the listing names it, published under the
+            // refusal every request against it meets.
             assert_eq!((roll_up.vaults(), roll_up.parked()), (1, 1));
             assert_eq!(
                 roll_up.attention(),

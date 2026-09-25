@@ -6116,6 +6116,28 @@ mod tests {
             );
         }
 
+        /// **`doctor` reports each vault's engine health as its status
+        /// reports its engine**: the delivered section beside what the slot
+        /// is doing.
+        #[test]
+        fn doctor_reports_an_enabled_engine_beside_its_section() {
+            let f = Fixture::new("doctor-engine-enabled");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            let (_engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = ready_host(&f, ops);
+
+            let (section, engine) = engine_reported(&host, &name);
+            assert_eq!(
+                host.doctor_registry(&norn_wire::DoctorRegistryParams::new())
+                    .engines,
+                [norn_wire::EngineHealth::new(name, section, engine.clone())]
+            );
+            assert!(
+                matches!(engine, norn_wire::EngineStatus::On { .. }),
+                "{engine:?}"
+            );
+        }
+
         /// **A vault whose section asks for no engine reports none standing,
         /// beside the section that says why**: stated nowhere, turned off,
         /// or refused by the engine — which takes only the engine out of
@@ -6312,7 +6334,10 @@ mod tests {
             let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
 
             let link = norn_wire::Advisory::symlink_skipped("away.md");
-            assert_eq!(status_of(&host, &name).advisories, std::slice::from_ref(&link));
+            assert_eq!(
+                status_of(&host, &name).advisories,
+                std::slice::from_ref(&link)
+            );
             assert_eq!(
                 rolled_up(&host).attention(),
                 [norn_wire::Attention::advisory(name, link)]
