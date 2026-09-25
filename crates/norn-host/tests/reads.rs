@@ -807,6 +807,29 @@ fn a_find_ordered_over_mixed_offsets_is_advised() {
         mixed.answer.advisories,
         [AnswerAdvisory::mixed_offset("created", ComparedBy::Sort)]
     );
+
+    // The same vault, read by the other verbs that compare dates: each one's
+    // advisory reaches its answer through the host.
+    let grouped = host
+        .count(&CountParams::new(address(vault.name())).with_by([GroupKey::field("created")]))
+        .expect("a count grouped by a date answers");
+    assert_eq!(
+        grouped.answer.advisories,
+        [AnswerAdvisory::mixed_offset("created", ComparedBy::Group)]
+    );
+    let bounded = host
+        .validate(
+            &ValidateParams::new(address(vault.name()))
+                .with_predicates([Predicate::after("created", "2000-01-01T00:00:00Z")]),
+        )
+        .expect("a validate bounded by a date answers");
+    assert_eq!(
+        bounded.answer.advisories,
+        [AnswerAdvisory::mixed_offset(
+            "created",
+            ComparedBy::Predicate
+        )]
+    );
 }
 
 /// **A validate answers the findings standing over the vault** under the
