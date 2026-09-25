@@ -5177,6 +5177,11 @@ mod tests {
         /// attach and the leg that mints again, and a real mint answers for
         /// the environment as it stands at the open.
         mint_fails: Arc<AtomicBool>,
+        /// The content model this coverage's store pins. Every coverage the
+        /// fake hands out pins a declaration of its own, so a case reads which
+        /// leg's coverage the entry recorded off the fingerprint a read
+        /// carries.
+        content_model: Arc<ContentModel>,
     }
 
     /// What a case reads about an entry's readers: one open counted where the
@@ -5474,6 +5479,9 @@ mod tests {
 
     #[derive(Default)]
     struct FakeOps {
+        /// How many coverages this fake has handed out, which names the
+        /// declaration the next one pins.
+        pins: AtomicUsize,
         /// The ledger every coverage this fake installs mints its reader
         /// through, so a case reads the readers of every entry the fake serves
         /// off one place.
@@ -5674,15 +5682,21 @@ mod tests {
         /// asked for. Every leg that hands coverage out builds it here, so a
         /// case reads one ledger whichever leg minted the handle.
         fn coverage(&self) -> FakeCoverage {
+            let pin = self.pins.fetch_add(1, Ordering::SeqCst) + 1;
             FakeCoverage {
                 readers: Arc::clone(&self.readers),
                 mint_fails: Arc::clone(&self.reader_mint_fails),
+                content_model: Arc::new(ContentModel::under(format!("pin-{pin}"))),
             }
         }
     }
 
     impl EntryOps for Arc<FakeOps> {
         type Attachment = FakeCoverage;
+
+        fn active_content_model(&self, attachment: &FakeCoverage) -> Arc<ContentModel> {
+            Arc::clone(&attachment.content_model)
+        }
 
         fn withheld_trust(&self, _: &FakeCoverage) -> Option<UntrustedReason> {
             self.withholds_trust
@@ -10761,6 +10775,51 @@ mod tests {
     /// requirement the verdict sets: `rebuild_required` dominates
     /// `recovery_required`, so the work the entry owes is the rebuild whichever
     /// door asks for it.
+    /// **A read after a rebuild compiles against the declaration the rebuild
+    /// pinned.** Rung 3 answers with coverage over a store it pinned itself,
+    /// and the entry records that store's declaration in the hold that
+    /// publishes the rung's outcome, so the first read the rebuilt entry
+    /// serves carries the rebuilt store's model rather than the one the
+    /// damaged store pinned.
+    #[test]
+    fn a_read_after_a_rebuild_carries_the_declaration_the_rebuild_pinned() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            host.begin_read(&name)
+                .expect("an attached entry answers a read")
+                .content_model()
+                .schema(),
+            Some("pin-1"),
+            "a read carries another declaration than the attach pinned"
+        );
+
+        arrange_for(&ops.damaged_reconcile_at, &name);
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
+        wait_until(
+            "the rebuild to put the entry back into service",
+            lifecycle_wait_budget(),
+            || match (ops.rebuilds.load(Ordering::SeqCst), host.state(&name)) {
+                (1, Ok(TrustState::Ready)) => Observed::Met(()),
+                (rebuilds, state) => {
+                    Observed::pending(format!("{rebuilds} rebuilds, the entry is {state:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        assert_eq!(
+            host.begin_read(&name)
+                .expect("a rebuilt entry answers a read")
+                .content_model()
+                .schema(),
+            Some("pin-2"),
+            "a read after the rebuild carries a declaration the rebuilt store does not pin"
+        );
+    }
+
     #[test]
     fn a_damaged_store_reaches_rung_three_and_never_the_recovery_ladder() {
         let ops = Arc::new(FakeOps::default());

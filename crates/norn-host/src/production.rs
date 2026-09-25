@@ -8624,6 +8624,59 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **The model a read compiles against is the one rung 3 pins from the
+    /// controls a recovery held for it.** The recovery reads a new schema it
+    /// cannot pin, so the attachment's model stays the one its store pins;
+    /// the rebuild pins the held schema, and the model is then the rebuilt
+    /// store's own, named by the fingerprint that store pins.
+    #[test]
+    fn a_rebuild_over_held_controls_takes_the_model_of_the_schema_it_pins() {
+        let f = Fixture::new("recover-order-moved-model");
+        write_two_spellings_of_one_stem(&f);
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+
+        let mut attachment =
+            derive_under_the_other_order(&f, ops.attach(&f.registration(), &progress).unwrap());
+        let served = ops.active_content_model(&attachment);
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\nfields:\n  created:\n    type: date\n",
+        )
+        .unwrap();
+
+        ops.recover(&name, &mut attachment, &progress)
+            .expect_err("a recovery over a store derived under the other order");
+        assert_eq!(
+            ops.active_content_model(&attachment).schema(),
+            served.schema(),
+            "a schema held for rung 3 was handed to reads before any pin"
+        );
+
+        let mut attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 under the order the coverage proved");
+        let pinned = attachment
+            .store
+            .begin_request()
+            .vault_schema_pin()
+            .unwrap()
+            .expect("the rebuild pinned the held schema")
+            .fingerprint;
+        let model = ops.active_content_model(&attachment);
+        assert_ne!(
+            model.schema(),
+            served.schema(),
+            "the rebuild kept the old model"
+        );
+        assert_eq!(model.schema(), Some(pinned.as_str()));
+        assert!(
+            model.typed_order("created").is_some(),
+            "the model does not type the key the pinned schema declares"
+        );
+        ops.detach(&name, attachment);
+    }
+
     /// **A reload that owes rung 3 for the path order delivers the config it
     /// read once, at the rung 3 that pins it.**
     #[test]
