@@ -157,7 +157,9 @@ impl<O: EntryOps> Host<O> {
     /// `host/entry-untrusted` under the environmental-refusal reason, the
     /// account the registry recheck gives a root it cannot read.
     ///
-    /// A name the host serves is refused `host/already-served`. A root a
+    /// A name the host serves, and a name the registry file already records
+    /// — another writer's registration, which the file keeps as it is — are
+    /// each refused `host/already-served`. A root a
     /// served vault already reaches is refused `host/duplicate-root` naming
     /// every such vault beside this one, before anything is written — so an
     /// incumbent serving that root goes on serving it. That read is
@@ -183,25 +185,28 @@ impl<O: EntryOps> Host<O> {
     /// Answer a `vault unregister`: the name removed, and whether its derived
     /// state was discarded.
     ///
-    /// A name the host serves nothing under is refused `host/unknown-vault`.
-    /// An entry standing on a park is refused with the park's own code, and an
-    /// entry something holds — coverage, work, a read, a lease — is refused
-    /// `host/entry-held`; the operator asks again once it is idle. Another
-    /// process holding the vault's maintainer lock is refused
+    /// A name the host serves nothing under is refused `host/unknown-vault`,
+    /// and an entry something holds — coverage, work, a read, a lease — is
+    /// refused `host/entry-held`; the operator asks again once it is idle. An
+    /// entry standing on a park that nothing holds is unregistered, and the
+    /// park leaves with it: a name parked beside it on one root is classified
+    /// again at once, and serves where nothing else reaches that root.
+    /// Another process holding the vault's maintainer lock is refused
     /// `host/maintainer-contended` with nothing changed.
     ///
-    /// Otherwise, under that lock, the entry leaves the serving set, the
-    /// derived database, its sidecars and the shadow home are discarded
-    /// unless `keep_state` keeps them, and the registry file is written. The
-    /// maintainer lock file is never removed, and nothing in the vault's own
-    /// tree but its shadow home is touched. A data directory that refuses the
-    /// lock or the discard is refused `host/entry-untrusted` under the
-    /// environmental-refusal reason, and a registry file that cannot be
-    /// written is refused `host/registry-unwritable`. After any refusal the
-    /// registration that stood before still stands, and an entry that had
-    /// already left the set is served again, unattached. Derived state is
-    /// rebuildable, so what a refused change did discard is derived again by
-    /// the next attach.
+    /// Otherwise, under that lock, the registry file is read, the derived
+    /// database, its sidecars and the shadow homes are discarded unless
+    /// `keep_state` keeps them, the file is written, and the entry leaves the
+    /// serving set; the lock goes back after all of it. The maintainer lock
+    /// file is never removed, and nothing in the vault's own tree but its
+    /// shadow home is touched. A data directory that refuses the lock or the
+    /// discard is refused `host/entry-untrusted` under the
+    /// environmental-refusal reason, and a registry file that cannot be read
+    /// or written is refused `host/registry-unwritable` — one that cannot be
+    /// read before anything is discarded. After any refusal the registration
+    /// that stood before still stands, served by the entry that stood.
+    /// Derived state is rebuildable, so what a refused change did discard is
+    /// derived again by the next attach.
     pub fn vault_unregister(
         &self,
         params: &UnregisterParams,
@@ -215,14 +220,15 @@ impl<O: EntryOps> Host<O> {
     }
 }
 
-/// One change to the registry file.
-#[derive(Clone, Copy, Debug)]
-pub enum RegistryChange<'a> {
-    /// Record `registration`, in place of whatever the file records under its
-    /// name.
-    Register(&'a Entry),
-    /// Remove whatever the file records under the name.
-    Unregister(&'a VaultName),
+/// Why a registration was not recorded in the registry file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecordRefusal {
+    /// The file already records a registration under the name. The file is
+    /// the durable record, so a registration another writer put there is not
+    /// replaced.
+    AlreadyRecorded,
+    /// The file could not be read or written.
+    Unwritable(RegistryUnwritable),
 }
 
 /// Why the registry file was not written: the write's own account, for a
@@ -253,24 +259,25 @@ impl fmt::Display for RegistryUnwritable {
 
 impl std::error::Error for RegistryUnwritable {}
 
-/// Why a vault's derived state was not retired, and how far the retirement
+/// Why a vault's registration was not retired, and how far the retirement
 /// got.
 ///
-/// The variants are ordered by where the retirement stopped, and a caller acts
-/// on that: the first two stopped before the host's own half ran, the third is
-/// that half's own refusal, and the last stopped after it.
+/// In each case the registry file still records the vault. Where the lock
+/// was not taken nothing ran; past it, what a refusal may have taken is
+/// derived state alone.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RetireRefusal<E> {
+pub enum RetireRefusal {
     /// Another process holds the vault's maintainer lock. Nothing ran.
     MaintainerContended(MaintainerIdentity),
     /// The maintainer lock could not be taken, for a reason other than another
     /// holder: the environment's account, naming no file. Nothing ran.
     Unclaimed(String),
-    /// The host's own half refused, under the lock. Nothing was discarded.
-    Left(E),
-    /// The host's own half ran and the derived state could not be discarded:
-    /// the environment's account, naming no file.
+    /// The derived state could not be discarded: the environment's account,
+    /// naming no file. The registry file was not written.
     Undiscarded(String),
+    /// The registry file could not be read, and nothing was discarded; or it
+    /// could not be written after the discard.
+    Unrecorded(RegistryUnwritable),
 }
 
 /// Why a registration change left the registration that stood before it
@@ -282,8 +289,8 @@ pub(crate) enum RegistrationRefusal {
     Serving(ServingRefusal),
     /// The set serves no entry under the name.
     UnknownVault,
-    /// The entry stands on a park, and this is the park's own refusal.
-    Parked(ErrorEnvelope),
+    /// The registry file already records the name.
+    AlreadyRecorded,
     /// Another registration already reaches the root. Every name here reaches
     /// it, the one asked for among them.
     DuplicateRoot(AliasConflict),
@@ -295,7 +302,7 @@ pub(crate) enum RegistrationRefusal {
     /// The data directory refused the maintainer lock or the discard: the
     /// environment's account, naming no file.
     StateRefused(String),
-    /// The registry file was not written.
+    /// The registry file was not read or not written.
     RegistryUnwritable(RegistryUnwritable),
 }
 

@@ -18,7 +18,7 @@ use norn_wire::{
 
 use crate::evidence::{ReadEvidence, ReadReading};
 use crate::registry::{
-    AliasConflict, RegistrationRefusal, RegistryChange, RegistryRead, RegistryUnwritable,
+    AliasConflict, RecordRefusal, RegistrationRefusal, RegistryRead, RegistryUnwritable,
     RetireRefusal,
 };
 use crate::reload::ReloadCandidate;
@@ -402,7 +402,7 @@ pub trait EntryOps: Send + Sync + 'static {
     ///
     /// The default keeps nothing beside an attachment, and does nothing.
     fn discard(&self, _: &VaultName) {}
-    /// Write one change to the registry file this host was started from.
+    /// Record `registration` in the registry file this host was started from.
     ///
     /// Every registration change the host makes writes the file first and its
     /// serving set after, so a change the file refused is one the set never
@@ -410,36 +410,47 @@ pub trait EntryOps: Send + Sync + 'static {
     /// every registry request after that: a hand edit to the file takes effect
     /// when a host is next started over it.
     ///
+    /// **A name the file already records is refused, and the file is left as
+    /// it is.** The file is the durable record, and a registration another
+    /// writer put there since startup is that writer's, not one to replace.
+    ///
     /// The default keeps no registry file, and refuses every change.
-    fn write_registry(&self, change: RegistryChange<'_>) -> Result<(), RegistryUnwritable> {
-        let _ = change;
-        Err(RegistryUnwritable::new(
+    fn record(&self, registration: &Registration) -> Result<(), RecordRefusal> {
+        let _ = registration;
+        Err(RecordRefusal::Unwritable(RegistryUnwritable::new(
             "this host keeps no registry file to write",
-        ))
+        )))
     }
-    /// Retire the derived state `registration`'s vault leaves behind as the
-    /// host stops serving it.
+    /// Retire `registration`: take it out of the registry file, and discard
+    /// the derived state its vault leaves unless `keep_state` keeps it.
     ///
     /// **The vault's maintainer lock is taken first, and nothing else runs
     /// without it.** Where another process holds it the answer is that
     /// process, and where it cannot be taken the answer is why; either way
-    /// `leave` never runs. Under the lock `leave` runs — the host's own half,
-    /// which takes the vault out of service — and where it refuses, nothing is
-    /// discarded. Where it answered, the derived state is discarded unless
-    /// `keep_state` says to keep it, and the lock goes back on every path. The
-    /// lock file itself is never removed, and neither is anything in the
-    /// vault's own tree that is not the ops' own.
+    /// nothing changes. Under the lock the ops give back what they hold for
+    /// the vault by name, as [`EntryOps::discard`] does, and the file is read:
+    /// a file this build cannot read refuses before anything is discarded.
+    /// Then the derived state is discarded and the file written without the
+    /// name, in that order, so a discard that refuses leaves the file
+    /// recording the vault. The lock goes back after the write, on every path.
+    /// The lock file itself is never removed, and neither is anything in the
+    /// vault's own tree that is not the ops' own, nor a directory that is one
+    /// of the `standing` registrations' roots.
     ///
-    /// The default keeps no derived state and holds no lock: it runs `leave`
-    /// and answers what `leave` answers.
-    fn retire<E>(
+    /// The caller keeps every door of its own off the vault before this runs,
+    /// so nothing in this process reaches for the lock while it is held here.
+    ///
+    /// The default keeps no registry file, and refuses every retirement.
+    fn retire(
         &self,
         registration: &Registration,
         keep_state: bool,
-        leave: impl FnOnce() -> Result<(), E>,
-    ) -> Result<(), RetireRefusal<E>> {
-        let _ = (registration, keep_state);
-        leave().map_err(RetireRefusal::Left)
+        standing: &[Registration],
+    ) -> Result<(), RetireRefusal> {
+        let _ = (registration, keep_state, standing);
+        Err(RetireRefusal::Unrecorded(RegistryUnwritable::new(
+            "this host keeps no registry file to write",
+        )))
     }
 }
 
@@ -714,7 +725,7 @@ impl<A: SnapshotSource> Entry<A> {
                 detach_due: false,
                 detach_scheduled: false,
                 detach_in_flight: false,
-                retired: false,
+                withdrawn: false,
             }),
         }
     }
@@ -868,15 +879,21 @@ struct EntryState<A: SnapshotSource> {
     detach_due: bool,
     detach_scheduled: bool,
     detach_in_flight: bool,
-    /// Whether the serving set has let go of this entry.
+    /// Whether an unregistration has taken this entry out of service.
     ///
-    /// Set under this gate by the removal that takes the entry out of the set,
-    /// and never cleared: a vault served again is served by a new entry. A
-    /// caller that read the entry out of the set before the removal still
-    /// holds it, and every door a caller asks through reads this before
-    /// anything else, so what that caller is answered is the name being
-    /// unknown rather than work scheduled against an entry nothing serves.
-    retired: bool,
+    /// Set under this gate by the unregistration that finds the entry holding
+    /// nothing and held by nothing, in the same hold that asks; kept by the
+    /// removal that takes the entry out of the set, so an entry the set let go
+    /// of stays out of service; and cleared only where that unregistration is
+    /// refused first, which puts the entry back in service as it stood.
+    ///
+    /// Every door a caller asks through reads this before anything else, a
+    /// caller holding the entry from before the removal included. While it
+    /// stands the caller is answered as though the set served no such name,
+    /// and nothing is recorded or scheduled against the entry — so nothing in
+    /// this process comes to hold the entry, or reaches for its maintainer
+    /// lock, while the unregistration holds that lock.
+    withdrawn: bool,
 }
 
 /// What a read's re-mint left: the handle the read runs on, and what the mint
@@ -1294,7 +1311,7 @@ impl<A: SnapshotSource> EntryState<A> {
     /// a park variant minted without a stance in the vocabulary does not
     /// compile rather than falling through to a label.
     fn published_demand(&self) -> Demand {
-        if self.retired {
+        if self.withdrawn {
             return Demand::UnknownVault;
         }
         self.parked()
@@ -2374,6 +2391,12 @@ fn park_identity_refusal<A: SnapshotSource>(state: &mut EntryState<A>, detail: S
 /// reader does, and one park is answered by one predicate.
 fn park_on_current_classification<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
     let _attach_guard = attach_gate(shared);
+    park_on_classification_under_gate(shared, name);
+}
+
+/// [`park_on_current_classification`]'s read and park, for a caller already
+/// holding the attach gate.
+fn park_on_classification_under_gate<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
     match shared.entries.recheck(name) {
         Ok(reading) => {
             if let Some(conflict) = &reading.conflict {
@@ -2398,10 +2421,10 @@ fn park_on_current_classification<O: EntryOps>(shared: &Arc<Shared<O>>, name: &V
 /// is the authority: the join stands, both names are parked, and the park is
 /// what the new entry publishes.
 ///
-/// A departure needs no such read. Taking a name out of an alias group only
-/// shrinks it, so no departure can raise a refusal, and the parks the group
-/// still stands under are retired by the acquisitions the remaining names'
-/// demands schedule.
+/// A departure raises nothing: taking a name out of an alias group only
+/// shrinks it. What it owes is the other side — the names left parked on a
+/// conflict the departed name was part of — and [`reclassify_after_departure`]
+/// is that read.
 fn serve<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     registration: Registration,
@@ -2421,17 +2444,48 @@ fn serve<O: EntryOps>(
         }))
 }
 
-/// Put back the entry an unregistration took out of the set, where the change
-/// did not go through.
+/// Classify again every served root parked on a conflict `departed` was part
+/// of, now that the set no longer serves it.
 ///
-/// The entry is a new one, unattached and holding nothing, as a vault read at
-/// startup is: the one that left was retired under its gate and answers
-/// nothing again. Its root was served until a moment ago under the
-/// registration lock this runs under, so there is nothing new to classify.
-fn serve_again<O: EntryOps>(shared: &Arc<Shared<O>>, registration: Registration) {
-    shared.entries.insert(registration).expect(
-        "the registration lock holds every change to the set, and the name left the set under it",
-    );
+/// A departure only shrinks an alias group, so this withdraws parks and
+/// raises none but the one a smaller group still earns: each such name's
+/// conflict park is withdrawn and its root read again under the attach gate,
+/// which parks it on whatever that read still finds — the rest of the group,
+/// or a root it cannot read — and leaves a name nothing else reaches free to
+/// serve at once. A lease standing over a name left free is answered the way
+/// every release answers one, with the work it is owed scheduled here.
+///
+/// A park this departure did not raise is not this read's to withdraw: a
+/// conflict naming only others stands until an acquisition reads it.
+fn reclassify_after_departure<O: EntryOps>(shared: &Arc<Shared<O>>, departed: &VaultName) {
+    let mut owed = Vec::new();
+    {
+        let _attach_guard = attach_gate(shared);
+        for entry in shared.entries.snapshot() {
+            {
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                if !state
+                    .duplicate_root
+                    .as_ref()
+                    .is_some_and(|conflict| conflict.aliases().names().contains(departed))
+                {
+                    continue;
+                }
+                state.duplicate_root = None;
+            }
+            park_on_classification_under_gate(shared, entry.name());
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            if schedule_demanded_work(&mut state, entry.name()).is_some() {
+                drop(state);
+                owed.push(entry);
+            }
+        }
+    }
+    for entry in owed {
+        // The one failure is the worker pool being gone, which is the host
+        // coming down: nothing is left to serve the lease either way.
+        let _ = dispatch_pending(shared, &entry);
+    }
 }
 
 struct Shared<O: EntryOps> {
@@ -2930,11 +2984,11 @@ impl<O: EntryOps> Host<O> {
     /// the set serves is refused; the root is admitted at its canonical
     /// spelling, or refused where it is no readable directory; a root a served
     /// vault already reaches is refused naming every such vault; the file is
-    /// written; and only then does the set change. So every refusal leaves
-    /// both as they stood, and two registrations of one root cannot both find
-    /// it unserved. The read of the served roots is best-effort — the
-    /// classification the join runs is the authority, and what it finds is in
-    /// the demand this answers.
+    /// written, or refused where it already records the name; and only then
+    /// does the set change. So every refusal leaves both as they stood, and
+    /// two registrations of one root cannot both find it unserved. The read of
+    /// the served roots is best-effort — the classification the join runs is
+    /// the authority, and what it finds is in the demand this answers.
     pub(crate) fn register(
         &self,
         registration: Registration,
@@ -2962,8 +3016,13 @@ impl<O: EntryOps> Host<O> {
         }
         shared
             .ops
-            .write_registry(RegistryChange::Register(&admitted))
-            .map_err(RegistrationRefusal::RegistryUnwritable)?;
+            .record(&admitted)
+            .map_err(|refused| match refused {
+                RecordRefusal::AlreadyRecorded => RegistrationRefusal::AlreadyRecorded,
+                RecordRefusal::Unwritable(unwritable) => {
+                    RegistrationRefusal::RegistryUnwritable(unwritable)
+                }
+            })?;
         let published = serve(shared, admitted.clone()).expect(
             "the registration lock holds every change to the set, and the set served no such name \
              under it",
@@ -2971,21 +3030,29 @@ impl<O: EntryOps> Host<O> {
         Ok((admitted, published))
     }
 
-    /// Take `name` out of the serving set and the registry file, retiring the
+    /// Take `name` out of the registry file and the serving set, retiring the
     /// derived state its vault leaves unless `keep_state` keeps it.
     ///
     /// Everything runs under the registration lock. A name the set does not
-    /// serve is unknown; an entry standing on a park is refused with the park;
-    /// an entry something holds is refused as held. Then the ops take the
-    /// vault's maintainer lock — refusing, and changing nothing, where it
-    /// cannot be taken — and under it the entry leaves the set and the derived
-    /// state is discarded. The file is written last.
+    /// serve is unknown. **The entry is withdrawn from service under its own
+    /// gate, in the hold that finds it holding nothing and held by nothing**,
+    /// and an entry something holds is refused as held. A park is no refusal:
+    /// an entry parked and held by nothing is withdrawn like any other, and
+    /// its park leaves with it. From the withdrawal on every door answers the
+    /// name as unknown and schedules nothing, so nothing in this process
+    /// comes to hold the entry — or reaches for the maintainer lock the ops
+    /// take next, which a holder in this process would answer as another
+    /// maintainer.
     ///
-    /// **A refusal after the entry left the set serves it again**, so the
-    /// registration that stood before still stands: a discard the data
-    /// directory refused, and a file that could not be written, each put an
-    /// unattached entry back under the name. Whatever the discard did take is
-    /// derived state, which the next attach derives again from the vault.
+    /// Then the ops retire the registration under that lock: the file read,
+    /// the derived state discarded, the file written. Only once the file no
+    /// longer records the vault does the entry leave the set, and the names
+    /// that were parked on a conflict with it are classified again.
+    ///
+    /// **A refusal puts the withdrawn entry back in service as it stood**, so
+    /// the registration that stood before still stands, park and all.
+    /// Whatever a discard did take before a refusal is derived state, which
+    /// the next attach derives again from the vault.
     pub(crate) fn unregister(
         &self,
         name: &VaultName,
@@ -2999,46 +3066,37 @@ impl<O: EntryOps> Host<O> {
         let Some(entry) = shared.entries.get(name) else {
             return Err(RegistrationRefusal::UnknownVault);
         };
-        // The removal under the maintainer lock asks whether the entry is held
-        // again, and that answer is the one that binds. Asking first is what
-        // keeps the ops from reaching for a lock this process's own attachment
-        // is holding, which would answer as another maintainer.
         {
-            let state = entry.gate.lock().expect("entry gate poisoned");
-            if let Some(park) = state.parked()
-                && let Err(refusal) = park.answer(name)
-            {
-                return Err(RegistrationRefusal::Parked(refusal));
-            }
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
             if state.held_by_anything() {
                 return Err(RegistrationRefusal::Serving(ServingRefusal::Held));
             }
+            state.withdrawn = true;
         }
-        let registration = entry.registration.clone();
-        drop(entry);
-        let retired = shared
+        let standing = shared.entries.registrations();
+        if let Err(refused) = shared
             .ops
-            .retire(&registration, keep_state, || shared.entries.remove(name));
-        match retired {
-            Ok(()) => {}
-            Err(RetireRefusal::MaintainerContended(incumbent)) => {
-                return Err(RegistrationRefusal::MaintainerContended(incumbent));
-            }
-            Err(RetireRefusal::Unclaimed(refusal)) => {
-                return Err(RegistrationRefusal::StateRefused(refusal));
-            }
-            Err(RetireRefusal::Left(refusal)) => {
-                return Err(RegistrationRefusal::Serving(refusal));
-            }
-            Err(RetireRefusal::Undiscarded(refusal)) => {
-                serve_again(shared, registration);
-                return Err(RegistrationRefusal::StateRefused(refusal));
-            }
+            .retire(&entry.registration, keep_state, &standing)
+        {
+            entry.gate.lock().expect("entry gate poisoned").withdrawn = false;
+            return Err(match refused {
+                RetireRefusal::MaintainerContended(incumbent) => {
+                    RegistrationRefusal::MaintainerContended(incumbent)
+                }
+                RetireRefusal::Unclaimed(refusal) | RetireRefusal::Undiscarded(refusal) => {
+                    RegistrationRefusal::StateRefused(refusal)
+                }
+                RetireRefusal::Unrecorded(unwritable) => {
+                    RegistrationRefusal::RegistryUnwritable(unwritable)
+                }
+            });
         }
-        if let Err(unwritable) = shared.ops.write_registry(RegistryChange::Unregister(name)) {
-            serve_again(shared, registration);
-            return Err(RegistrationRefusal::RegistryUnwritable(unwritable));
-        }
+        drop(entry);
+        shared
+            .entries
+            .remove(name)
+            .expect("an entry withdrawn under the registration lock leaves the set as it stands");
+        reclassify_after_departure(shared, name);
         Ok(())
     }
 
@@ -3151,7 +3209,8 @@ impl<O: EntryOps> Host<O> {
     /// it is.
     ///
     /// A name the host serves no entry under is `host/unknown-vault`, which is
-    /// the vocabulary's own spelling for the ask having no entry behind it.
+    /// the vocabulary's own spelling for the ask having no entry behind it,
+    /// and so is an entry an unregistration has withdrawn from service.
     /// Every other answer is `EntryState::published_demand` rendered through
     /// [`Demand::answer`] — the same demand, through the same mapping, that a
     /// lease answers with. That shared rendering is what keeps this surface
@@ -3182,15 +3241,18 @@ impl<O: EntryOps> Host<O> {
     /// This is the seam the vault status verb Layer 3's verb charter places reads
     /// through — the trust state beside the retained reload diagnostics, on
     /// demand; nothing in this crate outside its own cases reaches it yet.
+    ///
+    /// An entry an unregistration has withdrawn from service answers nothing,
+    /// as a name the host does not serve does; so does every inspection door
+    /// below.
     pub fn inspect(&self, name: &VaultName) -> Option<VaultInspection> {
-        self.shared.entries.get(name).map(|entry| {
-            let state = entry.gate.lock().expect("entry gate poisoned");
-            VaultInspection {
-                trust: state.trust.clone(),
-                active_fingerprints: state.active_fingerprints,
-                last_reload_error: state.last_reload_error.clone(),
-                reader_unavailable: state.reader_unavailable.clone(),
-            }
+        let entry = self.shared.entries.get(name)?;
+        let state = entry.gate.lock().expect("entry gate poisoned");
+        (!state.withdrawn).then(|| VaultInspection {
+            trust: state.trust.clone(),
+            active_fingerprints: state.active_fingerprints,
+            last_reload_error: state.last_reload_error.clone(),
+            reader_unavailable: state.reader_unavailable.clone(),
         })
     }
 
@@ -3205,6 +3267,9 @@ impl<O: EntryOps> Host<O> {
         let entry = self.shared.entries.get(name)?;
         let (active, control_root) = {
             let state = entry.gate.lock().expect("entry gate poisoned");
+            if state.withdrawn {
+                return None;
+            }
             (state.active_fingerprints, state.control_root.clone())
         };
         let Some(active) = active else {
@@ -3283,6 +3348,11 @@ impl<O: EntryOps> Host<O> {
         let (reply, answer) = mpsc::sync_channel(1);
         {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
+            // An entry withdrawn from service after the lookup above answers
+            // as a lookup after its removal would have.
+            if state.withdrawn {
+                return Err(ReloadRefusal::UnknownVault);
+            }
             if state.trust != TrustState::Ready
                 || !state.coverage.in_hand()
                 || state.claim.is_held()
@@ -3363,15 +3433,14 @@ impl<O: EntryOps> Host<O> {
     /// it at rest.
     #[cfg(feature = "induced-failure")]
     pub fn work_in_flight(&self, name: &VaultName) -> Option<WorkInFlight> {
-        self.shared.entries.get(name).map(|entry| {
-            let state = entry.gate.lock().expect("entry gate poisoned");
-            WorkInFlight {
-                claim_held: state.claim.is_held(),
-                leg_registered: state.claim.leg().is_some(),
-                job_queued: state.claim.slot_taken(),
-                detach_in_flight: state.detach_in_flight,
-                pinned: state.pinned(),
-            }
+        let entry = self.shared.entries.get(name)?;
+        let state = entry.gate.lock().expect("entry gate poisoned");
+        (!state.withdrawn).then(|| WorkInFlight {
+            claim_held: state.claim.is_held(),
+            leg_registered: state.claim.leg().is_some(),
+            job_queued: state.claim.slot_taken(),
+            detach_in_flight: state.detach_in_flight,
+            pinned: state.pinned(),
         })
     }
 
@@ -3389,13 +3458,9 @@ impl<O: EntryOps> Host<O> {
     /// bookkeeping fact, opened here for the suites that assert on it.
     #[cfg(feature = "induced-failure")]
     pub fn recovery_demands(&self, name: &VaultName) -> Option<usize> {
-        self.shared.entries.get(name).map(|entry| {
-            entry
-                .gate
-                .lock()
-                .expect("entry gate poisoned")
-                .recovery_demands
-        })
+        let entry = self.shared.entries.get(name)?;
+        let state = entry.gate.lock().expect("entry gate poisoned");
+        (!state.withdrawn).then_some(state.recovery_demands)
     }
 
     /// Record client demand and, where necessary, start one asynchronous job
@@ -3450,17 +3515,17 @@ impl<O: EntryOps> Host<O> {
     /// Record a demand against `entry`, the entry the serving set answered
     /// `name` with.
     ///
-    /// The entry was read out of the set before its gate is taken here, so a
-    /// removal can land between the two. The gate is what decides it: an
-    /// entry the set has let go of answers as a name the set does not serve,
-    /// recording nothing and scheduling nothing.
+    /// The entry was read out of the set before its gate is taken here, so an
+    /// unregistration can land between the two. The gate is what decides it:
+    /// an entry withdrawn from service answers as a name the set does not
+    /// serve, recording nothing and scheduling nothing.
     fn demand_entry(
         &self,
         name: &VaultName,
         entry: Arc<Entry<O::Attachment>>,
     ) -> Result<DemandLease<O>, HostError> {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
-        if state.retired {
+        if state.withdrawn {
             return Ok(unknown_vault_lease(name));
         }
         let recovery_demand = record_demand(&mut state);
@@ -3551,11 +3616,13 @@ impl<O: EntryOps> Host<O> {
             });
         }
         if let Some(entry) = self.shared.entries.get(name) {
-            entry
-                .gate
-                .lock()
-                .expect("entry gate poisoned")
-                .maintainer_contended = None;
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            // A withdrawn entry answers the demand below as unknown, and keeps
+            // the park it stood on for the refused unregistration that would
+            // put it back in service.
+            if !state.withdrawn {
+                state.maintainer_contended = None;
+            }
         }
         self.demand(name, mode)
     }
@@ -3614,9 +3681,10 @@ impl<O: EntryOps> Host<O> {
             return Err(ReadRefusal::NotServing(Demand::UnknownVault));
         };
         let mut state = entry.gate.lock().expect("entry gate poisoned");
-        // An entry the set let go of after the lookup above answers as the
-        // lookup would have, and records nothing against itself.
-        if state.retired {
+        // An entry withdrawn from service after the lookup above answers as a
+        // lookup after its removal would have, and records nothing against
+        // itself.
+        if state.withdrawn {
             return Err(ReadRefusal::NotServing(Demand::UnknownVault));
         }
         let recovery_demand = record_demand(&mut state);
@@ -6271,9 +6339,58 @@ mod tests {
         /// Whether discarding derived state refuses, which is a data directory
         /// that will not give it up.
         discard_refused: AtomicBool,
-        /// Every retirement whose host half answered, as the vault and whether
-        /// its derived state was discarded, in call order.
+        /// Every retirement that went through, as the vault and whether its
+        /// derived state was discarded, in call order.
         retirements: Mutex<Vec<(VaultName, bool)>>,
+        /// Where a case arranged one, the rendezvous every registry write
+        /// waits at for a second writer before it writes.
+        record_overlap: Mutex<Option<Arc<Overlap>>>,
+        /// Where a case arranged one, the pause every retirement takes under
+        /// the maintainer lock, before it reads the registry file.
+        retire_pause: Mutex<Option<Arc<RetirePause>>>,
+    }
+
+    /// A rendezvous two registry writes meet at, where both reach the write.
+    ///
+    /// Each writer waits a bounded while for the other: a second writer the
+    /// host keeps out never arrives, and the first goes on alone once the
+    /// wait is over.
+    #[derive(Default)]
+    struct Overlap {
+        writers: Mutex<usize>,
+        arrived: std::sync::Condvar,
+    }
+
+    impl Overlap {
+        /// How long a writer waits for the other.
+        const WAIT: Duration = Duration::from_millis(500);
+
+        fn meet(&self) {
+            let mut writers = self.writers.lock().expect("overlap poisoned");
+            *writers += 1;
+            self.arrived.notify_all();
+            let _ = self
+                .arrived
+                .wait_timeout_while(writers, Self::WAIT, |writers| *writers < 2)
+                .expect("overlap poisoned");
+        }
+    }
+
+    /// A retirement held under the maintainer lock: the retiring thread and
+    /// the case meet at `entered`, and the retirement goes on once they meet
+    /// again at `resume`.
+    struct RetirePause {
+        entered: std::sync::Barrier,
+        resume: std::sync::Barrier,
+    }
+
+    impl RetirePause {
+        fn new() -> Arc<Self> {
+            Arc::new(RetirePause {
+                entered: std::sync::Barrier::new(2),
+                resume: std::sync::Barrier::new(2),
+            })
+        }
     }
 
     /// What each armed panic says. The reason an unwound leg publishes carries
@@ -6698,30 +6815,34 @@ mod tests {
                 .push(name.clone());
         }
 
-        fn write_registry(&self, change: RegistryChange<'_>) -> Result<(), RegistryUnwritable> {
+        fn record(&self, registration: &Registration) -> Result<(), RecordRefusal> {
+            let overlap = self
+                .record_overlap
+                .lock()
+                .expect("overlap poisoned")
+                .clone();
+            if let Some(overlap) = overlap {
+                overlap.meet();
+            }
             if self.registry_unwritable.load(Ordering::SeqCst) {
-                return Err(RegistryUnwritable::new(
+                return Err(RecordRefusal::Unwritable(RegistryUnwritable::new(
                     "the fake registry file is read-only",
-                ));
+                )));
             }
             let mut registry = self.registry.lock().expect("registry poisoned");
-            match change {
-                RegistryChange::Register(registration) => {
-                    registry.insert(registration.name.clone(), registration.clone());
-                }
-                RegistryChange::Unregister(name) => {
-                    registry.remove(name);
-                }
+            if registry.contains_key(&registration.name) {
+                return Err(RecordRefusal::AlreadyRecorded);
             }
+            registry.insert(registration.name.clone(), registration.clone());
             Ok(())
         }
 
-        fn retire<E>(
+        fn retire(
             &self,
             registration: &Registration,
             keep_state: bool,
-            leave: impl FnOnce() -> Result<(), E>,
-        ) -> Result<(), RetireRefusal<E>> {
+            _: &[Registration],
+        ) -> Result<(), RetireRefusal> {
             if let Some(incumbent) = self
                 .maintained_elsewhere
                 .lock()
@@ -6730,12 +6851,25 @@ mod tests {
             {
                 return Err(RetireRefusal::MaintainerContended(incumbent));
             }
-            leave().map_err(RetireRefusal::Left)?;
+            let pause = self.retire_pause.lock().expect("pause poisoned").clone();
+            if let Some(pause) = pause {
+                pause.entered.wait();
+                pause.resume.wait();
+            }
+            if self.registry_unwritable.load(Ordering::SeqCst) {
+                return Err(RetireRefusal::Unrecorded(RegistryUnwritable::new(
+                    "the fake registry file is read-only",
+                )));
+            }
             if !keep_state && self.discard_refused.load(Ordering::SeqCst) {
                 return Err(RetireRefusal::Undiscarded(
                     "the fake data directory keeps its state".into(),
                 ));
             }
+            self.registry
+                .lock()
+                .expect("registry poisoned")
+                .remove(&registration.name);
             self.retirements
                 .lock()
                 .expect("retirements poisoned")
@@ -18946,10 +19080,15 @@ mod tests {
         /// Two registrations of one root racing each other admit exactly one:
         /// the registration lock is what makes the second one read the first
         /// one's root, and the one admitted is not parked by the one refused.
+        ///
+        /// Every registry write waits at a rendezvous for a second writer, so
+        /// two registrations that both found the root unserved meet inside
+        /// the write, and both would be admitted.
         #[cfg(unix)]
         #[test]
         fn concurrent_registrations_of_one_root_admit_exactly_one() {
             let ops = Arc::new(FakeOps::default());
+            *ops.record_overlap.lock().unwrap() = Some(Arc::default());
             let scratch = temp_base("register-race");
             let root = scratch.root().join("root");
             std::fs::create_dir_all(&root).unwrap();
@@ -19076,10 +19215,10 @@ mod tests {
             drop(lease);
         }
 
-        /// An entry standing on a park is refused with the park's own code
-        /// and detail, and stays served.
+        /// An entry standing on a park that nothing holds is unregistered, and
+        /// the park leaves with it.
         #[test]
-        fn a_parked_entry_is_refused_with_the_parks_own_code() {
+        fn a_parked_entry_nothing_holds_is_unregistered() {
             let ops = Arc::new(FakeOps::default());
             ops.contend_attach.store(true, Ordering::SeqCst);
             let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
@@ -19092,15 +19231,89 @@ mod tests {
             drop(lease);
             wait_for_rest(&host, &name);
 
-            let refusal = unregister(&host, UnregisterParams::new(name.clone()))
-                .expect_err("a parked entry was unregistered");
+            let report = unregister(&host, UnregisterParams::new(name.clone()))
+                .expect("a parked entry nothing holds was refused");
+
+            assert_eq!(report, UnregisterReport::new(name.clone(), true));
+            assert_eq!(*ops.retirements.lock().unwrap(), [(name.clone(), true)]);
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
+            assert_eq!(
+                host.state(&name)
+                    .expect_err("an unregistered vault refuses")
+                    .detail(),
+                &ErrorDetail::unknown_vault(name)
+            );
+        }
+
+        /// Two names over one root, both parked on the conflict. Unregistering
+        /// one classifies the other again at once: its park is gone, and the
+        /// lease standing over it is served without being asked again.
+        #[cfg(unix)]
+        #[test]
+        fn a_name_parked_beside_an_unregistered_one_serves_at_once() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("unregister-alias");
+            let root = scratch.root().join("root");
+            std::fs::create_dir_all(&root).unwrap();
+            let link = scratch.root().join("link");
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+            let (a, b) = (VaultName::new("a").unwrap(), VaultName::new("b").unwrap());
+            let host = quiet_host_over_roots(
+                Arc::clone(&ops),
+                &[(&a, root.as_path()), (&b, link.as_path())],
+            );
+            let conflict = a_conflict([a.clone(), b.clone()]);
+            drop(host.demand(&a, AttachMode::Durable).unwrap());
+            wait_for_park(&host, &a, Demand::DuplicateRoot(conflict.clone()));
+            let standing = host.demand(&b, AttachMode::Durable).unwrap();
+            wait_for_park(&host, &b, Demand::DuplicateRoot(conflict));
+            wait_for_rest(&host, &a);
+
+            unregister(&host, UnregisterParams::new(a.clone()))
+                .expect("a parked entry nothing holds was refused");
 
             assert_eq!(
-                refusal.detail(),
-                &ErrorDetail::maintainer_contended(MaintainerIdentity::unknown())
+                entry_park(&host, &b),
+                None,
+                "the conflict outlived its alias"
             );
-            assert!(ops.retirements.lock().unwrap().is_empty());
-            assert_eq!(listed(&host), [name]);
+            wait_for_state(&host, &b, TrustState::Ready);
+            drop(standing);
+        }
+
+        /// A refused unregistration leaves the registration that stood,
+        /// served by the entry that stood — park and all.
+        #[cfg(unix)]
+        #[test]
+        fn a_refused_unregistration_leaves_the_park_it_found() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("unregister-refused-park");
+            let root = scratch.root().join("root");
+            std::fs::create_dir_all(&root).unwrap();
+            let (a, b) = (VaultName::new("a").unwrap(), VaultName::new("b").unwrap());
+            let host = quiet_host_over_roots(
+                Arc::clone(&ops),
+                &[(&a, root.as_path()), (&b, root.as_path())],
+            );
+            let conflict = a_conflict([a.clone(), b.clone()]);
+            drop(host.demand(&a, AttachMode::Durable).unwrap());
+            wait_for_park(&host, &a, Demand::DuplicateRoot(conflict.clone()));
+            wait_for_park(&host, &b, Demand::DuplicateRoot(conflict.clone()));
+            wait_for_rest(&host, &a);
+            wait_for_rest(&host, &b);
+            ops.registry_unwritable.store(true, Ordering::SeqCst);
+
+            let refusal = unregister(&host, UnregisterParams::new(a.clone()))
+                .expect_err("an unregistration the file refused went through");
+
+            assert_eq!(refusal.code(), &ReasonCode::HostRegistryUnwritable);
+            for name in [&a, &b] {
+                assert_eq!(
+                    entry_park(&host, name),
+                    Some(Demand::DuplicateRoot(conflict.clone())),
+                    "{name} lost the park a refused unregistration found"
+                );
+            }
         }
 
         /// Another process holding the maintainer lock refuses the change with
@@ -19134,20 +19347,28 @@ mod tests {
             assert_eq!(host.state(&name), answered(TrustState::Unattached));
         }
 
-        /// A registry file that refuses the write leaves the registration that
-        /// stood before standing: the entry the change took out of the set is
-        /// served again, and a demand attaches it.
+        /// A registry file that refuses the change leaves the registration
+        /// that stood before standing, served by the entry that stood, and a
+        /// demand attaches it.
         #[test]
-        fn a_refused_registry_write_serves_the_entry_again() {
+        fn a_refused_registry_write_leaves_the_entry_that_stood_in_service() {
             let ops = Arc::new(FakeOps::default());
             let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
             record_startup(&host, &ops, &name);
             ops.registry_unwritable.store(true, Ordering::SeqCst);
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
 
             let refusal = unregister(&host, UnregisterParams::new(name.clone()))
                 .expect_err("an unregistration the file refused went through");
 
             assert_eq!(refusal.code(), &ReasonCode::HostRegistryUnwritable);
+            assert!(
+                Arc::ptr_eq(
+                    &entry,
+                    &host.shared.entries.get(&name).expect("the vault is served")
+                ),
+                "the refused change replaced the entry standing under the name"
+            );
             assert!(recorded(&ops, &name).is_some(), "the file lost the vault");
             assert_eq!(listed(&host), std::slice::from_ref(&name));
             assert_eq!(host.state(&name), answered(TrustState::Unattached));
@@ -19160,7 +19381,7 @@ mod tests {
         /// registration standing, refused as the environment refusing the
         /// work, and writes nothing.
         #[test]
-        fn a_refused_discard_serves_the_entry_again_and_writes_nothing() {
+        fn a_refused_discard_leaves_the_entry_that_stood_and_writes_nothing() {
             let ops = Arc::new(FakeOps::default());
             ops.discard_refused.store(true, Ordering::SeqCst);
             let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
@@ -19209,6 +19430,165 @@ mod tests {
             drop(state);
             settle();
             assert_eq!(ops.attaches.load(Ordering::SeqCst), 0);
+        }
+
+        /// While an unregistration holds the vault's maintainer lock, every
+        /// door answers the name as unknown, records nothing and schedules
+        /// nothing — so nothing in this process comes to hold the entry, or
+        /// reaches for the lock, under the unregistration.
+        #[test]
+        fn every_door_answers_unknown_while_an_unregistration_holds_the_lock() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            let pause = RetirePause::new();
+            *ops.retire_pause.lock().unwrap() = Some(Arc::clone(&pause));
+
+            let (answers, unregistered) = thread::scope(|scope| {
+                let unregistering =
+                    scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
+                pause.entered.wait();
+                let answers = (
+                    host.demand(&name, AttachMode::Durable)
+                        .unwrap()
+                        .outcome()
+                        .clone(),
+                    host.retry(&name, AttachMode::Durable)
+                        .unwrap()
+                        .outcome()
+                        .clone(),
+                    host.begin_read(&name).err(),
+                    host.reload(&name).err(),
+                    host.state(&name)
+                        .map_err(|refusal| refusal.detail().clone()),
+                    host.inspect(&name).is_none() && host.authored_drift(&name).is_none(),
+                    entry.gate.lock().unwrap().held_by_anything(),
+                );
+                pause.resume.wait();
+                (
+                    answers,
+                    unregistering.join().expect("the unregistration ran"),
+                )
+            });
+
+            let (demand, retry, read, reload, state, inspected, held) = answers;
+            assert_eq!(demand, Demand::UnknownVault);
+            assert_eq!(retry, Demand::UnknownVault);
+            assert!(
+                matches!(read, Some(ReadRefusal::NotServing(Demand::UnknownVault))),
+                "a read answered {read:?}"
+            );
+            assert!(
+                matches!(reload, Some(ReloadRefusal::UnknownVault)),
+                "a reload answered {reload:?}"
+            );
+            assert_eq!(state, Err(ErrorDetail::unknown_vault(name.clone())));
+            assert!(inspected, "an inspection door answered for the vault");
+            assert!(!held, "a door came to hold the entry");
+            unregistered.expect("the idle vault is unregistered");
+            settle();
+            assert_eq!(
+                ops.attaches.load(Ordering::SeqCst),
+                0,
+                "a door attached the vault being unregistered"
+            );
+        }
+
+        /// The two inspection doors behind `induced-failure` answer nothing
+        /// for a vault an unregistration holds, as the others do.
+        #[cfg(feature = "induced-failure")]
+        #[test]
+        fn the_bookkeeping_doors_answer_nothing_while_an_unregistration_holds_the_lock() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let pause = RetirePause::new();
+            *ops.retire_pause.lock().unwrap() = Some(Arc::clone(&pause));
+
+            let (answers, unregistered) = thread::scope(|scope| {
+                let unregistering =
+                    scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
+                pause.entered.wait();
+                let answers = (
+                    host.work_in_flight(&name).is_none(),
+                    host.recovery_demands(&name),
+                );
+                pause.resume.wait();
+                (
+                    answers,
+                    unregistering.join().expect("the unregistration ran"),
+                )
+            });
+
+            assert_eq!(answers, (true, None));
+            unregistered.expect("the idle vault is unregistered");
+        }
+
+        /// An unregistration refused under the lock puts the entry back in
+        /// service: a demand in the window was told the name is unknown, and
+        /// the demand after the refusal attaches the entry that stood.
+        #[test]
+        fn a_refused_unregistration_puts_the_withdrawn_entry_back_in_service() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            ops.registry_unwritable.store(true, Ordering::SeqCst);
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            let pause = RetirePause::new();
+            *ops.retire_pause.lock().unwrap() = Some(Arc::clone(&pause));
+
+            let (during, refused) = thread::scope(|scope| {
+                let unregistering =
+                    scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
+                pause.entered.wait();
+                let during = host
+                    .demand(&name, AttachMode::Durable)
+                    .unwrap()
+                    .outcome()
+                    .clone();
+                pause.resume.wait();
+                (
+                    during,
+                    unregistering.join().expect("the unregistration ran"),
+                )
+            });
+
+            assert_eq!(during, Demand::UnknownVault);
+            assert_eq!(
+                refused.expect_err("the file refused the change").code(),
+                &ReasonCode::HostRegistryUnwritable
+            );
+            assert!(Arc::ptr_eq(
+                &entry,
+                &host.shared.entries.get(&name).expect("the vault is served")
+            ));
+            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_for_state(&host, &name, TrustState::Ready);
+            drop(lease);
+        }
+
+        /// A name the registry file already records — another writer's
+        /// registration since startup — is refused as taken, and the file
+        /// keeps that writer's registration.
+        #[test]
+        fn a_name_the_registry_file_records_is_refused_and_the_file_keeps_it() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("register-recorded");
+            let host = quiet_host_over_roots(Arc::clone(&ops), &[]);
+            let name = VaultName::new("joined").unwrap();
+            let theirs = RegistryEntry::new(
+                name.clone(),
+                VaultRoot::new("/tmp/norn-host-another-writers-root").unwrap(),
+            );
+            ops.registry
+                .lock()
+                .unwrap()
+                .insert(name.clone(), theirs.clone());
+
+            let refusal = register(&host, &name, scratch.root())
+                .expect_err("a recorded name was registered over");
+
+            assert_eq!(refusal.detail(), &ErrorDetail::already_served(name.clone()));
+            assert_eq!(recorded(&ops, &name), Some(theirs));
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
         }
     }
 }

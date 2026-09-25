@@ -159,17 +159,24 @@ impl RegistrationRefusal {
     ///
     /// Every member is a fact about the host's serving of a registration, so
     /// every one is `host/…`. The serving set's own two render through
-    /// [`ServingRefusal::answer`], a park renders as the park it is, and the
-    /// three facts a registration change shares with a demand — another
-    /// maintainer, a root the registry cannot read, a name nothing is served
-    /// under — render as a demand renders them. The data directory refusing
+    /// [`ServingRefusal::answer`], a name the registry file already records
+    /// renders as the name being taken, and the three facts a registration
+    /// change shares with a demand — another maintainer, a root the registry
+    /// cannot read, a name nothing is served under — render as a demand
+    /// renders them. The data directory refusing
     /// the retirement is the environment refusing the work, which is the
     /// reason `host/entry-untrusted` already names.
     pub(crate) fn answer(self, name: &VaultName) -> ErrorEnvelope {
         match self {
             RegistrationRefusal::Serving(refusal) => refusal.answer(name),
             RegistrationRefusal::UnknownVault => unknown_vault(name),
-            RegistrationRefusal::Parked(refusal) => refusal,
+            RegistrationRefusal::AlreadyRecorded => ErrorEnvelope::new(
+                format!(
+                    "the registry file already records a vault under the name `{name}`, and a \
+                     registration is not written over it"
+                ),
+                ErrorDetail::already_served(name.clone()),
+            ),
             RegistrationRefusal::DuplicateRoot(conflict) => duplicate_registration(name, &conflict),
             RegistrationRefusal::RootRefused(refusal) => root_refused(refusal),
             RegistrationRefusal::MaintainerContended(incumbent) => maintainer_contended(incumbent),
@@ -181,8 +188,8 @@ impl RegistrationRefusal {
                 ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(refusal)),
             ),
             RegistrationRefusal::RegistryUnwritable(refusal) => ErrorEnvelope::new(
-                "the registry file could not be written, so the registration that stood before \
-                 still stands",
+                "the registry file could not be read or written, so the registration that \
+                 stood before still stands",
                 ErrorDetail::registry_unwritable(refusal.detail()),
             ),
         }

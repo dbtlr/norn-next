@@ -8,14 +8,19 @@
 //! holding. What `state_discarded` reports is the derived database, its
 //! sidecars and the shadow home.
 //!
+//! **A park is no refusal.** An entry standing on a park that nothing holds
+//! is unregistered, and the park leaves with it; a name parked beside it on
+//! one root is classified again at once and serves where nothing else reaches
+//! that root.
+//!
 //! The refusals are `host/unknown-vault` where no such registration exists,
 //! `host/entry-held` where the entry is in use, `host/maintainer-contended`
 //! where another process maintains the derived state,
-//! `host/registry-unwritable` where the registry file could not be replaced,
-//! `host/entry-untrusted` carrying the environmental-refusal reason where the
-//! data directory refused the maintainer lock or the discard, and a parked
-//! entry's own code. After any of them the registration that stood before
-//! still stands.
+//! `host/registry-unwritable` where the registry file could not be read or
+//! replaced, and `host/entry-untrusted` carrying the environmental-refusal
+//! reason where the data directory refused the maintainer lock or the
+//! discard. After any of them the registration that stood before still
+//! stands.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

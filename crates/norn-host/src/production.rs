@@ -28,7 +28,7 @@ use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
     EntryOps, Established, Establishment, Healing, JobFailure, MintedReader, ProgressReporter,
-    ReadSource, ReaderUnavailable, ReconcileWork, RegistryChange, RegistryUnwritable, ReloadError,
+    ReadSource, ReaderUnavailable, ReconcileWork, RecordRefusal, RegistryUnwritable, ReloadError,
     ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
 };
 
@@ -427,6 +427,34 @@ impl ProductionEntryOps {
 
     fn derived(&self, name: &VaultName) -> PathBuf {
         self.dirs.derived_dir(name)
+    }
+
+    /// Discard the derived state `registration`'s vault leaves: the derived
+    /// database and the files its journal leaves beside it, the semantic
+    /// sidecar and its own, and every shadow home the vault's maintainership
+    /// key resolves to — the one inside the derived directory, and the one
+    /// under the vault root's fallback directory, found at the directory the
+    /// registered root resolves to now. A directory that is one of the
+    /// `standing` roots is no home to discard. The lock file stays, and so
+    /// does the derived directory that holds it.
+    ///
+    /// Only under the vault's maintainer lock, for a maintainership that is
+    /// ending. The refusal is told without the paths it names, because the
+    /// account reaches a caller that holds no hold on the derived state.
+    fn discard_state(&self, registration: &Registration, standing: &[&Path]) -> Result<(), String> {
+        let name = &registration.name;
+        let derived = self.derived(name);
+        Store::discard_at(&derived.join(STORE_FILE))
+            .map_err(|refused| crate::refusal::store_refusal_told(&refused))?;
+        norn_semantic::Engine::discard_at(&derived.join(crate::semantic::SIDECAR_FILE))
+            .map_err(|refused| crate::refusal::engine_refusal_told(&refused))?;
+        discard_homes(
+            &canonical_spelling(registration.root.as_path()),
+            &derived.join(DATA_TMP),
+            &maintainership_key(&self.dirs, name),
+            standing,
+        )
+        .map_err(|refused| crate::refusal::data_dir_refusal_told(&refused))
     }
 
     /// Resolve the registry's single backend selection directly to the fs
@@ -1271,82 +1299,85 @@ impl EntryOps for ProductionEntryOps {
 
     /// The registry file is `norn-config`'s, changed through its locked
     /// read-modify-write, so no second writer's change is lost under this one
-    /// and a key this build does not model survives it.
+    /// and a key this build does not model survives it. The name is looked
+    /// for in the file as that change reads it, so a registration another
+    /// writer recorded is found under the same lock that would replace it.
     ///
     /// A write whose replacement landed and whose durability could not be
     /// confirmed is a written change: every reader of the file sees it, so
     /// the host's serving set follows it rather than standing as though the
     /// file had refused.
     #[allow(clippy::disallowed_methods)] // The registry surface is this crate's.
-    fn write_registry(&self, change: RegistryChange<'_>) -> Result<(), RegistryUnwritable> {
-        let written = norn_config::registry::mutate(&self.dirs, |registry| {
-            match change {
-                RegistryChange::Register(registration) => {
-                    registry.insert(registration.clone());
-                }
-                RegistryChange::Unregister(name) => {
-                    registry.remove(name);
-                }
+    fn record(&self, registration: &Registration) -> Result<(), RecordRefusal> {
+        let recorded = norn_config::registry::mutate(&self.dirs, |registry| {
+            if registry.get(&registration.name).is_some() {
+                return Ok(false);
             }
-            Ok(())
+            registry.insert(registration.clone());
+            Ok(true)
         });
-        match written {
-            Ok(()) | Err(norn_config::ConfigError::MutationUnconfirmed { .. }) => Ok(()),
-            Err(refused) => Err(RegistryUnwritable::new(refused.to_string())),
+        match recorded {
+            Ok(true) | Err(norn_config::ConfigError::MutationUnconfirmed { .. }) => Ok(()),
+            Ok(false) => Err(RecordRefusal::AlreadyRecorded),
+            Err(refused) => Err(RecordRefusal::Unwritable(RegistryUnwritable::new(
+                refused.to_string(),
+            ))),
         }
     }
 
-    /// The lock is the one an attach takes, in the vault's derived directory.
-    /// What is discarded is everything else this composition keeps for the
-    /// vault: the derived database and the files its journal leaves beside
-    /// it, the semantic sidecar and its own, and every shadow home the vault's
-    /// maintainership key resolves to — the one inside the derived directory,
-    /// and the one under the vault root's fallback directory, found at the
-    /// directory the registered root resolves to now. The lock file stays, and
-    /// so does the derived directory that holds it.
+    /// The lock is the one an attach takes, in the vault's derived directory,
+    /// and it is held until the registry file's change has returned.
     ///
-    /// Every refusal here is told without the paths it names, because the
-    /// account reaches a caller that holds no hold on the derived state.
-    fn retire<E>(
+    /// The file's change is `norn-config`'s locked read-modify-write, and the
+    /// discard runs inside it, between the read and the write: a file this
+    /// build cannot read or parse refuses before the read hands anything
+    /// over, so nothing is discarded, and a discard that refuses leaves the
+    /// registry as it was read, which is not written back. What is discarded
+    /// is the derived database and the files its journal leaves beside it,
+    /// the semantic sidecar and its own, and both shadow homes the vault's
+    /// maintainership key resolves to; the lock file and the derived
+    /// directory holding it stay. The lock refusals are told without the
+    /// paths they name.
+    #[allow(clippy::disallowed_methods)] // The registry surface is this crate's.
+    fn retire(
         &self,
         registration: &Registration,
         keep_state: bool,
-        leave: impl FnOnce() -> Result<(), E>,
-    ) -> Result<(), RetireRefusal<E>> {
-        let told = |refused: &norn_fs::Refusal| crate::refusal::data_dir_refusal_told(refused);
+        standing: &[Registration],
+    ) -> Result<(), RetireRefusal> {
         let name = &registration.name;
-        let derived = self.derived(name);
-        let maintainership = match try_acquire(&derived.join(MAINTAINER_LOCK_FILE)) {
+        let _maintainership = match try_acquire(&self.derived(name).join(MAINTAINER_LOCK_FILE)) {
             Ok(Acquisition::Acquired(guard)) => guard,
             Ok(Acquisition::Contended { incumbent }) => {
                 return Err(RetireRefusal::MaintainerContended(map_incumbent(incumbent)));
             }
-            Err(refused) => return Err(RetireRefusal::Unclaimed(told(&refused))),
+            Err(refused) => {
+                return Err(RetireRefusal::Unclaimed(
+                    crate::refusal::data_dir_refusal_told(&refused),
+                ));
+            }
         };
-        leave().map_err(RetireRefusal::Left)?;
-        if keep_state {
-            return Ok(());
-        }
         // A vault that is no longer served holds no engine: the slot goes
         // back before the sidecar it would read from is discarded.
-        if let Some(semantic) = &self.semantic {
-            semantic.detach(name);
+        self.discard(name);
+        let standing = standing
+            .iter()
+            .map(|registration| registration.root.as_path())
+            .collect::<Vec<_>>();
+        let retired = norn_config::registry::mutate(&self.dirs, |registry| {
+            if !keep_state && let Err(refused) = self.discard_state(registration, &standing) {
+                return Ok(Err(refused));
+            }
+            registry.remove(name);
+            Ok(Ok(()))
+        });
+        match retired {
+            Ok(Ok(())) | Err(norn_config::ConfigError::MutationUnconfirmed { .. }) => Ok(()),
+            Ok(Err(refused)) => Err(RetireRefusal::Undiscarded(refused)),
+            Err(refused) => Err(RetireRefusal::Unrecorded(RegistryUnwritable::new(
+                refused.to_string(),
+            ))),
         }
-        Store::discard_at(&derived.join(STORE_FILE)).map_err(|refused| {
-            RetireRefusal::Undiscarded(crate::refusal::store_refusal_told(&refused))
-        })?;
-        norn_semantic::Engine::discard_at(&derived.join(crate::semantic::SIDECAR_FILE)).map_err(
-            |refused| RetireRefusal::Undiscarded(crate::refusal::engine_refusal_told(&refused)),
-        )?;
-        discard_homes(
-            &canonical_spelling(registration.root.as_path()),
-            &derived.join(DATA_TMP),
-            &maintainership_key(&self.dirs, name),
-            &[],
-        )
-        .map_err(|refused| RetireRefusal::Undiscarded(told(&refused)))?;
-        drop(maintainership);
-        Ok(())
     }
 
     /// The engine goes back for a leg whose attachment went with an unwinding
@@ -5362,6 +5393,34 @@ mod tests {
                 freshness(&answer.watermarks, &store),
                 Freshness::trailing(0)
             );
+        }
+
+        /// A retirement gives the engine slot back whether or not it keeps
+        /// the derived state: a vault no longer served holds no engine, and
+        /// its sidecar, kept, is adopted by the next delivery.
+        #[test]
+        fn a_retirement_keeping_state_gives_the_engine_back() {
+            let f = Fixture::new("semantic-retire-keeping");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            // An attachment lost to an unwinding stack releases its lock and
+            // leaves the engine slot to the name-keyed give-back.
+            drop(
+                ops.attach(&f.registration(), &ProgressReporter::disconnected())
+                    .expect("an attach with an enabled engine"),
+            );
+            assert!(engines.section(&name).is_some());
+
+            ops.retire(&f.registration(), true, &[])
+                .expect("the idle vault is retired");
+
+            assert_eq!(
+                engines.section(&name),
+                None,
+                "the engine outlived the vault"
+            );
+            assert_eq!(engines.status(&name), SemanticStatus::Off);
         }
 
         /// No section, no engine: the status is off and the refusal says so.
@@ -13274,8 +13333,9 @@ mod tests {
         }
 
         /// An unregistered vault leaves the registry file and the set, and
-        /// its derived database, the database's sidecars and its shadow home
-        /// go with it — while its maintainer lock file and its documents stay.
+        /// its derived database, the database's sidecars, its semantic
+        /// sidecar and its shadow home go with it — while its maintainer lock
+        /// file and its documents stay.
         #[test]
         fn an_unregistered_vault_discards_its_derived_state_and_keeps_its_lock_file() {
             let f = Fixture::new("unregister-discards");
@@ -13285,6 +13345,9 @@ mod tests {
             attach_and_idle(&host);
             let derived = dirs.derived_dir(&notes());
             assert!(fs::metadata(derived.join("store.sqlite3")).is_ok());
+            // A semantic sidecar and a file its journal left beside it.
+            fs::write(derived.join("semantic.sqlite3"), b"").unwrap();
+            fs::write(derived.join("semantic.sqlite3-wal"), b"").unwrap();
 
             let report = unregister_once_idle(&host, &UnregisterParams::new(notes()))
                 .expect("the idle vault is unregistered");
@@ -13393,6 +13456,197 @@ mod tests {
             assert_eq!(listed(&host), [notes()]);
             assert!(fs::metadata(derived.join("store.sqlite3")).is_ok());
             drop(held);
+        }
+
+        /// A registry file this build cannot read — bytes that are no
+        /// registry, or a version ahead of this build — refuses the
+        /// unregistration before anything is discarded, and the registration
+        /// stands.
+        #[test]
+        fn a_registry_file_this_build_cannot_read_refuses_before_anything_is_discarded() {
+            for (label, body) in [
+                ("corrupt", "this is not [ a registry"),
+                ("ahead", "version = 999\n"),
+            ] {
+                let f = Fixture::new(&format!("unregister-unreadable-{label}"));
+                fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+                let (host, dirs) = empty_host(&f);
+                register(&host, &f.vault()).expect("the vault is registered");
+                attach_and_idle(&host);
+                fs::write(dirs.config_dir().join("registry.toml"), body).unwrap();
+
+                let refusal = unregister_once_idle(&host, &UnregisterParams::new(notes()))
+                    .expect_err("an unregistration over an unreadable file went through");
+
+                assert_eq!(
+                    refusal.code(),
+                    &ReasonCode::HostRegistryUnwritable,
+                    "{label}"
+                );
+                assert!(
+                    fs::metadata(dirs.derived_dir(&notes()).join("store.sqlite3")).is_ok(),
+                    "{label}: the derived database was discarded"
+                );
+                assert_eq!(listed(&host), [notes()], "{label}");
+            }
+        }
+
+        /// A name another writer recorded in the registry file since the host
+        /// started is refused as taken, and the file keeps that registration.
+        #[test]
+        fn a_name_the_registry_file_records_is_refused_and_the_file_keeps_it() {
+            let f = Fixture::watcherless("register-recorded");
+            let (host, dirs) = empty_host(&f);
+            let theirs = Registration::new(notes(), VaultRoot::new(f.root.join("theirs")).unwrap());
+            norn_config::registry::mutate(&dirs, |registry| {
+                registry.insert(theirs.clone());
+                Ok(())
+            })
+            .expect("another writer records the name");
+
+            let refusal =
+                register(&host, &f.vault()).expect_err("a recorded name was registered over");
+
+            assert_eq!(refusal.code(), &ReasonCode::HostAlreadyServed);
+            assert_eq!(recorded(&dirs, &notes()), Some(theirs));
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// A link standing at the vault's fallback home is no home: the
+        /// unregistration leaves it and the directory it reaches alone, and
+        /// discards everything else.
+        #[cfg(unix)]
+        #[test]
+        fn a_link_at_the_fallback_home_is_left_and_what_it_reaches_is_not_swept() {
+            let f = Fixture::new("unregister-fallback-link");
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            attach_and_idle(&host);
+            let key = dirs.derived_key(&notes());
+            let parent = f
+                .vault()
+                .join(norn_fs::FALLBACK)
+                .join(key.channel())
+                .join(key.vault());
+            fs::create_dir_all(&parent).unwrap();
+            let elsewhere = f.root.join("another-home");
+            fs::create_dir_all(&elsewhere).unwrap();
+            let foreign = elsewhere.join("norn-shadow-99999-1");
+            fs::write(&foreign, b"another write's staged bytes").unwrap();
+            let link = parent.join(key.data_base());
+            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+
+            let report = unregister_once_idle(&host, &UnregisterParams::new(notes()))
+                .expect("the vault is unregistered past the link");
+
+            assert_eq!(report, UnregisterReport::new(notes(), true));
+            assert!(
+                fs::metadata(&foreign).is_ok(),
+                "a shadow the link reaches was taken"
+            );
+            assert!(fs::symlink_metadata(&link).is_ok(), "the link was removed");
+            assert!(
+                fs::metadata(dirs.derived_dir(&notes()).join("store.sqlite3")).is_err(),
+                "the derived database stood"
+            );
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// Another registered vault whose root stands at this vault's
+        /// fallback home keeps its root, empty as it is.
+        #[test]
+        fn a_registered_root_at_the_fallback_home_is_left_standing() {
+            let f = Fixture::watcherless("unregister-fallback-root");
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            let key = dirs.derived_key(&notes());
+            let home = f
+                .vault()
+                .join(norn_fs::FALLBACK)
+                .join(key.channel())
+                .join(key.vault())
+                .join(key.data_base());
+            fs::create_dir_all(&home).unwrap();
+            let other = VaultName::new("other").unwrap();
+            host.vault_register(&RegisterParams::new(Registration::new(
+                other.clone(),
+                VaultRoot::new(&home).unwrap(),
+            )))
+            .expect("the other vault is registered");
+
+            unregister_once_idle(&host, &UnregisterParams::new(notes()))
+                .expect("the vault is unregistered");
+
+            assert!(
+                fs::metadata(&home).is_ok(),
+                "a registered vault's root was removed"
+            );
+            assert_eq!(listed(&host), [other]);
+        }
+
+        /// A demand racing an unregistration of the same idle vault is either
+        /// recorded before the unregistration asks — which refuses as held —
+        /// or answered as the name being unknown. The demand's attach never
+        /// meets the unregistration's maintainer lock, so no unregistration
+        /// is refused as contended by this process and no park names it.
+        #[test]
+        fn a_demand_racing_an_unregistration_never_contends_with_it() {
+            let f = Fixture::new("unregister-race");
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let (host, _dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut races = 0_u64;
+            while races < 200 && Instant::now() < deadline {
+                races += 1;
+                // The demand lands at a different offset into the
+                // unregistration on each race.
+                let offset = Duration::from_micros((races * 37) % 400);
+                let start = std::sync::Barrier::new(2);
+                let answer = std::thread::scope(|scope| {
+                    let demander = scope.spawn(|| {
+                        start.wait();
+                        let began = Instant::now();
+                        while began.elapsed() < offset {
+                            std::hint::spin_loop();
+                        }
+                        drop(host.demand(&notes(), AttachMode::Durable).unwrap());
+                    });
+                    start.wait();
+                    let answer =
+                        host.vault_unregister(&UnregisterParams::new(notes()).keeping_state());
+                    demander.join().expect("the demand ran");
+                    answer
+                });
+                match answer {
+                    Ok(_) => {
+                        register(&host, &f.vault()).expect("the vault is registered again");
+                        continue;
+                    }
+                    Err(refusal) => assert_eq!(
+                        refusal.code(),
+                        &ReasonCode::HostEntryHeld,
+                        "race {races}: {refusal:?}"
+                    ),
+                }
+                // The demand the unregistration was refused for attaches, and
+                // is let go of before the next race.
+                let settled = wait_until("the demand to settle", lifecycle_budget(), || match host
+                    .state(&notes())
+                {
+                    Ok(norn_wire::TrustState::Ready | norn_wire::TrustState::Unattached) => {
+                        Observed::Met(Ok(()))
+                    }
+                    Err(refusal) => Observed::Met(Err(refusal)),
+                    Ok(other) => Observed::Pending(format!("{other:?}")),
+                })
+                .unwrap_or_else(|failure| panic!("{failure}"));
+                assert_eq!(settled, Ok(()), "race {races}: the entry parked");
+                host.reap_idle(Instant::now() + Duration::from_secs(61))
+                    .unwrap();
+                wait_state(&host, &notes(), norn_wire::TrustState::Unattached);
+            }
         }
     }
 

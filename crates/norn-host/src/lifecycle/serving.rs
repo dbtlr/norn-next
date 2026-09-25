@@ -295,11 +295,17 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// not one this removes: a demand reaches the entry through the set, and
     /// the set is not readable while this decides.
     ///
-    /// **The entry is retired under that same gate hold.** A caller that read
-    /// the entry out of the set before this took it out still holds it, and
-    /// every door such a caller asks through reads the retirement first — so
-    /// what it is answered is the name being unknown, never work scheduled
-    /// against an entry the set no longer serves.
+    /// **An entry an unregistration has already withdrawn is removed as it
+    /// stands.** The withdrawal asked the same question under the same gate,
+    /// and kept every door off the entry from then on, so its answer is the
+    /// one that binds and this refuses nothing.
+    ///
+    /// **The entry is withdrawn under that same gate hold, where it was not
+    /// already.** A caller that read the entry out of the set before this took
+    /// it out still holds it, and every door such a caller asks through reads
+    /// the withdrawal first — so what it is answered is the name being
+    /// unknown, never work scheduled against an entry the set no longer
+    /// serves.
     ///
     /// A name the set does not serve is already not served, and removing it
     /// changes nothing. Whether the name was served is the caller's to ask
@@ -316,10 +322,10 @@ impl<A: SnapshotSource> ServingSet<A> {
         };
         {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            if state.held_by_anything() {
+            if !state.withdrawn && state.held_by_anything() {
                 return Err(ServingRefusal::Held);
             }
-            state.retired = true;
+            state.withdrawn = true;
         }
         let removed = entries.remove(name);
         drop(entries);
