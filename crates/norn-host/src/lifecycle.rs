@@ -6524,6 +6524,24 @@ mod tests {
                 resume: std::sync::Barrier::new(2),
             })
         }
+
+        /// Meet the retiring thread at `entered`. The retirement stays held
+        /// until the returned guard drops, which a panic in the case drops
+        /// too, so a failing assertion lets the retirement go on and the case
+        /// fails rather than waiting on it forever.
+        fn enter(&self) -> RetireHeld<'_> {
+            self.entered.wait();
+            RetireHeld(self)
+        }
+    }
+
+    /// A retirement a case holds at its pause; dropping it lets it go on.
+    struct RetireHeld<'a>(&'a RetirePause);
+
+    impl Drop for RetireHeld<'_> {
+        fn drop(&mut self) {
+            self.0.resume.wait();
+        }
     }
 
     /// What each armed panic says. The reason an unwound leg publishes carries
@@ -19634,7 +19652,7 @@ mod tests {
             let (answers, unregistered) = thread::scope(|scope| {
                 let unregistering =
                     scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
-                pause.entered.wait();
+                let held = pause.enter();
                 let lease = host.demand(&name, AttachMode::Durable).unwrap();
                 let answers = (
                     [
@@ -19655,7 +19673,7 @@ mod tests {
                     entry.gate.lock().unwrap().held_by_anything(),
                 );
                 drop(lease);
-                pause.resume.wait();
+                drop(held);
                 (
                     answers,
                     unregistering.join().expect("the unregistration ran"),
@@ -19704,10 +19722,10 @@ mod tests {
             let (answers, unregistered) = thread::scope(|scope| {
                 let unregistering =
                     scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
-                pause.entered.wait();
+                let held = pause.enter();
                 let answers = [false, true]
                     .map(|dry_run| reload_refused(&host, &reload_params(&name, dry_run)));
-                pause.resume.wait();
+                drop(held);
                 (
                     answers,
                     unregistering.join().expect("the unregistration ran"),
@@ -19794,12 +19812,12 @@ mod tests {
             let (answers, unregistered) = thread::scope(|scope| {
                 let unregistering =
                     scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
-                pause.entered.wait();
+                let held = pause.enter();
                 let answers = (
                     host.work_in_flight(&name).map(|_| ()),
                     host.recovery_demands(&name),
                 );
-                pause.resume.wait();
+                drop(held);
                 (
                     answers,
                     unregistering.join().expect("the unregistration ran"),
@@ -19826,7 +19844,7 @@ mod tests {
             let (during, refused) = thread::scope(|scope| {
                 let unregistering =
                     scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
-                pause.entered.wait();
+                let held = pause.enter();
                 let during = (
                     host.demand(&name, AttachMode::Durable)
                         .unwrap()
@@ -19835,7 +19853,7 @@ mod tests {
                     host.state(&name)
                         .map_err(|refusal| refusal.detail().clone()),
                 );
-                pause.resume.wait();
+                drop(held);
                 (
                     during,
                     unregistering.join().expect("the unregistration ran"),
@@ -19909,13 +19927,13 @@ mod tests {
             let (retried, refused) = thread::scope(|scope| {
                 let unregistering =
                     scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
-                pause.entered.wait();
+                let held = pause.enter();
                 let retried = host
                     .retry(&name, AttachMode::Durable)
                     .unwrap()
                     .outcome()
                     .clone();
-                pause.resume.wait();
+                drop(held);
                 (
                     retried,
                     unregistering.join().expect("the unregistration ran"),
