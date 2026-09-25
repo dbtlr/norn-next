@@ -63,8 +63,8 @@ mod statement;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    AnswerAdvisory, Cursor, CursorKey, FindingKind, FindingRow, KindTally, Moved, Page, Severity,
-    Unsatisfied, ValidateParams, ValidateReport,
+    AnswerAdvisory, Cursor, CursorKey, FindingKind, FindingRow, KindTally, Moved, Page, PagedRows,
+    Severity, Unsatisfied, ValidateParams, ValidateReport,
 };
 
 use crate::error::{self, StoreError};
@@ -204,7 +204,7 @@ impl Snapshot {
     /// from another schema than the snapshot pins, a part the store keeps no
     /// index of, and a bound that does not read as its key's declared type.
     /// And refused as a cursor that names no position among a validate's
-    /// findings ([`PageRefusal::NotAFindingCursor`]), and as any cursor on a
+    /// findings ([`PageRefusal::CursorNotTaken`]), and as any cursor on a
     /// summary, which is not paged ([`PageRefusal::SummaryNotPaged`]).
     pub fn validate(
         &self,
@@ -288,11 +288,13 @@ impl Snapshot {
             let (resume, moved) = match &params.after {
                 None => (None, Vec::new()),
                 Some(cursor) => {
+                    let not_taken = || PageRefusal::cursor_not_taken(cursor, PagedRows::Finding);
                     let CursorKey::Finding { kind, path, id, .. } = cursor.key() else {
-                        return Err(PageRefusal::NotAFindingCursor);
+                        return Err(not_taken());
                     };
-                    let moved = self.judge_reading(cursor, None, false, lookups)?;
-                    let id = i64::try_from(*id).map_err(|_| PageRefusal::NotAFindingCursor)?;
+                    let moved =
+                        self.judge_unordered_reading(cursor, PagedRows::Finding, lookups)?;
+                    let id = i64::try_from(*id).map_err(|_| not_taken())?;
                     (Some((kind.as_str(), path.as_str(), id)), moved)
                 }
             };

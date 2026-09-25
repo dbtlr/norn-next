@@ -2,7 +2,7 @@
 //! of the reading a cursor was minted under against it.
 
 use norn_db::rusqlite::types::Value;
-use norn_wire::{Cursor, CursorOrderChanged, Moved};
+use norn_wire::{Cursor, CursorOrderChanged, Moved, PagedRows};
 
 use super::{FieldOrder, Lookups, PageRefusal, Ran};
 use crate::ddl;
@@ -18,7 +18,9 @@ impl Snapshot {
     /// The cursor is refused where its fingerprint is not the order's — the
     /// active fingerprint for a typed order, none for any other — and where
     /// `misplaced` says its position is detectably in another order. The
-    /// refusal names the order the cursor was minted in either way.
+    /// refusal names the order the cursor was minted in either way. A page of
+    /// rows in no schema's order judges through
+    /// [`Snapshot::judge_unordered_reading`] instead.
     pub(crate) fn judge_reading(
         &self,
         cursor: &Cursor,
@@ -36,6 +38,25 @@ impl Snapshot {
             }));
         }
         cursor.continuation(&now).map_err(PageRefusal::OrderChanged)
+    }
+
+    /// Judge the reading `cursor` was minted under against the reading a page
+    /// of `paged` answers from on this snapshot, and say what moved since.
+    ///
+    /// `paged` are rows in no schema's order — hits, facets, findings or a
+    /// collection's ordinals — and no page of them mints a cursor carrying a
+    /// fingerprint, so one carrying a fingerprint names no position among
+    /// them and is refused as not taken.
+    pub(crate) fn judge_unordered_reading(
+        &self,
+        cursor: &Cursor,
+        paged: PagedRows,
+        lookups: &mut Lookups,
+    ) -> Result<Vec<Moved>, PageRefusal> {
+        if cursor.snapshot().schema_fingerprint.is_some() {
+            return Err(PageRefusal::cursor_not_taken(cursor, paged));
+        }
+        self.judge_reading(cursor, None, false, lookups)
     }
 
     /// This snapshot's reading as a cursor carries it for a page in `order`:

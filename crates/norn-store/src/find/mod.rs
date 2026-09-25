@@ -166,8 +166,10 @@
 //! orders and both fingerprints: a cursor naming another sort key or
 //! direction — among them a path-order cursor minted while its request's key
 //! was unknown, continued once the key is known — a typed order's cursor
-//! minted under another fingerprint or under none, a raw or path order's
-//! minted under one, and a path order's carrying a sort value. A raw
+//! minted under another fingerprint or under none, and a raw or path order's
+//! minted under one. A path order's cursor carrying a sort value names no
+//! position in any order, and is refused as a cursor naming no position among
+//! the documents the request pages ([`PageRefusal::CursorNotTaken`]). A raw
 //! continuation survives a re-pin that leaves its key untyped, since the raw
 //! order has not moved.
 
@@ -179,7 +181,7 @@ use std::collections::BTreeSet;
 use norn_db::EmittedPlan;
 use norn_wire::{
     AnswerAdvisory, Column, Cursor, CursorKey, Direction, DocumentRow, FindParams, FindReport,
-    Moved, Page, Sort, SortKey, Unsatisfied,
+    Moved, Page, PagedRows, RequestPart, Sort, SortKey, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -425,7 +427,11 @@ impl<'a> Projection<'a> {
                     nested.insert(3);
                 }
                 Column::Findings {} => projection.findings = true,
-                _ => return Err(PageRefusal::UnknownPart { part: "a column" }),
+                _ => {
+                    return Err(PageRefusal::UnknownPart {
+                        part: RequestPart::unknown("a column"),
+                    });
+                }
             }
         }
         projection.nested = nested.into_iter().map(|slot| Nested::ALL[slot]).collect();
@@ -545,10 +551,11 @@ impl Snapshot {
     /// active fingerprint for a typed order, and none for a raw or a path order
     /// — so a raw cursor continued in a typed order, a typed one continued in a
     /// raw order, and a typed one minted under a fingerprint the snapshot no
-    /// longer reads are refused. A path order's cursor carries no sort value,
-    /// so one carrying a value is refused too. A field order's cursor carrying
-    /// no sort value stands in its missing section. Every refusal names both
-    /// fingerprints and both orders.
+    /// longer reads are refused, each naming both fingerprints and both
+    /// orders. A path order's cursor carries no sort value, so one carrying a
+    /// value names no position among documents at all, and is refused before
+    /// its order is judged. A field order's cursor carrying no sort value
+    /// stands in its missing section.
     fn judge(
         &self,
         cursor: &Cursor,
@@ -562,13 +569,15 @@ impl Snapshot {
             ..
         } = cursor.key()
         else {
-            return Err(PageRefusal::NotADocumentCursor);
+            return Err(PageRefusal::cursor_not_taken(cursor, PagedRows::Document));
         };
-        let request_order = order.wire();
         // A path order's position carries no sort value, so a cursor naming
-        // the path order and carrying one is no position in its own order.
-        let off_its_order = matches!(cursor_order.key, SortKey::Path { .. }) && sort.is_some();
-        let misplaced = *cursor_order != request_order || off_its_order;
+        // the path order and carrying one is no position among documents.
+        if matches!(cursor_order.key, SortKey::Path { .. }) && sort.is_some() {
+            return Err(PageRefusal::cursor_not_taken(cursor, PagedRows::Document));
+        }
+        let request_order = order.wire();
+        let misplaced = *cursor_order != request_order;
         let moved = self
             .judge_reading(cursor, order.field_order(), misplaced, lookups)
             .map_err(|refusal| match refusal {
@@ -664,7 +673,7 @@ impl Snapshot {
                     Direction::Descending => PageDirection::Descending,
                     _ => {
                         return Err(PageRefusal::UnknownPart {
-                            part: "a sort direction",
+                            part: RequestPart::unknown("a sort direction"),
                         });
                     }
                 };
@@ -682,7 +691,11 @@ impl Snapshot {
                         },
                         direction,
                     },
-                    _ => return Err(PageRefusal::UnknownPart { part: "a sort key" }),
+                    _ => {
+                        return Err(PageRefusal::UnknownPart {
+                            part: RequestPart::unknown("a sort key"),
+                        });
+                    }
                 }
             }
         };

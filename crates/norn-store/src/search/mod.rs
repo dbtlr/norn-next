@@ -81,8 +81,8 @@ mod words;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    AnswerAdvisory, Column, Cursor, CursorKey, Hit, Moved, Page, Predicate, Score, SearchReport,
-    Unsatisfied,
+    AnswerAdvisory, Column, Cursor, CursorKey, Hit, Moved, Page, PagedRows, Predicate, Score,
+    SearchReport, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -280,8 +280,8 @@ impl Snapshot {
     /// another schema than the snapshot pins, a part or a projected column
     /// this build of the store does not know, and a bound that does not read
     /// as its key's declared type. And refused as a cursor that names no position among
-    /// hits ([`PageRefusal::NotAHitCursor`]), or one minted under a schema
-    /// fingerprint, which no ranking is ([`PageRefusal::OrderChanged`]).
+    /// hits ([`PageRefusal::CursorNotTaken`]): another kind of row's, or a
+    /// hit's carrying a schema fingerprint, which no ranking mints.
     pub fn search(
         &self,
         request: &LexicalQuery,
@@ -403,17 +403,18 @@ impl Snapshot {
     /// Judge the cursor a search continues: where it resumes — the score and
     /// the path of the hit it stopped after — and what moved since.
     ///
-    /// A ranking is no schema's order, so the cursor's reading is judged as a
-    /// raw order's is: one minted under a fingerprint is refused.
+    /// A ranking is no schema's order and no page of hits mints a cursor
+    /// carrying a fingerprint, so one carrying a fingerprint names no position
+    /// among hits and is refused as not taken.
     fn judge_hit(
         &self,
         cursor: &Cursor,
         lookups: &mut Lookups,
     ) -> Result<((f64, String), Vec<Moved>), PageRefusal> {
         let CursorKey::Hit { score, path, .. } = cursor.key() else {
-            return Err(PageRefusal::NotAHitCursor);
+            return Err(PageRefusal::cursor_not_taken(cursor, PagedRows::Hit));
         };
-        let moved = self.judge_reading(cursor, None, false, lookups)?;
+        let moved = self.judge_unordered_reading(cursor, PagedRows::Hit, lookups)?;
         Ok(((score.get(), path.clone()), moved))
     }
 

@@ -26,7 +26,7 @@ use norn_store::{
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
     ContainerKind, Cursor, CursorKey, DescribeParams, Direction, Facet, FacetKind, FieldType,
-    PathRuleKind, Pattern, Sort, SortKey, TagStance, VaultAddress, VaultName,
+    PagedRows, PathRuleKind, Pattern, Sort, SortKey, TagStance, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -490,18 +490,24 @@ fn a_cursor_at_the_last_facet_continues_to_an_empty_page() {
 }
 
 /// **A cursor that names no position among facets is refused**: a
-/// document's, and a finding's.
+/// document's, and a tally's.
 #[test]
 fn a_cursor_that_is_no_facets_position_is_refused() {
     let describing_store = Describing::new("describe-cursor-refused");
     let reading = describing_store.describe(&describing()).snapshot;
-    for key in [
-        CursorKey::document(
-            Sort::new(SortKey::path(), Direction::Ascending),
-            None,
-            "a.md",
+    for (key, rows) in [
+        (
+            CursorKey::document(
+                Sort::new(SortKey::path(), Direction::Ascending),
+                None,
+                "a.md",
+            ),
+            PagedRows::Document,
         ),
-        CursorKey::tally([Some("draft".to_string())]),
+        (
+            CursorKey::tally([Some("draft".to_string())]),
+            PagedRows::Tally,
+        ),
     ] {
         assert_eq!(
             describing_store
@@ -511,12 +517,47 @@ fn a_cursor_that_is_no_facets_position_is_refused() {
                     &describing_store.declared
                 )
                 .expect_err("the cursor is refused"),
-            PageRefusal::NotAFacetCursor
+            PageRefusal::CursorNotTaken {
+                cursor: rows,
+                paged: PagedRows::Facet,
+            }
         );
     }
     assert_eq!(
-        PageRefusal::NotAFacetCursor.to_string(),
-        "the cursor names no position among a describe's facets"
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Tally,
+            paged: PagedRows::Facet,
+        }
+        .to_string(),
+        "the cursor names a position among tallies, and the request pages facets"
+    );
+}
+
+/// **A facet's cursor carrying a schema fingerprint is refused as not
+/// taken**: no page of facets mints one, so it names no position among them,
+/// even under the fingerprint the snapshot pins.
+#[test]
+fn a_facet_cursor_carrying_a_fingerprint_is_not_taken() {
+    let describing_store = Describing::new("describe-cursor-fingerprint");
+    let reading = describing_store.describe(&describing()).snapshot;
+    let forged = Cursor::new(
+        norn_wire::Snapshot::new(
+            reading.epoch.clone(),
+            reading.generation,
+            Some(DESCRIBE_SCHEMA.to_string()),
+            None,
+        ),
+        CursorKey::facet(FacetKind::UndeclaredTags, TagStance::Report.as_str()),
+    );
+    assert_eq!(
+        describing_store
+            .snapshot()
+            .describe(&describing().with_after(forged), &describing_store.declared)
+            .expect_err("the cursor is refused"),
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Facet,
+            paged: PagedRows::Facet,
+        }
     );
 }
 

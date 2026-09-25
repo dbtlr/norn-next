@@ -32,6 +32,14 @@
 //! a surface's to choose: the handler that arrives renders one of these rather
 //! than minting a string of its own.
 //!
+//! **The codes a store's read refusals are spelled in are minted ahead too.**
+//! `host/read-failed`, `vault/unreadable-bound`, `request/out-of-bound`,
+//! `request/part-not-taken` and `request/cursor-not-taken` each answer one or
+//! more of the refusals a read builder returns in place of a page. The host's
+//! read handlers raise them when they render such a refusal onto the wire, and
+//! that rendering lands above this layer, so the call graph reaches none of
+//! them from this crate today.
+//!
 //! The pairing between a code and its detail is structural rather than a rule
 //! constructors keep: [`ErrorEnvelope::new`] takes the code from the detail,
 //! and the read path refuses an envelope whose code is not the code its detail
@@ -44,7 +52,7 @@ use std::fmt;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::cursor::CursorOrderChanged;
+use crate::cursor::{CursorOrderChanged, PagedRows};
 use crate::demand::AttachMode;
 use crate::finding_row::{CandidateHead, Hint};
 use crate::name::VaultName;
@@ -85,6 +93,173 @@ impl MaintainerIdentity {
     /// A maintainer whose diagnostic identity is unavailable.
     pub const fn unknown() -> Self {
         Self::Unknown {}
+    }
+}
+
+/// Which shape rule a request's own count or membership part violated, as
+/// `request/out-of-bound` names it.
+///
+/// Two counts are bounded — how many rows a page holds and how many values
+/// one membership part names — and a membership part naming none is a third
+/// shape failure the same code carries. A count bound carries the count the
+/// request named and the most it may be; a membership bound carries the key
+/// its part is on.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RequestBound {
+    /// A page limit outside 1 to the most rows a page holds: a limit of 0 is
+    /// refused as a limit over the maximum is.
+    #[non_exhaustive]
+    PageRows {
+        /// The limit the request named.
+        given: usize,
+        /// The most rows a page holds.
+        ceiling: usize,
+    },
+    /// A membership part naming more values than one part holds.
+    #[non_exhaustive]
+    MembershipValues {
+        /// The key the part is on.
+        key: String,
+        /// How many values the part named.
+        given: usize,
+        /// The most values one part names.
+        ceiling: usize,
+    },
+    /// A membership part naming no value at all. The wire refuses such a
+    /// part when a request is read, so only a request built in-process
+    /// reaches a store with one and is refused under this bound.
+    #[non_exhaustive]
+    EmptyMembership {
+        /// The key the empty part is on.
+        key: String,
+    },
+}
+
+impl RequestBound {
+    /// A page limit of `given` rows, outside 1 to `ceiling`.
+    pub const fn page_rows(given: usize, ceiling: usize) -> Self {
+        RequestBound::PageRows { given, ceiling }
+    }
+
+    /// A membership part on `key` naming `given` values, over `ceiling`.
+    pub fn membership_values(key: impl Into<String>, given: usize, ceiling: usize) -> Self {
+        RequestBound::MembershipValues {
+            key: key.into(),
+            given,
+            ceiling,
+        }
+    }
+
+    /// A membership part on `key` naming no value at all.
+    pub fn empty_membership(key: impl Into<String>) -> Self {
+        RequestBound::EmptyMembership { key: key.into() }
+    }
+}
+
+/// A part of a request, as `request/part-not-taken` names the one an answer
+/// does not take.
+///
+/// On the wire it is an object tagged `kind`: `{"kind":"cursor"}`. A part of
+/// a kind this build knows but whose value it does not — a predicate, a sort
+/// key or an anchor minted after it — is `{"kind":"unknown","name":"a sort
+/// key"}`, where the name is words for a person and clients never match on
+/// it.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RequestPart {
+    /// The anchor a target names: a heading or a block.
+    Anchor,
+    /// A column the request projects.
+    Column,
+    /// The cursor the request continues from.
+    Cursor,
+    /// The page limit the request names.
+    Limit,
+    /// A part this build does not know.
+    #[non_exhaustive]
+    Unknown {
+        /// The part in words, for a person reading a message or a log.
+        /// Clients never match on it.
+        name: String,
+    },
+}
+
+impl RequestPart {
+    /// A part this build does not know, named `name` in words.
+    pub fn unknown(name: impl Into<String>) -> Self {
+        RequestPart::Unknown { name: name.into() }
+    }
+}
+
+/// The shape of answer a request asks for, as `request/part-not-taken` names
+/// the one that does not take a part.
+///
+/// On the wire it is the flat string itself: `"collection_page"`,
+/// `"summary"`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AnswerShape {
+    /// One page of one nested collection of a document.
+    CollectionPage,
+    /// One document's record.
+    Record,
+    /// The section a heading anchor names.
+    Section,
+    /// The block a block anchor names.
+    Block,
+    /// A count's summary: every tally at once, unpaged.
+    Summary,
+}
+
+/// Why the store answered a read with no rows, as `host/read-failed` carries
+/// it.
+///
+/// Neither is anything a client's request can change. A read the store finds
+/// its derived data damaged for is not one of these: it answers
+/// `host/entry-untrusted` with the untrusted reason whose `kind` is
+/// `store_damaged_rebuilding`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ReadFailure {
+    /// The store refused a statement the read ran: its file, its driver or
+    /// its environment refused, and the detail is the store's own account.
+    /// A fault of the environment may pass, so the same read may later be
+    /// answered.
+    Statement {},
+    /// The declaration the read was compiled under was read from a schema
+    /// other than the one the store's snapshot pins. Each fingerprint is
+    /// `null` for no schema. It is a host defect, not advice to try the read
+    /// again as it stands.
+    #[non_exhaustive]
+    DeclarationNotPinned {
+        /// The fingerprint of the schema the declaration was read from.
+        declared_under: Option<String>,
+        /// The fingerprint of the schema the snapshot pins.
+        pinned: Option<String>,
+    },
+}
+
+impl ReadFailure {
+    /// A statement the store refused.
+    pub const fn statement() -> Self {
+        ReadFailure::Statement {}
+    }
+
+    /// A declaration read under `declared_under` against a snapshot pinning
+    /// `pinned`.
+    pub const fn declaration_not_pinned(
+        declared_under: Option<String>,
+        pinned: Option<String>,
+    ) -> Self {
+        ReadFailure::DeclarationNotPinned {
+            declared_under,
+            pinned,
+        }
     }
 }
 
@@ -141,6 +316,16 @@ pub enum ReasonCode {
     /// what refused.
     #[serde(rename = "host/registry-unwritable")]
     HostRegistryUnwritable,
+    /// `host/read-failed` — the store answered a read with no rows: its file,
+    /// its driver or its environment refused a statement the read ran, or the
+    /// declaration the read was compiled under is not the schema its snapshot
+    /// pins, which is a host defect. Neither is anything the request can
+    /// change. A read the store finds its derived data damaged for answers
+    /// `host/entry-untrusted` instead, with the untrusted reason whose `kind`
+    /// is `store_damaged_rebuilding`. The
+    /// detail is which failure, and the store's own account.
+    #[serde(rename = "host/read-failed")]
+    HostReadFailed,
     /// `vault/ambiguous-root` — the directory that was asked about is
     /// contained by more than one registration, so the ask names no one vault.
     /// It answers a resolution of a directory and never a request against an
@@ -168,11 +353,49 @@ pub enum ReasonCode {
     /// serving what its control files state. The detail is what it met.
     #[serde(rename = "vault/reload-failed")]
     VaultReloadFailed,
-    /// `vault/cursor-order-changed` — the cursor was minted under one order
-    /// and continued under another, so the position it names is in a sequence
-    /// that no longer exists. The detail is the two orders.
+    /// `vault/cursor-order-changed` — the cursor names no position in the
+    /// order the request reads: it was minted under one order and continued
+    /// under another — another schema's order, another key, or another
+    /// direction. The detail is the two orders.
     #[serde(rename = "vault/cursor-order-changed")]
     VaultCursorOrderChanged,
+    /// `vault/unreadable-bound` — a value a comparing part names — an
+    /// equality, an inequality, a membership or a before/after bound — on a
+    /// key declared with a typed order does not read as that type, so it
+    /// names no place in the key's order. The detail is the key and the
+    /// value.
+    #[serde(rename = "vault/unreadable-bound")]
+    VaultUnreadableBound,
+    /// `request/out-of-bound` — a count the request names on its own shape is
+    /// outside the range that count's bound holds it to — a page limit
+    /// outside 1 to the maximum, or too many values in one membership part —
+    /// or a membership part names no value at all. It answers a store's
+    /// refusal of a count outside its bound or of an empty membership part.
+    /// The detail is which bound, the count the request named and the most
+    /// it may be, and the key a membership part is on.
+    #[serde(rename = "request/out-of-bound")]
+    RequestOutOfBound,
+    /// `request/part-not-taken` — the request carries a part the answer it
+    /// asks for does not take: an anchor or a column on a collection page, a
+    /// column on a section or a block, a cursor or a limit on anything but a
+    /// collection page, a cursor on a summary, which is not paged, or a part
+    /// this build does not know, which no answer takes. The detail is the
+    /// part, and the answer that does not take it.
+    #[serde(rename = "request/part-not-taken")]
+    RequestPartNotTaken,
+    /// `request/cursor-not-taken` — the cursor names no position among the
+    /// rows the request pages: it names a position among another kind of
+    /// row, or among another collection of a document, or among the same
+    /// kind of row by a shape the request does not read — a tally's cursor
+    /// of another grouping width or with a member naming no place in its
+    /// key's order, a finding's cursor minted at another document than the
+    /// one a get pages, a path order's document cursor carrying a sort
+    /// value, a hit's, a facet's, a finding's or an ordinal's cursor carrying
+    /// a schema fingerprint, which no page of those rows mints, or a position
+    /// past what the store counts. The detail is the rows the cursor names a
+    /// position among and the rows the request pages.
+    #[serde(rename = "request/cursor-not-taken")]
+    RequestCursorNotTaken,
     /// `engine/not-enabled` — the vault has not enabled the rung the request
     /// asked for. The detail is the rung, and what to do about it.
     #[serde(rename = "engine/not-enabled")]
@@ -378,6 +601,18 @@ pub enum ErrorDetail {
         /// reading a message or a log. Clients never match on it.
         detail: String,
     },
+    /// The detail of `host/read-failed`: which failure, and the store's own
+    /// account of it.
+    #[serde(rename = "host/read-failed")]
+    #[non_exhaustive]
+    ReadFailed {
+        /// Which failure the store met, with the two fingerprints where the
+        /// declaration was not the pinned schema's.
+        failure: ReadFailure,
+        /// The store's own account of what refused, in words, for a person
+        /// reading a message or a log. Clients never match on it.
+        detail: String,
+    },
     /// The detail of `vault/ambiguous-root`: every registered name whose
     /// registration contains the directory that was asked about. No entry is
     /// involved; the ask is a resolution of a directory.
@@ -431,6 +666,45 @@ pub enum ErrorDetail {
         /// The order the cursor named and the order that stands, as the
         /// continuation's own account of the change.
         order: CursorOrderChanged,
+    },
+    /// The detail of `vault/unreadable-bound`: the key and the value.
+    #[serde(rename = "vault/unreadable-bound")]
+    #[non_exhaustive]
+    UnreadableBound {
+        /// The key declared with the typed order the value was read against.
+        key: String,
+        /// The value that does not read as that key's declared type.
+        value: String,
+    },
+    /// The detail of `request/out-of-bound`: which bound, the count the
+    /// request named and the most it may be, and the key a membership part
+    /// is on.
+    #[serde(rename = "request/out-of-bound")]
+    #[non_exhaustive]
+    OutOfBound {
+        /// The bound the request's own shape violated.
+        bound: RequestBound,
+    },
+    /// The detail of `request/part-not-taken`: the part, and the answer that
+    /// does not take it.
+    #[serde(rename = "request/part-not-taken")]
+    #[non_exhaustive]
+    PartNotTaken {
+        /// The part the request carries.
+        part: RequestPart,
+        /// The answer the request asks for, and `null` where the part is one
+        /// this build does not know, which no answer takes.
+        answer: Option<AnswerShape>,
+    },
+    /// The detail of `request/cursor-not-taken`: the rows the cursor names a
+    /// position among, and the rows the request pages.
+    #[serde(rename = "request/cursor-not-taken")]
+    #[non_exhaustive]
+    CursorNotTaken {
+        /// The rows the cursor names a position among.
+        cursor: PagedRows,
+        /// The rows the request pages.
+        paged: PagedRows,
     },
     /// The detail of `engine/not-enabled`: which rung, and what enables it.
     #[serde(rename = "engine/not-enabled")]
@@ -523,6 +797,15 @@ impl ErrorDetail {
         }
     }
 
+    /// The detail of `host/read-failed`, for `failure`, described by
+    /// `detail`.
+    pub fn read_failed(failure: ReadFailure, detail: impl Into<String>) -> Self {
+        ErrorDetail::ReadFailed {
+            failure,
+            detail: detail.into(),
+        }
+    }
+
     /// The detail of `vault/ambiguous-root`, for the `candidates` the
     /// directory resolves under.
     ///
@@ -567,6 +850,33 @@ impl ErrorDetail {
         ErrorDetail::CursorOrderChanged { order }
     }
 
+    /// The detail of `vault/unreadable-bound`, for the `key` declared with
+    /// the typed order `value` does not read as.
+    pub fn unreadable_bound(key: impl Into<String>, value: impl Into<String>) -> Self {
+        ErrorDetail::UnreadableBound {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    /// The detail of `request/out-of-bound`, for the `bound` the request's
+    /// own shape violated.
+    pub const fn out_of_bound(bound: RequestBound) -> Self {
+        ErrorDetail::OutOfBound { bound }
+    }
+
+    /// The detail of `request/part-not-taken`, for the `part` the `answer`
+    /// does not take, and no answer for a part this build does not know.
+    pub const fn part_not_taken(part: RequestPart, answer: Option<AnswerShape>) -> Self {
+        ErrorDetail::PartNotTaken { part, answer }
+    }
+
+    /// The detail of `request/cursor-not-taken`, for a `cursor` naming a
+    /// position among rows the request, paging `paged`, does not read it in.
+    pub const fn cursor_not_taken(cursor: PagedRows, paged: PagedRows) -> Self {
+        ErrorDetail::CursorNotTaken { cursor, paged }
+    }
+
     /// The detail of `engine/not-enabled`, for `rung`, described by `detail`.
     pub fn engine_not_enabled(rung: Rung, detail: impl Into<String>) -> Self {
         ErrorDetail::EngineNotEnabled {
@@ -604,12 +914,17 @@ impl ErrorDetail {
             ErrorDetail::EntryNotReady { .. } => ReasonCode::HostEntryNotReady,
             ErrorDetail::ReaderUnavailable { .. } => ReasonCode::HostReaderUnavailable,
             ErrorDetail::RegistryUnwritable { .. } => ReasonCode::HostRegistryUnwritable,
+            ErrorDetail::ReadFailed { .. } => ReasonCode::HostReadFailed,
             ErrorDetail::AmbiguousRoot { .. } => ReasonCode::VaultAmbiguousRoot,
             ErrorDetail::AmbiguousTarget { .. } => ReasonCode::VaultAmbiguousTarget,
             ErrorDetail::UnknownTarget { .. } => ReasonCode::VaultUnknownTarget,
             ErrorDetail::ReloadBusy { .. } => ReasonCode::VaultReloadBusy,
             ErrorDetail::ReloadFailed { .. } => ReasonCode::VaultReloadFailed,
             ErrorDetail::CursorOrderChanged { .. } => ReasonCode::VaultCursorOrderChanged,
+            ErrorDetail::UnreadableBound { .. } => ReasonCode::VaultUnreadableBound,
+            ErrorDetail::OutOfBound { .. } => ReasonCode::RequestOutOfBound,
+            ErrorDetail::PartNotTaken { .. } => ReasonCode::RequestPartNotTaken,
+            ErrorDetail::CursorNotTaken { .. } => ReasonCode::RequestCursorNotTaken,
             ErrorDetail::EngineNotEnabled { .. } => ReasonCode::EngineNotEnabled,
             ErrorDetail::EngineUnavailable { .. } => ReasonCode::EngineUnavailable,
             ErrorDetail::EngineFailed { .. } => ReasonCode::EngineFailed,
@@ -751,12 +1066,17 @@ mod tests {
             ReasonCode::HostEntryNotReady => "host/entry-not-ready",
             ReasonCode::HostReaderUnavailable => "host/reader-unavailable",
             ReasonCode::HostRegistryUnwritable => "host/registry-unwritable",
+            ReasonCode::HostReadFailed => "host/read-failed",
             ReasonCode::VaultAmbiguousRoot => "vault/ambiguous-root",
             ReasonCode::VaultAmbiguousTarget => "vault/ambiguous-target",
             ReasonCode::VaultUnknownTarget => "vault/unknown-target",
             ReasonCode::VaultReloadBusy => "vault/reload-busy",
             ReasonCode::VaultReloadFailed => "vault/reload-failed",
             ReasonCode::VaultCursorOrderChanged => "vault/cursor-order-changed",
+            ReasonCode::VaultUnreadableBound => "vault/unreadable-bound",
+            ReasonCode::RequestOutOfBound => "request/out-of-bound",
+            ReasonCode::RequestPartNotTaken => "request/part-not-taken",
+            ReasonCode::RequestCursorNotTaken => "request/cursor-not-taken",
             ReasonCode::EngineNotEnabled => "engine/not-enabled",
             ReasonCode::EngineUnavailable => "engine/unavailable",
             ReasonCode::EngineFailed => "engine/failed",
@@ -794,6 +1114,9 @@ mod tests {
             ReasonCode::HostRegistryUnwritable => {
                 ErrorDetail::registry_unwritable("the registry file is read-only")
             }
+            ReasonCode::HostReadFailed => {
+                ErrorDetail::read_failed(ReadFailure::statement(), "the statement refused")
+            }
             ReasonCode::VaultAmbiguousRoot => ErrorDetail::ambiguous_root(two_names()),
             ReasonCode::VaultAmbiguousTarget => ErrorDetail::ambiguous_target(
                 a_target(),
@@ -815,6 +1138,16 @@ mod tests {
             ReasonCode::VaultCursorOrderChanged => ErrorDetail::cursor_order_changed(
                 CursorOrderChanged::new("fp-1", Some("fp-2".to_string())),
             ),
+            ReasonCode::VaultUnreadableBound => ErrorDetail::unreadable_bound("due", "not-a-date"),
+            ReasonCode::RequestOutOfBound => {
+                ErrorDetail::out_of_bound(RequestBound::page_rows(5_000, 1_024))
+            }
+            ReasonCode::RequestPartNotTaken => {
+                ErrorDetail::part_not_taken(RequestPart::Cursor, Some(AnswerShape::Summary))
+            }
+            ReasonCode::RequestCursorNotTaken => {
+                ErrorDetail::cursor_not_taken(PagedRows::Tally, PagedRows::Document)
+            }
             ReasonCode::EngineNotEnabled => ErrorDetail::engine_not_enabled(
                 Rung::Vector,
                 "enable the engine section in .norn/config.toml and run vault reload",

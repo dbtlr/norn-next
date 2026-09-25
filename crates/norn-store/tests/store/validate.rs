@@ -29,7 +29,7 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    Cursor, CursorKey, Direction, FindingKind, FindingRow, Hint, KindTally, Predicate,
+    Cursor, CursorKey, Direction, FindingKind, FindingRow, Hint, KindTally, PagedRows, Predicate,
     ResolutionTarget, Severity, Sort, SortKey, Unsatisfied, ValidateParams, ValidateReport,
     VaultAddress, VaultName,
 };
@@ -708,11 +708,71 @@ fn a_cursor_that_is_no_position_among_the_findings_is_refused() {
                 &declared()
             )
             .expect_err("the cursor is refused"),
-        PageRefusal::NotAFindingCursor
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Document,
+            paged: PagedRows::Finding,
+        }
     );
     assert_eq!(
-        PageRefusal::NotAFindingCursor.to_string(),
-        "the cursor names no position among this validate's findings"
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Document,
+            paged: PagedRows::Finding,
+        }
+        .to_string(),
+        "the cursor names a position among documents, and the request pages findings"
+    );
+}
+
+/// **A finding's cursor whose id is past what the store counts is refused**
+/// as no position among the findings.
+#[test]
+fn a_finding_cursor_past_what_the_store_counts_is_refused() {
+    let validating_store = Validating::new("validate-cursor-past");
+    let reading = validating_store.validate(&validating()).snapshot;
+    let past = u64::try_from(i64::MAX).expect("a positive bound") + 1;
+    assert_eq!(
+        validating_store
+            .snapshot()
+            .validate(
+                &validating().with_after(Cursor::new(
+                    reading,
+                    CursorKey::finding(FindingKind::UndeclaredTag, "a.md", past)
+                )),
+                &declared()
+            )
+            .expect_err("the cursor is refused"),
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Finding,
+            paged: PagedRows::Finding,
+        }
+    );
+}
+
+/// **A finding's cursor carrying a schema fingerprint is refused as not
+/// taken**: no page of findings mints one, so it names no position among
+/// them, even under the fingerprint the snapshot pins.
+#[test]
+fn a_finding_cursor_carrying_a_fingerprint_is_not_taken() {
+    let validating_store = Validating::new("validate-cursor-fingerprint");
+    let reading = validating_store.validate(&validating()).snapshot;
+    let forged = Cursor::new(
+        norn_wire::Snapshot::new(
+            reading.epoch.clone(),
+            reading.generation,
+            Some(VALIDATE_SCHEMA.to_string()),
+            None,
+        ),
+        CursorKey::finding(FindingKind::UndeclaredTag, "a.md", 1),
+    );
+    assert_eq!(
+        validating_store
+            .snapshot()
+            .validate(&validating().with_after(forged), &declared())
+            .expect_err("the cursor is refused"),
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Finding,
+            paged: PagedRows::Finding,
+        }
     );
 }
 

@@ -153,7 +153,7 @@ pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenanc
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use read::{
     DEFAULT_PAGE, FieldOrder, IN_VALUES_CEILING, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
-    ReadStatement, RequestPart, TargetAmbiguity,
+    ReadStatement, TargetAmbiguity,
 };
 // The open ceremony's own vocabulary, which is this crate's too: a store is
 // one client of that ceremony, and the rung a disagreement names is the same

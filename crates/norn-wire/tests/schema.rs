@@ -11,23 +11,24 @@
 //! restating it.
 
 use norn_wire::{
-    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AttachMode, Attention, BlockRow,
-    BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage,
-    CollectionSelector, Column, ComparedBy, ContainerKind, ControlFileFailure, CountParams,
-    CountReport, Cursor, CursorKey, DescribeParams, DescribeReport, Direction, Directory,
-    DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift, EngineHealth,
-    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType,
-    FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope, Fingerprints,
-    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LinkFamily,
-    LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, Moved, NameSet, NotReady,
-    Page, PathRuleKind, PollBackend, Predicate, Published, ReasonCode, RegisterParams,
-    RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome,
-    ReloadParams, ReloadReport, Replace, RequestScope, ResolutionTarget, ResolveParams,
-    ResolveReport, RollUp, Rung, RungReport, RungSet, SchemaSource, Score, SearchParams,
-    SearchReport, SetParams, SetReport, Severity, Snapshot, Sort, SortKey, Span, StatusParams,
-    StatusReport, TagRow, TagSource, TagStance, Tally, TrustState, UnregisterParams,
-    UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
-    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AttachMode,
+    Attention, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection,
+    CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ControlFileFailure,
+    CountParams, CountReport, Cursor, CursorKey, DescribeParams, DescribeReport, Direction,
+    Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift,
+    EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind,
+    FieldType, FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
+    Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally,
+    LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, Moved, NameSet,
+    NotReady, Page, PagedRows, PathRuleKind, PollBackend, Predicate, Published, ReadFailure,
+    ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
+    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace, RequestBound, RequestPart,
+    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport,
+    RungSet, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity,
+    Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
+    TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams,
+    ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb,
+    WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -475,12 +476,17 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "host/entry-not-ready",
             "host/reader-unavailable",
             "host/registry-unwritable",
+            "host/read-failed",
             "vault/ambiguous-root",
             "vault/ambiguous-target",
             "vault/unknown-target",
             "vault/reload-busy",
             "vault/reload-failed",
             "vault/cursor-order-changed",
+            "vault/unreadable-bound",
+            "request/out-of-bound",
+            "request/part-not-taken",
+            "request/cursor-not-taken",
             "engine/not-enabled",
             "engine/unavailable",
             "engine/failed",
@@ -647,12 +653,17 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "host/entry-not-ready",
             "host/reader-unavailable",
             "host/registry-unwritable",
+            "host/read-failed",
             "vault/ambiguous-root",
             "vault/ambiguous-target",
             "vault/unknown-target",
             "vault/reload-busy",
             "vault/reload-failed",
             "vault/cursor-order-changed",
+            "vault/unreadable-bound",
+            "request/out-of-bound",
+            "request/part-not-taken",
+            "request/cursor-not-taken",
             "engine/not-enabled",
             "engine/unavailable",
             "engine/failed",
@@ -1480,6 +1491,56 @@ fn a_not_ready_state_and_a_reload_failure_advertise_their_tags() {
     assert_eq!(
         not_ready["properties"]["state"]["$ref"].as_str(),
         Some("#/$defs/NotReady")
+    );
+}
+
+/// The read refusals advertise their facts as nested typed shapes: a bound,
+/// a part and an answer, two rows, and a failure, each with its tag pinned.
+#[test]
+fn a_read_refusal_advertises_the_typed_facts_it_carries() {
+    let schema = schema_of::<ErrorDetail>();
+    let branch = |code: &str| {
+        branches(&schema)
+            .iter()
+            .find(|branch| tag_constant(branch, "code") == Some(code))
+            .unwrap_or_else(|| panic!("the {code} branch"))
+            .clone()
+    };
+    let cases: [(&str, &[&str]); 4] = [
+        ("request/out-of-bound", &["code", "bound"]),
+        ("request/part-not-taken", &["code", "part", "answer"]),
+        ("request/cursor-not-taken", &["code", "cursor", "paged"]),
+        ("host/read-failed", &["code", "failure", "detail"]),
+    ];
+    for (code, properties) in cases {
+        assert_eq!(
+            property_names(&branch(code)),
+            properties.iter().copied().collect(),
+            "{code}"
+        );
+    }
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<RequestBound>(), "kind")),
+        sorted(["page_rows", "membership_values", "empty_membership"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<RequestPart>(), "kind")),
+        sorted(["anchor", "column", "cursor", "limit", "unknown"])
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<AnswerShape>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("an answer branch is not a pinned string: {branch}"))
+        })),
+        sorted(["collection_page", "record", "section", "block", "summary"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<PagedRows>(), "row")),
+        sorted(["document", "hit", "tally", "finding", "facet", "collection"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<ReadFailure>(), "kind")),
+        sorted(["statement", "declaration_not_pinned"])
     );
 }
 

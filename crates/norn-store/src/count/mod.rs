@@ -86,8 +86,8 @@ mod statement;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    AnswerAdvisory, CountParams, CountReport, Cursor, CursorKey, GroupKey, Moved, Page, Tally,
-    Unsatisfied,
+    AnswerAdvisory, CountParams, CountReport, Cursor, CursorKey, GroupKey, Moved, Page, PagedRows,
+    RequestPart, Tally, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -203,7 +203,7 @@ impl Snapshot {
     /// from another schema than the snapshot pins, a part the store keeps no
     /// index of, and a bound that does not read as its key's declared type.
     /// And refused as a cursor that names no position among the request's
-    /// tallies ([`PageRefusal::NotATallyCursor`]), or one minted under
+    /// tallies ([`PageRefusal::CursorNotTaken`]), or one minted under
     /// another schema fingerprint than the grouping reads under
     /// ([`PageRefusal::OrderChanged`]).
     pub fn count(
@@ -318,11 +318,12 @@ impl Snapshot {
         declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<(Vec<Option<String>>, Vec<Moved>), PageRefusal> {
+        let not_taken = || PageRefusal::cursor_not_taken(cursor, PagedRows::Tally);
         let CursorKey::Tally { group, .. } = cursor.key() else {
-            return Err(PageRefusal::NotATallyCursor);
+            return Err(not_taken());
         };
         if group.len() != members.len() {
-            return Err(PageRefusal::NotATallyCursor);
+            return Err(not_taken());
         }
         let moved = self.judge_reading(cursor, order, false, lookups)?;
         let at = members
@@ -332,7 +333,7 @@ impl Snapshot {
                 None => Ok(None),
                 Some(label) => sort_key(member, label, declared)
                     .map(Some)
-                    .ok_or(PageRefusal::NotATallyCursor),
+                    .ok_or_else(not_taken),
             })
             .collect::<Result<Vec<Option<String>>, PageRefusal>>()?;
         Ok((at, moved))
@@ -456,7 +457,7 @@ impl Snapshot {
                     key: None,
                 }),
                 _ => Err(PageRefusal::UnknownPart {
-                    part: "a group key",
+                    part: RequestPart::unknown("a group key"),
                 }),
             })
             .collect::<Result<Vec<Member<'a>>, PageRefusal>>()?;

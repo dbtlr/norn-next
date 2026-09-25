@@ -70,7 +70,7 @@
 //! ordinal the page stopped at as its cursor
 //! ([`norn_wire::CursorKey::Ordinal`]). Each collection is its own row type,
 //! so a cursor minted paging one refuses on another
-//! ([`PageRefusal::CursorOfAnotherCollection`]). An ordinal cursor names its
+//! ([`PageRefusal::CursorNotTaken`], naming the two). An ordinal cursor names its
 //! collection and a position in it, and no document, so it continues the same
 //! collection of any document from that position, and one past the last row
 //! answers an empty page. The findings standing over the document are paged
@@ -78,8 +78,9 @@
 //! validate read them in at one path, with a finding's cursor
 //! ([`norn_wire::CursorKey::Finding`]). That cursor names the path it was
 //! minted at, so at another document's path it names no position
-//! ([`PageRefusal::NotACollectionCursor`]), as an ordinal cursor naming the
-//! findings does. Either reads one row past its bound to learn a next page
+//! ([`PageRefusal::CursorNotTaken`], a finding's cursor on findings paged),
+//! and an ordinal cursor naming the findings names none either, since the
+//! findings are paged by a finding's cursor. Either reads one row past its bound to learn a next page
 //! exists, through the keyset page every read builder reads
 //! ([`Snapshot::read_page`]).
 //!
@@ -95,8 +96,9 @@ use std::ops::Range;
 use norn_db::EmittedPlan;
 use norn_db::rusqlite::Row;
 use norn_wire::{
-    Anchor, BodyText, CollectionPage, CollectionSelector, Cursor, CursorKey, DocumentRow,
-    FindingKind, GetParams, GetReport, Hint, Page, ResolutionTarget, Unsatisfied,
+    Anchor, AnswerShape, BodyText, CollectionPage, CollectionSelector, Cursor, CursorKey,
+    DocumentRow, FindingKind, GetParams, GetReport, Hint, Page, PagedRows, RequestPart,
+    ResolutionTarget, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -107,7 +109,7 @@ use crate::find::{
     tag_row, wire_block, wire_heading,
 };
 use crate::read::{
-    Lookups, Naming, PageRefusal, ReadFilter, ReadStatement, RequestPart, Stepped, TargetAmbiguity,
+    Lookups, Naming, PageRefusal, ReadFilter, ReadStatement, Stepped, TargetAmbiguity,
     finding_base, page_limit, wire_path,
 };
 use crate::request::{Reading, stored_block, stored_heading, unreadable};
@@ -242,45 +244,47 @@ impl<'a> Shape<'a> {
     /// does not take: an anchor or a column on a collection page, a column on
     /// a section or a block, and a cursor or a limit on anything but a
     /// collection page.
+    ///
+    /// The answer is classified before any part is judged against it, so a
+    /// refused part always names the answer that does not take it. An anchor
+    /// this build does not know classifies as no answer, so it is refused
+    /// ([`PageRefusal::UnknownPart`]) ahead of any other part the request
+    /// carries.
     fn of(params: &'a GetParams) -> Result<Self, PageRefusal> {
         let not_taken = |part, answer| Err(PageRefusal::PartNotTaken { part, answer });
         if let Some(selector) = params.collection {
             if params.target.anchor().is_some() {
-                return not_taken(RequestPart::Anchor, "a collection page");
+                return not_taken(RequestPart::Anchor, AnswerShape::CollectionPage);
             }
             if !params.columns.is_empty() {
-                return not_taken(RequestPart::Column, "a collection page");
+                return not_taken(RequestPart::Column, AnswerShape::CollectionPage);
             }
             return Ok(Shape::Collection(selector));
         }
+        let (answer, anchored) = match params.target.anchor() {
+            None => (AnswerShape::Record, None),
+            Some(Anchor::Heading { text, .. }) => {
+                (AnswerShape::Section, Some(Shape::Section(text.as_str())))
+            }
+            Some(Anchor::Block { id, .. }) => (AnswerShape::Block, Some(Shape::Block(id.as_str()))),
+            Some(_) => {
+                return Err(PageRefusal::UnknownPart {
+                    part: RequestPart::unknown("an anchor"),
+                });
+            }
+        };
         if params.after.is_some() {
-            return not_taken(RequestPart::Cursor, "a record, a section or a block");
+            return not_taken(RequestPart::Cursor, answer);
         }
         if params.limit.is_some() {
-            return not_taken(RequestPart::Limit, "a record, a section or a block");
+            return not_taken(RequestPart::Limit, answer);
         }
-        let anchored = match params.target.anchor() {
-            None => {
-                return Ok(Shape::Record(if params.columns.is_empty() {
-                    Projection::whole()
-                } else {
-                    Projection::of(&params.columns)?
-                }));
-            }
-            Some(Anchor::Heading { text, .. }) => Shape::Section(text.as_str()),
-            Some(Anchor::Block { id, .. }) => Shape::Block(id.as_str()),
-            Some(_) => return Err(PageRefusal::UnknownPart { part: "an anchor" }),
-        };
-        if !params.columns.is_empty() {
-            return not_taken(
-                RequestPart::Column,
-                match anchored {
-                    Shape::Section(_) => "a section",
-                    _ => "a block",
-                },
-            );
+        match anchored {
+            None if params.columns.is_empty() => Ok(Shape::Record(Projection::whole())),
+            None => Ok(Shape::Record(Projection::of(&params.columns)?)),
+            Some(_) if !params.columns.is_empty() => not_taken(RequestPart::Column, answer),
+            Some(anchored) => Ok(anchored),
         }
-        Ok(anchored)
     }
 }
 
@@ -594,7 +598,7 @@ impl Snapshot {
             CollectionSelector::Tags => Nested::Tags,
             _ => {
                 return Err(PageRefusal::UnknownPart {
-                    part: "a collection",
+                    part: RequestPart::unknown("a collection"),
                 });
             }
         };
@@ -640,21 +644,17 @@ impl Snapshot {
         let Some(cursor) = after else {
             return Ok((None, Vec::new()));
         };
-        let index = match cursor.key() {
-            CursorKey::Ordinal { of, index, .. } if *of == paged => index,
-            CursorKey::Ordinal { of, .. } => {
-                return Err(PageRefusal::CursorOfAnotherCollection { minted: *of, paged });
-            }
-            CursorKey::Finding { .. } => {
-                return Err(PageRefusal::CursorOfAnotherCollection {
-                    minted: CollectionSelector::Findings,
-                    paged,
-                });
-            }
-            _ => return Err(PageRefusal::NotACollectionCursor),
+        let not_taken =
+            || PageRefusal::cursor_not_taken(cursor, PagedRows::Collection { of: paged });
+        let CursorKey::Ordinal { of, index, .. } = cursor.key() else {
+            return Err(not_taken());
         };
-        let index = i64::try_from(*index).map_err(|_| PageRefusal::NotACollectionCursor)?;
-        let moved = self.judge_reading(cursor, None, false, lookups)?;
+        if *of != paged {
+            return Err(not_taken());
+        }
+        let index = i64::try_from(*index).map_err(|_| not_taken())?;
+        let moved =
+            self.judge_unordered_reading(cursor, PagedRows::Collection { of: paged }, lookups)?;
         Ok((Some(index), moved))
     }
 
@@ -712,27 +712,18 @@ impl Snapshot {
         let (resume, moved) = match after {
             None => (None, Vec::new()),
             Some(cursor) => {
-                let (kind, path, id) = match cursor.key() {
-                    CursorKey::Finding { kind, path, id, .. } => (kind, path, id),
-                    // The findings are paged by a finding's cursor, so an
-                    // ordinal naming them was minted by no page.
-                    CursorKey::Ordinal {
-                        of: CollectionSelector::Findings,
-                        ..
-                    } => return Err(PageRefusal::NotACollectionCursor),
-                    CursorKey::Ordinal { of, .. } => {
-                        return Err(PageRefusal::CursorOfAnotherCollection {
-                            minted: *of,
-                            paged: CollectionSelector::Findings,
-                        });
-                    }
-                    _ => return Err(PageRefusal::NotACollectionCursor),
+                // The findings are paged by a finding's cursor, so an ordinal
+                // naming them was minted by no page, and one at another path
+                // names no position among this document's findings.
+                let not_taken = || PageRefusal::cursor_not_taken(cursor, PagedRows::Finding);
+                let CursorKey::Finding { kind, path, id, .. } = cursor.key() else {
+                    return Err(not_taken());
                 };
                 if *path != named.path {
-                    return Err(PageRefusal::NotACollectionCursor);
+                    return Err(not_taken());
                 }
-                let id = i64::try_from(*id).map_err(|_| PageRefusal::NotACollectionCursor)?;
-                let moved = self.judge_reading(cursor, None, false, lookups)?;
+                let id = i64::try_from(*id).map_err(|_| not_taken())?;
+                let moved = self.judge_unordered_reading(cursor, PagedRows::Finding, lookups)?;
                 (Some((kind.as_str(), id)), moved)
             }
         };

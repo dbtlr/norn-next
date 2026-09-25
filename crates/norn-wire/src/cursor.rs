@@ -61,7 +61,10 @@
 //! key names the sort key and direction its page was read in, so such an
 //! answer refuses a document cursor continued in another key or direction
 //! too: the fingerprint says which schema an order is taken under, and the key
-//! says which order it is.
+//! says which order it is. Hits, facets, findings and a collection's ordinals
+//! are in no schema's order and no page of them mints a fingerprint, so an
+//! answer paging them refuses a cursor carrying one as naming no position
+//! among its rows rather than as an order that changed.
 //!
 //! **Two asymmetries follow from those rules.** A cursor minted without a
 //! sidecar revision and continued where a sidecar now answers reports nothing
@@ -331,6 +334,47 @@ impl CursorKey {
     pub const fn ordinal(of: CollectionSelector, index: u64) -> Self {
         CursorKey::Ordinal { of, index }
     }
+
+    /// The rows this key names a position among.
+    pub const fn rows(&self) -> PagedRows {
+        match self {
+            CursorKey::Document { .. } => PagedRows::Document,
+            CursorKey::Hit { .. } => PagedRows::Hit,
+            CursorKey::Tally { .. } => PagedRows::Tally,
+            CursorKey::Finding { .. } => PagedRows::Finding,
+            CursorKey::Facet { .. } => PagedRows::Facet,
+            CursorKey::Ordinal { of, .. } => PagedRows::Collection { of: *of },
+        }
+    }
+}
+
+/// The rows a page is read over: the row a cursor names a position among, or
+/// the rows a request pages.
+///
+/// On the wire it is an object tagged `row`, the tag a cursor key carries:
+/// `{"row":"document"}`, `{"row":"collection","of":"links"}`. A get paging a
+/// document's findings pages `{"row":"finding"}`, the rows a finding's cursor
+/// names a position among, and every other collection by its position in it.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "row", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PagedRows {
+    /// Documents, as a find pages them.
+    Document,
+    /// Ranked hits, as a search pages them.
+    Hit,
+    /// Tallies, as a count pages them.
+    Tally,
+    /// Findings, as a validate pages them and a get pages one document's.
+    Finding,
+    /// Facets, as a describe pages them.
+    Facet,
+    /// One nested collection of a document, by position in it, as a get
+    /// pages every collection but the findings.
+    Collection {
+        /// The collection.
+        of: CollectionSelector,
+    },
 }
 
 /// What a cursor was minted under, and what an establishment reads now.

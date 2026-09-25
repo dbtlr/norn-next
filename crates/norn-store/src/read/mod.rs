@@ -34,8 +34,8 @@ mod run;
 mod suggest;
 
 use norn_wire::{
-    CandidateHead, CollectionSelector, CursorOrderChanged, Direction, Hint, ResolutionTarget, Sort,
-    SortKey,
+    AnswerShape, CandidateHead, CollectionSelector, Cursor, CursorOrderChanged, Direction, Hint,
+    PagedRows, RequestPart, ResolutionTarget, Sort, SortKey,
 };
 
 use crate::count::CountStatement;
@@ -76,21 +76,22 @@ pub const DEFAULT_PAGE: usize = 100;
 pub const IN_VALUES_CEILING: usize = 256;
 
 /// A count a request names that the store holds to a range.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReadBound {
     /// The rows a page holds: `1..=`[`MAX_PAGE`].
     PageRows,
-    /// The values one membership part names: at most [`IN_VALUES_CEILING`].
-    /// A part naming none is refused as [`PageRefusal::EmptyMembership`].
-    MembershipValues,
+    /// The values the membership part on `key` names: at most
+    /// [`IN_VALUES_CEILING`]. A part naming none is refused as
+    /// [`PageRefusal::EmptyMembership`].
+    MembershipValues { key: String },
 }
 
 impl ReadBound {
     /// The most the count may be.
-    pub const fn ceiling(self) -> usize {
+    pub const fn ceiling(&self) -> usize {
         match self {
             ReadBound::PageRows => MAX_PAGE,
-            ReadBound::MembershipValues => IN_VALUES_CEILING,
+            ReadBound::MembershipValues { .. } => IN_VALUES_CEILING,
         }
     }
 }
@@ -189,8 +190,7 @@ impl From<CountStatement> for ReadStatement {
 /// field, onto the wire's `vault/ambiguous-target` detail
 /// ([`norn_wire::ErrorDetail::AmbiguousTarget`]); the store keeps its own
 /// type because a refusal is typed by what it refuses and the wire detail is
-/// one variant of every detail an error carries. The mapping lives in the
-/// host's get handler (NORN-230), which turns a refusal into a wire error.
+/// one variant of every detail an error carries.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetAmbiguity {
     /// The target as the request named it, anchor included.
@@ -204,48 +204,8 @@ pub struct TargetAmbiguity {
     pub hint: Hint,
 }
 
-/// A part of a get request an answer may not take, as a refusal names it.
-///
-/// On its own it reads with its article, `an anchor`; a refusal that
-/// negates it names the noun alone, `a section takes no anchor`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum RequestPart {
-    Anchor,
-    Column,
-    Cursor,
-    Limit,
-}
-
-impl RequestPart {
-    /// The part's noun.
-    pub const fn noun(self) -> &'static str {
-        match self {
-            RequestPart::Anchor => "anchor",
-            RequestPart::Column => "column",
-            RequestPart::Cursor => "cursor",
-            RequestPart::Limit => "limit",
-        }
-    }
-
-    /// The indefinite article the noun takes.
-    pub const fn article(self) -> &'static str {
-        match self {
-            RequestPart::Anchor => "an",
-            RequestPart::Column | RequestPart::Cursor | RequestPart::Limit => "a",
-        }
-    }
-}
-
-impl std::fmt::Display for RequestPart {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{} {}", self.article(), self.noun())
-    }
-}
-
 /// Why a read builder answered no page.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
 pub enum PageRefusal {
     /// A value a comparing part names — an equality, an inequality, a
     /// membership or a `before`/`after` bound — on a key declared with a typed
@@ -264,20 +224,18 @@ pub enum PageRefusal {
     /// minted under a schema fingerprint the snapshot no longer reads, or in
     /// another order than the request's.
     OrderChanged(CursorOrderChanged),
-    /// The cursor names a position among rows that are not documents.
-    NotADocumentCursor,
-    /// The cursor names no position among a count's tallies: it is not a
-    /// tally's, its grouping tuple is another width than the request's, or a
-    /// member names no place in its key's order.
-    NotATallyCursor,
-    /// The cursor names no position among a validate's findings: it is not a
-    /// finding's.
-    NotAFindingCursor,
-    /// The cursor names no position among a describe's facets: it is not a
-    /// facet's.
-    NotAFacetCursor,
-    /// The cursor names no position among a search's hits: it is not a hit's.
-    NotAHitCursor,
+    /// The cursor names no position among the rows the request pages.
+    /// `cursor` is the rows its key names a position among, and `paged` the
+    /// rows the request pages. The two differ where the cursor is another
+    /// kind of row's, or another collection of a document's; they are equal
+    /// where the cursor's key is the paged rows' kind and names no position
+    /// among them: a tally's of another grouping width than the request's or
+    /// with a member naming no place in its key's order, a finding's at
+    /// another path than the document a get pages, a path order's carrying a
+    /// sort value, a hit's, a facet's, a finding's or an ordinal's carrying a
+    /// schema fingerprint, which no page of those rows mints, or one whose
+    /// position is past what the store counts.
+    CursorNotTaken { cursor: PagedRows, paged: PagedRows },
     /// The request answers a summary and carries a cursor. A summary answers
     /// every tally at once and is not paged, so no cursor names a position it
     /// continues from.
@@ -287,40 +245,29 @@ pub enum PageRefusal {
     /// in-process.
     EmptyMembership { key: String },
     /// A count the request names is outside the range `bound` holds it to:
-    /// `given` rows for a page, or `given` values for one membership part.
+    /// `given` rows for a page, or `given` values for the membership part on
+    /// the key the bound names.
     OutOfBound { bound: ReadBound, given: usize },
-    /// The request carries a part this build of the store does not know.
-    UnknownPart { part: &'static str },
+    /// The request carries a part this build of the store does not know:
+    /// `part` is [`RequestPart::Unknown`], naming it in words.
+    UnknownPart { part: RequestPart },
     /// The target names more than one document.
     AmbiguousTarget(Box<TargetAmbiguity>),
     /// The target names no document.
     UnknownTarget { target: ResolutionTarget },
-    /// The cursor names no position in the collection a get pages: it is no
-    /// collection's cursor, an ordinal cursor naming the findings, which are
-    /// paged by a finding's cursor, or a finding's at another path than the
-    /// document's.
-    ///
-    /// What sets the two cursors apart is what each carries. A finding's
-    /// cursor names the path it was minted at, so at another document's path
-    /// it names no position; an ordinal cursor names no document, so it
-    /// continues its collection at any document.
-    NotACollectionCursor,
-    /// The cursor was minted paging the collection `minted`, and the request
-    /// pages `paged`: each collection is its own row type, so a position in
-    /// one names no place in another.
-    CursorOfAnotherCollection {
-        minted: CollectionSelector,
-        paged: CollectionSelector,
-    },
     /// The request carries `part`, which the answer it asks for — `answer` —
     /// does not take: an anchor or a column on a collection page, a column on
     /// a section or a block, or a cursor or a limit on anything but a
     /// collection page.
     PartNotTaken {
         part: RequestPart,
-        answer: &'static str,
+        answer: AnswerShape,
     },
-    /// The store refused a statement.
+    /// The store refused a statement: its file, its driver or its environment
+    /// refused, and the error is the store's own account. A
+    /// [`StoreError::Damaged`] is the store's derived data being damaged, which
+    /// the host answers as an entry untrusted while it discards and rebuilds
+    /// that data; every other store error is filed as a failed read.
     Store(StoreError),
 }
 
@@ -341,21 +288,17 @@ impl std::fmt::Display for PageRefusal {
                 schema_named(pinned.as_deref())
             ),
             PageRefusal::OrderChanged(changed) => order_change_told(changed, formatter),
-            PageRefusal::NotADocumentCursor => {
-                formatter.write_str("the cursor names a position among rows that are not documents")
-            }
-            PageRefusal::NotATallyCursor => {
-                formatter.write_str("the cursor names no position among this count's tallies")
-            }
-            PageRefusal::NotAFindingCursor => {
-                formatter.write_str("the cursor names no position among this validate's findings")
-            }
-            PageRefusal::NotAFacetCursor => {
-                formatter.write_str("the cursor names no position among a describe's facets")
-            }
-            PageRefusal::NotAHitCursor => {
-                formatter.write_str("the cursor names no position among a search's hits")
-            }
+            PageRefusal::CursorNotTaken { cursor, paged } if cursor == paged => write!(
+                formatter,
+                "the cursor names no position among {} the request pages",
+                rows_named(*paged)
+            ),
+            PageRefusal::CursorNotTaken { cursor, paged } => write!(
+                formatter,
+                "the cursor names a position among {}, and the request pages {}",
+                rows_named(*cursor),
+                rows_named(*paged)
+            ),
             PageRefusal::SummaryNotPaged => {
                 formatter.write_str("a summary is not paged, so it continues no cursor")
             }
@@ -368,14 +311,14 @@ impl std::fmt::Display for PageRefusal {
                     "a page holds 1 to {} rows, and {given} were asked for",
                     bound.ceiling()
                 ),
-                ReadBound::MembershipValues => write!(
+                ReadBound::MembershipValues { key } => write!(
                     formatter,
-                    "a membership part names at most {} values, and {given} were named",
+                    "a membership part names at most {} values, and the part on `{key}` named {given}",
                     bound.ceiling()
                 ),
             },
             PageRefusal::UnknownPart { part } => {
-                write!(formatter, "this store does not know {part}")
+                write!(formatter, "this store does not know {}", part_named(part))
             }
             PageRefusal::AmbiguousTarget(ambiguity) => write!(
                 formatter,
@@ -386,24 +329,80 @@ impl std::fmt::Display for PageRefusal {
             PageRefusal::UnknownTarget { target } => {
                 write!(formatter, "`{target}` names no document")
             }
-            PageRefusal::NotACollectionCursor => {
-                formatter.write_str("the cursor names no position in the collection paged")
-            }
-            PageRefusal::CursorOfAnotherCollection { minted, paged } => write!(
+            PageRefusal::PartNotTaken { part, answer } => write!(
                 formatter,
-                "the cursor was minted paging a document's {}, and the request pages its {}",
-                collection_named(*minted),
-                collection_named(*paged)
+                "{} takes no {}",
+                answer_named(*answer),
+                part_noun(part)
             ),
-            PageRefusal::PartNotTaken { part, answer } => {
-                write!(formatter, "{answer} takes no {}", part.noun())
-            }
             PageRefusal::Store(problem) => problem.fmt(formatter),
         }
     }
 }
 
 impl std::error::Error for PageRefusal {}
+
+impl PageRefusal {
+    /// The refusal of `cursor` on a request paging `paged`: the rows its key
+    /// names a position among, and the rows the request pages.
+    pub(crate) const fn cursor_not_taken(cursor: &Cursor, paged: PagedRows) -> Self {
+        PageRefusal::CursorNotTaken {
+            cursor: cursor.key().rows(),
+            paged,
+        }
+    }
+}
+
+/// Rows as a refusal names them, in the plural.
+fn rows_named(rows: PagedRows) -> String {
+    match rows {
+        PagedRows::Document => "documents".to_string(),
+        PagedRows::Hit => "hits".to_string(),
+        PagedRows::Tally => "tallies".to_string(),
+        PagedRows::Finding => "findings".to_string(),
+        PagedRows::Facet => "facets".to_string(),
+        PagedRows::Collection { of } => format!("a document's {}", collection_named(of)),
+        _ => "rows".to_string(),
+    }
+}
+
+/// A part of a request as a refusal names it on its own: with its article,
+/// `an anchor`, or in the words a part this build does not know is named in.
+fn part_named(part: &RequestPart) -> &str {
+    match part {
+        RequestPart::Anchor => "an anchor",
+        RequestPart::Column => "a column",
+        RequestPart::Cursor => "a cursor",
+        RequestPart::Limit => "a limit",
+        RequestPart::Unknown { name, .. } => name,
+        _ => "a part",
+    }
+}
+
+/// A part of a request as a refusal that negates it names it: the noun
+/// alone, `a section takes no anchor`.
+fn part_noun(part: &RequestPart) -> &str {
+    match part {
+        RequestPart::Anchor => "anchor",
+        RequestPart::Column => "column",
+        RequestPart::Cursor => "cursor",
+        RequestPart::Limit => "limit",
+        RequestPart::Unknown { name, .. } => name,
+        _ => "part",
+    }
+}
+
+/// An answer shape as a refusal names it, with its article.
+fn answer_named(answer: AnswerShape) -> &'static str {
+    match answer {
+        AnswerShape::CollectionPage => "a collection page",
+        AnswerShape::Record => "a record",
+        AnswerShape::Section => "a section",
+        AnswerShape::Block => "a block",
+        AnswerShape::Summary => "a summary",
+        _ => "this answer",
+    }
+}
 
 /// A collection as a refusal names it.
 fn collection_named(selector: CollectionSelector) -> &'static str {
@@ -418,8 +417,7 @@ fn collection_named(selector: CollectionSelector) -> &'static str {
 }
 
 /// An order change as a refusal tells it: the two orders where they differ,
-/// else the two fingerprints where they differ, else the one order the cursor
-/// names no position in.
+/// else the two fingerprints, which differ wherever the orders do not.
 fn order_change_told(
     changed: &CursorOrderChanged,
     formatter: &mut std::fmt::Formatter<'_>,
@@ -429,11 +427,6 @@ fn order_change_told(
             formatter,
             "the cursor was minted in {}, and the request reads {}",
             order_named(&orders.cursor),
-            order_named(&orders.request)
-        ),
-        Some(orders) if changed.minted_under == changed.current => write!(
-            formatter,
-            "the cursor names no position in {}, the order the request reads",
             order_named(&orders.request)
         ),
         _ => write!(

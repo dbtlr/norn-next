@@ -18,7 +18,7 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    Column, CountParams, Cursor, CursorKey, Direction, FindParams, GroupKey, Predicate,
+    Column, CountParams, Cursor, CursorKey, Direction, FindParams, GroupKey, PagedRows, Predicate,
     ResolutionTarget, Sort, SortKey, Tally, Unsatisfied, VaultAddress, VaultName,
 };
 
@@ -778,14 +778,20 @@ fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
             .count(params, &declared())
             .expect_err("the cursor is refused")
     };
-    for key in [
-        CursorKey::document(
-            Sort::new(SortKey::path(), Direction::Ascending),
-            None,
-            "a.md",
+    for (key, rows) in [
+        (
+            CursorKey::document(
+                Sort::new(SortKey::path(), Direction::Ascending),
+                None,
+                "a.md",
+            ),
+            PagedRows::Document,
         ),
-        CursorKey::tally([None, None]),
-        CursorKey::tally([Some("nine".to_string())]),
+        (CursorKey::tally([None, None]), PagedRows::Tally),
+        (
+            CursorKey::tally([Some("nine".to_string())]),
+            PagedRows::Tally,
+        ),
     ] {
         assert_eq!(
             refused(
@@ -794,7 +800,10 @@ fn a_cursor_that_is_no_position_among_the_requests_tallies_is_refused() {
                     .clone()
                     .with_after(Cursor::new(reading.clone(), key.clone()))
             ),
-            PageRefusal::NotATallyCursor,
+            PageRefusal::CursorNotTaken {
+                cursor: rows,
+                paged: PagedRows::Tally,
+            },
             "{key:?}"
         );
     }

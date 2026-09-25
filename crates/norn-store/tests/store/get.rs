@@ -12,16 +12,16 @@ use std::sync::Arc;
 use norn_store::{
     BODY_ROW_CEILING, BlockFact, ContentModel, DocumentFacts, DocumentText, FindStatement,
     FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, HeadingFact, LinkFact,
-    LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, RequestPart, SectionAt,
-    Snapshot, SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity,
-    induced_failure,
+    LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, SectionAt, Snapshot,
+    SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
 use norn_wire::{
-    Candidate, CollectionPage, CollectionSelector, Column, Cursor, CursorKey, Direction,
-    DocumentRow, FindParams, FindingKind, GetParams, GetReport, Hint, Pattern, Predicate,
-    ResolutionTarget, Severity, Sort, SortKey, Unsatisfied, VaultAddress, VaultName,
+    AnswerShape, Candidate, CollectionPage, CollectionSelector, Column, Cursor, CursorKey,
+    Direction, DocumentRow, FindParams, FindingKind, GetParams, GetReport, Hint, PagedRows,
+    Pattern, Predicate, RequestPart, ResolutionTarget, Severity, Sort, SortKey, Unsatisfied,
+    VaultAddress, VaultName,
 };
 
 use crate::common::{Scratch, document, span, unread_block, write_documents};
@@ -901,50 +901,61 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
     let headings = first(CollectionSelector::Headings);
     let finding = first(CollectionSelector::Findings);
     let snapshot = headings.snapshot().clone();
-    for (paged, cursor, minted) in [
+    let collection = |of| PagedRows::Collection { of };
+    for (selector, cursor, minted, paged) in [
         (
             CollectionSelector::Blocks,
             &headings,
-            CollectionSelector::Headings,
+            collection(CollectionSelector::Headings),
+            collection(CollectionSelector::Blocks),
         ),
         (
             CollectionSelector::Tags,
             &headings,
-            CollectionSelector::Headings,
+            collection(CollectionSelector::Headings),
+            collection(CollectionSelector::Tags),
         ),
         (
             CollectionSelector::Findings,
             &headings,
-            CollectionSelector::Headings,
+            collection(CollectionSelector::Headings),
+            PagedRows::Finding,
         ),
         (
             CollectionSelector::Tags,
             &finding,
-            CollectionSelector::Findings,
+            PagedRows::Finding,
+            collection(CollectionSelector::Tags),
         ),
         (
             CollectionSelector::Headings,
             &first(CollectionSelector::Tags),
-            CollectionSelector::Tags,
+            collection(CollectionSelector::Tags),
+            collection(CollectionSelector::Headings),
         ),
     ] {
         assert_eq!(
             vault.refusal(
                 &getting("paged")
-                    .with_collection(paged)
+                    .with_collection(selector)
                     .with_after(cursor.clone())
             ),
-            PageRefusal::CursorOfAnotherCollection { minted, paged },
-            "{paged:?}"
+            PageRefusal::CursorNotTaken {
+                cursor: minted,
+                paged
+            },
+            "{selector:?}"
         );
     }
-    for (selector, cursor) in [
+    for (selector, cursor, minted, paged) in [
         (
             CollectionSelector::Findings,
             Cursor::new(
                 snapshot.clone(),
                 CursorKey::finding(FindingKind::UndeclaredTag, "other.md", 1),
             ),
+            PagedRows::Finding,
+            PagedRows::Finding,
         ),
         (
             CollectionSelector::Findings,
@@ -952,6 +963,8 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
                 snapshot.clone(),
                 CursorKey::ordinal(CollectionSelector::Findings, 1),
             ),
+            collection(CollectionSelector::Findings),
+            PagedRows::Finding,
         ),
         (
             CollectionSelector::Tags,
@@ -963,6 +976,8 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
                     "paged.md",
                 ),
             ),
+            PagedRows::Document,
+            collection(CollectionSelector::Tags),
         ),
     ] {
         assert_eq!(
@@ -971,9 +986,133 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
                     .with_collection(selector)
                     .with_after(cursor)
             ),
-            PageRefusal::NotACollectionCursor,
+            PageRefusal::CursorNotTaken {
+                cursor: minted,
+                paged
+            },
             "{selector:?}"
         );
+    }
+    assert_eq!(
+        PageRefusal::CursorNotTaken {
+            cursor: collection(CollectionSelector::Headings),
+            paged: PagedRows::Finding,
+        }
+        .to_string(),
+        "the cursor names a position among a document's headings, and the request pages findings"
+    );
+}
+
+/// **A cursor whose position is past what the store counts is refused** as
+/// no position among the rows the get pages: an ordinal or a finding's id one
+/// above the largest the store holds a row at.
+#[test]
+fn a_cursor_past_what_the_store_counts_names_no_position_in_the_collection() {
+    let vault = paged_vault("get-cursor-past", 0);
+    let snapshot = page_of(
+        &vault
+            .get(
+                &getting("paged")
+                    .with_collection(CollectionSelector::Headings)
+                    .with_limit(1),
+            )
+            .report,
+    )
+    .1
+    .expect("a next page")
+    .snapshot()
+    .clone();
+    let past = u64::try_from(i64::MAX).expect("a positive bound") + 1;
+    let headings = PagedRows::Collection {
+        of: CollectionSelector::Headings,
+    };
+    for (selector, key, paged) in [
+        (
+            CollectionSelector::Headings,
+            CursorKey::ordinal(CollectionSelector::Headings, past),
+            headings,
+        ),
+        (
+            CollectionSelector::Findings,
+            CursorKey::finding(FindingKind::UndeclaredTag, "paged.md", past),
+            PagedRows::Finding,
+        ),
+    ] {
+        assert_eq!(
+            vault.refusal(
+                &getting("paged")
+                    .with_collection(selector)
+                    .with_after(Cursor::new(snapshot.clone(), key))
+            ),
+            PageRefusal::CursorNotTaken {
+                cursor: paged,
+                paged
+            },
+            "{selector:?}"
+        );
+    }
+}
+
+/// **An ordinal's or a finding's cursor carrying a schema fingerprint is
+/// refused as not taken**: no page of a document's collection mints one, so
+/// it names no position among the rows the get pages, even under the
+/// fingerprint the snapshot pins.
+#[test]
+fn a_collection_cursor_carrying_a_fingerprint_is_not_taken() {
+    let vault = paged_vault("get-cursor-fingerprint", 0);
+    let reading = page_of(
+        &vault
+            .get(
+                &getting("paged")
+                    .with_collection(CollectionSelector::Headings)
+                    .with_limit(1),
+            )
+            .report,
+    )
+    .1
+    .expect("a next page")
+    .snapshot()
+    .clone();
+    let forged = norn_wire::Snapshot::new(
+        reading.epoch.clone(),
+        reading.generation,
+        Some(SCHEMA.to_string()),
+        None,
+    );
+    let headings = PagedRows::Collection {
+        of: CollectionSelector::Headings,
+    };
+    for (selector, key, paged) in [
+        (
+            CollectionSelector::Headings,
+            CursorKey::ordinal(CollectionSelector::Headings, 1),
+            headings,
+        ),
+        (
+            CollectionSelector::Findings,
+            CursorKey::finding(FindingKind::UndeclaredTag, "paged.md", 1),
+            PagedRows::Finding,
+        ),
+    ] {
+        let refusal = vault.refusal(
+            &getting("paged")
+                .with_collection(selector)
+                .with_after(Cursor::new(forged.clone(), key)),
+        );
+        assert_eq!(
+            refusal,
+            PageRefusal::CursorNotTaken {
+                cursor: paged,
+                paged
+            },
+            "{selector:?}"
+        );
+        if paged == headings {
+            assert_eq!(
+                refusal.to_string(),
+                "the cursor names no position among a document's headings the request pages"
+            );
+        }
     }
 }
 
@@ -1018,9 +1157,11 @@ fn an_ordinal_cursor_continues_its_collection_by_position() {
     assert!(page_of(&beyond.report).1.is_none());
 }
 
-/// **A part the answer asked for does not take is refused by name**: an
-/// anchor or a column on a collection page, a column on a section or a block,
-/// and a cursor or a limit on anything but a collection page.
+/// **A part the answer asked for does not take is refused by name**, naming
+/// the answer that does not take it: an anchor or a column on a collection
+/// page, a column on a section or a block, and a cursor or a limit on a
+/// record, a section or a block. The answer is classified before any part is
+/// judged, so a cursor or a limit names the one answer the target asks for.
 #[test]
 fn a_part_the_answer_does_not_take_is_refused() {
     let vault = paged_vault("get-parts", 0);
@@ -1035,48 +1176,70 @@ fn a_part_the_answer_does_not_take_is_refused() {
     )
     .1
     .expect("a next page");
-    for (params, part, answer) in [
+    for (params, part, answer, told) in [
         (
             getting("paged#Heading 0").with_collection(CollectionSelector::Tags),
             RequestPart::Anchor,
-            "a collection page",
+            AnswerShape::CollectionPage,
+            "a collection page takes no anchor",
         ),
         (
             getting("paged")
                 .with_collection(CollectionSelector::Tags)
                 .with_columns([Column::body()]),
             RequestPart::Column,
-            "a collection page",
+            AnswerShape::CollectionPage,
+            "a collection page takes no column",
         ),
         (
             getting("paged#Heading 0").with_columns([Column::body()]),
             RequestPart::Column,
-            "a section",
+            AnswerShape::Section,
+            "a section takes no column",
         ),
         (
             getting("paged#^b0").with_columns([Column::body()]),
             RequestPart::Column,
-            "a block",
+            AnswerShape::Block,
+            "a block takes no column",
         ),
         (
-            getting("paged").with_after(cursor),
+            getting("paged").with_after(cursor.clone()),
             RequestPart::Cursor,
-            "a record, a section or a block",
+            AnswerShape::Record,
+            "a record takes no cursor",
+        ),
+        (
+            getting("paged#Heading 0").with_after(cursor.clone()),
+            RequestPart::Cursor,
+            AnswerShape::Section,
+            "a section takes no cursor",
+        ),
+        (
+            getting("paged#^b0")
+                .with_after(cursor)
+                .with_columns([Column::body()]),
+            RequestPart::Cursor,
+            AnswerShape::Block,
+            "a block takes no cursor",
         ),
         (
             getting("paged").with_limit(2),
             RequestPart::Limit,
-            "a record, a section or a block",
+            AnswerShape::Record,
+            "a record takes no limit",
         ),
         (
             getting("paged#Heading 0").with_limit(1),
             RequestPart::Limit,
-            "a record, a section or a block",
+            AnswerShape::Section,
+            "a section takes no limit",
         ),
         (
             getting("paged#^b0").with_limit(1),
             RequestPart::Limit,
-            "a record, a section or a block",
+            AnswerShape::Block,
+            "a block takes no limit",
         ),
     ] {
         let refusal = vault.refusal(&params);
@@ -1085,17 +1248,8 @@ fn a_part_the_answer_does_not_take_is_refused() {
             PageRefusal::PartNotTaken { part, answer },
             "{params:?}"
         );
-        assert_eq!(
-            refusal.to_string(),
-            format!("{answer} takes no {}", part.noun())
-        );
+        assert_eq!(refusal.to_string(), told);
     }
-    assert_eq!(RequestPart::Anchor.to_string(), "an anchor");
-    assert_eq!(RequestPart::Limit.to_string(), "a limit");
-    assert_eq!(
-        vault.refusal(&getting("paged").with_limit(1)).to_string(),
-        "a record, a section or a block takes no limit"
-    );
 }
 
 // ---- the work bar ----

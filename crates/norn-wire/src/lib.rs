@@ -366,7 +366,7 @@ pub use address::{
 };
 pub use cursor::{
     Cursor, CursorKey, CursorOrderChanged, DocumentOrders, FacetKind, Moved, NonFiniteScore, Page,
-    Score, Snapshot,
+    PagedRows, Score, Snapshot,
 };
 pub use demand::AttachMode;
 pub use doctor::{
@@ -378,7 +378,10 @@ pub use document::{
     ElsewhereNamesDocuments, FieldValue, HeadingRow, LinkAddress, LinkFamily, LinkHealth, LinkRow,
     Span, TagRow, TagSource, TotalBelowHead, VAULT_PROTOCOL,
 };
-pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReasonCode, TooFewNames};
+pub use error::{
+    AnswerShape, ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReadFailure, ReasonCode,
+    RequestBound, RequestPart, TooFewNames,
+};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
 pub use glob::{CaseFold, Pattern, PatternError};
