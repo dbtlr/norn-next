@@ -9,16 +9,24 @@
 //! file — `.gitignore` at the vault root, up to [`GITIGNORE_BOUND`] bytes — and
 //! answers yes only where a line names the fallback directory or the `.norn`
 //! directory above it in one of the spellings [`covers_fallback`] lists, and no
-//! line is a negation. Every other arrangement answers no, which is the
-//! direction that warns: a vault this rule cannot show ignores the fallback is
-//! reported as not ignoring it. So every way the rule departs from git answers
-//! no where git ignores the fallback, never yes where git does not.
+//! line is a negation. Where no covering line excludes `.norn` itself, git
+//! descends into `.norn` and reads the `.gitignore` of each directory it
+//! enters, any of which can re-include the shadows; so the rule then answers
+//! yes only where no directory along the fallback home, from `.norn` down to
+//! the home itself, holds an entry named `.gitignore` of any kind. It asks
+//! that of each directory with one stat and reads none of those files. Every
+//! other arrangement answers no, which is the direction that warns: a vault
+//! this rule cannot show ignores the fallback is reported as not ignoring it.
+//! So every way the rule departs from git answers no where git ignores the
+//! fallback, never yes where git does not.
 //!
 //! What the rule does not read, each of which can ignore the fallback where
 //! this answers no:
 //!
 //! - a `.gitignore` in a directory above the vault root, where the vault is a
 //!   subdirectory of a repository;
+//! - the text of a `.gitignore` inside `.norn`, which answers no by being
+//!   there whatever it says;
 //! - `.git/info/exclude` and the `core.excludesFile` a git configuration names;
 //! - any pattern with a wildcard other than the trailing `*` and `**` spellings
 //!   listed, such as `.*` or `.n*`, and a spelling git matches only because it
@@ -27,7 +35,7 @@
 //! - a file opening with a byte-order mark, and one that is not UTF-8;
 //! - a file longer than [`GITIGNORE_BOUND`].
 
-use std::path::Path;
+use std::path::{Component, Path};
 
 use crate::read::{Bounded, read_if_present_bounded};
 use crate::refusal::Refusal;
@@ -46,7 +54,8 @@ const GITIGNORE_BOUND: usize = 64 * 1024;
 
 /// The spellings of a line, before its anchor, that cover the fallback
 /// directory: the `.norn` directory, its contents, the fallback directory and
-/// its contents.
+/// its contents. The first [`EXCLUDING_NORN`] of them exclude `.norn` itself,
+/// so git never descends into it.
 const COVERING: &[&str] = &[
     ".norn",
     ".norn/",
@@ -58,30 +67,75 @@ const COVERING: &[&str] = &[
     ".norn/tmp/**",
 ];
 
+/// How many of the leading [`COVERING`] spellings exclude the `.norn`
+/// directory itself rather than what is inside it.
+const EXCLUDING_NORN: usize = 2;
+
 /// The anchors a covering spelling may carry: none, the root, or any depth.
 /// Each matches a path directly under the vault root.
 const ANCHORS: &[&str] = &["", "/", "**/"];
 
-/// Whether the `.gitignore` at `vault_root` covers [`FALLBACK`], by the rule
-/// this module states.
+/// Whether the vault at `vault_root` ignores the fallback home at `home`,
+/// vault-relative, by the rule this module states.
 ///
 /// A vault root with no `.gitignore` covers nothing, and answers `false`, and
 /// so does one longer than 64 KiB, which is not read past that bound. A
-/// `.gitignore` that is there
-/// and cannot be read — a link, a directory, a pipe, a machine that refuses the
-/// read — is the refusal, and the caller decides what an unanswered question
-/// means; the file is read through the same anchored, link-refusing open every
-/// control file is, which opens a pipe without waiting for its writer.
-pub fn fallback_ignored(vault_root: &Path) -> Result<bool, Refusal> {
-    Ok(
-        match read_if_present_bounded(vault_root, Path::new(GITIGNORE), GITIGNORE_BOUND)? {
-            Some(Bounded::Whole(bytes)) => covers_fallback(&bytes),
-            Some(Bounded::Longer) | None => false,
-        },
+/// `.gitignore` that is there and cannot be read — a link, a directory, a
+/// pipe, a machine that refuses the read — is the refusal, and the caller
+/// decides what an unanswered question means; the file is read through the
+/// same anchored, link-refusing open every control file is, which opens a
+/// pipe without waiting for its writer.
+///
+/// Where the covering line leaves `.norn` itself unexcluded, the answer is
+/// `false` if any directory from `.norn` down to `home` holds an entry named
+/// `.gitignore`, or cannot be shown not to. A `home` that is not a plain
+/// vault-relative path under [`FALLBACK`] answers `false`: the directories
+/// git descends into are not known.
+pub fn fallback_ignored(vault_root: &Path, home: &Path) -> Result<bool, Refusal> {
+    let coverage = match read_if_present_bounded(vault_root, Path::new(GITIGNORE), GITIGNORE_BOUND)?
+    {
+        Some(Bounded::Whole(bytes)) => covers_fallback(&bytes),
+        Some(Bounded::Longer) | None => Coverage::None,
+    };
+    Ok(match coverage {
+        Coverage::None => false,
+        Coverage::Directory => true,
+        Coverage::Contents => {
+            home.starts_with(FALLBACK)
+                && home
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)))
+                && !home
+                    .ancestors()
+                    .take_while(|directory| !directory.as_os_str().is_empty())
+                    .any(|directory| gitignore_present(&vault_root.join(directory)))
+        }
+    })
+}
+
+/// Whether `directory` holds an entry named `.gitignore`, of any kind, or
+/// cannot be shown not to: only a stat that finds nothing there answers no.
+#[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns vault stat.
+fn gitignore_present(directory: &Path) -> bool {
+    !matches!(
+        std::fs::symlink_metadata(directory.join(GITIGNORE)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
     )
 }
 
-/// Whether the text of a `.gitignore` covers [`FALLBACK`].
+/// What the lines of a `.gitignore` cover of [`FALLBACK`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Coverage {
+    /// No line covers it, or the text leaves the question unanswered.
+    None,
+    /// A line excludes the `.norn` directory itself.
+    Directory,
+    /// A line covers the fallback from inside `.norn`, which git descends
+    /// into.
+    Contents,
+}
+
+/// What the text of a `.gitignore` covers of [`FALLBACK`].
 ///
 /// A line is read as git reads it: one carriage return ending it is removed,
 /// then its trailing spaces. A tab is kept, and so is a space a backslash
@@ -92,16 +146,17 @@ pub fn fallback_ignored(vault_root: &Path) -> Result<bool, Refusal> {
 /// git reads a negation against the lines before it and can re-include the
 /// fallback through a wildcard or an anchor this rule does not read, so any
 /// negation leaves the question unanswered and the answer is no. Bytes that
-/// are not UTF-8 cover nothing.
-fn covers_fallback(text: &[u8]) -> bool {
+/// are not UTF-8 cover nothing. A line excluding `.norn` itself outranks one
+/// covering what is inside it.
+fn covers_fallback(text: &[u8]) -> Coverage {
     debug_assert_eq!(
         FALLBACK, ".norn/tmp",
         "the covering spellings name FALLBACK"
     );
     let Ok(text) = std::str::from_utf8(text) else {
-        return false;
+        return Coverage::None;
     };
-    let mut covered = false;
+    let mut coverage = Coverage::None;
     for line in text.split('\n') {
         let line = line
             .strip_suffix('\r')
@@ -111,14 +166,20 @@ fn covers_fallback(text: &[u8]) -> bool {
             continue;
         }
         if line.starts_with('!') {
-            return false;
+            return Coverage::None;
         }
-        covered |= ANCHORS.iter().any(|anchor| {
-            line.strip_prefix(anchor)
-                .is_some_and(|pattern| COVERING.contains(&pattern))
+        let spelling = ANCHORS.iter().find_map(|anchor| {
+            let pattern = line.strip_prefix(anchor)?;
+            COVERING.iter().position(|spelling| *spelling == pattern)
         });
+        coverage = match (coverage, spelling) {
+            (Coverage::Directory, _) => Coverage::Directory,
+            (_, Some(index)) if index < EXCLUDING_NORN => Coverage::Directory,
+            (_, Some(_)) => Coverage::Contents,
+            (coverage, None) => coverage,
+        };
     }
-    covered
+    coverage
 }
 
 #[cfg(test)]
@@ -133,8 +194,37 @@ mod tests {
         for anchor in ANCHORS {
             for spelling in COVERING {
                 let line = format!("{anchor}{spelling}\n");
-                assert!(covers_fallback(line.as_bytes()), "{line:?} did not cover");
+                assert_ne!(
+                    covers_fallback(line.as_bytes()),
+                    Coverage::None,
+                    "{line:?} did not cover"
+                );
             }
+        }
+    }
+
+    /// **Only `.norn` and `.norn/` exclude the `.norn` directory itself**,
+    /// under every anchor, and such a line outranks a line covering what is
+    /// inside it wherever the two stand.
+    #[test]
+    fn only_the_norn_directory_spellings_exclude_it_whatever_else_stands() {
+        for anchor in ANCHORS {
+            for (index, spelling) in COVERING.iter().enumerate() {
+                let expected = if index < EXCLUDING_NORN {
+                    Coverage::Directory
+                } else {
+                    Coverage::Contents
+                };
+                let line = format!("{anchor}{spelling}\n");
+                assert_eq!(covers_fallback(line.as_bytes()), expected, "{line:?}");
+            }
+        }
+        for text in [".norn/tmp/*\n.norn/\n", ".norn\n.norn/tmp/*\n"] {
+            assert_eq!(
+                covers_fallback(text.as_bytes()),
+                Coverage::Directory,
+                "{text:?}"
+            );
         }
     }
 
@@ -149,7 +239,11 @@ mod tests {
             ".norn/\r",
             ".norn/",
         ] {
-            assert!(covers_fallback(text.as_bytes()), "{text:?} did not cover");
+            assert_ne!(
+                covers_fallback(text.as_bytes()),
+                Coverage::None,
+                "{text:?} did not cover"
+            );
         }
     }
 
@@ -167,7 +261,11 @@ mod tests {
             ".norn/\\ \n",
             ".norn\\ \n",
         ] {
-            assert!(!covers_fallback(text.as_bytes()), "{text:?} covered");
+            assert_eq!(
+                covers_fallback(text.as_bytes()),
+                Coverage::None,
+                "{text:?} covered"
+            );
         }
     }
 
@@ -195,7 +293,11 @@ mod tests {
             "*/.norn/\n",
             "*/.norn/tmp\n",
         ] {
-            assert!(!covers_fallback(text.as_bytes()), "{text:?} covered");
+            assert_eq!(
+                covers_fallback(text.as_bytes()),
+                Coverage::None,
+                "{text:?} covered"
+            );
         }
     }
 
@@ -218,14 +320,18 @@ mod tests {
             ".norn/*\n!tmp/\n",
             ".norn/\n!notes/keep.md\n",
         ] {
-            assert!(!covers_fallback(text.as_bytes()), "{text:?} covered");
+            assert_eq!(
+                covers_fallback(text.as_bytes()),
+                Coverage::None,
+                "{text:?} covered"
+            );
         }
     }
 
     /// Bytes that are not text cover nothing.
     #[test]
     fn bytes_that_are_not_utf8_cover_nothing() {
-        assert!(!covers_fallback(b".norn/\n\xff\n"));
+        assert_eq!(covers_fallback(b".norn/\n\xff\n"), Coverage::None);
     }
 
     /// The vault root's `.gitignore` is what is read: a covering one answers
@@ -234,11 +340,123 @@ mod tests {
     fn the_vault_roots_gitignore_is_read() {
         let scratch = Scratch::new("gitignore-read");
         let root = scratch.at("");
-        assert_eq!(fallback_ignored(&root), Ok(false));
+        assert_eq!(fallback_ignored(&root, Path::new(HOME)), Ok(false));
         scratch.place(GITIGNORE, b".norn/\n");
-        assert_eq!(fallback_ignored(&root), Ok(true));
+        assert_eq!(fallback_ignored(&root, Path::new(HOME)), Ok(true));
         scratch.place(GITIGNORE, b"notes/\n");
-        assert_eq!(fallback_ignored(&root), Ok(false));
+        assert_eq!(fallback_ignored(&root, Path::new(HOME)), Ok(false));
+    }
+
+    /// The fallback home a nested case stages under, vault-relative: the
+    /// channel, vault and key directories below [`FALLBACK`].
+    const HOME: &str = ".norn/tmp/norn-dev/notes/0123456789abcdef";
+
+    /// A scratch vault holding the fallback home, its root `.gitignore`
+    /// reading `root`, and `nested` placed at `at`.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging the tree a case reads.
+    fn nested_case(label: &str, root: &str, at: &str, nested: &str) -> Scratch {
+        let scratch = Scratch::new(label);
+        std::fs::create_dir_all(scratch.at(HOME)).unwrap();
+        scratch.place(GITIGNORE, format!("{root}\n").as_bytes());
+        scratch.place(at, format!("{nested}\n").as_bytes());
+        scratch
+    }
+
+    /// **A `.gitignore` inside the `.norn` directory answers no where the
+    /// covering line leaves `.norn` itself unexcluded**: git descends into
+    /// every directory along the home the line does not exclude and reads
+    /// each one's `.gitignore`, which can re-include the shadows. Each case
+    /// is one git does not ignore.
+    #[test]
+    fn a_nested_gitignore_answers_no_where_the_norn_directory_is_descended_into() {
+        for (root, at, nested) in [
+            (".norn/*", ".norn/.gitignore", "!tmp"),
+            (".norn/tmp/", ".norn/.gitignore", "!tmp/"),
+            (".norn/tmp", ".norn/.gitignore", "!tmp"),
+            (".norn/tmp/*", ".norn/tmp/.gitignore", "!*"),
+            (".norn/tmp/**", ".norn/tmp/.gitignore", "!*"),
+            (".norn/**", ".norn/.gitignore", "!*"),
+            ("**/.norn/*", ".norn/.gitignore", "!tmp"),
+        ] {
+            let scratch = nested_case("gitignore-nested", root, at, nested);
+            assert_eq!(
+                fallback_ignored(&scratch.at(""), Path::new(HOME)),
+                Ok(false),
+                "{root:?} with {at} = {nested:?} answered ignored"
+            );
+        }
+    }
+
+    /// **A `.gitignore` anywhere along the home answers no** under a line
+    /// that does not exclude `.norn`, whatever its kind: the rule asks only
+    /// whether an entry is there, down to the key's own directory.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: planting what a case reads.
+    fn a_gitignore_of_any_kind_at_any_level_of_the_home_answers_no() {
+        for level in [
+            ".norn",
+            ".norn/tmp",
+            ".norn/tmp/norn-dev",
+            ".norn/tmp/norn-dev/notes",
+            HOME,
+        ] {
+            let at = format!("{level}/{GITIGNORE}");
+            let scratch = nested_case("gitignore-level", ".norn/tmp/*", &at, "");
+            let root = scratch.at("");
+            let home = Path::new(HOME);
+            assert_eq!(fallback_ignored(&root, home), Ok(false), "a file at {at}");
+            std::fs::remove_file(scratch.at(&at)).unwrap();
+            assert_eq!(fallback_ignored(&root, home), Ok(true), "nothing at {at}");
+            std::fs::create_dir(scratch.at(&at)).unwrap();
+            assert_eq!(
+                fallback_ignored(&root, home),
+                Ok(false),
+                "a directory at {at}"
+            );
+            std::fs::remove_dir(scratch.at(&at)).unwrap();
+            std::os::unix::fs::symlink("elsewhere", scratch.at(&at)).unwrap();
+            assert_eq!(fallback_ignored(&root, home), Ok(false), "a link at {at}");
+        }
+    }
+
+    /// **A line excluding `.norn` itself answers yes whatever lies inside
+    /// it**: git does not descend into an excluded directory, so no
+    /// `.gitignore` under it is read.
+    #[test]
+    fn a_line_excluding_the_norn_directory_answers_yes_over_any_nested_gitignore() {
+        for root in [".norn", ".norn/", "/.norn", "**/.norn/"] {
+            for at in [".norn/.gitignore", ".norn/tmp/.gitignore"] {
+                let scratch = nested_case("gitignore-shut", root, at, "!*");
+                assert_eq!(
+                    fallback_ignored(&scratch.at(""), Path::new(HOME)),
+                    Ok(true),
+                    "{root:?} with {at} answered not ignored"
+                );
+            }
+        }
+    }
+
+    /// A home that is not under [`FALLBACK`], vault-relative, answers no:
+    /// the directories git would descend into are not known.
+    #[test]
+    fn a_home_outside_the_fallback_answers_no() {
+        let scratch = Scratch::new("gitignore-home");
+        scratch.place(GITIGNORE, b".norn/tmp/*\n");
+        let root = scratch.at("");
+        assert_eq!(fallback_ignored(&root, Path::new(HOME)), Ok(true));
+        for home in [
+            "elsewhere/key",
+            ".norn/key",
+            "/abs/.norn/tmp/key",
+            ".norn/tmp/../key",
+        ] {
+            assert_eq!(
+                fallback_ignored(&root, Path::new(home)),
+                Ok(false),
+                "{home}"
+            );
+        }
     }
 
     /// **A `.gitignore` longer than the bound is not read past it, and
@@ -251,10 +469,10 @@ mod tests {
         let mut text = b".norn/\n".to_vec();
         text.resize(GITIGNORE_BOUND, b'\n');
         scratch.place(GITIGNORE, &text);
-        assert_eq!(fallback_ignored(&root), Ok(true));
+        assert_eq!(fallback_ignored(&root, Path::new(HOME)), Ok(true));
         text.push(b'\n');
         scratch.place(GITIGNORE, &text);
-        assert_eq!(fallback_ignored(&root), Ok(false));
+        assert_eq!(fallback_ignored(&root, Path::new(HOME)), Ok(false));
     }
 
     /// A `.gitignore` that is a link is a refusal rather than an answer: the
@@ -267,7 +485,7 @@ mod tests {
         let root = scratch.at("");
         scratch.place("elsewhere", b".norn/\n");
         std::os::unix::fs::symlink("elsewhere", scratch.at(GITIGNORE)).unwrap();
-        assert!(fallback_ignored(&root).is_err());
+        assert!(fallback_ignored(&root, Path::new(HOME)).is_err());
     }
 
     /// A `.gitignore` that is a directory or a named pipe is a refusal, and
@@ -279,13 +497,13 @@ mod tests {
         let scratch = Scratch::new("gitignore-kinds");
         let root = scratch.at("");
         std::fs::create_dir(scratch.at(GITIGNORE)).unwrap();
-        assert!(fallback_ignored(&root).is_err());
+        assert!(fallback_ignored(&root, Path::new(HOME)).is_err());
         std::fs::remove_dir(scratch.at(GITIGNORE)).unwrap();
         let made = std::process::Command::new("mkfifo")
             .arg(scratch.at(GITIGNORE))
             .status()
             .expect("run mkfifo");
         assert!(made.success(), "mkfifo failed");
-        assert!(fallback_ignored(&root).is_err());
+        assert!(fallback_ignored(&root, Path::new(HOME)).is_err());
     }
 }

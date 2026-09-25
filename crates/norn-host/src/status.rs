@@ -65,19 +65,19 @@ pub enum AttachmentAdvisory {
 /// is `root`: the one rendering `vault status` and `doctor` report an entry's
 /// advisories through.
 ///
-/// A fallback in use is reported with whether the vault ignores it, read here
-/// from the `.gitignore` at `root` by [`norn_fs::fallback_ignored`]'s rule, at
-/// most once however many advisories there are. A `.gitignore` that cannot be
+/// A fallback in use is reported with whether the vault ignores the home it
+/// names, read here from the vault at `root` by [`norn_fs::fallback_ignored`]'s
+/// rule: the root `.gitignore` and whether a `.gitignore` stands in any
+/// directory along that home. A root `.gitignore` that cannot be
 /// read is reported as not ignoring the fallback: the question went
 /// unanswered, and the answer that warns is the safe one. The match carries no
 /// wildcard, so an advisory kept without a rendering here does not compile.
 pub(crate) fn reported_advisories(met: &[AttachmentAdvisory], root: &Path) -> Vec<Advisory> {
-    let mut ignored = None;
     met.iter()
         .map(|advisory| match advisory {
             AttachmentAdvisory::TmpFallbackInUse { home } => Advisory::tmp_fallback_in_use(
                 home.clone(),
-                *ignored.get_or_insert_with(|| norn_fs::fallback_ignored(root).unwrap_or(false)),
+                norn_fs::fallback_ignored(root, Path::new(home)).unwrap_or(false),
             ),
             AttachmentAdvisory::SymlinkSkipped { path } => Advisory::symlink_skipped(path.clone()),
         })
