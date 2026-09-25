@@ -1659,47 +1659,38 @@ fn a_changed_order_is_advertised_as_the_type_the_continuation_answers_with() {
     );
     assert_eq!(
         property_names(&schema["$defs"]["CursorOrderChanged"]),
-        ["minted_under", "current", "orders", "ladders"]
-            .into_iter()
-            .collect()
+        ["minted_under", "current", "orders"].into_iter().collect()
     );
     let orders =
         serde_json::to_string(&schema["$defs"]["CursorOrderChanged"]["properties"]["orders"])
             .expect("the orders property serializes");
     assert!(
-        orders.contains("#/$defs/DocumentOrders") && orders.contains("null"),
+        orders.contains("#/$defs/OrderPair") && orders.contains("null"),
         "the two orders are one nullable pair: {orders}"
     );
-    let pair = &schema["$defs"]["DocumentOrders"];
+    let pair = &schema["$defs"]["OrderPair"];
     assert_eq!(
-        property_names(pair),
-        ["cursor", "request"].into_iter().collect()
+        sorted(tag_constants(pair, "row")),
+        sorted(["document", "hit"]),
+        "a pair is tagged with the row kind its orders are orders of"
     );
-    for order in ["cursor", "request"] {
+    for branch in branches(pair) {
+        let (row, half) = match tag_constant(branch, "row") {
+            Some("document") => ("document", "#/$defs/Sort"),
+            Some("hit") => ("hit", "#/$defs/RungSet"),
+            other => panic!("a pair advertises the row kind {other:?}"),
+        };
         assert_eq!(
-            pair["properties"][order]["$ref"].as_str(),
-            Some("#/$defs/Sort"),
-            "each order of the pair is the order a request names"
+            property_names(branch),
+            ["row", "cursor", "request"].into_iter().collect()
         );
-    }
-    let ladders =
-        serde_json::to_string(&schema["$defs"]["CursorOrderChanged"]["properties"]["ladders"])
-            .expect("the ladders property serializes");
-    assert!(
-        ladders.contains("#/$defs/HitLadders") && ladders.contains("null"),
-        "the two ladders are one nullable pair: {ladders}"
-    );
-    let pair = &schema["$defs"]["HitLadders"];
-    assert_eq!(
-        property_names(pair),
-        ["cursor", "request"].into_iter().collect()
-    );
-    for ladder in ["cursor", "request"] {
-        assert_eq!(
-            pair["properties"][ladder]["$ref"].as_str(),
-            Some("#/$defs/RungSet"),
-            "each ladder of the pair is a rung set"
-        );
+        for order in ["cursor", "request"] {
+            assert_eq!(
+                branch["properties"][order]["$ref"].as_str(),
+                Some(half),
+                "each half of a {row} pair is the order a {row} cursor names"
+            );
+        }
     }
 }
 

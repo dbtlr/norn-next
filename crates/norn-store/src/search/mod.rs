@@ -83,8 +83,8 @@ mod words;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    AnswerAdvisory, Column, Cursor, CursorKey, Hit, LadderDeclaration, Moved, Page, PagedRows,
-    Predicate, RungSet, Score, SearchReport, Unsatisfied,
+    AnswerAdvisory, Column, Cursor, CursorKey, Hit, LadderDeclaration, Moved, Page, Predicate,
+    RungSet, Score, SearchReport, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -420,22 +420,18 @@ impl Snapshot {
     /// Judge the cursor a search continues: where it resumes — the score and
     /// the path of the hit it stopped after — and what moved since.
     ///
-    /// A ranking is no schema's order and no page of hits mints a cursor
-    /// carrying a fingerprint, so one carrying a fingerprint names no position
-    /// among hits and is refused as not taken. This rung ranks by the lexical
-    /// ladder alone, so a hit cursor minted under any other ladder is refused
-    /// as an order that changed, naming both.
+    /// A cursor that is no hit's, or a hit's carrying a fingerprint, names no
+    /// position among hits and is refused as not taken; this rung ranks by
+    /// `ranked_by` — the lexical ladder alone — so a hit cursor minted under
+    /// any other ladder is refused as an order that changed, naming both.
     fn judge_hit(
         &self,
         cursor: &Cursor,
         ranked_by: &RungSet,
         lookups: &mut Lookups,
     ) -> Result<((f64, String), Vec<Moved>), PageRefusal> {
-        let CursorKey::Hit { score, path, .. } = cursor.key() else {
-            return Err(PageRefusal::cursor_not_taken(cursor, PagedRows::Hit));
-        };
-        let moved = self.judge_ranked_reading(cursor, ranked_by, lookups)?;
-        Ok(((score.get(), path.clone()), moved))
+        let resume = self.judge_ranked_reading(cursor, ranked_by, lookups)?;
+        Ok(((resume.score.get(), resume.path.to_string()), resume.moved))
     }
 
     /// One page of ranked hits: at most `page.rows` of them, and the hit the

@@ -35,7 +35,7 @@ mod suggest;
 
 use norn_wire::{
     AnswerShape, CandidateHead, CollectionSelector, Cursor, CursorOrderChanged, Direction, Hint,
-    PagedRows, RequestPart, ResolutionTarget, Sort, SortKey,
+    OrderPair, PagedRows, RequestPart, ResolutionTarget, Rung, RungSet, Sort, SortKey,
 };
 
 use crate::count::CountStatement;
@@ -416,18 +416,29 @@ fn collection_named(selector: CollectionSelector) -> &'static str {
     }
 }
 
-/// An order change as a refusal tells it: the two orders where they differ,
-/// else the two fingerprints, which differ wherever the orders do not.
+/// An order change as a refusal tells it: the two document orders or the two
+/// ladders where they differ, else the two fingerprints, which differ wherever
+/// the orders do not.
 fn order_change_told(
     changed: &CursorOrderChanged,
     formatter: &mut std::fmt::Formatter<'_>,
 ) -> std::fmt::Result {
-    match &changed.orders {
-        Some(orders) if orders.cursor != orders.request => write!(
+    match changed.orders.as_deref() {
+        Some(OrderPair::Document {
+            cursor, request, ..
+        }) if cursor != request => write!(
             formatter,
             "the cursor was minted in {}, and the request reads {}",
-            order_named(&orders.cursor),
-            order_named(&orders.request)
+            order_named(cursor),
+            order_named(request)
+        ),
+        Some(OrderPair::Hit {
+            cursor, request, ..
+        }) if cursor != request => write!(
+            formatter,
+            "the cursor was ranked by {}, and the request ranks by {}",
+            ladder_named(cursor),
+            ladder_named(request)
         ),
         _ => write!(
             formatter,
@@ -452,6 +463,23 @@ fn order_named(order: &Sort) -> String {
         _ => "in another direction",
     };
     format!("{key} {direction}")
+}
+
+/// A ladder as a refusal names it: its rungs in ladder order, as the wire
+/// spells each.
+fn ladder_named(ladder: &RungSet) -> String {
+    let rungs: Vec<&str> = ladder
+        .rungs()
+        .iter()
+        .map(|rung| match rung {
+            Rung::Lexical => "lexical",
+            Rung::Vector => "vector",
+            Rung::Expansion => "expansion",
+            Rung::Rerank => "rerank",
+            _ => "another rung",
+        })
+        .collect();
+    format!("the ladder [{}]", rungs.join(", "))
 }
 
 /// A schema fingerprint as a refusal names it: quoted, or "no schema".

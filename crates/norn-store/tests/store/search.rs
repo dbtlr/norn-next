@@ -634,11 +634,16 @@ fn a_hit_cursor_ranked_by_another_ladder_is_refused_naming_both() {
             "notes/lantern.md",
         ),
     ));
+    let refusal = searching_store.refusal(&continued);
     assert_eq!(
-        searching_store.refusal(&continued),
+        refusal,
         PageRefusal::OrderChanged(
             CursorOrderChanged::minted_raw(None).in_ladders(fused, RungSet::lexical())
         )
+    );
+    assert_eq!(
+        refusal.to_string(),
+        "the cursor was ranked by the ladder [lexical, vector], and the request ranks by the ladder [lexical]"
     );
 }
 

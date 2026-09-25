@@ -3050,51 +3050,59 @@ fn a_continuation_reports_every_part_in_one_fixed_order() {
     );
 }
 
-/// **A refused continuation's two document orders travel as one pair.** Both
-/// orders are named, or neither is: a pair missing one order does not parse.
+/// **A refused continuation names at most one pair of orders, of one row
+/// kind**, tagged `row` as the cursor key is: two document orders, or two
+/// ladders. Both halves are named, or neither is: a pair missing one does not
+/// parse.
 #[test]
-fn a_changed_orders_document_orders_are_one_pair() {
-    let changed = CursorOrderChanged::minted_raw(None).in_orders(
+fn a_changed_orders_pair_is_one_pair_of_one_row_kind() {
+    let documents = CursorOrderChanged::minted_raw(None).in_orders(
         Sort::new(SortKey::field("due"), Direction::Ascending),
         Sort::new(SortKey::field("due"), Direction::Descending),
     );
-    let pinned = r#"{"minted_under":null,"current":null,"orders":{"cursor":{"key":{"by":"field","key":"due"},"direction":"ascending"},"request":{"key":{"by":"field","key":"due"},"direction":"descending"}},"ladders":null}"#;
     assert_eq!(
-        serde_json::to_string(&changed).expect("the change serializes"),
-        pinned
+        wire(&documents),
+        concat!(
+            r#"{"minted_under":null,"current":null,"orders":{"row":"document","#,
+            r#""cursor":{"key":{"by":"field","key":"due"},"direction":"ascending"},"#,
+            r#""request":{"key":{"by":"field","key":"due"},"direction":"descending"}}}"#
+        )
     );
-    let half = r#"{"minted_under":null,"current":null,"orders":{"cursor":{"key":{"by":"path"},"direction":"ascending"}}}"#;
-    assert!(
-        serde_json::from_str::<CursorOrderChanged>(half).is_err(),
-        "a pair naming one order parsed"
-    );
-}
-
-/// **A refused continuation's two hit ladders travel as one pair**, in a field
-/// of their own beside the document orders. Both ladders are named, or
-/// neither is: a pair missing one ladder does not parse.
-#[test]
-fn a_changed_orders_hit_ladders_are_one_pair() {
-    let changed =
-        CursorOrderChanged::minted_raw(None).in_ladders(RungSet::lexical(), fused_ladder());
-    let pinned = r#"{"minted_under":null,"current":null,"orders":null,"ladders":{"cursor":["lexical"],"request":["lexical","vector"]}}"#;
+    let hits = CursorOrderChanged::minted_raw(None).in_ladders(RungSet::lexical(), fused_ladder());
     assert_eq!(
-        serde_json::to_string(&changed).expect("the change serializes"),
-        pinned
+        wire(&hits),
+        concat!(
+            r#"{"minted_under":null,"current":null,"orders":{"row":"hit","#,
+            r#""cursor":["lexical"],"request":["lexical","vector"]}}"#
+        )
     );
-    round_trip(&changed);
-    let half =
-        r#"{"minted_under":null,"current":null,"orders":null,"ladders":{"cursor":["lexical"]}}"#;
-    assert!(
-        serde_json::from_str::<CursorOrderChanged>(half).is_err(),
-        "a pair naming one ladder parsed"
+    for changed in [&documents, &hits] {
+        round_trip(changed);
+    }
+    assert_eq!(
+        documents
+            .clone()
+            .in_ladders(RungSet::lexical(), fused_ladder()),
+        hits,
+        "a change named a second pair beside the first"
     );
+    for half in [
+        r#"{"minted_under":null,"current":null,"orders":{"row":"document","cursor":{"key":{"by":"path"},"direction":"ascending"}}}"#,
+        r#"{"minted_under":null,"current":null,"orders":{"row":"hit","cursor":["lexical"]}}"#,
+        r#"{"minted_under":null,"current":null,"orders":{"row":"hit","cursor":{"key":{"by":"path"},"direction":"ascending"},"request":{"key":{"by":"path"},"direction":"ascending"}}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<CursorOrderChanged>(half).is_err(),
+            "`{half}` parsed as a pair"
+        );
+    }
 }
 
 /// A hit cursor is a position in the ranking its ladder makes, on that
 /// ladder's scale. Continued under another ladder it is refused, naming both
-/// ladders; continued under its own it is judged as any continuation is, and a
-/// refusal on its fingerprint names both ladders too.
+/// ladders; continued under its own it resumes at its score and path and is
+/// judged as any continuation is, and a refusal on its fingerprint names both
+/// ladders too.
 #[test]
 fn a_hit_cursor_continued_under_another_ladder_is_refused_naming_both() {
     let snapshot = || Snapshot::new("epoch-1", 12, None, Some(sidecar(4)));
@@ -3104,16 +3112,29 @@ fn a_hit_cursor_continued_under_another_ladder_is_refused_naming_both() {
     );
     assert_eq!(
         lexical.ranked_continuation(&snapshot(), &fused_ladder()),
-        Err(CursorOrderChanged::minted_raw(None).in_ladders(RungSet::lexical(), fused_ladder()))
+        Some(Err(
+            CursorOrderChanged::minted_raw(None).in_ladders(RungSet::lexical(), fused_ladder())
+        ))
     );
+    let resumed = |now: &Snapshot| {
+        let resume = lexical
+            .ranked_continuation(now, &RungSet::lexical())
+            .expect("a hit cursor continues a ranking")
+            .expect("a hit cursor continued under its own ladder");
+        (resume.score, resume.path.to_string(), resume.moved)
+    };
     assert_eq!(
-        lexical.ranked_continuation(&snapshot(), &RungSet::lexical()),
-        Ok(vec![])
+        resumed(&snapshot()),
+        (score(0.5), "notes/a.md".to_string(), vec![])
     );
     let drained = Snapshot::new("epoch-1", 13, None, Some(sidecar(5)));
     assert_eq!(
-        lexical.ranked_continuation(&drained, &RungSet::lexical()),
-        Ok(vec![Moved::Generation, Moved::SidecarRevision])
+        resumed(&drained),
+        (
+            score(0.5),
+            "notes/a.md".to_string(),
+            vec![Moved::Generation, Moved::SidecarRevision]
+        )
     );
 
     let typed = Cursor::new(
@@ -3123,25 +3144,32 @@ fn a_hit_cursor_continued_under_another_ladder_is_refused_naming_both() {
     let unfingerprinted = Snapshot::new("epoch-1", 12, None, None);
     assert_eq!(
         typed.ranked_continuation(&unfingerprinted, &fused_ladder()),
-        Err(CursorOrderChanged::new("fp-1", None).in_ladders(fused_ladder(), fused_ladder()))
+        Some(Err(
+            CursorOrderChanged::new("fp-1", None).in_ladders(fused_ladder(), fused_ladder())
+        ))
     );
     assert_eq!(
         typed.ranked_continuation(&unfingerprinted, &RungSet::lexical()),
-        Err(CursorOrderChanged::new("fp-1", None).in_ladders(fused_ladder(), RungSet::lexical()))
+        Some(Err(
+            CursorOrderChanged::new("fp-1", None).in_ladders(fused_ladder(), RungSet::lexical())
+        ))
     );
 }
 
-/// A cursor that is no hit's records no ladder, so the ladder a request ranks
-/// by changes nothing about how it is judged.
+/// A cursor that is no hit's names no position in any ranking, so a ranked
+/// continuation of it is no continuation at all rather than one judged
+/// without a ladder.
 #[test]
-fn a_cursor_that_is_no_hits_is_judged_without_a_ladder() {
-    for now in [
-        Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(4))),
-        Snapshot::new("epoch-1", 13, Some("fp-2".to_string()), None),
-    ] {
+fn a_cursor_that_is_no_hits_is_no_ranked_continuation() {
+    let now = Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(4)));
+    for key in cursor_keys()
+        .into_iter()
+        .filter(|key| !matches!(key, CursorKey::Hit { .. }))
+    {
         assert_eq!(
-            minted().ranked_continuation(&now, &fused_ladder()),
-            minted().continuation(&now)
+            Cursor::new(now.clone(), key.clone()).ranked_continuation(&now, &RungSet::lexical()),
+            None,
+            "the cursor keyed {key:?} continued a ranking"
         );
     }
 }

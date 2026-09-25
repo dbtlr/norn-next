@@ -480,20 +480,19 @@ pub enum Moved {
 /// A continuation whose order no longer exists.
 ///
 /// The cursor names a position in an order the request does not read: an
-/// order taken under another schema's fingerprint, or another sort key or
-/// direction. The sequence its key names a position in is not the sequence the
+/// order taken under another schema's fingerprint, another sort key or
+/// direction, or a ranking by another ladder. The sequence its key names a position in is not the sequence the
 /// answer would walk, so the page is refused rather than answered from a
 /// position that means something else.
 ///
 /// The detail says which order was asked for and which one stands. The two
 /// fingerprints name the schema each order is taken under: `minted_under` is
 /// `null` for a cursor minted in an order no schema gives, and `current` where
-/// the order that stands is raw. A page of documents also names the two
-/// orders themselves in `orders`, since a document cursor records the sort key
-/// and direction its page was read in, and a page of hits names the two
-/// ladders in `ladders`, since a hit cursor records the ladder its page was
-/// ranked by. Each pair is one field for one row kind, and each is `null`
-/// where the cursor records no such order.
+/// the order that stands is raw. Where the cursor records the order its page
+/// was read in, `orders` names that order and the request's, as one pair of
+/// one row kind: a document cursor records the sort key and direction its page
+/// was read in, and a hit cursor records the ladder its page was ranked by.
+/// `orders` is `null` where the cursor records no such order.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct CursorOrderChanged {
@@ -504,14 +503,11 @@ pub struct CursorOrderChanged {
     /// that stands is raw.
     pub current: Option<String>,
     /// The order the cursor's page was read in and the order the request's
-    /// page is read in, and `null` where the cursor records no document order.
-    pub orders: Option<DocumentOrders>,
-    /// The ladder the cursor's page was ranked by and the ladder the
-    /// request's page is ranked by, and `null` where the cursor records no
-    /// ladder.
+    /// page is read in, of the one row kind the cursor is a position among,
+    /// and `null` where the cursor records no order.
     // Boxed so the refusal every continuation may return stays small; the
     // bytes are the pair's either way.
-    pub ladders: Option<Box<HitLadders>>,
+    pub orders: Option<Box<OrderPair>>,
 }
 
 impl CursorOrderChanged {
@@ -521,7 +517,6 @@ impl CursorOrderChanged {
             minted_under: Some(minted_under.into()),
             current,
             orders: None,
-            ladders: None,
         }
     }
 
@@ -531,73 +526,74 @@ impl CursorOrderChanged {
             minted_under: None,
             current,
             orders: None,
-            ladders: None,
         }
     }
 
     /// This change, between a page of documents read in `cursor` and one the
-    /// request reads in `request`.
+    /// request reads in `request`. It replaces any pair already named.
     #[must_use]
     pub fn in_orders(self, cursor: Sort, request: Sort) -> Self {
         CursorOrderChanged {
-            orders: Some(DocumentOrders::new(cursor, request)),
+            orders: Some(Box::new(OrderPair::Document { cursor, request })),
             ..self
         }
     }
 
     /// This change, between a page of hits ranked by `cursor` and one the
-    /// request ranks by `request`.
+    /// request ranks by `request`. It replaces any pair already named.
     #[must_use]
     pub fn in_ladders(self, cursor: RungSet, request: RungSet) -> Self {
         CursorOrderChanged {
-            ladders: Some(Box::new(HitLadders::new(cursor, request))),
+            orders: Some(Box::new(OrderPair::Hit { cursor, request })),
             ..self
         }
     }
 }
 
-/// The two document orders a refused continuation stands between.
+/// The two orders a refused continuation stands between: the cursor's and the
+/// request's, of one row kind.
 ///
-/// On the wire the pair is an object of two orders:
-/// `{"cursor":{"key":{"by":"field","key":"due"},"direction":"ascending"},"request":{"key":{"by":"field","key":"due"},"direction":"descending"}}`.
+/// On the wire an object tagged `row`, as the cursor key it is taken from is:
+/// `{"row":"document","cursor":{"key":{"by":"path"},"direction":"ascending"},"request":{"key":{"by":"field","key":"due"},"direction":"descending"}}`,
+/// `{"row":"hit","cursor":["lexical"],"request":["lexical","vector"]}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "row", rename_all = "snake_case")]
 #[non_exhaustive]
-pub struct DocumentOrders {
-    /// The order the cursor's page was read in.
-    pub cursor: Sort,
-    /// The order the request's page is read in: the request's sort, or the
-    /// path ascending where its sort key is outside the field universe.
-    pub request: Sort,
+pub enum OrderPair {
+    /// Two document orders.
+    #[non_exhaustive]
+    Document {
+        /// The order the cursor's page was read in.
+        cursor: Sort,
+        /// The order the request's page is read in: the request's sort, or
+        /// the path ascending where its sort key is outside the field
+        /// universe.
+        request: Sort,
+    },
+    /// Two ladders a page of hits is ranked by.
+    #[non_exhaustive]
+    Hit {
+        /// The ladder the cursor's page was ranked by.
+        cursor: RungSet,
+        /// The ladder the request's page is ranked by: the one its selection
+        /// resolved to when it was answered.
+        request: RungSet,
+    },
 }
 
-impl DocumentOrders {
-    /// A cursor's page read in `cursor`, continued by a request whose page is
-    /// read in `request`.
-    pub const fn new(cursor: Sort, request: Sort) -> Self {
-        DocumentOrders { cursor, request }
-    }
-}
-
-/// The two ladders a refused continuation of hits stands between.
-///
-/// On the wire the pair is an object of two rung sets:
-/// `{"cursor":["lexical"],"request":["lexical","vector"]}`.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+/// Where a hit cursor resumes the ranking it was minted in, and what moved
+/// under it: what [`Cursor::ranked_continuation`] answers for a cursor it
+/// continues. It is a judgment in process and never crosses the wire.
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
-pub struct HitLadders {
-    /// The ladder the cursor's page was ranked by.
-    pub cursor: RungSet,
-    /// The ladder the request's page is ranked by: the one its selection
-    /// resolved to when it was answered.
-    pub request: RungSet,
-}
-
-impl HitLadders {
-    /// A cursor's page ranked by `cursor`, continued by a request whose page
-    /// is ranked by `request`.
-    pub const fn new(cursor: RungSet, request: RungSet) -> Self {
-        HitLadders { cursor, request }
-    }
+pub struct HitResume<'a> {
+    /// The score of the hit the page stopped after.
+    pub score: Score,
+    /// The path of the hit the page stopped after.
+    pub path: &'a str,
+    /// What moved between the cursor being minted and the reading it is
+    /// continued against.
+    pub moved: Vec<Moved>,
 }
 
 /// Where a page stopped.
@@ -657,33 +653,47 @@ impl Cursor {
         Ok(moved)
     }
 
-    /// What has moved between this cursor being minted and `now`, for a page
-    /// of hits ranked by `ladder`, or the refusal that the order it names no
-    /// longer exists.
+    /// Where this cursor resumes a page of hits ranked by `ladder` — the
+    /// score and the path of the hit it stopped after — and what has moved
+    /// between its minting and `now`, or the refusal that the order it names
+    /// no longer exists; `None` where the cursor is no hit's, which names no
+    /// position in any ranking.
     ///
     /// A hit cursor minted under another ladder is refused: its score and path
     /// are a position in that ladder's ranking, on that ladder's scale, and in
     /// no other. Every refusal of a hit cursor names both ladders, beside the
-    /// two fingerprints. A cursor that is no hit's records no ladder, and is
-    /// judged by [`Cursor::continuation`] alone.
+    /// two fingerprints.
     pub fn ranked_continuation(
         &self,
         now: &Snapshot,
         ladder: &RungSet,
-    ) -> Result<Vec<Moved>, CursorOrderChanged> {
-        let CursorKey::Hit { ladder: minted, .. } = &self.key else {
-            return self.continuation(now);
+    ) -> Option<Result<HitResume<'_>, CursorOrderChanged>> {
+        let CursorKey::Hit {
+            ladder: minted,
+            score,
+            path,
+        } = &self.key
+        else {
+            return None;
         };
         let in_ladders =
             |changed: CursorOrderChanged| changed.in_ladders(minted.clone(), ladder.clone());
         if minted != ladder {
             let current = now.schema_fingerprint.clone();
-            return Err(in_ladders(match &self.snapshot.schema_fingerprint {
+            return Some(Err(in_ladders(match &self.snapshot.schema_fingerprint {
                 Some(minted_under) => CursorOrderChanged::new(minted_under, current),
                 None => CursorOrderChanged::minted_raw(current),
-            }));
+            })));
         }
-        self.continuation(now).map_err(in_ladders)
+        Some(
+            self.continuation(now)
+                .map(|moved| HitResume {
+                    score: *score,
+                    path,
+                    moved,
+                })
+                .map_err(in_ladders),
+        )
     }
 }
 
