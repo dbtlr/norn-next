@@ -453,7 +453,9 @@ pub(crate) fn store_refusal_told(error: &StoreError) -> String {
 /// refusals carry the sidecar's path and the driver's words the way a store's
 /// do, so they are told through [`store_refusal_told`] on the store's reading
 /// of the same substrate refusal. The embedder's refusals name the vault
-/// document an input came from and the model, which a caller already reads.
+/// document an input came from and the model, which a caller already reads,
+/// and a score the scan cannot rank names the vault document its row stands
+/// for.
 ///
 /// The match carries no wildcard, so a variant minted in the engine takes its
 /// stance on what it tells here.
