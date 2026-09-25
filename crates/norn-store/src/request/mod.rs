@@ -660,7 +660,7 @@ impl<'a> Request<'a> {
     /// ordinal order.
     ///
     /// The row, the body and the document's id come back in one statement, and
-    /// the five fact reads are keyed by that id — so the path is looked up once
+    /// the six fact reads are keyed by that id — so the path is looked up once
     /// rather than once per fact table.
     ///
     /// **All six reads run inside one `DEFERRED` transaction, so they all see
@@ -1686,7 +1686,7 @@ fn stored_document_sql() -> String {
 /// The statement [`Request::stored_facts`] opens its snapshot with.
 ///
 /// The row, the body and the document's id come back through one seek of
-/// `documents_path`, which is what lets the five fact reads below key off an id
+/// `documents_path`, which is what lets the six fact reads below key off an id
 /// this statement already found rather than look the path up once per table.
 fn stored_facts_document_sql() -> String {
     format!("SELECT id, body, {STORED_DOCUMENT_COLUMNS} FROM documents WHERE path = ?1")
@@ -1704,7 +1704,7 @@ const DOCUMENT_LINKS_SQL: &str = "SELECT family, embed, protocol, target, title,
 
 /// The statement [`Request::stored_facts`] reads a document's link keys with:
 /// each link row's keys by the link, in link order and then in key order.
-const DOCUMENT_LINK_KEYS_SQL: &str = "SELECT l.ordinal, k.key, k.folded_key, k.segments
+pub(crate) const DOCUMENT_LINK_KEYS_SQL: &str = "SELECT l.ordinal, k.key, k.folded_key, k.segments
                  FROM links AS l JOIN link_keys AS k ON k.link = l.id
                  WHERE l.document = ?1 ORDER BY l.ordinal, k.key";
 

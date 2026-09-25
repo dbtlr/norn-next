@@ -10,10 +10,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use norn_store::{
-    BODY_ROW_CEILING, BlockFact, ContentModel, DocumentFacts, DocumentText, FindingFacts,
-    GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, HeadingFact, LinkFact, LinkFamily,
-    NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, RequestPart, SectionAt, Snapshot,
-    SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity, induced_failure,
+    BODY_ROW_CEILING, BlockFact, ContentModel, DocumentFacts, DocumentText, FindStatement,
+    FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, HeadingFact, LinkFact,
+    LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, RequestPart, SectionAt,
+    Snapshot, SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity,
+    induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
@@ -1230,6 +1231,77 @@ fn the_get_bars_cover_every_statement() {
     for (slot, statement) in GetStatement::all().into_iter().enumerate() {
         assert_eq!(statement.slot(), slot, "{statement:?} claims another slot");
         assert!(!statement_barred_by(statement).is_empty());
+    }
+}
+
+/// Every plan `plans` holds for the find statement `statement`, which a get
+/// runs to resolve its target as every read resolves one.
+fn find_plans_of(plans: &[GetPlan], statement: FindStatement) -> Vec<QueryPlan> {
+    let matching: Vec<QueryPlan> = plans
+        .iter()
+        .filter(|plan| plan.statement == ReadStatement::Find(statement))
+        .map(plan)
+        .collect();
+    assert!(
+        !matching.is_empty(),
+        "the get runs no {statement:?}: {plans:?}"
+    );
+    matching
+}
+
+/// Judge a read of a class: a search of `documents` through `index`, the key
+/// the root probes, bounded on both sides, and nothing read end to end.
+fn judge_class(plan: &QueryPlan, index: &str, key: &str) {
+    plan.assert_no_full_scan();
+    let rows = rows_of(plan, "dr");
+    rows.assert_searches_through("documents", Access::Index(index));
+    rows.assert_search_constraint("documents", &format!("({key}>? AND {key}<?)"));
+}
+
+/// **A get's class is read through the suffix key the root probes**: the
+/// head, the total and each candidate's suffix probe a get's target runs —
+/// the find builder's class statements, which every resolution of a target
+/// runs — are each a seek of `documents_suffix_key` where the root tells
+/// spellings apart and of `documents_folded_suffix_key` where it folds ASCII
+/// case, bounded on both sides by the target's range.
+///
+/// Controls: a head read end to end fails; the probed index dropped, the head
+/// reads something else, and fails.
+#[test]
+fn a_class_is_read_through_the_suffix_key_the_root_probes() {
+    let paths: Vec<String> = (1..=7).map(|at| format!("d{at}/glossary.md")).collect();
+    let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+    for (order, index, key) in [
+        (Sensitive, "documents_suffix_key", "suffix_key"),
+        (Folding, "documents_folded_suffix_key", "folded_suffix_key"),
+    ] {
+        let mut vault = Vault::at(&format!("get-class-plan-{order:?}"), order, &paths);
+        let plans = vault.plans(&getting("glossary"));
+        for statement in [
+            FindStatement::ClassHead,
+            FindStatement::ClassTotal,
+            FindStatement::CandidateSuffix,
+        ] {
+            for plan in find_plans_of(&plans, statement) {
+                judge_class(&plan, index, key);
+            }
+        }
+        let head = find_plans_of(&plans, FindStatement::ClassHead).remove(0);
+        let walked = rewritten(&head, |detail| {
+            if detail.starts_with("SEARCH dr ") {
+                "SCAN dr".to_string()
+            } else {
+                detail.to_string()
+            }
+        });
+        failure_of("a head read end to end", || {
+            judge_class(&walked, index, key)
+        });
+        vault.drop_index(index);
+        let unindexed = find_plans_of(&vault.plans(&getting("glossary")), FindStatement::ClassHead);
+        failure_of(&format!("{index} dropped"), || {
+            judge_class(&unindexed[0], index, key)
+        });
     }
 }
 

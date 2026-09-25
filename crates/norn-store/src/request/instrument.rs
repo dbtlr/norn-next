@@ -26,11 +26,11 @@ use norn_wire::FindingKind;
 use crate::ddl;
 
 use super::{
-    DOCUMENT_BLOCKS_SQL, DOCUMENT_FIELDS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINKS_SQL,
-    DOCUMENT_TAGS_SQL, DiscardScope, DocumentPath, FINDING_ID_CHUNK, FeedCursor, FindingCursor,
-    INDEXED_TERM_PAGE_SQL, MAX_PAGE, Request, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL,
-    StoreError, StoredPathOrder, SubjectScope, SuffixProbe, TOMBSTONE_PAGE_SQL,
-    TYPED_VALUE_DISCARD_SQL, TargetClass, class_discard_sql, document_feed_sql,
+    DOCUMENT_BLOCKS_SQL, DOCUMENT_FIELDS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINK_KEYS_SQL,
+    DOCUMENT_LINKS_SQL, DOCUMENT_TAGS_SQL, DiscardScope, DocumentPath, FINDING_ID_CHUNK,
+    FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, MAX_PAGE, Request, STORED_TOMBSTONE_SQL,
+    SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope, SuffixProbe,
+    TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, TargetClass, class_discard_sql, document_feed_sql,
     document_page_parameters, document_page_sql, feed_page_parameters, finding_candidates_sql,
     finding_classes_sql, finding_id_parameters, finding_page_parameters, finding_page_sql,
     finding_subject_parameters, finding_subjects_sql, findings_in_class_sql, probe_parameters,
@@ -127,6 +127,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::StoredDocument(_) => stored_document_sql(),
             ExplainedStatement::StoredFactsDocument(_) => stored_facts_document_sql(),
             ExplainedStatement::DocumentLinks => DOCUMENT_LINKS_SQL.to_string(),
+            ExplainedStatement::DocumentLinkKeys => DOCUMENT_LINK_KEYS_SQL.to_string(),
             ExplainedStatement::DocumentHeadings => DOCUMENT_HEADINGS_SQL.to_string(),
             ExplainedStatement::DocumentBlocks => DOCUMENT_BLOCKS_SQL.to_string(),
             ExplainedStatement::DocumentTags => DOCUMENT_TAGS_SQL.to_string(),
@@ -220,10 +221,11 @@ impl<'a> Request<'a> {
             | ExplainedStatement::StoredFindings(path) => {
                 database.emitted_plan(&sql, params![path.as_str()])
             }
-            // The five fact statements are keyed by a row id rather than a
+            // The six fact statements are keyed by a row id rather than a
             // path, and the id is bound for the reason a page's cursor is —
             // see [`EXPLAINED_DOCUMENT_ROW`].
             ExplainedStatement::DocumentLinks
+            | ExplainedStatement::DocumentLinkKeys
             | ExplainedStatement::DocumentHeadings
             | ExplainedStatement::DocumentBlocks
             | ExplainedStatement::DocumentTags
@@ -353,10 +355,13 @@ pub enum ExplainedStatement<'a> {
     /// document's row, its body and its row id, keyed by the caller's path.
     StoredFactsDocument(&'a DocumentPath),
     /// The link rows [`Request::stored_facts`] reads for the document its first
-    /// statement found. The four below are the same read over the other fact
-    /// tables, and each is keyed by that document's row id rather than by a
-    /// path.
+    /// statement found. The five below are the same read over the link keys
+    /// and the other fact tables, and each is keyed by that document's row id
+    /// rather than by a path.
     DocumentLinks,
+    /// The link keys [`Request::stored_facts`] reads: the document's link rows
+    /// by the row id, each link's keys by the link.
+    DocumentLinkKeys,
     /// The heading rows [`Request::stored_facts`] reads.
     DocumentHeadings,
     /// The block-id rows [`Request::stored_facts`] reads.
@@ -398,13 +403,13 @@ pub enum ExplainedStatement<'a> {
 /// It is the length of [`ExplainedStatement::point_reads`], and that is the
 /// whole of the guarantee: a point read dropped from the census does not
 /// compile, rather than quietly narrowing the bar that iterates it.
-pub const POINT_READS: usize = 10;
+pub const POINT_READS: usize = 11;
 
 /// How many statements this seam names in total.
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 25;
+pub const STATEMENTS: usize = 26;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -450,6 +455,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::StoredDocument(subject),
             Self::StoredFactsDocument(subject),
             Self::DocumentLinks,
+            Self::DocumentLinkKeys,
             Self::DocumentHeadings,
             Self::DocumentBlocks,
             Self::DocumentTags,
@@ -487,15 +493,16 @@ impl<'a> ExplainedStatement<'a> {
             Self::StoredDocument(_) => 13,
             Self::StoredFactsDocument(_) => 14,
             Self::DocumentLinks => 15,
-            Self::DocumentHeadings => 16,
-            Self::DocumentBlocks => 17,
-            Self::DocumentTags => 18,
-            Self::DocumentFields => 19,
-            Self::StoredTombstone(_) => 20,
-            Self::StoredFindings(_) => 21,
-            Self::VaultSchemaPin => 22,
-            Self::FindingCandidates(_) => 23,
-            Self::FindingClasses(_) => 24,
+            Self::DocumentLinkKeys => 16,
+            Self::DocumentHeadings => 17,
+            Self::DocumentBlocks => 18,
+            Self::DocumentTags => 19,
+            Self::DocumentFields => 20,
+            Self::StoredTombstone(_) => 21,
+            Self::StoredFindings(_) => 22,
+            Self::VaultSchemaPin => 23,
+            Self::FindingCandidates(_) => 24,
+            Self::FindingClasses(_) => 25,
         };
         assert!(
             slot < STATEMENTS,
@@ -515,6 +522,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::StoredDocument(subject),
             Self::StoredFactsDocument(subject),
             Self::DocumentLinks,
+            Self::DocumentLinkKeys,
             Self::DocumentHeadings,
             Self::DocumentBlocks,
             Self::DocumentTags,
@@ -539,6 +547,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::StoredDocument(_)
             | Self::StoredFactsDocument(_)
             | Self::DocumentLinks
+            | Self::DocumentLinkKeys
             | Self::DocumentHeadings
             | Self::DocumentBlocks
             | Self::DocumentTags
