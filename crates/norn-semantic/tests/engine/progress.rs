@@ -277,7 +277,9 @@ fn a_watermark_carries_the_store_epoch_it_was_taken_in() {
 
 /// **Progress is recorded, not remembered.** A reopened engine answers the
 /// revision and the watermarks its sidecar committed, so a restart does not
-/// read as a sidecar that drained nothing.
+/// read as a sidecar that drained nothing. The second drain completes both
+/// feeds on pages that carry rows — a document and a death — so each
+/// watermark it leaves was committed with a page's writes rather than alone.
 #[test]
 fn a_reopened_engine_answers_the_progress_its_sidecar_recorded() {
     let scratch = Scratch::new("progress-reopen");
@@ -285,8 +287,14 @@ fn a_reopened_engine_answers_the_progress_its_sidecar_recorded() {
     write_document(&mut store, &document("docs/a.md", "hash-1", "alpha\n"));
     let mut engine = scratch.engine(CountingEmbedder::new());
     engine.drain(&mut store.feed_read()).expect("a drain");
+
+    write_document(&mut store, &document("docs/b.md", "hash-2", "bravo\n"));
+    record_death(&mut store, "docs/a.md");
+    engine.drain(&mut store.feed_read()).expect("a drain");
     let revision = engine.revision();
     let watermarks = engine.watermarks().clone();
+    assert_eq!(watermarks.documents, Some(caught_up(&mut store)));
+    assert_eq!(watermarks.tombstones, Some(caught_up(&mut store)));
     drop(engine);
 
     let engine = scratch.engine(CountingEmbedder::new());
@@ -323,6 +331,10 @@ fn recorded_progress_that_will_not_read_is_rebuilt_from_zero() {
         (
             "watermark-generation",
             "INSERT INTO meta (key, value) VALUES ('tombstone_watermark', 'x:epoch')",
+        ),
+        (
+            "watermark-epoch",
+            "INSERT INTO meta (key, value) VALUES ('document_watermark', '12:')",
         ),
     ] {
         let scratch = Scratch::new(&format!("progress-unreadable-{label}"));
