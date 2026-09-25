@@ -97,6 +97,15 @@ pub(crate) fn identity_of(metadata: &std::fs::Metadata) -> Identity {
     }
 }
 
+/// The identity of what `stat` describes, read through a descriptor.
+#[allow(clippy::unnecessary_cast)] // st_dev's native width differs between supported Unix targets.
+pub(crate) fn identity_of_stat(stat: &rustix::fs::Stat) -> Identity {
+    Identity {
+        dev: stat.st_dev as u64,
+        ino: stat.st_ino as u64,
+    }
+}
+
 /// The identity `path` resolves to now, or `None` when it resolves to nothing.
 ///
 /// One spelling for both consumers: a write asks it to find out whether the name
@@ -118,6 +127,30 @@ pub(crate) fn name_identity(path: &Path) -> Result<Option<Identity>, Refusal> {
 /// reaching around `norn-fs` to stat a vault root itself.
 pub fn path_identity(path: &Path) -> Result<Option<Identity>, Refusal> {
     name_identity(path)
+}
+
+/// The identity of the directory `path` names, where it names one this
+/// process can read.
+///
+/// A vault root is read by listing it, so this answers for a root only where
+/// the listing opens: `path` is followed through every link it spells, what it
+/// reaches is a directory, and that directory lists. Nothing at `path`,
+/// something other than a directory, and a directory this process may not list
+/// are each an environmental refusal naming `path` and carrying what the
+/// operating system said.
+#[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns vault stat.
+pub fn readable_directory(path: &Path) -> Result<Identity, Refusal> {
+    const OPERATION: &str = "reading the directory";
+    let metadata = std::fs::metadata(path).map_err(|error| environment(OPERATION, path, &error))?;
+    if !metadata.is_dir() {
+        return Err(environment(
+            OPERATION,
+            path,
+            &std::io::Error::from_raw_os_error(libc::ENOTDIR),
+        ));
+    }
+    std::fs::read_dir(path).map_err(|error| environment(OPERATION, path, &error))?;
+    Ok(identity_of(&metadata))
 }
 
 /// The post-state identity of a file whose content hashed to `content_hash`.
@@ -171,5 +204,59 @@ mod tests {
             rendered.contains("11") && rendered.contains('7'),
             "{rendered}"
         );
+    }
+
+    /// A directory, and a link to it, answer with the one directory's
+    /// identity.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree this case reads.
+    fn a_readable_directory_answers_with_its_identity_through_a_link() {
+        let tree = norn_testkit::scratch::Scratch::new("norn-fs-readable-directory");
+        let directory = tree.join("vault");
+        std::fs::create_dir_all(&directory).unwrap();
+        let link = tree.join("link");
+        std::os::unix::fs::symlink(&directory, &link).unwrap();
+
+        let identity = readable_directory(&directory).expect("a readable directory");
+        assert_eq!(Some(identity), path_identity(&directory).unwrap());
+        assert_eq!(readable_directory(&link), Ok(identity));
+    }
+
+    /// Nothing at the path, a file, and a directory this process may not list
+    /// each refuse as the environment, naming the path.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree this case reads.
+    fn what_is_not_a_readable_directory_refuses_as_the_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tree = norn_testkit::scratch::Scratch::new("norn-fs-unreadable-directory");
+        let missing = tree.join("missing");
+        let file = tree.join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        let sealed = tree.join("sealed");
+        std::fs::create_dir_all(&sealed).unwrap();
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let refused = [
+            (&missing, std::io::ErrorKind::NotFound),
+            (&file, std::io::ErrorKind::NotADirectory),
+            (&sealed, std::io::ErrorKind::PermissionDenied),
+        ]
+        .map(|(path, expected)| (path, expected, readable_directory(path)));
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        for (path, expected, answer) in refused {
+            match answer {
+                Err(Refusal::Environment {
+                    path: named, kind, ..
+                }) => {
+                    assert_eq!(&named, path);
+                    assert_eq!(kind, expected, "{}", path.display());
+                }
+                other => panic!("{} answered {other:?}", path.display()),
+            }
+        }
     }
 }

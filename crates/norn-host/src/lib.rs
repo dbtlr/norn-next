@@ -66,7 +66,7 @@ pub use production::{
     WATCH_SYNCHRONIZATION_DEADLINE, stored_path_order,
 };
 pub use read::Answered;
-pub use registry::{AliasConflict, RegistryRead};
+pub use registry::{AliasConflict, RecordRefusal, RegistryRead, RegistryUnwritable, RetireRefusal};
 pub use reload::{
     ActiveFingerprints, AuthoredDrift, ConfigFingerprint, EngineConfigReceiver, ReloadError,
     ReloadFile, ReloadJudgment, ReloadOutcome, ReloadRefusal, ReloadStage, VaultInspection,

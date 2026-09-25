@@ -51,7 +51,7 @@ use rustix::fs::{AtFlags, Dir, FileType, Mode, open, openat, readlinkat, statat}
 use self::faults::{Paged, WalkFaults};
 use crate::exclusion::{Excluded, ExclusionError, Exclusions};
 use crate::hash::{ContentHash, read_bytes_and_hash};
-use crate::identity::{Identity, identity_of};
+use crate::identity::{Identity, identity_of, identity_of_stat};
 use crate::open::{Reached, directory_flags, open_regular_at};
 use crate::path::{
     CaseSensitivity, ChildKeys, NormalizedPath, NormalizerError, PathError, PathNormalizer,
@@ -1637,10 +1637,7 @@ fn stat_raw(metadata: &rustix::fs::Stat) -> FileStat {
     FileStat {
         len: metadata.st_size as u64,
         mtime,
-        identity: Identity {
-            dev: metadata.st_dev as u64,
-            ino: metadata.st_ino,
-        },
+        identity: identity_of_stat(metadata),
     }
 }
 

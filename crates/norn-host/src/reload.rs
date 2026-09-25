@@ -140,9 +140,10 @@ impl<O: EntryOps> Host<O> {
     /// either meets gets the same policy, and a reload the host drops without
     /// an answer — moved past before it ran, or lost with a leg that unwound —
     /// answers where the entry stands once it is dropped. Where the entry
-    /// stands is its published demand, so an entry standing on a park is
-    /// refused with the park's own code, as `vault status` answers it. Every
-    /// refusal renders through [`ReloadRefusal::answer`].
+    /// stands is its published demand, so an entry an unregistration holds is
+    /// refused as held, a name the host no longer serves as unknown, and an
+    /// entry standing on a park with the park's own code, as `vault status`
+    /// answers each. Every refusal renders through [`ReloadRefusal::answer`].
     ///
     /// `Err(HostError)` is a host shutting down or whose job channel is gone,
     /// which is transport death and carries no code: nothing about the vault
@@ -178,12 +179,13 @@ impl<O: EntryOps> Host<O> {
 /// Why one internal reload request did not return a Ready vault.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReloadRefusal {
-    UnknownVault,
     Unsupported,
     /// The entry is not reloadable right now, and this is where it stands:
-    /// its published demand, the park it stands on first and its trust state
-    /// where nothing parks it — the one reading `vault status` and a demand
-    /// lease answer the same entry with.
+    /// its published demand — the one reading `vault status` and a demand
+    /// lease answer the same name with. A name the host does not serve and an
+    /// entry an unregistration holds answer as every door answers them; an
+    /// entry in service answers with the park it stands on first, and its
+    /// trust state where nothing parks it.
     Unavailable(Demand),
     Core(ReloadError),
     Runtime(JobFailure),

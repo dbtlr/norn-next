@@ -10,7 +10,8 @@ use norn_config::schema::VaultSchema;
 use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH};
 use norn_fs::{
     Acquisition, Maintainership, MaintainershipKey, OwnWrites, Placement, RescanScope, ShadowHome,
-    Subscription, WatchError, try_acquire, walk, walk_subtree, watch, watch_polling,
+    Subscription, WatchError, canonical_spelling, discard_homes, try_acquire, walk, walk_subtree,
+    watch, watch_polling,
 };
 use norn_store::{
     Change, ContentModel, DerivedFinding, DirectoryPrefix, DocumentPath, FindingFacts,
@@ -27,9 +28,20 @@ use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
     EntryOps, Established, Establishment, Healing, JobFailure, MintedReader, ProgressReporter,
-    ReadSource, ReaderUnavailable, ReconcileWork, ReloadError, ReloadJudgment, ReloadOutcome,
-    SnapshotSource,
+    ReadSource, ReaderUnavailable, ReconcileWork, RecordRefusal, RegistryUnwritable, ReloadError,
+    ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
 };
+
+/// The derived database's file, inside the vault's derived directory.
+const STORE_FILE: &str = "store.sqlite3";
+
+/// The maintainer lock's file, inside the vault's derived directory. It is
+/// never removed: see [`norn_fs::Maintainership`].
+const MAINTAINER_LOCK_FILE: &str = "maintainer.lock";
+
+/// The temporary directory inside the vault's derived directory, which is the
+/// shadow home wherever the device comparison places it there.
+const DATA_TMP: &str = "tmp";
 
 /// Maximum number of document changes materialized for one store transaction.
 pub const MAX_CHANGESET_SIZE: usize = 1024;
@@ -415,6 +427,34 @@ impl ProductionEntryOps {
 
     fn derived(&self, name: &VaultName) -> PathBuf {
         self.dirs.derived_dir(name)
+    }
+
+    /// Discard the derived state `registration`'s vault leaves: the derived
+    /// database and the files its journal leaves beside it, the semantic
+    /// sidecar and its own, and every shadow home the vault's maintainership
+    /// key resolves to — the one inside the derived directory, and the one
+    /// under the vault root's fallback directory, found at the directory the
+    /// registered root resolves to now. A directory that is one of the
+    /// `spared` roots is no home to discard. The lock file stays, and so does
+    /// the derived directory that holds it.
+    ///
+    /// Only under the vault's maintainer lock, for a maintainership that is
+    /// ending. The refusal is told without the paths it names, because the
+    /// account reaches a caller that holds no hold on the derived state.
+    fn discard_state(&self, registration: &Registration, spared: &[&Path]) -> Result<(), String> {
+        let name = &registration.name;
+        let derived = self.derived(name);
+        Store::discard_at(&derived.join(STORE_FILE))
+            .map_err(|refused| crate::refusal::store_refusal_told(&refused))?;
+        norn_semantic::Engine::discard_at(&derived.join(crate::semantic::SIDECAR_FILE))
+            .map_err(|refused| crate::refusal::engine_refusal_told(&refused))?;
+        discard_homes(
+            &canonical_spelling(registration.root.as_path()),
+            &derived.join(DATA_TMP),
+            &maintainership_key(&self.dirs, name),
+            spared,
+        )
+        .map_err(|refused| crate::refusal::shadow_discard_refusal_told(&refused))
     }
 
     /// Resolve the registry's single backend selection directly to the fs
@@ -815,7 +855,7 @@ impl EntryOps for ProductionEntryOps {
         progress.installing_coverage();
         let derived = self.derived(&registration.name);
         let maintainership =
-            match try_acquire(&derived.join("maintainer.lock")).map_err(data_dir_effect)? {
+            match try_acquire(&derived.join(MAINTAINER_LOCK_FILE)).map_err(data_dir_effect)? {
                 Acquisition::Acquired(guard) => guard,
                 Acquisition::Contended { incumbent } => {
                     return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
@@ -833,7 +873,7 @@ impl EntryOps for ProductionEntryOps {
         let path_order = stored_path_order(subscription.case_sensitivity());
         let root = covered_root.as_path();
         let shadows =
-            ShadowHome::resolve(root, &derived.join("tmp"), &key).map_err(data_dir_effect)?;
+            ShadowHome::resolve(root, &derived.join(DATA_TMP), &key).map_err(data_dir_effect)?;
         shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
         if shadows.placement() == Placement::VaultFallback {
             // Residue no key's own sweep will ever open again: what a build that
@@ -853,7 +893,7 @@ impl EntryOps for ProductionEntryOps {
         // is rebuilt from zero here, before anything derives into it or reads
         // from it.
         let store = Store::open(
-            derived.join("store.sqlite3"),
+            derived.join(STORE_FILE),
             path_order,
             crate::DERIVATION_VERSION,
         )
@@ -975,7 +1015,7 @@ impl EntryOps for ProductionEntryOps {
             .map_err(JobFailure::Reload)?;
         let derived = self.derived(&attachment.registration.name);
         let key = maintainership_key(&self.dirs, &attachment.registration.name);
-        let shadows = ShadowHome::resolve(&covered_root, &derived.join("tmp"), &key)
+        let shadows = ShadowHome::resolve(&covered_root, &derived.join(DATA_TMP), &key)
             .map_err(data_dir_effect)?;
         shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
         attachment.subscription = Some(subscription);
@@ -1255,6 +1295,97 @@ impl EntryOps for ProductionEntryOps {
             semantic.detach(name);
         }
         release(attachment);
+    }
+
+    /// The registry file is `norn-config`'s, changed through its locked
+    /// read-modify-write, so no second writer's change is lost under this one
+    /// and a key this build does not model survives it. The name is looked
+    /// for in the file as that change reads it, so a registration another
+    /// writer recorded is found under the same lock that would replace it.
+    ///
+    /// A write whose replacement landed and whose durability could not be
+    /// confirmed is a written change: every reader of the file sees it, so
+    /// the host's serving set follows it rather than standing as though the
+    /// file had refused. A refusal is told without the paths it names.
+    #[allow(clippy::disallowed_methods)] // The registry surface is this crate's.
+    fn record(&self, registration: &Registration) -> Result<(), RecordRefusal> {
+        let recorded = norn_config::registry::mutate(&self.dirs, |registry| {
+            if registry.get(&registration.name).is_some() {
+                return Ok(false);
+            }
+            registry.insert(registration.clone());
+            Ok(true)
+        });
+        match recorded {
+            Ok(true) | Err(norn_config::ConfigError::MutationUnconfirmed { .. }) => Ok(()),
+            Ok(false) => Err(RecordRefusal::AlreadyRecorded),
+            Err(refused) => Err(RecordRefusal::Unwritable(RegistryUnwritable::new(
+                crate::refusal::config_refusal_told(&refused),
+            ))),
+        }
+    }
+
+    /// The lock is the one an attach takes, in the vault's derived directory,
+    /// and it is held until the registry file's change has returned.
+    ///
+    /// The file's change is `norn-config`'s locked read-modify-write, and the
+    /// discard runs inside it, between the read and the write: a file this
+    /// build cannot read or parse refuses before the read hands anything
+    /// over, so nothing is discarded, and a discard that refuses leaves the
+    /// registry as it was read, which is not written back. What is discarded
+    /// is the derived database and the files its journal leaves beside it,
+    /// the semantic sidecar and its own, and both shadow homes the vault's
+    /// maintainership key resolves to; the lock file and the derived
+    /// directory holding it stay. The registry file's own lock is held across
+    /// the discard, so another writer of the file waits for it too. The lock
+    /// refusals and the registry file's are told without the paths they
+    /// name.
+    #[allow(clippy::disallowed_methods)] // The registry surface is this crate's.
+    fn retire(
+        &self,
+        registration: &Registration,
+        keep_state: bool,
+        standing: &[Registration],
+    ) -> Result<(), RetireRefusal> {
+        let name = &registration.name;
+        let _maintainership = match try_acquire(&self.derived(name).join(MAINTAINER_LOCK_FILE)) {
+            Ok(Acquisition::Acquired(guard)) => guard,
+            Ok(Acquisition::Contended { incumbent }) => {
+                return Err(RetireRefusal::MaintainerContended(map_incumbent(incumbent)));
+            }
+            Err(refused) => {
+                return Err(RetireRefusal::Unclaimed(
+                    crate::refusal::data_dir_refusal_told(&refused),
+                ));
+            }
+        };
+        // A vault that is no longer served holds no engine: the slot goes
+        // back before the sidecar it would read from is discarded.
+        self.discard(name);
+        let retired = norn_config::registry::mutate(&self.dirs, |registry| {
+            // A root the file records is somebody's vault whether or not
+            // this host serves it, so the file's registrations are spared
+            // beside the served ones.
+            let spared = standing
+                .iter()
+                .chain(registry.entries())
+                .map(|registration| registration.root.as_path())
+                .collect::<Vec<_>>();
+            if !keep_state && let Err(refused) = self.discard_state(registration, &spared) {
+                return Ok(Err(refused));
+            }
+            #[cfg(test)]
+            tests::run_inside_retirement();
+            registry.remove(name);
+            Ok(Ok(()))
+        });
+        match retired {
+            Ok(Ok(())) | Err(norn_config::ConfigError::MutationUnconfirmed { .. }) => Ok(()),
+            Ok(Err(refused)) => Err(RetireRefusal::Undiscarded(refused)),
+            Err(refused) => Err(RetireRefusal::Unrecorded(RegistryUnwritable::new(
+                crate::refusal::config_refusal_told(&refused),
+            ))),
+        }
     }
 
     /// The engine goes back for a leg whose attachment went with an unwinding
@@ -3327,6 +3458,21 @@ mod tests {
     use std::fs;
     use std::thread;
 
+    thread_local! {
+        /// What a case arranged to run inside a retirement's registry change,
+        /// after the discard and before the file is written.
+        static INSIDE_RETIREMENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
+
+    /// Run what a case on this thread arranged to happen inside a
+    /// retirement's registry change, once.
+    pub(super) fn run_inside_retirement() {
+        if let Some(arranged) = INSIDE_RETIREMENT.with(|slot| slot.borrow_mut().take()) {
+            arranged();
+        }
+    }
+
     /// **The read seam's refusal names no file.** The reason a refused mint or
     /// establishment leaves is retained beside the entry's published demand and
     /// is rendered into the vault inspection and into a read's refusal detail,
@@ -4254,7 +4400,7 @@ mod tests {
         assert_eq!(host.inspect(&name), standing);
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::ReloadPending)
+            Ok(crate::AuthoredDrift::ReloadPending)
         );
         assert_eq!(receiver.seen.lock().unwrap().len(), delivered);
         assert_eq!(host.state(&name), answered(norn_wire::TrustState::Ready));
@@ -4267,7 +4413,7 @@ mod tests {
         assert_ne!(host.inspect(&name), standing);
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::Current)
+            Ok(crate::AuthoredDrift::Current)
         );
         assert!(receiver.seen.lock().unwrap().len() > delivered);
     }
@@ -4589,7 +4735,7 @@ mod tests {
     ) -> norn_wire::UntrustedReason {
         wait_until("an untrusted entry", lifecycle_budget(), || {
             match host.inspect(name).map(|inspection| inspection.trust) {
-                Some(norn_wire::TrustState::Untrusted { reason, .. }) => Observed::Met(reason),
+                Ok(norn_wire::TrustState::Untrusted { reason, .. }) => Observed::Met(reason),
                 other => Observed::Pending(format!("the state is {other:?}")),
             }
         })
@@ -5075,18 +5221,18 @@ mod tests {
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::Current)
+            Ok(crate::AuthoredDrift::Current)
         );
 
         fs::write(f.vault().join(".norn/config.toml"), "[engine.broken\n").unwrap();
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::ReloadPending),
+            Ok(crate::AuthoredDrift::ReloadPending),
             "the drift query parsed invalid TOML instead of comparing bytes"
         );
 
         fs::remove_file(f.vault().join(".norn/schema.yaml")).unwrap();
-        let Some(crate::AuthoredDrift::Unreadable(error)) = host.authored_drift(&name) else {
+        let Ok(crate::AuthoredDrift::Unreadable(error)) = host.authored_drift(&name) else {
             panic!("a missing schema was not reported as unreadable");
         };
         assert_eq!(error.file(), crate::ReloadFile::Schema);
@@ -5135,13 +5281,13 @@ mod tests {
 
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::Current)
+            Ok(crate::AuthoredDrift::Current)
         );
         host.reload(&name)
             .expect("config-only reload from covered root");
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::Current)
+            Ok(crate::AuthoredDrift::Current)
         );
     }
 
@@ -5166,14 +5312,14 @@ mod tests {
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         assert_eq!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::Current)
+            Ok(crate::AuthoredDrift::Current)
         );
 
         fs::create_dir(f.vault().join(".norn/config.toml")).unwrap();
 
         assert!(matches!(
             host.authored_drift(&name),
-            Some(crate::AuthoredDrift::Unreadable(
+            Ok(crate::AuthoredDrift::Unreadable(
                 crate::ReloadError::ConfigRead(_)
             ))
         ));
@@ -5270,6 +5416,34 @@ mod tests {
                 freshness(&answer.watermarks, &store),
                 Freshness::trailing(0)
             );
+        }
+
+        /// A retirement gives the engine slot back whether or not it keeps
+        /// the derived state: a vault no longer served holds no engine, and
+        /// its sidecar, kept, is adopted by the next delivery.
+        #[test]
+        fn a_retirement_keeping_state_gives_the_engine_back() {
+            let f = Fixture::new("semantic-retire-keeping");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+            // An attachment lost to an unwinding stack releases its lock and
+            // leaves the engine slot to the name-keyed give-back.
+            drop(
+                ops.attach(&f.registration(), &ProgressReporter::disconnected())
+                    .expect("an attach with an enabled engine"),
+            );
+            assert!(engines.section(&name).is_some());
+
+            ops.retire(&f.registration(), true, &[])
+                .expect("the idle vault is retired");
+
+            assert_eq!(
+                engines.section(&name),
+                None,
+                "the engine outlived the vault"
+            );
+            assert_eq!(engines.status(&name), SemanticStatus::Off);
         }
 
         /// No section, no engine: the status is off and the refusal says so.
@@ -13055,6 +13229,636 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.content_hash, during);
+    }
+
+    /// The registration changes over the production seam: the registry file
+    /// written through `norn-config`, the maintainer lock taken in the data
+    /// directory, and the derived state discarded there.
+    mod registration_changes {
+        use super::*;
+        use norn_wire::{
+            ErrorEnvelope, ListParams, ReasonCode, RegisterParams, RegisterReport,
+            UnregisterParams, UnregisterReport,
+        };
+
+        const NOTES: &str = "notes";
+
+        fn notes() -> VaultName {
+            VaultName::new(NOTES).unwrap()
+        }
+
+        /// A production host over `f`'s directories, started from a registry
+        /// file that records nothing.
+        fn empty_host(f: &Fixture) -> (crate::Host<ProductionEntryOps>, ConfigDirs) {
+            empty_host_over(&f.root.join("config"), &f.root.join("data"))
+        }
+
+        /// A production host over the config base `config` and the data base
+        /// `data`, started from a registry file that records nothing.
+        fn empty_host_over(
+            config: &Path,
+            data: &Path,
+        ) -> (crate::Host<ProductionEntryOps>, ConfigDirs) {
+            let dirs = ConfigDirs::new(config, data).unwrap();
+            let host = crate::Host::new(
+                crate::RegistryRead::from_entries([]),
+                ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(2, 2).unwrap()),
+                crate::LifecyclePolicy {
+                    idle_after: Duration::from_secs(60),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_secs(60),
+                },
+            )
+            .unwrap();
+            (host, dirs)
+        }
+
+        fn register(
+            host: &crate::Host<ProductionEntryOps>,
+            root: &Path,
+        ) -> Result<RegisterReport, ErrorEnvelope> {
+            host.vault_register(&RegisterParams::new(Registration::new(
+                notes(),
+                VaultRoot::new(root).unwrap(),
+            )))
+        }
+
+        /// What the registry file records under `name`, read the way a host
+        /// starting over it reads it.
+        fn recorded(dirs: &ConfigDirs, name: &VaultName) -> Option<Registration> {
+            norn_config::registry::read(dirs)
+                .expect("the registry file reads")
+                .get(name)
+                .cloned()
+        }
+
+        fn listed(host: &crate::Host<ProductionEntryOps>) -> Vec<VaultName> {
+            host.vault_list(&ListParams::new())
+                .registrations
+                .into_iter()
+                .map(|registration| registration.name)
+                .collect()
+        }
+
+        /// Attach the registered vault, then let it idle out.
+        fn attach_and_idle(host: &crate::Host<ProductionEntryOps>) {
+            let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
+            wait_state(host, &notes(), norn_wire::TrustState::Ready);
+            drop(lease);
+            host.reap_idle(Instant::now() + Duration::from_secs(61))
+                .unwrap();
+            wait_state(host, &notes(), norn_wire::TrustState::Unattached);
+        }
+
+        /// Unregister, asking again while the release that idled the entry out
+        /// still holds it — which is what an operator told the entry is held
+        /// does.
+        fn unregister_once_idle(
+            host: &crate::Host<ProductionEntryOps>,
+            params: &UnregisterParams,
+        ) -> Result<UnregisterReport, ErrorEnvelope> {
+            wait_until(
+                "the entry to be let go of",
+                lifecycle_budget(),
+                || match host.vault_unregister(params) {
+                    Err(refusal) if refusal.code() == &ReasonCode::HostEntryHeld => {
+                        Observed::Pending("the entry is held".to_string())
+                    }
+                    answer => Observed::Met(answer),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+        }
+
+        /// A root spelled through a link is recorded, listed and served at the
+        /// directory the link reaches, so the attach that follows reads one
+        /// directory with no link as its last component.
+        #[cfg(unix)]
+        #[test]
+        fn a_vault_registered_through_a_link_is_recorded_at_its_directory_and_attaches() {
+            use std::os::unix::fs::symlink;
+
+            let f = Fixture::new("register-through-link");
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let link = f.root.join("link");
+            symlink(f.vault(), &link).unwrap();
+            let (host, dirs) = empty_host(&f);
+
+            let report = register(&host, &link).expect("the vault is registered");
+
+            let directory = VaultRoot::new(fs::canonicalize(f.vault()).unwrap()).unwrap();
+            assert_eq!(report.registration.root, directory);
+            assert_eq!(recorded(&dirs, &notes()), Some(report.registration));
+            assert_eq!(listed(&host), [notes()]);
+            let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
+            wait_state(&host, &notes(), norn_wire::TrustState::Ready);
+            drop(lease);
+        }
+
+        /// An unregistered vault leaves the registry file and the set, and
+        /// its derived database, the database's sidecars, its semantic
+        /// sidecar and its shadow home go with it — while its maintainer lock
+        /// file and its documents stay.
+        #[test]
+        fn an_unregistered_vault_discards_its_derived_state_and_keeps_its_lock_file() {
+            let f = Fixture::new("unregister-discards");
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            attach_and_idle(&host);
+            let derived = dirs.derived_dir(&notes());
+            assert!(fs::metadata(derived.join("store.sqlite3")).is_ok());
+            // A semantic sidecar and a file its journal left beside it.
+            fs::write(derived.join("semantic.sqlite3"), b"").unwrap();
+            fs::write(derived.join("semantic.sqlite3-wal"), b"").unwrap();
+
+            let report = unregister_once_idle(&host, &UnregisterParams::new(notes()))
+                .expect("the idle vault is unregistered");
+
+            assert_eq!(report, UnregisterReport::new(notes(), true));
+            let left = fs::read_dir(&derived)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                left,
+                ["maintainer.lock"],
+                "the derived directory kept state, or lost its lock file"
+            );
+            assert!(
+                fs::metadata(f.vault().join("a.md")).is_ok(),
+                "a vault document went with the derived state"
+            );
+            assert_eq!(recorded(&dirs, &notes()), None);
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// Keeping the state leaves the derived database where it was.
+        #[test]
+        fn an_unregistration_keeping_state_leaves_the_derived_database() {
+            let f = Fixture::new("unregister-keeps");
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            attach_and_idle(&host);
+
+            let report =
+                unregister_once_idle(&host, &UnregisterParams::new(notes()).keeping_state())
+                    .expect("the idle vault is unregistered");
+
+            assert_eq!(report, UnregisterReport::new(notes(), false));
+            assert!(fs::metadata(dirs.derived_dir(&notes()).join("store.sqlite3")).is_ok());
+            assert_eq!(recorded(&dirs, &notes()), None);
+        }
+
+        /// A registry file whose directory cannot be made refuses the
+        /// registration, and the serving set does not change.
+        #[test]
+        fn a_registry_file_that_cannot_be_written_leaves_the_set_as_it_stood() {
+            let f = Fixture::watcherless("register-unwritable");
+            let config = f.root.join("config-is-a-file");
+            fs::write(&config, b"").unwrap();
+            let (host, _) = empty_host_over(&config, &f.root.join("data"));
+
+            let refusal =
+                register(&host, &f.vault()).expect_err("a registration the file refused went in");
+
+            assert_eq!(refusal.code(), &ReasonCode::HostRegistryUnwritable);
+            assert_names_no_path(&refusal, &f);
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// A refusal a registration change answers with names no file: the
+        /// account keeps the act that failed and what refused it, and a caller
+        /// holding no hold on the machine's directories reads no path to them.
+        fn assert_names_no_path(refusal: &ErrorEnvelope, f: &Fixture) {
+            let rendered = format!("{} {:?}", refusal.message(), refusal.detail());
+            let tail = f
+                .root
+                .root()
+                .file_name()
+                .expect("a scratch directory name")
+                .to_string_lossy();
+            assert!(
+                !rendered.contains(tail.as_ref()),
+                "the refusal names a path under the scratch root: {rendered}"
+            );
+        }
+
+        /// A data directory in which the maintainer lock cannot be taken
+        /// refuses the unregistration as the environment refusing the work,
+        /// and the registration stands in the file and the set.
+        #[test]
+        fn a_data_directory_refusing_the_lock_leaves_the_registration_standing() {
+            let f = Fixture::watcherless("unregister-unclaimed");
+            let data = f.root.join("data-is-a-file");
+            fs::write(&data, b"").unwrap();
+            let (host, dirs) = empty_host_over(&f.root.join("config"), &data);
+            register(&host, &f.vault()).expect("the vault is registered");
+
+            let refusal = host
+                .vault_unregister(&UnregisterParams::new(notes()))
+                .expect_err("an unregistration without the lock went through");
+
+            assert!(
+                matches!(
+                    refusal.detail(),
+                    norn_wire::ErrorDetail::EntryUntrusted {
+                        reason: norn_wire::UntrustedReason::EnvironmentalRefusal { .. },
+                        ..
+                    }
+                ),
+                "{refusal:?}"
+            );
+            assert!(recorded(&dirs, &notes()).is_some());
+            assert_eq!(listed(&host), [notes()]);
+        }
+
+        /// Another holder of the vault's maintainer lock refuses the change,
+        /// and nothing changes: the file, the set and the derived state all
+        /// stand.
+        #[test]
+        fn another_holder_of_the_maintainer_lock_changes_nothing() {
+            let f = Fixture::new("unregister-contended");
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            attach_and_idle(&host);
+            let derived = dirs.derived_dir(&notes());
+            let norn_fs::Acquisition::Acquired(held) =
+                norn_fs::try_acquire(&derived.join("maintainer.lock")).unwrap()
+            else {
+                panic!("the idle vault's lock is held");
+            };
+
+            let answer = unregister_once_idle(&host, &UnregisterParams::new(notes()));
+
+            let refusal = answer.expect_err("a contended vault was unregistered");
+            assert_eq!(refusal.code(), &ReasonCode::HostMaintainerContended);
+            assert!(recorded(&dirs, &notes()).is_some());
+            assert_eq!(listed(&host), [notes()]);
+            assert!(fs::metadata(derived.join("store.sqlite3")).is_ok());
+            drop(held);
+        }
+
+        /// A registry file this build cannot read — bytes that are no
+        /// registry, or a version ahead of this build — refuses the
+        /// unregistration before anything is discarded, and the registration
+        /// stands.
+        #[test]
+        fn a_registry_file_this_build_cannot_read_refuses_before_anything_is_discarded() {
+            for (label, body) in [
+                ("corrupt", "this is not [ a registry"),
+                ("ahead", "version = 999\n"),
+            ] {
+                let f = Fixture::new(&format!("unregister-unreadable-{label}"));
+                fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+                let (host, dirs) = empty_host(&f);
+                register(&host, &f.vault()).expect("the vault is registered");
+                attach_and_idle(&host);
+                fs::write(dirs.config_dir().join("registry.toml"), body).unwrap();
+
+                let refusal = unregister_once_idle(&host, &UnregisterParams::new(notes()))
+                    .expect_err("an unregistration over an unreadable file went through");
+
+                assert_eq!(
+                    refusal.code(),
+                    &ReasonCode::HostRegistryUnwritable,
+                    "{label}"
+                );
+                assert_names_no_path(&refusal, &f);
+                assert!(
+                    fs::metadata(dirs.derived_dir(&notes()).join("store.sqlite3")).is_ok(),
+                    "{label}: the derived database was discarded"
+                );
+                assert_eq!(listed(&host), [notes()], "{label}");
+            }
+        }
+
+        /// A name another writer recorded in the registry file since the host
+        /// started is refused as taken, and the file keeps that registration.
+        #[test]
+        fn a_name_the_registry_file_records_is_refused_and_the_file_keeps_it() {
+            let f = Fixture::watcherless("register-recorded");
+            let (host, dirs) = empty_host(&f);
+            let theirs = Registration::new(notes(), VaultRoot::new(f.root.join("theirs")).unwrap());
+            norn_config::registry::mutate(&dirs, |registry| {
+                registry.insert(theirs.clone());
+                Ok(())
+            })
+            .expect("another writer records the name");
+
+            let refusal =
+                register(&host, &f.vault()).expect_err("a recorded name was registered over");
+
+            assert_eq!(refusal.code(), &ReasonCode::HostAlreadyServed);
+            assert_eq!(recorded(&dirs, &notes()), Some(theirs));
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// A link standing at the vault's fallback home is no home: the
+        /// unregistration leaves it and the directory it reaches alone, and
+        /// discards everything else.
+        #[cfg(unix)]
+        #[test]
+        fn a_link_at_the_fallback_home_is_left_and_what_it_reaches_is_not_swept() {
+            let f = Fixture::new("unregister-fallback-link");
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            attach_and_idle(&host);
+            let key = dirs.derived_key(&notes());
+            let parent = f
+                .vault()
+                .join(norn_fs::FALLBACK)
+                .join(key.channel())
+                .join(key.vault());
+            fs::create_dir_all(&parent).unwrap();
+            let elsewhere = f.root.join("another-home");
+            fs::create_dir_all(&elsewhere).unwrap();
+            let foreign = elsewhere.join("norn-shadow-99999-1");
+            fs::write(&foreign, b"another write's staged bytes").unwrap();
+            let link = parent.join(key.data_base());
+            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+
+            let report = unregister_once_idle(&host, &UnregisterParams::new(notes()))
+                .expect("the vault is unregistered past the link");
+
+            assert_eq!(report, UnregisterReport::new(notes(), true));
+            assert!(
+                fs::metadata(&foreign).is_ok(),
+                "a shadow the link reaches was taken"
+            );
+            assert!(fs::symlink_metadata(&link).is_ok(), "the link was removed");
+            assert!(
+                fs::metadata(dirs.derived_dir(&notes()).join("store.sqlite3")).is_err(),
+                "the derived database stood"
+            );
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// A shadow the fallback home keeps because the home refuses its
+        /// removal refuses the unregistration: nothing reports the state
+        /// discarded, the refusal names the home under the vault root without
+        /// its path, and the registration stands.
+        #[cfg(unix)]
+        #[test]
+        fn a_shadow_a_read_only_fallback_home_keeps_refuses_the_unregistration() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let f = Fixture::new("unregister-read-only-home");
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            attach_and_idle(&host);
+            let key = dirs.derived_key(&notes());
+            let home = f
+                .vault()
+                .join(norn_fs::FALLBACK)
+                .join(key.channel())
+                .join(key.vault())
+                .join(key.data_base());
+            fs::create_dir_all(&home).unwrap();
+            let shadow = home.join("norn-shadow-99999-1");
+            fs::write(&shadow, b"staged bytes").unwrap();
+            fs::set_permissions(&home, fs::Permissions::from_mode(0o555)).unwrap();
+            let probe = home.join("permission-probe");
+            if fs::write(&probe, b"").is_ok() {
+                // Permission bits do not bind this process, so the refusal
+                // this case is about cannot be arranged.
+                fs::remove_file(&probe).unwrap();
+                fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+                eprintln!("skipped: permission bits do not bind this process");
+                return;
+            }
+
+            let answer = unregister_once_idle(&host, &UnregisterParams::new(notes()));
+            fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let refusal = answer.expect_err("an unregistration that left a shadow went through");
+            match refusal.detail() {
+                norn_wire::ErrorDetail::EntryUntrusted {
+                    reason: norn_wire::UntrustedReason::EnvironmentalRefusal { detail, .. },
+                    ..
+                } => assert!(
+                    detail.contains("shadow home under the vault root"),
+                    "the refusal names another place: {detail}"
+                ),
+                other => panic!("the refusal is not environmental: {other:?}"),
+            }
+            assert_names_no_path(&refusal, &f);
+            assert!(fs::metadata(&shadow).is_ok(), "the shadow went");
+            assert!(recorded(&dirs, &notes()).is_some());
+            assert_eq!(listed(&host), [notes()]);
+        }
+
+        /// Another registered vault whose root stands at this vault's
+        /// fallback home keeps its root, empty as it is.
+        #[test]
+        fn a_registered_root_at_the_fallback_home_is_left_standing() {
+            let f = Fixture::watcherless("unregister-fallback-root");
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            let key = dirs.derived_key(&notes());
+            let home = f
+                .vault()
+                .join(norn_fs::FALLBACK)
+                .join(key.channel())
+                .join(key.vault())
+                .join(key.data_base());
+            fs::create_dir_all(&home).unwrap();
+            let other = VaultName::new("other").unwrap();
+            host.vault_register(&RegisterParams::new(Registration::new(
+                other.clone(),
+                VaultRoot::new(&home).unwrap(),
+            )))
+            .expect("the other vault is registered");
+
+            unregister_once_idle(&host, &UnregisterParams::new(notes()))
+                .expect("the vault is unregistered");
+
+            assert!(
+                fs::metadata(&home).is_ok(),
+                "a registered vault's root was removed"
+            );
+            assert_eq!(listed(&host), [other]);
+        }
+
+        /// The maintainer lock a retirement takes is held across the discard
+        /// and the registry write: another holder trying it from inside the
+        /// registry change finds it held, by this process.
+        #[test]
+        fn a_retirement_holds_the_maintainer_lock_through_the_discard_and_the_write() {
+            let f = Fixture::watcherless("retire-holds-the-lock");
+            let (ops, name) = f.ops(2);
+            let lock = ops.derived(&name).join(MAINTAINER_LOCK_FILE);
+            let tried = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let reported = std::sync::Arc::clone(&tried);
+            INSIDE_RETIREMENT.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    *reported.lock().unwrap() = Some(match norn_fs::try_acquire(&lock) {
+                        Ok(Acquisition::Contended { incumbent }) => Ok(incumbent),
+                        Ok(Acquisition::Acquired(_)) => Err("taken".to_string()),
+                        Err(refused) => Err(refused.to_string()),
+                    });
+                }));
+            });
+
+            ops.retire(&f.registration(), false, &[])
+                .expect("the vault is retired");
+
+            let tried = tried.lock().unwrap().take();
+            assert!(
+                matches!(
+                    &tried,
+                    Some(Ok(norn_fs::Incumbent::Named { pid, .. })) if *pid == std::process::id()
+                ),
+                "the lock was not held inside the registry change: {tried:?}"
+            );
+        }
+
+        /// A root another writer recorded in the registry file since the host
+        /// started, standing at this vault's fallback home, keeps its root
+        /// too: the host does not serve it, and the file says it is somebody's
+        /// vault.
+        #[test]
+        fn a_root_the_registry_file_records_at_the_fallback_home_is_left_standing() {
+            let f = Fixture::watcherless("unregister-fallback-recorded-root");
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            let key = dirs.derived_key(&notes());
+            let home = f
+                .vault()
+                .join(norn_fs::FALLBACK)
+                .join(key.channel())
+                .join(key.vault())
+                .join(key.data_base());
+            fs::create_dir_all(&home).unwrap();
+            norn_config::registry::mutate(&dirs, |registry| {
+                registry.insert(Registration::new(
+                    VaultName::new("theirs").unwrap(),
+                    VaultRoot::new(&home).unwrap(),
+                ));
+                Ok(())
+            })
+            .expect("another writer records its vault");
+
+            unregister_once_idle(&host, &UnregisterParams::new(notes()))
+                .expect("the vault is unregistered");
+
+            assert!(
+                fs::metadata(&home).is_ok(),
+                "a root the registry file records was removed"
+            );
+            assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// A demand racing an unregistration of the same idle vault is either
+        /// recorded before the unregistration asks — which refuses as held —
+        /// or answered as the name being unknown. The demand's attach never
+        /// meets the unregistration's maintainer lock, so no unregistration
+        /// is refused as contended by this process and no park names it.
+        #[test]
+        fn a_demand_racing_an_unregistration_never_contends_with_it() {
+            let f = Fixture::new("unregister-race");
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let (host, _dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut races = 0_u64;
+            while races < 200 && Instant::now() < deadline {
+                races += 1;
+                // The demand lands at a different offset into the
+                // unregistration on each race.
+                let offset = Duration::from_micros((races * 37) % 400);
+                let start = std::sync::Barrier::new(2);
+                let answer = std::thread::scope(|scope| {
+                    let demander = scope.spawn(|| {
+                        start.wait();
+                        let began = Instant::now();
+                        while began.elapsed() < offset {
+                            std::hint::spin_loop();
+                        }
+                        drop(host.demand(&notes(), AttachMode::Durable).unwrap());
+                    });
+                    start.wait();
+                    let answer =
+                        host.vault_unregister(&UnregisterParams::new(notes()).keeping_state());
+                    demander.join().expect("the demand ran");
+                    answer
+                });
+                match answer {
+                    Ok(_) => {
+                        register(&host, &f.vault()).expect("the vault is registered again");
+                        continue;
+                    }
+                    Err(refusal) => assert_eq!(
+                        refusal.code(),
+                        &ReasonCode::HostEntryHeld,
+                        "race {races}: {refusal:?}"
+                    ),
+                }
+                // The demand the unregistration was refused for attaches, and
+                // is let go of before the next race.
+                let settled = wait_until("the demand to settle", lifecycle_budget(), || match host
+                    .state(&notes())
+                {
+                    Ok(norn_wire::TrustState::Ready | norn_wire::TrustState::Unattached) => {
+                        Observed::Met(Ok(()))
+                    }
+                    Err(refusal) => Observed::Met(Err(refusal)),
+                    Ok(other) => Observed::Pending(format!("{other:?}")),
+                })
+                .unwrap_or_else(|failure| panic!("{failure}"));
+                assert_eq!(settled, Ok(()), "race {races}: the entry parked");
+                host.reap_idle(Instant::now() + Duration::from_secs(61))
+                    .unwrap();
+                wait_state(&host, &notes(), norn_wire::TrustState::Unattached);
+            }
+        }
+
+        /// An idle attached vault whose root is replaced by a link the
+        /// registry cannot read is parked by the watcher's next poll, which
+        /// gives its coverage — and the maintainer lock inside it — back. An
+        /// unregistration asked for over and over across that give-back is
+        /// refused as held until the lock is back, and never as another
+        /// maintainer: the only maintainer is this process.
+        #[cfg(unix)]
+        #[test]
+        fn an_unregistration_across_an_identity_refusals_give_back_never_meets_its_own_lock() {
+            for round in 0..5 {
+                let f = Fixture::new(&format!("unregister-identity-give-back-{round}"));
+                fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+                let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+                let host = crate::Host::new(
+                    crate::RegistryRead::from_entries([]),
+                    ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+                    crate::LifecyclePolicy {
+                        idle_after: Duration::from_secs(600),
+                        worker_slots: 1,
+                        watch_poll_interval: Duration::from_millis(5),
+                    },
+                )
+                .unwrap();
+                register(&host, &f.vault()).expect("the vault is registered");
+                let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
+                wait_state(&host, &notes(), norn_wire::TrustState::Ready);
+                drop(lease);
+
+                let answer = std::thread::scope(|scope| {
+                    let unregistering = scope.spawn(|| {
+                        unregister_once_idle(&host, &UnregisterParams::new(notes()).keeping_state())
+                    });
+                    fs::remove_dir_all(f.vault()).unwrap();
+                    std::os::unix::fs::symlink(f.vault().file_name().unwrap(), f.vault()).unwrap();
+                    unregistering.join().expect("the unregistration ran")
+                });
+
+                assert_eq!(
+                    answer.map(|report| report.name),
+                    Ok(notes()),
+                    "round {round}"
+                );
+            }
+        }
     }
 
     /// The budget every lifecycle condition here is given: long enough that a

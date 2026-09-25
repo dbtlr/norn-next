@@ -108,11 +108,11 @@ disallowed-methods = [
     { path = "rusqlite::Connection::from_handle", reason = "norn-db is the substrate seam; adopting a raw handle is opening one" },
     { path = "rusqlite::Connection::from_handle_owned", reason = "norn-db is the substrate seam; adopting a raw handle is opening one" },
     # No norn-config registry-surface use outside norn-host. The registry file
-    # is the serving set, and reading or changing it is the orchestrator's act;
-    # the machine surface beside it — endpoint discovery, token read — is
-    # shared and has no entry here. `norn-config` re-exports nothing from
-    # `registry` at its root, so every use of the surface names this path and
-    # the rule can be stated over it.
+    # seeds the host's serving set, and reading or changing it is the
+    # orchestrator's act; the machine surface beside it — endpoint discovery,
+    # token read — is shared and has no entry here. `norn-config` re-exports
+    # nothing from `registry` at its root, so every use of the surface names
+    # this path and the rule can be stated over it.
     #
     # Reaching the file is the act the rule is about, so its subject is these
     # two functions rather than the module's types. The paths to the registry

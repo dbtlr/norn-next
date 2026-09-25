@@ -17,28 +17,31 @@
 //! Joining while the host runs carries a classification with it, and that is
 //! the lifecycle's own move rather than this module's: a set knows which roots
 //! it holds, and whether two of them are one root is a filesystem reading taken
-//! against the entries a refusal then acts on. The registration verbs Layer
-//! 3's product surface offers land on that move; these two are what it is
-//! built from.
-//!
-//! The pair is dormant until those verbs exist. Startup and the lifecycle's
-//! own join are what reach [`ServingSet::insert`], [`ServingSet::remove`] has
-//! no caller outside this crate's own cases, and nothing above this crate
-//! reaches either.
+//! against the entries a refusal then acts on. The registration verbs —
+//! [`Host::vault_register`] and [`Host::vault_unregister`] — land on that
+//! move and on [`ServingSet::remove`], each under the one lock every
+//! registration change holds, so no insertion or removal but startup's runs
+//! outside it.
 //!
 //! [`Host::new`]: crate::Host::new
+//! [`Host::vault_register`]: crate::Host::vault_register
+//! [`Host::vault_unregister`]: crate::Host::vault_unregister
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use norn_config::registry::Entry as Registration;
 use norn_fs::Refusal;
 use norn_wire::VaultName;
 
-use super::{Entry, SnapshotSource};
-use crate::registry::{ResolveRefusal, RootReading, containing, recheck};
+use std::collections::BTreeSet;
+
+use norn_fs::Identity;
+
+use super::{Entry, Service, SnapshotSource};
+use crate::registry::{ResolveRefusal, RootReading, containing, reaching, recheck};
 
 /// Why the serving set stands unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,7 +75,10 @@ pub(crate) enum ServingRefusal {
 /// strands nothing that is running. Work in the job channel keeps no handle:
 /// it carries a name and an epoch, and the worker that takes it resolves that
 /// name through the set again, so a job whose name the set no longer serves
-/// reaches no entry and does nothing where it arrives.
+/// reaches no entry and does nothing where it arrives. A job whose name the
+/// set serves again reaches the entry serving it now, and does nothing there
+/// either: an entry joins at the highest epoch any removed entry stood at, and
+/// every job a removed entry left queued carries an epoch below that.
 ///
 /// That second read is what a removal is admitted under while jobs are in
 /// flight. A job carrying the entry it was scheduled against would spare the
@@ -110,6 +116,14 @@ pub(crate) struct ServingSet<A: SnapshotSource> {
     /// root, so this counts the set's whole filesystem cost, and a path that
     /// leaves it unmoved spent no stat on the registry.
     classifications: AtomicUsize,
+    /// The highest epoch any entry this set removed stood at, which is where
+    /// an entry joining it starts.
+    ///
+    /// A job is queued at the epoch its entry stood at, and the entry moves
+    /// past it before the job's queue slot is given up — so a removed entry,
+    /// which holds no slot, stands past every job it left queued. Written and
+    /// read under the set's write lock.
+    retired_epoch: AtomicU64,
 }
 
 impl<A: SnapshotSource> ServingSet<A> {
@@ -118,6 +132,7 @@ impl<A: SnapshotSource> ServingSet<A> {
         Self {
             entries: RwLock::new(BTreeMap::new()),
             classifications: AtomicUsize::new(0),
+            retired_epoch: AtomicU64::new(0),
         }
     }
 
@@ -237,10 +252,38 @@ impl<A: SnapshotSource> ServingSet<A> {
         )
     }
 
+    /// Every name the set serves whose root reaches `identity` at this
+    /// instant.
+    ///
+    /// The name and root of every entry are copied out under the read guard,
+    /// and the stats run after it goes back, as [`ServingSet::recheck`]'s do.
+    /// They reach every served root, so the pass is counted as a
+    /// classification.
+    pub(crate) fn reaching(&self, identity: Identity) -> BTreeSet<VaultName> {
+        let roots = self
+            .entries
+            .read()
+            .expect("serving set poisoned")
+            .values()
+            .map(|entry| {
+                (
+                    entry.registration.name.clone(),
+                    entry.registration.root.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.classifications.fetch_add(1, Ordering::SeqCst);
+        reaching(
+            roots.iter().map(|(name, root)| (name, root.as_path())),
+            identity,
+        )
+    }
+
     /// Serve one more vault, from now.
     ///
     /// The entry appears exactly as an entry read at startup does — Unattached,
-    /// holding nothing, demandable — so the demand that follows attaches it the
+    /// holding nothing, demandable, its claim at the highest epoch a removed
+    /// entry stood at — so the demand that follows attaches it the
     /// way it attaches any registered vault, classification and maintainer
     /// singleton included. What a join into a *running* host owes beyond that
     /// is the classification of the incumbents, which is the lifecycle's move
@@ -252,7 +295,10 @@ impl<A: SnapshotSource> ServingSet<A> {
         }
         entries.insert(
             registration.name.clone(),
-            Arc::new(Entry::unattached(registration)),
+            Arc::new(Entry::unattached(
+                registration,
+                self.retired_epoch.load(Ordering::SeqCst),
+            )),
         );
         Ok(())
     }
@@ -265,30 +311,38 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// not one this removes: a demand reaches the entry through the set, and
     /// the set is not readable while this decides.
     ///
+    /// **An entry an unregistration has already withdrawn is removed as it
+    /// stands.** The withdrawal asked the same question under the same gate,
+    /// and kept every door off the entry from then on, so its answer is the
+    /// one that binds and this refuses nothing.
+    ///
+    /// **The entry is retired under that same gate hold.** A caller that read
+    /// the entry out of the set before this took it out still holds it, and
+    /// every door such a caller asks through reads the entry's service first
+    /// — so what it is answered is the name being unknown, never work
+    /// scheduled against an entry the set no longer serves.
+    ///
     /// A name the set does not serve is already not served, and removing it
-    /// changes nothing.
+    /// changes nothing. Whether the name was served is the caller's to ask
+    /// first where it answers differently for the two.
     ///
     /// The entry the set gives up is dropped after the write lock goes back.
     /// The last handle to an entry runs its state's drop glue — the reader the
     /// caller's coverage minted among it — which is work no holder of this
     /// lock does.
-    // Insertion is on the startup path and removal has no caller in this crate
-    // outside its own cases, so the allow is what says the seam is built and
-    // waiting for the registration verb Layer 3's product surface offers to
-    // call it rather than unfinished.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn remove(&self, name: &VaultName) -> Result<(), ServingRefusal> {
         let mut entries = self.entries.write().expect("serving set poisoned");
         let Some(entry) = entries.get(name) else {
             return Ok(());
         };
-        if entry
-            .gate
-            .lock()
-            .expect("entry gate poisoned")
-            .held_by_anything()
         {
-            return Err(ServingRefusal::Held);
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            if state.service == Service::Served && state.held_by_anything() {
+                return Err(ServingRefusal::Held);
+            }
+            state.service = Service::Retired;
+            self.retired_epoch
+                .fetch_max(state.claim.epoch(), Ordering::SeqCst);
         }
         let removed = entries.remove(name);
         drop(entries);

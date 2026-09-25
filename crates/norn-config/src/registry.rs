@@ -273,8 +273,8 @@ pub fn read(dirs: &ConfigDirs) -> Result<Registry, ConfigError> {
 /// replaced, so no second writer's read can begin inside this one's window.
 /// **A lost update is not possible**, rather than unlikely: the whole
 /// read-modify-write is one critical section. The wait for the lock is
-/// unbounded — the thing being waited for is another writer's rewrite of a
-/// small file.
+/// unbounded: a waiter waits for the holder's whole change — its read, its
+/// `apply`, whatever that `apply` does while the lock is held, and its write.
 ///
 /// A refusal from `apply` leaves the file untouched, and so does a mutation
 /// that changes nothing: bytes identical to the ones read are not written back.

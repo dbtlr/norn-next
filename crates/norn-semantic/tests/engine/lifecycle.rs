@@ -98,3 +98,27 @@ fn an_engine_opens_without_a_store() {
         .expect("opening an engine with no store");
     assert_eq!(engine.projection().expect("a projection"), Vec::new());
 }
+
+/// A sidecar discarded without being opened is gone, and discarding one that
+/// is not there answers; the next open creates one from zero.
+#[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: reading the directory back.
+fn a_sidecar_discarded_at_its_path_is_gone() {
+    let scratch = Scratch::new("discard-at");
+    drop(scratch.engine(CountingEmbedder::new()));
+
+    Engine::discard_at(&scratch.sidecar_path()).expect("the sidecar is discarded");
+    Engine::discard_at(&scratch.sidecar_path()).expect("an absent sidecar is discarded");
+
+    let derived = scratch.sidecar_path();
+    let derived = derived.parent().expect("the derived directory");
+    assert_eq!(
+        std::fs::read_dir(derived).unwrap().count(),
+        0,
+        "the sidecar or a file beside it stood"
+    );
+    assert_eq!(
+        scratch.engine(CountingEmbedder::new()).open_outcome(),
+        &SidecarOutcome::Created
+    );
+}

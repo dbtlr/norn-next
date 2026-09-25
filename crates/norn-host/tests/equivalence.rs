@@ -174,7 +174,7 @@ fn assert_the_attach_stated_the_root(host: &attach::ServingHost, name: &VaultNam
         host.classifications() > 0,
         "{label} stated no root against the serving set"
     );
-    assert_eq!(host.recovery_demands(name), Some(0), "{label}");
+    assert_eq!(host.recovery_demands(name), Ok(0), "{label}");
 }
 
 /// The same claim, in a build whose readers are not compiled.

@@ -1,15 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
+use std::fmt;
 use std::path::Path;
 
-use norn_config::registry::{Entry, Registry};
-use norn_fs::{Identity, Refusal, canonical_spelling, path_identity};
+use norn_config::registry::{Entry, Registry, VaultRoot};
+use norn_fs::{Identity, Refusal, canonical_spelling, path_identity, readable_directory};
 use norn_wire::{
-    ErrorEnvelope, ListParams, ListReport, NameSet, ResolveParams, ResolveReport, TooFewNames,
+    ErrorEnvelope, ListParams, ListReport, MaintainerIdentity, NameSet, Published, RegisterParams,
+    RegisterReport, ResolveParams, ResolveReport, TooFewNames, UnregisterParams, UnregisterReport,
     VaultName,
 };
 
-use crate::lifecycle::{EntryOps, Host};
+use crate::lifecycle::{EntryOps, Host, ServingRefusal};
 
 /// Every registry name that resolves to one filesystem root.
 ///
@@ -108,12 +110,15 @@ impl RegistryRead {
     }
 }
 
-/// The registry requests: questions about the serving set as a whole.
+/// The registry requests: questions about the serving set as a whole, and
+/// the changes to it.
 ///
 /// Each answers from the set this host serves at the instant it is asked,
-/// never from a fresh read of the registry file: the set is the one account of
-/// which names exist and where their roots are, so a vault that joined after
-/// startup is answered for and one that left is not.
+/// never from a fresh read of the registry file: the set is seeded from that
+/// file at startup and is the one account of which names exist and where their
+/// roots are after that, so a vault that joined after startup is answered for
+/// and one that left is not. A change writes the file first and the set after,
+/// and a change the file refused leaves the set as it stood.
 impl<O: EntryOps> Host<O> {
     /// Answer a `vault list`: every registration this host serves, ascending
     /// by name.
@@ -142,6 +147,196 @@ impl<O: EntryOps> Host<O> {
             })
             .map_err(ResolveRefusal::answer)
     }
+
+    /// Answer a `vault register`: the registration as admitted, and what its
+    /// entry publishes once it is in.
+    ///
+    /// **The root is admitted at its [`canonical_spelling`]**, links anywhere
+    /// in it resolved, and the report echoes the root as stored. A root that
+    /// is nothing, is not a directory, or cannot be listed is refused
+    /// `host/entry-untrusted` under the environmental-refusal reason, the
+    /// account the registry recheck gives a root it cannot read.
+    ///
+    /// A name the host serves, and a name the registry file already records
+    /// — another writer's registration, which the file keeps as it is — are
+    /// each refused `host/already-served`. A root a
+    /// served vault already reaches is refused `host/duplicate-root` naming
+    /// every such vault beside this one, before anything is written — so an
+    /// incumbent serving that root goes on serving it. That read is
+    /// best-effort: the classification the join runs is the authority, and
+    /// where the filesystem moved between the two and the join parks the
+    /// root, the registration stands and `published` carries the park. A
+    /// registry file that cannot be written is refused
+    /// `host/registry-unwritable`, and the serving set does not change.
+    ///
+    /// Nothing is attached here. The entry joins unattached, and the demand
+    /// that follows attaches it the way it attaches every registered vault.
+    pub fn vault_register(&self, params: &RegisterParams) -> Result<RegisterReport, ErrorEnvelope> {
+        let name = &params.registration.name;
+        let (admitted, published) = self
+            .register(params.registration.clone())
+            .map_err(|refusal| refusal.answer(name))?;
+        Ok(RegisterReport::new(
+            admitted,
+            Published::of(published.answer(name)),
+        ))
+    }
+
+    /// Answer a `vault unregister`: the name removed, and whether its derived
+    /// state was discarded.
+    ///
+    /// A name the host serves nothing under is refused `host/unknown-vault`,
+    /// and an entry something holds — coverage, work, a read, a lease — is
+    /// refused `host/entry-held`; the operator asks again once it is idle. An
+    /// entry standing on a park that nothing holds is unregistered, and the
+    /// park leaves with it: a name parked beside it on one root is classified
+    /// again at once, and serves where nothing else reaches that root.
+    /// Another process holding the vault's maintainer lock is refused
+    /// `host/maintainer-contended` with nothing changed.
+    ///
+    /// Otherwise, under that lock, the registry file is read, the derived
+    /// database, its sidecars and the shadow homes are discarded unless
+    /// `keep_state` keeps them, and the file is written; the lock goes back
+    /// then, and the entry leaves the serving set after it. The maintainer
+    /// lock file is never removed, and nothing in the vault's own tree but
+    /// its shadow homes is touched. From the moment the entry is found idle
+    /// until the change commits or is refused, every request that asks the
+    /// entry for anything is refused `host/entry-held`, while `vault list`
+    /// and `vault resolve` still name the vault; after the commit the name is
+    /// `host/unknown-vault`. A data directory that refuses the lock or the
+    /// discard is refused `host/entry-untrusted` under the
+    /// environmental-refusal reason, and a registry file that cannot be read
+    /// or written is refused `host/registry-unwritable` — one that cannot be
+    /// read before anything is discarded. After any refusal the registration
+    /// that stood before still stands, served by the entry that stood.
+    /// Derived state is rebuildable, so what a refused change did discard is
+    /// derived again by the next attach.
+    pub fn vault_unregister(
+        &self,
+        params: &UnregisterParams,
+    ) -> Result<UnregisterReport, ErrorEnvelope> {
+        self.unregister(&params.name, params.keep_state)
+            .map_err(|refusal| refusal.answer(&params.name))?;
+        Ok(UnregisterReport::new(
+            params.name.clone(),
+            !params.keep_state,
+        ))
+    }
+}
+
+/// Why a registration was not recorded in the registry file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecordRefusal {
+    /// The file already records a registration under the name. The file is
+    /// the durable record, so a registration another writer put there is not
+    /// replaced.
+    AlreadyRecorded,
+    /// The file could not be read or written.
+    Unwritable(RegistryUnwritable),
+}
+
+/// Why the registry file was not read or written: the act that failed and
+/// what refused it, naming no file, for a person reading a message or a log.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegistryUnwritable {
+    detail: String,
+}
+
+impl RegistryUnwritable {
+    pub fn new(detail: impl Into<String>) -> Self {
+        RegistryUnwritable {
+            detail: detail.into(),
+        }
+    }
+
+    /// The refusal in words.
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl fmt::Display for RegistryUnwritable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for RegistryUnwritable {}
+
+/// Why a vault's registration was not retired, and how far the retirement
+/// got.
+///
+/// In each case the registry file still records the vault. Where the lock
+/// was not taken nothing ran; past it, what a refusal may have taken is
+/// derived state alone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RetireRefusal {
+    /// Another process holds the vault's maintainer lock. Nothing ran.
+    MaintainerContended(MaintainerIdentity),
+    /// The maintainer lock could not be taken, for a reason other than another
+    /// holder: the environment's account, naming no file. Nothing ran.
+    Unclaimed(String),
+    /// The derived state could not be discarded: the environment's account,
+    /// naming no file. The registry file was not written.
+    Undiscarded(String),
+    /// The registry file could not be read, and nothing was discarded; or it
+    /// could not be written after the discard.
+    Unrecorded(RegistryUnwritable),
+}
+
+/// Why a registration change left the registration that stood before it
+/// standing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RegistrationRefusal {
+    /// The serving set refused the change: the name is served already, or the
+    /// entry holds something or is held.
+    Serving(ServingRefusal),
+    /// The set serves no entry under the name.
+    UnknownVault,
+    /// The registry file already records the name.
+    AlreadyRecorded,
+    /// Another registration already reaches the root. Every name here reaches
+    /// it, the one asked for among them.
+    DuplicateRoot(AliasConflict),
+    /// The root does not exist, is not a directory, or cannot be read: the
+    /// registry's account of it.
+    RootRefused(String),
+    /// Another process maintains the vault's derived state.
+    MaintainerContended(MaintainerIdentity),
+    /// The data directory refused the maintainer lock or the discard: the
+    /// environment's account, naming no file.
+    StateRefused(String),
+    /// The registry file was not read or not written.
+    RegistryUnwritable(RegistryUnwritable),
+}
+
+/// `registration` as admitted: its root at its [`canonical_spelling`], with the
+/// identity of the directory that spelling names.
+///
+/// **Only a readable directory is admitted.** A root is read by listing it, so
+/// nothing at the spelling, something other than a directory, and a directory
+/// this process may not list are each refused with the environment's account.
+/// A spelling that resolves through a link is admitted as the directory the
+/// link reaches, so no admitted root has a link as its last component.
+pub(crate) fn admitted(mut registration: Entry) -> Result<(Entry, Identity), RegistrationRefusal> {
+    let spelling = canonical_spelling(registration.root.as_path());
+    let identity = readable_directory(&spelling)
+        .map_err(|refusal| RegistrationRefusal::RootRefused(refusal.to_string()))?;
+    registration.root = VaultRoot::new(&spelling)
+        .map_err(|illegal| RegistrationRefusal::RootRefused(illegal.to_string()))?;
+    Ok((registration, identity))
+}
+
+/// Every name among the served `roots` whose root reaches `identity`.
+///
+/// One stat per root. A root the filesystem answers for with nothing, or
+/// refuses to answer for, reaches nothing.
+pub(crate) fn reaching<'a>(
+    roots: impl IntoIterator<Item = (&'a VaultName, &'a Path)>,
+    identity: Identity,
+) -> BTreeSet<VaultName> {
+    let Ok(mut identities) = roots_by_identity(roots, |_, _| Ok::<(), Infallible>(()));
+    identities.remove(&identity).unwrap_or_default()
 }
 
 /// Why a resolution names no one registration.

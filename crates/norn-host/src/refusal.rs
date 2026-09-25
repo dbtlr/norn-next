@@ -51,20 +51,22 @@ use norn_semantic::EngineError;
 use norn_store::{PageRefusal, ReadBound, StoreError};
 use norn_wire::{
     AnswerShape, AttachMode, ControlFile, ControlFileFailure, ErrorDetail, ErrorEnvelope,
-    ReadFailure, ReloadFailure, RequestBound, RequestPart, TrustState, UntrustedReason, VaultName,
+    MaintainerIdentity, ReadFailure, ReloadFailure, RequestBound, RequestPart, TrustState,
+    UntrustedReason, VaultName,
 };
 
 use crate::lifecycle::{Demand, HostError, JobFailure, ReadRefusal, ServingRefusal};
-use crate::registry::ResolveRefusal;
+use crate::registry::{AliasConflict, RegistrationRefusal, ResolveRefusal};
 use crate::reload::{ReloadError, ReloadFile, ReloadRefusal, ReloadStage};
 
 impl Demand {
     /// This demand in the wire vocabulary: the trust state it answers `name`
     /// with, or the refusal it is.
     ///
-    /// `name` is the name that was asked for, and [`Demand::UnknownVault`] is
-    /// the only demand that echoes it: a demand for a vault the registry does
-    /// not hold has no entry to read a name off, so the ask is all the refusal
+    /// `name` is the name that was asked for, and [`Demand::UnknownVault`] and
+    /// [`Demand::EntryHeld`] are the demands that echo it: a demand for a
+    /// vault the host does not serve, or for one an unregistration holds, has
+    /// no entry in service to read a name off, so the ask is all the refusal
     /// has to name. Every other demand answers out of what it carries and
     /// reads nothing from `name`. A caller holding the entry's lease answers
     /// through [`DemandLease::answer`](crate::DemandLease::answer), which is
@@ -74,26 +76,51 @@ impl Demand {
     pub fn answer(self, name: &VaultName) -> Result<TrustState, ErrorEnvelope> {
         match self {
             Demand::State(state) => answer_state(state),
-            Demand::MaintainerContended(incumbent) => Err(ErrorEnvelope::new(
-                "another process maintains this vault's derived state",
-                ErrorDetail::maintainer_contended(incumbent),
-            )),
+            Demand::MaintainerContended(incumbent) => Err(maintainer_contended(incumbent)),
             Demand::DuplicateRoot(conflict) => Err(ErrorEnvelope::new(
                 "more than one registered name resolves to this vault's root, so none of them \
                  is served",
                 ErrorDetail::duplicate_root(conflict.aliases().clone()),
             )),
-            Demand::IdentityRefused(refusal) => Err(ErrorEnvelope::new(
-                "the registry cannot read this vault's root",
-                ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(refusal)),
-            )),
-            Demand::UnknownVault => Err(ErrorEnvelope::new(
-                format!("no vault is registered under the name `{name}`"),
-                ErrorDetail::unknown_vault(name.clone()),
+            Demand::IdentityRefused(refusal) => Err(root_refused(refusal)),
+            Demand::UnknownVault => Err(unknown_vault(name)),
+            Demand::EntryHeld => Err(ErrorEnvelope::new(
+                format!(
+                    "`{name}` is being unregistered, so it is not served until that change \
+                     commits or is refused"
+                ),
+                ErrorDetail::entry_held(name.clone()),
             )),
             Demand::UnsupportedMode(mode) => Err(unsupported_attach_mode(mode)),
         }
     }
+}
+
+/// The envelope another process holding a vault's maintainer lock is refused
+/// with, naming that process as far as its lock body does.
+fn maintainer_contended(incumbent: MaintainerIdentity) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        "another process maintains this vault's derived state",
+        ErrorDetail::maintainer_contended(incumbent),
+    )
+}
+
+/// The envelope a root the registry cannot read is refused with: the
+/// registry's account of it, as the environment refusing the work.
+fn root_refused(refusal: String) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        "the registry cannot read this vault's root",
+        ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(refusal)),
+    )
+}
+
+/// The envelope a name the host serves no entry under is refused with,
+/// echoing the name that was asked for.
+fn unknown_vault(name: &VaultName) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        format!("this host serves no vault under the name `{name}`"),
+        ErrorDetail::unknown_vault(name.clone()),
+    )
 }
 
 /// The envelope a request for an attach mode this host has no lifecycle for is
@@ -115,17 +142,8 @@ impl ServingRefusal {
     /// are `host/…` and both echo the name: what a caller does about either
     /// one is addressed to that name.
     ///
-    /// A dormant carrier for the vault namespace handlers. The serving set is
-    /// changed by the registry verbs — `vault register` and `vault
-    /// unregister` — and this is the rendering those verbs refuse through;
-    /// their handlers are not built, so nothing calls it yet. They land in
-    /// this crate, which is why the visibility is `pub(crate)`: the mapping
-    /// waits for the handler beside it rather than for a surface above it.
-    #[allow(
-        dead_code,
-        reason = "a dormant carrier: the vault namespace's registry verbs, not yet built, \
-                  refuse through this mapping"
-    )]
+    /// The registry verbs — `vault register` and `vault unregister` — refuse
+    /// through this, by way of [`RegistrationRefusal::answer`].
     pub(crate) fn answer(self, name: &VaultName) -> ErrorEnvelope {
         match self {
             ServingRefusal::AlreadyServed => ErrorEnvelope::new(
@@ -141,6 +159,66 @@ impl ServingRefusal {
             ),
         }
     }
+}
+
+impl RegistrationRefusal {
+    /// This refusal in the wire vocabulary, for the vault `name` the change
+    /// was asked for under.
+    ///
+    /// Every member is a fact about the host's serving of a registration, so
+    /// every one is `host/…`. The serving set's own two render through
+    /// [`ServingRefusal::answer`], a name the registry file already records
+    /// renders as the name being taken, and the three facts a registration
+    /// change shares with a demand — another maintainer, a root the registry
+    /// cannot read, a name nothing is served under — render as a demand
+    /// renders them. The data directory refusing
+    /// the retirement is the environment refusing the work, which is the
+    /// reason `host/entry-untrusted` already names.
+    pub(crate) fn answer(self, name: &VaultName) -> ErrorEnvelope {
+        match self {
+            RegistrationRefusal::Serving(refusal) => refusal.answer(name),
+            RegistrationRefusal::UnknownVault => unknown_vault(name),
+            RegistrationRefusal::AlreadyRecorded => ErrorEnvelope::new(
+                format!(
+                    "the registry file already records a vault under the name `{name}`, and a \
+                     registration is not written over it"
+                ),
+                ErrorDetail::already_served(name.clone()),
+            ),
+            RegistrationRefusal::DuplicateRoot(conflict) => duplicate_registration(name, &conflict),
+            RegistrationRefusal::RootRefused(refusal) => root_refused(refusal),
+            RegistrationRefusal::MaintainerContended(incumbent) => maintainer_contended(incumbent),
+            RegistrationRefusal::StateRefused(refusal) => ErrorEnvelope::new(
+                format!(
+                    "the derived state of `{name}` could not be retired, so its registration \
+                     stands"
+                ),
+                ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(refusal)),
+            ),
+            RegistrationRefusal::RegistryUnwritable(refusal) => ErrorEnvelope::new(
+                "the registry file could not be read or written, so the registration that \
+                 stood before still stands",
+                ErrorDetail::registry_unwritable(refusal.detail()),
+            ),
+        }
+    }
+}
+
+/// The envelope a registration over a root other registrations already reach
+/// is refused with, naming every one of them beside `name`.
+fn duplicate_registration(name: &VaultName, conflict: &AliasConflict) -> ErrorEnvelope {
+    let incumbents = conflict
+        .aliases()
+        .names()
+        .iter()
+        .filter(|alias| *alias != name)
+        .map(|alias| format!("`{alias}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ErrorEnvelope::new(
+        format!("{incumbents} already reaches this root, so `{name}` is not registered over it"),
+        ErrorDetail::duplicate_root(conflict.aliases().clone()),
+    )
 }
 
 impl ResolveRefusal {
@@ -179,11 +257,12 @@ impl ReloadRefusal {
     ///
     /// Every reload outcome is a fact about the vault, so every one of them is
     /// `vault/…` — except where the host answers before a reload is a thing
-    /// that happened at all: a name the registry does not hold
-    /// (`host/unknown-vault`), and an entry that is not reloadable because of
-    /// where it stands. That entry answers with its published demand rendered
+    /// that happened at all: an entry that is not reloadable because of where
+    /// it stands. That entry answers with its published demand rendered
     /// through [`Demand::answer`], the mapping `vault status` and a demand
-    /// lease answer through: a park in its own code (`host/duplicate-root`,
+    /// lease answer through: a name the host does not serve in
+    /// `host/unknown-vault`, an entry an unregistration holds in
+    /// `host/entry-held`, a park in its own code (`host/duplicate-root`,
     /// `host/maintainer-contended`, or `host/entry-untrusted` for a root the
     /// registry cannot read), an entry whose derived state cannot be trusted
     /// in `host/entry-untrusted`, an entry that holds nothing to reload yet in
@@ -200,10 +279,6 @@ impl ReloadRefusal {
     /// not a surface's to choose.
     pub fn answer(self, name: &VaultName) -> Result<ErrorEnvelope, HostError> {
         Ok(match self {
-            ReloadRefusal::UnknownVault => ErrorEnvelope::new(
-                format!("no vault is registered under the name `{name}`"),
-                ErrorDetail::unknown_vault(name.clone()),
-            ),
             ReloadRefusal::Unavailable(demand) => match demand.answer(name) {
                 Err(envelope) => envelope,
                 Ok(state) => unavailable(state),
@@ -510,30 +585,105 @@ pub(crate) fn engine_refusal_told(error: &EngineError) -> String {
 
 /// A refusal met in the host's own data directory in words, naming no file.
 ///
-/// The maintainer lock and the shadow home sit beside the derived database,
-/// so a path any of them names is a path to the directory that database is
-/// in. The account keeps the act that failed and what the operating system
-/// said, and drops every path.
+/// The maintainer lock and the data-root shadow home sit beside the derived
+/// database, so a path any of them names is a path to the directory that
+/// database is in. The account keeps the act that failed and what the
+/// operating system said, and drops every path.
+pub(crate) fn data_dir_refusal_told(error: &norn_fs::Refusal) -> String {
+    fs_refusal_told_in("the data directory", error)
+}
+
+/// A refusal discarding a vault's shadow homes in words, naming no file, and
+/// naming the place the home that refused sits: the data directory for the
+/// data-root home, and the vault root for the fallback home beneath it.
+pub(crate) fn shadow_discard_refusal_told(error: &norn_fs::DiscardRefusal) -> String {
+    match error.placement {
+        norn_fs::Placement::DataRoot => data_dir_refusal_told(&error.refusal),
+        norn_fs::Placement::VaultFallback => {
+            fs_refusal_told_in("the shadow home under the vault root", &error.refusal)
+        }
+    }
+}
+
+/// A filesystem refusal met in `place` in words: the act that failed and what
+/// the operating system said, and no path.
 ///
 /// The match carries no wildcard, so a variant minted in the filesystem crate
 /// takes its stance on what it tells here.
-pub(crate) fn data_dir_refusal_told(error: &norn_fs::Refusal) -> String {
+fn fs_refusal_told_in(place: &str, error: &norn_fs::Refusal) -> String {
     match error {
         norn_fs::Refusal::Environment {
             operation, kind, ..
-        } => format!("{operation} in the data directory failed: {kind}"),
+        } => format!("{operation} in {place} failed: {kind}"),
         norn_fs::Refusal::LockFileReplaced { attempts, .. } => {
             format!("the lock file was replaced on each of {attempts} attempts to lock it")
         }
         norn_fs::Refusal::Drifted { .. } | norn_fs::Refusal::Republished { .. } => {
-            "a file in the data directory changed under the host".to_string()
+            format!("a file in {place} changed under the host")
         }
         norn_fs::Refusal::DestinationExists { .. } => {
-            "a file in the data directory already exists".to_string()
+            format!("a file in {place} already exists")
         }
         norn_fs::Refusal::SymlinkDestination { .. } => {
-            "a file in the data directory is a symbolic link".to_string()
+            format!("a file in {place} is a symbolic link")
         }
+    }
+}
+
+/// A refusal met reading or writing the registry file in words, naming no
+/// file.
+///
+/// The registry file sits in the host's config directory, so a path any of
+/// these names is a path into that directory. The account keeps the act that
+/// failed and what refused it, and drops every path, as
+/// [`data_dir_refusal_told`] does for the data directory. The file's own
+/// rendering keeps the path for the log lines and the machine surface that
+/// read it.
+///
+/// The match carries no wildcard, so a variant minted in the config crate
+/// takes its stance on what it tells here.
+pub(crate) fn config_refusal_told(error: &norn_config::ConfigError) -> String {
+    use norn_config::ConfigError;
+    match error {
+        ConfigError::Io {
+            operation, message, ..
+        } => format!("{operation} in the config directory failed: {message}"),
+        ConfigError::MutationUnconfirmed {
+            operation, message, ..
+        } => format!(
+            "the registry file holds the change, and {operation} it afterwards failed: \
+             {message}"
+        ),
+        ConfigError::Corrupt { reason, .. } => {
+            format!("the registry file is not readable: {reason}")
+        }
+        ConfigError::VersionAhead {
+            found, supported, ..
+        } => format!(
+            "the registry file is at schema version {found} and this build reads {supported}"
+        ),
+        ConfigError::DanglingSymlink { .. } => {
+            "a symlink on the way to the registry file has no target".to_string()
+        }
+        ConfigError::SymlinkedFile { .. } => "the registry file is a symlink".to_string(),
+        ConfigError::InsecurePermissions { mode, .. } => {
+            format!(
+                "a file in the config directory has mode {mode:04o}, which reaches beyond its owner"
+            )
+        }
+        ConfigError::IllegalPath {
+            subject, problem, ..
+        } => format!("a {subject} is not one the registry file records: {problem}"),
+        ConfigError::NestedMutation { .. } => {
+            "the registry file is already being changed further up this thread's stack".to_string()
+        }
+        // None of these names a path: each is told as it renders.
+        ConfigError::Environment { .. }
+        | ConfigError::DuplicateLabel { .. }
+        | ConfigError::EmptySecret { .. }
+        | ConfigError::ClockBeforeEpoch
+        | ConfigError::IllegalName { .. }
+        | ConfigError::IllegalLabel { .. } => error.to_string(),
     }
 }
 
@@ -603,6 +753,7 @@ mod tests {
         DuplicateRoot,
         IdentityRefused,
         UnknownVault,
+        EntryHeld,
         UnsupportedMode,
     }
 
@@ -616,7 +767,8 @@ mod tests {
                 Shape::MaintainerContended => Some(Shape::DuplicateRoot),
                 Shape::DuplicateRoot => Some(Shape::IdentityRefused),
                 Shape::IdentityRefused => Some(Shape::UnknownVault),
-                Shape::UnknownVault => Some(Shape::UnsupportedMode),
+                Shape::UnknownVault => Some(Shape::EntryHeld),
+                Shape::EntryHeld => Some(Shape::UnsupportedMode),
                 Shape::UnsupportedMode => None,
             }
         }
@@ -647,6 +799,7 @@ mod tests {
             Demand::DuplicateRoot(_) => Shape::DuplicateRoot,
             Demand::IdentityRefused(_) => Shape::IdentityRefused,
             Demand::UnknownVault => Shape::UnknownVault,
+            Demand::EntryHeld => Shape::EntryHeld,
             Demand::UnsupportedMode(_) => Shape::UnsupportedMode,
         }
     }
@@ -727,6 +880,7 @@ mod tests {
                 Demand::UnknownVault,
                 Some(ErrorDetail::unknown_vault(asked())),
             ),
+            (Demand::EntryHeld, Some(ErrorDetail::entry_held(asked()))),
             (
                 Demand::UnsupportedMode(AttachMode::Throwaway),
                 Some(ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)),
@@ -939,7 +1093,6 @@ mod reload_tests {
     /// in the walk below fails the census rather than passing unexercised.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Shape {
-        UnknownVault,
         Unsupported,
         Unavailable,
         Core,
@@ -950,7 +1103,6 @@ mod reload_tests {
     impl Shape {
         const fn after(self) -> Option<Shape> {
             match self {
-                Shape::UnknownVault => Some(Shape::Unsupported),
                 Shape::Unsupported => Some(Shape::Unavailable),
                 Shape::Unavailable => Some(Shape::Core),
                 Shape::Core => Some(Shape::Runtime),
@@ -961,7 +1113,7 @@ mod reload_tests {
     }
 
     fn every_shape() -> Vec<Shape> {
-        let mut shapes = vec![Shape::UnknownVault];
+        let mut shapes = vec![Shape::Unsupported];
         while let Some(next) = shapes.last().expect("the walk starts at a shape").after() {
             assert!(!shapes.contains(&next), "{next:?} is reached twice");
             shapes.push(next);
@@ -973,7 +1125,6 @@ mod reload_tests {
     /// or store error variant minted without a shape does not compile.
     fn shape(refusal: &ReloadRefusal) -> Shape {
         match refusal {
-            ReloadRefusal::UnknownVault => Shape::UnknownVault,
             ReloadRefusal::Unsupported => Shape::Unsupported,
             ReloadRefusal::Unavailable(_) => Shape::Unavailable,
             ReloadRefusal::Core(_) => Shape::Core,
@@ -988,8 +1139,12 @@ mod reload_tests {
         let unreadable = || ReloadError::SchemaParse("line 3 is not a mapping".to_string());
         vec![
             (
-                ReloadRefusal::UnknownVault,
+                ReloadRefusal::Unavailable(Demand::UnknownVault),
                 Some(ErrorDetail::unknown_vault(name("notes"))),
+            ),
+            (
+                ReloadRefusal::Unavailable(Demand::EntryHeld),
+                Some(ErrorDetail::entry_held(name("notes"))),
             ),
             (
                 ReloadRefusal::Unsupported,

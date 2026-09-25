@@ -1085,6 +1085,17 @@ impl Store {
         Ok(())
     }
 
+    /// Discard the database at `path`, and every sidecar a journal leaves
+    /// beside it, without opening it.
+    ///
+    /// For derived state nothing is going to open again: the vault it was
+    /// derived from is no longer served. The caller holds the maintainer lock
+    /// over the directory, so no store is open on the file. A database that is
+    /// not there is already discarded.
+    pub fn discard_at(path: &Path) -> Result<(), StoreError> {
+        Ok(norn_db::remove_database(path)?)
+    }
+
     /// Discard the database and open a store on the one that replaces it — heal
     /// rung 3 for damage found after the open.
     ///
@@ -1472,6 +1483,33 @@ mod tests {
             .begin_request()
             .pin_vault_schema(b"version: 1\n", "a-fingerprint")
             .expect("the writer still writes");
+    }
+
+    /// A database discarded without being opened is gone with every sidecar
+    /// beside it, and discarding one that is not there answers.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: reading the directory back.
+    fn a_database_discarded_at_its_path_is_gone_with_its_sidecars() {
+        let scratch = Scratch::new("norn-store-discard-at");
+        let path = scratch.join("derived").join("store.sqlite3");
+        let store = Store::open(
+            &path,
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .expect("a store opens");
+        let wal = scratch.join("derived").join("store.sqlite3-wal");
+        std::fs::write(&wal, b"").expect("a sidecar beside the database");
+        drop(store);
+
+        Store::discard_at(&path).expect("the database is discarded");
+        Store::discard_at(&path).expect("an absent database is already discarded");
+
+        assert_eq!(
+            std::fs::read_dir(scratch.join("derived")).unwrap().count(),
+            0,
+            "the database or a sidecar stood"
+        );
     }
 
     /// **The connection is out of the handle only while a read holds it.** A
