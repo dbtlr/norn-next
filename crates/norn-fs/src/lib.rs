@@ -40,7 +40,9 @@
 //!   [`read_and_hash`] and [`read_optional_and_hash`] are the one-open/one-read
 //!   content observation over it, and the walk's own reads take the same seam.
 //! - [`path`] — the root-scoped, filesystem-case-aware normalization point used
-//!   by walks today and watcher invalidation roots next.
+//!   by walks today and watcher invalidation roots next, and
+//!   [`canonical_spelling`], the one spelling an absolute path is resolved to
+//!   before it is compared with another.
 //! - [`reads`] — what this thread asked the filesystem for while a caller's
 //!   window stood over it: the opens, stats and directory entries that module
 //!   names, counted where they happen. Evidence a caller folds into its own
@@ -111,7 +113,9 @@ pub use exclusion::{Excluded, ExclusionError, Exclusions};
 pub use hash::{ContentHash, hashed_from};
 pub use identity::{Identity, PostState, path_identity};
 pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
-pub use path::{CaseSensitivity, NormalizedPath, NormalizerError, PathError, PathNormalizer};
+pub use path::{
+    CaseSensitivity, NormalizedPath, NormalizerError, PathError, PathNormalizer, canonical_spelling,
+};
 pub use read::{
     PathKind, ReadAndHash, read_and_hash, read_if_present_and_hash, read_optional_and_hash,
 };

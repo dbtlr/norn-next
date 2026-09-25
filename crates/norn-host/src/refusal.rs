@@ -55,6 +55,7 @@ use norn_wire::{
 };
 
 use crate::lifecycle::{Demand, HostError, JobFailure, ReadRefusal, ServingRefusal};
+use crate::registry::ResolveRefusal;
 use crate::reload::{ReloadError, ReloadFile, ReloadRefusal, ReloadStage};
 
 impl Demand {
@@ -138,6 +139,36 @@ impl ServingRefusal {
                 ),
                 ErrorDetail::entry_held(name.clone()),
             ),
+        }
+    }
+}
+
+impl ResolveRefusal {
+    /// This refusal in the wire vocabulary.
+    ///
+    /// A resolution is a question about a directory rather than about an
+    /// entry, so its refusal is `vault/ambiguous-root` and never the
+    /// `host/duplicate-root` an entry over the same conflict is refused with:
+    /// the candidates are every name that reaches the root, and the ask names
+    /// none of them to echo.
+    pub(crate) fn answer(self) -> ErrorEnvelope {
+        match self {
+            ResolveRefusal::AmbiguousRoot(conflict) => {
+                let candidates = conflict.aliases().clone();
+                let named = candidates
+                    .names()
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ErrorEnvelope::new(
+                    format!(
+                        "the registrations {named} all contain this directory at one root, so it \
+                         names no one vault"
+                    ),
+                    ErrorDetail::ambiguous_root(candidates),
+                )
+            }
         }
     }
 }
@@ -841,6 +872,42 @@ mod serving_tests {
             assert!(
                 envelope.message().contains("notes"),
                 "{refusal:?} refuses without naming the vault: {}",
+                envelope.message()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use norn_wire::{ErrorDetail, NameSet, ReasonCode, VaultName};
+
+    use crate::registry::{AliasConflict, ResolveRefusal};
+
+    fn names() -> [VaultName; 2] {
+        [
+            VaultName::new("alpha").expect("a legal vault name"),
+            VaultName::new("beta").expect("a legal vault name"),
+        ]
+    }
+
+    /// A resolution refused over a root two registrations reach is
+    /// `vault/ambiguous-root`, carrying every name that reaches the root and
+    /// naming them in words: the ask names no one vault, so no entry's
+    /// refusal answers for it.
+    #[test]
+    fn an_ambiguous_resolution_is_refused_naming_every_candidate() {
+        let conflict = AliasConflict::new(names()).expect("two distinct registrations");
+        let envelope = ResolveRefusal::AmbiguousRoot(conflict).answer();
+        assert_eq!(
+            envelope.detail(),
+            &ErrorDetail::ambiguous_root(NameSet::new(names()).expect("two distinct names"))
+        );
+        assert_eq!(envelope.code(), &ReasonCode::VaultAmbiguousRoot);
+        for name in names() {
+            assert!(
+                envelope.message().contains(name.as_str()),
+                "the refusal does not name `{name}` in words: {}",
                 envelope.message()
             );
         }

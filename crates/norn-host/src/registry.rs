@@ -1,9 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::path::Path;
 
 use norn_config::registry::{Entry, Registry};
-use norn_fs::{Identity, Refusal, path_identity};
-use norn_wire::{NameSet, TooFewNames, VaultName};
+use norn_fs::{Identity, Refusal, canonical_spelling, path_identity};
+use norn_wire::{
+    ErrorEnvelope, ListParams, ListReport, NameSet, ResolveParams, ResolveReport, TooFewNames,
+    VaultName,
+};
+
+use crate::lifecycle::{EntryOps, Host};
 
 /// Every registry name that resolves to one filesystem root.
 ///
@@ -102,6 +108,138 @@ impl RegistryRead {
     }
 }
 
+/// The registry requests: questions about the serving set as a whole.
+///
+/// Each answers from the set this host serves at the instant it is asked,
+/// never from a fresh read of the registry file: the set is the one account of
+/// which names exist and where their roots are, so a vault that joined after
+/// startup is answered for and one that left is not.
+impl<O: EntryOps> Host<O> {
+    /// Answer a `vault list`: every registration this host serves, ascending
+    /// by name.
+    ///
+    /// Nothing refuses a listing. The set is read under its own lock and
+    /// nothing else is read, so a host serving nothing answers an empty list.
+    pub fn vault_list(&self, _params: &ListParams) -> ListReport {
+        ListReport::new(self.registrations())
+    }
+
+    /// Answer a `vault resolve`: the registration whose root most specifically
+    /// contains `params.directory`, or none where no root contains it.
+    ///
+    /// The directory is resolved to its [`canonical_spelling`], and a root
+    /// contains it where the directory the root resolves to is that spelling
+    /// or one of its ancestors: a link on either side is judged as the
+    /// directory it reaches, and a directory that does not exist is judged on
+    /// its spelling beneath what does. Every registration the set serves when
+    /// asked is a candidate. The one refusal is a most specific root that more
+    /// than one registration reaches, which is `vault/ambiguous-root` naming
+    /// them all.
+    pub fn vault_resolve(&self, params: &ResolveParams) -> Result<ResolveReport, ErrorEnvelope> {
+        self.containing(params.directory.as_path())
+            .map(|registration| {
+                registration.map_or_else(ResolveReport::none, ResolveReport::registered)
+            })
+            .map_err(ResolveRefusal::answer)
+    }
+}
+
+/// Why a resolution names no one registration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ResolveRefusal {
+    /// The most specific root containing the directory is reached by more
+    /// than one registration, and every name here reaches it. Neither root is
+    /// under the other, so neither is more specific.
+    AmbiguousRoot(AliasConflict),
+}
+
+/// The registration among `registrations` whose root most specifically
+/// contains `directory`, none where no root contains it, or the refusal where
+/// that root is reached by more than one of them.
+///
+/// The registrations are keyed by name, so each name is one candidate and the
+/// names a refusal gathers are distinct.
+///
+/// **Containment is judged on filesystem identity**, the one notion by which
+/// the host decides two roots are one: a root contains the directory when the
+/// directory's resolved spelling, or one of its ancestors, is the directory
+/// that root resolves to. The directory is resolved through
+/// [`canonical_spelling`] first, so a `..` or a link in it is taken by the
+/// filesystem and every ancestor walked is the directory it names; the
+/// deepest ancestor that is some root is the most specific root, and a
+/// sibling whose name merely begins with a root's name is a different
+/// directory. A root spelled through a link, and two spellings of one root,
+/// are judged as the directory they reach, which is also what makes two
+/// registrations over one root a conflict here exactly as they are one at an
+/// attach.
+///
+/// A directory that does not exist is judged on the spelling
+/// [`canonical_spelling`] gives it: its components past what resolves have no
+/// identity and contain nothing, and the ancestors that do resolve are walked
+/// like any other. A root or an ancestor the filesystem answers for with
+/// nothing, or refuses to answer for, is no root here, which is how a recheck
+/// classifies a root too.
+///
+/// The cost is one stat per registered root, one resolution of the directory,
+/// and one stat per ancestor walked until one is a root — none of them taken
+/// under the serving set's lock, and none where nothing is registered.
+pub(crate) fn containing(
+    registrations: &BTreeMap<VaultName, Entry>,
+    directory: &Path,
+) -> Result<Option<Entry>, ResolveRefusal> {
+    let Ok(mut roots) = roots_by_identity(
+        registrations
+            .iter()
+            .map(|(name, registration)| (name, registration.root.as_path())),
+        |_, _| Ok::<(), Infallible>(()),
+    );
+    if roots.is_empty() {
+        return Ok(None);
+    }
+    let directory = canonical_spelling(directory);
+    for ancestor in directory.ancestors() {
+        let Ok(Some(identity)) = path_identity(ancestor) else {
+            continue;
+        };
+        let Some(reaching) = roots.remove(&identity) else {
+            continue;
+        };
+        return match AliasConflict::new(reaching.iter().cloned()) {
+            Ok(conflict) => Err(ResolveRefusal::AmbiguousRoot(conflict)),
+            // One name reaches the root, so its registration is the answer.
+            Err(_) => Ok(reaching
+                .first()
+                .and_then(|name| registrations.get(name))
+                .cloned()),
+        };
+    }
+    Ok(None)
+}
+
+/// The served `roots` grouped by the filesystem identity each resolves to,
+/// with every name whose root reaches that identity: one stat per root.
+///
+/// A root the filesystem answers for with nothing is registrable rather than
+/// resolved and joins no group. A root the filesystem refuses to answer for is
+/// handed to `refused` with its name, which either passes over it — the root
+/// joins no group — or ends the grouping with the error it returns.
+fn roots_by_identity<'a, E>(
+    roots: impl IntoIterator<Item = (&'a VaultName, &'a Path)>,
+    mut refused: impl FnMut(&VaultName, Refusal) -> Result<(), E>,
+) -> Result<BTreeMap<Identity, BTreeSet<VaultName>>, E> {
+    let mut identities = BTreeMap::<Identity, BTreeSet<VaultName>>::new();
+    for (name, root) in roots {
+        match path_identity(root) {
+            Ok(Some(identity)) => {
+                identities.entry(identity).or_default().insert(name.clone());
+            }
+            Ok(None) => {}
+            Err(refusal) => refused(name, refusal)?,
+        }
+    }
+    Ok(identities)
+}
+
 /// Classify every root the host serves against the others, answering for
 /// `requested` alone: the identity its root resolved to, and the conflict it
 /// stands in where more than one served name reaches that root.
@@ -114,21 +252,16 @@ pub(crate) fn recheck<'a>(
     roots: impl IntoIterator<Item = (&'a VaultName, &'a Path)>,
     requested: &VaultName,
 ) -> Result<RootReading, Refusal> {
-    let mut identities = BTreeMap::<Identity, BTreeSet<VaultName>>::new();
-    let mut resolved = None;
-    for (name, root) in roots {
-        match path_identity(root) {
-            Ok(Some(identity)) => {
-                if name == requested {
-                    resolved = Some(identity);
-                }
-                identities.entry(identity).or_default().insert(name.clone());
-            }
-            Ok(None) => {}
-            Err(refusal) if name == requested => return Err(refusal),
-            Err(_) => {}
+    let identities = roots_by_identity(roots, |name, refusal| {
+        if name == requested {
+            Err(refusal)
+        } else {
+            Ok(())
         }
-    }
+    })?;
+    let resolved = identities
+        .iter()
+        .find_map(|(identity, names)| names.contains(requested).then_some(*identity));
     Ok(RootReading {
         identity: resolved,
         conflict: conflicts_from_identities(identities).remove(requested),
@@ -172,6 +305,280 @@ mod tests {
                 .map(|entry| (&entry.name, entry.root.as_path())),
             requested,
         )
+    }
+
+    /// A tree of one case's own: directories under one scratch root, created
+    /// as the case names them.
+    struct Tree(Scratch);
+
+    impl Tree {
+        fn new(label: &str) -> Self {
+            Tree(Scratch::new(&format!("norn-host-resolve-{label}")))
+        }
+
+        /// `relative` under the tree, created as a directory.
+        fn dir(&self, relative: &str) -> std::path::PathBuf {
+            let path = self.0.join(relative);
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        }
+
+        /// `relative` under the tree, created as a link to `target`.
+        fn link(&self, relative: &str, target: &Path) -> std::path::PathBuf {
+            let path = self.0.join(relative);
+            std::os::unix::fs::symlink(target, &path).unwrap();
+            path
+        }
+
+        /// `relative` under the tree, created as nothing.
+        fn path(&self, relative: &str) -> std::path::PathBuf {
+            self.0.join(relative)
+        }
+    }
+
+    fn served(name: &str, root: &Path) -> Entry {
+        Entry::new(VaultName::new(name).unwrap(), VaultRoot::new(root).unwrap())
+    }
+
+    /// `registrations` keyed by name, as the serving set holds them.
+    fn by_name(registrations: &[Entry]) -> BTreeMap<VaultName, Entry> {
+        registrations
+            .iter()
+            .map(|registration| (registration.name.clone(), registration.clone()))
+            .collect()
+    }
+
+    /// The name of the one registration `directory` resolves to among
+    /// `registrations`, or nothing.
+    fn resolved(registrations: &[Entry], directory: &Path) -> Option<String> {
+        containing(&by_name(registrations), directory)
+            .expect("the resolution names one registration or none")
+            .map(|registration| registration.name.to_string())
+    }
+
+    /// A directory under one registered root resolves to that registration
+    /// and to no other.
+    #[test]
+    fn a_directory_resolves_to_the_registration_whose_root_contains_it() {
+        let tree = Tree::new("contained");
+        let registrations = [
+            served("notes", &tree.dir("notes")),
+            served("work", &tree.dir("work")),
+        ];
+        assert_eq!(
+            resolved(&registrations, &tree.dir("notes/journal/2026")),
+            Some("notes".to_owned())
+        );
+    }
+
+    /// Where registered roots nest, the most specific root containing the
+    /// directory answers, and the outer one still answers for the rest of
+    /// its tree.
+    #[test]
+    fn nested_roots_resolve_to_the_most_specific_one() {
+        let tree = Tree::new("nested");
+        let registrations = [
+            served("outer", &tree.dir("vault")),
+            served("inner", &tree.dir("vault/inner")),
+        ];
+        assert_eq!(
+            resolved(&registrations, &tree.dir("vault/inner/deep")),
+            Some("inner".to_owned())
+        );
+        assert_eq!(
+            resolved(&registrations, &tree.dir("vault/beside")),
+            Some("outer".to_owned())
+        );
+    }
+
+    /// A root contains itself: the directory a registration is rooted at
+    /// resolves to that registration rather than to one around it.
+    #[test]
+    fn a_directory_that_is_a_root_resolves_to_its_registration() {
+        let tree = Tree::new("itself");
+        let registrations = [
+            served("outer", &tree.dir("vault")),
+            served("inner", &tree.dir("vault/inner")),
+        ];
+        assert_eq!(
+            resolved(&registrations, &tree.path("vault/inner")),
+            Some("inner".to_owned())
+        );
+    }
+
+    /// Containment is by whole components: a sibling whose name begins with
+    /// a root's name is not under that root.
+    #[test]
+    fn a_root_does_not_contain_a_sibling_that_shares_its_prefix() {
+        let tree = Tree::new("prefix");
+        let registrations = [served("a", &tree.dir("v/a"))];
+        assert_eq!(resolved(&registrations, &tree.dir("v/ab")), None);
+        assert_eq!(resolved(&registrations, &tree.dir("v/ab/deeper")), None);
+    }
+
+    /// A directory under no registered root resolves to none, which is an
+    /// answer rather than a refusal.
+    #[test]
+    fn a_directory_no_root_contains_resolves_to_none() {
+        let tree = Tree::new("uncontained");
+        let registrations = [served("notes", &tree.dir("notes"))];
+        assert_eq!(resolved(&registrations, &tree.dir("elsewhere")), None);
+    }
+
+    /// Two registrations whose roots are one directory name no one vault for
+    /// a directory under it, so the resolution is refused naming both.
+    #[test]
+    fn two_registrations_over_one_root_refuse_naming_both() {
+        let tree = Tree::new("ambiguous");
+        let shared = tree.dir("shared");
+        let registrations = [
+            served("beta", &tree.link("alias", &shared)),
+            served("alpha", &shared),
+        ];
+        assert_eq!(
+            containing(&by_name(&registrations), &tree.dir("shared/sub")),
+            Err(ResolveRefusal::AmbiguousRoot(
+                AliasConflict::new([
+                    VaultName::new("alpha").unwrap(),
+                    VaultName::new("beta").unwrap(),
+                ])
+                .unwrap()
+            ))
+        );
+    }
+
+    /// An alias pair is ambiguous only where it is the most specific root:
+    /// a directory under a single registration nested inside the pair
+    /// resolves to that registration.
+    #[test]
+    fn an_alias_pair_around_a_more_specific_root_does_not_refuse() {
+        let tree = Tree::new("ambiguous-outer");
+        let shared = tree.dir("shared");
+        let registrations = [
+            served("alpha", &shared),
+            served("beta", &tree.link("alias", &shared)),
+            served("inner", &tree.dir("shared/inner")),
+        ];
+        assert_eq!(
+            resolved(&registrations, &tree.dir("shared/inner/deep")),
+            Some("inner".to_owned())
+        );
+    }
+
+    /// A directory reached through a link resolves to the registration of
+    /// the directory the link reaches.
+    #[test]
+    fn a_directory_reached_through_a_link_resolves_to_its_targets_registration() {
+        let tree = Tree::new("linked-directory");
+        let root = tree.dir("vault");
+        tree.dir("vault/sub");
+        let registrations = [served("notes", &root)];
+        let link = tree.link("shortcut", &root);
+        assert_eq!(
+            resolved(&registrations, &link.join("sub")),
+            Some("notes".to_owned())
+        );
+    }
+
+    /// A `..` after a link steps out of the directory the link reaches, so a
+    /// directory spelled through a root's link and back out of it is not
+    /// under that root.
+    #[test]
+    fn a_parent_step_after_a_link_leaves_the_links_target() {
+        let tree = Tree::new("linked-parent");
+        let root = tree.dir("elsewhere/vault");
+        let registrations = [served("notes", &root)];
+        let link = tree.link("shortcut", &root);
+        assert_eq!(resolved(&registrations, &link.join("..")), None);
+    }
+
+    /// A root spelled through a link contains the directory the link reaches,
+    /// so a directory asked about by its own spelling resolves to it.
+    #[test]
+    fn a_root_spelled_through_a_link_contains_the_directory_it_reaches() {
+        let tree = Tree::new("linked-root");
+        let target = tree.dir("target");
+        let registrations = [served("notes", &tree.link("root-link", &target))];
+        assert_eq!(
+            resolved(&registrations, &tree.dir("target/sub")),
+            Some("notes".to_owned())
+        );
+    }
+
+    /// A directory that does not exist is judged on its spelling beneath what
+    /// the filesystem resolves, links included, rather than refused.
+    #[test]
+    fn a_directory_that_does_not_exist_is_judged_on_its_spelling() {
+        let tree = Tree::new("absent");
+        let root = tree.dir("vault");
+        let registrations = [served("notes", &root)];
+        let link = tree.link("shortcut", &root);
+        assert_eq!(
+            resolved(&registrations, &tree.path("vault/not/yet")),
+            Some("notes".to_owned())
+        );
+        assert_eq!(
+            resolved(&registrations, &link.join("not-yet")),
+            Some("notes".to_owned())
+        );
+        assert_eq!(resolved(&registrations, &tree.path("nowhere/yet")), None);
+    }
+
+    /// A `..` past what exists steps back into a root, and a link named
+    /// after it is judged as the directory it reaches: into another root, or
+    /// out of every root.
+    #[test]
+    fn a_link_after_a_parent_step_past_what_exists_is_judged_as_its_target() {
+        let tree = Tree::new("absent-parent-link");
+        let root = tree.dir("v/root");
+        let other = tree.dir("other");
+        tree.dir("other/r2/x");
+        tree.link("v/root/sub", &tree.path("other/r2"));
+        tree.link("v/root/out", &tree.dir("elsewhere"));
+        let registrations = [served("root", &root), served("other", &other)];
+        assert_eq!(
+            resolved(&registrations, &root.join("notyet/../sub/x")),
+            Some("other".to_owned())
+        );
+        assert_eq!(resolved(&registrations, &root.join("notyet/../out")), None);
+    }
+
+    /// An ancestor the filesystem refuses to stat — a name beneath a file, a
+    /// link that loops — is no root, and the walk goes on to the root above
+    /// it.
+    #[test]
+    fn an_ancestor_the_filesystem_refuses_is_passed_over() {
+        let tree = Tree::new("refused-ancestor");
+        let root = tree.dir("v");
+        std::fs::write(tree.path("v/file.md"), b"").unwrap();
+        tree.link("v/loop", &tree.path("v/loop"));
+        let registrations = [served("notes", &root)];
+        assert!(path_identity(&tree.path("v/file.md/sub")).is_err());
+        assert!(path_identity(&tree.path("v/loop")).is_err());
+        assert_eq!(
+            resolved(&registrations, &tree.path("v/file.md/sub")),
+            Some("notes".to_owned())
+        );
+        assert_eq!(
+            resolved(&registrations, &tree.path("v/loop/sub")),
+            Some("notes".to_owned())
+        );
+    }
+
+    /// A registered root the filesystem refuses to stat contains nothing, and
+    /// the other roots still answer.
+    #[test]
+    fn a_root_the_filesystem_refuses_contains_nothing_and_the_rest_answer() {
+        let tree = Tree::new("refused-root");
+        let root = tree.dir("vault");
+        let looping = tree.link("loop", &tree.path("loop"));
+        assert!(path_identity(&looping).is_err());
+        let registrations = [served("broken", &looping), served("notes", &root)];
+        assert_eq!(
+            resolved(&registrations, &tree.dir("vault/sub")),
+            Some("notes".to_owned())
+        );
+        assert_eq!(resolved(&registrations, &tree.path("loop/sub")), None);
     }
 
     /// A conflict is between at least two registrations, and the floor is the

@@ -22,15 +22,15 @@
 //! only one code fills is a field every other code leaves empty, and readers
 //! learn to check the code before believing it.
 //!
-//! **Two codes here are minted ahead of the layer that produces them.**
-//! `vault/ambiguous-root` answers a `vault resolve` ask over a directory that
-//! more than one registration contains; `host/registry-unwritable` answers a
-//! registration change whose write of the registry file refused. Both are the
-//! vault-namespace handlers' to raise, and those handlers land above this
-//! layer (NORN-231), so the call graph reaches neither from this crate today.
-//! They are spelled here because the vocabulary a refusal is spelled in is not
-//! a surface's to choose: the handler that arrives renders one of these rather
-//! than minting a string of its own.
+//! **One registry code is minted ahead of the handler that raises it.**
+//! `host/registry-unwritable` answers a registration change whose write of the
+//! registry file refused, and no handler writes the registry file yet, so the
+//! call graph reaches it from no crate today. `vault/ambiguous-root`, which
+//! answers a `vault resolve` ask over a directory whose most specific
+//! containing root more than one registration reaches, is raised by the
+//! host's resolve handler. Both are spelled here because the vocabulary a
+//! refusal is spelled in is not a surface's to choose: a handler renders one
+//! of these rather than minting a string of its own.
 //!
 //! **The codes a store's read refusals are spelled in are minted ahead too.**
 //! `host/read-failed`, `vault/unreadable-bound`, `request/out-of-bound`,
@@ -326,12 +326,14 @@ pub enum ReasonCode {
     /// detail is which failure, and the store's own account.
     #[serde(rename = "host/read-failed")]
     HostReadFailed,
-    /// `vault/ambiguous-root` — the directory that was asked about is
-    /// contained by more than one registration, so the ask names no one vault.
-    /// It answers a resolution of a directory and never a request against an
-    /// entry: what a host refuses about entries it serves under names that
-    /// resolve to one root is `host/duplicate-root`. The detail is every name
-    /// that contains the directory.
+    /// `vault/ambiguous-root` — the most specific registered root containing
+    /// the directory that was asked about is reached by more than one
+    /// registration, so the ask names no one vault. A directory that several
+    /// nested roots contain is not refused while one registration alone
+    /// reaches the innermost of them. It answers a resolution of a directory
+    /// and never a request against an entry: what a host refuses about entries
+    /// it serves under names that resolve to one root is `host/duplicate-root`.
+    /// The detail is every registered name that reaches that one root.
     #[serde(rename = "vault/ambiguous-root")]
     VaultAmbiguousRoot,
     /// `vault/ambiguous-target` — the target the request named resolves to
@@ -614,9 +616,10 @@ pub enum ErrorDetail {
         /// reading a message or a log. Clients never match on it.
         detail: String,
     },
-    /// The detail of `vault/ambiguous-root`: every registered name whose
-    /// registration contains the directory that was asked about. No entry is
-    /// involved; the ask is a resolution of a directory.
+    /// The detail of `vault/ambiguous-root`: every registered name that
+    /// reaches the most specific registered root containing the directory that
+    /// was asked about. No entry is involved; the ask is a resolution of a
+    /// directory.
     #[serde(rename = "vault/ambiguous-root")]
     #[non_exhaustive]
     AmbiguousRoot {

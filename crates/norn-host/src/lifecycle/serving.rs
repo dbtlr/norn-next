@@ -2,9 +2,10 @@
 //!
 //! One collection answers what the host serves and at which roots. Each entry
 //! carries its own registration beside its lifecycle state, so the root a job
-//! attaches, the root a recheck classifies and the root a refusal names are one
-//! fact read from one place — there is no second account of the serving set to
-//! disagree with this one about which names exist or where their roots are.
+//! attaches, the root a recheck classifies, the root a refusal names and the
+//! registration a registry request answers with are one fact read from one
+//! place — there is no second account of the serving set to disagree with this
+//! one about which names exist or where their roots are.
 //!
 //! # Joining and leaving
 //!
@@ -28,6 +29,7 @@
 //! [`Host::new`]: crate::Host::new
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -36,7 +38,7 @@ use norn_fs::Refusal;
 use norn_wire::VaultName;
 
 use super::{Entry, SnapshotSource};
-use crate::registry::{RootReading, recheck};
+use crate::registry::{ResolveRefusal, RootReading, containing, recheck};
 
 /// Why the serving set stands unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,17 +87,21 @@ pub(crate) enum ServingRefusal {
 ///
 /// The cost of an insertable set over one frozen at construction is one
 /// uncontended read lock and one refcount per lookup, and per pass over every
-/// entry one allocation plus whatever that pass copies out of the map. Two
+/// entry one allocation plus whatever that pass copies out of the map. Three
 /// passes exist. [`ServingSet::snapshot`] copies the handles — N refcount
 /// increments taking the reading and N decrements dropping it — and a
 /// dispatcher tick takes three such readings. [`ServingSet::recheck`] copies
 /// the name and root of every entry instead: two allocations each and no
 /// refcount, and it stats every one of those roots. It runs on the legs that
 /// acquire coverage and on the signals that invalidate it, never on a request
-/// path. That is the price of insertability: a pass over a set nothing can
-/// join borrows its entries in place and pays neither. A scan reads the set
-/// once and works from that reading, so a vault that joins mid-scan is served
-/// from the next pass.
+/// path. [`ServingSet::registrations`] copies every entry's whole
+/// registration and reads nothing else, and a listing answers from it;
+/// [`ServingSet::containing`] is that pass followed by a stat of every root it
+/// copied, which makes it the one request path that stats the served roots,
+/// and it is counted as a classification for that. That is the price of
+/// insertability: a pass over a set nothing can join borrows its entries in
+/// place and pays neither. A scan reads the set once and works from that
+/// reading, so a vault that joins mid-scan is served from the next pass.
 ///
 /// [`EntryOps`]: crate::EntryOps
 pub(crate) struct ServingSet<A: SnapshotSource> {
@@ -115,18 +121,19 @@ impl<A: SnapshotSource> ServingSet<A> {
         }
     }
 
-    /// How many classifications have run against this set.
+    /// How many passes that stat every served root have run against this set.
     ///
-    /// A caller reads this to hold a path to the stats it spends: the counter
-    /// moves once per [`ServingSet::recheck`], and one recheck stats every
-    /// served root.
+    /// A caller reads this to hold a path to the root stats it spends: the
+    /// counter moves once per [`ServingSet::recheck`] and once per
+    /// [`ServingSet::containing`], and each of those stats every served root.
+    /// It counts those stats alone, not the other reads a pass takes.
     ///
     /// The set is this crate's own, so a bar outside it reads this through
     /// `Host::classifications`, which is the narrowest surface that reaches it.
-    /// Both stand on the same terms: the count is written by every recheck and
-    /// read by the cases and suites that assert what an act stated, so the
-    /// reader is compiled for this crate's own cases and for the
-    /// harness-reachable feature and for nothing else.
+    /// Both stand on the same terms: the count is written by every pass that
+    /// stats the roots and read by the cases and suites that assert what an
+    /// act stated, so the reader is compiled for this crate's own cases and
+    /// for the harness-reachable feature and for nothing else.
     #[cfg(any(feature = "induced-failure", test))]
     pub(crate) fn classifications(&self) -> usize {
         self.classifications.load(Ordering::SeqCst)
@@ -149,6 +156,42 @@ impl<A: SnapshotSource> ServingSet<A> {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// Every registration the set serves at this instant, ascending by name.
+    ///
+    /// The registrations are copied out under the read guard and the guard
+    /// goes back before this returns, so what a caller then does with them —
+    /// a filesystem read included — stands outside the set's lock and holds
+    /// no entry alive.
+    pub(crate) fn registrations(&self) -> Vec<Registration> {
+        self.entries
+            .read()
+            .expect("serving set poisoned")
+            .values()
+            .map(|entry| entry.registration.clone())
+            .collect()
+    }
+
+    /// The registration whose root most specifically contains `directory`,
+    /// judged by [`containing`] against every registration the set serves at
+    /// this instant.
+    ///
+    /// The registrations are copied out through [`ServingSet::registrations`]
+    /// and keyed by the name the set keys them by, so the stats the judgement
+    /// takes stand outside the set's lock. Those stats reach every served
+    /// root, which is a classification's cost, so the pass is counted as one.
+    pub(crate) fn containing(
+        &self,
+        directory: &Path,
+    ) -> Result<Option<Registration>, ResolveRefusal> {
+        let registrations = self
+            .registrations()
+            .into_iter()
+            .map(|registration| (registration.name.clone(), registration))
+            .collect();
+        self.classifications.fetch_add(1, Ordering::SeqCst);
+        containing(&registrations, directory)
     }
 
     /// Classify `name`'s root against every other root the set serves.

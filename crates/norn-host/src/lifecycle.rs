@@ -2763,6 +2763,22 @@ impl<O: EntryOps> Host<O> {
         &self.shared.ops
     }
 
+    /// Every registration this host serves at this instant, ascending by name.
+    /// The serving set is what answers it, so a vault that joined after
+    /// startup is listed and one that left is not.
+    pub(crate) fn registrations(&self) -> Vec<Registration> {
+        self.shared.entries.registrations()
+    }
+
+    /// The served registration whose root most specifically contains
+    /// `directory`, judged against the serving set as it stands.
+    pub(crate) fn containing(
+        &self,
+        directory: &std::path::Path,
+    ) -> Result<Option<Registration>, crate::registry::ResolveRefusal> {
+        self.shared.entries.containing(directory)
+    }
+
     pub fn new(
         registry: RegistryRead,
         ops: O,
@@ -2962,13 +2978,16 @@ impl<O: EntryOps> Host<O> {
         answer.recv().unwrap_or(Err(ReloadRefusal::HostStopped))
     }
 
-    /// How many classifications this host has run against its serving set.
+    /// How many passes that stat every served root this host has run against
+    /// its serving set: each classification a recheck runs, and each
+    /// resolution of a directory.
     ///
-    /// One classification stats every root the host serves, so this is the whole
-    /// filesystem cost the registry itself carries: a path that moves the
-    /// counter spent those stats, and a path that leaves it standing spent none.
-    /// It is cumulative, so what one act cost is the difference between a
-    /// reading before it and one after.
+    /// The count is of root stats alone: a path that moves the counter spent a
+    /// stat of every served root, and a path that leaves it standing spent
+    /// none. What a resolution spends beyond those — the resolution of the
+    /// directory it is asked about and a stat of each ancestor it walks — is
+    /// not counted here. It is cumulative, so what one act cost is the
+    /// difference between a reading before it and one after.
     ///
     /// **Behind `induced-failure`, with the rest of the harness-reachable
     /// surface.** Nothing a client asks for is answered from this number: it
@@ -17189,6 +17208,160 @@ mod tests {
             assert_eq!(
                 host.demand(&name, AttachMode::Durable).unwrap().outcome(),
                 &Demand::UnknownVault
+            );
+        }
+    }
+
+    /// The registry requests a host answers from the set it serves: a listing
+    /// and a resolution of a directory.
+    ///
+    /// What is pinned here is the source. Both answer from the serving set at
+    /// the instant they are asked, so a vault the set gained or lost after
+    /// startup is answered for as the set now stands rather than as the
+    /// registry read at startup stood.
+    mod registry_requests {
+        use super::*;
+        use norn_wire::{Directory, ListParams, ResolveParams, ResolveReport};
+
+        fn registration(name: &str, root: &std::path::Path) -> RegistryEntry {
+            RegistryEntry::new(VaultName::new(name).unwrap(), VaultRoot::new(root).unwrap())
+        }
+
+        fn host_serving(registrations: Vec<RegistryEntry>) -> Host<Arc<FakeOps>> {
+            Host::new(
+                RegistryRead::from_entries(registrations),
+                Arc::new(FakeOps::default()),
+                LifecyclePolicy {
+                    idle_after: Duration::from_secs(60),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_secs(60),
+                },
+            )
+            .unwrap()
+        }
+
+        /// A resolution answers from the set as it stands: a vault that joined
+        /// after startup contains the directories under its root.
+        #[test]
+        fn a_resolution_answers_from_the_served_set() {
+            let scratch = temp_base("resolve-served-set");
+            let root = scratch.root().join("joined");
+            std::fs::create_dir_all(root.join("sub")).unwrap();
+            let host = host_serving(Vec::new());
+            let joined = RegistryEntry::new(
+                VaultName::new("joined").unwrap(),
+                VaultRoot::new(&root).unwrap(),
+            );
+            let asked = ResolveParams::new(Directory::new(root.join("sub")).unwrap());
+            assert_eq!(host.vault_resolve(&asked), Ok(ResolveReport::none()));
+
+            host.shared
+                .entries
+                .insert(joined.clone())
+                .expect("the set serves no such name");
+
+            assert_eq!(
+                host.vault_resolve(&asked),
+                Ok(ResolveReport::registered(joined))
+            );
+        }
+
+        /// A resolution stats every served root, so it is counted as the
+        /// classification it costs.
+        #[test]
+        fn a_resolution_is_counted_as_a_classification() {
+            let scratch = temp_base("resolve-counted");
+            let root = scratch.root().join("notes");
+            std::fs::create_dir_all(root.join("sub")).unwrap();
+            let notes = registration("notes", &root);
+            let host = host_serving(vec![notes.clone()]);
+            let before = host.shared.entries.classifications();
+            assert_eq!(
+                host.vault_resolve(&ResolveParams::new(
+                    Directory::new(root.join("sub")).unwrap()
+                )),
+                Ok(ResolveReport::registered(notes))
+            );
+            assert_eq!(host.shared.entries.classifications(), before + 1);
+        }
+
+        /// A listing reads the set and nothing else, so it spends no
+        /// classification.
+        #[test]
+        fn a_listing_is_not_counted_as_a_classification() {
+            let scratch = temp_base("list-uncounted");
+            let host = host_serving(vec![registration("notes", &scratch.root().join("notes"))]);
+            let before = host.shared.entries.classifications();
+            assert_eq!(host.vault_list(&ListParams::new()).registrations.len(), 1);
+            assert_eq!(host.shared.entries.classifications(), before);
+        }
+
+        /// A resolution over a root two served names reach is refused through
+        /// the one rendering of that refusal, naming both.
+        #[test]
+        fn an_ambiguous_resolution_is_refused_as_an_ambiguous_root() {
+            let scratch = temp_base("resolve-ambiguous");
+            let root = scratch.root().join("shared");
+            std::fs::create_dir_all(&root).unwrap();
+            let host = host_serving(vec![
+                RegistryEntry::new(
+                    VaultName::new("alpha").unwrap(),
+                    VaultRoot::new(&root).unwrap(),
+                ),
+                RegistryEntry::new(
+                    VaultName::new("beta").unwrap(),
+                    VaultRoot::new(root.join(".")).unwrap(),
+                ),
+            ]);
+
+            let envelope = host
+                .vault_resolve(&ResolveParams::new(Directory::new(&root).unwrap()))
+                .expect_err("a directory two registrations reach at one root resolved");
+            assert_eq!(
+                envelope.detail(),
+                &ErrorDetail::ambiguous_root(colliding(
+                    &VaultName::new("alpha").unwrap(),
+                    &VaultName::new("beta").unwrap()
+                ))
+            );
+        }
+
+        /// A host serving nothing lists nothing, and that is an answer.
+        #[test]
+        fn a_host_serving_nothing_lists_nothing() {
+            let host = host_serving(Vec::new());
+            assert_eq!(host.vault_list(&ListParams::new()).registrations, []);
+        }
+
+        /// A listing is every registration the set serves as it now stands,
+        /// ascending by name: one that joined after startup among them, and
+        /// one that left gone.
+        #[test]
+        fn a_listing_is_every_served_registration_in_name_order() {
+            let scratch = temp_base("list-order");
+            let root = |name: &str| scratch.root().join(name);
+            let host = host_serving(vec![
+                registration("notes", &root("notes")),
+                registration("archive", &root("archive")),
+                registration("leaving", &root("leaving")),
+            ]);
+            let joined = registration("journal", &root("journal"));
+            host.shared
+                .entries
+                .insert(joined.clone())
+                .expect("the set serves no such name");
+            host.shared
+                .entries
+                .remove(&VaultName::new("leaving").unwrap())
+                .expect("the entry holds nothing");
+
+            assert_eq!(
+                host.vault_list(&ListParams::new()).registrations,
+                [
+                    registration("archive", &root("archive")),
+                    joined,
+                    registration("notes", &root("notes")),
+                ]
             );
         }
     }
