@@ -26,7 +26,7 @@ use norn_wire::{
     ListReport, MaintainerIdentity, ModelIdentity, Moved, NameSet, NoProblems, NonFiniteScore,
     NotReady, Page, PathRuleKind, PollBackend, Predicate, Published, ReasonCode, RegisterParams,
     RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome,
-    ReloadParams, ReloadReport, ReloadStage, Replace, RequestScope, ResolutionTarget,
+    ReloadParams, ReloadReport, ReloadStage, Replace, RequestBound, RequestScope, ResolutionTarget,
     ResolveParams, ResolveReport, RollUp, Rung, RungReport, RungSet, SchemaSource, Score,
     SearchParams, SetParams, SetReport, Severity, Snapshot, Sort, SortKey, Span, StatusParams,
     StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead, TrustState,
@@ -129,12 +129,15 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::HostEntryNotReady,
         ReasonCode::HostReaderUnavailable,
         ReasonCode::HostRegistryUnwritable,
+        ReasonCode::HostReadFailed,
         ReasonCode::VaultAmbiguousRoot,
         ReasonCode::VaultAmbiguousTarget,
         ReasonCode::VaultUnknownTarget,
         ReasonCode::VaultReloadBusy,
         ReasonCode::VaultReloadFailed,
         ReasonCode::VaultCursorOrderChanged,
+        ReasonCode::VaultUnreadableBound,
+        ReasonCode::RequestOutOfBound,
         ReasonCode::EngineNotEnabled,
         ReasonCode::EngineUnavailable,
         ReasonCode::EngineFailed,
@@ -207,6 +210,7 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::entry_held(name("notes")),
         ErrorDetail::reader_unavailable("this coverage mints no read handle"),
         ErrorDetail::registry_unwritable("the registry file is read-only"),
+        ErrorDetail::read_failed("the database disk image is malformed"),
         ErrorDetail::ambiguous_root(names([name("notes"), name("vault")])),
         ErrorDetail::ambiguous_target(
             target("glossary"),
@@ -228,6 +232,10 @@ fn error_details() -> Vec<ErrorDetail> {
             Sort::new(SortKey::path(), Direction::Ascending),
             Sort::new(SortKey::field("due"), Direction::Descending),
         )),
+        ErrorDetail::unreadable_bound("due", "not-a-date"),
+        ErrorDetail::out_of_bound(RequestBound::page_rows(5_000)),
+        ErrorDetail::out_of_bound(RequestBound::membership_values(5_000)),
+        ErrorDetail::out_of_bound(RequestBound::empty_membership("type")),
     ]);
     details.extend(
         not_ready_states()
@@ -3194,10 +3202,11 @@ fn a_reload_failure_is_an_object_tagged_kind() {
     );
 }
 
-/// Every code the three namespaces hold is a fact about the host's serving of
-/// an entry, about the requested vault, or about that vault's engine.
+/// Every code the four namespaces hold is a fact about the host's serving of
+/// an entry, about the requested vault, about that vault's engine, or about
+/// the request's own shape.
 #[test]
-fn every_code_sits_in_one_of_the_three_namespaces() {
+fn every_code_sits_in_one_of_the_four_namespaces() {
     let namespaces: BTreeSet<String> = reason_codes()
         .iter()
         .map(|code| {
@@ -3210,7 +3219,7 @@ fn every_code_sits_in_one_of_the_three_namespaces() {
         .collect();
     assert_eq!(
         namespaces,
-        ["host", "vault", "engine"]
+        ["host", "vault", "engine", "request"]
             .map(str::to_string)
             .into_iter()
             .collect()

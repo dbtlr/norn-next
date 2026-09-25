@@ -88,6 +88,56 @@ impl MaintainerIdentity {
     }
 }
 
+/// Which shape rule a request's own count or membership part violated, as
+/// `request/out-of-bound` names it.
+///
+/// Two counts are bounded — how many rows a page holds and how many values
+/// one membership part names — and a membership part naming none is a third
+/// shape failure the same code carries. Each variant carries what the
+/// request named: the count, for a count bound; the key, for a part naming
+/// none.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RequestBound {
+    /// A page limit the request named outside the range a page holds.
+    #[non_exhaustive]
+    PageRows {
+        /// The count the request named.
+        given: usize,
+    },
+    /// A membership part naming more values than one statement holds.
+    #[non_exhaustive]
+    MembershipValues {
+        /// The count the request named.
+        given: usize,
+    },
+    /// A membership part naming no value at all.
+    #[non_exhaustive]
+    EmptyMembership {
+        /// The key the empty part named.
+        key: String,
+    },
+}
+
+impl RequestBound {
+    /// A page limit outside the range a page holds, for the `given` count.
+    pub const fn page_rows(given: usize) -> Self {
+        RequestBound::PageRows { given }
+    }
+
+    /// A membership part naming more values than one statement holds, for
+    /// the `given` count.
+    pub const fn membership_values(given: usize) -> Self {
+        RequestBound::MembershipValues { given }
+    }
+
+    /// A membership part on `key` naming no value at all.
+    pub fn empty_membership(key: impl Into<String>) -> Self {
+        RequestBound::EmptyMembership { key: key.into() }
+    }
+}
+
 /// The code a refusal is filed under.
 ///
 /// A code is a flat namespaced string — `namespace/what-happened` — and the
@@ -141,6 +191,11 @@ pub enum ReasonCode {
     /// what refused.
     #[serde(rename = "host/registry-unwritable")]
     HostRegistryUnwritable,
+    /// `host/read-failed` — the store refused a statement while answering a
+    /// read, so the read was not answered. The detail is the store's own
+    /// account.
+    #[serde(rename = "host/read-failed")]
+    HostReadFailed,
     /// `vault/ambiguous-root` — the directory that was asked about is
     /// contained by more than one registration, so the ask names no one vault.
     /// It answers a resolution of a directory and never a request against an
@@ -168,11 +223,29 @@ pub enum ReasonCode {
     /// serving what its control files state. The detail is what it met.
     #[serde(rename = "vault/reload-failed")]
     VaultReloadFailed,
-    /// `vault/cursor-order-changed` — the cursor was minted under one order
-    /// and continued under another, so the position it names is in a sequence
-    /// that no longer exists. The detail is the two orders.
+    /// `vault/cursor-order-changed` — the cursor names a position in an order
+    /// that does not hold here: minted under one order and continued under
+    /// another — another schema's order, another key, or another direction —
+    /// a forged cursor naming no position in any order, or a cursor minted
+    /// over one kind of row and continued over another. The detail is the two
+    /// orders, or no orders where what changed is the row's kind rather than
+    /// a document order.
     #[serde(rename = "vault/cursor-order-changed")]
     VaultCursorOrderChanged,
+    /// `vault/unreadable-bound` — a value a comparing part names — an
+    /// equality, an inequality, a membership or a before/after bound — on a
+    /// key declared with a typed order does not read as that type, so it
+    /// names no place in the key's order. The detail is the key and the
+    /// value.
+    #[serde(rename = "vault/unreadable-bound")]
+    VaultUnreadableBound,
+    /// `request/out-of-bound` — a count the request names on its own shape is
+    /// outside the range that count's bound holds it to — a page limit over
+    /// the maximum, or too many values in one membership part — or a
+    /// membership part names no value at all. The detail is which bound, and
+    /// the count the request named, or the key for a part naming none.
+    #[serde(rename = "request/out-of-bound")]
+    RequestOutOfBound,
     /// `engine/not-enabled` — the vault has not enabled the rung the request
     /// asked for. The detail is the rung, and what to do about it.
     #[serde(rename = "engine/not-enabled")]
@@ -378,6 +451,15 @@ pub enum ErrorDetail {
         /// reading a message or a log. Clients never match on it.
         detail: String,
     },
+    /// The detail of `host/read-failed`: the store's own account of what
+    /// refused.
+    #[serde(rename = "host/read-failed")]
+    #[non_exhaustive]
+    ReadFailed {
+        /// The store's own account of what refused, in words, for a person
+        /// reading a message or a log. Clients never match on it.
+        detail: String,
+    },
     /// The detail of `vault/ambiguous-root`: every registered name whose
     /// registration contains the directory that was asked about. No entry is
     /// involved; the ask is a resolution of a directory.
@@ -431,6 +513,23 @@ pub enum ErrorDetail {
         /// The order the cursor named and the order that stands, as the
         /// continuation's own account of the change.
         order: CursorOrderChanged,
+    },
+    /// The detail of `vault/unreadable-bound`: the key and the value.
+    #[serde(rename = "vault/unreadable-bound")]
+    #[non_exhaustive]
+    UnreadableBound {
+        /// The key declared with the typed order the value was read against.
+        key: String,
+        /// The value that does not read as that key's declared type.
+        value: String,
+    },
+    /// The detail of `request/out-of-bound`: which bound, and the count the
+    /// request named, or the key for a part naming none.
+    #[serde(rename = "request/out-of-bound")]
+    #[non_exhaustive]
+    OutOfBound {
+        /// The bound the request's own shape violated.
+        bound: RequestBound,
     },
     /// The detail of `engine/not-enabled`: which rung, and what enables it.
     #[serde(rename = "engine/not-enabled")]
@@ -523,6 +622,13 @@ impl ErrorDetail {
         }
     }
 
+    /// The detail of `host/read-failed`, described by `detail`.
+    pub fn read_failed(detail: impl Into<String>) -> Self {
+        ErrorDetail::ReadFailed {
+            detail: detail.into(),
+        }
+    }
+
     /// The detail of `vault/ambiguous-root`, for the `candidates` the
     /// directory resolves under.
     ///
@@ -567,6 +673,21 @@ impl ErrorDetail {
         ErrorDetail::CursorOrderChanged { order }
     }
 
+    /// The detail of `vault/unreadable-bound`, for the `key` declared with
+    /// the typed order `value` does not read as.
+    pub fn unreadable_bound(key: impl Into<String>, value: impl Into<String>) -> Self {
+        ErrorDetail::UnreadableBound {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    /// The detail of `request/out-of-bound`, for the `bound` the request's
+    /// own shape violated.
+    pub const fn out_of_bound(bound: RequestBound) -> Self {
+        ErrorDetail::OutOfBound { bound }
+    }
+
     /// The detail of `engine/not-enabled`, for `rung`, described by `detail`.
     pub fn engine_not_enabled(rung: Rung, detail: impl Into<String>) -> Self {
         ErrorDetail::EngineNotEnabled {
@@ -604,12 +725,15 @@ impl ErrorDetail {
             ErrorDetail::EntryNotReady { .. } => ReasonCode::HostEntryNotReady,
             ErrorDetail::ReaderUnavailable { .. } => ReasonCode::HostReaderUnavailable,
             ErrorDetail::RegistryUnwritable { .. } => ReasonCode::HostRegistryUnwritable,
+            ErrorDetail::ReadFailed { .. } => ReasonCode::HostReadFailed,
             ErrorDetail::AmbiguousRoot { .. } => ReasonCode::VaultAmbiguousRoot,
             ErrorDetail::AmbiguousTarget { .. } => ReasonCode::VaultAmbiguousTarget,
             ErrorDetail::UnknownTarget { .. } => ReasonCode::VaultUnknownTarget,
             ErrorDetail::ReloadBusy { .. } => ReasonCode::VaultReloadBusy,
             ErrorDetail::ReloadFailed { .. } => ReasonCode::VaultReloadFailed,
             ErrorDetail::CursorOrderChanged { .. } => ReasonCode::VaultCursorOrderChanged,
+            ErrorDetail::UnreadableBound { .. } => ReasonCode::VaultUnreadableBound,
+            ErrorDetail::OutOfBound { .. } => ReasonCode::RequestOutOfBound,
             ErrorDetail::EngineNotEnabled { .. } => ReasonCode::EngineNotEnabled,
             ErrorDetail::EngineUnavailable { .. } => ReasonCode::EngineUnavailable,
             ErrorDetail::EngineFailed { .. } => ReasonCode::EngineFailed,
@@ -751,12 +875,15 @@ mod tests {
             ReasonCode::HostEntryNotReady => "host/entry-not-ready",
             ReasonCode::HostReaderUnavailable => "host/reader-unavailable",
             ReasonCode::HostRegistryUnwritable => "host/registry-unwritable",
+            ReasonCode::HostReadFailed => "host/read-failed",
             ReasonCode::VaultAmbiguousRoot => "vault/ambiguous-root",
             ReasonCode::VaultAmbiguousTarget => "vault/ambiguous-target",
             ReasonCode::VaultUnknownTarget => "vault/unknown-target",
             ReasonCode::VaultReloadBusy => "vault/reload-busy",
             ReasonCode::VaultReloadFailed => "vault/reload-failed",
             ReasonCode::VaultCursorOrderChanged => "vault/cursor-order-changed",
+            ReasonCode::VaultUnreadableBound => "vault/unreadable-bound",
+            ReasonCode::RequestOutOfBound => "request/out-of-bound",
             ReasonCode::EngineNotEnabled => "engine/not-enabled",
             ReasonCode::EngineUnavailable => "engine/unavailable",
             ReasonCode::EngineFailed => "engine/failed",
@@ -794,6 +921,7 @@ mod tests {
             ReasonCode::HostRegistryUnwritable => {
                 ErrorDetail::registry_unwritable("the registry file is read-only")
             }
+            ReasonCode::HostReadFailed => ErrorDetail::read_failed("the statement refused"),
             ReasonCode::VaultAmbiguousRoot => ErrorDetail::ambiguous_root(two_names()),
             ReasonCode::VaultAmbiguousTarget => ErrorDetail::ambiguous_target(
                 a_target(),
@@ -815,6 +943,10 @@ mod tests {
             ReasonCode::VaultCursorOrderChanged => ErrorDetail::cursor_order_changed(
                 CursorOrderChanged::new("fp-1", Some("fp-2".to_string())),
             ),
+            ReasonCode::VaultUnreadableBound => ErrorDetail::unreadable_bound("due", "not-a-date"),
+            ReasonCode::RequestOutOfBound => {
+                ErrorDetail::out_of_bound(RequestBound::page_rows(5_000))
+            }
             ReasonCode::EngineNotEnabled => ErrorDetail::engine_not_enabled(
                 Rung::Vector,
                 "enable the engine section in .norn/config.toml and run vault reload",

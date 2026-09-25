@@ -378,7 +378,9 @@ pub use document::{
     ElsewhereNamesDocuments, FieldValue, HeadingRow, LinkAddress, LinkFamily, LinkHealth, LinkRow,
     Span, TagRow, TagSource, TotalBelowHead, VAULT_PROTOCOL,
 };
-pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReasonCode, TooFewNames};
+pub use error::{
+    ErrorDetail, ErrorEnvelope, MaintainerIdentity, NameSet, ReasonCode, RequestBound, TooFewNames,
+};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
 pub use glob::{CaseFold, Pattern, PatternError};
