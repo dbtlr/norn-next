@@ -13648,6 +13648,51 @@ mod tests {
                 wait_state(&host, &notes(), norn_wire::TrustState::Unattached);
             }
         }
+
+        /// An idle attached vault whose root is replaced by a link the
+        /// registry cannot read is parked by the watcher's next poll, which
+        /// gives its coverage — and the maintainer lock inside it — back. An
+        /// unregistration asked for over and over across that give-back is
+        /// refused as held until the lock is back, and never as another
+        /// maintainer: the only maintainer is this process.
+        #[cfg(unix)]
+        #[test]
+        fn an_unregistration_across_an_identity_refusals_give_back_never_meets_its_own_lock() {
+            for round in 0..5 {
+                let f = Fixture::new(&format!("unregister-identity-give-back-{round}"));
+                fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+                let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+                let host = crate::Host::new(
+                    crate::RegistryRead::from_entries([]),
+                    ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+                    crate::LifecyclePolicy {
+                        idle_after: Duration::from_secs(600),
+                        worker_slots: 1,
+                        watch_poll_interval: Duration::from_millis(5),
+                    },
+                )
+                .unwrap();
+                register(&host, &f.vault()).expect("the vault is registered");
+                let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
+                wait_state(&host, &notes(), norn_wire::TrustState::Ready);
+                drop(lease);
+
+                let answer = std::thread::scope(|scope| {
+                    let unregistering = scope.spawn(|| {
+                        unregister_once_idle(&host, &UnregisterParams::new(notes()).keeping_state())
+                    });
+                    fs::remove_dir_all(f.vault()).unwrap();
+                    std::os::unix::fs::symlink(f.vault().file_name().unwrap(), f.vault()).unwrap();
+                    unregistering.join().expect("the unregistration ran")
+                });
+
+                assert_eq!(
+                    answer.map(|report| report.name),
+                    Ok(notes()),
+                    "round {round}"
+                );
+            }
+        }
     }
 
     /// The budget every lifecycle condition here is given: long enough that a

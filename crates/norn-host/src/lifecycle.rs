@@ -2291,11 +2291,21 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
 /// which is why the release here is the ops alone: this is a park with the
 /// resources given back under it, not a teardown, and a demand asking for
 /// coverage again is what serves the entry.
+///
+/// **Coverage the refusal takes is out with the refusal until the ops have
+/// it.** It is taken under the gate as a release the entry began itself, with
+/// the release flag standing, and both are put down under the gate that
+/// follows the detach. So the entry reads as held for as long as the maintainer
+/// lock inside the coverage is still open — an unregistration asking in
+/// between is refused as held rather than meeting that lock as another
+/// maintainer — and a demand raised in between schedules nothing beside the
+/// detach. The close answers that demand, as [`finish_release`] does for a
+/// teardown, and leaves the park and the recovery standing.
 fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName, detail: String) {
     let Some(entry) = shared.entries.get(name) else {
         return;
     };
-    let attachment = {
+    let taken = {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         state.claim.invalidate();
         state.pending.merge(Batch::rescan(RescanScope::Vault));
@@ -2313,7 +2323,8 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
         // ends — and a handle the entry kept would outlast the store either
         // way.
         state.close_reader();
-        match state.coverage.give_up() {
+        let epoch = state.claim.epoch();
+        match state.coverage.take(epoch) {
             // The entry holds its own coverage, whatever leg is registered
             // against it. The refusal gives it back, and the registration ends
             // with the taking: what would otherwise stand is a leg recorded as
@@ -2321,7 +2332,8 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
             Some(attachment) => {
                 state.claim.end_running_leg();
                 state.claim.open();
-                Some(attachment)
+                state.detach_in_flight = true;
+                Some((epoch, attachment))
             }
             // Coverage out with a leg is that leg's, and comes back where the
             // leg ends. The gate stays where it is: a leg running against the
@@ -2335,8 +2347,19 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
             }
         }
     };
-    if let Some(attachment) = attachment {
-        give_back(shared.ops.as_ref(), name, attachment);
+    let Some((epoch, attachment)) = taken else {
+        return;
+    };
+    give_back(shared.ops.as_ref(), name, attachment);
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    state.coverage.released_by(epoch);
+    state.detach_in_flight = false;
+    let owed = schedule_demanded_work(&mut state, name).is_some();
+    drop(state);
+    if owed {
+        // The one failure is the worker pool being gone, which is the host
+        // coming down: nothing is left to serve the lease either way.
+        let _ = dispatch_pending(shared, &entry);
     }
 }
 
@@ -19589,6 +19612,91 @@ mod tests {
             assert_eq!(refusal.detail(), &ErrorDetail::already_served(name.clone()));
             assert_eq!(recorded(&ops, &name), Some(theirs));
             assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// A served vault whose root the registry can no longer read, idle
+        /// with its coverage in hand, and the refusal that finds it given
+        /// back its coverage on another thread: `ops.detach` blocks until the
+        /// case releases it.
+        #[cfg(unix)]
+        fn refused_under_a_blocked_give_back(
+            label: &str,
+        ) -> (Arc<FakeOps>, Host<Arc<FakeOps>>, VaultName, Scratch) {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base(label);
+            let root = scratch.root().join("root");
+            std::fs::create_dir_all(&root).unwrap();
+            let name = VaultName::new("notes").unwrap();
+            let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, root.as_path())]);
+            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, &name, TrustState::Ready);
+            refuse_root_identity(&root);
+            ops.block_detach.store(true, Ordering::SeqCst);
+            (ops, host, name, scratch)
+        }
+
+        /// An identity refusal giving an idle entry's coverage back holds the
+        /// entry until the coverage has reached the ops: an unregistration
+        /// asking while the detach runs is refused as held, and never reaches
+        /// for a maintainer lock the detach has not yet let go of. Once the
+        /// coverage is back the parked entry is unregistered.
+        #[cfg(unix)]
+        #[test]
+        fn an_identity_refusal_holds_the_entry_until_its_coverage_is_back() {
+            let (ops, host, name, _scratch) =
+                refused_under_a_blocked_give_back("unregister-identity-give-back");
+
+            let during = thread::scope(|scope| {
+                let refusing = scope.spawn(|| park_on_current_classification(&host.shared, &name));
+                wait_for_flag("detach_started", &ops.detach_started);
+                let during = unregister(&host, UnregisterParams::new(name.clone()));
+                ops.detach_release.store(true, Ordering::SeqCst);
+                refusing.join().expect("the refusal ran");
+                during
+            });
+
+            assert_eq!(
+                during
+                    .expect_err("an entry whose coverage was still going back was unregistered")
+                    .detail(),
+                &ErrorDetail::entry_held(name.clone())
+            );
+            assert!(ops.retirements.lock().unwrap().is_empty());
+            unregister(&host, UnregisterParams::new(name.clone()))
+                .expect("the parked entry holding nothing is unregistered");
+            assert_eq!(*ops.retirements.lock().unwrap(), [(name, true)]);
+        }
+
+        /// A demand raised while an identity refusal's give-back runs attaches
+        /// nothing until the coverage is back, and is answered by the attach
+        /// the give-back's end schedules.
+        #[cfg(unix)]
+        #[test]
+        fn a_demand_during_an_identity_refusals_give_back_attaches_after_it() {
+            let (ops, host, name, scratch) =
+                refused_under_a_blocked_give_back("demand-identity-give-back");
+            let root = scratch.root().join("root");
+
+            let (attaches_during, lease) = thread::scope(|scope| {
+                let refusing = scope.spawn(|| park_on_current_classification(&host.shared, &name));
+                wait_for_flag("detach_started", &ops.detach_started);
+                std::fs::remove_file(&root).unwrap();
+                std::fs::create_dir(&root).unwrap();
+                let lease = host.demand(&name, AttachMode::Durable).unwrap();
+                settle();
+                let attaches_during = ops.attaches.load(Ordering::SeqCst);
+                ops.detach_release.store(true, Ordering::SeqCst);
+                refusing.join().expect("the refusal ran");
+                (attaches_during, lease)
+            });
+
+            assert_eq!(
+                attaches_during, 1,
+                "a demand attached beside coverage still going back"
+            );
+            wait_for_state(&host, &name, TrustState::Ready);
+            assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+            drop(lease);
         }
     }
 }
