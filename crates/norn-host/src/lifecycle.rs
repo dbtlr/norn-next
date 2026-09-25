@@ -1954,33 +1954,6 @@ fn reclaim_unwound_leg<O: EntryOps>(
     }
 }
 
-/// Answer the asker of an explicit reload whose leg unwound, from the reading
-/// [`reclaim_unwound_leg`] published over the entry.
-///
-/// The unwind drops the job's own sender before the entry is reconciled, so
-/// the asker is held on the worker's second sender until this runs, and is
-/// told where the entry stands rather than that the host stopped. A leg that
-/// sent its reply before it unwound has answered already, and what this sends
-/// reaches no one.
-fn answer_unwound_reload<O: EntryOps>(
-    shared: &Arc<Shared<O>>,
-    name: &VaultName,
-    reply: &ReloadReply,
-) {
-    let refusal = match shared.entries.get(name) {
-        Some(entry) => ReloadRefusal::Unavailable(
-            entry
-                .gate
-                .lock()
-                .expect("entry gate poisoned")
-                .trust
-                .clone(),
-        ),
-        None => ReloadRefusal::UnknownVault,
-    };
-    let _ = reply.try_send(Err(refusal));
-}
-
 /// What is running against an entry at the instant it was read.
 ///
 /// Each field is one of the holds `EntryState::held_by_anything` answers for
@@ -2388,6 +2361,11 @@ struct Shared<O: EntryOps> {
     /// Root identities claimed by coverage acquisitions while their
     /// filesystem work runs outside this gate.
     attach_gate: Mutex<BTreeMap<Identity, VaultName>>,
+    /// Unwind the next reload turn that hands its reload on, straight after
+    /// the hand-on. That turn no longer holds the entry, so its unwind is the
+    /// one whose asker the turn it handed on to answers.
+    #[cfg(test)]
+    panic_after_reload_handoff: AtomicBool,
 }
 
 pub struct Host<O: EntryOps> {
@@ -2874,6 +2852,8 @@ impl<O: EntryOps> Host<O> {
             shutting_down: AtomicBool::new(false),
             idle_after: policy.idle_after,
             attach_gate: Mutex::new(BTreeMap::new()),
+            #[cfg(test)]
+            panic_after_reload_handoff: AtomicBool::new(false),
         });
         let mut workers = Vec::with_capacity(policy.worker_slots);
         for _ in 0..policy.worker_slots {
@@ -2889,7 +2869,14 @@ impl<O: EntryOps> Host<O> {
                             };
                             let leg = Leg::Job(job.epoch());
                             let name = job.name().clone();
-                            let reload_reply = job.reload_reply();
+                            // A second sender to an explicit reload's asker,
+                            // held until the reconciliation below has run. An
+                            // unwind drops the job's own sender with the stack,
+                            // and the asker left unanswered reads where the
+                            // entry stands once every sender is gone, so this
+                            // is what keeps that reading from being taken
+                            // before the unwind has published over the entry.
+                            let asker = job.reload_reply();
                             // The unwind is caught here rather than around the
                             // leg's own work, and that placement is the whole
                             // of what keeps the pool alive: the thread that
@@ -2907,10 +2894,8 @@ impl<O: EntryOps> Host<O> {
                                     leg,
                                     unwind_detail(payload.as_ref()),
                                 );
-                                if let Some(reply) = reload_reply {
-                                    answer_unwound_reload(&shared, &name, &reply);
-                                }
                             }
+                            drop(asker);
                         }
                         Err(_) => break,
                     }
@@ -3049,10 +3034,17 @@ impl<O: EntryOps> Host<O> {
     /// answer. The entry must be `Ready`, hold its coverage, and have nothing
     /// working over it.
     ///
-    /// A job whose leg unwinds is answered by the worker that caught it, from
-    /// the reading the unwind published. `HostStopped` is what is left: a job
-    /// channel that refused the send, or a job dropped undelivered because the
-    /// host is shutting down.
+    /// A leg that runs answers the asker itself. A reload that is dropped
+    /// with no answer sent is one the host moved past, and the asker is told
+    /// where the entry stands, read once every sender of its reply is gone:
+    /// a job the entry was moved past on its marker, in the channel, or on
+    /// its way back to its marker; a job whose vault left the serving set;
+    /// and a leg that unwound, whose worker holds the asker until the
+    /// unwind has published over the entry. A turn that handed the reload on
+    /// before it unwound leaves a sender with the turn it handed on to, and
+    /// that turn is what answers. `HostStopped` is what is left: a job
+    /// channel that refused the send, or a job dropped undelivered because
+    /// the host is shutting down.
     fn request_reload(
         &self,
         name: &VaultName,
@@ -3076,7 +3068,29 @@ impl<O: EntryOps> Host<O> {
                 .schedule(|epoch| job(name.clone(), epoch, reply));
         }
         dispatch_pending(&self.shared, &entry).map_err(|_| ReloadRefusal::HostStopped)?;
-        answer.recv().unwrap_or(Err(ReloadRefusal::HostStopped))
+        answer
+            .recv()
+            .unwrap_or_else(|_| Err(self.unanswered_reload(name)))
+    }
+
+    /// What the asker of a reload the host dropped unanswered is told: where
+    /// the entry stands now, a vault the serving set no longer holds, or a
+    /// host that is shutting down.
+    fn unanswered_reload(&self, name: &VaultName) -> ReloadRefusal {
+        if self.shared.shutting_down.load(Ordering::SeqCst) {
+            return ReloadRefusal::HostStopped;
+        }
+        match self.shared.entries.get(name) {
+            Some(entry) => ReloadRefusal::Unavailable(
+                entry
+                    .gate
+                    .lock()
+                    .expect("entry gate poisoned")
+                    .trust
+                    .clone(),
+            ),
+            None => ReloadRefusal::UnknownVault,
+        }
     }
 
     /// How many passes that stat every served root this host has run against
@@ -3897,6 +3911,9 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
         // back only where it is this job's own, and so does the marker — both
         // at another epoch belong to the work that superseded this job.
         state.claim.free_slot(epoch);
+        // A job the entry has moved past runs nothing. An explicit reload
+        // among them is answered by its asker, which reads where the entry
+        // stands once the job's last sender is gone.
         if !state.claim.stands_at(epoch) {
             if state.claim.marker().map(Job::epoch) == Some(epoch) {
                 state.claim.drop_marker();
@@ -5162,6 +5179,13 @@ fn run_reload_job<O: EntryOps>(
             .hand_on(|epoch| Job::ReloadReconcile(name.clone(), epoch, judgment, reply));
         drop(state);
         dispatch_handoff(shared, entry, epoch, next);
+        #[cfg(test)]
+        if shared
+            .panic_after_reload_handoff
+            .swap(false, Ordering::SeqCst)
+        {
+            panic!("the reload turn unwound after its hand-on");
+        }
         return None;
     }
 
@@ -7655,6 +7679,230 @@ mod tests {
             assert_eq!(answered, expected);
         }
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 3);
+    }
+
+    /// Two vaults over roots of their own, both `Ready`, on a host with one
+    /// worker and no dispatcher tick of its own, so a job blocked on one entry
+    /// holds every other entry's job behind it for as long as a case drives.
+    #[cfg(unix)]
+    fn one_worker_host_over(
+        ops: &Arc<FakeOps>,
+        base: &std::path::Path,
+        names: &[&VaultName],
+    ) -> Arc<Host<Arc<FakeOps>>> {
+        let roots: Vec<_> = names.iter().map(|name| base.join(name.as_str())).collect();
+        let pairs: Vec<_> = names
+            .iter()
+            .copied()
+            .zip(roots.iter().map(std::path::PathBuf::as_path))
+            .collect();
+        let host = Arc::new(rooted_host(
+            Arc::clone(ops),
+            &pairs,
+            1,
+            Duration::from_secs(60),
+        ));
+        for name in names {
+            drop(host.demand(name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, name, TrustState::Ready);
+        }
+        host
+    }
+
+    /// Ask `vault reload` of `name` on a thread of its own.
+    fn reload_on_a_thread(
+        host: &Arc<Host<Arc<FakeOps>>>,
+        name: &VaultName,
+        dry_run: bool,
+    ) -> thread::JoinHandle<Result<Result<norn_wire::ReloadReport, ErrorEnvelope>, HostError>> {
+        let host = Arc::clone(host);
+        let params = reload_params(name, dry_run);
+        thread::spawn(move || host.vault_reload(&params))
+    }
+
+    /// Park `name` on its root's identity refusal, and return the refusal the
+    /// entry then stands at as a reload answers it.
+    #[cfg(unix)]
+    fn park_on_identity(
+        host: &Host<Arc<FakeOps>>,
+        name: &VaultName,
+        root: &std::path::Path,
+    ) -> ErrorDetail {
+        refuse_root_identity(root);
+        park_on_current_classification(&host.shared, name);
+        let Some(Demand::IdentityRefused(detail)) = entry_park(host, name) else {
+            panic!("the entry stands on no identity park");
+        };
+        ReloadRefusal::Unavailable(TrustState::untrusted(
+            UntrustedReason::environmental_refusal(detail),
+        ))
+        .answer(name)
+        .expect("an unavailable entry is answered with a code")
+        .detail()
+        .clone()
+    }
+
+    /// **A reload the entry moves past while it waits in the channel is
+    /// answered with where the entry stands**, in either mode, rather than as
+    /// a stopped host. The reload queues behind another vault's reload on the
+    /// one worker, an identity park moves the entry past it, and the worker
+    /// that then picks it up runs nothing of it.
+    #[cfg(unix)]
+    #[test]
+    fn a_reload_moved_past_in_the_channel_answers_the_trust_the_entry_stands_at() {
+        for dry_run in [false, true] {
+            let scratch = temp_base("reload-moved-past-in-channel");
+            let queued = VaultName::new("queued").unwrap();
+            let holding = VaultName::new("holding").unwrap();
+            let ops = Arc::new(FakeOps::default());
+            ops.reload_supported.store(true, Ordering::SeqCst);
+            let host = one_worker_host_over(&ops, scratch.root(), &[&queued, &holding]);
+            ops.block_reload.store(true, Ordering::SeqCst);
+            let held = reload_on_a_thread(&host, &holding, dry_run);
+            wait_for_flag("reload_started", &ops.reload_started);
+
+            let moved_past = reload_on_a_thread(&host, &queued, dry_run);
+            let entry = host.shared.entries.get(&queued).unwrap();
+            wait_until(
+                "the queued vault's reload to wait in the channel",
+                lifecycle_wait_budget(),
+                || {
+                    if entry.gate.lock().unwrap().claim.slot_taken() {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending("the queued vault's slot is free")
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let refused = park_on_identity(&host, &queued, &scratch.root().join("queued"));
+            ops.reload_release.store(true, Ordering::SeqCst);
+
+            let answered = moved_past
+                .join()
+                .unwrap()
+                .expect("a live host answered the reload it moved past with no code")
+                .expect_err("the reload the entry moved past was answered as run");
+            assert_eq!(answered.detail(), &refused, "dry run: {dry_run}");
+            held.join()
+                .unwrap()
+                .expect("the host is running")
+                .expect("the reload holding the worker");
+        }
+    }
+
+    /// **A reload the entry moves past before any worker takes it is answered
+    /// with where the entry stands**, in either mode. The channel is full, so
+    /// the reload waits on its marker for a later dispatch; an identity park
+    /// moves the entry past the marker, and the asker is answered then rather
+    /// than behind the work still holding the channel.
+    #[cfg(unix)]
+    #[test]
+    fn a_reload_moved_past_on_its_marker_answers_the_trust_the_entry_stands_at() {
+        for dry_run in [false, true] {
+            let scratch = temp_base("reload-moved-past-on-marker");
+            let queued = VaultName::new("queued").unwrap();
+            let holding = VaultName::new("holding").unwrap();
+            let filling = VaultName::new("filling").unwrap();
+            let ops = Arc::new(FakeOps::default());
+            ops.reload_supported.store(true, Ordering::SeqCst);
+            let host = one_worker_host_over(&ops, scratch.root(), &[&queued, &holding, &filling]);
+            ops.block_reload.store(true, Ordering::SeqCst);
+            let held = reload_on_a_thread(&host, &holding, dry_run);
+            wait_for_flag("reload_started", &ops.reload_started);
+            let filled = reload_on_a_thread(&host, &filling, dry_run);
+            let filling_entry = host.shared.entries.get(&filling).unwrap();
+            wait_until(
+                "the filling vault's reload to take the channel",
+                lifecycle_wait_budget(),
+                || {
+                    if filling_entry.gate.lock().unwrap().claim.slot_taken() {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending("the filling vault's slot is free")
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+
+            let moved_past = reload_on_a_thread(&host, &queued, dry_run);
+            let entry = host.shared.entries.get(&queued).unwrap();
+            wait_until(
+                "the queued vault's reload to stand on its marker",
+                lifecycle_wait_budget(),
+                || {
+                    if entry.gate.lock().unwrap().claim.marker().is_some() {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending("the queued vault holds no marker")
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let refused = park_on_identity(&host, &queued, &scratch.root().join("queued"));
+
+            let answered = moved_past
+                .join()
+                .unwrap()
+                .expect("a live host answered the reload it moved past with no code")
+                .expect_err("the reload the entry moved past was answered as run");
+            assert_eq!(answered.detail(), &refused, "dry run: {dry_run}");
+            ops.reload_release.store(true, Ordering::SeqCst);
+            for asked in [held, filled] {
+                asked
+                    .join()
+                    .unwrap()
+                    .expect("the host is running")
+                    .expect("a reload the entry stood at");
+            }
+        }
+    }
+
+    /// **A reload turn that unwinds after handing the reload on is answered
+    /// once, by the turn it handed on to.** The unwinding turn no longer holds
+    /// the entry, so its unwind publishes nothing and the asker waits for the
+    /// next turn's activation rather than being told a reading the reload is
+    /// about to leave.
+    #[test]
+    fn a_reload_turn_unwinding_after_its_hand_on_leaves_the_answer_to_the_next_turn() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+        host.shared
+            .panic_after_reload_handoff
+            .store(true, Ordering::SeqCst);
+
+        let entry = host.shared.entries.get(&name).unwrap();
+        let (reply, answer) = mpsc::sync_channel(1);
+        entry
+            .gate
+            .lock()
+            .unwrap()
+            .claim
+            .schedule(|epoch| Job::Reload(name.clone(), epoch, reply));
+        dispatch_pending(&host.shared, &entry).unwrap();
+
+        assert_eq!(
+            answer.recv(),
+            Ok(Ok(fake_judgment(ReloadOutcome::SchemaChanged))),
+            "the asker was answered before the turn it was handed on to"
+        );
+        assert!(
+            answer.recv().is_err(),
+            "the reload was answered a second time"
+        );
+        assert!(
+            !host
+                .shared
+                .panic_after_reload_handoff
+                .load(Ordering::SeqCst),
+            "the turn never reached its hand-on"
+        );
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
     }
 
     /// **A host whose job channel is gone answers no reload at all**: no code,

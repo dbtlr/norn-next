@@ -1908,8 +1908,11 @@ nothing about the candidate — no active fingerprint, retained error or config 
 runtime failure a dry run meets — damaged derived state, a moved path order, a lost
 maintainership — is a fact about the entry rather than the candidate, and gets the policy an
 activation applies to it: withdrawn trust and an owed rung, or a release. A reload of either
-mode whose leg unwinds answers with the untrusted reading the unwind publishes; a reload is
-answered with no code only by a host shutting down or whose job channel is gone.
+mode that the host drops without an answer, whether moved past before a worker ran it or
+lost with a leg that unwound, answers with where the entry stands once it is dropped, which
+for an unwound leg is the untrusted reading the unwind publishes. A turn that unwinds after
+handing the reload on leaves the answer to the turn it handed on to. A reload is answered
+with no code only by a host shutting down or whose job channel is gone.
 
 **An attach has no such declaration to fall back on, and does not refuse.** It acquires
 the maintainer lock, watcher coverage and the store, pins nothing, derives nothing, and

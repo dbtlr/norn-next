@@ -137,8 +137,10 @@ impl<O: EntryOps> Host<O> {
     /// whenever an activation asked at the same moment would be — among them
     /// `vault/reload-busy` while something works over the vault — and answers
     /// the outcome and fingerprints that activation would. A runtime failure
-    /// either meets gets the same policy, and a leg that unwinds answers the
-    /// reading its unwind published. Every refusal renders through
+    /// either meets gets the same policy, and a reload the host drops without
+    /// an answer — moved past before it ran, or lost with a leg that unwound —
+    /// answers where the entry stands once it is dropped. Every refusal renders
+    /// through
     /// [`ReloadRefusal::answer`].
     ///
     /// `Err(HostError)` is a host shutting down or whose job channel is gone,

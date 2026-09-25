@@ -216,11 +216,13 @@ impl ReloadRefusal {
 /// nothing yet is filed as not ready, and what is left is an entry that is
 /// ready and busy — a warm job holds it, which is what a reload is refused behind.
 ///
-/// **`Ready` reaches here by two paths, and on both the reload did not run.**
-/// At the ask, a claim held or coverage out with a leg is a job holding the
-/// entry. At a reload leg's epilogue, a claim superseded by newer work is a
+/// **`Ready` reaches here by three paths, and on each the reload did not
+/// run.** At the ask, a claim held or coverage out with a leg is a job holding
+/// the entry. At a reload leg's epilogue, a claim superseded by newer work is a
 /// reload that lost its turn, and the entry may stand `Ready` again by the
-/// time that epilogue reports. A release does not reach it as `Ready`:
+/// time that epilogue reports. A reload the host moved past before any leg ran
+/// it is answered with the state the entry stands at once it is dropped, and
+/// that too may be `Ready` again. A release does not reach it as `Ready`:
 /// `begin_release` sets `detach_in_flight` and sets the trust to
 /// `Warming(WarmingPhase::ReleasingCoverage)` in the same statement pair under
 /// one hold of the gate, so the epilogue that reads the flag reads that state
