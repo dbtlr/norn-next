@@ -560,24 +560,81 @@ const HANDBOOK: &str = "---\ncreated: 2026-03-01T00:00:00Z\n---\n# Handbook\n\ni
 ## Design Notes\n\ndesign body ^design\n\n### Deep\n\ndeep body\n\n## Last\n\nlast body\n";
 
 /// The documents the verb cases add beside the generated tree: the handbook,
-/// two documents one target names, and one whose frontmatter never closes.
-const WRITTEN: &[(&str, &str)] = &[
-    ("zz-guide/zz-handbook.md", HANDBOOK),
-    (
-        "zz-twins/one/zz-twin.md",
-        "---\ncreated: 2026-03-02T00:00:00Z\n---\none\n",
-    ),
-    (
-        "zz-twins/two/zz-twin.md",
-        "---\ncreated: 2026-03-03T00:00:00Z\n---\ntwo\n",
-    ),
-    (
-        "zz-broken/zz-unclosed.md",
-        "---\ncreated: 2026-03-04\nbody\n",
-    ),
-];
+/// two documents one target names, one whose frontmatter never closes, and
+/// the shapes a section or a block is cut at — a block id on the line after a
+/// closing fence, CRLF and bare-CR line endings, setext headings, ATX headings
+/// closed by `#`s, duplicate headings, headings inside a blockquote and a list
+/// item, multibyte text beside the offsets, frontmatter over 6 KB, and empty
+/// bodies.
+fn written() -> Vec<(&'static str, String)> {
+    let documents: &[(&str, &str)] = &[
+        ("zz-guide/zz-handbook.md", HANDBOOK),
+        (
+            "zz-twins/one/zz-twin.md",
+            "---\ncreated: 2026-03-02T00:00:00Z\n---\none\n",
+        ),
+        (
+            "zz-twins/two/zz-twin.md",
+            "---\ncreated: 2026-03-03T00:00:00Z\n---\ntwo\n",
+        ),
+        (
+            "zz-broken/zz-unclosed.md",
+            "---\ncreated: 2026-03-04\nbody\n",
+        ),
+        (
+            "zz-corpus/zz-fenced.md",
+            "# Fenced\n\n```rust\nlet x = 1;\n```\n^fenced\n\n~~~\nplain\n~~~\n\n^apart\n\n\
+             after ^after\n",
+        ),
+        (
+            "zz-corpus/zz-crlf.md",
+            "# CRLF Title\r\n\r\ncrlf body ^crlf\r\n\r\n```\r\ncode\r\n```\r\n^crfence\r\n\r\n\
+             ## CRLF Next\r\n\r\nnext body\r\n",
+        ),
+        (
+            "zz-corpus/zz-bare-cr.md",
+            "# CR Title\r\rcr body ^cr\r\r## CR Next\r\rnext body ^crnext\r",
+        ),
+        (
+            "zz-corpus/zz-setext.md",
+            "Setext Title\n============\n\nsetext body ^setext\n\nSetext Sub\n----------\n\n\
+             sub body\n",
+        ),
+        (
+            "zz-corpus/zz-closed.md",
+            "# Closed Title ##\n\nclosed body ^closed\n\n## Also Closed #####\n\nmore\n",
+        ),
+        (
+            "zz-corpus/zz-duplicate.md",
+            "## Same\n\nfirst ^first\n\n## Same\n\nsecond ^second\n\n## Same\n\nthird\n",
+        ),
+        (
+            "zz-corpus/zz-containers.md",
+            "# Outer\n\n> ## Quoted\n> quoted body ^quoted\n\n- # Listed\n  listed body ^listed\n\n\
+             ## After\n\nafter body\n",
+        ),
+        (
+            "zz-corpus/zz-multibyte.md",
+            "# Café ☕ ##\n\nnaïve ☕ ^naive\n\n## ☕ Brew\n\nÅngström ✓ body ^brew\n",
+        ),
+        ("zz-corpus/zz-empty-body.md", "---\ntitle: empty\n---\n"),
+        ("zz-corpus/zz-empty.md", ""),
+    ];
+    let mut written: Vec<_> = documents
+        .iter()
+        .map(|(path, text)| (*path, (*text).to_string()))
+        .collect();
+    written.push((
+        "zz-corpus/zz-long-frontmatter.md",
+        format!(
+            "---\nsummary: \"{}\"\n---\n# Past The Frontmatter\n\nlate body ^late\n",
+            "long ".repeat(1400)
+        ),
+    ));
+    written
+}
 
-/// A generated vault holding [`WRITTEN`] and `extra` beside its own tree,
+/// A generated vault holding [`written`] and `extra` beside its own tree,
 /// derived under [`DATED_SCHEMA`], and a host serving it once it is `Ready`.
 fn a_verb_vault(
     label: &str,
@@ -586,7 +643,10 @@ fn a_verb_vault(
     let (sandbox, vault) = a_vault(label);
     std::fs::write(vault.path().join(".norn/schema.yaml"), DATED_SCHEMA)
         .expect("write the dated schema");
-    for (path, text) in WRITTEN.iter().chain(extra) {
+    let extra = extra
+        .iter()
+        .map(|(path, text)| (*path, (*text).to_string()));
+    for (path, text) in written().into_iter().chain(extra) {
         let at = vault.path().join(path);
         std::fs::create_dir_all(at.parent().expect("a document's folder"))
             .expect("create the document's folder");
