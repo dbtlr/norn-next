@@ -612,6 +612,55 @@ impl LinkHealth {
     }
 }
 
+/// A link addressed elsewhere named documents it cannot resolve to.
+///
+/// A link addressed elsewhere ([`LinkAddress::Elsewhere`]) is not judged and
+/// names no document: a protocol other than `vault`, or a Markdown target
+/// opening with a URI scheme, is not a document address at all. A row built
+/// or read with any documents beside such a link describes one link that is
+/// both unaddressed and resolved, which no vault produces, so it is refused
+/// where a row is built and where one is read alike.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ElsewhereNamesDocuments {
+    total: u64,
+}
+
+impl ElsewhereNamesDocuments {
+    /// How many documents the elsewhere-addressed link was handed.
+    pub const fn total(&self) -> u64 {
+        self.total
+    }
+
+    /// `targets`, if `health` can carry it: a link not judged because it
+    /// addresses no document resolves to none. `health` is the derivation
+    /// [`LinkHealth::of_link`] already ran, so this reuses its judgement
+    /// rather than re-deciding addressing on its own — a link resolves to no
+    /// document *and* is not judged for reasons other than being addressed
+    /// elsewhere (an attachment target resolving to none), and only the
+    /// elsewhere case is refused here; that case is exactly the one where
+    /// `health` is [`LinkHealth::NotJudged`] and `targets` is nonzero, because
+    /// the attachment reading of [`LinkHealth::NotJudged`] only ever arises at
+    /// a total of zero.
+    fn check(health: LinkHealth, targets: u64) -> Result<(), Self> {
+        if health == LinkHealth::NotJudged && targets != 0 {
+            return Err(ElsewhereNamesDocuments { total: targets });
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for ElsewhereNamesDocuments {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the link addresses no document, and it resolves to {} of them",
+            self.total,
+        )
+    }
+}
+
+impl std::error::Error for ElsewhereNamesDocuments {}
+
 /// The written form a link was recognized from.
 ///
 /// On the wire a family is the flat string itself: `"wikilink"`, `"markdown"`.
@@ -663,12 +712,15 @@ pub struct LinkRow {
 
 impl LinkRow {
     /// A link of `family` at `span`, written as `target`, resolving to the
-    /// documents `targets` heads.
+    /// documents `targets` heads, or the reason `targets` names documents a
+    /// link addressed elsewhere cannot.
     ///
     /// The health is computed from the link's addressing and the total
     /// `targets` carries rather than passed in, so the two name one reading of
     /// the vault. A link addressed elsewhere ([`LinkAddress::Elsewhere`])
-    /// resolves to none, so its `targets` is the empty head.
+    /// resolves to none, so a nonzero `targets` for one is refused
+    /// ([`ElsewhereNamesDocuments`]) rather than built into a row the read
+    /// path would then refuse to read back.
     #[allow(clippy::too_many_arguments)] // A link row is the link's own facts; grouping them would mint a shape nothing else holds.
     pub fn new(
         family: LinkFamily,
@@ -679,10 +731,11 @@ impl LinkRow {
         anchor: Option<Anchor>,
         span: Span,
         targets: CandidateHead,
-    ) -> Self {
+    ) -> Result<Self, ElsewhereNamesDocuments> {
         let target = target.into();
         let health = LinkHealth::of_link(family, protocol.as_deref(), &target, targets.total());
-        LinkRow {
+        ElsewhereNamesDocuments::check(health, targets.total())?;
+        Ok(LinkRow {
             family,
             embed,
             protocol,
@@ -692,7 +745,7 @@ impl LinkRow {
             span,
             targets,
             health,
-        }
+        })
     }
 
     /// What resolving this link's target found.
@@ -718,11 +771,12 @@ struct LinkRowFields {
 }
 
 impl<'de> Deserialize<'de> for LinkRow {
-    /// A row arrives with both halves of one fact and is read back by
-    /// recomputing the derived half: a row whose `health` is not the health of
-    /// its addressing and the `targets` beside it, or a link addressed
-    /// elsewhere that names documents, is refused rather than read into a value
-    /// whose fields say different things about one link.
+    /// A row arrives with both halves of one fact and is read back through the
+    /// same rule the constructor holds: a link addressed elsewhere that names
+    /// documents ([`ElsewhereNamesDocuments`]), or a row whose `health` is not
+    /// the health of its addressing and the `targets` beside it, is refused
+    /// rather than read into a value whose fields say different things about
+    /// one link.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -734,12 +788,8 @@ impl<'de> Deserialize<'de> for LinkRow {
             &fields.target,
             fields.targets.total(),
         );
-        if derived == LinkHealth::NotJudged && fields.targets.total() != 0 {
-            return Err(D::Error::custom(format!(
-                "the link addresses no document, and it resolves to {} of them",
-                fields.targets.total(),
-            )));
-        }
+        ElsewhereNamesDocuments::check(derived, fields.targets.total())
+            .map_err(D::Error::custom)?;
         if fields.health != derived {
             return Err(D::Error::custom(format!(
                 "the link's health {:?} is not the health of the {} documents it resolves to, {derived:?}",

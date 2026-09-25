@@ -18,21 +18,22 @@ use norn_wire::{
     CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage,
     CollectionSelector, Column, ContainerKind, ControlFile, ControlFileFailure, CountParams,
     Cursor, CursorKey, CursorOrderChanged, DescribeParams, Direction, Directory,
-    DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift, EmptyLadder,
-    EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind,
-    FieldType, FieldValue, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints,
-    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LadderDeclaration,
-    LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity,
-    ModelIdentity, Moved, NameSet, NoProblems, NonFiniteScore, NotReady, Page, PathRuleKind,
-    PollBackend, Predicate, Published, ReasonCode, RegisterParams, RegisterReport, Registration,
-    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
-    ReloadStage, Replace, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp,
-    Rung, RungReport, RungSet, SchemaSource, Score, SearchParams, SetParams, SetReport, Severity,
-    Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
-    TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
-    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
-    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer,
-    VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift,
+    ElsewhereNamesDocuments, EmptyLadder, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
+    ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind, FindingRow,
+    FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
+    KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams,
+    ListReport, MaintainerIdentity, ModelIdentity, Moved, NameSet, NoProblems, NonFiniteScore,
+    NotReady, Page, PathRuleKind, PollBackend, Predicate, Published, ReasonCode, RegisterParams,
+    RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome,
+    ReloadParams, ReloadReport, ReloadStage, Replace, RequestScope, ResolutionTarget,
+    ResolveParams, ResolveReport, RollUp, Rung, RungReport, RungSet, SchemaSource, Score,
+    SearchParams, SetParams, SetReport, Severity, Snapshot, Sort, SortKey, Span, StatusParams,
+    StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead, TrustState,
+    UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
+    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
+    Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -609,6 +610,7 @@ fn addressed_row(protocol: Option<&str>, target: &str, targets: CandidateHead) -
         span(),
         targets,
     )
+    .expect("a document link, or an elsewhere link resolving to none")
 }
 
 /// A link row resolving to `targets`, built through the constructor that
@@ -624,6 +626,7 @@ fn link_row(targets: CandidateHead) -> LinkRow {
         span(),
         targets,
     )
+    .expect("a wikilink names a document, never elsewhere")
 }
 
 /// The candidates a link row's head carries, as the bytes a reader is handed.
@@ -3454,13 +3457,13 @@ fn a_links_address_is_selected_protocol_first_and_family_second() {
 
 /// **A link is judged by resolving it first.** A link addressed elsewhere —
 /// written with a protocol other than `vault`, or a Markdown target opening
-/// with a URI scheme — is not judged, whatever it resolved to. Any other link
-/// that resolves to documents is judged by how many, whatever its leaf
-/// carries. One that resolves to none is not judged where its leaf carries an
-/// extension other than the document extension, which names an attachment,
-/// and is broken otherwise: a leaf with no extension, or the document
-/// extension in any ASCII case. A dot in a directory segment or leading a
-/// name is no extension.
+/// with a URI scheme — is not judged, and a nonzero head for one is refused
+/// rather than built. Any other link that resolves to documents is judged by
+/// how many, whatever its leaf carries. One that resolves to none is not
+/// judged where its leaf carries an extension other than the document
+/// extension, which names an attachment, and is broken otherwise: a leaf with
+/// no extension, or the document extension in any ASCII case. A dot in a
+/// directory segment or leading a name is no extension.
 #[test]
 fn a_link_is_judged_by_resolving_it_first() {
     use LinkFamily::{Markdown, Wikilink};
@@ -3478,7 +3481,6 @@ fn a_link_is_judged_by_resolving_it_first() {
             span(),
             head(candidates, total),
         )
-        .health()
     };
     for (family, protocol, target) in [
         (Markdown, Some("https"), "example.com/page"),
@@ -3486,11 +3488,18 @@ fn a_link_is_judged_by_resolving_it_first() {
         (Markdown, None, "mailto:someone@example.com"),
         (Markdown, None, "tel:+1-555-0100"),
     ] {
-        for total in [0, 1, 2] {
-            assert_eq!(
-                judged(family, protocol, target, total),
-                LinkHealth::NotJudged,
-                "{family:?} {protocol:?} `{target}` resolving to {total}"
+        let label = format!("{family:?} {protocol:?} `{target}`");
+        assert_eq!(
+            judged(family, protocol, target, 0)
+                .unwrap_or_else(|error| panic!("{label} resolving to 0: {error}"))
+                .health(),
+            LinkHealth::NotJudged,
+            "{label}"
+        );
+        for total in [1, 2] {
+            assert!(
+                judged(family, protocol, target, total).is_err(),
+                "{label} addressed elsewhere accepted a head of {total}"
             );
         }
     }
@@ -3517,17 +3526,76 @@ fn a_link_is_judged_by_resolving_it_first() {
         (Wikilink, Some("vault"), "Notes", LinkHealth::Broken),
     ] {
         let label = format!("{family:?} {protocol:?} `{target}`");
-        assert_eq!(judged(family, protocol, target, 0), unresolved, "{label}");
         assert_eq!(
-            judged(family, protocol, target, 1),
+            judged(family, protocol, target, 0)
+                .unwrap_or_else(|error| panic!("{label} resolving to 0: {error}"))
+                .health(),
+            unresolved,
+            "{label}"
+        );
+        assert_eq!(
+            judged(family, protocol, target, 1)
+                .unwrap_or_else(|error| panic!("{label} resolving to 1: {error}"))
+                .health(),
             LinkHealth::Healthy,
             "{label}"
         );
         assert_eq!(
-            judged(family, protocol, target, 2),
+            judged(family, protocol, target, 2)
+                .unwrap_or_else(|error| panic!("{label} resolving to 2: {error}"))
+                .health(),
             LinkHealth::Ambiguous,
             "{label}"
         );
+    }
+}
+
+/// A link addressed elsewhere carries no documents: `LinkRow::new` refuses a
+/// nonzero head for one ([`ElsewhereNamesDocuments`]), over every other
+/// combination of family, addressing and head size a row built here or read
+/// off the wire accepts and round-trips.
+#[test]
+fn link_row_new_accepts_a_head_only_where_its_address_names_documents() {
+    use LinkFamily::{Markdown, Wikilink};
+    for (family, protocol, target) in [
+        (Markdown, Some("https"), "example.com"),
+        (Wikilink, Some("https"), "example.com"),
+        (Markdown, None, "mailto:someone@example.com"),
+        (Wikilink, Some("vault"), "notes/x"),
+        (Markdown, Some("vault"), "notes/x.md?raw=1"),
+        (Wikilink, None, ""),
+        (Markdown, None, ""),
+        (Wikilink, None, "notes/x"),
+        (Markdown, None, "notes/x.md"),
+        (Markdown, None, "/notes/x.md"),
+        (Markdown, None, "picture.png"),
+    ] {
+        let elsewhere = LinkAddress::of(family, protocol, target) == LinkAddress::Elsewhere;
+        let label = format!("{family:?} {protocol:?} `{target}`");
+        for total in [0, 1, 2] {
+            let candidates: Vec<Candidate> = (0..total)
+                .map(|index| candidate(&format!("notes/c{index}")))
+                .collect();
+            let row = LinkRow::new(
+                family,
+                false,
+                protocol.map(str::to_string),
+                target,
+                None,
+                None,
+                span(),
+                head(candidates, total),
+            );
+            if elsewhere && total != 0 {
+                let refusal: ElsewhereNamesDocuments =
+                    row.expect_err(&format!("{label} accepted a head of {total}"));
+                assert_eq!(refusal.total(), total, "{label} resolving to {total}");
+            } else {
+                round_trip(
+                    &row.unwrap_or_else(|error| panic!("{label} resolving to {total}: {error}")),
+                );
+            }
+        }
     }
 }
 

@@ -104,7 +104,7 @@ impl Snapshot {
             .map(|id| named.remove(id).unwrap_or_default())
             .collect();
         let targets = self.candidate_heads(heads, ignore, record)?;
-        Ok(links
+        links
             .into_iter()
             .zip(targets)
             .map(|((_, link), targets)| {
@@ -123,8 +123,11 @@ impl Snapshot {
                     wire_span(link.span),
                     targets,
                 )
+                .map_err(|problem| StoreError::Damaged {
+                    what: format!("a link addressed elsewhere named a document: {problem}"),
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// The head of what each link `links` names, by the link's id: at most
