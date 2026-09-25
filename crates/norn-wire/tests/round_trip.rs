@@ -270,6 +270,9 @@ fn error_details() -> Vec<ErrorDetail> {
                 of: CollectionSelector::Tags,
             },
         ),
+        ErrorDetail::cursor_order_changed(
+            CursorOrderChanged::minted_raw(None).in_ladders(RungSet::lexical(), fused_ladder()),
+        ),
     ]);
     details.extend(
         not_ready_states()
@@ -424,6 +427,11 @@ fn sidecar(revision: u64) -> SidecarRevision {
     SidecarRevision::new("sidecar-1", revision)
 }
 
+/// A ladder above the floor: the lexical and vector rungs fused.
+fn fused_ladder() -> RungSet {
+    RungSet::of([Rung::Lexical, Rung::Vector]).expect("a ladder that runs a rung")
+}
+
 /// Every paged row type, with one key per shape its order takes.
 fn cursor_keys() -> Vec<CursorKey> {
     let mut keys = vec![
@@ -437,7 +445,8 @@ fn cursor_keys() -> Vec<CursorKey> {
             None,
             "notes/a.md",
         ),
-        CursorKey::hit(score(0.5), "notes/a.md"),
+        CursorKey::hit(RungSet::lexical(), score(0.5), "notes/a.md"),
+        CursorKey::hit(fused_ladder(), score(0.5), "notes/a.md"),
         CursorKey::tally([Some("note".to_string()), None]),
         CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", 7),
     ];
@@ -1798,7 +1807,11 @@ fn a_cursor_key_names_the_rows_it_is_a_position_among() {
             PagedRows::Document,
         ),
         (
-            CursorKey::hit(Score::new(0.5).expect("a finite score"), "notes/a.md"),
+            CursorKey::hit(
+                RungSet::lexical(),
+                Score::new(0.5).expect("a finite score"),
+                "notes/a.md",
+            ),
             PagedRows::Hit,
         ),
         (
@@ -2718,7 +2731,7 @@ fn a_hit_cursor_carries_its_score_bit_for_bit() {
     for value in spread.into_iter().filter(|value| value.is_finite()) {
         let cursor = Cursor::new(
             Snapshot::new("epoch-1", 3, None, None),
-            CursorKey::hit(score(value), "notes/a.md"),
+            CursorKey::hit(RungSet::lexical(), score(value), "notes/a.md"),
         );
         let json = wire(&cursor);
         let back: Cursor = serde_json::from_str(&json).unwrap_or_else(|error| {
@@ -2844,7 +2857,7 @@ fn a_score_that_is_not_finite_is_no_score() {
     }
     let overflowing = concat!(
         r#"{"snapshot":{"epoch":"e","generation":1,"schema_fingerprint":null,"#,
-        r#""sidecar_revision":null},"key":{"row":"hit","score":1e400,"path":"a.md"}}"#
+        r#""sidecar_revision":null},"key":{"row":"hit","ladder":["lexical"],"score":1e400,"path":"a.md"}}"#
     );
     assert!(
         serde_json::from_str::<Cursor>(&opaque(overflowing.as_bytes())).is_err(),
@@ -3027,7 +3040,7 @@ fn a_changed_orders_document_orders_are_one_pair() {
         Sort::new(SortKey::field("due"), Direction::Ascending),
         Sort::new(SortKey::field("due"), Direction::Descending),
     );
-    let pinned = r#"{"minted_under":null,"current":null,"orders":{"cursor":{"key":{"by":"field","key":"due"},"direction":"ascending"},"request":{"key":{"by":"field","key":"due"},"direction":"descending"}}}"#;
+    let pinned = r#"{"minted_under":null,"current":null,"orders":{"cursor":{"key":{"by":"field","key":"due"},"direction":"ascending"},"request":{"key":{"by":"field","key":"due"},"direction":"descending"}},"ladders":null}"#;
     assert_eq!(
         serde_json::to_string(&changed).expect("the change serializes"),
         pinned
@@ -3037,6 +3050,82 @@ fn a_changed_orders_document_orders_are_one_pair() {
         serde_json::from_str::<CursorOrderChanged>(half).is_err(),
         "a pair naming one order parsed"
     );
+}
+
+/// **A refused continuation's two hit ladders travel as one pair**, in a field
+/// of their own beside the document orders. Both ladders are named, or
+/// neither is: a pair missing one ladder does not parse.
+#[test]
+fn a_changed_orders_hit_ladders_are_one_pair() {
+    let changed =
+        CursorOrderChanged::minted_raw(None).in_ladders(RungSet::lexical(), fused_ladder());
+    let pinned = r#"{"minted_under":null,"current":null,"orders":null,"ladders":{"cursor":["lexical"],"request":["lexical","vector"]}}"#;
+    assert_eq!(
+        serde_json::to_string(&changed).expect("the change serializes"),
+        pinned
+    );
+    round_trip(&changed);
+    let half =
+        r#"{"minted_under":null,"current":null,"orders":null,"ladders":{"cursor":["lexical"]}}"#;
+    assert!(
+        serde_json::from_str::<CursorOrderChanged>(half).is_err(),
+        "a pair naming one ladder parsed"
+    );
+}
+
+/// A hit cursor is a position in the ranking its ladder makes, on that
+/// ladder's scale. Continued under another ladder it is refused, naming both
+/// ladders; continued under its own it is judged as any continuation is, and a
+/// refusal on its fingerprint names both ladders too.
+#[test]
+fn a_hit_cursor_continued_under_another_ladder_is_refused_naming_both() {
+    let snapshot = || Snapshot::new("epoch-1", 12, None, Some(sidecar(4)));
+    let lexical = Cursor::new(
+        snapshot(),
+        CursorKey::hit(RungSet::lexical(), score(0.5), "notes/a.md"),
+    );
+    assert_eq!(
+        lexical.ranked_continuation(&snapshot(), &fused_ladder()),
+        Err(CursorOrderChanged::minted_raw(None).in_ladders(RungSet::lexical(), fused_ladder()))
+    );
+    assert_eq!(
+        lexical.ranked_continuation(&snapshot(), &RungSet::lexical()),
+        Ok(vec![])
+    );
+    let drained = Snapshot::new("epoch-1", 13, None, Some(sidecar(5)));
+    assert_eq!(
+        lexical.ranked_continuation(&drained, &RungSet::lexical()),
+        Ok(vec![Moved::Generation, Moved::SidecarRevision])
+    );
+
+    let typed = Cursor::new(
+        Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), None),
+        CursorKey::hit(fused_ladder(), score(0.5), "notes/a.md"),
+    );
+    let unfingerprinted = Snapshot::new("epoch-1", 12, None, None);
+    assert_eq!(
+        typed.ranked_continuation(&unfingerprinted, &fused_ladder()),
+        Err(CursorOrderChanged::new("fp-1", None).in_ladders(fused_ladder(), fused_ladder()))
+    );
+    assert_eq!(
+        typed.ranked_continuation(&unfingerprinted, &RungSet::lexical()),
+        Err(CursorOrderChanged::new("fp-1", None).in_ladders(fused_ladder(), RungSet::lexical()))
+    );
+}
+
+/// A cursor that is no hit's records no ladder, so the ladder a request ranks
+/// by changes nothing about how it is judged.
+#[test]
+fn a_cursor_that_is_no_hits_is_judged_without_a_ladder() {
+    for now in [
+        Snapshot::new("epoch-1", 12, Some("fp-1".to_string()), Some(sidecar(4))),
+        Snapshot::new("epoch-1", 13, Some("fp-2".to_string()), None),
+    ] {
+        assert_eq!(
+            minted().ranked_continuation(&now, &fused_ladder()),
+            minted().continuation(&now)
+        );
+    }
 }
 
 /// A cursor minted under one order and continued under another refuses: the

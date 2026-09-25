@@ -19,8 +19,9 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan, ScanTarget};
 use norn_wire::{
-    Column, Cursor, CursorKey, Direction, FieldValue, FindParams, FindingKind, Moved, PagedRows,
-    Predicate, ResolutionTarget, Score, Sort, SortKey, Unsatisfied, VaultAddress, VaultName,
+    Column, Cursor, CursorKey, CursorOrderChanged, Direction, FieldValue, FindParams, FindingKind,
+    Moved, PagedRows, Predicate, ResolutionTarget, Rung, RungSet, Score, Sort, SortKey,
+    Unsatisfied, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -591,7 +592,11 @@ fn a_cursor_that_is_no_position_among_hits_is_refused() {
             paged: PagedRows::Hit,
         }
     );
-    let hit = CursorKey::hit(Score::new(1.0).expect("a score"), "notes/lantern.md");
+    let hit = CursorKey::hit(
+        RungSet::lexical(),
+        Score::new(1.0).expect("a score"),
+        "notes/lantern.md",
+    );
     let typed = searching("lantern").with_after(Cursor::new(
         norn_wire::Snapshot::new(
             reading.epoch.clone(),
@@ -609,8 +614,32 @@ fn a_cursor_that_is_no_position_among_hits_is_refused() {
         },
         "a hit cursor carrying a fingerprint was not refused as not taken"
     );
-    let raw = searching("lantern").with_after(Cursor::new(reading, hit));
+    let raw = searching("lantern").with_after(Cursor::new(reading.clone(), hit));
     assert!(searching_store.search(&raw).moved.is_empty());
+}
+
+/// **A hit cursor ranked by another ladder is refused, naming both**: this
+/// rung ranks by the lexical ladder alone, and a score and a path from a fused
+/// ranking are a position on another scale.
+#[test]
+fn a_hit_cursor_ranked_by_another_ladder_is_refused_naming_both() {
+    let searching_store = Searching::new("search-cursor-ladder");
+    let reading = searching_store.search(&searching("lantern")).snapshot;
+    let fused = RungSet::of([Rung::Lexical, Rung::Vector]).expect("a ladder");
+    let continued = searching("lantern").with_after(Cursor::new(
+        reading,
+        CursorKey::hit(
+            fused.clone(),
+            Score::new(1.0).expect("a score"),
+            "notes/lantern.md",
+        ),
+    ));
+    assert_eq!(
+        searching_store.refusal(&continued),
+        PageRefusal::OrderChanged(
+            CursorOrderChanged::minted_raw(None).in_ladders(fused, RungSet::lexical())
+        )
+    );
 }
 
 /// **A document edited is searched as it now reads, on a snapshot established

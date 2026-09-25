@@ -2,7 +2,7 @@
 //! of the reading a cursor was minted under against it.
 
 use norn_db::rusqlite::types::Value;
-use norn_wire::{Cursor, CursorOrderChanged, Moved, PagedRows};
+use norn_wire::{Cursor, CursorOrderChanged, Moved, PagedRows, RungSet};
 
 use super::{FieldOrder, Lookups, PageRefusal, Ran};
 use crate::ddl;
@@ -57,6 +57,29 @@ impl Snapshot {
             return Err(PageRefusal::cursor_not_taken(cursor, paged));
         }
         self.judge_reading(cursor, None, false, lookups)
+    }
+
+    /// Judge the reading a hit `cursor` was minted under against the reading a
+    /// page of hits ranked by `ladder` answers from on this snapshot, and say
+    /// what moved since.
+    ///
+    /// A ranking is no schema's order, so a cursor carrying a fingerprint is
+    /// refused as not taken, as [`Snapshot::judge_unordered_reading`] refuses
+    /// it. A hit cursor minted under another ladder is refused as an order
+    /// that changed, naming both ladders.
+    pub(crate) fn judge_ranked_reading(
+        &self,
+        cursor: &Cursor,
+        ladder: &RungSet,
+        lookups: &mut Lookups,
+    ) -> Result<Vec<Moved>, PageRefusal> {
+        if cursor.snapshot().schema_fingerprint.is_some() {
+            return Err(PageRefusal::cursor_not_taken(cursor, PagedRows::Hit));
+        }
+        let now = self.reading_facts(None, lookups)?;
+        cursor
+            .ranked_continuation(&now, ladder)
+            .map_err(PageRefusal::OrderChanged)
     }
 
     /// This snapshot's reading as a cursor carries it for a page in `order`:

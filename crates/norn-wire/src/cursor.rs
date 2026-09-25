@@ -64,10 +64,13 @@
 //! key names the sort key and direction its page was read in, so such an
 //! answer refuses a document cursor continued in another key or direction
 //! too: the fingerprint says which schema an order is taken under, and the key
-//! says which order it is. Hits, facets, findings and a collection's ordinals
-//! are in no schema's order and no page of them mints a fingerprint, so an
-//! answer paging them refuses a cursor carrying one as naming no position
-//! among its rows rather than as an order that changed.
+//! says which order it is. A hit key names the ladder its page was ranked by,
+//! and [`Cursor::ranked_continuation`] refuses a hit cursor continued under
+//! another ladder: each ladder ranks on its own scale, so a score and a path
+//! taken from one ranking name no position in another. Hits, facets, findings
+//! and a collection's ordinals are in no schema's order and no page of them
+//! mints a fingerprint, so an answer paging them refuses a cursor carrying one
+//! as naming no position among its rows rather than as an order that changed.
 //!
 //! **Two asymmetries follow from those rules.** A cursor minted without a
 //! sidecar revision and continued where a sidecar now answers reports nothing
@@ -87,6 +90,7 @@ use crate::base64url;
 use crate::finding::FindingKind;
 use crate::read::find::Sort;
 use crate::read::get::CollectionSelector;
+use crate::read::search::RungSet;
 
 /// What a facet row is a facet of.
 ///
@@ -216,7 +220,8 @@ impl<'de> Deserialize<'de> for Score {
 /// Where one page of rows stopped, as the parts that row's order sorts by.
 ///
 /// On the wire a key is an object tagged `row`:
-/// `{"row":"document","order":{"key":{"by":"field","key":"due"},"direction":"ascending"},"sort":"2026-01-01","path":"notes/a.md"}`.
+/// `{"row":"document","order":{"key":{"by":"field","key":"due"},"direction":"ascending"},"sort":"2026-01-01","path":"notes/a.md"}`,
+/// `{"row":"hit","ladder":["lexical"],"score":0.5,"path":"notes/a.md"}`.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "row", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -240,9 +245,14 @@ pub enum CursorKey {
         /// The document's path.
         path: String,
     },
-    /// A ranked hit: relevance descending, then the path.
+    /// A ranked hit: the ladder the page was ranked by, then relevance
+    /// descending, then the path.
     #[non_exhaustive]
     Hit {
+        /// The rungs the answer ran, which is the ladder its selection resolved
+        /// to. The score is on this ladder's scale, and the score and the path
+        /// are a position in this ladder's ranking and in no other.
+        ladder: RungSet,
         /// The hit's relevance score.
         score: Score,
         /// The document's path.
@@ -301,9 +311,11 @@ impl CursorKey {
         }
     }
 
-    /// A ranked hit stopped at `path`, scored `score`.
-    pub fn hit(score: Score, path: impl Into<String>) -> Self {
+    /// A ranked hit of a page ranked by `ladder`, stopped at `path`, scored
+    /// `score`.
+    pub fn hit(ladder: RungSet, score: Score, path: impl Into<String>) -> Self {
         CursorKey::Hit {
+            ladder,
             score,
             path: path.into(),
         }
@@ -478,8 +490,10 @@ pub enum Moved {
 /// `null` for a cursor minted in an order no schema gives, and `current` where
 /// the order that stands is raw. A page of documents also names the two
 /// orders themselves in `orders`, since a document cursor records the sort key
-/// and direction its page was read in; `orders` is `null` where the cursor
-/// records no such order.
+/// and direction its page was read in, and a page of hits names the two
+/// ladders in `ladders`, since a hit cursor records the ladder its page was
+/// ranked by. Each pair is one field for one row kind, and each is `null`
+/// where the cursor records no such order.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct CursorOrderChanged {
@@ -490,8 +504,14 @@ pub struct CursorOrderChanged {
     /// that stands is raw.
     pub current: Option<String>,
     /// The order the cursor's page was read in and the order the request's
-    /// page is read in, and `null` where the cursor records no order.
+    /// page is read in, and `null` where the cursor records no document order.
     pub orders: Option<DocumentOrders>,
+    /// The ladder the cursor's page was ranked by and the ladder the
+    /// request's page is ranked by, and `null` where the cursor records no
+    /// ladder.
+    // Boxed so the refusal every continuation may return stays small; the
+    // bytes are the pair's either way.
+    pub ladders: Option<Box<HitLadders>>,
 }
 
 impl CursorOrderChanged {
@@ -501,6 +521,7 @@ impl CursorOrderChanged {
             minted_under: Some(minted_under.into()),
             current,
             orders: None,
+            ladders: None,
         }
     }
 
@@ -510,6 +531,7 @@ impl CursorOrderChanged {
             minted_under: None,
             current,
             orders: None,
+            ladders: None,
         }
     }
 
@@ -519,6 +541,16 @@ impl CursorOrderChanged {
     pub fn in_orders(self, cursor: Sort, request: Sort) -> Self {
         CursorOrderChanged {
             orders: Some(DocumentOrders::new(cursor, request)),
+            ..self
+        }
+    }
+
+    /// This change, between a page of hits ranked by `cursor` and one the
+    /// request ranks by `request`.
+    #[must_use]
+    pub fn in_ladders(self, cursor: RungSet, request: RungSet) -> Self {
+        CursorOrderChanged {
+            ladders: Some(Box::new(HitLadders::new(cursor, request))),
             ..self
         }
     }
@@ -543,6 +575,28 @@ impl DocumentOrders {
     /// read in `request`.
     pub const fn new(cursor: Sort, request: Sort) -> Self {
         DocumentOrders { cursor, request }
+    }
+}
+
+/// The two ladders a refused continuation of hits stands between.
+///
+/// On the wire the pair is an object of two rung sets:
+/// `{"cursor":["lexical"],"request":["lexical","vector"]}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct HitLadders {
+    /// The ladder the cursor's page was ranked by.
+    pub cursor: RungSet,
+    /// The ladder the request's page is ranked by: the one its selection
+    /// resolved to when it was answered.
+    pub request: RungSet,
+}
+
+impl HitLadders {
+    /// A cursor's page ranked by `cursor`, continued by a request whose page
+    /// is ranked by `request`.
+    pub const fn new(cursor: RungSet, request: RungSet) -> Self {
+        HitLadders { cursor, request }
     }
 }
 
@@ -601,6 +655,35 @@ impl Cursor {
             moved.push(Moved::SidecarRevision);
         }
         Ok(moved)
+    }
+
+    /// What has moved between this cursor being minted and `now`, for a page
+    /// of hits ranked by `ladder`, or the refusal that the order it names no
+    /// longer exists.
+    ///
+    /// A hit cursor minted under another ladder is refused: its score and path
+    /// are a position in that ladder's ranking, on that ladder's scale, and in
+    /// no other. Every refusal of a hit cursor names both ladders, beside the
+    /// two fingerprints. A cursor that is no hit's records no ladder, and is
+    /// judged by [`Cursor::continuation`] alone.
+    pub fn ranked_continuation(
+        &self,
+        now: &Snapshot,
+        ladder: &RungSet,
+    ) -> Result<Vec<Moved>, CursorOrderChanged> {
+        let CursorKey::Hit { ladder: minted, .. } = &self.key else {
+            return self.continuation(now);
+        };
+        let in_ladders =
+            |changed: CursorOrderChanged| changed.in_ladders(minted.clone(), ladder.clone());
+        if minted != ladder {
+            let current = now.schema_fingerprint.clone();
+            return Err(in_ladders(match &self.snapshot.schema_fingerprint {
+                Some(minted_under) => CursorOrderChanged::new(minted_under, current),
+                None => CursorOrderChanged::minted_raw(current),
+            }));
+        }
+        self.continuation(now).map_err(in_ladders)
     }
 }
 

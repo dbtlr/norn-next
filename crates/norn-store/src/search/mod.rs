@@ -40,13 +40,15 @@
 //! hit, and hits are ordered by score descending, then by path in byte order.
 //! A floor admits the hits scored at or above it, on the same scale. A page
 //! holds at most its bound of hits and reads one past it to learn a next page
-//! exists; the cursor it mints names the last hit's score and path, and a
-//! continuation resumes after that position, comparing the score it carries
-//! with each match's score exactly as it was computed. On the snapshot that
-//! minted the cursor that computation is the one the page ran, so a drain a
-//! page at a time is the whole ranking; a continuation answered from another
-//! snapshot reports what moved, and resumes after the same `(score, path)` in a
-//! ranking the corpus may have moved under.
+//! exists; the cursor it mints names the lexical ladder and the last hit's
+//! score and path, and a continuation resumes after that position, comparing
+//! the score it carries with each match's score exactly as it was computed. On
+//! the snapshot that minted the cursor that computation is the one the page
+//! ran, so a drain a page at a time is the whole ranking; a continuation
+//! answered from another snapshot reports what moved, and resumes after the
+//! same `(score, path)` in a ranking the corpus may have moved under. A cursor
+//! naming another ladder is a position in another ranking, on another scale,
+//! and is refused as an order that changed.
 //!
 //! **Ranking costs the matched set.** The full-text index hands back every
 //! document matching the query; each is tested against the conjunction, every
@@ -81,8 +83,8 @@ mod words;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
-    AnswerAdvisory, Column, Cursor, CursorKey, Hit, Moved, Page, PagedRows, Predicate, Score,
-    SearchReport, Unsatisfied,
+    AnswerAdvisory, Column, Cursor, CursorKey, Hit, Moved, Page, PagedRows, Predicate, RungSet,
+    Score, SearchReport, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -280,9 +282,11 @@ impl Snapshot {
     /// value or more than [`crate::IN_VALUES_CEILING`], a declaration read from
     /// another schema than the snapshot pins, a part or a projected column
     /// this build of the store does not know, and a bound that does not read
-    /// as its key's declared type. And refused as a cursor that names no position among
-    /// hits ([`PageRefusal::CursorNotTaken`]): another kind of row's, or a
-    /// hit's carrying a schema fingerprint, which no ranking mints.
+    /// as its key's declared type. And refused as a cursor that names no
+    /// position among hits ([`PageRefusal::CursorNotTaken`]): another kind of
+    /// row's, or a hit's carrying a schema fingerprint, which no ranking mints;
+    /// and as an order that changed ([`PageRefusal::OrderChanged`]) where a
+    /// hit cursor was ranked by another ladder, naming both.
     pub fn search(
         &self,
         request: &LexicalQuery,
@@ -365,7 +369,13 @@ impl Snapshot {
         };
         let snapshot = self.reading_facts(None, lookups)?;
         let next = next
-            .map(|last| Ok::<_, StoreError>(CursorKey::hit(score_of(last.score)?, last.path)))
+            .map(|last| {
+                Ok::<_, StoreError>(CursorKey::hit(
+                    RungSet::lexical(),
+                    score_of(last.score)?,
+                    last.path,
+                ))
+            })
             .transpose()?
             .map(|key| Cursor::new(snapshot.clone(), key));
         // A query holding no word runs no lexical page, so its conjunction
@@ -406,7 +416,9 @@ impl Snapshot {
     ///
     /// A ranking is no schema's order and no page of hits mints a cursor
     /// carrying a fingerprint, so one carrying a fingerprint names no position
-    /// among hits and is refused as not taken.
+    /// among hits and is refused as not taken. This rung ranks by the lexical
+    /// ladder alone, so a hit cursor minted under any other ladder is refused
+    /// as an order that changed, naming both.
     fn judge_hit(
         &self,
         cursor: &Cursor,
@@ -415,7 +427,7 @@ impl Snapshot {
         let CursorKey::Hit { score, path, .. } = cursor.key() else {
             return Err(PageRefusal::cursor_not_taken(cursor, PagedRows::Hit));
         };
-        let moved = self.judge_unordered_reading(cursor, PagedRows::Hit, lookups)?;
+        let moved = self.judge_ranked_reading(cursor, &RungSet::lexical(), lookups)?;
         Ok(((score.get(), path.clone()), moved))
     }
 

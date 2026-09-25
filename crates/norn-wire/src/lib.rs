@@ -210,7 +210,8 @@
 //! [`RungSelection`] variant, whose variants are the parts of a plain enum
 //! that extend by gaining a field,
 //! [`Cursor::new`], [`Page::new`], [`Snapshot::new`], [`SidecarRevision::new`],
-//! [`CursorOrderChanged::new`], [`DocumentOrders::new`], [`Score::new`],
+//! [`CursorOrderChanged::new`], [`DocumentOrders::new`], [`HitLadders::new`],
+//! [`Score::new`],
 //! [`AnswerReading::new`], [`LadderDeclaration::new`],
 //! [`ModelIdentity::new`], [`Freshness::trailing`], [`Freshness::rescanning`],
 //! [`VaultAnswer::new`], [`VaultAnswer::with_advisories`],
@@ -371,8 +372,8 @@ pub use address::{
     absolute_path,
 };
 pub use cursor::{
-    Cursor, CursorKey, CursorOrderChanged, DocumentOrders, FacetKind, Moved, NonFiniteScore, Page,
-    PagedRows, Score, SidecarRevision, Snapshot,
+    Cursor, CursorKey, CursorOrderChanged, DocumentOrders, FacetKind, HitLadders, Moved,
+    NonFiniteScore, Page, PagedRows, Score, SidecarRevision, Snapshot,
 };
 pub use demand::AttachMode;
 pub use doctor::{

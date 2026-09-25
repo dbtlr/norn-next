@@ -1143,7 +1143,12 @@ fn a_cursor_key_advertises_its_row_tag() {
         .expect("the hit branch");
     assert_eq!(
         property_names(hit),
-        ["row", "score", "path"].into_iter().collect()
+        ["row", "ladder", "score", "path"].into_iter().collect()
+    );
+    assert_eq!(
+        hit["properties"]["ladder"]["$ref"].as_str(),
+        Some("#/$defs/RungSet"),
+        "a hit key names the ladder it was ranked by as a rung set: {hit}"
     );
     assert_eq!(
         hit["properties"]["score"]["$ref"].as_str(),
@@ -1575,7 +1580,9 @@ fn a_changed_order_is_advertised_as_the_type_the_continuation_answers_with() {
     );
     assert_eq!(
         property_names(&schema["$defs"]["CursorOrderChanged"]),
-        ["minted_under", "current", "orders"].into_iter().collect()
+        ["minted_under", "current", "orders", "ladders"]
+            .into_iter()
+            .collect()
     );
     let orders =
         serde_json::to_string(&schema["$defs"]["CursorOrderChanged"]["properties"]["orders"])
@@ -1594,6 +1601,25 @@ fn a_changed_order_is_advertised_as_the_type_the_continuation_answers_with() {
             pair["properties"][order]["$ref"].as_str(),
             Some("#/$defs/Sort"),
             "each order of the pair is the order a request names"
+        );
+    }
+    let ladders =
+        serde_json::to_string(&schema["$defs"]["CursorOrderChanged"]["properties"]["ladders"])
+            .expect("the ladders property serializes");
+    assert!(
+        ladders.contains("#/$defs/HitLadders") && ladders.contains("null"),
+        "the two ladders are one nullable pair: {ladders}"
+    );
+    let pair = &schema["$defs"]["HitLadders"];
+    assert_eq!(
+        property_names(pair),
+        ["cursor", "request"].into_iter().collect()
+    );
+    for ladder in ["cursor", "request"] {
+        assert_eq!(
+            pair["properties"][ladder]["$ref"].as_str(),
+            Some("#/$defs/RungSet"),
+            "each ladder of the pair is a rung set"
         );
     }
 }
