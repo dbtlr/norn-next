@@ -1129,7 +1129,7 @@ fn a_read_of_targets_seeks_the_class_or_the_path_each_names() {
             "documents_path_nocase",
         ),
     ] {
-        let mut linked = crowded(&format!("links-resolution-plan-{order:?}"), order);
+        let linked = crowded(&format!("links-resolution-plan-{order:?}"), order);
         let params = request()
             .with_predicates([Predicate::path("src/many.md")])
             .with_columns([Column::links()]);
@@ -1166,9 +1166,17 @@ fn a_read_of_targets_seeks_the_class_or_the_path_each_names() {
             judge_class(&plan, class_index, key);
         }
 
+        // Each index is dropped on its own fresh fixture: on a store shared
+        // across the three, the first drop alone leaves `link_keys_link`
+        // missing for the rest, and the later controls would fail on that
+        // residual break whether or not they judged their own row at all.
         for index in ["link_keys_link", class_index, path_index] {
-            linked.drop_index(index);
-            let unindexed = linked.plans(&params);
+            let mut probe = crowded(
+                &format!("links-resolution-plan-{order:?}-without-{index}"),
+                order,
+            );
+            probe.drop_index(index);
+            let unindexed = probe.plans(&params);
             failure_of(&format!("{index} dropped"), || {
                 judge_link_targets(
                     &plans_of(&unindexed, FindStatement::LinkTargets)[0],
