@@ -102,11 +102,17 @@
 //! is a health finding, never something to steal from.
 
 use std::ffi::OsStr;
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use crate::identity::{Identity, identity_of, name_identity};
+use rustix::fs::{AtFlags, Dir, Mode, fstat, unlinkat};
+use rustix::io::Errno;
+
+use crate::identity::{Identity, identity_of, identity_of_stat, name_identity};
+use crate::open::directory_flags;
 use crate::path::CaseSensitivity;
 use crate::refusal::{Refusal, environment};
 
@@ -435,13 +441,18 @@ pub fn sweep_fallback_tree(vault_root: &Path) -> Result<Swept, Refusal> {
 /// crate did not hand out is somebody's. A home that is not there is already
 /// discarded.
 ///
-/// **Only a directory standing at a home's own path is a home.** Both paths
-/// are read without following a link before either is touched: a link
-/// standing at one, or anything else that is not a directory, is not a home
-/// this crate made, so it and whatever it reaches are left as they are and
-/// the discard goes on without it. A directory that is, by identity, one of
-/// `standing_roots` — a vault root somebody registered at that path — is
-/// left as it stands too, contents and all.
+/// **Only a directory standing at a home's own path is a home, and it is
+/// swept through the handle that proved it.** Each home is opened without
+/// following a link at its own name before either is touched: a link standing
+/// there, or anything else that is not a directory, is not a home this crate
+/// made, so it and whatever it reaches are left as they are and the discard
+/// goes on without it. A directory that is, by identity, one of
+/// `standing_roots` — a vault root somebody registered at that path — is left
+/// as it stands too, contents and all. Every shadow is then removed relative
+/// to that open directory, so a name replaced by a link after the open leads
+/// the sweep nowhere: what it sweeps is the directory it proved, wherever that
+/// directory now is. The home itself is removed by name last, which removes a
+/// directory only where it is empty and never follows a link.
 ///
 /// Both placements are taken because the device comparison that chose between
 /// them reads one moment: an attach made under another arrangement of mounts
@@ -462,54 +473,72 @@ pub fn discard_homes(
         .collect::<Vec<_>>();
     let homes = [data_tmp, fallback.as_path()]
         .into_iter()
-        .map(|home| Ok(is_discardable_home(home, &standing)?.then_some(home)))
+        .map(|home| Ok(open_home(home, &standing)?.map(|directory| (home, directory))))
         .collect::<Result<Vec<_>, Refusal>>()?;
-    for home in homes.into_iter().flatten() {
-        discard_home(home)?;
+    #[cfg(test)]
+    tests::run_before_sweep();
+    for (home, directory) in homes.into_iter().flatten() {
+        discard_home(home, &directory)?;
     }
     Ok(())
 }
 
-/// Whether `home` is a home [`discard_homes`] takes: a directory standing at
-/// that very path rather than a link to one, and none of the `standing`
-/// roots. Nothing at the path is no home to take.
-#[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns the shadow home.
-fn is_discardable_home(home: &Path, standing: &[Identity]) -> Result<bool, Refusal> {
-    match std::fs::symlink_metadata(home) {
-        Ok(metadata) => Ok(metadata.is_dir() && !standing.contains(&identity_of(&metadata))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(environment("reading", home, &error)),
-    }
+/// The directory standing at `home`'s own path, opened without following a
+/// link there, where it is a home [`discard_homes`] takes: none of the
+/// `standing` roots. Nothing at the path, a link and anything else that is not
+/// a directory are no home to take.
+fn open_home(home: &Path, standing: &[Identity]) -> Result<Option<OwnedFd>, Refusal> {
+    let directory = match rustix::fs::open(home, directory_flags(), Mode::empty()) {
+        Ok(directory) => directory,
+        Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => return Ok(None),
+        Err(errno) => return Err(environment_errno("opening", home, errno)),
+    };
+    let identity = fstat(&directory).map_err(|errno| environment_errno("reading", home, errno))?;
+    Ok((!standing.contains(&identity_of_stat(&identity))).then_some(directory))
 }
 
-/// Take every shadow in `home`, and then `home` itself where nothing else is
-/// left in it.
+/// Take every shadow in `directory`, the home opened at `home`, and then
+/// `home` itself where nothing else is left in it.
+///
+/// Only names [`is_shadow_name`] accepts are removed, each relative to
+/// `directory` and as a file: a directory carrying a shadow's name refuses the
+/// removal and stands.
 #[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns the shadow home.
-fn discard_home(home: &Path) -> Result<(), Refusal> {
-    let mut swept = Swept {
-        removed: 0,
-        left: 0,
-    };
-    match sweep_entries(home, Duration::ZERO, &mut swept) {
-        Ok(_) => {}
-        Err(Refusal::Environment {
-            kind: std::io::ErrorKind::NotFound,
-            ..
-        }) => return Ok(()),
-        Err(refusal) => return Err(refusal),
+fn discard_home(home: &Path, directory: &OwnedFd) -> Result<(), Refusal> {
+    let entries =
+        Dir::read_from(directory).map_err(|errno| environment_errno("reading", home, errno))?;
+    for entry in entries {
+        let entry = entry.map_err(|errno| environment_errno("reading", home, errno))?;
+        let name = OsStr::from_bytes(entry.file_name().to_bytes());
+        if is_shadow_name(name) {
+            // A shadow another sweep took first, or a name the filesystem
+            // refuses to remove, is left to the next one.
+            let _ = unlinkat(directory, entry.file_name(), AtFlags::empty());
+        }
     }
     match std::fs::remove_dir(home) {
         Ok(()) => Ok(()),
         Err(error)
             if matches!(
                 error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::DirectoryNotEmpty
+                    | std::io::ErrorKind::NotADirectory
             ) =>
         {
             Ok(())
         }
         Err(error) => Err(environment("removing", home, &error)),
     }
+}
+
+/// The refusal an operating-system error number makes, over `path`.
+fn environment_errno(operation: &'static str, path: &Path, errno: Errno) -> Refusal {
+    environment(
+        operation,
+        path,
+        &std::io::Error::from_raw_os_error(errno.raw_os_error()),
+    )
 }
 
 /// Remove the shadows at least `older_than` old directly inside `directory`,
@@ -767,7 +796,6 @@ mod tests {
     /// out is ASCII.
     #[test]
     fn a_name_that_is_not_text_is_not_a_shadow() {
-        use std::os::unix::ffi::OsStrExt;
         assert!(!is_shadow_name(OsStr::from_bytes(b"norn-shadow-1-\xff")));
     }
 
@@ -1088,6 +1116,58 @@ mod tests {
         assert!(
             !scratch.exists(data_root.directory()),
             "the home beside the link stood"
+        );
+    }
+
+    thread_local! {
+        /// What a case arranged to run inside [`discard_homes`], after both
+        /// homes are read and before either is swept.
+        static BEFORE_SWEEP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
+
+    /// Run what a case on this thread arranged to happen between reading the
+    /// homes and sweeping them, once.
+    pub(super) fn run_before_sweep() {
+        if let Some(arranged) = BEFORE_SWEEP.with(|slot| slot.borrow_mut().take()) {
+            arranged();
+        }
+    }
+
+    /// A home replaced by a link after the discard read it is not followed:
+    /// what the link reaches keeps every shadow in it, and the link stands.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the home, the link and what it reaches.
+    fn a_home_replaced_by_a_link_after_it_is_read_sweeps_nothing_the_link_reaches() {
+        let scratch = Scratch::new("shadow-discard-swapped");
+        let vault = scratch.directory("vault");
+        let data_tmp = scratch.path("data/vaults/notes/tmp");
+        let ours = key();
+        let fallback = ShadowHome::resolve_where(&vault, &data_tmp, &ours, false)
+            .expect("the key's fallback home");
+        let home = fallback.directory().to_path_buf();
+        std::fs::write(fallback.next_shadow(), b"staged").unwrap();
+        let elsewhere = scratch.directory("elsewhere");
+        let foreign = elsewhere.join("norn-shadow-99999-1");
+        std::fs::write(&foreign, b"another maintainer's staged bytes").unwrap();
+        let (replaced, target) = (home.clone(), elsewhere.clone());
+        BEFORE_SWEEP.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                std::fs::remove_dir_all(&replaced).unwrap();
+                std::os::unix::fs::symlink(&target, &replaced).unwrap();
+            }));
+        });
+
+        discard_homes(&vault, &data_tmp, &ours, &[]).expect("the homes are discarded");
+
+        assert!(
+            scratch.exists(&foreign),
+            "a shadow the swapped-in link reaches was taken"
+        );
+        assert!(
+            std::fs::symlink_metadata(&home).is_ok_and(|metadata| metadata.is_symlink()),
+            "the link standing at the home was removed"
         );
     }
 

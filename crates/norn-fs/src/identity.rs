@@ -97,6 +97,15 @@ pub(crate) fn identity_of(metadata: &std::fs::Metadata) -> Identity {
     }
 }
 
+/// The identity of what `stat` describes, read through a descriptor.
+#[allow(clippy::unnecessary_cast)] // st_dev's native width differs between supported Unix targets.
+pub(crate) fn identity_of_stat(stat: &rustix::fs::Stat) -> Identity {
+    Identity {
+        dev: stat.st_dev as u64,
+        ino: stat.st_ino as u64,
+    }
+}
+
 /// The identity `path` resolves to now, or `None` when it resolves to nothing.
 ///
 /// One spelling for both consumers: a write asks it to find out whether the name
