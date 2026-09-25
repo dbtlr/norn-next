@@ -69,7 +69,7 @@ pub use read::Answered;
 pub use registry::{AliasConflict, RegistryRead};
 pub use reload::{
     ActiveFingerprints, AuthoredDrift, ConfigFingerprint, EngineConfigReceiver, ReloadError,
-    ReloadFile, ReloadOutcome, ReloadRefusal, ReloadStage, VaultInspection,
+    ReloadFile, ReloadJudgment, ReloadOutcome, ReloadRefusal, ReloadStage, VaultInspection,
 };
 pub use search::{RRF_K, SearchCost, VECTOR_MARGIN_CAP};
 pub use semantic::{

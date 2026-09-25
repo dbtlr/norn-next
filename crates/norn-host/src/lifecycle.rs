@@ -20,7 +20,8 @@ use crate::evidence::{ReadEvidence, ReadReading};
 use crate::registry::{AliasConflict, RegistryRead};
 use crate::reload::ReloadCandidate;
 use crate::{
-    ActiveFingerprints, AuthoredDrift, ReloadError, ReloadOutcome, ReloadRefusal, VaultInspection,
+    ActiveFingerprints, AuthoredDrift, ReloadError, ReloadJudgment, ReloadOutcome, ReloadRefusal,
+    VaultInspection,
 };
 
 mod claim;
@@ -268,14 +269,16 @@ pub trait EntryOps: Send + Sync + 'static {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure>;
-    /// Read, validate, and apply the two authored vault control files. The
-    /// default reports unsupported, which does not change the vault state.
+    /// Read, validate, and apply the two authored vault control files, and
+    /// answer what was decided about the schema and the fingerprints of the
+    /// candidate put into service. The default reports unsupported, which does
+    /// not change the vault state.
     fn reload(
         &self,
         _: &VaultName,
         _: &mut Self::Attachment,
         _: &ProgressReporter<Self::Attachment>,
-    ) -> Result<ReloadOutcome, EntryReloadFailure> {
+    ) -> Result<ReloadJudgment, EntryReloadFailure> {
         Err(EntryReloadFailure::Unsupported)
     }
     /// The core fingerprints active in this attachment, where it has them.
@@ -1236,10 +1239,14 @@ enum Job {
     Rebuild(VaultName, u64),
     Reconcile(VaultName, u64),
     Maintenance(VaultName, u64),
-    Reload(VaultName, u64, mpsc::SyncSender<Result<(), ReloadRefusal>>),
-    ReloadReconcile(VaultName, u64, mpsc::SyncSender<Result<(), ReloadRefusal>>),
+    Reload(VaultName, u64, ReloadReply),
+    /// A schema reload's next turn, carrying what its first turn judged.
+    ReloadReconcile(VaultName, u64, ReloadJudgment, ReloadReply),
     Detach(VaultName, u64),
 }
+
+/// Where an explicit reload's asker waits for what the reload judged.
+type ReloadReply = mpsc::SyncSender<Result<ReloadJudgment, ReloadRefusal>>;
 
 impl Job {
     fn epoch(&self) -> u64 {
@@ -1250,7 +1257,7 @@ impl Job {
             | Self::Reconcile(_, epoch)
             | Self::Maintenance(_, epoch)
             | Self::Reload(_, epoch, _)
-            | Self::ReloadReconcile(_, epoch, _)
+            | Self::ReloadReconcile(_, epoch, _, _)
             | Self::Detach(_, epoch) => *epoch,
         }
     }
@@ -1263,7 +1270,7 @@ impl Job {
             | Self::Reconcile(name, _)
             | Self::Maintenance(name, _)
             | Self::Reload(name, _, _)
-            | Self::ReloadReconcile(name, _, _)
+            | Self::ReloadReconcile(name, _, _, _)
             | Self::Detach(name, _) => name,
         }
     }
@@ -2949,14 +2956,16 @@ impl<O: EntryOps> Host<O> {
         )
     }
 
-    /// Request one explicit reload and wait until the vault has its outcome.
+    /// Request one explicit reload and wait until the vault has its outcome:
+    /// what the reload decided about the schema, and the fingerprints it put
+    /// into service, which are the ones the entry reports as active from here.
     ///
     /// This is the seam the vault reload verb Layer 3's verb charter places lands
     /// on. Watcher events activate neither control file, so an edited schema
     /// reaches the store's pin only through this reload or through the fresh
     /// read an attach or a recovery leg makes for itself; nothing in this crate
     /// outside its own cases reaches it yet.
-    pub fn reload(&self, name: &VaultName) -> Result<(), ReloadRefusal> {
+    pub fn reload(&self, name: &VaultName) -> Result<ReloadJudgment, ReloadRefusal> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Err(ReloadRefusal::UnknownVault);
         };
@@ -3922,7 +3931,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         | Job::Reconcile(name, _)
         | Job::Maintenance(name, _)
         | Job::Reload(name, _, _)
-        | Job::ReloadReconcile(name, _, _)
+        | Job::ReloadReconcile(name, _, _, _)
         | Job::Detach(name, _) => name,
     };
     let entry = shared.entries.get(name)?;
@@ -4693,9 +4702,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         Job::Reload(name, epoch, reply) => {
             run_reload_job(shared, entry, name, epoch, reply, ReloadStep::Activate)
         }
-        Job::ReloadReconcile(name, epoch, reply) => {
-            run_reload_job(shared, entry, name, epoch, reply, ReloadStep::Reconcile)
-        }
+        Job::ReloadReconcile(name, epoch, judgment, reply) => run_reload_job(
+            shared,
+            entry,
+            name,
+            epoch,
+            reply,
+            ReloadStep::Reconcile(judgment),
+        ),
         Job::Maintenance(name, epoch) => {
             let mut attachment = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -4861,7 +4875,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
 #[derive(Clone, Copy)]
 enum ReloadStep {
     Activate,
-    Reconcile,
+    /// A later turn of a schema reload, carrying what its first turn judged.
+    Reconcile(ReloadJudgment),
 }
 
 /// Run one bounded turn of an explicit reload.
@@ -4874,7 +4889,7 @@ fn run_reload_job<O: EntryOps>(
     entry: &Arc<Entry<O::Attachment>>,
     name: VaultName,
     epoch: u64,
-    reply: mpsc::SyncSender<Result<(), ReloadRefusal>>,
+    reply: ReloadReply,
     step: ReloadStep,
 ) -> Option<O::Attachment> {
     let (mut attachment, work) = {
@@ -4891,46 +4906,47 @@ fn run_reload_job<O: EntryOps>(
         state.pin_for_leg(Leg::Job(epoch));
         let work = match step {
             ReloadStep::Activate => Batch::default(),
-            ReloadStep::Reconcile => std::mem::take(&mut state.pending),
+            ReloadStep::Reconcile(_) => std::mem::take(&mut state.pending),
         };
         (attachment, work)
     };
 
-    let mut unsupported = false;
+    // `None` is an attachment that holds no reload at all.
     let mut result = match step {
         ReloadStep::Activate => {
             match shared
                 .ops
                 .reload(&name, &mut attachment, &reporter(entry, epoch))
             {
-                Ok(outcome) => Ok(outcome),
-                Err(EntryReloadFailure::Unsupported) => {
-                    unsupported = true;
-                    Ok(ReloadOutcome::ConfigOnly)
-                }
-                Err(EntryReloadFailure::Runtime(failure)) => Err(failure),
+                Ok(judgment) => Some(Ok(judgment)),
+                Err(EntryReloadFailure::Unsupported) => None,
+                Err(EntryReloadFailure::Runtime(failure)) => Some(Err(failure)),
             }
         }
-        ReloadStep::Reconcile if work.is_empty() => Ok(ReloadOutcome::SchemaChanged),
-        ReloadStep::Reconcile => shared
-            .ops
-            .reconcile(
-                &name,
-                &mut attachment,
-                ReconcileWork { batch: work },
-                &reporter(entry, epoch),
-            )
-            .map(|()| ReloadOutcome::SchemaChanged),
+        ReloadStep::Reconcile(judgment) if work.is_empty() => Some(Ok(judgment)),
+        ReloadStep::Reconcile(judgment) => Some(
+            shared
+                .ops
+                .reconcile(
+                    &name,
+                    &mut attachment,
+                    ReconcileWork { batch: work },
+                    &reporter(entry, epoch),
+                )
+                .map(|()| judgment),
+        ),
     };
     let mut observed = Batch::default();
     let mut handoff_saturated = false;
-    if !unsupported && matches!(result, Ok(ReloadOutcome::SchemaChanged)) {
+    if let Some(Ok(judgment)) = &result
+        && judgment.outcome == ReloadOutcome::SchemaChanged
+    {
         match drain_observed(&shared.ops, &name, &mut attachment) {
             Ok((batch, saturated)) => {
                 observed = batch;
                 handoff_saturated = saturated;
             }
-            Err(error) => result = Err(error),
+            Err(error) => result = Some(Err(error)),
         }
     }
 
@@ -4954,32 +4970,34 @@ fn run_reload_job<O: EntryOps>(
         let _ = reply.send(Err(ReloadRefusal::Unavailable(trust)));
         return Some(attachment);
     }
-    if unsupported {
+    let Some(result) = result else {
         state.coverage.park_by(epoch, attachment);
         state.claim.release();
         drop(state);
         let _ = reply.send(Err(ReloadRefusal::Unsupported));
         return None;
-    }
-    if matches!(result, Ok(ReloadOutcome::SchemaChanged))
+    };
+    if let Ok(judgment) = &result
+        && judgment.outcome == ReloadOutcome::SchemaChanged
         && (handoff_saturated || !observed.is_empty())
     {
+        let judgment = *judgment;
         state.pending.merge(observed);
         state.coverage.park_by(epoch, attachment);
         let next = state
             .claim
-            .hand_on(|epoch| Job::ReloadReconcile(name.clone(), epoch, reply));
+            .hand_on(|epoch| Job::ReloadReconcile(name.clone(), epoch, judgment, reply));
         drop(state);
         dispatch_handoff(shared, entry, epoch, next);
         return None;
     }
 
     let response = match result {
-        Ok(outcome) => {
+        Ok(judgment) => {
             record_active_declaration(&mut state, &*shared.ops, &attachment);
             state.last_reload_error = None;
             state.clear_rung_requirements();
-            match outcome {
+            match judgment.outcome {
                 ReloadOutcome::ConfigOnly => {
                     // A config-only reload closed no handle, so the slot is
                     // full and this mints nothing. It is spelled as the
@@ -4994,7 +5012,7 @@ fn run_reload_job<O: EntryOps>(
                 }
             }
             state.trust = TrustState::Ready;
-            Ok(())
+            Ok(judgment)
         }
         Err(JobFailure::Reload(error)) => {
             record_active_declaration(&mut state, &*shared.ops, &attachment);
@@ -5791,6 +5809,22 @@ mod tests {
         }
     }
 
+    /// What the fake answers a reload with: `outcome`, at fingerprints that
+    /// name the schema it decided on and no config file.
+    fn fake_judgment(outcome: ReloadOutcome) -> ReloadJudgment {
+        let schema: &[u8] = match outcome {
+            ReloadOutcome::ConfigOnly => b"the attached schema",
+            ReloadOutcome::SchemaChanged => b"the reloaded schema",
+        };
+        ReloadJudgment {
+            outcome,
+            fingerprints: ActiveFingerprints {
+                schema: norn_fs::ContentHash::of(schema),
+                config: crate::ConfigFingerprint::Missing,
+            },
+        }
+    }
+
     impl EntryOps for Arc<FakeOps> {
         type Attachment = FakeCoverage;
 
@@ -5963,7 +5997,7 @@ mod tests {
             _: &VaultName,
             _: &mut FakeCoverage,
             progress: &ProgressReporter<FakeCoverage>,
-        ) -> Result<ReloadOutcome, EntryReloadFailure> {
+        ) -> Result<ReloadJudgment, EntryReloadFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             if !self.reload_supported.load(Ordering::SeqCst) {
                 return Err(EntryReloadFailure::Unsupported);
@@ -5987,9 +6021,9 @@ mod tests {
                         ReloadError::SchemaApply("the candidate could not be pinned".into()),
                     )));
                 }
-                Ok(ReloadOutcome::SchemaChanged)
+                Ok(fake_judgment(ReloadOutcome::SchemaChanged))
             } else {
-                Ok(ReloadOutcome::ConfigOnly)
+                Ok(fake_judgment(ReloadOutcome::ConfigOnly))
             }
         }
 
@@ -6856,7 +6890,7 @@ mod tests {
             },
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
-        assert_eq!(response, Ok(()));
+        assert_eq!(response, Ok(fake_judgment(ReloadOutcome::ConfigOnly)));
         assert_eq!(host.state(&name), answered(TrustState::Ready));
     }
 
@@ -6975,7 +7009,11 @@ mod tests {
             Ok(TrustState::Warming { .. })
         ));
         *ops.continuous_handoff_poll_for.lock().unwrap() = None;
-        reload.join().unwrap().expect("the reload to become Ready");
+        // The turn that finishes answers what the first turn judged.
+        assert_eq!(
+            reload.join().unwrap(),
+            Ok(fake_judgment(ReloadOutcome::SchemaChanged))
+        );
         sibling_ready.unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(host.state(&reloaded), answered(TrustState::Ready));
         assert_eq!(

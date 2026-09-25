@@ -27,7 +27,8 @@ use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
     EntryOps, Established, Establishment, Healing, JobFailure, MintedReader, ProgressReporter,
-    ReadSource, ReaderUnavailable, ReconcileWork, ReloadError, ReloadOutcome, SnapshotSource,
+    ReadSource, ReaderUnavailable, ReconcileWork, ReloadError, ReloadJudgment, ReloadOutcome,
+    SnapshotSource,
 };
 
 /// Maximum number of document changes materialized for one store transaction.
@@ -975,7 +976,7 @@ impl EntryOps for ProductionEntryOps {
         name: &VaultName,
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
-    ) -> Result<ReloadOutcome, crate::EntryReloadFailure> {
+    ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
         attachment.drop_controls_held_for_rung_three();
         let _job = self.evidence.attributing();
         if !attachment
@@ -1004,13 +1005,15 @@ impl EntryOps for ProductionEntryOps {
             attachment.hold_for_rung_three(candidate);
             return Err(JobFailure::StoreDamaged(reason.to_string()).into());
         }
-        let schema_changed =
-            candidate.fingerprints().schema != attachment.controls.fingerprints().schema;
-        if !schema_changed {
+        let fingerprints = candidate.fingerprints();
+        if fingerprints.schema == attachment.controls.fingerprints().schema {
             attachment.controls = candidate;
             self.dispatch_config(attachment);
             self.drain_semantic(name, attachment);
-            return Ok(ReloadOutcome::ConfigOnly);
+            return Ok(ReloadJudgment {
+                outcome: ReloadOutcome::ConfigOnly,
+                fingerprints,
+            });
         }
 
         progress.begin_schema_reload();
@@ -1038,7 +1041,10 @@ impl EntryOps for ProductionEntryOps {
         self.dispatch_config(attachment);
         self.heal_under_coverage(attachment, progress)?;
         self.drain_semantic(name, attachment);
-        Ok(ReloadOutcome::SchemaChanged)
+        Ok(ReloadJudgment {
+            outcome: ReloadOutcome::SchemaChanged,
+            fingerprints,
+        })
     }
 
     fn active_fingerprints(
@@ -4064,6 +4070,74 @@ mod tests {
         assert_eq!(inspection.last_reload_error, Some(error));
     }
 
+    /// A production host serving the fixture's one vault, `Ready`, with the
+    /// lease that keeps it served.
+    fn ready_host(
+        f: &Fixture,
+    ) -> (
+        crate::Host<ProductionEntryOps>,
+        VaultName,
+        crate::DemandLease<ProductionEntryOps>,
+    ) {
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        (host, name, lease)
+    }
+
+    /// **A reload over an unchanged schema answers config-only, with the
+    /// fingerprints it put into service.** The config file it activated is
+    /// the one the entry then reports as active, beside the schema it kept.
+    #[test]
+    fn a_config_only_reload_answers_the_fingerprints_it_activated() {
+        let f = Fixture::new("reload-answers-config-only");
+        let (host, name, _lease) = ready_host(&f);
+        let before = host.inspect(&name).unwrap().active_fingerprints.unwrap();
+
+        fs::write(f.vault().join(".norn/config.toml"), "# edited\n").unwrap();
+        let judged = host.reload(&name).expect("the config-only reload");
+
+        assert_eq!(judged.outcome, crate::ReloadOutcome::ConfigOnly);
+        let active = host.inspect(&name).unwrap().active_fingerprints;
+        assert_eq!(Some(judged.fingerprints), active);
+        assert_eq!(judged.fingerprints.schema, before.schema);
+        assert_ne!(judged.fingerprints.config, before.config);
+    }
+
+    /// **A reload over an edited schema answers schema-changed, with the
+    /// fingerprints it put into service.**
+    #[test]
+    fn a_schema_reload_answers_the_fingerprints_it_activated() {
+        let f = Fixture::new("reload-answers-schema-changed");
+        let (host, name, _lease) = ready_host(&f);
+        let before = host.inspect(&name).unwrap().active_fingerprints.unwrap();
+
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\nfields:\n  created:\n    type: date\n",
+        )
+        .unwrap();
+        let judged = host.reload(&name).expect("the schema reload");
+
+        assert_eq!(judged.outcome, crate::ReloadOutcome::SchemaChanged);
+        let active = host.inspect(&name).unwrap().active_fingerprints;
+        assert_eq!(Some(judged.fingerprints), active);
+        assert_ne!(judged.fingerprints.schema, before.schema);
+    }
+
     /// **A schema that reads as YAML and declares something this grammar does
     /// not hold is refused on the same path invalid YAML is.** The candidate
     /// never reaches a pin, so the vault keeps the declaration it was serving
@@ -4140,7 +4214,10 @@ mod tests {
         );
 
         fs::write(f.vault().join(".norn/schema.yaml"), "version: 1\n").unwrap();
-        let outcome = ops.reload(&name, &mut attachment, &progress).unwrap();
+        let outcome = ops
+            .reload(&name, &mut attachment, &progress)
+            .unwrap()
+            .outcome;
         assert_eq!(outcome, ReloadOutcome::SchemaChanged);
         assert_eq!(
             ops.withheld_trust(&attachment),
@@ -4514,7 +4591,9 @@ mod tests {
 
         fs::write(f.vault().join(".norn/schema.yaml"), REPORTING_SCHEMA).unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
 
@@ -4548,7 +4627,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
         let after = stored(&mut attachment, "note.md").expect("the document's row");
@@ -4579,7 +4660,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
 
@@ -4662,7 +4745,9 @@ mod tests {
         let numbered = "version: 1\nfields:\n  rating:\n    type: number\n";
         fs::write(f.vault().join(".norn/schema.yaml"), numbered).unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
         let after = stored(&mut attachment, "note.md").expect("the document's row");
@@ -4681,7 +4766,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
         let after = stored(&mut attachment, "note.md").expect("the document's row");
@@ -4700,7 +4787,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
         let after = stored(&mut attachment, "note.md").expect("the document's row");
@@ -5051,7 +5140,8 @@ mod tests {
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             let outcome = ops
                 .reload(&name, &mut attachment, &ProgressReporter::disconnected())
-                .expect("the enabling reload");
+                .expect("the enabling reload")
+                .outcome;
             assert_eq!(outcome, ReloadOutcome::ConfigOnly);
             assert!(matches!(
                 engines.status(&name),
@@ -5386,7 +5476,8 @@ mod tests {
             .unwrap();
             let outcome = ops
                 .reload(&name, &mut attachment, &ProgressReporter::disconnected())
-                .expect("the schema reload");
+                .expect("the schema reload")
+                .outcome;
             assert_eq!(outcome, ReloadOutcome::SchemaChanged);
             let answer = engines.nearest(&name, "beta", 5).expect("an answer");
             assert_eq!(answer.neighbors.len(), 2, "{answer:?}");
@@ -8646,7 +8737,9 @@ mod tests {
 
         fs::write(&schema, "version: 1\n").unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
         assert_eq!(attachment.store.path_order(), proven);
@@ -9905,7 +9998,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
 
@@ -12074,7 +12169,9 @@ mod tests {
         let mut attachment = ops.attach(&registration, &progress).unwrap();
         fs::write(&schema, "version: 1\n# a second declaration\n").unwrap();
         assert_eq!(
-            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ops.reload(&name, &mut attachment, &progress)
+                .unwrap()
+                .outcome,
             ReloadOutcome::SchemaChanged
         );
         assert!(stored(&mut attachment, ".norn/schema.md").is_none());

@@ -96,6 +96,14 @@ pub enum ReloadOutcome {
     SchemaChanged,
 }
 
+/// What a reload judged its candidate to be: the outcome it decided about the
+/// schema, and the fingerprints the candidate was read at.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReloadJudgment {
+    pub outcome: ReloadOutcome,
+    pub fingerprints: ActiveFingerprints,
+}
+
 /// Why one internal reload request did not return a Ready vault.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReloadRefusal {

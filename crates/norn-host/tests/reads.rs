@@ -234,7 +234,7 @@ fn a_hold_carries_the_declaration_its_snapshot_pins_across_a_schema_reload() {
         "the reload to activate the rewritten schema",
         attach::state_budget(attach::READY_LIMIT),
         || match host.reload(vault.name()) {
-            Ok(()) => Observed::Met(()),
+            Ok(_) => Observed::Met(()),
             Err(ReloadRefusal::Unavailable(trust)) => {
                 Observed::pending(format!("the entry is {trust:?}"))
             }

@@ -2025,7 +2025,7 @@ fn reload(host: &attach::ServingHost, name: &VaultName, applied: &Applied) {
         "the explicit reload to activate the vault's control files",
         SETTLING.budget_for(applied.steps()),
         || match host.reload(name) {
-            Ok(()) => Observed::Met(()),
+            Ok(_) => Observed::Met(()),
             Err(ReloadRefusal::Unavailable(trust)) => {
                 Observed::pending(format!("the entry is {trust:?}"))
             }
