@@ -101,6 +101,7 @@ pub mod watch;
 pub mod write;
 
 mod faults;
+mod gitignore;
 mod hash;
 mod identity;
 mod open;
@@ -110,6 +111,7 @@ mod refusal;
 mod scratch;
 
 pub use exclusion::{Excluded, ExclusionError, Exclusions};
+pub use gitignore::fallback_ignored;
 pub use hash::{ContentHash, hashed_from};
 pub use identity::{Identity, PostState, path_identity, readable_directory};
 pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
