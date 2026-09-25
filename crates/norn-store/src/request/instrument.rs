@@ -384,9 +384,9 @@ pub enum ExplainedStatement<'a> {
     /// rather than the text.
     VaultSchemaPin,
     /// The pinned-scalar read [`Request::write_generation`] runs: the store's
-    /// last committed write generation, which a lane-2 consumer records at the
-    /// end of a drain. The statement text is the pin's; the key it binds is
-    /// its own.
+    /// last committed write generation, which a lane-2 consumer reads before a
+    /// feed page and records beside the completion that page reaches. The
+    /// statement text is the pin's; the key it binds is its own.
     WriteGeneration,
     /// The candidate heads of a chunk of this many findings, which
     /// [`Request::stored_findings`], [`Request::findings_in_class`] and

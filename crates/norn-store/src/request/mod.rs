@@ -1094,16 +1094,12 @@ impl<'a> Request<'a> {
     ///
     /// Every write that takes a generation moves it, whether or not the write
     /// changes a row either feed presents, so a consumer that records this
-    /// value at the end of a drain records how far the store had got rather
-    /// than how far its feed rows reached. A store records its counter at
-    /// create; one that records none is damaged, because no reading of it can
-    /// say what it read.
+    /// value beside a feed's completion records how far the store had got
+    /// rather than how far its feed rows reached. A store records its counter at create;
+    /// one that records none is damaged, because no reading of it can say what
+    /// it read.
     pub fn write_generation(&self) -> Result<i64, StoreError> {
-        norn_db::meta::get_meta(self.store.connection(), norn_db::meta::WRITE_GENERATION)?
-            .ok_or_else(|| StoreError::Damaged {
-                what: "the database records no write generation, so no read can say what it read"
-                    .to_string(),
-            })
+        crate::store::last_write_generation(self.store.connection())
     }
 
     /// The pinned vault-schema projection, if a schema has been pinned.
