@@ -4152,14 +4152,19 @@ mod tests {
         host.vault_reload(params).expect("the host is running")
     }
 
-    /// Active fingerprints as the wire spells them: 64 lowercase hex digits
-    /// each, and no config where the vault serves the missing-file default.
-    fn spelled(active: crate::ActiveFingerprints) -> norn_wire::Fingerprints {
-        let schema = norn_wire::Fingerprints::new(active.schema.to_hex());
-        match active.config {
-            crate::ConfigFingerprint::Missing => schema,
-            crate::ConfigFingerprint::File(config) => schema.with_config(config.to_hex()),
-        }
+    /// Whether the wire's `spelled` names `active`: each fingerprint as 64
+    /// lowercase hex digits, which is all [`norn_fs::ContentHash::from_hex`]
+    /// parses, spelling that hash, and no config where the vault serves the
+    /// missing-file default.
+    fn spells(spelled: &norn_wire::Fingerprints, active: crate::ActiveFingerprints) -> bool {
+        let config = match (&spelled.config, active.config) {
+            (None, crate::ConfigFingerprint::Missing) => true,
+            (Some(config), crate::ConfigFingerprint::File(hash)) => {
+                norn_fs::ContentHash::from_hex(config) == Some(hash)
+            }
+            _ => false,
+        };
+        config && norn_fs::ContentHash::from_hex(&spelled.schema) == Some(active.schema)
     }
 
     /// The control-file failure a refused `vault reload` carries.
@@ -4186,10 +4191,9 @@ mod tests {
         let report = vault_reload(&host, &reload_params(&name, false)).expect("the reload");
 
         let active = host.inspect(&name).unwrap().active_fingerprints.unwrap();
-        assert_eq!(
-            report,
-            norn_wire::ReloadReport::new(norn_wire::ReloadOutcome::ConfigOnly, spelled(active))
-        );
+        assert!(report.activated);
+        assert_eq!(report.outcome, norn_wire::ReloadOutcome::ConfigOnly);
+        assert!(spells(&report.fingerprints, active), "{report:?}");
         assert_eq!(active.schema, before.schema);
         assert_ne!(active.config, before.config);
     }
@@ -4210,10 +4214,9 @@ mod tests {
         let report = vault_reload(&host, &reload_params(&name, false)).expect("the reload");
 
         let active = host.inspect(&name).unwrap().active_fingerprints.unwrap();
-        assert_eq!(
-            report,
-            norn_wire::ReloadReport::new(norn_wire::ReloadOutcome::SchemaChanged, spelled(active))
-        );
+        assert!(report.activated);
+        assert_eq!(report.outcome, norn_wire::ReloadOutcome::SchemaChanged);
+        assert!(spells(&report.fingerprints, active), "{report:?}");
         assert_ne!(active.schema, before.schema);
     }
 
@@ -4657,6 +4660,9 @@ mod tests {
         assert_eq!(values, [Some(1), Some(2)]);
     }
 
+    /// A reload and its dry run both check maintainership before they read
+    /// the candidate: a replaced lock is a lost maintainership, whatever the
+    /// candidate would have been refused for.
     #[cfg(unix)]
     #[test]
     fn reload_checks_maintainership_before_it_reads_the_candidate() {
@@ -4670,6 +4676,12 @@ mod tests {
         fs::write(&lock, "replacement lock identity").unwrap();
         fs::write(f.vault().join(".norn/config.toml"), "[engine.sample\n").unwrap();
 
+        assert_eq!(
+            ops.judge_reload(&name, &attachment),
+            Err(crate::EntryReloadFailure::Runtime(
+                JobFailure::LostMaintainership
+            ))
+        );
         assert_eq!(
             ops.reload(&name, &mut attachment, &progress),
             Err(crate::EntryReloadFailure::Runtime(
@@ -9027,6 +9039,55 @@ mod tests {
             foo_resolves_through(&mut attachment),
             foo_resolves_under(proven)
         );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A dry run judges its store's path order as a reload does**, and
+    /// answers the damage the reload then meets: the same verdict, which the
+    /// lifecycle answers with the same owed rung 3. It holds nothing for that
+    /// rung — the controls it read are a candidate's, and a dry run puts a
+    /// candidate nowhere — and derives nothing into the store.
+    #[test]
+    fn a_dry_run_over_a_store_derived_under_the_other_path_order_meets_the_reloads_damage() {
+        let f = Fixture::new("dry-run-order-moved");
+        write_two_spellings_of_one_stem(&f);
+        let schema = f.vault().join(".norn/schema.yaml");
+        fs::write(&schema, "version: 9\n").unwrap();
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let proven = proven_order(&f);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        attachment.store = attachment
+            .store
+            .discard_and_reopen(other_order(proven))
+            .unwrap();
+        derive_stale_rows(&mut attachment.store);
+        fs::write(&schema, "version: 1\n").unwrap();
+
+        let judged = ops
+            .judge_reload(&name, &attachment)
+            .expect_err("a dry run over a store derived under the other order");
+        assert!(
+            matches!(
+                judged,
+                crate::EntryReloadFailure::Runtime(JobFailure::StoreDamaged(_))
+            ),
+            "the moved order was judged as {judged:?} rather than owing rung 3"
+        );
+        assert!(
+            attachment.held_for_rung_three.is_none(),
+            "the dry run held its candidate for rung 3"
+        );
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["a/Foo.md", "stale.md"]
+        );
+
+        let reloaded = ops
+            .reload(&name, &mut attachment, &progress)
+            .expect_err("a reload over a store derived under the other order");
+        assert_eq!(judged, reloaded);
         ops.detach(&name, attachment);
     }
 
