@@ -322,28 +322,18 @@ fn fused(rankings: &[Vec<String>]) -> Vec<Ranked> {
     ranked
 }
 
-/// The vector rung's neighbors on their own scale, ordered, or the refusal
-/// that the engine scored a document with no relevance score.
-fn vector_scale(neighbors: &[Neighbor]) -> Result<Vec<Ranked>, VectorRefusal> {
-    let mut ranked = Vec::with_capacity(neighbors.len());
-    for neighbor in neighbors {
-        let score = f64::from(neighbor.score);
-        if !score.is_finite() {
-            return Err(VectorRefusal::Failed {
-                message: "this vault's engine failed to answer the vector rung".to_string(),
-                detail: format!(
-                    "the engine scored `{}` {score}, which is no relevance score",
-                    neighbor.path
-                ),
-            });
-        }
-        ranked.push(Ranked {
+/// The vector rung's neighbors on their own scale, ordered. Every score is
+/// finite: the engine refuses an answer that scored a row otherwise.
+fn vector_scale(neighbors: &[Neighbor]) -> Vec<Ranked> {
+    let mut ranked: Vec<Ranked> = neighbors
+        .iter()
+        .map(|neighbor| Ranked {
             path: neighbor.path.clone(),
-            score,
-        });
-    }
+            score: f64::from(neighbor.score),
+        })
+        .collect();
     order(&mut ranked);
-    Ok(ranked)
+    ranked
 }
 
 /// The sidecar state an answer read, as a cursor carries it, or the refusal
@@ -736,10 +726,7 @@ fn ranked_answer(
     } = inputs;
     let sidecar = wire_sidecar(&answer.sidecar)
         .map_err(|refusal| BuildRefused::Answered(refusal.envelope()))?;
-    // Judged before either arm, so an answer holding a neighbor with no
-    // relevance score is refused whether the rung answers alone or fused.
-    let vector = vector_scale(&answer.neighbors)
-        .map_err(|refusal| BuildRefused::Answered(refusal.envelope()))?;
+    let vector = vector_scale(&answer.neighbors);
     let lexical_ran = resolved.ladder.rungs().contains(&Rung::Lexical);
     let declaration = declaration(lexical_ran, &answer, snapshot)?;
     let ladder = declaration.rung_set();

@@ -504,40 +504,49 @@ fn on_the_sidecar<T>(
     }
 }
 
-/// **A non-finite vector score refuses `engine/failed` on every ladder that
-/// holds the vector rung**: a relevance score is a finite number, so an answer
-/// holding a neighbor the engine scored NaN or infinite has failed, whether
-/// the rung answers alone or fused. A row's embedding is overwritten with
-/// NaN, then with infinity, under the running engine.
+/// **A non-finite score refuses `engine/failed` wherever the scan ranks it, at
+/// any vault size.** Over a vault larger than the rows the vector rung's scan
+/// holds, one row's embedding is overwritten with a positive and a negative
+/// NaN, then a positive and a negative infinity. A negative score ranks below
+/// every finite one, so the scan pushes it out of what it holds before any
+/// answer is ranked; every ladder holding the vector rung, filtered or not,
+/// is refused all the same.
 #[test]
-fn a_non_finite_vector_score_refuses_engine_failed_on_every_ladder() {
-    let (_sandbox, vault) = a_vault("search-non-finite", Some("[engine.semantic]\n"));
+fn a_non_finite_score_the_scan_pushes_out_still_refuses_engine_failed() {
+    let depth = norn_wire::RUNG_DEPTH as usize;
+    let documents = depth + 16;
+    let (_sandbox, vault) = a_vault_of_alphas("search-non-finite-pushed-out", documents);
     let serving = serve(&vault);
+    let drained = answered(
+        &serving,
+        &searching(&vault, "alpha").with_rungs(exactly([Rung::Vector])),
+    );
+    assert_eq!(drained.work.margin, 0, "the engine trails the snapshot");
     let dimensions: i64 = on_the_sidecar(&vault, |sidecar| {
         sidecar.query_row(
-            "SELECT dimensions FROM document_vectors WHERE path = 'docs/lone.md'",
+            "SELECT dimensions FROM document_vectors WHERE path = 'd/00000.md'",
             [],
             |row| row.get(0),
         )
     });
-    // Little-endian f32 words: a quiet NaN, and positive infinity.
-    for word in ["0000c07f", "0000807f"] {
+    // Little-endian f32 words: +NaN, -NaN, +infinity, -infinity.
+    for word in ["0000c07f", "0000c0ff", "0000807f", "000080ff"] {
         let embedding = word.repeat(usize::try_from(dimensions).expect("a dimension count"));
         on_the_sidecar(&vault, |sidecar| {
             sidecar.execute_batch(&format!(
-                "UPDATE document_vectors SET embedding = x'{embedding}' WHERE path = 'docs/lone.md'"
+                "UPDATE document_vectors SET embedding = x'{embedding}' WHERE path = 'd/00000.md'"
             ))
         });
         for selection in [exactly([Rung::Vector]), RungSelection::enabled()] {
-            let refusal = refused(
-                &serving,
-                &searching(&vault, "alpha").with_rungs(selection.clone()),
-            );
-            assert_eq!(
-                refusal.code(),
-                &ReasonCode::EngineFailed,
-                "{word} under {selection:?}: {refusal:?}"
-            );
+            let request = searching(&vault, "alpha").with_rungs(selection.clone());
+            for request in [request.clone(), request.with_predicates([every_document()])] {
+                let refusal = refused(&serving, &request);
+                assert_eq!(
+                    refusal.code(),
+                    &ReasonCode::EngineFailed,
+                    "{word} under {request:?}: {refusal:?}"
+                );
+            }
         }
     }
 }

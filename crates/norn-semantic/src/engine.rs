@@ -99,7 +99,8 @@ pub struct VectorRow {
     pub values: Vec<f32>,
 }
 
-/// One nearest answer: a path and its score, higher meaning nearer.
+/// One nearest answer: a path and its score, higher meaning nearer. A score
+/// an answer carries is finite: a scan that scores a row otherwise refuses.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Neighbor {
     pub path: String,
@@ -413,11 +414,15 @@ impl Engine {
     /// under this engine's model, and what the answer read.
     ///
     /// The score is the dot product against the query's embedding, and the
-    /// order is total: score descending under `total_cmp` — which ranks a
-    /// non-finite score a model produced by its sign, a positive one above
-    /// every finite score and a negative one below, deterministically rather
-    /// than hidden — then path ascending, so equal scores answer the same
-    /// way on every run.
+    /// order is total: score descending, then path ascending, so equal scores
+    /// answer the same way on every run.
+    ///
+    /// **Every score the scan computes is judged finite.** A row scored NaN
+    /// or infinite refuses the answer ([`EngineError::NonFiniteScore`]) the
+    /// moment it is scored, whether or not it would be kept: a negative NaN or
+    /// infinity ranks below every finite score, so a scan scoring more rows
+    /// than its limit would otherwise push it out unseen. What the answer
+    /// holds is therefore finite, and so is every score it answers.
     ///
     /// **The scan streams, and holds at most `limit` scored rows.** Each row
     /// of the model is read, tested against `admits`, decoded and scored one
@@ -476,6 +481,9 @@ impl Engine {
             }
             let score = dot(query.values(), &decode(&blob, dimensions)?);
             work.rows_scored += 1;
+            if !score.is_finite() {
+                return Err(EngineError::NonFiniteScore { path, score });
+            }
             let ranked = Ranked(Neighbor { path, score });
             if kept.len() < limit {
                 kept.push(ranked);

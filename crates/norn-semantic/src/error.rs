@@ -10,11 +10,12 @@ use norn_store::StoreError;
 ///
 /// Three seams meet here and each keeps its own vocabulary: the sidecar's
 /// substrate ([`DbError`]), the lane-1 record the engine derives from
-/// ([`StoreError`]), and the embedder ([`EmbedError`]). The engine adds one
-/// judgment of its own — [`EngineError::SidecarDamaged`] — because damage is
-/// the refusal the owner resolves differently: a damaged sidecar is discarded
-/// and rebuilt ([`crate::Engine::discard_and_reopen`]), while every other
-/// refusal is an operation to retry or report.
+/// ([`StoreError`]), and the embedder ([`EmbedError`]). The engine adds two
+/// judgments of its own. [`EngineError::SidecarDamaged`] is the refusal the
+/// owner resolves differently: a damaged sidecar is discarded and rebuilt
+/// ([`crate::Engine::discard_and_reopen`]), while every other refusal is an
+/// operation to retry or report. [`EngineError::NonFiniteScore`] is an answer
+/// that scored a row with no relevance score.
 #[derive(Debug)]
 pub enum EngineError {
     /// The sidecar's substrate refused, and the refusal is not about the
@@ -40,6 +41,12 @@ pub enum EngineError {
     /// construction, and the wholesale rebuild is the permanent
     /// always-correct floor (ADR 0021).
     SidecarDamaged { what: String },
+    /// A nearest answer scored a row with no relevance score: NaN or an
+    /// infinity. Judged for every row the scan scores, kept or not, so a
+    /// score ranked below every finite one refuses the answer as surely as
+    /// one ranked above. Not damage: a model can produce the values that
+    /// score so, and a rebuild would derive them again.
+    NonFiniteScore { path: String, score: f32 },
 }
 
 impl EngineError {
@@ -51,7 +58,8 @@ impl EngineError {
             EngineError::Db(_)
             | EngineError::Store(_)
             | EngineError::Embed { .. }
-            | EngineError::WrongWidth { .. } => None,
+            | EngineError::WrongWidth { .. }
+            | EngineError::NonFiniteScore { .. } => None,
         }
     }
 }
@@ -77,6 +85,12 @@ impl fmt::Display for EngineError {
             }
             EngineError::SidecarDamaged { what } => {
                 write!(f, "the sidecar is damaged: {what}")
+            }
+            EngineError::NonFiniteScore { path, score } => {
+                write!(
+                    f,
+                    "the engine scored `{path}` {score}, which is no relevance score"
+                )
             }
         }
     }

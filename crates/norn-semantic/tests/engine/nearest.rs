@@ -262,3 +262,41 @@ fn a_row_the_answer_does_not_admit_is_never_scored() {
     assert_eq!(restricted.work.rows_read, 3);
     assert_eq!(restricted.work.rows_scored, 2);
 }
+
+/// **Every row the scan scores is judged a relevance score, kept or not.** A
+/// row whose embedding is overwritten with a positive or a negative NaN, or a
+/// positive or a negative infinity, refuses the answer naming that row, at a
+/// limit of one over forty rows: a score ranked below every finite one is
+/// pushed out of what the scan holds, and it refuses all the same. A test
+/// refusing that row leaves it unscored, and the answer stands.
+#[test]
+fn a_non_finite_score_refuses_the_answer_wherever_the_scan_ranks_it() {
+    let (scratch, engine) = drained_over("nearest-non-finite", 40);
+    let dimensions = engine.projection().expect("a projection")[0].values.len();
+    let connection = match norn_db::connect(&scratch.sidecar_path()).expect("the sidecar") {
+        norn_db::Attempt::Connected(connection) => connection,
+        norn_db::Attempt::Unreadable { detail } => panic!("the sidecar is unreadable: {detail}"),
+    };
+    // Little-endian f32 words: +NaN, -NaN, +infinity, -infinity.
+    for word in ["0000c07f", "0000c0ff", "0000807f", "000080ff"] {
+        connection
+            .execute_batch(&format!(
+                "UPDATE document_vectors SET embedding = x'{}' WHERE path = 'docs/0000.md'",
+                word.repeat(dimensions)
+            ))
+            .expect("damaging one row");
+        let refused = engine
+            .nearest_among("alpha3 bravo1", 1, |_| true)
+            .expect_err("an answer over a row scored with no relevance score");
+        let norn_semantic::EngineError::NonFiniteScore { path, .. } = &refused else {
+            panic!("{word}: {refused:?}");
+        };
+        assert_eq!(path, "docs/0000.md", "{word}");
+        assert!(refused.sidecar_damage().is_none(), "{word}");
+
+        let unscored = engine
+            .nearest_among("alpha3 bravo1", 1, |path| path != "docs/0000.md")
+            .expect("an answer that never scored the row");
+        assert_eq!(unscored.work.rows_scored, 39, "{word}");
+    }
+}

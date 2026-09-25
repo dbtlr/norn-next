@@ -463,7 +463,9 @@ pub(crate) fn engine_refusal_told(error: &EngineError) -> String {
         EngineError::Store(refused) => {
             format!("the lane-1 store refused: {}", store_refusal_told(refused))
         }
-        EngineError::Embed { .. } | EngineError::WrongWidth { .. } => error.to_string(),
+        EngineError::Embed { .. }
+        | EngineError::WrongWidth { .. }
+        | EngineError::NonFiniteScore { .. } => error.to_string(),
         EngineError::SidecarDamaged { .. } => "the sidecar is damaged".to_string(),
     }
 }
