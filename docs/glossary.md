@@ -170,7 +170,7 @@ _Avoid_: Event queue, event bus
 The identity a derived database carries from creation to discard. Progress recorded against one epoch is not valid in the next.
 
 **Watermark**:
-How far an engine has drained one feed: the store's write generation at the last completion of that feed, qualified by the store epoch it was observed in. Freshness is a watermark judged against a store reading.
+How far an engine has drained one feed: how many writes the store had committed when the engine last read that feed to its end, qualified by the store epoch that count was taken in. Freshness is how many committed writes a reader's view of the store holds past the watermark.
 _Avoid_: Cursor (a cursor is a feed position, not a store generation)
 
 **Sidecar revision**:
