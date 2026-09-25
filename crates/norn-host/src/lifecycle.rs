@@ -1959,8 +1959,9 @@ fn reclaim_unwound_leg<O: EntryOps>(
 ///
 /// The unwind drops the job's own sender before the entry is reconciled, so
 /// the asker is held on the worker's second sender until this runs, and is
-/// told where the entry stands rather than that the host stopped. A reply the
-/// leg already sent before it unwound fills the channel, and this adds nothing.
+/// told where the entry stands rather than that the host stopped. A leg that
+/// sent its reply before it unwound has answered already, and what this sends
+/// reaches no one.
 fn answer_unwound_reload<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     name: &VaultName,
