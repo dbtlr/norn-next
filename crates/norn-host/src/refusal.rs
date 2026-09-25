@@ -612,6 +612,63 @@ pub(crate) fn data_dir_refusal_told(error: &norn_fs::Refusal) -> String {
     }
 }
 
+/// A refusal met reading or writing the registry file in words, naming no
+/// file.
+///
+/// The registry file sits in the host's config directory, so a path any of
+/// these names is a path into that directory. The account keeps the act that
+/// failed and what refused it, and drops every path, as
+/// [`data_dir_refusal_told`] does for the data directory. The file's own
+/// rendering keeps the path for the log lines and the machine surface that
+/// read it.
+///
+/// The match carries no wildcard, so a variant minted in the config crate
+/// takes its stance on what it tells here.
+pub(crate) fn config_refusal_told(error: &norn_config::ConfigError) -> String {
+    use norn_config::ConfigError;
+    match error {
+        ConfigError::Io {
+            operation, message, ..
+        } => format!("{operation} in the config directory failed: {message}"),
+        ConfigError::MutationUnconfirmed {
+            operation, message, ..
+        } => format!(
+            "the registry file holds the change, and {operation} it afterwards failed: \
+             {message}"
+        ),
+        ConfigError::Corrupt { reason, .. } => {
+            format!("the registry file is not readable: {reason}")
+        }
+        ConfigError::VersionAhead {
+            found, supported, ..
+        } => format!(
+            "the registry file is at schema version {found} and this build reads {supported}"
+        ),
+        ConfigError::DanglingSymlink { .. } => {
+            "a symlink on the way to the registry file has no target".to_string()
+        }
+        ConfigError::SymlinkedFile { .. } => "the registry file is a symlink".to_string(),
+        ConfigError::InsecurePermissions { mode, .. } => {
+            format!(
+                "a file in the config directory has mode {mode:04o}, which reaches beyond its owner"
+            )
+        }
+        ConfigError::IllegalPath {
+            subject, problem, ..
+        } => format!("a {subject} is not one the registry file records: {problem}"),
+        ConfigError::NestedMutation { .. } => {
+            "the registry file is already being changed further up this thread's stack".to_string()
+        }
+        // None of these names a path: each is told as it renders.
+        ConfigError::Environment { .. }
+        | ConfigError::DuplicateLabel { .. }
+        | ConfigError::EmptySecret { .. }
+        | ConfigError::ClockBeforeEpoch
+        | ConfigError::IllegalName { .. }
+        | ConfigError::IllegalLabel { .. } => error.to_string(),
+    }
+}
+
 /// The envelope an entry that is serving with no read seam refuses with.
 fn reader_unavailable(detail: impl Into<String>) -> ErrorEnvelope {
     ErrorEnvelope::new(

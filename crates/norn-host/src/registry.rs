@@ -235,8 +235,8 @@ pub enum RecordRefusal {
     Unwritable(RegistryUnwritable),
 }
 
-/// Why the registry file was not written: the write's own account, for a
-/// person reading a message or a log.
+/// Why the registry file was not read or written: the act that failed and
+/// what refused it, naming no file, for a person reading a message or a log.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryUnwritable {
     detail: String,

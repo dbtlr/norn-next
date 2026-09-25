@@ -435,13 +435,13 @@ impl ProductionEntryOps {
     /// key resolves to — the one inside the derived directory, and the one
     /// under the vault root's fallback directory, found at the directory the
     /// registered root resolves to now. A directory that is one of the
-    /// `standing` roots is no home to discard. The lock file stays, and so
-    /// does the derived directory that holds it.
+    /// `spared` roots is no home to discard. The lock file stays, and so does
+    /// the derived directory that holds it.
     ///
     /// Only under the vault's maintainer lock, for a maintainership that is
     /// ending. The refusal is told without the paths it names, because the
     /// account reaches a caller that holds no hold on the derived state.
-    fn discard_state(&self, registration: &Registration, standing: &[&Path]) -> Result<(), String> {
+    fn discard_state(&self, registration: &Registration, spared: &[&Path]) -> Result<(), String> {
         let name = &registration.name;
         let derived = self.derived(name);
         Store::discard_at(&derived.join(STORE_FILE))
@@ -452,7 +452,7 @@ impl ProductionEntryOps {
             &canonical_spelling(registration.root.as_path()),
             &derived.join(DATA_TMP),
             &maintainership_key(&self.dirs, name),
-            standing,
+            spared,
         )
         .map_err(|refused| crate::refusal::data_dir_refusal_told(&refused))
     }
@@ -1306,7 +1306,7 @@ impl EntryOps for ProductionEntryOps {
     /// A write whose replacement landed and whose durability could not be
     /// confirmed is a written change: every reader of the file sees it, so
     /// the host's serving set follows it rather than standing as though the
-    /// file had refused.
+    /// file had refused. A refusal is told without the paths it names.
     #[allow(clippy::disallowed_methods)] // The registry surface is this crate's.
     fn record(&self, registration: &Registration) -> Result<(), RecordRefusal> {
         let recorded = norn_config::registry::mutate(&self.dirs, |registry| {
@@ -1320,7 +1320,7 @@ impl EntryOps for ProductionEntryOps {
             Ok(true) | Err(norn_config::ConfigError::MutationUnconfirmed { .. }) => Ok(()),
             Ok(false) => Err(RecordRefusal::AlreadyRecorded),
             Err(refused) => Err(RecordRefusal::Unwritable(RegistryUnwritable::new(
-                refused.to_string(),
+                crate::refusal::config_refusal_told(&refused),
             ))),
         }
     }
@@ -1336,8 +1336,10 @@ impl EntryOps for ProductionEntryOps {
     /// is the derived database and the files its journal leaves beside it,
     /// the semantic sidecar and its own, and both shadow homes the vault's
     /// maintainership key resolves to; the lock file and the derived
-    /// directory holding it stay. The lock refusals are told without the
-    /// paths they name.
+    /// directory holding it stay. The registry file's own lock is held across
+    /// the discard, so another writer of the file waits for it too. The lock
+    /// refusals and the registry file's are told without the paths they
+    /// name.
     #[allow(clippy::disallowed_methods)] // The registry surface is this crate's.
     fn retire(
         &self,
@@ -1381,7 +1383,7 @@ impl EntryOps for ProductionEntryOps {
             Ok(Ok(())) | Err(norn_config::ConfigError::MutationUnconfirmed { .. }) => Ok(()),
             Ok(Err(refused)) => Err(RetireRefusal::Undiscarded(refused)),
             Err(refused) => Err(RetireRefusal::Unrecorded(RegistryUnwritable::new(
-                refused.to_string(),
+                crate::refusal::config_refusal_told(&refused),
             ))),
         }
     }
@@ -13421,7 +13423,25 @@ mod tests {
                 register(&host, &f.vault()).expect_err("a registration the file refused went in");
 
             assert_eq!(refusal.code(), &ReasonCode::HostRegistryUnwritable);
+            assert_names_no_path(&refusal, &f);
             assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// A refusal a registration change answers with names no file: the
+        /// account keeps the act that failed and what refused it, and a caller
+        /// holding no hold on the machine's directories reads no path to them.
+        fn assert_names_no_path(refusal: &ErrorEnvelope, f: &Fixture) {
+            let rendered = format!("{} {:?}", refusal.message(), refusal.detail());
+            let tail = f
+                .root
+                .root()
+                .file_name()
+                .expect("a scratch directory name")
+                .to_string_lossy();
+            assert!(
+                !rendered.contains(tail.as_ref()),
+                "the refusal names a path under the scratch root: {rendered}"
+            );
         }
 
         /// A data directory in which the maintainer lock cannot be taken
@@ -13504,6 +13524,7 @@ mod tests {
                     &ReasonCode::HostRegistryUnwritable,
                     "{label}"
                 );
+                assert_names_no_path(&refusal, &f);
                 assert!(
                     fs::metadata(dirs.derived_dir(&notes()).join("store.sqlite3")).is_ok(),
                     "{label}: the derived database was discarded"

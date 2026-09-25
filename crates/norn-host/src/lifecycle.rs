@@ -432,10 +432,11 @@ pub trait EntryOps: Send + Sync + 'static {
     /// a file this build cannot read refuses before anything is discarded.
     /// Then the derived state is discarded and the file written without the
     /// name, in that order, so a discard that refuses leaves the file
-    /// recording the vault. The lock goes back after the write, on every path.
-    /// The lock file itself is never removed, and neither is anything in the
-    /// vault's own tree that is not the ops' own, nor a directory that is one
-    /// of the `standing` registrations' roots.
+    /// recording the vault. The lock goes back when this returns, on every
+    /// path, and not before the write. The lock file itself is never removed,
+    /// and neither is anything in the vault's own tree that is not the ops'
+    /// own, nor a directory that is the root of one of the `standing`
+    /// registrations or of a registration the file records.
     ///
     /// The caller keeps every door of its own off the vault before this runs,
     /// so nothing in this process reaches for the lock while it is held here.
