@@ -726,13 +726,15 @@
       "sources": ["NRN-433", "NRN-440", "NRN-356", "NRN-357", "NRN-350", "NRN-432", "NRN-123"],
       "binding": {
         "status": "dormant",
-        "reason": "the recognition half is carried: crates/norn-text/src/link.rs is the one authority, and crates/norn-text/tests/markdown_links.rs holds code opacity, the destination split, the caret rule and one link universe across all four accessors. The target-normalization half has a consumer now: crates/norn-store/src/path.rs drops a leaf's markdown extension and opens both readings of a leaf that carries a dot, crates/norn-store/src/link.rs derives a stored link's addressing and its link-index keys through it, and crates/norn-store/src/read/naming.rs resolves a link's target through the one resolver at the read. No test holds the link universe equal across the consumers that compute it, and no verb a surface dispatches reads a link, because crates/norn-serve is not in the workspace.",
+        "reason": "the recognition half is carried: crates/norn-text/src/link.rs is the one authority, and crates/norn-text/tests/markdown_links.rs holds code opacity, the destination split, the caret rule and one link universe across all four accessors. The target-normalization half has a consumer now: which reading a link's target takes is selected in one place, the address in crates/norn-wire/src/document.rs, protocol first and family second, a Markdown path read by URL rules with its query cut off; crates/norn-host/src/derivation.rs::the_text_layers_reading_of_a_link_agrees_with_the_wires_address holds norn-text's syntax-only reading of a link in agreement with it; crates/norn-store/src/link.rs maps it onto the store's addressing and derives each link's index keys at the write through crates/norn-store/src/path.rs, which drops a leaf's markdown extension and opens both readings of a leaf that carries a dot; and crates/norn-store/src/read/naming.rs resolves what a link names at the read from those keys. No test holds the link universe equal across the consumers that compute it, and no verb a surface dispatches reads a link, because crates/norn-serve is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-text/src/link.rs" },
           { "present": "crates/norn-text/tests/markdown_links.rs" },
           { "present": "crates/norn-store/src/path.rs" },
           { "present": "crates/norn-store/src/link.rs" },
           { "present": "crates/norn-store/src/read/naming.rs" },
+          { "present": "crates/norn-wire/src/document.rs" },
+          { "symbol-present": "crates/norn-host/src/derivation.rs::the_text_layers_reading_of_a_link_agrees_with_the_wires_address" },
           { "absent": "crates/norn-serve" }
         ]
       }

@@ -3,47 +3,51 @@
 //!
 //! A link is stored as it was written, and what it names is decided at read
 //! time against the vault as it stands. What this module decides is a function
-//! of the link and the document holding it alone, so it is the same at a write
-//! and at every read: which reading of the target applies, and — for a target
-//! that can name a document — the keys a links-to seek finds the link by.
+//! of the link and the document holding it alone, so it is decided once, at
+//! the write: which reading of the target applies, and — for a target that can
+//! name a document — the keys the link index holds it under, which every read
+//! of what the link names seeks.
 //!
-//! # The addressing is the link's own
+//! # The addressing is the wire's
 //!
-//! **Protocol first, family second, and only a document link is judged.** A
-//! link that names no document — written with a protocol, or with a target
-//! naming an attachment ([`norn_wire::link_names_a_document`]) — is not
-//! judged, resolves to nothing and is held under no key. A wikilink's target
-//! is a suffix address, read through the one resolver. A Markdown link's
-//! target is a path: percent-decoded, joined to the directory of the document
-//! holding it — or to the vault root where it opens with a separator — with
-//! `.` and `..` segments folded in, and never reduced, so `[t](foo)` names the
+//! Which reading applies is [`norn_wire::LinkAddress`], the one addressing
+//! selector: protocol first, family second. [`Addressing`] maps it onto what
+//! the store reads. A link addressed elsewhere is held under no key. A suffix
+//! address is read through the one resolver, whatever its leaf carries: a
+//! target naming an attachment still resolves to a document carrying that
+//! name, and is judged by what it resolves to. A path is read by URL rules:
+//! split into segments on the separator first, each segment then
+//! percent-decoded — so an encoded separator is a character inside its
+//! segment, and a segment holding one names no document — and joined to the
+//! directory of the document holding the link, or to the vault root, with `.`
+//! and `..` segments folded in and nothing reduced, so `[t](foo)` names the
 //! path `foo` and never `foo.md`. A path that climbs above the vault root, or
-//! that is no document path, names no document. A link with an empty target
-//! is a same-document anchor, and names the document holding it.
+//! that is no document path, names no document. An empty target names the
+//! document holding the link.
 //!
-//! # The keys are the link's side of a links-to seek
+//! # The keys are what every read of a link seeks
 //!
 //! A suffix address's keys are its probe's prefixes — one per reduction of a
 //! dotted leaf — in the segment-reversed form a document's suffix key takes,
 //! beside the target's segment count its ambiguity-ignore test reads. A path's
 //! key is the path itself. Each is held raw and with ASCII case folded, so a
-//! links-to seek reads the one the store's path order selects. A suffix key
-//! always ends in the separator and a path never does, so the two kinds share
-//! one key column and no key of one kind equals a key of the other.
+//! read seeks the one the store's path order selects. A suffix key always ends
+//! in the separator and a path never does, so the two kinds share one key
+//! column and no key of one kind equals a key of the other.
 
-use norn_wire::link_names_a_document;
+use norn_wire::LinkAddress;
 
-use crate::facts::{LinkFact, LinkFamily};
+use crate::facts::LinkFact;
 use crate::path::{DocumentPath, SuffixKey, fold_ascii_case, suffix_probe};
 
 /// The separator between segments, in a target and in a path alike.
 const SEPARATOR: char = '/';
 
-/// How a link's target reaches documents.
+/// How a link's target reaches documents, as the store reads it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Addressing<'a> {
-    /// The link names no document, so no resolution judges it.
-    NotJudged,
+    /// The link addresses no document, so it is held under no key.
+    Elsewhere,
     /// A suffix address, resolved through the one resolver.
     Suffix(&'a str),
     /// A vault path, resolved exactly, or `None` where the target names no
@@ -52,17 +56,15 @@ pub(crate) enum Addressing<'a> {
 }
 
 impl<'a> Addressing<'a> {
-    /// How `link`, held by the document at `holder`, reaches documents.
+    /// How `link`, held by the document at `holder`, reaches documents: the
+    /// wire's address, with a path read to the vault path it names.
     pub(crate) fn of(link: &'a LinkFact, holder: &DocumentPath) -> Self {
-        if !link_names_a_document(link.protocol.as_deref(), &link.target) {
-            return Addressing::NotJudged;
-        }
-        if link.target.is_empty() {
-            return Addressing::Path(Some(holder.as_str().to_string()));
-        }
-        match link.family {
-            LinkFamily::Wikilink => Addressing::Suffix(&link.target),
-            LinkFamily::Markdown => Addressing::Path(joined(holder, &link.target)),
+        match LinkAddress::of(link.family.wire(), link.protocol.as_deref(), &link.target) {
+            LinkAddress::Elsewhere => Addressing::Elsewhere,
+            LinkAddress::HoldingDocument => Addressing::Path(Some(holder.as_str().to_string())),
+            LinkAddress::Suffix(target) => Addressing::Suffix(target),
+            LinkAddress::Relative(path) => Addressing::Path(joined(directory_of(holder), path)),
+            LinkAddress::Rooted(path) => Addressing::Path(joined(Vec::new(), path)),
         }
     }
 }
@@ -80,11 +82,11 @@ pub(crate) struct LinkKey {
 }
 
 /// The keys the link index holds `link`, held by the document at `holder`,
-/// under: none for a link that names no document or names no vault path, a
+/// under: none for a link addressed elsewhere or naming no vault path, a
 /// suffix address's prefixes, or a path.
 pub(crate) fn link_keys(link: &LinkFact, holder: &DocumentPath) -> Vec<LinkKey> {
     match Addressing::of(link, holder) {
-        Addressing::NotJudged | Addressing::Path(None) => Vec::new(),
+        Addressing::Elsewhere | Addressing::Path(None) => Vec::new(),
         Addressing::Path(Some(path)) => vec![LinkKey {
             folded_key: fold_ascii_case(&path),
             key: path,
@@ -134,37 +136,42 @@ pub(crate) fn keys_naming(document: &DocumentPath, key: SuffixKey) -> Vec<String
     keys
 }
 
-/// The vault path a Markdown target names from the document at `holder`, or
-/// `None` where it names none.
+/// The segments of the directory holding the document at `holder`.
+fn directory_of(holder: &DocumentPath) -> Vec<String> {
+    holder
+        .as_str()
+        .rsplit_once(SEPARATOR)
+        .map(|(directory, _)| directory.split(SEPARATOR).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// The vault path `path` names read from the directory whose segments are
+/// `from` — the empty list being the vault root — or `None` where it names
+/// none.
 ///
-/// The target is percent-decoded first, and a decoding that is not UTF-8 names
-/// no path. A rooted target is read from the vault root and any other from the
-/// holder's directory. Empty and `.` segments are dropped, and `..` climbs one
-/// directory; a climb above the vault root names no path, and so does a
-/// result the document path grammar refuses.
-pub(crate) fn joined(holder: &DocumentPath, target: &str) -> Option<String> {
-    let decoded = percent_decoded(target)?;
-    let (mut segments, relative): (Vec<&str>, &str) = match decoded.strip_prefix(SEPARATOR) {
-        Some(rooted) => (Vec::new(), rooted),
-        None => (
-            holder
-                .as_str()
-                .rsplit_once(SEPARATOR)
-                .map(|(directory, _)| directory.split(SEPARATOR).collect())
-                .unwrap_or_default(),
-            decoded.as_str(),
-        ),
-    };
-    for segment in relative.split(SEPARATOR) {
+/// The path is split into segments first, and each is then percent-decoded,
+/// so an encoded separator is a character inside its segment: a decoding that
+/// holds a separator, or that is not UTF-8, names no path. Empty and `.`
+/// segments are dropped, and `..` climbs one directory; a climb above the
+/// vault root names no path, and so does a result the document path grammar
+/// refuses.
+pub(crate) fn joined(mut from: Vec<String>, path: &str) -> Option<String> {
+    for segment in path.split(SEPARATOR) {
         match segment {
             "" | "." => {}
             ".." => {
-                segments.pop()?;
+                from.pop()?;
             }
-            name => segments.push(name),
+            written => {
+                let decoded = percent_decoded(written)?;
+                if decoded.contains(SEPARATOR) {
+                    return None;
+                }
+                from.push(decoded);
+            }
         }
     }
-    let path = segments.join("/");
+    let path = from.join("/");
     DocumentPath::new(&path).ok().map(|_| path)
 }
 
@@ -204,12 +211,35 @@ mod tests {
         DocumentPath::new(path).expect("a document path")
     }
 
+    /// The vault path a Markdown link to `target` names from `holder`.
+    fn named(holder: &DocumentPath, target: &str) -> Option<String> {
+        let link = LinkFact {
+            family: crate::facts::LinkFamily::Markdown,
+            embed: false,
+            protocol: None,
+            target: target.to_string(),
+            title: None,
+            anchor: None,
+            block_ref: None,
+            span: crate::facts::Span {
+                line: 1,
+                column: 1,
+                byte_offset: 0,
+            },
+        };
+        match Addressing::of(&link, holder) {
+            Addressing::Path(path) => path,
+            other => panic!("`{target}` is no path: {other:?}"),
+        }
+    }
+
     /// A Markdown target is joined to its document's directory, or to the
-    /// vault root where it is rooted, and never reduced.
+    /// vault root where it is rooted, split before it is decoded, its query
+    /// cut off, and never reduced.
     #[test]
     fn a_markdown_target_names_the_path_it_joins_to() {
         let holder = at("a/b/doc.md");
-        for (target, named) in [
+        for (target, named_path) in [
             ("./c.md", Some("a/b/c.md")),
             ("c.md", Some("a/b/c.md")),
             ("../x/y.md", Some("a/x/y.md")),
@@ -219,21 +249,25 @@ mod tests {
             ("../x/my%20note.md", Some("a/x/my note.md")),
             ("foo", Some("a/b/foo")),
             ("./sub/./c.md", Some("a/b/sub/c.md")),
+            ("q.md?x=1", Some("a/b/q.md")),
+            ("sub%2Fc.md", None),
+            ("%2E%2E/c.md", None),
             ("../../../escape.md", None),
             ("..", Some("a")),
             ("../..", None),
             ("%ff.md", None),
             ("back\\slash.md", None),
+            ("", Some("a/b/doc.md")),
         ] {
             assert_eq!(
-                joined(&holder, target).as_deref(),
-                named,
+                named(&holder, target).as_deref(),
+                named_path,
                 "`{target}` from `{}`",
                 holder.as_str()
             );
         }
-        assert_eq!(joined(&at("top.md"), "../x.md"), None);
-        assert_eq!(joined(&at("top.md"), "x.md").as_deref(), Some("x.md"));
+        assert_eq!(named(&at("top.md"), "../x.md"), None);
+        assert_eq!(named(&at("top.md"), "x.md").as_deref(), Some("x.md"));
     }
 
     /// A document is named by each segment-aligned prefix of its suffix key

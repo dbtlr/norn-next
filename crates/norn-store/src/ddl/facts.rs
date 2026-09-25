@@ -36,9 +36,10 @@
 //! not as a resolved edge, and not as a mode column either.
 //!
 //! **There is deliberately no addressing-mode column.** How a target resolves
-//! derives from the fact protocol-first and family-second — `norn-text`'s
-//! `Link::resolution` states the rule, and [`crate::link`] reads the same two
-//! columns by it, since this crate links no text layer. A column beside
+//! derives from the fact protocol-first and family-second: the wire's
+//! `LinkAddress` is the one selector, which [`crate::link`] reads the family,
+//! protocol and target columns through, and `norn-text`'s syntax-only
+//! `Link::resolution` agrees with it. A column beside
 //! `family` and `protocol` would be a second answer to a question those two
 //! already settle, and a stored answer that disagreed with them would be
 //! believed. For the same reason the store never re-derives emission order
@@ -63,13 +64,15 @@
 //!   key, or two for a leaf carrying a dot, which reduces both ways — beside
 //!   the number of segments the target spells, which the ambiguity-ignore test
 //!   reads.
-//! - A Markdown target is a path, and its one key is the vault path it joins
-//!   to from the holding document, percent-decoded; a same-document anchor's
-//!   key is the holding document's own path. `segments` is `NULL` beside a
-//!   path's key.
+//! - A path — a Markdown target, or a `vault://` stem — has one key: the vault
+//!   path it names, read from the holding document's directory or from the
+//!   vault root by URL rules; a same-document anchor's key is the holding
+//!   document's own path. `segments` is `NULL` beside a path's key.
 //!
-//! A link that names no document — a protocol, an attachment — and a target
-//! that names no vault path are held under no key.
+//! A target naming an attachment is keyed like any other, since a document
+//! may carry the attachment's name. A link addressed elsewhere — a protocol
+//! other than `vault`, a Markdown target opening with a URI scheme — and a
+//! target that names no vault path are held under no key.
 //!
 //! **A document's keys are a handful, so a links-to seek is a handful of
 //! equality seeks.** The documents a link could name share a key with it: a

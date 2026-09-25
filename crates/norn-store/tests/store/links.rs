@@ -5,9 +5,10 @@
 //! A link row carries the documents its target resolves to now and the health
 //! that gives it, on a find's links column and a get's links page alike. A
 //! wikilink's target is a suffix address read through the one resolver; a
-//! Markdown link's is a path joined to its document's directory; a link naming
-//! no document is not judged. A `links_to` part matches the documents holding
-//! a link that resolves to exactly the one document its own target names.
+//! Markdown link's is a path joined to its document's directory; a link is
+//! judged by resolving it first, and one addressed elsewhere is not judged. A
+//! `links_to` part matches the documents holding a link that resolves to
+//! exactly the one document its own target names.
 
 use std::sync::Arc;
 
@@ -377,6 +378,95 @@ fn a_markdown_link_names_the_one_path_it_joins_to() {
     }
 }
 
+/// A vault whose `x/src.md` holds a link of every address shape, beside the
+/// documents they may name.
+fn addressed() -> Vec<DocumentFacts> {
+    vec![
+        holding("v1.2.md", Vec::new()),
+        holding("diagram.png.md", Vec::new()),
+        holding("notes/glossary.md", Vec::new()),
+        holding("x/y.md", Vec::new()),
+        holding("x/a/b.md", Vec::new()),
+        holding("x/q.md", Vec::new()),
+        holding(
+            "x/src.md",
+            vec![
+                // 0: a dotted leaf reduced to the document it names.
+                wikilink("v1.2"),
+                // 1: an attachment no document is.
+                wikilink("photo.png"),
+                // 2: an attachment's name a document carries.
+                wikilink("diagram.png"),
+                // 3: a `vault://` wikilink, a path from the vault root.
+                link(
+                    LinkFamily::Wikilink,
+                    Some("vault"),
+                    "notes/glossary.md",
+                    None,
+                ),
+                // 4: a `vault://` Markdown link.
+                link(LinkFamily::Markdown, Some("vault"), "x/y.md", None),
+                // 5: a URI scheme with no `//`.
+                markdown("mailto:someone@example.com"),
+                // 6: another.
+                markdown("tel:+1-555-0100"),
+                // 7: an encoded separator inside one segment.
+                markdown("a%2Fb.md"),
+                // 8: the separator itself.
+                markdown("a/b.md"),
+                // 9: a query, which is not part of the path.
+                markdown("q.md?x=1"),
+                // 10: a rooted path.
+                markdown("/x/y.md"),
+            ],
+        ),
+    ]
+}
+
+/// **A link is judged by resolving it first, and its address is read
+/// protocol first and family second**, on either root: `[[v1.2]]` names
+/// `v1.2.md`; `[[photo.png]]` naming no document is an attachment and not
+/// judged, while `[[diagram.png]]` names `diagram.png.md` and is healthy; a
+/// `vault://` link of either family is a path from the vault root; a Markdown
+/// target opening with a URI scheme is not judged; a Markdown target is split
+/// into segments before it is decoded, so `%2F` is a character inside a
+/// segment and names no document; and its query is not part of its path.
+#[test]
+fn a_link_is_judged_by_resolving_it_first() {
+    for order in [Sensitive, Folding] {
+        let linked = Linked::holding(&format!("links-addressed-{order:?}"), order, &addressed());
+        let links = linked.links("x/src.md");
+        for (at, expected) in [
+            (0, names(LinkHealth::Healthy, &["v1.2.md"])),
+            (1, names(LinkHealth::NotJudged, &[])),
+            (2, names(LinkHealth::Healthy, &["diagram.png.md"])),
+            (3, names(LinkHealth::Healthy, &["notes/glossary.md"])),
+            (4, names(LinkHealth::Healthy, &["x/y.md"])),
+            (5, names(LinkHealth::NotJudged, &[])),
+            (6, names(LinkHealth::NotJudged, &[])),
+            (7, names(LinkHealth::Broken, &[])),
+            (8, names(LinkHealth::Healthy, &["x/a/b.md"])),
+            (9, names(LinkHealth::Healthy, &["x/q.md"])),
+            (10, names(LinkHealth::Healthy, &["x/y.md"])),
+        ] {
+            assert_eq!(
+                reading(&links[at]),
+                expected,
+                "{order:?} link {at}, `{}`",
+                links[at].target
+            );
+        }
+        for target in ["v1.2", "diagram.png", "notes/glossary", "x/a/b", "x/q"] {
+            assert_eq!(
+                linked.backlinks(target),
+                ["x/src.md"],
+                "{order:?} `{target}`"
+            );
+        }
+        assert_eq!(linked.backlinks("x/y"), ["x/src.md"], "{order:?}");
+    }
+}
+
 /// **A `%` spells a byte only before two hexadecimal digits**: `%+1` is no
 /// escape, so `[t](100%+1.md)` names the document whose name holds those
 /// three characters as written.
@@ -396,11 +486,12 @@ fn a_percent_not_before_two_hexadecimal_digits_is_itself() {
     );
 }
 
-/// **A link that names no document is not judged**: one written with a
-/// protocol and one naming an attachment each carry no document and the
-/// fourth health, on either root.
+/// **A link addressed elsewhere, or naming an attachment no document is, is
+/// not judged**: one written with a protocol and one naming an attachment
+/// that resolves to no document each carry no document and the fourth
+/// health, on either root.
 #[test]
-fn a_link_that_names_no_document_is_not_judged() {
+fn a_link_addressed_elsewhere_or_to_an_absent_attachment_is_not_judged() {
     for order in [Sensitive, Folding] {
         let linked = Linked::new(&format!("links-unjudged-{order:?}"), order, 0);
         let links = linked.links("src/a.md");

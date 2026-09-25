@@ -16,7 +16,7 @@ use norn_wire::{Anchor, Candidate, CandidateHead, LinkRow};
 
 use super::Ran;
 use crate::error::{self, StoreError};
-use crate::facts::{CANDIDATE_HEAD, LinkFact, LinkFamily};
+use crate::facts::{CANDIDATE_HEAD, LinkFact};
 use crate::find::{
     FindStatement, compose_candidate_suffix, compose_class_head, compose_class_total,
     compose_path_head, compose_path_total, wire_span,
@@ -84,7 +84,7 @@ impl Snapshot {
         record: &mut Vec<Ran>,
     ) -> Result<LinkRow, StoreError> {
         let head = match Addressing::of(&link, holder) {
-            Addressing::NotJudged | Addressing::Path(None) => None,
+            Addressing::Elsewhere | Addressing::Path(None) => None,
             Addressing::Suffix(target) => {
                 match TargetClass::compile(target, self.path_order(), ignore) {
                     Ok(class) => Some(self.class_head(&class, record)?),
@@ -97,10 +97,7 @@ impl Snapshot {
             None => CandidateHead::new([], 0).expect("no candidate heads no document"),
             Some(head) => self.candidates(head, ignore, record)?,
         };
-        let family = match link.family {
-            LinkFamily::Wikilink => norn_wire::LinkFamily::Wikilink,
-            LinkFamily::Markdown => norn_wire::LinkFamily::Markdown,
-        };
+        let family = link.family.wire();
         let anchor = match (link.block_ref, link.anchor) {
             (Some(id), _) => Some(Anchor::block(id)),
             (None, Some(text)) => Some(Anchor::heading(text)),

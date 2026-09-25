@@ -232,11 +232,14 @@ fn link(family: LinkFamily, protocol: Option<&str>, target: &str) -> LinkFact {
 /// **A link is held under the keys a links-to seek reads**, derived from the
 /// link and the path of the document holding it. A wikilink's are its suffix
 /// address's segment-reversed prefixes, one per reduction of a dotted leaf,
-/// beside the segments the target spells; a Markdown link's is the vault path
-/// it joins to, percent-decoded and never reduced; a same-document anchor's is
-/// the holding document's own path. A link that names no document — a
-/// protocol, an attachment — and a target that names no vault path or no
-/// suffix address are held under no key. Each key is held raw and folded.
+/// beside the segments the target spells, an attachment's name among them; a
+/// path's — a Markdown target's or a `vault://` stem's — is the vault path it
+/// names, split before each segment is percent-decoded, its query cut off and
+/// nothing reduced; a same-document anchor's is the holding document's own
+/// path. A link addressed elsewhere — a protocol other than `vault`, a
+/// Markdown target opening with a URI scheme — and a target that names no
+/// vault path or no suffix address are held under no key. Each key is held
+/// raw and folded.
 #[test]
 fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
     let scratch = Scratch::new("link-keys");
@@ -253,6 +256,10 @@ fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
         link(LinkFamily::Markdown, Some("https"), "example.com/page.md"),
         link(LinkFamily::Wikilink, None, "picture.png"),
         link(LinkFamily::Wikilink, None, "../relative"),
+        link(LinkFamily::Markdown, Some("vault"), "notes/X.md?raw=1"),
+        link(LinkFamily::Markdown, None, "mailto:someone@example.com"),
+        link(LinkFamily::Markdown, None, "sub%2Fc.md"),
+        link(LinkFamily::Markdown, None, "q.md?x=1"),
     ];
     let mut request = store.begin_request();
     write_document(&mut request, &facts);
@@ -276,6 +283,10 @@ fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
             key(3, "a/b/foo", "a/b/foo", None),
             key(4, "top.md", "top.md", None),
             key(6, "a/b/doc.md", "a/b/doc.md", None),
+            key(8, "picture.png/", "picture.png/", Some(1)),
+            key(8, "picture/", "picture/", Some(1)),
+            key(10, "notes/X.md", "notes/x.md", None),
+            key(13, "a/b/q.md", "a/b/q.md", None),
         ]
     );
 

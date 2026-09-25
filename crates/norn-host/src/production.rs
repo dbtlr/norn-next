@@ -2116,9 +2116,11 @@ where
     }
 }
 
+/// Whether `path` names a document: its extension is the wire's document
+/// extension, in any ASCII case.
 fn is_markdown(path: &Path) -> bool {
     path.extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(norn_wire::DOCUMENT_EXTENSION))
 }
 
 /// The order a store's rows are derived under, for a vault root the

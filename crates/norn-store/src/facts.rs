@@ -72,6 +72,14 @@ impl LinkFamily {
         }
     }
 
+    /// The family as the wire names it.
+    pub(crate) const fn wire(self) -> norn_wire::LinkFamily {
+        match self {
+            LinkFamily::Wikilink => norn_wire::LinkFamily::Wikilink,
+            LinkFamily::Markdown => norn_wire::LinkFamily::Markdown,
+        }
+    }
+
     pub(crate) fn from_str(stored: &str) -> Option<Self> {
         match stored {
             "wikilink" => Some(LinkFamily::Wikilink),

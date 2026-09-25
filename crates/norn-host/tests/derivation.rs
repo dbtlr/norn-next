@@ -59,7 +59,7 @@ use norn_wire::FindingKind;
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(3),
-    "c218ce1f93da9468a8c4bac2c064b8c384d89b36f87c72026c9ae0fbd5dd1f66",
+    "64bfe508c5a084173e61564648e74fce47149263e30c597ff515b179a39eb9a8",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -217,8 +217,11 @@ setext title
 /// undeclared, both setext levels, every ATX level, containers, repeated and
 /// marked-up headings, a heading ending in a non-breaking space, both link
 /// families with and without protocol, title, anchor, block reference and
-/// embed, a percent-encoded Markdown target, one climbing out of the vault
-/// and one naming an attachment, body and frontmatter tags, declared and not, block ids, a
+/// embed, a percent-encoded Markdown target, one climbing out of the vault,
+/// one naming an attachment, a rooted one, one opening with a URI scheme, one
+/// carrying a query and one an encoded separator, a dotted wikilink, a
+/// same-document anchor, a wikilink no suffix address reads, `vault://` links
+/// of both families, body and frontmatter tags, declared and not, block ids, a
 /// frontmatter wikilink carrying an alias and an anchor, and a tag whose name
 /// carries a combining mark.
 const GLOSSARY: &str = "---
@@ -271,6 +274,8 @@ Embed ![[picture.png]] and ![[Notes#Setext|embedded]].
 Markdown [shown](notes/Deep%20Note.md) and [anchor](Glossary.md#use-norn-bold \"a title\") and [web](https://example.com/page) and ![image](assets/pic.png) and [block](Notes.md#^para-block) and [vault](vault://Notes).
 A wikilink with a protocol: [[https://example.com/wiki|external]].
 A Markdown link climbing out of the vault: [outside](../outside.md), and one to an attachment: [the picture](assets/pic.png).
+A dotted wikilink [[v1.2]], a same-document anchor [[#Repeated]], a wikilink no suffix address reads [[../relative]] and a vault wikilink [[vault://notes/Deep Note.md]].
+A rooted [rooted](/Notes.md), a scheme [mail](mailto:hi@example.com), a query [query](Notes.md?view=raw) and an encoded separator [slash](notes%2FDeep%20Note.md?x=1).
 
 A paragraph closing on a block id. ^glossary-block
 
@@ -424,15 +429,21 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         glossary.links.iter().any(|link| link.title.is_some()),
         "no link title is exercised"
     );
-    // The link index: the keys a links-to seek reads, derived from each link
-    // and the path of the document holding it.
-    let keys_of = |document: &norn_testkit::equivalence::ProjectedDocument, target: &str| {
+    // The link index: the keys every read of what a link names seeks,
+    // derived from each link and the path of the document holding it.
+    let keys_of = |document: &norn_testkit::equivalence::ProjectedDocument,
+                   protocol: Option<&str>,
+                   target: &str| {
         let at = document
             .links
             .iter()
-            .position(|link| link.target == target)
-            .unwrap_or_else(|| panic!("`{}` holds no link to `{target}`", document.path))
-            as u64;
+            .position(|link| link.protocol.as_deref() == protocol && link.target == target)
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{}` holds no link to {protocol:?} `{target}`",
+                    document.path
+                )
+            }) as u64;
         document
             .link_keys
             .iter()
@@ -440,30 +451,125 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             .map(|key| key.key.clone())
             .collect::<Vec<String>>()
     };
-    assert_eq!(
-        keys_of(glossary, "notes/Deep%20Note.md"),
-        ["notes/Deep Note.md"],
-        "no percent-encoded Markdown link is keyed by the path it decodes to"
-    );
-    assert_eq!(
-        keys_of(document("notes/Deep Note.md"), "../Notes.md"),
-        ["Notes.md"],
-        "no Markdown link climbing a directory is keyed by the path it joins to"
-    );
-    assert_eq!(
-        keys_of(glossary, "notes/Deep Note"),
-        ["Deep Note/notes/"],
-        "no wikilink is keyed by its suffix address"
-    );
-    for unkeyed in [
-        "../outside.md",
-        "picture.png",
-        "assets/pic.png",
-        "example.com/page",
+    let deep = document("notes/Deep Note.md");
+    for (holder, protocol, target, keys, shape) in [
+        (
+            glossary,
+            None,
+            "notes/Deep%20Note.md",
+            &["notes/Deep Note.md"][..],
+            "a percent-encoded Markdown link is keyed by the path it decodes to",
+        ),
+        (
+            deep,
+            None,
+            "../Notes.md",
+            &["Notes.md"],
+            "a Markdown link climbing a directory is keyed by the path it joins to",
+        ),
+        (
+            glossary,
+            None,
+            "notes/Deep Note",
+            &["Deep Note/notes/"],
+            "a wikilink is keyed by its suffix address",
+        ),
+        (
+            glossary,
+            None,
+            "v1.2",
+            &["v1.2/", "v1/"],
+            "a dotted wikilink is keyed by both reductions",
+        ),
+        (
+            glossary,
+            None,
+            "picture.png",
+            &["picture.png/", "picture/"],
+            "a wikilink naming an attachment is keyed by both reductions",
+        ),
+        (
+            glossary,
+            None,
+            "assets/pic.png",
+            &["assets/pic.png"],
+            "a Markdown link naming an attachment is keyed by its path",
+        ),
+        (
+            glossary,
+            None,
+            "",
+            &["Glossary.md"],
+            "a same-document anchor is keyed by its own document's path",
+        ),
+        (
+            glossary,
+            None,
+            "/Notes.md",
+            &["Notes.md"],
+            "a rooted Markdown link is keyed by the path from the vault root",
+        ),
+        (
+            glossary,
+            Some("vault"),
+            "Notes",
+            &["Notes"],
+            "a vault Markdown link is keyed by the path from the vault root",
+        ),
+        (
+            glossary,
+            Some("vault"),
+            "notes/Deep Note.md",
+            &["notes/Deep Note.md"],
+            "a vault wikilink is keyed by the path from the vault root",
+        ),
+        (
+            glossary,
+            None,
+            "Notes.md?view=raw",
+            &["Notes.md"],
+            "a Markdown link's query is not part of its key",
+        ),
+        (
+            glossary,
+            None,
+            "notes%2FDeep%20Note.md?x=1",
+            &[],
+            "an encoded separator is a character inside its segment, which no path holds",
+        ),
+        (
+            glossary,
+            None,
+            "../outside.md",
+            &[],
+            "a Markdown link climbing out of the vault names no path",
+        ),
+        (
+            glossary,
+            None,
+            "../relative",
+            &[],
+            "a wikilink no suffix address reads is keyed by nothing",
+        ),
+        (
+            glossary,
+            None,
+            "mailto:hi@example.com",
+            &[],
+            "a Markdown link opening with a URI scheme is addressed elsewhere",
+        ),
+        (
+            glossary,
+            Some("https"),
+            "example.com/page",
+            &[],
+            "a link written with a protocol is addressed elsewhere",
+        ),
     ] {
-        assert!(
-            keys_of(glossary, unkeyed).is_empty(),
-            "`{unkeyed}` names no document and is keyed"
+        assert_eq!(
+            keys_of(holder, protocol, target),
+            keys,
+            "the corpus does not hold that {shape}"
         );
     }
     // A wikilink embed is the one embed the text layer records; the Markdown

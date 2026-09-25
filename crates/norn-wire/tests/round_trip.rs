@@ -22,9 +22,9 @@ use norn_wire::{
     EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind,
     FieldType, FieldValue, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints,
     Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally, LadderDeclaration,
-    LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, ModelIdentity,
-    Moved, NameSet, NoProblems, NonFiniteScore, NotReady, Page, PathRuleKind, PollBackend,
-    Predicate, Published, ReasonCode, RegisterParams, RegisterReport, Registration,
+    LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity,
+    ModelIdentity, Moved, NameSet, NoProblems, NonFiniteScore, NotReady, Page, PathRuleKind,
+    PollBackend, Predicate, Published, ReasonCode, RegisterParams, RegisterReport, Registration,
     RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
     ReloadStage, Replace, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp,
     Rung, RungReport, RungSet, SchemaSource, Score, SearchParams, SetParams, SetReport, Severity,
@@ -3367,55 +3367,159 @@ fn a_links_health_is_the_count_of_what_it_resolves_to() {
     assert_eq!(rows[1].health(), LinkHealth::Healthy);
     assert_eq!(rows[2].health(), LinkHealth::Ambiguous);
     assert_eq!(rows[3].health(), LinkHealth::NotJudged);
-    assert_eq!(LinkHealth::of_targets(0), LinkHealth::Broken);
-    assert_eq!(LinkHealth::of_targets(1), LinkHealth::Healthy);
-    assert_eq!(LinkHealth::of_targets(400), LinkHealth::Ambiguous);
 }
 
-/// **Only a link to a document is judged.** A link written with a protocol
-/// addresses whatever the protocol addresses, and a target whose last segment
-/// carries an extension other than the document extension names an
-/// attachment: neither is judged, whatever its head. A target whose last
-/// segment carries no extension, or the document extension in any ASCII case,
-/// names a document, and a dot in a directory segment or leading a name is no
-/// extension.
+/// **A link's address is selected protocol first and family second.** A
+/// protocol other than `vault` addresses no document, and a `vault://` stem is
+/// a path from the vault root. With no protocol, an empty target names the
+/// document holding the link, a wikilink's target is a suffix address — a
+/// colon in it is a character like any other — and a Markdown target is a
+/// path: from the vault root where it opens with the separator, and from the
+/// holding document's directory otherwise, its query cut off. A Markdown
+/// target opening with a URI scheme, `://` or not, addresses no document; a
+/// scheme opens with a letter and ends at the first colon, before any
+/// separator.
 #[test]
-fn a_link_that_names_no_document_is_not_judged() {
-    for (protocol, target) in [
-        (Some("https"), "example.com/page"),
-        (Some("vault"), "Notes"),
-        (None, "picture.png"),
-        (None, "assets/pic.png"),
-        (None, "archive.tar.gz"),
-        (None, "v1.2"),
+fn a_links_address_is_selected_protocol_first_and_family_second() {
+    use LinkFamily::{Markdown, Wikilink};
+    for (family, protocol, target, address) in [
+        (
+            Markdown,
+            Some("https"),
+            "example.com",
+            LinkAddress::Elsewhere,
+        ),
+        (
+            Wikilink,
+            Some("https"),
+            "example.com",
+            LinkAddress::Elsewhere,
+        ),
+        (
+            Wikilink,
+            Some("vault"),
+            "notes/x",
+            LinkAddress::Rooted("notes/x"),
+        ),
+        (
+            Markdown,
+            Some("vault"),
+            "notes/x.md?raw=1",
+            LinkAddress::Rooted("notes/x.md"),
+        ),
+        (Wikilink, None, "", LinkAddress::HoldingDocument),
+        (Markdown, None, "", LinkAddress::HoldingDocument),
+        (Markdown, None, "?x=1", LinkAddress::HoldingDocument),
+        (Wikilink, None, "notes/x", LinkAddress::Suffix("notes/x")),
+        (Wikilink, None, "mailto:x", LinkAddress::Suffix("mailto:x")),
+        (
+            Markdown,
+            None,
+            "mailto:someone@example.com",
+            LinkAddress::Elsewhere,
+        ),
+        (Markdown, None, "tel:", LinkAddress::Elsewhere),
+        (
+            Markdown,
+            None,
+            "Note+1.x-y:draft.md",
+            LinkAddress::Elsewhere,
+        ),
+        (
+            Markdown,
+            None,
+            "a/b:c.md",
+            LinkAddress::Relative("a/b:c.md"),
+        ),
+        (Markdown, None, "1a:b.md", LinkAddress::Relative("1a:b.md")),
+        (Markdown, None, ":b.md", LinkAddress::Relative(":b.md")),
+        (Markdown, None, "q.md?x=1", LinkAddress::Relative("q.md")),
+        (Markdown, None, "../x.md", LinkAddress::Relative("../x.md")),
+        (Markdown, None, "/x.md", LinkAddress::Rooted("x.md")),
     ] {
-        assert!(
-            !norn_wire::link_names_a_document(protocol, target),
-            "{protocol:?} {target} named a document"
-        );
         assert_eq!(
-            addressed_row(protocol, target, head([], 0)).health(),
-            LinkHealth::NotJudged,
-            "{protocol:?} {target}"
+            LinkAddress::of(family, protocol, target),
+            address,
+            "{family:?} {protocol:?} `{target}`"
         );
     }
-    for target in [
-        "notes",
-        "notes.md",
-        "Notes.MD",
-        "a.b/c",
-        ".hidden",
-        "../x/my%20note.md",
-        "",
+}
+
+/// **A link is judged by resolving it first.** A link addressed elsewhere —
+/// written with a protocol other than `vault`, or a Markdown target opening
+/// with a URI scheme — is not judged, whatever it resolved to. Any other link
+/// that resolves to documents is judged by how many, whatever its leaf
+/// carries. One that resolves to none is not judged where its leaf carries an
+/// extension other than the document extension, which names an attachment,
+/// and is broken otherwise: a leaf with no extension, or the document
+/// extension in any ASCII case. A dot in a directory segment or leading a
+/// name is no extension.
+#[test]
+fn a_link_is_judged_by_resolving_it_first() {
+    use LinkFamily::{Markdown, Wikilink};
+    let judged = |family, protocol: Option<&str>, target: &str, total: u64| {
+        let candidates: Vec<Candidate> = (0..total)
+            .map(|index| candidate(&format!("notes/c{index}")))
+            .collect();
+        LinkRow::new(
+            family,
+            false,
+            protocol.map(str::to_string),
+            target,
+            None,
+            None,
+            span(),
+            head(candidates, total),
+        )
+        .health()
+    };
+    for (family, protocol, target) in [
+        (Markdown, Some("https"), "example.com/page"),
+        (Wikilink, Some("https"), "example.com/wiki"),
+        (Markdown, None, "mailto:someone@example.com"),
+        (Markdown, None, "tel:+1-555-0100"),
     ] {
-        assert!(
-            norn_wire::link_names_a_document(None, target),
-            "{target} named no document"
+        for total in [0, 1, 2] {
+            assert_eq!(
+                judged(family, protocol, target, total),
+                LinkHealth::NotJudged,
+                "{family:?} {protocol:?} `{target}` resolving to {total}"
+            );
+        }
+    }
+    for (family, protocol, target, unresolved) in [
+        (Wikilink, None, "picture.png", LinkHealth::NotJudged),
+        (Markdown, None, "assets/pic.png", LinkHealth::NotJudged),
+        (Markdown, None, "pic.png?size=2", LinkHealth::NotJudged),
+        (Wikilink, None, "archive.tar.gz", LinkHealth::NotJudged),
+        (Wikilink, None, "v1.2", LinkHealth::NotJudged),
+        (
+            Wikilink,
+            Some("vault"),
+            "assets/pic.png",
+            LinkHealth::NotJudged,
+        ),
+        (Wikilink, None, "notes", LinkHealth::Broken),
+        (Markdown, None, "notes.md", LinkHealth::Broken),
+        (Wikilink, None, "Notes.MD", LinkHealth::Broken),
+        (Wikilink, None, "a.b/c", LinkHealth::Broken),
+        (Wikilink, None, ".hidden", LinkHealth::Broken),
+        (Wikilink, None, "note:draft", LinkHealth::Broken),
+        (Markdown, None, "../x/my%20note.md", LinkHealth::Broken),
+        (Markdown, None, "", LinkHealth::Broken),
+        (Wikilink, Some("vault"), "Notes", LinkHealth::Broken),
+    ] {
+        let label = format!("{family:?} {protocol:?} `{target}`");
+        assert_eq!(judged(family, protocol, target, 0), unresolved, "{label}");
+        assert_eq!(
+            judged(family, protocol, target, 1),
+            LinkHealth::Healthy,
+            "{label}"
         );
         assert_eq!(
-            addressed_row(None, target, head([], 0)).health(),
-            LinkHealth::Broken,
-            "{target}"
+            judged(family, protocol, target, 2),
+            LinkHealth::Ambiguous,
+            "{label}"
         );
     }
 }
@@ -3429,8 +3533,25 @@ fn a_links_judgement_is_read_back_off_its_addressing() {
     let read: LinkRow =
         serde_json::from_str(&json).unwrap_or_else(|error| panic!("reading {json}: {error}"));
     assert_eq!(read.health(), LinkHealth::NotJudged);
+    let json = addressed_row_json(
+        None,
+        "pic.png",
+        "healthy",
+        &candidate_values(&["pic.png"]),
+        1,
+    );
+    let read: LinkRow =
+        serde_json::from_str(&json).unwrap_or_else(|error| panic!("reading {json}: {error}"));
+    assert_eq!(read.health(), LinkHealth::Healthy);
     for json in [
         addressed_row_json(Some("https"), "example.com", "broken", &[], 0),
+        addressed_row_json(
+            Some("https"),
+            "example.com",
+            "not_judged",
+            &candidate_values(&["example.md"]),
+            1,
+        ),
         addressed_row_json(None, "pic.png", "broken", &[], 0),
         addressed_row_json(None, "notes", "not_judged", &[], 0),
         addressed_row_json(
