@@ -853,6 +853,22 @@ impl<A: SnapshotSource> EntryState<A> {
         self.retire_recovery_demands();
     }
 
+    /// Owe the rebuild that resolves damaged derived state, and withdraw
+    /// trust for it.
+    ///
+    /// Every leg that meets [`JobFailure::StoreDamaged`] while it holds an
+    /// attachment, and a read whose store met damage over a free entry, give
+    /// this verdict here, so what a client reads does not depend on who met
+    /// the damage. The reason is the rebuilding one — the entry holds the
+    /// database and discards it on its own — rather than
+    /// [`UntrustedReason::StoreDamagedAwaitingDemand`], which an attach that
+    /// acquired no store publishes and which promises nothing until a demand
+    /// opens a file to discard.
+    fn withdraw_trust_for_damage(&mut self, detail: impl Into<String>) {
+        self.require_rebuild();
+        self.trust = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+    }
+
     /// Whether the entry owes a rung of the ladder, which is work no ordinary
     /// reconcile stands in for.
     ///
@@ -1261,19 +1277,6 @@ fn watcher_lost(error: WatchError) -> UntrustedReason {
         WatchError::SynchronizationExpired => WatcherLossCause::SynchronizationExpired,
     };
     UntrustedReason::watcher_lost(cause, detail)
-}
-
-/// The trust an entry holding a damaged database publishes.
-///
-/// Every leg that meets [`JobFailure::StoreDamaged`] while it holds an
-/// attachment withdraws trust here, so what a client reads does not depend on
-/// which leg met the damage. The reason is the rebuilding one — the entry holds
-/// the database and discards it on its own — rather than
-/// [`UntrustedReason::StoreDamagedAwaitingDemand`], which an attach that
-/// acquired no store publishes and which promises nothing until a demand opens
-/// a file to discard.
-fn trust_withdrawn_for_damage(detail: impl Into<String>) -> TrustState {
-    TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail))
 }
 
 /// Whether a terminal watch failure says the ground under the entry moved.
@@ -3411,8 +3414,7 @@ impl<O: EntryOps> Host<O> {
                 "the store found its derived data damaged while other work held this entry",
             ));
         }
-        state.require_rebuild();
-        state.trust = trust_withdrawn_for_damage(detail);
+        state.withdraw_trust_for_damage(detail);
         schedule_demand(&mut state, name);
         let published = state.published_demand();
         drop(state);
@@ -3639,8 +3641,7 @@ fn poll_claimed_entry<O: EntryOps>(
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.claim.drop_marker();
                     state.claim.end_poll(epoch);
-                    state.require_rebuild();
-                    state.trust = trust_withdrawn_for_damage(detail);
+                    state.withdraw_trust_for_damage(detail);
                     state.coverage.park_by(epoch, attachment);
                     schedule = Some(
                         state
@@ -4320,9 +4321,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::StoreDamaged(detail)) => {
-                    state.require_rebuild();
+                    state.withdraw_trust_for_damage(detail);
                     state.coverage.park_by(epoch, attachment);
-                    state.trust = trust_withdrawn_for_damage(detail);
                     next = Some(
                         state
                             .claim
@@ -4632,8 +4632,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 // the leg that follows this one.
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
-                    state.require_rebuild();
-                    state.trust = trust_withdrawn_for_damage(detail);
+                    state.withdraw_trust_for_damage(detail);
                     let next = state
                         .claim
                         .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
@@ -4768,8 +4767,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 // nothing else meets arrives through.
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
-                    state.require_rebuild();
-                    state.trust = trust_withdrawn_for_damage(detail);
+                    state.withdraw_trust_for_damage(detail);
                     next = Some(
                         state
                             .claim
@@ -5027,8 +5025,7 @@ fn run_reload_job<O: EntryOps>(
             // the mint settles is which of a handle and a reason stands when
             // the rebuild puts the entry back.
             state.park_coverage(epoch, attachment);
-            state.require_rebuild();
-            state.trust = trust_withdrawn_for_damage(detail);
+            state.withdraw_trust_for_damage(detail);
             let next = state
                 .claim
                 .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
@@ -8520,9 +8517,7 @@ mod tests {
             // The state a maintenance or poll verdict of damage leaves behind:
             // the entry holds its coverage and owes the rung against it.
             let mut state = entry.gate.lock().unwrap();
-            state.require_rebuild();
-            state.trust =
-                TrustState::untrusted(UntrustedReason::store_damaged_rebuilding("malformed"));
+            state.withdraw_trust_for_damage("malformed");
         }
 
         refuse_identity_error(&host.shared, &name, "root unreadable".to_string());
