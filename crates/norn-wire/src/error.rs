@@ -22,15 +22,15 @@
 //! only one code fills is a field every other code leaves empty, and readers
 //! learn to check the code before believing it.
 //!
-//! **Two codes here are minted ahead of the layer that produces them.**
-//! `vault/ambiguous-root` answers a `vault resolve` ask over a directory that
-//! more than one registration contains; `host/registry-unwritable` answers a
-//! registration change whose write of the registry file refused. Both are the
-//! vault-namespace handlers' to raise, and those handlers land above this
-//! layer (NORN-231), so the call graph reaches neither from this crate today.
-//! They are spelled here because the vocabulary a refusal is spelled in is not
-//! a surface's to choose: the handler that arrives renders one of these rather
-//! than minting a string of its own.
+//! **One registry code is minted ahead of the handler that raises it.**
+//! `host/registry-unwritable` answers a registration change whose write of the
+//! registry file refused, and no handler writes the registry file yet, so the
+//! call graph reaches it from no crate today. `vault/ambiguous-root`, which
+//! answers a `vault resolve` ask over a directory whose most specific
+//! containing root more than one registration reaches, is raised by the
+//! host's resolve handler. Both are spelled here because the vocabulary a
+//! refusal is spelled in is not a surface's to choose: a handler renders one
+//! of these rather than minting a string of its own.
 //!
 //! **The codes a store's read refusals are spelled in are minted ahead too.**
 //! `host/read-failed`, `vault/unreadable-bound`, `request/out-of-bound`,

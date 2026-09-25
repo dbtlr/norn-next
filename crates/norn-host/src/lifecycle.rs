@@ -2770,6 +2770,15 @@ impl<O: EntryOps> Host<O> {
         self.shared.entries.registrations()
     }
 
+    /// The served registration whose root most specifically contains
+    /// `directory`, judged against the serving set as it stands.
+    pub(crate) fn containing(
+        &self,
+        directory: &std::path::Path,
+    ) -> Result<Option<Registration>, crate::registry::ResolveRefusal> {
+        self.shared.entries.containing(directory)
+    }
+
     pub fn new(
         registry: RegistryRead,
         ops: O,
@@ -17209,7 +17218,7 @@ mod tests {
     /// registry read at startup stood.
     mod registry_requests {
         use super::*;
-        use norn_wire::ListParams;
+        use norn_wire::{Directory, ListParams, ResolveParams, ResolveReport};
 
         fn registration(name: &str, root: &str) -> RegistryEntry {
             RegistryEntry::new(VaultName::new(name).unwrap(), VaultRoot::new(root).unwrap())
@@ -17226,6 +17235,78 @@ mod tests {
                 },
             )
             .unwrap()
+        }
+
+        /// A resolution answers from the set as it stands: a vault that joined
+        /// after startup contains the directories under its root.
+        #[test]
+        fn a_resolution_answers_from_the_served_set() {
+            let scratch = temp_base("resolve-served-set");
+            let root = scratch.root().join("joined");
+            std::fs::create_dir_all(root.join("sub")).unwrap();
+            let host = host_serving(Vec::new());
+            let joined = RegistryEntry::new(
+                VaultName::new("joined").unwrap(),
+                VaultRoot::new(&root).unwrap(),
+            );
+            let asked = ResolveParams::new(Directory::new(root.join("sub")).unwrap());
+            assert_eq!(host.vault_resolve(&asked), Ok(ResolveReport::none()));
+
+            host.shared
+                .entries
+                .insert(joined.clone())
+                .expect("the set serves no such name");
+
+            assert_eq!(
+                host.vault_resolve(&asked),
+                Ok(ResolveReport::registered(joined))
+            );
+        }
+
+        /// A resolution stats every served root, so it is counted as the
+        /// classification it costs.
+        #[test]
+        fn a_resolution_is_counted_as_a_classification() {
+            let host = host_serving(vec![registration(
+                "notes",
+                "/tmp/norn-host-resolve-counted",
+            )]);
+            let before = host.shared.entries.classifications();
+            host.vault_resolve(&ResolveParams::new(
+                Directory::new("/tmp/norn-host-resolve-counted/sub").unwrap(),
+            ))
+            .expect("a directory under one root resolves");
+            assert_eq!(host.shared.entries.classifications(), before + 1);
+        }
+
+        /// A resolution over a root two served names reach is refused through
+        /// the one rendering of that refusal, naming both.
+        #[test]
+        fn an_ambiguous_resolution_is_refused_as_an_ambiguous_root() {
+            let scratch = temp_base("resolve-ambiguous");
+            let root = scratch.root().join("shared");
+            std::fs::create_dir_all(&root).unwrap();
+            let host = host_serving(vec![
+                RegistryEntry::new(
+                    VaultName::new("alpha").unwrap(),
+                    VaultRoot::new(&root).unwrap(),
+                ),
+                RegistryEntry::new(
+                    VaultName::new("beta").unwrap(),
+                    VaultRoot::new(root.join(".")).unwrap(),
+                ),
+            ]);
+
+            let envelope = host
+                .vault_resolve(&ResolveParams::new(Directory::new(&root).unwrap()))
+                .expect_err("a directory two registrations reach at one root resolved");
+            assert_eq!(
+                envelope.detail(),
+                &ErrorDetail::ambiguous_root(colliding(
+                    &VaultName::new("alpha").unwrap(),
+                    &VaultName::new("beta").unwrap()
+                ))
+            );
         }
 
         /// A host serving nothing lists nothing, and that is an answer.
