@@ -6508,6 +6508,24 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
 
+        /// Wait until `name` stands untrusted for an environmental refusal: an
+        /// overflow publishes its own untrusted reason ahead of the reconcile
+        /// it schedules, and this waits past it for the leg's failure.
+        fn wait_refused<O: EntryOps>(host: &crate::Host<O>, name: &VaultName) {
+            wait_until(
+                "an environmental refusal",
+                lifecycle_budget(),
+                || match host.inspect(name).map(|inspection| inspection.trust) {
+                    Ok(norn_wire::TrustState::Untrusted {
+                        reason: UntrustedReason::EnvironmentalRefusal { .. },
+                        ..
+                    }) => Observed::Met(()),
+                    other => Observed::Pending(format!("the state is {other:?}")),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        }
+
         /// **A reconcile whose whole-vault rescan commits lane-1 work and
         /// then fails leaves the engine reported trailing that work**: the
         /// reconcile leg records where the store stands at its end.
@@ -6530,14 +6548,10 @@ mod tests {
                 return;
             }
             armed.store(true, std::sync::atomic::Ordering::SeqCst);
-            let reason = wait_untrusted(&host, &name);
+            wait_refused(&host, &name);
             let (_, engine) = engine_reported(&host, &name);
             listable_again(&denied);
 
-            assert!(
-                matches!(reason, UntrustedReason::EnvironmentalRefusal { .. }),
-                "{reason:?}"
-            );
             // The rescan committed the rewritten `a.md` and the new `b.md` as
             // one full changeset before it met the directory it cannot list.
             assert_eq!(
@@ -6564,7 +6578,7 @@ mod tests {
                 return;
             }
             armed.store(true, std::sync::atomic::Ordering::SeqCst);
-            wait_untrusted(&host, &name);
+            wait_refused(&host, &name);
             assert_eq!(
                 engine_reported(&host, &name).1,
                 norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
@@ -6582,14 +6596,10 @@ mod tests {
                 },
             )
             .unwrap_or_else(|failure| panic!("{failure}"));
-            let reason = wait_untrusted(&host, &name);
+            wait_refused(&host, &name);
             let (_, engine) = engine_reported(&host, &name);
             listable_again(&denied);
 
-            assert!(
-                matches!(reason, UntrustedReason::EnvironmentalRefusal { .. }),
-                "{reason:?}"
-            );
             // The recovery's heal committed the new `c.md` and `d.md` as one
             // more full changeset before it met the directory it cannot list.
             assert_eq!(
