@@ -17,8 +17,8 @@
 //! its rows were read at.
 
 use norn_store::{
-    ContentModel, CountWork, DescribeWork, FindWork, GetWork, PageRefusal, Snapshot,
-    SnapshotCounters, ValidateWork,
+    ContentModel, CountWork, Counted, DescribeWork, Described, FindWork, Found, GetWork, Gotten,
+    PageRefusal, Snapshot, SnapshotCounters, ValidateWork, Validated,
 };
 use norn_wire::{
     AnswerAdvisory, AnswerReading, CountParams, CountReport, DescribeParams, DescribeReport,
@@ -131,15 +131,7 @@ where
         params: &CountParams,
     ) -> Result<Answered<CountReport, CountWork>, ErrorEnvelope> {
         self.answer_read(&params.vault, |snapshot, declared| {
-            let counted = snapshot.count(params, declared)?;
-            let work = counted.work;
-            let (unsatisfied, advisories, report) = counted.into_report();
-            Ok(Built {
-                unsatisfied,
-                advisories,
-                report,
-                work,
-            })
+            Ok(snapshot.count(params, declared)?.into())
         })
     }
 
@@ -150,15 +142,7 @@ where
         params: &FindParams,
     ) -> Result<Answered<FindReport, FindWork>, ErrorEnvelope> {
         self.answer_read(&params.vault, |snapshot, declared| {
-            let found = snapshot.find(params, declared)?;
-            let work = found.work;
-            let (unsatisfied, advisories, report) = found.into_report();
-            Ok(Built {
-                unsatisfied,
-                advisories,
-                report,
-                work,
-            })
+            Ok(snapshot.find(params, declared)?.into())
         })
     }
 
@@ -169,35 +153,18 @@ where
         params: &ValidateParams,
     ) -> Result<Answered<ValidateReport, ValidateWork>, ErrorEnvelope> {
         self.answer_read(&params.vault, |snapshot, declared| {
-            let validated = snapshot.validate(params, declared)?;
-            let work = validated.work;
-            let (unsatisfied, advisories, report) = validated.into_report();
-            Ok(Built {
-                unsatisfied,
-                advisories,
-                report,
-                work,
-            })
+            Ok(snapshot.validate(params, declared)?.into())
         })
     }
 
     /// Answer a `describe`: one page of the facets `params` asks for, from
-    /// the vault it addresses. A describe applies every part it takes and
-    /// compares no dates, so its answer carries neither an unsatisfied part
-    /// nor an advisory.
+    /// the vault it addresses.
     pub fn describe(
         &self,
         params: &DescribeParams,
     ) -> Result<Answered<DescribeReport, DescribeWork>, ErrorEnvelope> {
         self.answer_read(&params.vault, |snapshot, declared| {
-            let described = snapshot.describe(params, declared)?;
-            let work = described.work;
-            Ok(Built {
-                unsatisfied: Vec::new(),
-                advisories: Vec::new(),
-                report: described.into_report(),
-                work,
-            })
+            Ok(snapshot.describe(params, declared)?.into())
         })
     }
 
@@ -207,19 +174,81 @@ where
     ///
     /// A section and a block are cut by `norn-text` from the body the
     /// snapshot holds of the document, so the text answered is the text the
-    /// snapshot derived. A get compares no dates, so its answer carries no
-    /// advisory.
+    /// snapshot derived.
     pub fn get(&self, params: &GetParams) -> Result<Answered<GetReport, GetWork>, ErrorEnvelope> {
         self.answer_read(&params.vault, |snapshot, declared| {
-            let gotten = snapshot.get(params, declared, &TextLayer)?;
-            let work = gotten.work;
-            let (unsatisfied, report) = gotten.into_report();
-            Ok(Built {
-                unsatisfied,
-                advisories: Vec::new(),
-                report,
-                work,
-            })
+            Ok(snapshot.get(params, declared, &TextLayer)?.into())
         })
+    }
+}
+
+// ---- what each store builder answered, as the seam wraps it ----
+//
+// A count, a find and a validate each report the parts they could not apply
+// and what the parts they applied assumed. A describe applies every part it
+// takes and compares no dates, so it carries neither; a get compares no dates,
+// so it carries no advisory.
+
+impl From<Counted> for Built<CountReport, CountWork> {
+    fn from(counted: Counted) -> Self {
+        let work = counted.work;
+        let (unsatisfied, advisories, report) = counted.into_report();
+        Built {
+            unsatisfied,
+            advisories,
+            report,
+            work,
+        }
+    }
+}
+
+impl From<Found> for Built<FindReport, FindWork> {
+    fn from(found: Found) -> Self {
+        let work = found.work;
+        let (unsatisfied, advisories, report) = found.into_report();
+        Built {
+            unsatisfied,
+            advisories,
+            report,
+            work,
+        }
+    }
+}
+
+impl From<Validated> for Built<ValidateReport, ValidateWork> {
+    fn from(validated: Validated) -> Self {
+        let work = validated.work;
+        let (unsatisfied, advisories, report) = validated.into_report();
+        Built {
+            unsatisfied,
+            advisories,
+            report,
+            work,
+        }
+    }
+}
+
+impl From<Described> for Built<DescribeReport, DescribeWork> {
+    fn from(described: Described) -> Self {
+        let work = described.work;
+        Built {
+            unsatisfied: Vec::new(),
+            advisories: Vec::new(),
+            report: described.into_report(),
+            work,
+        }
+    }
+}
+
+impl From<Gotten> for Built<GetReport, GetWork> {
+    fn from(gotten: Gotten) -> Self {
+        let work = gotten.work;
+        let (unsatisfied, report) = gotten.into_report();
+        Built {
+            unsatisfied,
+            advisories: Vec::new(),
+            report,
+            work,
+        }
     }
 }
