@@ -6320,8 +6320,6 @@ mod tests {
         #[cfg(unix)]
         #[test]
         fn a_leg_that_fails_after_committing_reports_the_engine_trailing_its_work() {
-            use std::os::unix::fs::PermissionsExt;
-
             let f = Fixture::new("status-engine-failed-leg");
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
@@ -6332,13 +6330,8 @@ mod tests {
                 norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
             );
 
-            fs::write(f.vault().join("a.md"), "beta beta\n").unwrap();
             let denied = f.vault().join("zz");
-            fs::create_dir(&denied).unwrap();
-            fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
-            if fs::read_dir(&denied).is_ok() {
-                eprintln!("skipped: this account reads a mode-000 directory");
-                fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
+            if !unlistable_directory(&denied) {
                 return;
             }
             fs::write(
@@ -6348,7 +6341,7 @@ mod tests {
             .unwrap();
             let refused = host.reload(&name);
             let (_, engine) = engine_reported(&host, &name);
-            fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
+            listable_again(&denied);
 
             assert!(
                 matches!(
@@ -6357,8 +6350,8 @@ mod tests {
                 ),
                 "{refused:?}"
             );
-            // The walk committed the rewritten `a.md` as one generation
-            // before it met the directory it cannot list.
+            // The reload pinned the edited schema as one generation before
+            // its heal met the directory it cannot list.
             assert_eq!(
                 engine,
                 norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
