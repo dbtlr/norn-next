@@ -1704,9 +1704,12 @@ nothing and hands back one of two shapes, and the demand takes precedence: the p
 demand itself — a warming entry with its phase, coverage on its way back, an untrusted
 state, or a park under its own code — rendered through the mapping every other surface
 renders that demand through, with one refusal added because a read cannot answer with a
-state: a warming entry is refused as `host/entry-not-ready` carrying its phase and counters,
-where a poll is answered with the state itself; an untrusted entry keeps the untrusted
-reading, and a park keeps its own code; or, where the demand is serving, reader-unavailable,
+state: a warming or unattached entry is refused as `host/entry-not-ready` carrying its phase
+and counters, where a poll is answered with the state itself. An untrusted entry has the
+recovery it owes demanded by the read, and the read answers under what that work publishes —
+the warming of the recovery, refused as `host/entry-not-ready` — and under the untrusted state
+it found, refused as `host/entry-untrusted` with its reason, only where no work is scheduled.
+A park keeps its own code. Where the demand is serving, the refusal is reader-unavailable,
 which is an entry serving every surface but this one.
 
 A read's hold is a demand lease, and it does what a lease does: it holds the entry's idle

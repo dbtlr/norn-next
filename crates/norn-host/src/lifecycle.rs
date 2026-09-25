@@ -10820,6 +10820,50 @@ mod tests {
         );
     }
 
+    /// **A read over an untrusted entry whose owed work cannot be scheduled
+    /// answers with the untrusted state it found.** Rung 3 holds the entry's
+    /// claim while it runs, so the read's demand schedules nothing, and the
+    /// read is refused as `host/entry-untrusted` carrying the reason the entry
+    /// publishes rather than as the warming of work it could not ask for.
+    #[test]
+    fn a_read_over_an_untrusted_entry_whose_work_is_held_answers_untrusted() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        arrange_for(&ops.damaged_reconcile_at, &name);
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+
+        let reason =
+            UntrustedReason::store_damaged_rebuilding("the database disk image is malformed");
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("an untrusted entry answered a read");
+        let envelope = refusal.answer(&name);
+        assert_eq!(
+            envelope.code(),
+            &norn_wire::ReasonCode::HostEntryUntrusted,
+            "{envelope:?}"
+        );
+        assert!(
+            matches!(
+                envelope.detail(),
+                ErrorDetail::EntryUntrusted { reason: carried, .. } if carried == &reason
+            ),
+            "the read was refused without the reason the entry publishes: {envelope:?}"
+        );
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            1,
+            "the read scheduled work while the entry's claim was held"
+        );
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
     #[test]
     fn a_damaged_store_reaches_rung_three_and_never_the_recovery_ladder() {
         let ops = Arc::new(FakeOps::default());
