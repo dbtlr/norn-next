@@ -14,26 +14,26 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AttachMode, Attention, BlockRow,
-    BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection, CollectionPage,
-    CollectionSelector, Column, ComparedBy, ContainerKind, ControlFile, ControlFileFailure,
-    CountParams, Cursor, CursorKey, CursorOrderChanged, DescribeParams, Direction, Directory,
-    DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift,
-    ElsewhereNamesDocuments, EmptyLadder, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
-    ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind, FindingRow,
-    FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
-    KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams,
-    ListReport, MaintainerIdentity, ModelIdentity, Moved, NameSet, NoProblems, NonFiniteScore,
-    NotReady, Page, PathRuleKind, PollBackend, Predicate, Published, ReasonCode, RegisterParams,
-    RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome,
-    ReloadParams, ReloadReport, ReloadStage, Replace, RequestBound, RequestScope, ResolutionTarget,
-    ResolveParams, ResolveReport, RollUp, Rung, RungReport, RungSet, SchemaSource, Score,
-    SearchParams, SetParams, SetReport, Severity, Snapshot, Sort, SortKey, Span, StatusParams,
-    StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead, TrustState,
-    UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
-    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
-    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
-    Verb, WarmingPhase, WatcherLossCause,
+    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AttachMode,
+    Attention, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection,
+    CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ControlFile,
+    ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged, DescribeParams,
+    Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow,
+    Drift, ElsewhereNamesDocuments, EmptyLadder, EngineHealth, EngineSection, EngineStatus,
+    ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind,
+    FindingRow, FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
+    Hint, Hit, KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow,
+    ListParams, ListReport, MaintainerIdentity, ModelIdentity, Moved, NameSet, NoProblems,
+    NonFiniteScore, NotReady, Page, PagedRows, PathRuleKind, PollBackend, Predicate, Published,
+    ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem,
+    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace,
+    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
+    RollUp, Rung, RungReport, RungSet, SchemaSource, Score, SearchParams, SetParams, SetReport,
+    Severity, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind,
+    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
+    UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
+    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -138,6 +138,8 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::VaultCursorOrderChanged,
         ReasonCode::VaultUnreadableBound,
         ReasonCode::RequestOutOfBound,
+        ReasonCode::RequestPartNotTaken,
+        ReasonCode::RequestCursorNotTaken,
         ReasonCode::EngineNotEnabled,
         ReasonCode::EngineUnavailable,
         ReasonCode::EngineFailed,
@@ -210,7 +212,18 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::entry_held(name("notes")),
         ErrorDetail::reader_unavailable("this coverage mints no read handle"),
         ErrorDetail::registry_unwritable("the registry file is read-only"),
-        ErrorDetail::read_failed("the database disk image is malformed"),
+        ErrorDetail::read_failed(
+            ReadFailure::statement(),
+            "the database disk image is malformed",
+        ),
+        ErrorDetail::read_failed(
+            ReadFailure::declaration_not_pinned(Some("fp-1".to_string()), None),
+            "the declaration was read from the schema `fp-1`, and the snapshot pins no schema",
+        ),
+        ErrorDetail::read_failed(
+            ReadFailure::declaration_not_pinned(None, Some("fp-2".to_string())),
+            "the declaration was read from no schema, and the snapshot pins the schema `fp-2`",
+        ),
         ErrorDetail::ambiguous_root(names([name("notes"), name("vault")])),
         ErrorDetail::ambiguous_target(
             target("glossary"),
@@ -233,9 +246,29 @@ fn error_details() -> Vec<ErrorDetail> {
             Sort::new(SortKey::field("due"), Direction::Descending),
         )),
         ErrorDetail::unreadable_bound("due", "not-a-date"),
-        ErrorDetail::out_of_bound(RequestBound::page_rows(5_000)),
-        ErrorDetail::out_of_bound(RequestBound::membership_values(5_000)),
+        ErrorDetail::out_of_bound(RequestBound::page_rows(5_000, 1_024)),
+        ErrorDetail::out_of_bound(RequestBound::page_rows(0, 1_024)),
+        ErrorDetail::out_of_bound(RequestBound::membership_values("status", 257, 256)),
         ErrorDetail::out_of_bound(RequestBound::empty_membership("type")),
+        ErrorDetail::part_not_taken(RequestPart::Anchor, Some(AnswerShape::CollectionPage)),
+        ErrorDetail::part_not_taken(RequestPart::Column, Some(AnswerShape::Section)),
+        ErrorDetail::part_not_taken(RequestPart::Column, Some(AnswerShape::Block)),
+        ErrorDetail::part_not_taken(RequestPart::Limit, Some(AnswerShape::Record)),
+        ErrorDetail::part_not_taken(RequestPart::Cursor, Some(AnswerShape::Summary)),
+        ErrorDetail::part_not_taken(RequestPart::unknown("a sort key"), None),
+        ErrorDetail::cursor_not_taken(PagedRows::Tally, PagedRows::Document),
+        ErrorDetail::cursor_not_taken(PagedRows::Document, PagedRows::Tally),
+        ErrorDetail::cursor_not_taken(PagedRows::Hit, PagedRows::Finding),
+        ErrorDetail::cursor_not_taken(PagedRows::Finding, PagedRows::Facet),
+        ErrorDetail::cursor_not_taken(PagedRows::Facet, PagedRows::Hit),
+        ErrorDetail::cursor_not_taken(
+            PagedRows::Collection {
+                of: CollectionSelector::Headings,
+            },
+            PagedRows::Collection {
+                of: CollectionSelector::Tags,
+            },
+        ),
     ]);
     details.extend(
         not_ready_states()
@@ -1642,6 +1675,130 @@ fn a_refused_mode_crosses_as_the_mode_that_was_named() {
             r#""detail":{"code":"host/unsupported-attach-mode","mode":"throwaway"}}"#
         )
     );
+}
+
+/// A read refusal about the request's own shape crosses as typed facts: the
+/// bound with the count named and the most it may be, the part with the
+/// answer that does not take it, and the rows a cursor names against the rows
+/// the request pages.
+#[test]
+fn a_request_refusal_crosses_as_the_shape_facts_it_names() {
+    assert_eq!(
+        wire(&ErrorDetail::out_of_bound(RequestBound::page_rows(
+            0, 1_024
+        ))),
+        r#"{"code":"request/out-of-bound","bound":{"kind":"page_rows","given":0,"ceiling":1024}}"#
+    );
+    assert_eq!(
+        wire(&ErrorDetail::out_of_bound(RequestBound::membership_values(
+            "status", 257, 256
+        ))),
+        concat!(
+            r#"{"code":"request/out-of-bound","#,
+            r#""bound":{"kind":"membership_values","key":"status","given":257,"ceiling":256}}"#
+        )
+    );
+    assert_eq!(
+        wire(&ErrorDetail::out_of_bound(RequestBound::empty_membership(
+            "type"
+        ))),
+        r#"{"code":"request/out-of-bound","bound":{"kind":"empty_membership","key":"type"}}"#
+    );
+    assert_eq!(
+        wire(&ErrorDetail::part_not_taken(
+            RequestPart::Cursor,
+            Some(AnswerShape::Summary)
+        )),
+        r#"{"code":"request/part-not-taken","part":{"kind":"cursor"},"answer":"summary"}"#
+    );
+    assert_eq!(
+        wire(&ErrorDetail::part_not_taken(
+            RequestPart::unknown("a sort key"),
+            None
+        )),
+        concat!(
+            r#"{"code":"request/part-not-taken","#,
+            r#""part":{"kind":"unknown","name":"a sort key"},"answer":null}"#
+        )
+    );
+    assert_eq!(
+        wire(&ErrorDetail::cursor_not_taken(
+            PagedRows::Collection {
+                of: CollectionSelector::Findings
+            },
+            PagedRows::Finding,
+        )),
+        concat!(
+            r#"{"code":"request/cursor-not-taken","#,
+            r#""cursor":{"row":"collection","of":"findings"},"paged":{"row":"finding"}}"#
+        )
+    );
+}
+
+/// A failed read names which failure it was, and a declaration read under
+/// another schema than the pinned one carries both fingerprints, `null` for
+/// no schema.
+#[test]
+fn a_failed_read_crosses_as_the_failure_it_names() {
+    assert_eq!(
+        wire(&ErrorDetail::read_failed(
+            ReadFailure::statement(),
+            "the database disk image is malformed"
+        )),
+        concat!(
+            r#"{"code":"host/read-failed","failure":{"kind":"statement"},"#,
+            r#""detail":"the database disk image is malformed"}"#
+        )
+    );
+    assert_eq!(
+        wire(&ErrorDetail::read_failed(
+            ReadFailure::declaration_not_pinned(Some("fp-1".to_string()), None),
+            "declared elsewhere"
+        )),
+        concat!(
+            r#"{"code":"host/read-failed","#,
+            r#""failure":{"kind":"declaration_not_pinned","declared_under":"fp-1","pinned":null},"#,
+            r#""detail":"declared elsewhere"}"#
+        )
+    );
+}
+
+/// A cursor key names the rows it is a position among, and a nested
+/// collection's key names its collection.
+#[test]
+fn a_cursor_key_names_the_rows_it_is_a_position_among() {
+    let order = Sort::new(SortKey::path(), Direction::Ascending);
+    let cases = [
+        (
+            CursorKey::document(order, None, "notes/a.md"),
+            PagedRows::Document,
+        ),
+        (
+            CursorKey::hit(Score::new(0.5).expect("a finite score"), "notes/a.md"),
+            PagedRows::Hit,
+        ),
+        (
+            CursorKey::tally([Some("open".to_string())]),
+            PagedRows::Tally,
+        ),
+        (
+            CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", 1),
+            PagedRows::Finding,
+        ),
+        (
+            CursorKey::facet(FacetKind::Folder, "notes"),
+            PagedRows::Facet,
+        ),
+        (
+            CursorKey::ordinal(CollectionSelector::Links, 3),
+            PagedRows::Collection {
+                of: CollectionSelector::Links,
+            },
+        ),
+    ];
+    for (key, rows) in cases {
+        assert_eq!(key.rows(), rows, "{key:?}");
+    }
 }
 
 /// A name is the string itself, and the read path is the grammar: a string
