@@ -1003,6 +1003,56 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
     );
 }
 
+/// **A cursor whose position is past what the store counts is refused** as
+/// no position among the rows the get pages: an ordinal or a finding's id one
+/// above the largest the store holds a row at.
+#[test]
+fn a_cursor_past_what_the_store_counts_names_no_position_in_the_collection() {
+    let vault = paged_vault("get-cursor-past", 0);
+    let snapshot = page_of(
+        &vault
+            .get(
+                &getting("paged")
+                    .with_collection(CollectionSelector::Headings)
+                    .with_limit(1),
+            )
+            .report,
+    )
+    .1
+    .expect("a next page")
+    .snapshot()
+    .clone();
+    let past = u64::try_from(i64::MAX).expect("a positive bound") + 1;
+    let headings = PagedRows::Collection {
+        of: CollectionSelector::Headings,
+    };
+    for (selector, key, paged) in [
+        (
+            CollectionSelector::Headings,
+            CursorKey::ordinal(CollectionSelector::Headings, past),
+            headings,
+        ),
+        (
+            CollectionSelector::Findings,
+            CursorKey::finding(FindingKind::UndeclaredTag, "paged.md", past),
+            PagedRows::Finding,
+        ),
+    ] {
+        assert_eq!(
+            vault.refusal(
+                &getting("paged")
+                    .with_collection(selector)
+                    .with_after(Cursor::new(snapshot.clone(), key))
+            ),
+            PageRefusal::CursorNotTaken {
+                cursor: paged,
+                paged
+            },
+            "{selector:?}"
+        );
+    }
+}
+
 /// **An ordinal cursor continues its collection positionally**: minted on
 /// one document's headings, it continues another document's headings from
 /// the same position, as every builder's cursor continues its row type's

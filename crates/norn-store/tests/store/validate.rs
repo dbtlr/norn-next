@@ -723,6 +723,31 @@ fn a_cursor_that_is_no_position_among_the_findings_is_refused() {
     );
 }
 
+/// **A finding's cursor whose id is past what the store counts is refused**
+/// as no position among the findings.
+#[test]
+fn a_finding_cursor_past_what_the_store_counts_is_refused() {
+    let validating_store = Validating::new("validate-cursor-past");
+    let reading = validating_store.validate(&validating()).snapshot;
+    let past = u64::try_from(i64::MAX).expect("a positive bound") + 1;
+    assert_eq!(
+        validating_store
+            .snapshot()
+            .validate(
+                &validating().with_after(Cursor::new(
+                    reading,
+                    CursorKey::finding(FindingKind::UndeclaredTag, "a.md", past)
+                )),
+                &declared()
+            )
+            .expect_err("the cursor is refused"),
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::Finding,
+            paged: PagedRows::Finding,
+        }
+    );
+}
+
 /// **A declaration read from another schema than the snapshot pins is
 /// refused**, as every read refuses it, by a page and a summary alike: one
 /// read from another schema, and the declaration of a store with none, each
