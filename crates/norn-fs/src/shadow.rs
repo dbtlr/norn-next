@@ -106,7 +106,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use crate::identity::identity_of;
+use crate::identity::{Identity, identity_of, name_identity};
 use crate::path::CaseSensitivity;
 use crate::refusal::{Refusal, environment};
 
@@ -435,6 +435,14 @@ pub fn sweep_fallback_tree(vault_root: &Path) -> Result<Swept, Refusal> {
 /// crate did not hand out is somebody's. A home that is not there is already
 /// discarded.
 ///
+/// **Only a directory standing at a home's own path is a home.** Both paths
+/// are read without following a link before either is touched: a link
+/// standing at one, or anything else that is not a directory, is not a home
+/// this crate made, so it and whatever it reaches are left as they are and
+/// the discard goes on without it. A directory that is, by identity, one of
+/// `standing_roots` — a vault root somebody registered at that path — is
+/// left as it stands too, contents and all.
+///
 /// Both placements are taken because the device comparison that chose between
 /// them reads one moment: an attach made under another arrangement of mounts
 /// resolved the other home, under the same key. The directories above the
@@ -443,9 +451,35 @@ pub fn discard_homes(
     vault_root: &Path,
     data_tmp: &Path,
     key: &MaintainershipKey,
+    standing_roots: &[&Path],
 ) -> Result<(), Refusal> {
-    discard_home(data_tmp)?;
-    discard_home(&vault_root.join(FALLBACK).join(key.as_path()))
+    let fallback = vault_root.join(FALLBACK).join(key.as_path());
+    // A root the filesystem does not answer for has no identity a home could
+    // share, so it spares nothing.
+    let standing = standing_roots
+        .iter()
+        .filter_map(|root| name_identity(root).ok().flatten())
+        .collect::<Vec<_>>();
+    let homes = [data_tmp, fallback.as_path()]
+        .into_iter()
+        .map(|home| Ok(is_discardable_home(home, &standing)?.then_some(home)))
+        .collect::<Result<Vec<_>, Refusal>>()?;
+    for home in homes.into_iter().flatten() {
+        discard_home(home)?;
+    }
+    Ok(())
+}
+
+/// Whether `home` is a home [`discard_homes`] takes: a directory standing at
+/// that very path rather than a link to one, and none of the `standing`
+/// roots. Nothing at the path is no home to take.
+#[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns the shadow home.
+fn is_discardable_home(home: &Path, standing: &[Identity]) -> Result<bool, Refusal> {
+    match std::fs::symlink_metadata(home) {
+        Ok(metadata) => Ok(metadata.is_dir() && !standing.contains(&identity_of(&metadata))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(environment("reading", home, &error)),
+    }
 }
 
 /// Take every shadow in `home`, and then `home` itself where nothing else is
@@ -997,9 +1031,9 @@ mod tests {
             .expect("a home holding somebody's file");
         std::fs::write(kept_home.directory().join("notes.md"), b"somebody's").unwrap();
 
-        discard_homes(&vault, &data_tmp, &ours).expect("the homes are discarded");
-        discard_homes(&kept, &kept_tmp, &ours).expect("a home holding a file stands");
-        discard_homes(&vault, &data_tmp, &ours).expect("an absent home is discarded");
+        discard_homes(&vault, &data_tmp, &ours, &[]).expect("the homes are discarded");
+        discard_homes(&kept, &kept_tmp, &ours, &[]).expect("a home holding a file stands");
+        discard_homes(&vault, &data_tmp, &ours, &[]).expect("an absent home is discarded");
 
         assert!(
             !scratch.exists(fallback.directory()),
@@ -1021,6 +1055,66 @@ mod tests {
         assert!(
             scratch.exists(&kept_home.directory().join("notes.md")),
             "a file the predicate does not accept was removed"
+        );
+    }
+
+    /// A link standing where a home would be is not a home: the discard
+    /// leaves it and what it reaches alone, and goes on to the other home.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the link and what it reaches.
+    fn a_link_at_a_homes_path_is_left_and_what_it_reaches_is_not_swept() {
+        let scratch = Scratch::new("shadow-discard-link");
+        let vault = scratch.directory("vault");
+        let data_tmp = scratch.path("data/vaults/notes/tmp");
+        let ours = key();
+        let data_root = ShadowHome::resolve_where(&vault, &data_tmp, &ours, true)
+            .expect("the key's data-root home");
+        std::fs::write(data_root.directory().join("norn-shadow-1-0"), b"staged").unwrap();
+        let fallback = vault.join(FALLBACK).join(ours.as_path());
+        std::fs::create_dir_all(fallback.parent().expect("a parent")).unwrap();
+        let elsewhere = scratch.directory("elsewhere");
+        let foreign = elsewhere.join("norn-shadow-99999-1");
+        std::fs::write(&foreign, b"another home's staged bytes").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &fallback).unwrap();
+
+        discard_homes(&vault, &data_tmp, &ours, &[]).expect("the link is left, not refused");
+
+        assert!(
+            scratch.exists(&foreign),
+            "a shadow the link reaches was taken"
+        );
+        assert!(scratch.exists(&fallback), "the link was removed");
+        assert!(
+            !scratch.exists(data_root.directory()),
+            "the home beside the link stood"
+        );
+    }
+
+    /// A home that is, by identity, a directory a caller names as a standing
+    /// root is left as it stands, empty or not.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the root standing at the home.
+    fn a_home_that_is_a_standing_root_is_left_as_it_stands() {
+        let scratch = Scratch::new("shadow-discard-root");
+        let vault = scratch.directory("vault");
+        let data_tmp = scratch.path("data/vaults/notes/tmp");
+        let ours = key();
+        let fallback = ShadowHome::resolve_where(&vault, &data_tmp, &ours, false)
+            .expect("the key's fallback home");
+        let staged = fallback.next_shadow();
+        std::fs::write(&staged, b"a document named like a shadow").unwrap();
+
+        discard_homes(&vault, &data_tmp, &ours, &[fallback.directory()])
+            .expect("the homes are discarded");
+
+        assert!(scratch.exists(&staged), "a standing root was swept");
+        std::fs::remove_file(&staged).unwrap();
+        discard_homes(&vault, &data_tmp, &ours, &[fallback.directory()])
+            .expect("the homes are discarded");
+        assert!(
+            scratch.exists(fallback.directory()),
+            "an empty standing root was removed"
         );
     }
 

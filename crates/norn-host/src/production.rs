@@ -1342,6 +1342,7 @@ impl EntryOps for ProductionEntryOps {
             &canonical_spelling(registration.root.as_path()),
             &derived.join(DATA_TMP),
             &maintainership_key(&self.dirs, name),
+            &[],
         )
         .map_err(|refused| RetireRefusal::Undiscarded(told(&refused)))?;
         drop(maintainership);
