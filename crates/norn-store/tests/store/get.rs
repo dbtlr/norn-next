@@ -1094,18 +1094,25 @@ fn a_collection_cursor_carrying_a_fingerprint_is_not_taken() {
             PagedRows::Finding,
         ),
     ] {
+        let refusal = vault.refusal(
+            &getting("paged")
+                .with_collection(selector)
+                .with_after(Cursor::new(forged.clone(), key)),
+        );
         assert_eq!(
-            vault.refusal(
-                &getting("paged")
-                    .with_collection(selector)
-                    .with_after(Cursor::new(forged.clone(), key))
-            ),
+            refusal,
             PageRefusal::CursorNotTaken {
                 cursor: paged,
                 paged
             },
             "{selector:?}"
         );
+        if paged == headings {
+            assert_eq!(
+                refusal.to_string(),
+                "the cursor names no position among a document's headings the request pages"
+            );
+        }
     }
 }
 

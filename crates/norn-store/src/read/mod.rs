@@ -286,7 +286,7 @@ impl std::fmt::Display for PageRefusal {
             PageRefusal::OrderChanged(changed) => order_change_told(changed, formatter),
             PageRefusal::CursorNotTaken { cursor, paged } if cursor == paged => write!(
                 formatter,
-                "the cursor names no position among the {} the request pages",
+                "the cursor names no position among {} the request pages",
                 rows_named(*paged)
             ),
             PageRefusal::CursorNotTaken { cursor, paged } => write!(

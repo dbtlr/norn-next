@@ -558,7 +558,7 @@ fn a_path_order_cursor_carrying_a_sort_value_is_refused() {
             paged: PagedRows::Document,
         }
         .to_string(),
-        "the cursor names no position among the documents the request pages"
+        "the cursor names no position among documents the request pages"
     );
 }
 
