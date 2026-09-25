@@ -24,9 +24,9 @@ use norn_testkit::wait::{Observed, wait_until};
 use norn_wire::{
     AnswerAdvisory, AttachMode, BodyText, CollectionPage, CollectionSelector, Column, ComparedBy,
     CountParams, DescribeParams, Direction, ErrorDetail, Facet, FacetKind, FieldType, FindParams,
-    FindReport, FindingKind, GetParams, GetReport, GroupKey, Hint, NotReady, ReasonCode,
-    ResolutionTarget, Sort, SortKey, TrustState, UntrustedReason, ValidateParams, ValidateReport,
-    VaultAddress, VaultName, VaultRoot,
+    FindReport, FindingKind, GetParams, GetReport, GroupKey, Hint, NotReady, Predicate, ReasonCode,
+    ResolutionTarget, Sort, SortKey, TrustState, Unsatisfied, UntrustedReason, ValidateParams,
+    ValidateReport, VaultAddress, VaultName, VaultRoot,
 };
 
 /// The generated profile every case here attaches.
@@ -959,6 +959,65 @@ fn a_get_of_an_unknown_target_refuses_as_unknown() {
     assert_eq!(
         refused.detail(),
         &ErrorDetail::unknown_target(a_target("zz-nowhere#^gone"))
+    );
+}
+
+/// **A part a verb could not apply reaches the answer through the host.** A
+/// get of a section or a block its document does not carry answers the
+/// document's record with exactly that part unsatisfied; a find reports a
+/// predicate key outside the field universe; a validate reports a `resolves`
+/// part as not applicable. Each is answered under the reading of its
+/// snapshot, never refused.
+#[test]
+fn a_part_a_verb_could_not_apply_is_answered_unsatisfied() {
+    let (_sandbox, vault, host) = a_verb_vault("host-reads-unsatisfied", &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    for (target, unsatisfied) in [
+        (
+            "zz-handbook#nowhere",
+            Unsatisfied::missing_section("nowhere"),
+        ),
+        ("zz-handbook#^gone", Unsatisfied::missing_block("gone")),
+    ] {
+        let answered = host
+            .get(&GetParams::new(address(vault.name()), a_target(target)))
+            .expect("a get of a part its document lacks answers");
+        assert_read_from_its_snapshot(&answered.answer.reading, &vault);
+        assert_eq!(answered.answer.unsatisfied, [unsatisfied], "{target}");
+        let GetReport::Record { document, .. } = &answered.answer.report else {
+            panic!("`{target}` answered {:?}", answered.answer.report);
+        };
+        assert_eq!(document.path.as_str(), "zz-guide/zz-handbook.md");
+    }
+
+    let found = host
+        .find(
+            &FindParams::new(address(vault.name()))
+                .with_predicates([Predicate::missing("zz-no-such-key")]),
+        )
+        .expect("a find over an unknown key answers");
+    assert_read_from_its_snapshot(&found.answer.reading, &vault);
+    assert!(
+        matches!(
+            found.answer.unsatisfied.as_slice(),
+            [Unsatisfied::UnknownPredicateKey { key, .. }] if key == "zz-no-such-key"
+        ),
+        "{:?}",
+        found.answer.unsatisfied
+    );
+
+    let resolving = a_target("zz-handbook");
+    let validated = host
+        .validate(
+            &ValidateParams::new(address(vault.name()))
+                .with_predicates([Predicate::resolves(resolving.clone())]),
+        )
+        .expect("a validate with a resolves part answers");
+    assert_read_from_its_snapshot(&validated.answer.reading, &vault);
+    assert_eq!(
+        validated.answer.unsatisfied,
+        [Unsatisfied::resolves_not_applicable(resolving)]
     );
 }
 
