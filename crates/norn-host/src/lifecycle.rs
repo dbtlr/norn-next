@@ -18369,6 +18369,54 @@ mod tests {
             );
         }
 
+        /// A caller that read the entry out of the set before the removal took
+        /// it out still holds it, and is answered as the set answers: the
+        /// removal withdrew the entry under the gate hold that let it go, so
+        /// the caller's demand records nothing and schedules nothing.
+        #[test]
+        fn a_removed_entry_answers_its_holder_as_the_set_does() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+
+            host.shared
+                .entries
+                .remove(&name)
+                .expect("the entry holds nothing");
+            let lease = host
+                .demand_entry(&name, Arc::clone(&entry))
+                .expect("the host is running");
+
+            assert_eq!(lease.outcome(), &Demand::UnknownVault);
+            assert_eq!(
+                entry.gate.lock().unwrap().demand_leases,
+                0,
+                "a demand was recorded against an entry the set let go of"
+            );
+            settle();
+            assert_eq!(ops.attaches.load(Ordering::SeqCst), 0);
+        }
+
+        /// An entry an unregistration has already withdrawn is removed as it
+        /// stands, whatever it reads as holding: the withdrawal asked under
+        /// the entry's gate and kept every door off it from then on, so its
+        /// answer is the one that binds.
+        #[test]
+        fn a_withdrawn_entry_is_removed_as_it_stands() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_for_state(&host, &name, TrustState::Ready);
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            entry.gate.lock().unwrap().withdrawn = true;
+
+            let removed = host.shared.entries.remove(&name);
+
+            assert_eq!(removed, Ok(()));
+            assert!(host.shared.entries.get(&name).is_none());
+            drop(lease);
+        }
+
         /// A job dispatched against a name the set then stops serving does
         /// nothing when it arrives, and the worker that answered it goes on to
         /// the next vault's work.
@@ -19694,6 +19742,103 @@ mod tests {
             assert_eq!(refusal.detail(), &ErrorDetail::already_served(name.clone()));
             assert_eq!(recorded(&ops, &name), Some(theirs));
             assert_eq!(listed(&host), Vec::<VaultName>::new());
+        }
+
+        /// A retry asked while an unregistration holds the entry withdrawn
+        /// answers the name as unknown and takes nothing off the entry: the
+        /// unregistration refused after it leaves the entry on the maintainer
+        /// park it stood on.
+        #[test]
+        fn a_retry_during_a_refused_unregistration_leaves_the_contention_park() {
+            let ops = Arc::new(FakeOps::default());
+            ops.contend_attach.store(true, Ordering::SeqCst);
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let contended = Demand::MaintainerContended(MaintainerIdentity::unknown());
+            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            wait_for_park(&host, &name, contended.clone());
+            wait_for_rest(&host, &name);
+            ops.registry_unwritable.store(true, Ordering::SeqCst);
+            let pause = RetirePause::new();
+            *ops.retire_pause.lock().unwrap() = Some(Arc::clone(&pause));
+
+            let (retried, refused) = thread::scope(|scope| {
+                let unregistering =
+                    scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
+                pause.entered.wait();
+                let retried = host
+                    .retry(&name, AttachMode::Durable)
+                    .unwrap()
+                    .outcome()
+                    .clone();
+                pause.resume.wait();
+                (
+                    retried,
+                    unregistering.join().expect("the unregistration ran"),
+                )
+            });
+
+            assert_eq!(retried, Demand::UnknownVault);
+            assert_eq!(
+                refused.expect_err("the file refused the change").code(),
+                &ReasonCode::HostRegistryUnwritable
+            );
+            assert_eq!(
+                entry_park(&host, &name),
+                Some(contended),
+                "a retry against the withdrawn entry took its park"
+            );
+        }
+
+        /// An unregistration classifies again only the names parked on a
+        /// conflict it was part of. A conflict naming others alone stands as
+        /// it is, even where a fresh read of their roots would no longer find
+        /// it: an acquisition is what reads it again.
+        #[cfg(unix)]
+        #[test]
+        fn a_conflict_naming_only_others_outlives_an_unregistration() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("unregister-unrelated-conflict");
+            let (root, elsewhere, other) = (
+                scratch.root().join("root"),
+                scratch.root().join("elsewhere"),
+                scratch.root().join("other"),
+            );
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            let link = scratch.root().join("link");
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+            let (a, b, leaving) = (
+                VaultName::new("a").unwrap(),
+                VaultName::new("b").unwrap(),
+                VaultName::new("leaving").unwrap(),
+            );
+            let host = quiet_host_over_roots(
+                Arc::clone(&ops),
+                &[
+                    (&a, root.as_path()),
+                    (&b, link.as_path()),
+                    (&leaving, other.as_path()),
+                ],
+            );
+            let conflict = Demand::DuplicateRoot(a_conflict([a.clone(), b.clone()]));
+            drop(host.demand(&a, AttachMode::Durable).unwrap());
+            wait_for_park(&host, &a, conflict.clone());
+            wait_for_park(&host, &b, conflict.clone());
+            wait_for_rest(&host, &a);
+            wait_for_rest(&host, &b);
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+
+            unregister(&host, UnregisterParams::new(leaving))
+                .expect("the idle vault is unregistered");
+
+            for name in [&a, &b] {
+                assert_eq!(
+                    entry_park(&host, name),
+                    Some(conflict.clone()),
+                    "{name}'s park was read again for a departure it was not part of"
+                );
+            }
         }
 
         /// A retirement that unwinds under the maintainer lock leaves the
