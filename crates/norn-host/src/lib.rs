@@ -56,8 +56,8 @@ pub use norn_config::registry::Entry as Registration;
 /// layer lands, by deriving over a throwaway store and throwing it away with
 /// the work. The store-side half of that seam is built — `norn-store` opens a
 /// throwaway store today — while nothing here establishes an entry over one,
-/// which is why the only path this crate's call graph reaches the mode by is
-/// the refusal at the demand seam.
+/// which is why the only paths this crate's call graph reaches the mode by are
+/// refusals: a demand naming it, and a request addressing its vault by root.
 pub use norn_wire::AttachMode;
 pub use production::{
     MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy, ProductionPolicyError,

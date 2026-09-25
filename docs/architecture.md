@@ -1702,11 +1702,12 @@ carries with the handle is the published demand read in the gate hold that estab
 snapshot, never the trust label a park outranks. An acquisition that mints no hold serves
 nothing and hands back one of two shapes, and the demand takes precedence: the published
 demand itself — a warming entry with its phase, coverage on its way back, an untrusted
-state, or a park under its own code — rendered as that demand's own answer, which is a state
-a caller polls for a warming entry, the untrusted reading where trust is withdrawn, and a
-refusal under its own code for a park, the same rendering every other surface gives that
-demand; or, where the demand is serving, reader-unavailable, which is an entry serving every
-surface but this one.
+state, or a park under its own code — rendered through the mapping every other surface
+renders that demand through, with one refusal added because a read cannot answer with a
+state: a warming entry is refused as `host/entry-not-ready` carrying its phase and counters,
+where a poll is answered with the state itself; an untrusted entry keeps the untrusted
+reading, and a park keeps its own code; or, where the demand is serving, reader-unavailable,
+which is an entry serving every surface but this one.
 
 A read's hold is a demand lease, and it does what a lease does: it holds the entry's idle
 interval open for as long as the read runs and restarts it when the hold drops, it clears
@@ -1790,6 +1791,11 @@ rows from the snapshot its hold established — the store counts the snapshots e
 through a reader, and an acquired request establishes exactly one — and the reading the
 request carries names the trust state and the store generation at that snapshot; a semantic
 rung reads its engine's sidecar instead and carries its own freshness in that same reading.
+The content model a builder compiles the request against is the entry's record of the schema
+its store pins, taken in the gate hold that establishes the snapshot: every leg that pins a
+schema records the model in the hold that publishes it, and no read is served between the
+pin and that hold, so a request is never compiled against a declaration its snapshot does not
+pin.
 The guarantee is one of transaction ownership: the reader is a second connection beside the
 writer, so no write consumes the snapshot a request read and no later write executes inside
 the request's snapshot transaction; and the snapshot is ended by the handle that opened it,
