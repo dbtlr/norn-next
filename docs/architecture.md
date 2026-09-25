@@ -814,7 +814,9 @@ root tells spellings apart and the folded one where it folds ASCII case; a tag b
 kind under the active fingerprint; and a links-to part on the link index, below. The full-text match shape is barred as that filter, and
 suffix/stem resolve and findings-for-path are read through statements the seam above bars;
 findings-for-path is also a validate narrowed by a path part, below. Suffix/stem resolve to
-one document is the get builder's too, below.
+one document is the get builder's too, below. A find's cursor names the order its page was
+read in — the sort key and direction, and the path ascending where the sort key is outside
+the field universe — and refuses in another.
 
 **The count-by-field shape has a builder** beside it: the count builder compiles a
 request's conjunction through the one compilation every read builder shares — so a part

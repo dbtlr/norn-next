@@ -285,10 +285,9 @@ impl Column {
 /// of rows kept describes nothing: there is no reading of it under which the
 /// head is a head of anything. Every bounded head in the vocabulary — a
 /// nested [`Collection`] on a row, the [`BodyText`] a body crosses as, and the
-/// [`CandidateHead`](crate::CandidateHead) a finding, a link row and a
-/// refusal carry —
-/// refuses through this one type, so a person reads one sentence whichever
-/// head they cut short.
+/// [`CandidateHead`] a finding, a link row and a refusal carry — refuses
+/// through this one type, so a person reads one sentence whichever head they
+/// cut short.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TotalBelowHead {
     head: usize,

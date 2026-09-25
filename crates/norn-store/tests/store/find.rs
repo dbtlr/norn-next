@@ -39,6 +39,15 @@ pub(crate) fn sorted(key: SortKey, direction: Direction) -> FindParams {
     request().with_sort(Sort::new(key, direction))
 }
 
+/// The order `params` names: its sort, or the path ascending where it names
+/// none.
+pub(crate) fn order_of(params: &FindParams) -> Sort {
+    params
+        .sort
+        .clone()
+        .unwrap_or_else(|| Sort::new(SortKey::path(), Direction::Ascending))
+}
+
 /// An order that reads a raw value as an integer: `"10"` stands before `"9"` as
 /// text and after it as a number, so the two orders part on the fixture.
 pub(crate) fn integer_order() -> TypedOrder {
@@ -270,7 +279,7 @@ impl Seeded {
     }
 
     /// `params` continuing from a row ordered by `sort` at `path`, with a
-    /// cursor minted in the order `params` reads under `declared`: the reading
+    /// cursor minted in the order `params` names under `declared`: the reading
     /// a first page of it answers from, positioned there.
     fn resumed_under(
         &self,
@@ -286,7 +295,7 @@ impl Seeded {
             .snapshot;
         params.clone().with_after(Cursor::new(
             reading,
-            CursorKey::document(sort.map(str::to_string), path),
+            CursorKey::document(order_of(params), sort.map(str::to_string), path),
         ))
     }
 

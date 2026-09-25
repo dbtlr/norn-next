@@ -29,8 +29,9 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    Cursor, CursorKey, FindingKind, FindingRow, Hint, KindTally, Predicate, ResolutionTarget,
-    Severity, Unsatisfied, ValidateParams, ValidateReport, VaultAddress, VaultName,
+    Cursor, CursorKey, Direction, FindingKind, FindingRow, Hint, KindTally, Predicate,
+    ResolutionTarget, Severity, Sort, SortKey, Unsatisfied, ValidateParams, ValidateReport,
+    VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -696,7 +697,14 @@ fn a_cursor_that_is_no_position_among_the_findings_is_refused() {
         validating_store
             .snapshot()
             .validate(
-                &validating().with_after(Cursor::new(reading, CursorKey::document(None, "a.md"))),
+                &validating().with_after(Cursor::new(
+                    reading,
+                    CursorKey::document(
+                        Sort::new(SortKey::path(), Direction::Ascending),
+                        None,
+                        "a.md"
+                    )
+                )),
                 &declared()
             )
             .expect_err("the cursor is refused"),

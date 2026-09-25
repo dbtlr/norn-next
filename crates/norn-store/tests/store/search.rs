@@ -19,8 +19,8 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan, ScanTarget};
 use norn_wire::{
-    Column, Cursor, CursorKey, FieldValue, FindParams, FindingKind, Moved, Predicate,
-    ResolutionTarget, Score, Unsatisfied, VaultAddress, VaultName,
+    Column, Cursor, CursorKey, Direction, FieldValue, FindParams, FindingKind, Moved, Predicate,
+    ResolutionTarget, Score, Sort, SortKey, Unsatisfied, VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -578,7 +578,11 @@ fn a_cursor_that_is_no_position_among_hits_is_refused() {
     let reading = searching_store.search(&searching("lantern")).snapshot;
     let document = searching("lantern").with_after(Cursor::new(
         reading.clone(),
-        CursorKey::document(None, "notes/lantern.md"),
+        CursorKey::document(
+            Sort::new(SortKey::path(), Direction::Ascending),
+            None,
+            "notes/lantern.md",
+        ),
     ));
     assert_eq!(
         searching_store.refusal(&document),

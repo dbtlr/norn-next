@@ -31,7 +31,10 @@ mod reading;
 mod run;
 mod suggest;
 
-use norn_wire::{CandidateHead, CollectionSelector, CursorOrderChanged, Hint, ResolutionTarget};
+use norn_wire::{
+    CandidateHead, CollectionSelector, CursorOrderChanged, Direction, Hint, ResolutionTarget, Sort,
+    SortKey,
+};
 
 use crate::count::CountStatement;
 use crate::describe::DescribeStatement;
@@ -334,12 +337,7 @@ impl std::fmt::Display for PageRefusal {
                 schema_named(declared_under.as_deref()),
                 schema_named(pinned.as_deref())
             ),
-            PageRefusal::OrderChanged(changed) => write!(
-                formatter,
-                "the cursor was minted in an order under {}, and the request reads one under {}",
-                schema_named(changed.minted_under.as_deref()),
-                schema_named(changed.current.as_deref())
-            ),
+            PageRefusal::OrderChanged(changed) => order_change_told(changed, formatter),
             PageRefusal::NotADocumentCursor => {
                 formatter.write_str("the cursor names a position among rows that are not documents")
             }
@@ -414,6 +412,50 @@ fn collection_named(selector: CollectionSelector) -> &'static str {
         CollectionSelector::Findings => "findings",
         _ => "collection",
     }
+}
+
+/// An order change as a refusal tells it: the two orders where they differ,
+/// else the two fingerprints where they differ, else the one order the cursor
+/// names no position in.
+fn order_change_told(
+    changed: &CursorOrderChanged,
+    formatter: &mut std::fmt::Formatter<'_>,
+) -> std::fmt::Result {
+    match &changed.orders {
+        Some(orders) if orders.cursor != orders.request => write!(
+            formatter,
+            "the cursor was minted in {}, and the request reads {}",
+            order_named(&orders.cursor),
+            order_named(&orders.request)
+        ),
+        Some(orders) if changed.minted_under == changed.current => write!(
+            formatter,
+            "the cursor names no position in {}, the order the request reads",
+            order_named(&orders.request)
+        ),
+        _ => write!(
+            formatter,
+            "the cursor was minted in an order under {}, and the request reads one under {}",
+            schema_named(changed.minted_under.as_deref()),
+            schema_named(changed.current.as_deref())
+        ),
+    }
+}
+
+/// A document order as a refusal names it: the quoted key or "the path", then
+/// the direction.
+fn order_named(order: &Sort) -> String {
+    let key = match &order.key {
+        SortKey::Field { key, .. } => format!("`{key}`"),
+        SortKey::Path { .. } => "the path".to_string(),
+        _ => "an order".to_string(),
+    };
+    let direction = match order.direction {
+        Direction::Ascending => "ascending",
+        Direction::Descending => "descending",
+        _ => "in another direction",
+    };
+    format!("{key} {direction}")
 }
 
 /// A schema fingerprint as a refusal names it: quoted, or "no schema".

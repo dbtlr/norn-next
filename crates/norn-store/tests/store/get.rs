@@ -19,9 +19,9 @@ use norn_store::{
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
 use norn_wire::{
-    Candidate, CollectionPage, CollectionSelector, Column, Cursor, CursorKey, DocumentRow,
-    FindParams, FindingKind, GetParams, GetReport, Hint, Pattern, Predicate, ResolutionTarget,
-    Severity, Unsatisfied, VaultAddress, VaultName,
+    Candidate, CollectionPage, CollectionSelector, Column, Cursor, CursorKey, Direction,
+    DocumentRow, FindParams, FindingKind, GetParams, GetReport, Hint, Pattern, Predicate,
+    ResolutionTarget, Severity, Sort, SortKey, Unsatisfied, VaultAddress, VaultName,
 };
 
 use crate::common::{Scratch, document, span, unread_block, write_documents};
@@ -955,7 +955,14 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
         ),
         (
             CollectionSelector::Tags,
-            Cursor::new(snapshot, CursorKey::document(None, "paged.md")),
+            Cursor::new(
+                snapshot,
+                CursorKey::document(
+                    Sort::new(SortKey::path(), Direction::Ascending),
+                    None,
+                    "paged.md",
+                ),
+            ),
         ),
     ] {
         assert_eq!(

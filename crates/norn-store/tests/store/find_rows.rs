@@ -17,7 +17,9 @@ use norn_wire::{
 };
 
 use crate::common::{Scratch, ambiguity, document, unread_block, violation, write_documents};
-use crate::find::{SEED_SCHEMA, Seeded, declared, integer_order, map, request, sorted, string};
+use crate::find::{
+    SEED_SCHEMA, Seeded, declared, integer_order, map, order_of, request, sorted, string,
+};
 
 /// The fixture's declaration, read from the schema pinned under `schema`.
 fn declared_under(schema: &str) -> ContentModel {
@@ -207,11 +209,11 @@ fn a_continuation_after_a_write_reports_the_generation_moved() {
 
 /// **A typed cursor refuses once its fingerprint no longer stands; a raw one
 /// survives a re-pin that leaves its key untyped.** The refusal is the wire's,
-/// naming both fingerprints. A raw cursor over `count` goes on in the raw order
-/// after a re-pin whose declaration still orders `count` by its text, because
-/// the order it names a position in has not moved; continued under a
-/// declaration that gives `count` a type, it is refused, because the request's
-/// order is now the typed one.
+/// naming both fingerprints and the one sort both pages name. A raw cursor
+/// over `count` goes on in the raw order after a re-pin whose declaration still
+/// orders `count` by its text, because the order it names a position in has
+/// not moved; continued under a declaration that gives `count` a type, it is
+/// refused, because the request's order is now the typed one.
 #[test]
 fn a_typed_cursor_refuses_after_a_re_pin_and_a_raw_one_survives_it() {
     let mut seeded = Seeded::new("find-cursor-re-pin");
@@ -237,16 +239,20 @@ fn a_typed_cursor_refuses_after_a_re_pin_and_a_raw_one_survives_it() {
             .find(&by_count.clone().with_after(cursor.clone()), declared)
             .expect_err("a cursor that is no position in the request's order")
     };
+    let count_ascending = || order_of(&by_count);
     assert_eq!(
         refused(&typed_cursor, &declared_under("schema-2")),
-        PageRefusal::OrderChanged(CursorOrderChanged::new(
-            "schema-1",
-            Some("schema-2".to_string())
-        ))
+        PageRefusal::OrderChanged(
+            CursorOrderChanged::new("schema-1", Some("schema-2".to_string()))
+                .in_orders(count_ascending(), count_ascending())
+        )
     );
     assert_eq!(
         refused(&raw_cursor, &declared_under("schema-2")),
-        PageRefusal::OrderChanged(CursorOrderChanged::minted_raw(Some("schema-2".to_string())))
+        PageRefusal::OrderChanged(
+            CursorOrderChanged::minted_raw(Some("schema-2".to_string()))
+                .in_orders(count_ascending(), count_ascending())
+        )
     );
 
     let survived = seeded.found_under(
@@ -265,10 +271,9 @@ fn a_typed_cursor_refuses_after_a_re_pin_and_a_raw_one_survives_it() {
 /// **A cursor is judged against the order its request names, on one
 /// snapshot.** The fixture's declaration orders `count` by a type and `status`
 /// by its text. A raw cursor continued in a typed order, a typed one continued
-/// in a raw order or a path order, and a cursor carrying a sort value continued
-/// in a path order are each refused with the wire's order change; a cursor
-/// carrying no sort value continued in a raw field order stands in its missing
-/// section.
+/// in a raw order or a path order, a raw one continued in a path order, and a
+/// path order's cursor continued in a raw field order are each refused with the
+/// wire's order change, naming both fingerprints and both orders.
 #[test]
 fn a_cursor_minted_in_another_order_than_the_requests_is_refused() {
     let seeded = Seeded::new("find-cursor-other-order");
@@ -302,40 +307,252 @@ fn a_cursor_minted_in_another_order_than_the_requests_is_refused() {
             .expect_err("a cursor that is no position in the request's order")
     };
     let seed = || Some(SEED_SCHEMA.to_string());
-    for (params, cursor, changed) in [
+    for (params, (cursor, minted_in), changed) in [
         (
             &by_count,
-            &raw_cursor,
+            (&raw_cursor, &by_status),
             CursorOrderChanged::minted_raw(seed()),
         ),
         (
             &by_count,
-            &path_cursor,
+            (&path_cursor, &by_path),
             CursorOrderChanged::minted_raw(seed()),
         ),
         (
             &by_status,
-            &typed_cursor,
+            (&typed_cursor, &by_count),
             CursorOrderChanged::new(SEED_SCHEMA, None),
         ),
         (
             &by_path,
-            &typed_cursor,
+            (&typed_cursor, &by_count),
             CursorOrderChanged::new(SEED_SCHEMA, None),
         ),
-        (&by_path, &raw_cursor, CursorOrderChanged::minted_raw(None)),
+        (
+            &by_path,
+            (&raw_cursor, &by_status),
+            CursorOrderChanged::minted_raw(None),
+        ),
+        (
+            &by_status,
+            (&path_cursor, &by_path),
+            CursorOrderChanged::minted_raw(None),
+        ),
     ] {
         assert_eq!(
             refusal(params, cursor),
-            PageRefusal::OrderChanged(changed),
+            PageRefusal::OrderChanged(changed.in_orders(order_of(minted_in), order_of(params))),
             "{params:?} continuing {cursor:?}"
         );
     }
+}
 
-    // A path order's cursor carries no sort value, which a raw field order
-    // reads as a position in its missing section: the encoding names no key.
-    let continued = seeded.found(&by_status.clone().with_after(path_cursor));
+/// The order `params` names, run the other way.
+fn reversed(params: &FindParams) -> FindParams {
+    let order = order_of(params);
+    let direction = match order.direction {
+        Direction::Ascending => Direction::Descending,
+        _ => Direction::Ascending,
+    };
+    params.clone().with_sort(Sort::new(order.key, direction))
+}
+
+/// **A cursor names the sort key and direction it was minted in, and a
+/// continuation in another is refused.** Every order's cursor names its own
+/// order, and continued in the same order reversed it is refused, with the
+/// fingerprints unchanged and the two orders named. Under a declaration that
+/// orders both keys by their text, a cursor minted by `status` is refused
+/// by `count`, though both orders are raw and read no fingerprint.
+#[test]
+fn a_cursor_continued_in_another_key_or_direction_is_refused() {
+    let seeded = Seeded::new("find-cursor-other-key");
+    let cursor = |params: &FindParams, declared: &ContentModel| {
+        seeded
+            .found_under(&params.clone().with_limit(1), declared)
+            .next
+            .expect("a next page")
+    };
+    let refusal = |params: &FindParams, cursor: &Cursor, declared: &ContentModel| {
+        seeded
+            .snapshot()
+            .find(&params.clone().with_after(cursor.clone()), declared)
+            .expect_err("a cursor that is no position in the request's order")
+    };
+
+    for params in orders() {
+        let minted = cursor(&params, &declared());
+        let CursorKey::Document { order, .. } = minted.key() else {
+            panic!("a find mints a document cursor: {minted:?}");
+        };
+        assert_eq!(order, &order_of(&params), "the cursor names another order");
+        let fingerprint = minted.snapshot().schema_fingerprint.clone();
+        let unchanged = match fingerprint.clone() {
+            Some(minted_under) => CursorOrderChanged::new(minted_under, fingerprint),
+            None => CursorOrderChanged::minted_raw(None),
+        };
+        let back = reversed(&params);
+        assert_eq!(
+            refusal(&back, &minted, &declared()),
+            PageRefusal::OrderChanged(unchanged.in_orders(order_of(&params), order_of(&back))),
+            "{params:?} continued reversed"
+        );
+    }
+
+    let by_status = sorted(SortKey::field("status"), Direction::Ascending);
+    let by_count = sorted(SortKey::field("count"), Direction::Ascending);
+    let minted = cursor(&by_status, &declared_raw_under(SEED_SCHEMA));
+    assert_eq!(minted.snapshot().schema_fingerprint, None);
+    assert_eq!(
+        refusal(&by_count, &minted, &declared_raw_under(SEED_SCHEMA)),
+        PageRefusal::OrderChanged(
+            CursorOrderChanged::minted_raw(None)
+                .in_orders(order_of(&by_status), order_of(&by_count))
+        )
+    );
+}
+
+/// **An order change says what changed.** A cursor continued in another key
+/// or direction is refused naming both orders; one continued in its own order
+/// under another schema, naming both fingerprints; and one that names no
+/// position in its own order, naming that order.
+#[test]
+fn an_order_change_names_what_changed() {
+    let due = |direction| Sort::new(SortKey::field("due"), direction);
+    let path = Sort::new(SortKey::path(), Direction::Ascending);
+    for (changed, account) in [
+        (
+            CursorOrderChanged::minted_raw(None)
+                .in_orders(due(Direction::Ascending), due(Direction::Descending)),
+            "the cursor was minted in `due` ascending, and the request reads `due` descending",
+        ),
+        (
+            CursorOrderChanged::minted_raw(None).in_orders(path.clone(), due(Direction::Ascending)),
+            "the cursor was minted in the path ascending, and the request reads `due` ascending",
+        ),
+        (
+            CursorOrderChanged::new("schema-1", Some("schema-2".to_string()))
+                .in_orders(due(Direction::Ascending), due(Direction::Ascending)),
+            "the cursor was minted in an order under the schema `schema-1`, and the request \
+             reads one under the schema `schema-2`",
+        ),
+        (
+            CursorOrderChanged::minted_raw(None).in_orders(path.clone(), path),
+            "the cursor names no position in the path ascending, the order the request reads",
+        ),
+    ] {
+        assert_eq!(PageRefusal::OrderChanged(changed).to_string(), account);
+    }
+}
+
+/// **A cursor minted while its sort key was unknown names the path order its
+/// page was read in, and is refused once the key is known.** A sort key no
+/// document carries and no declaration names orders the page by path,
+/// ascending, whatever direction the request asked for, and the cursor names
+/// that order: continued while the key is still unknown it goes on in path
+/// order, exactly. Once a document carries the key, the request's order is the
+/// key's, and the cursor is no position in it.
+#[test]
+fn a_cursor_minted_while_its_sort_key_was_unknown_is_refused_once_it_is_known() {
+    let mut seeded = Seeded::new("find-cursor-key-known");
+    let by_priority = sorted(SortKey::field("priority"), Direction::Descending).with_limit(2);
+    let first = seeded.found(&by_priority);
+    assert_eq!(paths(&first), ["notes/a.md", "notes/B.md"]);
+    let minted = first.next.expect("a next page");
+    let by_path = Sort::new(SortKey::path(), Direction::Ascending);
+    assert!(
+        matches!(minted.key(), CursorKey::Document { order, .. } if *order == by_path),
+        "the cursor names another order than its page was read in: {minted:?}"
+    );
+
+    let continued = seeded.found(&by_priority.clone().with_after(minted.clone()));
     assert!(continued.moved.is_empty());
+    assert_eq!(paths(&continued), ["notes/c.md", "other/glossary.md"]);
+
+    seeded.write(&[document("notes/d.md", "hash-d", "a body\n")
+        .with_frontmatter(Some(map(vec![("priority", string("high"))])), &declared())]);
+    assert_eq!(
+        seeded
+            .snapshot()
+            .find(&by_priority.clone().with_after(minted), &declared())
+            .expect_err("a cursor minted in the path order, continued in the key's"),
+        PageRefusal::OrderChanged(
+            CursorOrderChanged::minted_raw(None).in_orders(by_path, order_of(&by_priority))
+        )
+    );
+}
+
+/// **A cursor is judged by the order its page was read in, not the one its
+/// request named.** Two requests by a key no document carries both read the
+/// path ascending, whatever direction each names, so a cursor minted by one
+/// goes on exactly under the other. A cursor minted while a document carried
+/// the key is refused once none does: its page was read in the key's order,
+/// and the request's now reads the path's.
+#[test]
+fn a_cursor_is_judged_by_the_order_its_page_was_read_in() {
+    let mut seeded = Seeded::new("find-cursor-read-order");
+    let priority = |direction| sorted(SortKey::field("priority"), direction).with_limit(2);
+    let by_path = Sort::new(SortKey::path(), Direction::Ascending);
+
+    let minted = seeded
+        .found(&priority(Direction::Descending))
+        .next
+        .expect("a next page");
+    let continued = seeded.found(&priority(Direction::Ascending).with_after(minted));
+    assert!(continued.moved.is_empty());
+    assert_eq!(paths(&continued), ["notes/c.md", "other/glossary.md"]);
+
+    let prioritized = |frontmatter| {
+        document("notes/d.md", "hash-d", "a body\n").with_frontmatter(frontmatter, &declared())
+    };
+    seeded.write(&[prioritized(Some(map(vec![("priority", string("high"))])))]);
+    let known = seeded
+        .found(&priority(Direction::Descending))
+        .next
+        .expect("a next page");
+    assert!(
+        matches!(known.key(), CursorKey::Document { order, .. } if *order == order_of(&priority(Direction::Descending))),
+        "the cursor names another order than its page was read in: {known:?}"
+    );
+    seeded.write(&[prioritized(None)]);
+    assert_eq!(
+        seeded
+            .snapshot()
+            .find(
+                &priority(Direction::Descending).with_after(known),
+                &declared()
+            )
+            .expect_err("a cursor minted in the key's order, continued in the path's"),
+        PageRefusal::OrderChanged(
+            CursorOrderChanged::minted_raw(None)
+                .in_orders(order_of(&priority(Direction::Descending)), by_path)
+        )
+    );
+}
+
+/// **A path order's cursor carries no sort value.** One that carries a value
+/// is no position in the path order, though it names that order and its
+/// fingerprint, and it is refused.
+#[test]
+fn a_path_order_cursor_carrying_a_sort_value_is_refused() {
+    let seeded = Seeded::new("find-cursor-path-value");
+    let by_path = request().with_limit(1);
+    let minted = seeded.found(&by_path).next.expect("a next page");
+    let CursorKey::Document { order, path, .. } = minted.key() else {
+        panic!("a find mints a document cursor: {minted:?}");
+    };
+    let forged = Cursor::new(
+        minted.snapshot().clone(),
+        CursorKey::document(order.clone(), Some("zzzz".to_string()), path.clone()),
+    );
+    assert_eq!(
+        seeded
+            .snapshot()
+            .find(&by_path.clone().with_after(forged), &declared())
+            .expect_err("a path order's cursor carrying a sort value"),
+        PageRefusal::OrderChanged(
+            CursorOrderChanged::minted_raw(None).in_orders(order_of(&by_path), order_of(&by_path))
+        )
+    );
 }
 
 /// **A find's declaration is the one the snapshot pins.** A declaration read
