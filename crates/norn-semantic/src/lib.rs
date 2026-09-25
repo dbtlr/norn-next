@@ -68,7 +68,7 @@ mod progress;
 mod settings;
 mod sidecar;
 
-pub use engine::{DrainReport, Engine, Neighbor, VectorRow};
+pub use engine::{DrainReport, Engine, Nearest, NearestWork, Neighbor, VectorRow};
 pub use error::EngineError;
 pub use progress::{SidecarRevision, Watermark, Watermarks};
 pub use settings::{SectionError, Settings};
