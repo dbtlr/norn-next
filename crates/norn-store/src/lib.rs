@@ -96,11 +96,6 @@
 //!   recorded to survive is a policy over generations, and nothing here decides
 //!   it: a tombstone is kept until something says otherwise.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
-//! - **The read shape no builder emits.** Nothing indexes a link's target,
-//!   so a find refuses a `links_to` part by name, and no read resolves one, so
-//!   a find refuses the links column and a get refuses the links collection by
-//!   name. The refusals are dormant carriers whose consumer is the Layer 3 link
-//!   index unit.
 
 pub mod ddl;
 
