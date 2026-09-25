@@ -33,9 +33,9 @@
 //!
 //! # Why clearing the typed column at the pin is safe
 //!
-//! A pin clears `typed`, `least_typed` and `offset_stated` everywhere, and the heal that follows
-//! a schema reload refills them for every document derived before the pin,
-//! whether or not its bytes moved. Between the two, a reader could meet a column
+//! A pin clears `typed`, `least_typed` and `offset_stated` everywhere, and the
+//! heal that follows a schema reload refills them for every document derived
+//! before the pin, whether or not its bytes moved. Between the two, a reader could meet a column
 //! that is half refilled. None does: a schema reload closes the reader and
 //! publishes the vault as warming while the heal runs, and hands a reader back
 //! only once the heal has converged — so no read observes the column between the

@@ -141,6 +141,7 @@ mod tests {
     fn a_comparison_is_mixed_exactly_where_two_spellings_meet() {
         let none = BTreeSet::new();
         let stated = BTreeSet::from([Stated]);
+        let unstated = BTreeSet::from([Unstated]);
         let both = BTreeSet::from([Stated, Unstated]);
         let order = compared(ComparedBy::Sort, &[]);
         assert!(!order.is_mixed(&none));
@@ -149,6 +150,8 @@ mod tests {
         assert!(!compared(ComparedBy::Predicate, &[Stated]).is_mixed(&stated));
         assert!(!compared(ComparedBy::Predicate, &[Unstated]).is_mixed(&none));
         assert!(compared(ComparedBy::Predicate, &[Unstated]).is_mixed(&stated));
+        assert!(!compared(ComparedBy::Predicate, &[Unstated]).is_mixed(&unstated));
+        assert!(compared(ComparedBy::Predicate, &[Stated]).is_mixed(&unstated));
         assert!(compared(ComparedBy::Predicate, &[Stated]).is_mixed(&both));
         assert!(compared(ComparedBy::Predicate, &[Stated, Unstated]).is_mixed(&stated));
     }

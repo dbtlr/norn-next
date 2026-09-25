@@ -1,8 +1,9 @@
 //! What every read builder shares: the refusal a builder answers with instead
 //! of a page, the statements a read runs and records, the reading a cursor is
 //! judged against, the one compilation of a conjunction, the filters it
-//! spells, the advisories its applied parts earn, the one walk of the keys documents carry, and the one keyset page a
-//! builder reads section after section.
+//! spells, the advisories its applied parts earn, the one walk of the keys
+//! documents carry, and the one keyset page a builder reads section after
+//! section.
 //!
 //! A read builder is inherent methods on [`Snapshot`], so every statement it
 //! runs reads the one instant the snapshot was established at and is counted

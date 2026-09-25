@@ -113,6 +113,20 @@ impl Vault {
         )
     }
 
+    /// Unstated dates alone, and a value that is no date.
+    fn unstated(label: &str) -> Self {
+        Self::new(
+            label,
+            &[
+                ("notes/a.md", "2026-03-04"),
+                ("notes/b.md", "2026-03-05"),
+                ("notes/c.md", "2026-03-06"),
+                ("notes/d.md", "soon"),
+            ],
+            &declared(),
+        )
+    }
+
     fn snapshot(&self) -> Snapshot {
         self.reader
             .try_take()
@@ -198,7 +212,9 @@ fn a_date_order_over_both_spellings_is_advised() {
 /// answer is advised. A bound, an equality, an inequality and a membership
 /// each compare their value against every date the key holds. Where the
 /// value's spelling is the only one the key holds, nothing is advised; where
-/// it is not, the part is advised though the key's own dates agree.
+/// it is not, the part is advised though the key's own dates agree: an
+/// unstated value against stated dates, and a stated value against unstated
+/// ones.
 #[test]
 fn a_date_predicate_comparing_across_spellings_is_advised() {
     let vault = Vault::mixed("advisory-predicate", &declared());
@@ -248,6 +264,34 @@ fn a_date_predicate_comparing_across_spellings_is_advised() {
                 .advisories,
             predicate_advised(),
             "{part:?} compared an unstated value against stated dates"
+        );
+    }
+
+    let unstated = Vault::unstated("advisory-predicate-unstated");
+    for part in [
+        Predicate::after("due", "2026-03-04"),
+        Predicate::equal_to("due", "2026-03-05"),
+        Predicate::in_any("due", ["2026-03-04".to_string(), "2026-03-06".to_string()]),
+    ] {
+        assert_eq!(
+            unstated
+                .find(&request().with_predicates([part.clone()]))
+                .advisories,
+            [],
+            "{part:?} compared one spelling and was advised"
+        );
+    }
+    for part in [
+        Predicate::after("due", "2026-03-04Z"),
+        Predicate::equal_to("due", "2026-03-05Z"),
+        Predicate::in_any("due", ["2026-03-06Z".to_string()]),
+    ] {
+        assert_eq!(
+            unstated
+                .find(&request().with_predicates([part.clone()]))
+                .advisories,
+            predicate_advised(),
+            "{part:?} compared a stated value against unstated dates"
         );
     }
 }

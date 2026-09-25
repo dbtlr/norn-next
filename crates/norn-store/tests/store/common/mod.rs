@@ -213,7 +213,6 @@ pub fn drained(mut page: impl FnMut(Option<&DocumentPath>) -> Vec<DocumentPath>)
     }
 }
 
-/// A document path, or a panic naming what was wrong with it.
 /// A dated order enough to part the two offset spellings: a date is a
 /// `YYYY-MM-DD` day, and a `Z` after it states an offset. `2026-03-04Z` and
 /// `2026-03-04` are one place in the order, as a date reading them at offset
@@ -232,6 +231,7 @@ pub fn dated_order() -> TypedOrder {
     })
 }
 
+/// A document path, or a panic naming what was wrong with it.
 pub fn path(text: &str) -> DocumentPath {
     DocumentPath::new(text)
         .unwrap_or_else(|problem| panic!("`{text}` is a document path: {problem}"))

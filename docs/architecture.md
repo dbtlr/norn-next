@@ -1928,13 +1928,13 @@ row per scalar; they are maintained inside the document's own changeset; and the
 invalidation key is the document's content hash, because they are written with the
 document's changeset and rewritten whenever the document is. The typed column, its
 least-value marker and, beside a typed date, whether the date stated an offset from UTC:
-their inputs are the value rows and the vault's schema content model;
-derivation is deterministic, one pure function from a value and its key's declared type;
-they are maintained inside the document's changeset beside the value they type; and their
+their inputs are the value rows and the vault's schema content model; derivation is
+deterministic, one pure function from a value and its key's declared type; they are
+maintained inside the document's changeset beside the value they type; and their
 invalidation key is the standing schema pin held in `meta`. **The typed column joins what a
 re-pin discards**: the pin's own transaction clears every typed value, its least-value
-marker and its offset spelling beside the findings it discards, and the walk that follows refills them. That is safe
-because a schema reload closes the entry's reader and publishes `Warming` in its `Healing`
+marker and its offset spelling beside the findings it discards, and the walk that follows
+refills them. That is safe because a schema reload closes the entry's reader and publishes `Warming` in its `Healing`
 phase until the heal converges, so no read observes a column the walk has half refilled.
 **The pin is the key at both ends**: the declaration the host hands the store names the
 fingerprint it was read from, an increment refuses typed values derived under any other
