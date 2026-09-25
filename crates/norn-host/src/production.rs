@@ -1014,15 +1014,27 @@ impl EntryOps for ProductionEntryOps {
         }
 
         progress.begin_schema_reload();
-        attachment
-            .pin(&candidate)
-            .map_err(|failure| match failure {
+        // A pin the store refused leaves the store pinning the schema the
+        // entry serves under, so the refusal is the schema's to report and
+        // the entry keeps serving.
+        Self::pin_candidate(&mut attachment.store, &candidate).map_err(
+            |failure| match failure {
                 JobFailure::Environmental(detail) => {
                     JobFailure::Reload(ReloadError::SchemaApply(detail))
                 }
                 other => other,
-            })?;
+            },
+        )?;
+        // **From here the store pins the candidate**, so the controls are the
+        // candidate's before anything else can fail: a rebuild owed below pins
+        // the controls the attachment holds. A failure to read the pin back is
+        // not the schema's. It would leave the entry serving the model of a
+        // schema its store no longer pins, so it keeps its own class — the
+        // environment refusing, which untrusts the entry and owes a recovery
+        // that pins and reads the schema again, or damage, which owes a
+        // rebuild — and is never a refused apply that leaves the entry serving.
         attachment.controls = candidate;
+        attachment.read_pinned_model()?;
         self.dispatch_config(attachment);
         self.heal_under_coverage(attachment, progress)?;
         self.drain_semantic(name, attachment);
