@@ -411,6 +411,39 @@ fn a_cursor_continued_in_another_key_or_direction_is_refused() {
     );
 }
 
+/// **An order change says what changed.** A cursor continued in another key
+/// or direction is refused naming both orders; one continued in its own order
+/// under another schema, naming both fingerprints; and one that names no
+/// position in its own order, naming that order.
+#[test]
+fn an_order_change_names_what_changed() {
+    let due = |direction| Sort::new(SortKey::field("due"), direction);
+    let path = Sort::new(SortKey::path(), Direction::Ascending);
+    for (changed, account) in [
+        (
+            CursorOrderChanged::minted_raw(None)
+                .in_orders(due(Direction::Ascending), due(Direction::Descending)),
+            "the cursor was minted in `due` ascending, and the request reads `due` descending",
+        ),
+        (
+            CursorOrderChanged::minted_raw(None).in_orders(path.clone(), due(Direction::Ascending)),
+            "the cursor was minted in the path ascending, and the request reads `due` ascending",
+        ),
+        (
+            CursorOrderChanged::new("schema-1", Some("schema-2".to_string()))
+                .in_orders(due(Direction::Ascending), due(Direction::Ascending)),
+            "the cursor was minted in an order under the schema `schema-1`, and the request \
+             reads one under the schema `schema-2`",
+        ),
+        (
+            CursorOrderChanged::minted_raw(None).in_orders(path.clone(), path),
+            "the cursor names no position in the path ascending, the order the request reads",
+        ),
+    ] {
+        assert_eq!(PageRefusal::OrderChanged(changed).to_string(), account);
+    }
+}
+
 /// **A cursor minted while its sort key was unknown names the path order its
 /// page was read in, and is refused once the key is known.** A sort key no
 /// document carries and no declaration names orders the page by path,
