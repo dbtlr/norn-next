@@ -235,8 +235,8 @@ fn a_hold_carries_the_declaration_its_snapshot_pins_across_a_schema_reload() {
         attach::state_budget(attach::READY_LIMIT),
         || match host.reload(vault.name()) {
             Ok(_) => Observed::Met(()),
-            Err(ReloadRefusal::Unavailable(trust)) => {
-                Observed::pending(format!("the entry is {trust:?}"))
+            Err(ReloadRefusal::Unavailable(standing)) => {
+                Observed::pending(format!("the entry stands at {standing:?}"))
             }
             Err(refused) => panic!("the reload was refused: {refused:?}"),
         },
