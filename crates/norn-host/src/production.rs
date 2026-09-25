@@ -14,7 +14,7 @@ use norn_fs::{
     watch, watch_polling,
 };
 use norn_store::{
-    Change, ContentModel, DerivedFinding, DirectoryPrefix, DocumentPath, FindingFacts,
+    Change, ContentModel, DerivedFinding, DirectoryPrefix, DocumentPath, FeedRead, FindingFacts,
     IncrementProvenance, Provenance, RebuildReason, SchemaPin, Store, StoreError, StoreReading,
     StoredDocument, StoredPathOrder, SubjectScope,
 };
@@ -418,10 +418,8 @@ impl ProductionEntryOps {
     ///
     /// The reading is recorded ahead of the drain, so a status taken while
     /// the drain runs judges the engine against the work this leg committed
-    /// and reports it trailing, as a search would. A reading that cannot be
-    /// taken is recorded as none, which is nothing to judge against, and the
-    /// drain meets whatever refused it. A host that composes no engine
-    /// judges no engine, and records nothing.
+    /// and reports it trailing, as a search would. A host that composes no
+    /// engine judges no engine, records nothing and drains nothing.
     fn drain_semantic(
         &self,
         name: &VaultName,
@@ -429,14 +427,213 @@ impl ProductionEntryOps {
         progress: &ProgressReporter<ProductionAttachment>,
     ) {
         if let Some(semantic) = &self.semantic {
-            let mut feed = attachment.store.feed_read();
-            let reading = feed
-                .write_generation()
-                .ok()
-                .map(|generation| StoreReading::of(feed.epoch(), generation));
-            progress.record_store_reading(reading);
+            let mut feed = self.record_store_reading(attachment, progress);
             semantic.drain(name, &mut feed);
         }
+    }
+
+    /// Record where `attachment`'s lane-1 store stands through `progress`,
+    /// and hand back the feed-read handle the reading was taken over. A
+    /// reading that cannot be taken is recorded as none, which is nothing to
+    /// judge against.
+    fn record_store_reading<'a>(
+        &self,
+        attachment: &'a mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> FeedRead<'a> {
+        let mut feed = attachment.store.feed_read();
+        let reading = feed
+            .write_generation()
+            .ok()
+            .map(|generation| StoreReading::of(feed.epoch(), generation));
+        progress.record_store_reading(reading);
+        feed
+    }
+
+    /// The end of a leg that keeps `attachment`: a leg that failed records
+    /// where the store stands, since lane-1 work it committed before the
+    /// failure is work no drain has reached. The coverage it leaves holds
+    /// the engine its attachment was delivered, and a status judges that
+    /// engine against this reading. A leg that succeeded recorded its
+    /// reading ahead of its drain. A host that composes no engine records
+    /// nothing.
+    fn leg_ended<T, E>(
+        &self,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+        ended: Result<T, E>,
+    ) -> Result<T, E> {
+        if ended.is_err() && self.semantic.is_some() {
+            self.record_store_reading(attachment, progress);
+        }
+        ended
+    }
+
+    /// The work of [`EntryOps::reconcile`], whose end [`Self::leg_ended`]
+    /// records.
+    fn reconcile_leg(
+        &self,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        work: ReconcileWork,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<(), JobFailure> {
+        let _job = self.evidence.attributing();
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
+            return Err(JobFailure::LostMaintainership);
+        }
+        // A reconcile derives document changes under the active schema. Schema
+        // watcher facts are inert; only an explicit vault reload can replace
+        // the active pin.
+        if work.batch.rescans().contains(&RescanScope::Vault) {
+            self.heal(attachment, progress)?;
+            self.drain_semantic(name, attachment, progress);
+            return Ok(());
+        }
+        let healing = progress.healing();
+        scoped_increment(
+            &mut attachment.store,
+            &attachment.covered_root,
+            work.batch.vault_roots(),
+            self.policy,
+            &healing,
+            &exclusions_at(
+                &attachment.registration,
+                &attachment.shadows,
+                &attachment.covered_root,
+            ),
+        )?;
+        self.drain_semantic(name, attachment, progress);
+        Ok(())
+    }
+
+    /// The work of [`EntryOps::recover`], whose end [`Self::leg_ended`]
+    /// records.
+    fn recover_leg(
+        &self,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<(), JobFailure> {
+        attachment.drop_controls_held_for_rung_three();
+        let _job = self.evidence.attributing();
+        self.evidence.count_recovery();
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
+            return Err(JobFailure::LostMaintainership);
+        }
+        // Recovery re-installs coverage before it re-heals, so it enters the
+        // same prologue phase an attach does.
+        progress.installing_coverage();
+        let schema = Self::schema_path(&attachment.registration);
+        let (subscription, own_writes) =
+            Self::start_watch(&attachment.registration, &schema).map_err(watcher)?;
+        subscription
+            .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
+            .map_err(watcher)?;
+        let covered_root = subscription.covered_root().to_owned();
+        let candidate = ReloadCandidate::read_at(&attachment.registration, &covered_root)
+            .map_err(JobFailure::Reload)?;
+        let derived = self.derived(&attachment.registration.name);
+        let key = maintainership_key(&self.dirs, &attachment.registration.name);
+        let shadows = ShadowHome::resolve(&covered_root, &derived.join(DATA_TMP), &key)
+            .map_err(data_dir_effect)?;
+        shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
+        attachment.subscription = Some(subscription);
+        attachment._own_writes = own_writes;
+        attachment.shadow_advisory = fallback_advisory(&shadows, &covered_root);
+        attachment.shadows = shadows;
+        attachment.covered_root = covered_root;
+        // The first point a recovery holds both the order its new coverage
+        // proved and the store it will derive into, and the judgment is taken
+        // whatever the declaration says. A store derived under the other order
+        // holds rows under another document identity — which spellings are
+        // one row — with its finding classes filed in another key space, so
+        // nothing is pinned or derived into it and no read is served from it:
+        // it owes rung 3, which discards it and derives the vault again under
+        // the order this coverage proved, where the declaration read here
+        // lets it derive at all, and delivers that declaration's config once
+        // the rebuild has pinned it.
+        if let Some(reason) = attachment.path_order_moved() {
+            attachment.hold_for_rung_three(candidate);
+            return Err(JobFailure::StoreDamaged(reason.to_string()));
+        }
+        if candidate.undeclarable().is_some() {
+            // The same stance the attach takes: coverage is re-installed, the
+            // schema is re-read, and a declaration this build still cannot read
+            // pins nothing and derives nothing. A recovery run after the schema
+            // is corrected is what returns the vault to service.
+            attachment.controls = candidate;
+            return Ok(());
+        }
+        attachment.pin(&candidate)?;
+        attachment.controls = candidate;
+        self.dispatch_config(attachment);
+        self.heal_under_coverage(attachment, progress)?;
+        self.drain_semantic(name, attachment, progress);
+        Ok(())
+    }
+
+    /// The work of [`EntryOps::reload`], whose end [`Self::leg_ended`]
+    /// records.
+    fn reload_leg(
+        &self,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
+        attachment.drop_controls_held_for_rung_three();
+        let _job = self.evidence.attributing();
+        let (candidate, judgment) = Self::judge_candidate(attachment)?;
+        // A store whose rows were derived under another order than the
+        // coverage proved is neither pinned nor derived into here: it owes
+        // rung 3, which derives the vault again under the proven order and
+        // under the declaration this reload read, and delivers that
+        // declaration's config once the rebuild has pinned it.
+        if let Some(reason) = attachment.path_order_moved() {
+            attachment.hold_for_rung_three(candidate);
+            return Err(JobFailure::StoreDamaged(reason.to_string()).into());
+        }
+        if judgment.outcome == ReloadOutcome::ConfigOnly {
+            attachment.controls = candidate;
+            self.dispatch_config(attachment);
+            self.drain_semantic(name, attachment, progress);
+            return Ok(judgment);
+        }
+
+        progress.begin_schema_reload();
+        // A pin the store refused leaves the store pinning the schema the
+        // entry serves under, so the refusal is the schema's to report and
+        // the entry keeps serving.
+        Self::pin_candidate(&mut attachment.store, &candidate).map_err(
+            |failure| match failure {
+                JobFailure::Environmental(detail) => {
+                    JobFailure::Reload(ReloadError::SchemaApply(detail))
+                }
+                other => other,
+            },
+        )?;
+        // **From here the store pins the candidate**, so the controls are the
+        // candidate's before anything else can fail: a rebuild owed below pins
+        // the controls the attachment holds. A failure to read the pin back is
+        // not the schema's. It would leave the entry serving the model of a
+        // schema its store no longer pins, so it keeps its own class — the
+        // environment refusing, which untrusts the entry and owes a recovery
+        // that pins and reads the schema again, or damage, which owes a
+        // rebuild — and is never a refused apply that leaves the entry serving.
+        attachment.controls = candidate;
+        attachment.read_pinned_model()?;
+        self.dispatch_config(attachment);
+        self.heal_under_coverage(attachment, progress)?;
+        self.drain_semantic(name, attachment, progress);
+        Ok(judgment)
     }
 
     /// Deliver the config of the controls the attachment holds to every
@@ -1052,37 +1249,8 @@ impl EntryOps for ProductionEntryOps {
         work: ReconcileWork,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
-        let _job = self.evidence.attributing();
-        if !attachment
-            .maintainership
-            .still_current()
-            .map_err(data_dir_effect)?
-        {
-            return Err(JobFailure::LostMaintainership);
-        }
-        // A reconcile derives document changes under the active schema. Schema
-        // watcher facts are inert; only an explicit vault reload can replace
-        // the active pin.
-        if work.batch.rescans().contains(&RescanScope::Vault) {
-            self.heal(attachment, progress)?;
-            self.drain_semantic(name, attachment, progress);
-            return Ok(());
-        }
-        let healing = progress.healing();
-        scoped_increment(
-            &mut attachment.store,
-            &attachment.covered_root,
-            work.batch.vault_roots(),
-            self.policy,
-            &healing,
-            &exclusions_at(
-                &attachment.registration,
-                &attachment.shadows,
-                &attachment.covered_root,
-            ),
-        )?;
-        self.drain_semantic(name, attachment, progress);
-        Ok(())
+        let ended = self.reconcile_leg(name, attachment, work, progress);
+        self.leg_ended(attachment, progress, ended)
     }
 
     fn recover(
@@ -1091,66 +1259,8 @@ impl EntryOps for ProductionEntryOps {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
-        attachment.drop_controls_held_for_rung_three();
-        let _job = self.evidence.attributing();
-        self.evidence.count_recovery();
-        if !attachment
-            .maintainership
-            .still_current()
-            .map_err(data_dir_effect)?
-        {
-            return Err(JobFailure::LostMaintainership);
-        }
-        // Recovery re-installs coverage before it re-heals, so it enters the
-        // same prologue phase an attach does.
-        progress.installing_coverage();
-        let schema = Self::schema_path(&attachment.registration);
-        let (subscription, own_writes) =
-            Self::start_watch(&attachment.registration, &schema).map_err(watcher)?;
-        subscription
-            .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
-            .map_err(watcher)?;
-        let covered_root = subscription.covered_root().to_owned();
-        let candidate = ReloadCandidate::read_at(&attachment.registration, &covered_root)
-            .map_err(JobFailure::Reload)?;
-        let derived = self.derived(&attachment.registration.name);
-        let key = maintainership_key(&self.dirs, &attachment.registration.name);
-        let shadows = ShadowHome::resolve(&covered_root, &derived.join(DATA_TMP), &key)
-            .map_err(data_dir_effect)?;
-        shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
-        attachment.subscription = Some(subscription);
-        attachment._own_writes = own_writes;
-        attachment.shadow_advisory = fallback_advisory(&shadows, &covered_root);
-        attachment.shadows = shadows;
-        attachment.covered_root = covered_root;
-        // The first point a recovery holds both the order its new coverage
-        // proved and the store it will derive into, and the judgment is taken
-        // whatever the declaration says. A store derived under the other order
-        // holds rows under another document identity — which spellings are
-        // one row — with its finding classes filed in another key space, so
-        // nothing is pinned or derived into it and no read is served from it:
-        // it owes rung 3, which discards it and derives the vault again under
-        // the order this coverage proved, where the declaration read here
-        // lets it derive at all, and delivers that declaration's config once
-        // the rebuild has pinned it.
-        if let Some(reason) = attachment.path_order_moved() {
-            attachment.hold_for_rung_three(candidate);
-            return Err(JobFailure::StoreDamaged(reason.to_string()));
-        }
-        if candidate.undeclarable().is_some() {
-            // The same stance the attach takes: coverage is re-installed, the
-            // schema is re-read, and a declaration this build still cannot read
-            // pins nothing and derives nothing. A recovery run after the schema
-            // is corrected is what returns the vault to service.
-            attachment.controls = candidate;
-            return Ok(());
-        }
-        attachment.pin(&candidate)?;
-        attachment.controls = candidate;
-        self.dispatch_config(attachment);
-        self.heal_under_coverage(attachment, progress)?;
-        self.drain_semantic(name, attachment, progress);
-        Ok(())
+        let ended = self.recover_leg(name, attachment, progress);
+        self.leg_ended(attachment, progress, ended)
     }
 
     fn reload(
@@ -1159,51 +1269,8 @@ impl EntryOps for ProductionEntryOps {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
-        attachment.drop_controls_held_for_rung_three();
-        let _job = self.evidence.attributing();
-        let (candidate, judgment) = Self::judge_candidate(attachment)?;
-        // A store whose rows were derived under another order than the
-        // coverage proved is neither pinned nor derived into here: it owes
-        // rung 3, which derives the vault again under the proven order and
-        // under the declaration this reload read, and delivers that
-        // declaration's config once the rebuild has pinned it.
-        if let Some(reason) = attachment.path_order_moved() {
-            attachment.hold_for_rung_three(candidate);
-            return Err(JobFailure::StoreDamaged(reason.to_string()).into());
-        }
-        if judgment.outcome == ReloadOutcome::ConfigOnly {
-            attachment.controls = candidate;
-            self.dispatch_config(attachment);
-            self.drain_semantic(name, attachment, progress);
-            return Ok(judgment);
-        }
-
-        progress.begin_schema_reload();
-        // A pin the store refused leaves the store pinning the schema the
-        // entry serves under, so the refusal is the schema's to report and
-        // the entry keeps serving.
-        Self::pin_candidate(&mut attachment.store, &candidate).map_err(
-            |failure| match failure {
-                JobFailure::Environmental(detail) => {
-                    JobFailure::Reload(ReloadError::SchemaApply(detail))
-                }
-                other => other,
-            },
-        )?;
-        // **From here the store pins the candidate**, so the controls are the
-        // candidate's before anything else can fail: a rebuild owed below pins
-        // the controls the attachment holds. A failure to read the pin back is
-        // not the schema's. It would leave the entry serving the model of a
-        // schema its store no longer pins, so it keeps its own class — the
-        // environment refusing, which untrusts the entry and owes a recovery
-        // that pins and reads the schema again, or damage, which owes a
-        // rebuild — and is never a refused apply that leaves the entry serving.
-        attachment.controls = candidate;
-        attachment.read_pinned_model()?;
-        self.dispatch_config(attachment);
-        self.heal_under_coverage(attachment, progress)?;
-        self.drain_semantic(name, attachment, progress);
-        Ok(judgment)
+        let ended = self.reload_leg(name, attachment, progress);
+        self.leg_ended(attachment, progress, ended)
     }
 
     /// The reload's judgment of the candidate, over the attachment as it
@@ -6244,6 +6311,58 @@ mod tests {
                     } if *generations > 0
                 )
             });
+        }
+
+        /// **A leg that commits lane-1 work and then fails leaves the engine
+        /// reported trailing that work**: the leg records where the store
+        /// stands at its end, failure included, so a status never calls an
+        /// engine caught up with a store the failed leg moved on.
+        #[cfg(unix)]
+        #[test]
+        fn a_leg_that_fails_after_committing_reports_the_engine_trailing_its_work() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let f = Fixture::new("status-engine-failed-leg");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("a.md"), "alpha alpha\n").unwrap();
+            let (_engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = ready_host(&f, ops);
+            assert_eq!(
+                engine_reported(&host, &name).1,
+                norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            );
+
+            fs::write(f.vault().join("a.md"), "beta beta\n").unwrap();
+            let denied = f.vault().join("zz");
+            fs::create_dir(&denied).unwrap();
+            fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+            if fs::read_dir(&denied).is_ok() {
+                eprintln!("skipped: this account reads a mode-000 directory");
+                fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
+                return;
+            }
+            fs::write(
+                f.vault().join(".norn/schema.yaml"),
+                "version: 1\n# edited\n",
+            )
+            .unwrap();
+            let refused = host.reload(&name);
+            let (_, engine) = engine_reported(&host, &name);
+            fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
+
+            assert!(
+                matches!(
+                    refused,
+                    Err(crate::ReloadRefusal::Runtime(JobFailure::Environmental(_)))
+                ),
+                "{refused:?}"
+            );
+            // The walk committed the rewritten `a.md` as one generation
+            // before it met the directory it cannot list.
+            assert_eq!(
+                engine,
+                norn_wire::EngineStatus::on(None, Some(Freshness::trailing(1)))
+            );
         }
 
         /// **A status and a doctor are answered while a drain holds the

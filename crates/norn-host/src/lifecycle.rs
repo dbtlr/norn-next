@@ -519,7 +519,8 @@ impl<A: SnapshotSource> ProgressReporter<A> {
 
     /// Record `reading` as where this entry's lane-1 store stands: the reading
     /// a leg takes where its lane-1 work has committed, ahead of the drain it
-    /// relays, and `None` where that reading could not be taken.
+    /// relays, or at its end where it failed, and `None` where that reading
+    /// could not be taken.
     ///
     /// It is what `vault status` and `doctor` judge the engine's watermarks
     /// against, so a status taken while the drain runs reports the engine
@@ -909,7 +910,8 @@ struct EntryState<A: SnapshotSource> {
     /// since this host started carries none.
     advisories: Vec<AttachmentAdvisory>,
     /// Where the lane-1 store of the coverage the entry holds stood when the
-    /// last leg over it committed its lane-1 work, as that leg recorded it
+    /// last leg over it committed its lane-1 work or failed, as that leg
+    /// recorded it
     /// through [`ProgressReporter::record_store_reading`]; `None` until one
     /// has, and once the coverage goes back.
     store_reading: Option<StoreReading>,
