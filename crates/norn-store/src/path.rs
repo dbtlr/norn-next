@@ -806,7 +806,12 @@ fn segment_problem(path: &str) -> Option<&'static str> {
 /// The dot has to be inside the name for the extension to be one: `.gitignore`
 /// is a name, not an empty stem with an extension, and reducing it to nothing
 /// would put every dotfile in the same ambiguity class.
-fn leaf_stem(leaf: &str) -> &str {
+///
+/// This is the one rule for what a leaf's extension is — [`suffix_probe`] and
+/// [`DocumentPath::new`] apply it to key a document by its stem, and the
+/// store's `link` module applies the same rule to a rooted wikilink's leaf,
+/// so a dotted name reduces the same way whichever reads it.
+pub(crate) fn leaf_stem(leaf: &str) -> &str {
     match leaf.rfind('.') {
         Some(dot) if dot > 0 => &leaf[..dot],
         _ => leaf,

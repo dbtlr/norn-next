@@ -31,10 +31,12 @@
 //! A `vault://` link is read from the vault root under its own family's
 //! rules. A Markdown one is a path, as above. A wikilink's is a rooted name:
 //! read by the wikilink grammar, with nothing decoded or cut off, it names
-//! exactly the root path each reduction of its leaf spells — the name with
-//! the document extension appended, and, where the leaf carries an extension,
-//! the name as written — so `[[vault://Notes]]` and `[[vault://Notes.md]]`
-//! name `Notes.md`, and `[[vault://Deep]]` never reaches `sub/Deep.md`.
+//! exactly the root path each reduction of its leaf spells — the stem as
+//! written, and the stem with its extension stripped, each with the document
+//! extension appended — mirroring a suffix wikilink's own two reductions, so
+//! `[[vault://Notes]]` and `[[vault://Notes.md]]` name `Notes.md`,
+//! `[[vault://v1.2]]` names `v1.2.md` or `v1.md`, and `[[vault://Deep]]`
+//! never reaches `sub/Deep.md`.
 //!
 //! # The keys are what every read of a link seeks
 //!
@@ -50,7 +52,7 @@
 use norn_wire::{DOCUMENT_EXTENSION, LinkAddress};
 
 use crate::facts::LinkFact;
-use crate::path::{DocumentPath, SuffixKey, fold_ascii_case, suffix_probe};
+use crate::path::{DocumentPath, SuffixKey, fold_ascii_case, leaf_stem, suffix_probe};
 
 /// The separator between segments, in a target and in a path alike.
 const SEPARATOR: char = '/';
@@ -158,21 +160,34 @@ pub(crate) fn keys_naming(document: &DocumentPath, key: SuffixKey) -> Vec<String
 }
 
 /// The root paths a rooted wikilink's `name` spells, one per reduction of its
-/// leaf: the name with the document extension appended, and, where the leaf
-/// carries an extension, the name as written. A name the wikilink grammar
+/// leaf — mirroring a suffix wikilink's own two reductions: the stem as
+/// written, with the document extension appended, and, where the leaf carries
+/// an extension, the stem with that extension stripped, with the document
+/// extension appended in its place. `leaf_stem` is what decides whether the
+/// leaf carries an extension and where it ends, the same rule a suffix
+/// address's own reductions strip by, so `[[vault://v1.2]]` names `v1.2.md`
+/// or `v1.md` — never the literal `v1.2`. A name the wikilink grammar
 /// refuses — an empty segment, a `.` or `..` segment — names none, and so does
 /// a spelling the document path grammar refuses. Nothing in the name is
 /// decoded or cut off.
 fn rooted_name(name: &str) -> Vec<String> {
-    let Ok(probe) = suffix_probe(name) else {
+    if suffix_probe(name).is_err() {
         return Vec::new();
-    };
+    }
+    let (ancestors, leaf) = name.rsplit_once(SEPARATOR).unwrap_or(("", name));
+    let stem = leaf_stem(leaf);
     let as_a_stem = format!("{name}.{DOCUMENT_EXTENSION}");
-    // A probe opens a second range exactly where the leaf carries an
-    // extension, which is where the name as written is a reduction too.
-    let as_written = (probe.range_count() > 1).then(|| name.to_string());
+    // The leaf carries an extension exactly where its stem is shorter than
+    // it, which is the one case with a second reduction.
+    let stripped = (stem != leaf).then(|| {
+        if ancestors.is_empty() {
+            format!("{stem}.{DOCUMENT_EXTENSION}")
+        } else {
+            format!("{ancestors}{SEPARATOR}{stem}.{DOCUMENT_EXTENSION}")
+        }
+    });
     std::iter::once(as_a_stem)
-        .chain(as_written)
+        .chain(stripped)
         .filter(|path| DocumentPath::new(path).is_ok())
         .collect()
 }
@@ -297,8 +312,9 @@ mod tests {
 
     /// A `vault://` wikilink is keyed by the root paths its reductions spell —
     /// the target with the document extension appended, and, where its leaf
-    /// carries an extension, the target as written — with nothing decoded or
-    /// cut off, and a target the wikilink grammar refuses names none. A
+    /// carries an extension, the target with that extension stripped and the
+    /// document extension appended in its place — with nothing decoded or cut
+    /// off, and a target the wikilink grammar refuses names none. A
     /// `vault://` Markdown link is keyed by the one root path it decodes to,
     /// its query cut off and never reduced. Neither is read from the holding
     /// document's directory.
@@ -308,7 +324,7 @@ mod tests {
         for (family, target, keys) in [
             (Wikilink, "Notes", &["Notes.md"][..]),
             (Wikilink, "Notes.md", &["Notes.md.md", "Notes.md"]),
-            (Wikilink, "v1.2", &["v1.2.md", "v1.2"]),
+            (Wikilink, "v1.2", &["v1.2.md", "v1.md"]),
             (Wikilink, "a.b/Notes", &["a.b/Notes.md"]),
             (Wikilink, "my%20note", &["my%20note.md"]),
             (Wikilink, "Notes?x", &["Notes?x.md"]),

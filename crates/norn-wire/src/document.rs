@@ -488,9 +488,11 @@ pub enum LinkAddress<'a> {
     /// A suffix address, resolved through the one resolver.
     Suffix(&'a str),
     /// A wikilink's name read from the vault root: it names the document at
-    /// exactly the root path one of its reductions spells — the name with
-    /// [`DOCUMENT_EXTENSION`] appended, and, where its leaf carries an
-    /// extension, the name as written — and never a suffix of a deeper path.
+    /// exactly the root path one of its reductions spells — mirroring a
+    /// suffix wikilink's own two reductions: the stem as written, and, where
+    /// its leaf carries an extension, the stem with that extension stripped,
+    /// each with [`DOCUMENT_EXTENSION`] appended — and never a suffix of a
+    /// deeper path.
     RootedName(&'a str),
     /// A path read from the directory of the document holding the link.
     Relative(&'a str),

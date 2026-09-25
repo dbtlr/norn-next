@@ -986,8 +986,9 @@ none, and a path climbing above the root names none; a segment that decodes to `
 is data, which no document path holds. A `vault://` stem is read from the vault root under
 its family's own rules: a Markdown one is a path, read the same way, and a wikilink's is a
 rooted name, read with nothing decoded or cut off, that names exactly the root path each
-reduction of its leaf spells — the name with `.md` appended, and, where its leaf carries an
-extension, the name as written — matched under the store's order and never as a suffix. A
+reduction of its leaf spells — mirroring a suffix wikilink's own two reductions: the stem as
+written, and, where its leaf carries an extension, the stem with that extension stripped,
+each with `.md` appended — matched under the store's order and never as a suffix. A
 same-document anchor names its own document. A link is
 judged by resolving it first: one document is healthy and more are ambiguous, and none is
 broken unless the target's last segment carries an extension other than `.md`, which names

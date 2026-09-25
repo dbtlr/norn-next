@@ -485,7 +485,7 @@ fn rooted() -> Vec<DocumentFacts> {
     use LinkFamily::{Markdown, Wikilink};
     let mut all = vec![
         holding("Notes.md", Vec::new()),
-        holding("v1.2.md", Vec::new()),
+        holding("v1.md", Vec::new()),
         holding("sub/Deep.md", Vec::new()),
         holding("my note.md", Vec::new()),
     ];
@@ -513,8 +513,10 @@ fn rooted() -> Vec<DocumentFacts> {
 /// **A `vault://` link is rooted at the vault root, and its family keeps its
 /// own rules**, on either root. A wikilink names the root path each of its
 /// reductions spells: `[[vault://Notes]]` and `[[vault://Notes.md]]` name
-/// `Notes.md`, and `[[vault://v1.2]]` names `v1.2.md`; it is never a suffix
-/// address, so `[[vault://Deep]]` does not reach `sub/Deep.md`; and nothing in
+/// `Notes.md`, and `[[vault://v1.2]]` names `v1.md` — its dotted leaf's
+/// stem, stripped of its extension, exactly as a suffix wikilink's own
+/// second reduction reaches it; it is never a suffix address, so
+/// `[[vault://Deep]]` does not reach `sub/Deep.md`; and nothing in
 /// it is decoded or cut off, so `[[vault://my%20note]]` and
 /// `[[vault://Notes?x]]` name nothing. A Markdown link names the one path it
 /// spells, percent-decoded and its query cut off and never reduced:
@@ -534,7 +536,7 @@ fn a_vault_link_is_rooted_and_its_family_keeps_its_rules() {
         for (at, expected) in [
             ("h/w-notes.md", names(LinkHealth::Healthy, &["Notes.md"])),
             ("h/w-notes-md.md", names(LinkHealth::Healthy, &["Notes.md"])),
-            ("h/w-v12.md", names(LinkHealth::Healthy, &["v1.2.md"])),
+            ("h/w-v12.md", names(LinkHealth::Healthy, &["v1.md"])),
             ("h/w-deep.md", names(LinkHealth::Broken, &[])),
             ("h/w-encoded.md", names(LinkHealth::Broken, &[])),
             ("h/w-query.md", names(LinkHealth::Broken, &[])),
@@ -561,13 +563,39 @@ fn a_vault_link_is_rooted_and_its_family_keeps_its_rules() {
             notes.sort_unstable();
         }
         assert_eq!(linked.backlinks("Notes"), notes, "{order:?}");
-        assert_eq!(linked.backlinks("v1.2"), ["h/w-v12.md"], "{order:?}");
+        assert_eq!(linked.backlinks("v1"), ["h/w-v12.md"], "{order:?}");
         assert_eq!(linked.backlinks("my note"), ["h/m-encoded.md"], "{order:?}");
         assert_eq!(
             linked.backlinks("sub/Deep"),
             Vec::<String>::new(),
             "{order:?}"
         );
+    }
+}
+
+/// **A `vault://` wikilink's dotted-leaf reduction reaches the same document
+/// a suffix wikilink's does.** With only `v1.md` standing, `[[v1.2]]` and
+/// `[[vault://v1.2]]` both strip `v1.2`'s leaf to its stem `v1` for their
+/// second reduction, so both name `v1.md` and are healthy, on either root.
+#[test]
+fn a_vault_wikilinks_dotted_leaf_reduction_matches_a_suffix_wikilinks() {
+    for order in [Sensitive, Folding] {
+        let linked = Linked::holding(
+            &format!("links-vault-dotted-leaf-{order:?}"),
+            order,
+            &[
+                holding("v1.md", Vec::new()),
+                holding("h/s.md", vec![wikilink("v1.2")]),
+                holding("h/r.md", vec![vault(LinkFamily::Wikilink, "v1.2")]),
+            ],
+        );
+        for at in ["h/s.md", "h/r.md"] {
+            assert_eq!(
+                reading(&linked.links(at)[0]),
+                names(LinkHealth::Healthy, &["v1.md"]),
+                "{order:?} `{at}`"
+            );
+        }
     }
 }
 

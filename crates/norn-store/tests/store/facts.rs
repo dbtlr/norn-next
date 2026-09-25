@@ -289,8 +289,8 @@ fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
             key(8, "picture/", "picture/", Some(1)),
             key(10, "notes/X.md", "notes/x.md", None),
             key(13, "a/b/q.md", "a/b/q.md", None),
-            key(14, "Notes/v1.2", "notes/v1.2", None),
             key(14, "Notes/v1.2.md", "notes/v1.2.md", None),
+            key(14, "Notes/v1.md", "notes/v1.md", None),
         ]
     );
 
