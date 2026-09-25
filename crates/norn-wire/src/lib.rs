@@ -35,8 +35,10 @@
 //! well: the [`AnswerReading`] every answer carries — its [`TrustState`], its
 //! establishment, and the [`LadderDeclaration`] of [`RungReport`]s a search
 //! ran — the [`Unsatisfied`] parts of a request that could not be applied, the
-//! [`AnswerAdvisory`] saying what an applied part assumed and the
-//! [`ComparedBy`] place it compared in, and
+//! [`AnswerAdvisory`] saying what an applied part assumed or where it stopped,
+//! with the [`ComparedBy`] place a comparison compared in, the
+//! [`RungSkipReason`] a rung was left out for, and the [`RUNG_DEPTH`] a rung
+//! stops at, and
 //! the [`Cursor`] a page continues from, with the [`Snapshot`] a continuation
 //! is judged against, what [`Moved`] under it, and the [`CursorKey`] each
 //! paged row type stops at.
@@ -212,6 +214,7 @@
 //! [`Cursor::new`], [`Page::new`], [`Snapshot::new`], [`SidecarRevision::new`],
 //! [`CursorOrderChanged::new`], [`DocumentOrders::new`], [`HitLadders::new`],
 //! [`Score::new`],
+//! [`RungSkipReason::unavailable`],
 //! [`AnswerReading::new`], [`LadderDeclaration::new`],
 //! [`ModelIdentity::new`], [`Freshness::trailing`], [`Freshness::rescanning`],
 //! [`VaultAnswer::new`], [`VaultAnswer::with_advisories`],
@@ -394,14 +397,16 @@ pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint
 pub use glob::{CaseFold, Pattern, PatternError};
 pub use name::{IllegalVaultName, VaultName};
 pub use predicate::Predicate;
-pub use product::{AnswerAdvisory, ComparedBy, Unsatisfied, VaultAnswer};
+pub use product::{AnswerAdvisory, ComparedBy, RungSkipReason, Unsatisfied, VaultAnswer};
 pub use read::count::{CountParams, CountReport, GroupKey, Tally};
 pub use read::describe::{
     ContainerKind, DescribeParams, DescribeReport, Facet, FieldType, PathRuleKind, TagStance,
 };
 pub use read::find::{Direction, FindParams, FindReport, Sort, SortKey};
 pub use read::get::{CollectionPage, CollectionSelector, GetParams, GetReport};
-pub use read::search::{EmptyLadder, Hit, RungSelection, RungSet, SearchParams, SearchReport};
+pub use read::search::{
+    EmptyLadder, Hit, RUNG_DEPTH, RungSelection, RungSet, SearchParams, SearchReport,
+};
 pub use read::validate::{KindTally, ValidateParams, ValidateReport};
 pub use reading::{
     AnswerReading, EngineSection, Freshness, LadderDeclaration, ModelIdentity, Rung, RungReport,

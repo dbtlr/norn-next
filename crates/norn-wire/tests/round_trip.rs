@@ -25,13 +25,13 @@ use norn_wire::{
     Hint, Hit, KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow,
     ListParams, ListReport, MaintainerIdentity, ModelIdentity, Moved, NameSet, NoProblems,
     NonFiniteScore, NotReady, Page, PagedRows, PathRuleKind, PollBackend, Predicate, Published,
-    ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem,
-    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace,
-    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
-    RollUp, Rung, RungReport, RungSelection, RungSet, SchemaSource, Score, SearchParams, SetParams,
-    SetReport, Severity, SidecarRevision, Snapshot, Sort, SortKey, Span, StatusParams,
-    StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead, TrustState,
-    UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
+    RUNG_DEPTH, ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration,
+    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
+    ReloadStage, Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
+    ResolveReport, RollUp, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
+    Score, SearchParams, SetParams, SetReport, Severity, SidecarRevision, Snapshot, Sort, SortKey,
+    Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead,
+    TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
     UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
     ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
     Verb, WarmingPhase, WatcherLossCause,
@@ -585,6 +585,11 @@ fn answer_advisories() -> Vec<AnswerAdvisory> {
         AnswerAdvisory::mixed_offset("due", ComparedBy::Sort),
         AnswerAdvisory::mixed_offset("due", ComparedBy::Group),
         AnswerAdvisory::mixed_offset("due", ComparedBy::Predicate),
+        AnswerAdvisory::rung_skipped(
+            Rung::Vector,
+            RungSkipReason::unavailable("the engine slot is empty"),
+        ),
+        AnswerAdvisory::rung_depth_reached(Rung::Vector, RUNG_DEPTH),
     ]
 }
 
@@ -3369,6 +3374,37 @@ fn an_unsatisfied_part_is_an_object_tagged_part() {
     assert!(
         serde_json::from_str::<Unsatisfied>(r#"{"part":"links_to_unknown","target":""}"#).is_err(),
         "a links-to part carrying an addressless target read back as one"
+    );
+}
+
+/// A rung left out of the enabled set is advised with the rung and the reason,
+/// and the reason is spelled as the refusal code a search naming the rung
+/// exactly meets. A rung that reached its depth is advised with the rung and
+/// the depth, which is one page.
+#[test]
+fn a_rung_advisory_names_the_rung_and_why() {
+    let reason = RungSkipReason::unavailable("the engine slot is empty");
+    assert_eq!(reason.code(), ReasonCode::EngineUnavailable);
+    assert_eq!(
+        tag_string(&reason, "reason"),
+        flat_string(&ReasonCode::EngineUnavailable),
+        "a skip reason is spelled as another code than the refusal it stands for"
+    );
+    assert_eq!(
+        wire(&AnswerAdvisory::rung_skipped(Rung::Vector, reason)),
+        r#"{"advisory":"rung_skipped","rung":"vector","reason":{"reason":"engine/unavailable","detail":"the engine slot is empty"}}"#
+    );
+    assert!(
+        serde_json::from_str::<RungSkipReason>(r#"{"reason":"engine/failed","detail":"x"}"#)
+            .is_err(),
+        "a reason nobody skips a rung for read back as one"
+    );
+    assert_eq!(
+        wire(&AnswerAdvisory::rung_depth_reached(
+            Rung::Vector,
+            RUNG_DEPTH
+        )),
+        r#"{"advisory":"rung_depth_reached","rung":"vector","depth":1024}"#
     );
 }
 

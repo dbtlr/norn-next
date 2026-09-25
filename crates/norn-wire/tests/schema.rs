@@ -24,11 +24,11 @@ use norn_wire::{
     ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
     ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace, RequestBound, RequestPart,
     RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, Rung, RungReport,
-    RungSelection, RungSet, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport,
-    Severity, SidecarRevision, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow,
-    TagSource, TagStance, Tally, TrustState, UnregisterParams, UnregisterReport, Unsatisfied,
-    UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName,
-    VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    RungSelection, RungSet, RungSkipReason, SchemaSource, Score, SearchParams, SearchReport,
+    SetParams, SetReport, Severity, SidecarRevision, Snapshot, Sort, SortKey, Span, StatusParams,
+    StatusReport, TagRow, TagSource, TagStance, Tally, TrustState, UnregisterParams,
+    UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
+    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -154,6 +154,7 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<Unsatisfied>(),
         schema_of::<ComparedBy>(),
         schema_of::<AnswerAdvisory>(),
+        schema_of::<RungSkipReason>(),
         schema_of::<VaultAnswer<String>>(),
         schema_of::<NotReady>(),
         schema_of::<ControlFileFailure>(),
@@ -1439,13 +1440,39 @@ fn an_unsatisfied_part_advertises_its_part_tag() {
     );
 }
 
-/// An answer advisory advertises its tag, and where a mixed-offset comparison
-/// was made as the flat strings the vocabulary holds.
+/// An answer advisory advertises its tag, where a mixed-offset comparison
+/// was made as the flat strings the vocabulary holds, and why a rung was left
+/// out as the refusal code a search naming it exactly meets.
 #[test]
 fn an_answer_advisory_advertises_its_tag_and_where_it_compared() {
+    let schema = schema_of::<AnswerAdvisory>();
     assert_eq!(
-        sorted(tag_constants(&schema_of::<AnswerAdvisory>(), "advisory")),
-        sorted(["mixed_offset"])
+        sorted(tag_constants(&schema, "advisory")),
+        sorted(["mixed_offset", "rung_skipped", "rung_depth_reached"])
+    );
+    let skipped = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "advisory") == Some("rung_skipped"))
+        .expect("the rung-skipped branch");
+    assert_eq!(
+        property_names(skipped),
+        ["advisory", "rung", "reason"].into_iter().collect()
+    );
+    assert_eq!(
+        skipped["properties"]["reason"]["$ref"].as_str(),
+        Some("#/$defs/RungSkipReason")
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<RungSkipReason>(), "reason")),
+        sorted(["engine/unavailable"])
+    );
+    let reached = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "advisory") == Some("rung_depth_reached"))
+        .expect("the rung-depth-reached branch");
+    assert_eq!(
+        property_names(reached),
+        ["advisory", "rung", "depth"].into_iter().collect()
     );
     let compared_by = schema_of::<ComparedBy>();
     assert_eq!(

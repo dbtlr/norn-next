@@ -98,6 +98,10 @@ pub use instrument::{ExplainedStatement, POINT_READS, STATEMENTS};
 /// would be a set of numbers that agree until one of them is moved.
 pub const MAX_PAGE: usize = 1024;
 
+// A search rung's depth is one page of that rung, so the two bounds are one
+// number.
+const _: () = assert!(norn_wire::RUNG_DEPTH as usize == MAX_PAGE);
+
 /// The lowest row key a finding can be stored under, which is the floor an
 /// unset cursor coalesces to.
 ///

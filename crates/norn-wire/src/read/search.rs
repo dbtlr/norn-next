@@ -51,6 +51,16 @@ use crate::document::{Column, DocumentPath, DocumentRow};
 use crate::predicate::Predicate;
 use crate::reading::Rung;
 
+/// The most candidates one rung hands the ranking an answer is fused from:
+/// its depth.
+///
+/// A rung finds its candidates up to this depth and no further, so an answer
+/// ranks none beyond it, and one whose rung reached it is advised as having
+/// done so ([`AnswerAdvisory::RungDepthReached`](crate::AnswerAdvisory::RungDepthReached)).
+/// It is the most rows one page holds, so one rung's candidates are one page
+/// of that rung.
+pub const RUNG_DEPTH: u32 = 1024;
+
 /// A ladder that runs no rung.
 ///
 /// Every search runs at least one rung, so a set naming no rung names no
