@@ -14,7 +14,7 @@
 //! offsets and frontmatter diagnostic counts, the frontmatter projection, the
 //! links and the keys the link index holds them under, headings, block ids and
 //! tags, the field rows with their typed sort
-//! keys, the terms the full-text index holds, the
+//! keys and the offset spelling beside a typed date, the terms the full-text index holds, the
 //! pinned vault schema, and every finding — findings at paths no document row
 //! stands at included, because those are exactly the ones a keyed read cannot be
 //! asked for.
@@ -90,8 +90,8 @@ use std::fmt::Write as _;
 use norn_fixtures::digest::{Sha256, hex};
 use norn_store::{
     BlockFact, DocumentPath, FieldRow, FieldRows, FindingCursor, HeadingFact, IndexedTerm,
-    LinkFact, PillarReport, Span, Store, StoreError, StoredFinding, StoredLinkKey, StoredPathOrder,
-    StoredSuffixKeys, StoredTombstone, TagFact, ddl,
+    LinkFact, OffsetSpelling, PillarReport, Span, Store, StoreError, StoredFinding, StoredLinkKey,
+    StoredPathOrder, StoredSuffixKeys, StoredTombstone, TagFact, ddl,
 };
 use norn_wire::{FindingKind, FindingScope};
 
@@ -1141,13 +1141,14 @@ impl StoredColumns for TagFact {
 /// nowhere, since no reader joins it back to `documents` to check.
 impl StoredColumns for FieldRow {
     fn columns(&self) -> Vec<(&'static str, String)> {
-        let (container, raw, typed, least_raw, least_typed) = match self {
+        let (container, raw, typed, least_raw, least_typed, offset) = match self {
             FieldRow::Presence { container, .. } => {
-                (Some(container.as_str()), None, None, false, false)
+                (Some(container.as_str()), None, None, false, false, None)
             }
             FieldRow::Value {
                 raw,
                 typed,
+                offset,
                 least_raw,
                 least_typed,
                 ..
@@ -1157,6 +1158,7 @@ impl StoredColumns for FieldRow {
                 typed.as_deref(),
                 *least_raw,
                 *least_typed,
+                *offset,
             ),
         };
         vec![
@@ -1168,6 +1170,13 @@ impl StoredColumns for FieldRow {
             ("typed", optional_text(typed)),
             ("least_raw", flag(least_raw)),
             ("least_typed", flag(least_typed)),
+            (
+                "offset_stated",
+                offset.map_or_else(
+                    || NULL.to_string(),
+                    |offset| flag(offset == OffsetSpelling::Stated),
+                ),
+            ),
         ]
     }
 }

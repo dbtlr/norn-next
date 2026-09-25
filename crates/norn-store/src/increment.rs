@@ -14,7 +14,7 @@ use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{DocumentFacts, FindingFacts, Invalidation, Provenance};
-use crate::fields::FieldRow;
+use crate::fields::{FieldRow, OffsetSpelling};
 use crate::hash;
 use crate::json;
 use crate::link::link_keys;
@@ -437,8 +437,8 @@ impl<'t> Statements<'t> {
             insert_field: prepared(
                 "INSERT INTO document_fields (
                      document, key, ordinal, path, container, raw, typed, least_raw,
-                     least_typed
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     least_typed, offset_stated
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 "preparing a field write",
             )?,
             // The hash the tombstone carries comes back from the row this
@@ -605,13 +605,14 @@ fn upsert(
     }
 
     for row in facts.fields().rows() {
-        let (container, raw, typed, least_raw, least_typed) = match row {
+        let (container, raw, typed, least_raw, least_typed, offset) = match row {
             FieldRow::Presence { container, .. } => {
-                (Some(container.as_str()), None, None, false, false)
+                (Some(container.as_str()), None, None, false, false, None)
             }
             FieldRow::Value {
                 raw,
                 typed,
+                offset,
                 least_raw,
                 least_typed,
                 ..
@@ -621,6 +622,7 @@ fn upsert(
                 typed.as_deref(),
                 *least_raw,
                 *least_typed,
+                *offset,
             ),
         };
         debug_assert_eq!(
@@ -640,6 +642,7 @@ fn upsert(
                 typed,
                 least_raw,
                 least_typed,
+                offset.map(OffsetSpelling::stated),
             ])
             .map_err(|error| error::sql("writing a field row", error))?;
     }

@@ -44,6 +44,17 @@
 //! the earliest element. The markers are computed here, with the rows, before
 //! anything is written, so a sort over a set-valued field can read one row per
 //! document — its least value — rather than every value it holds.
+//!
+//! # A typed date carries whether it stated an offset
+//!
+//! A date's typed key reads an unstated offset as zero, so an instant written
+//! with an offset and a wall-clock reading written with none are placed in one
+//! order by an assumption. Beside the typed key a date's value row carries the
+//! [`OffsetSpelling`] its raw text was written in, where the key's order is
+//! [`TypedOrder::dated`]; every other row carries none. The flag is derived
+//! with the typed key it qualifies, from the same reading of the raw text, so
+//! a read can ask whether a key holds both spellings without reading one raw
+//! value.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -121,6 +132,10 @@ pub enum FieldRow {
         /// The declared type's sort key, or `None` where the key carries no
         /// typed order or the raw text does not read as the declared type.
         typed: Option<String>,
+        /// Whether the typed key's raw text stated an offset from UTC, where
+        /// the key's order is a dated one and the text reads as a date, and
+        /// `None` everywhere else.
+        offset: Option<OffsetSpelling>,
         /// Whether this is the key's least value under the raw order.
         least_raw: bool,
         /// Whether this is the key's least value under the typed order.
@@ -203,20 +218,25 @@ impl FieldRows {
                 path: path.as_str().to_string(),
             });
             let order = declared.typed_order(key);
-            let typed: Vec<Option<String>> = scalars
+            let (typed, offsets): (Vec<Option<String>>, Vec<Option<OffsetSpelling>>) = scalars
                 .iter()
                 .map(|raw| {
-                    order.and_then(|order| raw.as_deref().and_then(|raw| order.sort_key(raw)))
+                    order
+                        .and_then(|order| raw.as_deref().and_then(|raw| order.read(raw)))
+                        .map_or((None, None), |(typed, offset)| (Some(typed), offset))
                 })
-                .collect();
+                .unzip();
             let least_raw = least(&scalars);
             let least_typed = least(&typed);
-            for (index, (raw, typed)) in scalars.into_iter().zip(typed).enumerate() {
+            for (index, ((raw, typed), offset)) in
+                scalars.into_iter().zip(typed).zip(offsets).enumerate()
+            {
                 rows.push(FieldRow::Value {
                     key: key.to_string(),
                     ordinal: index as u32 + 1,
                     raw,
                     typed,
+                    offset,
                     least_raw: least_raw == Some(index),
                     least_typed: least_typed == Some(index),
                     path: path.as_str().to_string(),
@@ -591,29 +611,94 @@ impl FieldDeclaration {
 /// How one declared type reads a raw value into the key it sorts by.
 ///
 /// It maps a raw text to a sort key whose bytewise order is the type's order,
-/// or to nothing where the text does not read as the type. The host builds one
-/// from the schema's type; the store only applies it.
+/// or to nothing where the text does not read as the type. A **dated** order
+/// also says of each date whether its text stated an offset from UTC, which is
+/// the assumption its order makes where one date did and another did not. The
+/// host builds one from the schema's type; the store only applies it.
 #[derive(Clone)]
-pub struct TypedOrder(Arc<SortKeyOf>);
+pub struct TypedOrder {
+    read: Arc<ReadOf>,
+    dated: bool,
+}
 
-/// The function a [`TypedOrder`] applies: raw text in, sort key out.
-type SortKeyOf = dyn Fn(&str) -> Option<String> + Send + Sync;
+/// The function a [`TypedOrder`] applies: raw text in, sort key and — for a
+/// dated order — the offset spelling out.
+type ReadOf = dyn Fn(&str) -> Option<(String, Option<OffsetSpelling>)> + Send + Sync;
 
 impl TypedOrder {
-    /// The order `sort_key` computes.
+    /// The order `sort_key` computes, over values that spell no offset.
     pub fn new(sort_key: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Self {
-        TypedOrder(Arc::new(sort_key))
+        TypedOrder {
+            read: Arc::new(move |raw| sort_key(raw).map(|key| (key, None))),
+            dated: false,
+        }
+    }
+
+    /// The order a date reading computes: each raw text's sort key, and
+    /// whether the text stated an offset from UTC.
+    pub fn dated(
+        read: impl Fn(&str) -> Option<(String, OffsetSpelling)> + Send + Sync + 'static,
+    ) -> Self {
+        TypedOrder {
+            read: Arc::new(move |raw| read(raw).map(|(key, offset)| (key, Some(offset)))),
+            dated: true,
+        }
     }
 
     /// The sort key `raw` reads as, or nothing where it does not read as this
     /// type.
     pub fn sort_key(&self, raw: &str) -> Option<String> {
-        (self.0)(raw)
+        self.read(raw).map(|(key, _)| key)
+    }
+
+    /// The sort key `raw` reads as and, under a dated order, the offset
+    /// spelling it was written in; nothing where it does not read as this
+    /// type.
+    pub fn read(&self, raw: &str) -> Option<(String, Option<OffsetSpelling>)> {
+        (self.read)(raw)
+    }
+
+    /// Whether this order reads dates, whose comparison assumes an offset
+    /// where one side stated none.
+    pub fn is_dated(&self) -> bool {
+        self.dated
+    }
+}
+
+/// Whether a date's text stated an offset from UTC.
+///
+/// A date stating none — a calendar day or a wall-clock reading — is ordered
+/// as if it stated zero, which is an assumption only where it is compared
+/// against one that states an offset.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum OffsetSpelling {
+    /// The text states no offset.
+    Unstated,
+    /// The text states an offset, `Z` among them.
+    Stated,
+}
+
+impl OffsetSpelling {
+    /// The spelling as the field pillar's `offset_stated` column holds it.
+    pub(crate) const fn stated(self) -> bool {
+        matches!(self, OffsetSpelling::Stated)
+    }
+
+    /// The spelling the `offset_stated` column's `stated` names.
+    pub(crate) const fn of_stated(stated: bool) -> Self {
+        if stated {
+            OffsetSpelling::Stated
+        } else {
+            OffsetSpelling::Unstated
+        }
     }
 }
 
 impl fmt::Debug for TypedOrder {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("TypedOrder(..)")
+        formatter
+            .debug_struct("TypedOrder")
+            .field("dated", &self.dated)
+            .finish_non_exhaustive()
     }
 }

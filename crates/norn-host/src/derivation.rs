@@ -41,11 +41,11 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use norn_config::schema::{FieldType, UndeclaredTags, VaultSchema};
+use norn_config::schema::{FieldType, Offset, TypedValue, UndeclaredTags, VaultSchema};
 use norn_store::{
     BlockFact, Change, ContentModel, DerivationVersion, DiscardScope, DocumentFacts, DocumentPath,
-    FieldDeclaration, FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Provenance, Span,
-    TagFact, TagSource, TypedOrder,
+    FieldDeclaration, FrontmatterValue, HeadingFact, LinkFact, LinkFamily, OffsetSpelling,
+    Provenance, Span, TagFact, TagSource, TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, FindingScope, Severity, TagStance};
@@ -65,7 +65,7 @@ use norn_wire::{FindingKind, FindingScope, Severity, TagStance};
 /// pinned corpus from zero and digests every derived row, pinned beside the
 /// version it was taken under, and it fails when the digest moves while this
 /// does not.
-pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(3);
+pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(4);
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -918,14 +918,26 @@ fn content_model(schema: &VaultSchema, fingerprint: String) -> ContentModel {
 /// `describe` facet reports, which is spelled as `kind` is — the two enums are
 /// one vocabulary, held equal by spelling in `norn-config`'s suite — and, for a
 /// type that does not order as text, with the typed order `kind` reads a raw
-/// value into.
+/// value into. A date's order is dated: beside each sort key it says whether
+/// the date stated an offset, which the store records beside the typed key.
 fn field_declaration(kind: FieldType) -> FieldDeclaration {
     let order = || TypedOrder::new(move |raw| kind.read(raw).ok().map(|value| value.sort_key()));
     match kind {
         FieldType::Text => FieldDeclaration::text(),
         FieldType::Number => FieldDeclaration::number(order()),
         FieldType::Boolean => FieldDeclaration::boolean(order()),
-        FieldType::Date => FieldDeclaration::date(order()),
+        FieldType::Date => FieldDeclaration::date(TypedOrder::dated(|raw| {
+            match FieldType::Date.read(raw).ok()? {
+                value @ TypedValue::Date(date) => Some((
+                    value.sort_key(),
+                    match date.offset() {
+                        Offset::Stated(_) => OffsetSpelling::Stated,
+                        Offset::Unstated => OffsetSpelling::Unstated,
+                    },
+                )),
+                _ => None,
+            }
+        })),
         FieldType::Tags => FieldDeclaration::tags(),
     }
 }
