@@ -59,7 +59,7 @@ use norn_wire::FindingKind;
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(3),
-    "4251b116d10feb9dfe282d3bb5f11e38f32fd4de5e56fcde7fd1247a0b1b8a93",
+    "b9f05fed217911b6a0ade6f8c894c1120be274e1d2c839623630db2a5b175959",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -274,7 +274,7 @@ Embed ![[picture.png]] and ![[Notes#Setext|embedded]].
 Markdown [shown](notes/Deep%20Note.md) and [anchor](Glossary.md#use-norn-bold \"a title\") and [web](https://example.com/page) and ![image](assets/pic.png) and [block](Notes.md#^para-block) and [vault](vault://Notes).
 A wikilink with a protocol: [[https://example.com/wiki|external]].
 A Markdown link climbing out of the vault: [outside](../outside.md), and one to an attachment: [the picture](assets/pic.png).
-A dotted wikilink [[v1.2]], a same-document anchor [[#Repeated]], a wikilink no suffix address reads [[../relative]] and a vault wikilink [[vault://notes/Deep Note.md]].
+A dotted wikilink [[v1.2]], a same-document anchor [[#Repeated]], a wikilink no suffix address reads [[../relative]] and vault wikilinks [[vault://notes/Deep Note.md]] and [[vault://v1.2]].
 A rooted [rooted](/Notes.md), a scheme [mail](mailto:hi@example.com), a query [query](Notes.md?view=raw) and an encoded separator [slash](notes%2FDeep%20Note.md?x=1).
 
 A paragraph closing on a block id. ^glossary-block
@@ -523,6 +523,14 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             "notes/Deep Note.md",
             &["notes/Deep Note.md", "notes/Deep Note.md.md"],
             "a vault wikilink is keyed by the root path each of its reductions spells",
+        ),
+        (
+            glossary,
+            Some("vault"),
+            "v1.2",
+            &["v1.2.md", "v1.md"],
+            "a vault wikilink whose leaf carries a non-Markdown extension is keyed by the stem \
+             as written and the stem without its extension, each a Markdown path",
         ),
         (
             glossary,
