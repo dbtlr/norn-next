@@ -1910,7 +1910,7 @@ maintainership — is a fact about the entry rather than the candidate, and gets
 activation applies to it: withdrawn trust and an owed rung, or a release. A reload of either
 mode that the host drops without an answer, whether moved past before a worker ran it or
 lost with a leg that unwound, answers with where the entry stands once it is dropped, which
-for an unwound leg is the untrusted reading the unwind publishes. A turn that unwinds after
+for an unwound leg is the untrusted reading the unwind publishes, or the park that stands over it. A turn that unwinds after
 handing the reload on leaves the answer to the turn it handed on to. A reload is answered
 with no code only by a host shutting down or whose job channel is gone.
 

@@ -140,8 +140,7 @@ impl<O: EntryOps> Host<O> {
     /// either meets gets the same policy, and a reload the host drops without
     /// an answer — moved past before it ran, or lost with a leg that unwound —
     /// answers where the entry stands once it is dropped. Every refusal renders
-    /// through
-    /// [`ReloadRefusal::answer`].
+    /// through [`ReloadRefusal::answer`].
     ///
     /// `Err(HostError)` is a host shutting down or whose job channel is gone,
     /// which is transport death and carries no code: nothing about the vault
