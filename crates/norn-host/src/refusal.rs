@@ -214,7 +214,7 @@ impl ReloadRefusal {
 /// Three readings of one trust state, taken in the order that makes each of
 /// them true: a state that refuses carries its own reason, a state that holds
 /// nothing yet is filed as not ready, and what is left is an entry that is
-/// ready and busy — a warm job holds it, which is what a reload waits behind.
+/// ready and busy — a warm job holds it, which is what a reload is refused behind.
 ///
 /// **`Ready` reaches here by two paths, and on both the reload did not run.**
 /// At the ask, a claim held or coverage out with a leg is a job holding the

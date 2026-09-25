@@ -1903,8 +1903,13 @@ declaration this build cannot read — a later grammar version, a key the gramma
 hold — is one of those errors: the vault is already serving a declaration it can read, and
 replacing it with one nothing reads would take that away. A successful candidate clears that
 error. A dry run is admitted and run as a reload is, holding the entry while it reads, and
-judges the same candidate the same way; it activates nothing and records nothing — no active
-fingerprint, retained error, trust change or owed rung.
+judges the same candidate the same way. A dry run that completes activates nothing and records
+nothing about the candidate — no active fingerprint, retained error or config delivery. A
+runtime failure a dry run meets — damaged derived state, a moved path order, a lost
+maintainership — is a fact about the entry rather than the candidate, and gets the policy an
+activation applies to it: withdrawn trust and an owed rung, or a release. A reload of either
+mode whose leg unwinds answers with the untrusted reading the unwind publishes; a reload is
+answered with no code only by a host shutting down or whose job channel is gone.
 
 **An attach has no such declaration to fall back on, and does not refuse.** It acquires
 the maintainer lock, watcher coverage and the store, pins nothing, derives nothing, and
