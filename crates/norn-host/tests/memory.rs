@@ -704,11 +704,11 @@ fn a_directory(rows: &[DocumentRow]) -> Option<String> {
 /// its verb answers with, and how many rows that report answered.
 ///
 /// **The report type ties a shape to its verb.** [`ReadReport::answered`] is
-/// the only way the child records a shape's rows, and it takes them from the
-/// report the shape's verb returned, so a count's tallies cannot stand in for
-/// a search's hits or a describe's facets. The two pairs of shapes that share
-/// a verb (find and backlinks, count and links-to) are told apart by
-/// [`pinned_answers`].
+/// the only way the child records a shape's rows, and it takes them from a
+/// report of the type the shape names. A report of another verb recorded
+/// under a shape's name answers another number of rows, which
+/// [`pinned_answers`] refuses; the pins are also what tell apart the two pairs
+/// of shapes that share a verb (find and backlinks, count and links-to).
 trait Shape {
     /// The shape's name in the child's report.
     const NAME: &'static str;

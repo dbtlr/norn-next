@@ -277,9 +277,9 @@ jobs:
   # 300-document one, so an eight-byte id kept for every document fails it,
   # where a whole-process peak absorbs whole rows. The reading is a
   # high-water, so a retention built after the find's pages are gone shows
-  # only once it climbs past them. A child
-  # that attaches adopts a tree its parent generated, so what the kernel
-  # accounts to it is the attachment and not the generation.
+  # only once it climbs past them. A child that attaches adopts a tree its
+  # parent generated, so what the kernel accounts to it is the attachment and
+  # not the generation.
   # The >=5k scale and the recorded peak-memory readings stay in certify.yml,
   # where a clock is legal to read.
   memory:

@@ -1060,7 +1060,7 @@ full-scan steps of every statement run on its snapshot, and holds them equal acr
 pair. These statement counters do not see work a virtual table does inside a statement, so a
 full-text match's posting-list walk is not among them; a search's page cost is read off the
 matches the module hands back instead. Each pair has a control that grows with the vault and
-reads more at the larger scale. In the memory lane, the `read-` bars hold one process that
+reads more at the larger scale. In the memory lane, three `read-` bars hold one process that
 attached a per-PR profile and ran the read mix through the host's read verbs: a find under a
 predicate, sorted and paged; a count by field; a get with suffix resolve; links-to and
 backlinks; a validate narrowed by a path part, which is findings-for-path; lexical search;

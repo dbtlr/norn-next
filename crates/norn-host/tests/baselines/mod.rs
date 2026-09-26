@@ -28,8 +28,8 @@
 //! **The platform that gates is `ubuntu-latest` x86_64-glibc.** Every authored
 //! band below carries its hosted readings beside the local ones, the same way
 //! the generator's baselines carry both architectures they were measured on,
-//! except [`FD_BUDGET`], a count read on macos-arm64 that every lane holds on
-//! both platforms. A
+//! except [`FD_BUDGET`] and [`READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION`],
+//! counts read on macos-arm64 that hold the same on both platforms. A
 //! band un-authored back to `None` for recalibration carries the readings it
 //! had, because what a recalibration window gathers is the next set. The soak
 //! bands' hosted readings come off the nightly lane's hour-long load at the
@@ -107,7 +107,7 @@ use std::time::Duration;
 /// **22.40–23.39 MiB** over eight runs. An indicative band, not a fixed
 /// measurement, so a rerun lands near an edge rather than the middle. On
 /// `ubuntu-latest` x86_64-glibc the hosted readings of this lane's attaches at
-/// this profile span **16.73–24.24 MiB** over seventeen readings: 17.69 and
+/// this profile span **16.73–24.24 MiB** over nineteen readings: 17.69 and
 /// 18.26 at the first hosted run, 16.73 and 17.00 in the Layer 1 acceptance
 /// pass, 17.73/18.30, 17.96/18.18, 18.82/18.37 and 17.95/17.91 across four
 /// consecutive `memory invariant` runs, then 21.40 from this case and 21.53
@@ -121,11 +121,12 @@ use std::time::Duration;
 /// local band above.
 ///
 /// **The hosted spread is 7.5 MiB wide, and it has risen twice.** The first
-/// ten readings sit inside 16.73–18.82, where one run's two attaches differ by
+/// twelve readings sit inside 16.73–18.82, where one run's two attaches differ by
 /// as much as 0.57 MiB; the next run reads about 2.7 MiB above that, and the
 /// one after it about 2.7 MiB above that again, where the run after that
-/// stays. The local band rose by the same order between its two days. The rise is recorded for the trend this
-/// file keeps, and the number that bounds the readings is the top one.
+/// stays. The local band rose by the same order between its two days. The rise
+/// is recorded for the trend this file keeps, and the number that bounds the
+/// readings is the top one.
 ///
 /// The ceiling stays at 40 MiB, which is 1.61x the highest reading, local or
 /// hosted, 24.87 MiB, and 1.65x the highest hosted one, 24.24 MiB. The readings it holds are
