@@ -6534,6 +6534,10 @@ mod tests {
                 self.inner.withheld_trust(attachment)
             }
 
+            fn count_leg_mint(&self, statements: u64) {
+                self.inner.count_leg_mint(statements);
+            }
+
             fn semantic(&self) -> Option<&SemanticEngines> {
                 self.inner.semantic()
             }
@@ -12808,6 +12812,10 @@ mod tests {
         fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
             self.inner.detach(name, attachment);
         }
+
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
     }
 
     #[test]
@@ -13892,6 +13900,9 @@ mod tests {
         fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
             self.inner.detach(name, attachment)
         }
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
     }
 
     #[test]
@@ -14276,6 +14287,10 @@ mod tests {
 
         fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
             self.inner.detach(name, attachment);
+        }
+
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
         }
     }
 

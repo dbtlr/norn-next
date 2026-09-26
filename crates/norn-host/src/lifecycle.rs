@@ -383,8 +383,10 @@ pub trait EntryOps: Send + Sync + 'static {
     ///
     /// Called under the entry gate, so it does no I/O and takes no lock.
     ///
-    /// The default keeps no account.
-    fn count_leg_mint(&self, _statements: u64) {}
+    /// **There is no default.** Every implementation states where its legs'
+    /// mints land, so ops that wrap another implementation forward this to it
+    /// rather than dropping the count, and ops that keep no account say so.
+    fn count_leg_mint(&self, statements: u64);
     /// The semantic engines these ops compose, where they compose them: what a
     /// search's vector rung is answered through.
     ///
@@ -1358,7 +1360,8 @@ impl<A: SnapshotSource> EntryState<A> {
     /// the establishing statement so neither reading has to stand for the
     /// other. The mint is the one a leg's publication runs,
     /// [`EntryState::mint_reader`]; what this adds is the read's own guard,
-    /// and the read account as the place its statements land.
+    /// and it answers the statements rather than counting them: the read path
+    /// that calls it charges them to the read account.
     ///
     /// Answers the handle the read now runs on, and what this cost the gate.
     fn remint_for_a_read(&mut self) -> ReadMint<A::Reader> {
@@ -15056,6 +15059,8 @@ mod tests {
             Ok(self.emit.swap(false, Ordering::SeqCst).then(Batch::default))
         }
         fn detach(&self, _: &VaultName, _: FakeCoverage) {}
+        /// No case here reads a job account, so these ops keep none.
+        fn count_leg_mint(&self, _: u64) {}
     }
 
     #[test]
@@ -15145,6 +15150,8 @@ mod tests {
             )
         }
         fn detach(&self, _: &VaultName, _: FakeCoverage) {}
+        /// No case here reads a job account, so these ops keep none.
+        fn count_leg_mint(&self, _: u64) {}
     }
 
     #[test]
@@ -17058,6 +17065,7 @@ mod tests {
             .close_reader();
 
         let before = host.read_evidence();
+        let jobs_before = ops.account.read();
         let refusal = host
             .begin_read(&name)
             .expect_err("a coverage that mints nothing answered a read");
@@ -17066,6 +17074,11 @@ mod tests {
             "the refused mint was rendered as something other than the read seam: {refusal:?}"
         );
         let reading = host.read_evidence().since(before);
+        assert_eq!(
+            ops.account.read().since(jobs_before),
+            crate::evidence::EvidenceReading::default(),
+            "the read's refused mint moved the account of the host's jobs"
+        );
 
         assert_eq!(
             (reading.reads_served, reading.statements_under_the_gate),
@@ -17282,6 +17295,172 @@ mod tests {
             host.read_evidence().mint_statements_under_the_gate,
             0,
             "a leg's mint moved the read account"
+        );
+    }
+
+    /// **Rung 3 accounts for the mint it ran over the coverage it put in
+    /// place.** The attach and the rebuild each mint a handle in the gate hold
+    /// that publishes them, so the job account holds both mints rather than
+    /// the attach's alone.
+    #[test]
+    fn a_rebuild_accounts_its_mint_to_the_job_account() {
+        let ops = Arc::new(FakeOps::default());
+        ops.readers.mint_statements.store(3, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        arrange_for(&ops.damaged_poll_at, &name);
+        poll_watchers(&host.shared);
+        wait_for_one_rebuild_to_ready(&host, &name, &ops);
+
+        assert!(reader_stands(&host, &name));
+        assert_eq!(
+            ops.account.read().mint_statements_under_the_gate,
+            6,
+            "the rebuild's mint is missing from the job account beside the attach's"
+        );
+        assert_eq!(
+            host.read_evidence().mint_statements_under_the_gate,
+            0,
+            "a leg's mint moved the read account"
+        );
+    }
+
+    /// **A recovery that parks its coverage over an empty slot accounts for
+    /// the mint it ran.** The terminal watcher leaves the entry owing a
+    /// recovery with its handle standing; the case empties the slot, so the
+    /// recovery's publication is the leg that mints the handle again.
+    #[test]
+    fn a_recovery_over_an_empty_slot_accounts_its_mint_to_the_job_account() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        poll_watchers(&host.shared);
+        wait_for_state(&host, &name, backend_lost());
+        host.shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered")
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .close_reader();
+        ops.readers.mint_statements.store(3, Ordering::SeqCst);
+
+        let before = ops.account.read();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        assert!(reader_stands(&host, &name));
+        assert_eq!(
+            ops.account
+                .read()
+                .since(before)
+                .mint_statements_under_the_gate,
+            3,
+            "the mint the recovery ran under the gate is missing from the job account"
+        );
+    }
+
+    /// **A schema reload that fails after closing the handle accounts for the
+    /// mint that parks its coverage, whichever way it failed.** The schema
+    /// half closes the entry's handle, so every failure after it parks over an
+    /// empty slot and mints: a candidate that could not be pinned, and a
+    /// terminal watcher, a refusing environment or damaged derived state met
+    /// by the reload's handoff drain. Each row is its own host, and every row
+    /// that charged the wrong count is reported together.
+    #[test]
+    fn a_schema_reload_that_fails_accounts_the_mint_that_parks_its_coverage() {
+        struct Row {
+            failure: &'static str,
+            arm: fn(&FakeOps, &VaultName),
+            answered: fn(&ReloadRefusal) -> bool,
+        }
+        let rows = [
+            Row {
+                failure: "a candidate that could not be pinned",
+                arm: |ops, _| {
+                    ops.reload_schema_apply_failure
+                        .store(true, Ordering::SeqCst);
+                },
+                answered: |refusal| matches!(refusal, ReloadRefusal::Core(_)),
+            },
+            Row {
+                failure: "a terminal watcher",
+                arm: |ops, _| {
+                    *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+                },
+                answered: |refusal| {
+                    matches!(
+                        refusal,
+                        ReloadRefusal::Runtime(JobFailure::WatcherTerminal(_))
+                    )
+                },
+            },
+            Row {
+                failure: "a refusing environment",
+                arm: |ops, _| ops.environmental_poll.store(true, Ordering::SeqCst),
+                answered: |refusal| {
+                    matches!(
+                        refusal,
+                        ReloadRefusal::Runtime(JobFailure::Environmental(_))
+                    )
+                },
+            },
+            Row {
+                failure: "damaged derived state",
+                // The rung the damage hands on to mints a handle of its own,
+                // so it is held until the count is read.
+                arm: |ops, name| {
+                    arrange_for(&ops.damaged_poll_at, name);
+                    ops.block_rebuild.store(true, Ordering::SeqCst);
+                },
+                answered: |refusal| {
+                    matches!(refusal, ReloadRefusal::Runtime(JobFailure::StoreDamaged(_)))
+                },
+            },
+        ];
+
+        let mut misaccounted = Vec::new();
+        for row in rows {
+            let ops = Arc::new(FakeOps::default());
+            ops.reload_supported.store(true, Ordering::SeqCst);
+            ops.reload_schema_changed.store(true, Ordering::SeqCst);
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_for_state(&host, &name, TrustState::Ready);
+            ops.readers.mint_statements.store(3, Ordering::SeqCst);
+            (row.arm)(&ops, &name);
+
+            let before = ops.account.read();
+            let refusal = host
+                .reload(&name)
+                .expect_err("a reload armed to fail succeeded");
+            assert!(
+                (row.answered)(&refusal),
+                "the reload that met {} answered {refusal:?}",
+                row.failure
+            );
+            let charged = ops
+                .account
+                .read()
+                .since(before)
+                .mint_statements_under_the_gate;
+            if charged != 3 {
+                misaccounted.push(format!("{}: {charged}", row.failure));
+            }
+
+            ops.rebuild_release.store(true, Ordering::SeqCst);
+            drop(lease);
+            drop(host);
+        }
+        assert!(
+            misaccounted.is_empty(),
+            "a failed reload's parking mint was not charged its 3 statements: {misaccounted:?}"
         );
     }
 

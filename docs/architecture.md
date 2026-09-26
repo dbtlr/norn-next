@@ -1765,14 +1765,14 @@ its jobs where the mint returns, whichever way the mint ended. A mint that fails
 trust label and publishes no refusal of its own: the reason is retained beside the entry's
 published demand, the way a reload's diagnostic and an engine's are, and a read refuses
 with it as reader-unavailable's detail. The host tells a refusal met in the store, in the
-semantic engine's sidecar, or in its own data directory without a path: a store or sidecar refusal — a read's refusal, a job leg's failure as the
-entry's untrusted reason or a reload's failure — is told from the refusal's typed facts and
-never from the driver's words, which can name the database file, and a refusal met where the
-maintainer lock and the shadow home sit beside the database is told without the directory. So
-no refusal hands a caller a path to the derived database to open its own connection by. A
-refusal about the vault's own files — a schema or config it could not read, a walk or a read
-the filesystem refused, a watcher that lost the root — names the vault path the caller
-registered. The vault status
+semantic engine's sidecar, or in its own data directory without a path: a store or sidecar
+refusal — a read's refusal, a job leg's failure as the entry's untrusted reason or a
+reload's failure — is told from the refusal's typed facts and never from the driver's words,
+which can name the database file, and a refusal met where the maintainer lock and the shadow
+home sit beside the database is told without the directory. So no refusal hands a caller a
+path to the derived database to open its own connection by. A refusal about the vault's own
+files — a schema or config it could not read, a walk or a read the filesystem refused, a
+watcher that lost the root — names the vault path the caller registered. The vault status
 verb reports it beside trust and engine state; that verb is not built, and what the host
 retains for it today is the trust label, the active fingerprints and the last reload error.
 A mint may fail at a publication that is not serving, and then the read renders that demand
@@ -1823,6 +1823,7 @@ under-report exactly there.
 left**: the mint is accounted where the mint returns, the establishment where the
 establishment returns, and the wait where the wait ends, each of them before the branch that
 decides how the read leaves.
+
 A leg's publication runs the same mint as a read's repair, and its statements land in the
 host's account of its jobs rather than in the read account, so neither account moves for the
 other's work. A leg's mint is counted where it returns rather than with what the job spent
