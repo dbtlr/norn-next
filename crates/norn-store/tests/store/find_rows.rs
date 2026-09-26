@@ -662,6 +662,25 @@ fn a_cursor_among_other_rows_is_refused() {
 
 // ---- what a row costs ----
 
+/// **A snapshot counts the steps of every statement a find runs on it.** The
+/// page statement's steps are the find's own page counts; the fingerprint
+/// read beside it is a statement the page counts do not hold and the
+/// snapshot's do.
+#[test]
+fn a_snapshot_counts_every_statement_a_find_steps() {
+    let seeded = Seeded::new("find-snapshot-steps");
+    let snapshot = seeded.snapshot();
+    let before = snapshot.counters();
+    let found = snapshot.find(&request(), &declared()).expect("a page");
+    let after = snapshot.counters();
+    assert!(
+        after.vm_steps() - before.vm_steps() > found.work.page_vm_steps,
+        "the snapshot counted {} steps and the page statement alone ran {}",
+        after.vm_steps() - before.vm_steps(),
+        found.work.page_vm_steps
+    );
+}
+
 /// **A page of `limit` rows hydrates exactly `limit` document rows, and reads
 /// no table whose column was not named.** The page statement reads one key
 /// past the bound, which is how it knows a next page exists; the hydration

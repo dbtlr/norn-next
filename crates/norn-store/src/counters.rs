@@ -193,6 +193,8 @@ impl DerivationCounters {
 pub struct SnapshotCounters {
     snapshots_opened: u64,
     statements_executed: u64,
+    vm_steps: u64,
+    full_scan_steps: u64,
 }
 
 impl SnapshotCounters {
@@ -202,6 +204,8 @@ impl SnapshotCounters {
         [
             ("snapshots_opened", self.snapshots_opened),
             ("statements_executed", self.statements_executed),
+            ("vm_steps", self.vm_steps),
+            ("full_scan_steps", self.full_scan_steps),
         ]
         .into_iter()
     }
@@ -222,11 +226,30 @@ impl SnapshotCounters {
         self.statements_executed
     }
 
+    /// Virtual-machine operations SQLite ran stepping the read's statements:
+    /// every statement a read builder ran on the snapshot, whichever part of
+    /// the read it answered. The establishing statement is not among them.
+    pub fn vm_steps(&self) -> u64 {
+        self.vm_steps
+    }
+
+    /// Steps SQLite took through a loop no constraint bounds, over the same
+    /// statements [`SnapshotCounters::vm_steps`] counts.
+    pub fn full_scan_steps(&self) -> u64 {
+        self.full_scan_steps
+    }
+
     pub(crate) fn count_snapshot(&mut self) {
         self.snapshots_opened = self.snapshots_opened.saturating_add(1);
     }
 
     pub(crate) fn count_statement(&mut self) {
         self.statements_executed = self.statements_executed.saturating_add(1);
+    }
+
+    /// Add what SQLite counted stepping one statement a read builder ran.
+    pub(crate) fn count_steps(&mut self, vm_steps: u64, full_scan_steps: u64) {
+        self.vm_steps = self.vm_steps.saturating_add(vm_steps);
+        self.full_scan_steps = self.full_scan_steps.saturating_add(full_scan_steps);
     }
 }

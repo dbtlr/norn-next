@@ -113,6 +113,20 @@ pub struct DescribeWork {
 }
 
 impl DescribeWork {
+    /// The whole reading, name by name, every count present: the shape a
+    /// harness compares, for the reason
+    /// [`FindWork::readings`](crate::FindWork::readings) gives.
+    pub fn readings(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
+        [
+            ("describe_statements", self.statements),
+            ("describe_facets_read", self.facets_read),
+            ("describe_full_scan_steps", self.full_scan_steps),
+            ("describe_sorts", self.sorts),
+            ("describe_vm_steps", self.vm_steps),
+        ]
+        .into_iter()
+    }
+
     fn stepped(&mut self, stepped: Stepped) {
         self.full_scan_steps += stepped.full_scan_steps;
         self.sorts += stepped.sorts;

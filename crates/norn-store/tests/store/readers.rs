@@ -197,8 +197,13 @@ fn establishing_a_snapshot_costs_one_snapshot_and_one_statement() {
     );
     assert_eq!(
         counters.readings().collect::<Vec<_>>(),
-        vec![("snapshots_opened", 1), ("statements_executed", 1)],
-        "the reading carries another vocabulary"
+        vec![
+            ("snapshots_opened", 1),
+            ("statements_executed", 1),
+            ("vm_steps", 0),
+            ("full_scan_steps", 0),
+        ],
+        "the reading carries another vocabulary, or counts steps no read builder ran"
     );
 }
 

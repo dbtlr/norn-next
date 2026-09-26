@@ -166,6 +166,20 @@ pub struct CountWork {
 }
 
 impl CountWork {
+    /// The whole reading, name by name, every count present: the shape a
+    /// harness compares, for the reason
+    /// [`FindWork::readings`](crate::FindWork::readings) gives.
+    pub fn readings(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
+        [
+            ("count_statements", self.statements),
+            ("count_tallies_read", self.tallies_read),
+            ("count_full_scan_steps", self.full_scan_steps),
+            ("count_sorts", self.sorts),
+            ("count_vm_steps", self.vm_steps),
+        ]
+        .into_iter()
+    }
+
     /// Add what SQLite counted stepping the tally statements.
     fn stepped(&mut self, stepped: Stepped) {
         self.full_scan_steps += stepped.full_scan_steps;

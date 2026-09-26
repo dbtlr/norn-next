@@ -314,7 +314,8 @@ impl ConnectionTurn {
             .expect("a turn holds the connection until it establishes or drops");
         let reader = Arc::clone(&self.reader);
         let mut counters = SnapshotCounters::default();
-        let snapshot = match establish_on(&mut database, &reader.epoch, &mut counters) {
+        let established = establish_on(&mut database, &reader.epoch, &mut counters);
+        let snapshot = match established {
             Ok(reading) => Ok(Snapshot {
                 order: reader.order,
                 reader,
@@ -464,7 +465,7 @@ impl Snapshot {
     }
 
     /// What this read's snapshot cost: the snapshot itself, and the statements
-    /// run on it.
+    /// run on it and what SQLite counted stepping them.
     pub fn counters(&self) -> SnapshotCounters {
         self.counters.get()
     }
@@ -507,6 +508,14 @@ impl Snapshot {
     pub(crate) fn count_statement(&self) {
         let mut counters = self.counters.get();
         counters.count_statement();
+        self.counters.set(counters);
+    }
+
+    /// Add what SQLite counted stepping one statement run on this snapshot's
+    /// connection.
+    pub(crate) fn count_steps(&self, stepped: crate::read::Stepped) {
+        let mut counters = self.counters.get();
+        counters.count_steps(stepped.vm_steps, stepped.full_scan_steps);
         self.counters.set(counters);
     }
 }

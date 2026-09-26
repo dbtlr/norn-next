@@ -25,20 +25,34 @@
 //!   states each cost as a line in the rows drained, and plan bars over the ten
 //!   keyed point reads assert an equality seek on the key each was given —
 //!   through a named index for eight of them, and through a primary key for the
-//!   field rows and the pinned-schema read. The store's find suites hold each
-//!   find statement's plan, and the two bars below hold a find's work.
+//!   field rows and the pinned-schema read. The store's read suites hold each
+//!   read statement's plan, and the two bars below hold each read shape's
+//!   work.
 //! - **A read through a live hold reads no vault document.** A find run on a
 //!   production hold's snapshot, under a live attachment, reads nothing through
 //!   `norn-fs` on its own thread and moves nothing in the host's account of what
 //!   its jobs derived and read off the vault, and each page runs a pinned number
-//!   of statements. Each zero is measured rather than structural: a document
-//!   read and a walk of the root on the same thread move the first, and a
-//!   document written and then removed under the same attachment moves the
-//!   second.
+//!   of statements. So does every other read shape, each asked through the host
+//!   verb a client's request reaches and each read in a window of its own: the
+//!   acceptance contract's count-by-field, suffix / stem resolve, links-to,
+//!   findings-for-path and full-text match, and a get's page of a document's
+//!   links and a describe beside them. Each zero is measured rather than
+//!   structural: a document read and a walk of the root on the same thread move
+//!   the first, and a document written and then removed under the same
+//!   attachment moves the second. The window is the calling thread's, where a
+//!   read verb runs its read; a read on a thread the verb spawned is outside it.
 //! - **Size independence.** One bounded write costs the same at 300 documents
-//!   and at 2000, and so does one unfiltered find paged newest first. A ceiling
-//!   passes anything under it; a pair fails the moment the two scales stop
-//!   moving together.
+//!   and at 2000, and so does one unfiltered find paged newest first, and so
+//!   does every other read shape above, each in the bounded form its verb's
+//!   contract makes flat and each reading above zero on its statements and on
+//!   its rows or its steps. A read shape's cost is its builder's work and the
+//!   steps SQLite took over every statement run on its snapshot: statement
+//!   counters, not a clock, and they do not see work a virtual table does
+//!   inside a statement, so a full-text match's posting-list walk is not
+//!   among them. A ceiling passes anything under it; a pair fails the moment
+//!   the two scales stop moving together. Every read pair has a control that
+//!   grows with the vault, run at the same two attachments, and each control
+//!   must read more at the larger scale on the counts it names.
 //!
 //! **Every reading is recorded, zero included.** A gate that passes says only
 //! that nothing moved; which counters were asked and what each read is the
@@ -53,10 +67,10 @@
 //! Each generated tree sits in a testkit sandbox, which is a unix-only harness,
 //! and the lane that runs these cases is a Linux one.
 //!
-//! **The read-through-a-hold bar reads the host's account**, which a build
+//! **The read-through-a-hold bars read the host's account**, which a build
 //! reads only behind `induced-failure`, so the lane step names the feature. A
-//! build without it compiles every case and refuses that one when it runs,
-//! rather than passing it having read nothing.
+//! build without it compiles every case and refuses the two that read the
+//! account when they run, rather than passing them having read nothing.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -70,14 +84,19 @@ use attach::read::{FIND_LIMIT, Pages, bounded_find, pages, the_pinned_declaratio
 use norn_fs::reads::{ReadTally, ReadWindow};
 use norn_host::Demand;
 use norn_store::{
-    Change, DocumentFacts, DocumentPath, ExplainedStatement, IncrementProvenance, MAX_PAGE, Store,
-    StoredDocument, StoredPathOrder,
+    Change, ContentModel, DocumentFacts, DocumentPath, ExplainedStatement, IncrementProvenance,
+    MAX_PAGE, SnapshotCounters, Store, StoredDocument, StoredPathOrder,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::process::Sandbox;
 use norn_testkit::scale::{ScaleObservation, SizeIndependencePair};
 use norn_testkit::wait::{Observed, wait_until};
-use norn_wire::{Column, Direction, Predicate, Sort, SortKey, TrustState};
+use norn_wire::{
+    CollectionPage, CollectionSelector, Column, CountParams, DescribeParams, Direction, FacetKind,
+    FindParams, GetParams, GetReport, GroupKey, Predicate, ResolutionTarget, RungSelection,
+    RungSet, SearchParams, Sort, SortKey, TrustState, ValidateParams, ValidateReport, VaultAddress,
+    VaultName,
+};
 
 /// The document the size-independence pair writes at both scales.
 ///
@@ -262,11 +281,16 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     read_on_this_thread.assert_all_zero("a find through a live hold, on its own thread");
     read_off_the_vault.assert_all_zero("a find through a live hold, in the host's account");
 
-    // **The other half of the thread's zero.** The same window around one
-    // document read and one walk of the registration root, both through
-    // `norn-fs`, moves every count the zero asserts.
+    the_thread_tally_moves(&vault, subject.path.as_str());
+    the_hosts_account_moves(&host, &vault);
+}
+
+/// **The other half of the thread's zero.** A read window on this thread
+/// around one read of `document` and one walk of the registration root, both
+/// through `norn-fs`, moves every count a thread's zero asserts.
+fn the_thread_tally_moves(vault: &attach::Vault, document: &str) {
     let window = ReadWindow::open();
-    norn_fs::read_and_hash(vault.path(), Path::new(subject.path.as_str()))
+    norn_fs::read_and_hash(vault.path(), Path::new(document))
         .expect("reading a document the attachment derived");
     for fact in norn_fs::walk(vault.path(), &[]).expect("walking the registration root") {
         fact.expect("a walk of the registration root");
@@ -283,13 +307,16 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
              {reached:?}"
         );
     }
+}
 
-    // **The other half of the account's zero.** A document written into the
-    // vault under the same attachment is derived by the host, and removing it
-    // is deleted and tombstoned by the host; each moves its counts.
+/// **The other half of the account's zero.** A document written into the
+/// vault under a live attachment is derived by the host, and removing it is
+/// deleted and tombstoned by the host; each moves its counts in the host's
+/// account.
+fn the_hosts_account_moves(host: &attach::ServingHost, vault: &attach::Vault) {
     let written = vault.path().join("counter-gate-derived.md");
     let derived = the_host_spends(
-        &host,
+        host,
         || {
             std::fs::write(&written, "---\ntitle: derived\n---\n\na body\n")
                 .expect("writing a document into the vault");
@@ -305,7 +332,7 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     record_the_counters("a document written under a live attachment", &derived);
 
     let deleted = the_host_spends(
-        &host,
+        host,
         || std::fs::remove_file(&written).expect("removing the written document"),
         "delete the document removed under its attachment",
         &[
@@ -692,6 +719,699 @@ fn find_shapes(label: &str, profile: &norn_fixtures::Profile) -> FindShapes {
         bounded: pages(hold.snapshot(), &bounded, &declared, 2),
         whole: pages(hold.snapshot(), &whole, &declared, 1),
         walked: pages(hold.snapshot(), &walked, &declared, 1),
+    }
+}
+
+/// **Every read shape through a live hold reads no vault document, and costs
+/// the same at both scales.** Five shapes the acceptance contract names in
+/// `docs/architecture.md` (count-by-field, suffix / stem resolve, links-to,
+/// findings-for-path and full-text match; its predicate + sort + page is the
+/// find [`a_bounded_find_costs_the_same_at_both_scales`] holds), and two read
+/// verbs beside them, are each asked through the host verb a client's request
+/// reaches, over `ambiguous` (300 documents) and `realistic` (2000), each with
+/// the same planted neighborhood beside the generated tree ([`plant`]).
+///
+/// Each shape is held in the form its verb's contract makes flat, and bounded
+/// by construction:
+///
+/// - **count-by-field**, a count grouped by `type` and narrowed by a path part
+///   to the planted neighborhood. A part that seeks what it keeps drives the
+///   tallies, so the work is the documents it admits. An unnarrowed ungrouped
+///   count is not held: it is the b-tree's own count of `documents` and steps
+///   no row, so its readings stand still while the pages it counts grow.
+/// - **suffix / stem resolve**, a get of the whole record of a document named
+///   by its bare stem, one segment of suffix: the class seek, the one document
+///   and its collections' heads.
+/// - **links page**, a get's page of the links one document carries, each
+///   resolved at the read to the documents it names, and each naming a class
+///   of one.
+/// - **links-to**, a find narrowed by a `links_to` part: a single target's
+///   three backlinks, paged at [`FIND_LIMIT`].
+/// - **findings-for-path**, a validate summary narrowed by a path part to the
+///   planted neighborhood. A page bounds itself; a summary tallies every
+///   finding it admits, so the narrowing part is what bounds it.
+/// - **full-text match**, a search on the lexical rung alone, for a word four
+///   planted documents carry and nothing else does. A search costs the
+///   documents its query matches, so the query is what bounds it.
+/// - **describe**, a page of two observed fields. A page's work follows the
+///   distinct keys it pages, so the page bound is what bounds it.
+///
+/// **The zeros are per shape.** Each shape runs inside its own read window on
+/// this thread and its own two readings of the host's account, and reads no
+/// document opened, no stat and no directory entry, and moves no document
+/// derived, file opened or changeset landed. The zeros are measured: at each
+/// scale, once the shapes have run, a document read and a walk through
+/// `norn-fs` move the thread's counts, and a document written and removed
+/// under the attachment moves the account's. The window is the calling
+/// thread's, which is where a read verb runs its read; a file a verb read on
+/// a thread of its own would be in neither reading.
+///
+/// **The work is read where the verb reports it**: the builder's own work
+/// counts, and the snapshot's. The snapshot counts every statement run on it,
+/// and the virtual-machine and full-scan steps SQLite took over each of them
+/// whichever part of the read it answered. Statement counters do not see work
+/// a virtual table does inside a statement, so a full-text match's
+/// posting-list walk is not among them; a search's page cost is read off the
+/// matches the module hands back instead. Each shape runs a pinned number of
+/// statements, reads above zero on its statements, on its rows or its steps,
+/// and on the snapshot's statements and steps, at both scales; and every
+/// count is compared name by name across the pair.
+///
+/// **Each shape has a control that grows with the vault**, read at the same
+/// two attachments, and each must read more at the larger scale on the counts
+/// its shape names, the snapshot's steps among them. The
+/// planted crowd is what grows: a tenth of the profile's documents, each
+/// sharing one stem, carrying a key of its own and a word of its own and
+/// linking one hub, beside as many documents whose frontmatter never closes.
+/// So an unnarrowed grouped count walks every document; a get of the crowd's
+/// stem is refused as ambiguous and counts the class it names; a links page
+/// holding a link to that stem counts the same class; the hub's backlinks are
+/// the crowd; an unnarrowed summary tallies the crowd's findings; a search for
+/// the crowd's word matches the crowd; and a describe page at the most a page
+/// may hold reads the crowd's keys.
+///
+/// Every failure names its shape and its scale, and every failure is
+/// reported at once.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document() {
+    the_hosts_account_is_readable();
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let mut failures = Vec::new();
+    let at_small = read_every_shape("counter-gate-shapes-ambiguous", &small, &mut failures);
+    let at_large = read_every_shape("counter-gate-shapes-realistic", &large, &mut failures);
+    let documents = (at_small.documents, at_large.documents);
+
+    let mut controls = Vec::new();
+    for (shape, (small_reading, large_reading)) in READ_SHAPES
+        .iter()
+        .zip(at_small.shapes.iter().zip(&at_large.shapes))
+    {
+        for (profile, reading) in [(&small, small_reading), (&large, large_reading)] {
+            record_the_counters(
+                &format!(
+                    "`{}` through a live hold over `{}`",
+                    shape.name, profile.name
+                ),
+                &reading.bounded,
+            );
+            for count in shape.working.iter().chain(SNAPSHOT_WORKING) {
+                if reading.bounded.get(count) == 0 {
+                    failures.push(format!(
+                        "`{}` over `{}` read nothing on `{count}`, so its zeros say nothing: {:?}",
+                        shape.name, profile.name, reading.bounded
+                    ));
+                }
+            }
+            let ran = reading.bounded.get("statements_executed");
+            if ran != shape.statements {
+                failures.push(format!(
+                    "`{}` over `{}` ran {ran} statements on its snapshot, and its shape runs {}",
+                    shape.name, profile.name, shape.statements
+                ));
+            }
+        }
+        failures.extend(
+            SizeIndependencePair::new(
+                shape.name,
+                ScaleObservation::new(&small, small_reading.bounded.clone()),
+                ScaleObservation::new(&large, large_reading.bounded.clone()),
+            )
+            .violations(),
+        );
+
+        let operation = format!("{}, its control", shape.name);
+        let control = SizeIndependencePair::new(
+            &operation,
+            ScaleObservation::new(&small, small_reading.control.clone()),
+            ScaleObservation::new(&large, large_reading.control.clone()),
+        )
+        .violations();
+        for grows in shape.grows {
+            let grown = (
+                small_reading.control.get(grows),
+                large_reading.control.get(grows),
+            );
+            if grown.1 <= grown.0 {
+                failures.push(format!(
+                    "`{}`'s control did not grow with the vault on `{grows}`, reading {} over \
+                     {} documents and {} over {}",
+                    shape.name, grown.0, documents.0, grown.1, documents.1
+                ));
+            }
+        }
+        controls.push((shape.name, control.join("; ")));
+    }
+    norn_testkit::readings::record("the read shapes' controls", &controls);
+    assert!(
+        failures.is_empty(),
+        "the read shapes failed the lane:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The directory the planted documents sit in, beside the generated tree.
+///
+/// Every planted stem opens `cg-`, which no stem the generator draws does, so
+/// no generated link names a planted document and no planted class holds a
+/// generated one.
+const PLANTED: &str = "counter-gate";
+
+/// The word the neighborhood's search reads: carried by the lodestar and its
+/// three linkers, and by no other document.
+const NEIGHBORHOOD_WORD: &str = "counterquill";
+
+/// The word every crowd document carries, and no other document does.
+const CROWD_WORD: &str = "countercrowd";
+
+/// The planted neighborhood, the same at every scale: a lodestar with two
+/// links and three backlinks, a hub the crowd links to, a pointer holding a
+/// link to the crowd's stem, and one document whose frontmatter never closes.
+/// Every path is under `counter-gate/fixed/`.
+const NEIGHBORHOOD: &[(&str, &str)] = &[
+    (
+        "cg-lodestar.md",
+        "---\ntitle: Lodestar\ntype: note\ncreated: 2026-01-01T00:00:00Z\ntags: [gate]\n---\n\n\
+         # Lodestar\n\nThe counterquill lodestar. ^anchor\n\n## Bearings\n\n\
+         See [[cg-linker-one]] and [[cg-linker-two]].\n",
+    ),
+    (
+        "cg-linker-one.md",
+        "---\ntitle: Linker One\ntype: note\ncreated: 2026-01-02T00:00:00Z\n---\n\n\
+         One counterquill points at [[cg-lodestar]].\n",
+    ),
+    (
+        "cg-linker-two.md",
+        "---\ntitle: Linker Two\ntype: task\ncreated: 2026-01-03T00:00:00Z\n---\n\n\
+         Two counterquill points at [[cg-lodestar]].\n",
+    ),
+    (
+        "cg-linker-three.md",
+        "---\ntitle: Linker Three\ntype: task\ncreated: 2026-01-04T00:00:00Z\n---\n\n\
+         Three counterquill points at [[cg-lodestar]].\n",
+    ),
+    (
+        "cg-hub.md",
+        "---\ntitle: Hub\ntype: note\ncreated: 2026-01-05T00:00:00Z\n---\n\n\
+         The crowd links here.\n",
+    ),
+    (
+        "cg-pointer.md",
+        "---\ntitle: Pointer\ntype: note\ncreated: 2026-01-06T00:00:00Z\n---\n\n\
+         A link naming the crowd's stem: [[cg-twin]].\n",
+    ),
+    (
+        "cg-unclosed.md",
+        "---\ncreated: 2026-01-07T00:00:00Z\nthe frontmatter never closes\n",
+    ),
+];
+
+/// How many crowd documents stand beside `profile`'s tree, and as many whose
+/// frontmatter never closes: a tenth of its documents, so the crowd grows
+/// with the vault.
+fn crowd(profile: &norn_fixtures::Profile) -> usize {
+    profile.docs / 10
+}
+
+/// Write the planted documents into `vault`'s tree before anything attaches
+/// it, and hand back how many were written.
+///
+/// **The neighborhood is what each shape reads, and it is the same at every
+/// scale**, so a shape whose work follows what it reads counts the same over
+/// both trees. **The crowd is what each control reads, and it grows with the
+/// vault**: each crowd document stands in a directory of its own under one
+/// stem, `cg-twin`, so the class that stem names is the crowd; each carries a
+/// key of its own, the crowd's word, and a link to `cg-hub`. Beside it stand
+/// as many documents whose frontmatter never closes, each a finding.
+fn plant(vault: &attach::Vault, profile: &norn_fixtures::Profile) -> usize {
+    let mut written = 0;
+    let mut write = |path: String, text: &str| {
+        let at = vault.path().join(path);
+        std::fs::create_dir_all(at.parent().expect("a planted document's folder"))
+            .expect("creating a planted document's folder");
+        std::fs::write(at, text).expect("writing a planted document");
+        written += 1;
+    };
+    for (path, text) in NEIGHBORHOOD {
+        write(format!("{PLANTED}/fixed/{path}"), text);
+    }
+    for at in 0..crowd(profile) {
+        write(
+            format!("{PLANTED}/crowd/{at:04}/cg-twin.md"),
+            &format!(
+                "---\ntype: crowd\ncreated: 2026-02-01T00:00:00Z\nzz-cg-{at:04}: x\n---\n\n\
+                 {CROWD_WORD} reaches [[cg-hub]].\n"
+            ),
+        );
+        write(
+            format!("{PLANTED}/broken/cg-broken-{at:04}.md"),
+            "---\ncreated: 2026-02-01T00:00:00Z\nthe frontmatter never closes\n",
+        );
+    }
+    written
+}
+
+/// What a read shape reads through: the live host, the vault it serves, and
+/// the declaration the vault's store pins.
+struct Reader<'a> {
+    host: &'a attach::ServingHost,
+    name: VaultName,
+    declared: ContentModel,
+}
+
+impl Reader<'_> {
+    fn vault(&self) -> VaultAddress {
+        VaultAddress::name(self.name.clone())
+    }
+
+    fn target(text: &str) -> ResolutionTarget {
+        ResolutionTarget::new(text).expect("a planted target")
+    }
+}
+
+/// One read shape the lane holds, and the control that shows its pair can
+/// fail.
+struct ReadShape {
+    /// The shape: the acceptance contract's name for it where the contract
+    /// names it, and the verb's where it does not.
+    name: &'static str,
+    /// The bounded form: the verb as a client asks it, and what it read.
+    bounded: fn(&Reader<'_>) -> CounterSnapshot,
+    /// The counts of the bounded form's work that must read above zero.
+    working: &'static [&'static str],
+    /// The statements the bounded form runs on its snapshot, the
+    /// establishing statement included, at every scale.
+    statements: u64,
+    /// The control: the same verb over what the crowd grows.
+    control: fn(&Reader<'_>) -> CounterSnapshot,
+    /// The counts the control must grow across the pair: each reads more at
+    /// the larger scale.
+    grows: &'static [&'static str],
+}
+
+/// The shapes [`every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document`]
+/// holds, beside the find its siblings hold.
+const READ_SHAPES: &[ReadShape] = &[
+    ReadShape {
+        name: "count-by-field",
+        bounded: |reader| count(reader, [Predicate::path(format!("{PLANTED}/fixed/**"))]),
+        working: &["count_statements", "count_tallies_read", "count_vm_steps"],
+        statements: 5,
+        control: |reader| count(reader, []),
+        grows: &["count_full_scan_steps", "vm_steps"],
+    },
+    ReadShape {
+        name: "suffix / stem resolve",
+        bounded: get_the_lodestar,
+        working: &["get_statements", "get_vm_steps"],
+        statements: 11,
+        control: get_the_crowds_stem,
+        grows: &["get_vm_steps", "vm_steps"],
+    },
+    ReadShape {
+        name: "links page",
+        bounded: |reader| links_page(reader, "cg-lodestar", 2),
+        working: &["get_statements", "get_vm_steps"],
+        statements: 6,
+        control: |reader| links_page(reader, "cg-pointer", 1),
+        grows: &["get_vm_steps", "vm_steps"],
+    },
+    ReadShape {
+        name: "links-to",
+        bounded: |reader| backlinks(reader, "cg-lodestar", Some(3)),
+        working: &[
+            "find_statements",
+            "find_documents_hydrated",
+            "find_page_vm_steps",
+        ],
+        statements: 5,
+        control: |reader| backlinks(reader, "cg-hub", None),
+        grows: &["find_page_vm_steps", "vm_steps"],
+    },
+    ReadShape {
+        name: "findings-for-path",
+        bounded: |reader| {
+            validate_summary(reader, [Predicate::path(format!("{PLANTED}/fixed/**"))])
+        },
+        working: &[
+            "validate_statements",
+            "validate_rows_read",
+            "validate_vm_steps",
+        ],
+        statements: 3,
+        control: |reader| validate_summary(reader, []),
+        grows: &["validate_vm_steps", "vm_steps"],
+    },
+    ReadShape {
+        name: "full-text match",
+        bounded: |reader| lexical_search(reader, NEIGHBORHOOD_WORD, Some(4)),
+        working: &[
+            "search_statements",
+            "search_documents_hydrated",
+            "search_page_vm_steps",
+        ],
+        statements: 4,
+        control: |reader| lexical_search(reader, CROWD_WORD, None),
+        grows: &["search_page_vm_steps", "vm_steps"],
+    },
+    ReadShape {
+        name: "describe",
+        bounded: |reader| observed_fields(reader, 2),
+        working: &[
+            "describe_statements",
+            "describe_facets_read",
+            "describe_vm_steps",
+        ],
+        statements: 3,
+        control: |reader| {
+            observed_fields(
+                reader,
+                u32::try_from(MAX_PAGE).expect("a page bound fits a wire limit"),
+            )
+        },
+        grows: &["describe_facets_read", "vm_steps"],
+    },
+];
+
+/// The snapshot's counts every shape's bounded form must read above zero,
+/// beside the counts of its builder's work its shape names: the statements
+/// it ran and the steps SQLite took stepping them.
+const SNAPSHOT_WORKING: &[&str] = &["statements_executed", "vm_steps"];
+
+/// What a shape's answer cost: the builder's work, then the snapshot's.
+fn cost(
+    work: impl Iterator<Item = (&'static str, u64)>,
+    snapshot: &SnapshotCounters,
+) -> CounterSnapshot {
+    work.chain(snapshot.readings()).collect()
+}
+
+/// A count of the documents `predicates` admits, grouped by `type`.
+fn count(reader: &Reader<'_>, predicates: impl IntoIterator<Item = Predicate>) -> CounterSnapshot {
+    let answered = reader
+        .host
+        .count(
+            &CountParams::new(reader.vault())
+                .with_by([GroupKey::field("type")])
+                .with_predicates(predicates),
+        )
+        .unwrap_or_else(|refusal| panic!("a count was refused: {refusal:?}"));
+    assert!(
+        answered.answer.is_complete() && !answered.answer.report.rows.is_empty(),
+        "a count answered no tally, or could not apply its parts: {:?}",
+        answered.answer
+    );
+    cost(answered.work.readings(), &answered.snapshot)
+}
+
+/// The whole record of the lodestar, named by its bare stem.
+fn get_the_lodestar(reader: &Reader<'_>) -> CounterSnapshot {
+    let answered = reader
+        .host
+        .get(&GetParams::new(
+            reader.vault(),
+            Reader::target("cg-lodestar"),
+        ))
+        .unwrap_or_else(|refusal| panic!("a get of the lodestar was refused: {refusal:?}"));
+    let GetReport::Record { document, .. } = &answered.answer.report else {
+        panic!("a get with no anchor answered {:?}", answered.answer.report);
+    };
+    assert_eq!(
+        document.path.as_str(),
+        format!("{PLANTED}/fixed/cg-lodestar.md"),
+        "the lodestar's stem resolved to another document"
+    );
+    cost(answered.work.readings(), &answered.snapshot)
+}
+
+/// What a get of the crowd's stem ran before it was refused as ambiguous,
+/// read off the statements its plans ran on a live hold's snapshot: a refusal
+/// answers no work of its own.
+fn get_the_crowds_stem(reader: &Reader<'_>) -> CounterSnapshot {
+    let hold = reader
+        .host
+        .begin_read(&reader.name)
+        .expect("a live attachment answers a read");
+    let plans = hold
+        .snapshot()
+        .get_plans(
+            &GetParams::new(reader.vault(), Reader::target("cg-twin")),
+            &reader.declared,
+            &NoText,
+        )
+        .unwrap_or_else(|refusal| panic!("a get of the crowd's stem was refused: {refusal:?}"));
+    let mut work = CounterSnapshot::new();
+    for plan in &plans {
+        for (name, value) in plan.work.readings() {
+            work.set(name, work.get(name) + value);
+        }
+    }
+    for (name, value) in hold.snapshot().counters().readings() {
+        work.set(name, value);
+    }
+    work
+}
+
+/// A get's text layer that is never asked: a get of a whole record cuts no
+/// section and no block.
+struct NoText;
+
+impl norn_store::DocumentText for NoText {
+    fn section(
+        &self,
+        _: &[norn_store::HeadingFact],
+        _: &str,
+        _: &str,
+    ) -> Option<norn_store::SectionAt> {
+        unreachable!("a get of a whole record cuts no section")
+    }
+
+    fn block(&self, _: &str, _: usize) -> std::ops::Range<usize> {
+        unreachable!("a get of a whole record cuts no block")
+    }
+}
+
+/// A get's page of the links the document `stem` names carries, which must
+/// hold `links` of them.
+fn links_page(reader: &Reader<'_>, stem: &str, links: usize) -> CounterSnapshot {
+    let answered = reader
+        .host
+        .get(
+            &GetParams::new(reader.vault(), Reader::target(stem))
+                .with_collection(CollectionSelector::Links)
+                .with_limit(FIND_LIMIT),
+        )
+        .unwrap_or_else(|refusal| panic!("a links page of `{stem}` was refused: {refusal:?}"));
+    let GetReport::Collection {
+        page: CollectionPage::Links { page, .. },
+        ..
+    } = &answered.answer.report
+    else {
+        panic!("a links page answered {:?}", answered.answer.report);
+    };
+    assert_eq!(
+        page.rows.len(),
+        links,
+        "`{stem}` carries other links: {page:?}"
+    );
+    cost(answered.work.readings(), &answered.snapshot)
+}
+
+/// A page of the documents linking to `stem`, each carrying its fields, which
+/// must hold `backlinks` of them where it names a number.
+fn backlinks(reader: &Reader<'_>, stem: &str, backlinks: Option<usize>) -> CounterSnapshot {
+    let answered = reader
+        .host
+        .find(
+            &FindParams::new(reader.vault())
+                .with_predicates([Predicate::links_to(Reader::target(stem))])
+                .with_columns([Column::fields()])
+                .with_limit(FIND_LIMIT),
+        )
+        .unwrap_or_else(|refusal| panic!("the backlinks of `{stem}` were refused: {refusal:?}"));
+    assert!(
+        answered.answer.is_complete(),
+        "the backlinks of `{stem}` could not apply {:?}",
+        answered.answer.unsatisfied
+    );
+    if let Some(backlinks) = backlinks {
+        assert_eq!(
+            answered.answer.report.rows.len(),
+            backlinks,
+            "`{stem}` has other backlinks"
+        );
+    }
+    cost(answered.work.readings(), &answered.snapshot)
+}
+
+/// A summary of the findings standing over the documents `predicates`
+/// admits.
+fn validate_summary(
+    reader: &Reader<'_>,
+    predicates: impl IntoIterator<Item = Predicate>,
+) -> CounterSnapshot {
+    let answered = reader
+        .host
+        .validate(
+            &ValidateParams::new(reader.vault())
+                .with_predicates(predicates)
+                .summarized(),
+        )
+        .unwrap_or_else(|refusal| panic!("a validate was refused: {refusal:?}"));
+    let ValidateReport::Summary { by_kind, .. } = &answered.answer.report else {
+        panic!("a summary answered {:?}", answered.answer.report);
+    };
+    assert!(
+        by_kind.iter().any(|tally| tally.count > 0),
+        "a summary over the planted findings tallied none"
+    );
+    cost(answered.work.readings(), &answered.snapshot)
+}
+
+/// A page of the lexical rung's hits for `word`, each carrying its document's
+/// fields, which must hold `hits` of them where it names a number.
+fn lexical_search(reader: &Reader<'_>, word: &str, hits: Option<usize>) -> CounterSnapshot {
+    let answered = reader
+        .host
+        .search(
+            &SearchParams::new(reader.vault(), word)
+                .with_rungs(RungSelection::exactly(RungSet::lexical()))
+                .with_columns([Column::fields()])
+                .with_limit(FIND_LIMIT),
+        )
+        .unwrap_or_else(|refusal| panic!("a search for `{word}` was refused: {refusal:?}"));
+    if let Some(hits) = hits {
+        assert_eq!(
+            answered.answer.report.page.rows.len(),
+            hits,
+            "`{word}` matched other documents"
+        );
+    }
+    let searched = &answered.work;
+    let lexical = searched
+        .lexical
+        .expect("a lexical search ran the lexical rung");
+    assert!(
+        searched.vector.is_none(),
+        "a lexical search ran the vector rung"
+    );
+    // The search's own counts are the vector rung's and its restriction's,
+    // which a lexical search runs none of: they are in the pair so that a
+    // lexical path that starts spending them is read.
+    let own = [
+        ("search_candidate_pages", searched.candidate_pages),
+        ("search_candidates", searched.candidates),
+        ("search_margin", searched.margin),
+        ("search_paths_checked", searched.paths_checked),
+    ];
+    cost(lexical.readings().chain(own), &answered.snapshot)
+}
+
+/// A page of `limit` observed fields.
+fn observed_fields(reader: &Reader<'_>, limit: u32) -> CounterSnapshot {
+    let answered = reader
+        .host
+        .describe(
+            &DescribeParams::new(reader.vault())
+                .with_facets([FacetKind::ObservedField])
+                .with_limit(limit),
+        )
+        .unwrap_or_else(|refusal| panic!("a describe was refused: {refusal:?}"));
+    assert!(
+        !answered.answer.report.rows.is_empty(),
+        "a describe answered no observed field"
+    );
+    cost(answered.work.readings(), &answered.snapshot)
+}
+
+/// One shape's readings at one scale: its bounded form's and its control's.
+struct ShapeReading {
+    bounded: CounterSnapshot,
+    control: CounterSnapshot,
+}
+
+/// Every shape's readings at one scale, and how many documents the
+/// attachment derived there.
+struct ScaleReading {
+    documents: usize,
+    shapes: Vec<ShapeReading>,
+}
+
+/// Attach `profile` with the planted documents beside it under a live host,
+/// and read every [`READ_SHAPES`] shape through it.
+///
+/// Each bounded form runs inside a read window of its own and two readings
+/// of the host's account of its own, and a count either moves is a failure
+/// naming the shape and the scale. The two instruments' controls run after
+/// the shapes, under the same attachment.
+fn read_every_shape(
+    label: &str,
+    profile: &norn_fixtures::Profile,
+    failures: &mut Vec<String>,
+) -> ScaleReading {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    let planted = plant(&vault, profile);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let mut store = vault.store();
+    let derived = attach::derived_documents(&mut store);
+    assert_eq!(
+        derived,
+        profile.docs + planted,
+        "`{}` emits {} documents and {planted} were planted beside them, and the attachment \
+         derived {derived}",
+        profile.name,
+        profile.docs
+    );
+    let reader = Reader {
+        host: &host,
+        name: vault.name().clone(),
+        declared: the_pinned_declaration(&mut store),
+    };
+
+    let mut readings = Vec::new();
+    for shape in READ_SHAPES {
+        let before = vault_work(&host);
+        let window = ReadWindow::open();
+        let bounded = (shape.bounded)(&reader);
+        let on_this_thread = thread_reads(window.finish());
+        let off_the_vault = before
+            .delta(&vault_work(&host))
+            .expect("two readings of one account");
+        for (what, moved) in [
+            ("read through norn-fs on its own thread", &on_this_thread),
+            ("moved the host's account", &off_the_vault),
+        ] {
+            record_the_counters(
+                &format!("`{}` over `{}`, what it {what}", shape.name, profile.name),
+                moved,
+            );
+            let nonzero = moved.nonzero();
+            if !nonzero.is_empty() {
+                failures.push(format!(
+                    "`{}` over `{}` {what}: {nonzero:?}",
+                    shape.name, profile.name
+                ));
+            }
+        }
+        let control = (shape.control)(&reader);
+        readings.push(ShapeReading { bounded, control });
+    }
+
+    assert_eq!(
+        host.state(vault.name()),
+        Ok(TrustState::Ready),
+        "the shapes were meant to read a live attachment, and the entry is not ready"
+    );
+    the_thread_tally_moves(&vault, &format!("{PLANTED}/fixed/cg-lodestar.md"));
+    the_hosts_account_moves(&host, &vault);
+    ScaleReading {
+        documents: derived,
+        shapes: readings,
     }
 }
 
