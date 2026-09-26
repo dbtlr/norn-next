@@ -895,6 +895,33 @@ fn a_bare_directory_probe_is_two_seeks_of_the_path_index() {
     failure_of("documents_path dropped", || judge(&plan));
 }
 
+/// **An existence check is one select-one-shaped statement.** Whether a key is
+/// known, whether a path is a bare directory, and whether the full-text engine
+/// reads a query are each asked once per request, as a single `EXISTS` over a
+/// `SELECT 1` subquery: one row answers, and the subquery stops at the first
+/// row it finds rather than reading every row that would.
+#[test]
+fn an_existence_check_is_one_select_exists_statement() {
+    let seeded = Seeded::new("find-existence-shape");
+    for (part, statement) in [
+        (Predicate::has("seen"), FindStatement::KnownKey),
+        (Predicate::path("notes"), FindStatement::BareDirectory),
+        (Predicate::matches("interloper"), FindStatement::MatchProbe),
+    ] {
+        let probe = plan_of(
+            &seeded.plans(&request().with_predicates([part.clone()])),
+            statement,
+        );
+        let sql = probe.sql().split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            sql.starts_with("SELECT EXISTS (SELECT 1 ")
+                || sql.starts_with("SELECT NOT EXISTS (SELECT 1 "),
+            "{part:?} asked {statement:?} as something other than one EXISTS: {sql}"
+        );
+        probe.assert_no_full_scan();
+    }
+}
+
 /// **A match probe is one read of the full-text index through its `MATCH`
 /// selection**, which is the step at which the engine parses the query: the
 /// probe reads no relation end to end, and asks the index nothing but the

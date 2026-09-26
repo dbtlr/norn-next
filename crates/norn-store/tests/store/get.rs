@@ -1527,6 +1527,55 @@ fn a_section_and_a_block_are_read_within_one_document() {
     });
 }
 
+/// **A get resolves its target once and reads its document once.** Whatever it
+/// answers, a record, a section found or missing, a block, or a page of one
+/// collection, the target's class is read by one statement, and no statement
+/// the get runs is run twice: the document's row, its body and each collection
+/// it reads are each read by one statement.
+#[test]
+fn a_get_resolves_its_target_once_and_reads_its_document_once() {
+    let vault = paged_vault("get-once", 3);
+    for params in [
+        getting("paged"),
+        getting("paged").with_columns([Column::body(), Column::links(), Column::findings()]),
+        getting("paged#Heading 3"),
+        getting("paged#Nope"),
+        getting("paged#^b2"),
+        getting("paged")
+            .with_collection(CollectionSelector::Headings)
+            .with_limit(2),
+        getting("paged")
+            .with_collection(CollectionSelector::Findings)
+            .with_limit(2),
+        getting("paged")
+            .with_collection(CollectionSelector::Links)
+            .with_limit(2),
+    ] {
+        let ran: Vec<ReadStatement> = vault
+            .plans(&params)
+            .into_iter()
+            .map(|plan| plan.statement)
+            .collect();
+        let resolved = ran
+            .iter()
+            .filter(|statement| **statement == ReadStatement::Find(FindStatement::ClassHead))
+            .count();
+        assert_eq!(
+            resolved, 1,
+            "{params:?} resolved its target {resolved} times: {ran:?}"
+        );
+        let distinct: std::collections::BTreeSet<String> = ran
+            .iter()
+            .map(|statement| format!("{statement:?}"))
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            ran.len(),
+            "{params:?} ran a statement twice: {ran:?}"
+        );
+    }
+}
+
 /// **A collection page seeks the document from its cursor**: a collection
 /// paged by ordinal is one seek of its table's `(document, ordinal)` index
 /// bounded below by the ordinal the page continues after, and the findings

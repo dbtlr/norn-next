@@ -18,6 +18,7 @@ mod attach;
 
 use std::path::Path;
 
+use norn_fs::reads::{ReadTally, ReadWindow};
 use norn_host::{Demand, ReadRefusal, ReloadRefusal};
 use norn_testkit::process::Sandbox;
 use norn_testkit::wait::{Observed, wait_until};
@@ -1186,6 +1187,93 @@ fn a_gets_sections_and_blocks_are_the_text_layers_reading() {
     assert!(
         sections > 0 && blocks > 0,
         "the vault read {sections} sections and {blocks} blocks"
+    );
+}
+
+/// **A read answers a body from the snapshot, and reads no file for it.** A
+/// find projecting every document's body and a get of each document's record
+/// with its body answer what the store derived, which is the document's body
+/// as `norn-text` reads it out of the bytes on disk, byte for byte to the row
+/// ceiling: the CRLF, bare-CR, multibyte, empty and past-long-frontmatter
+/// bodies included. While they run, this thread reads nothing through
+/// `norn-fs`, the one file reader the host has: no document opened, no stat and
+/// no directory entry.
+///
+/// The zero is measured rather than structural: the same window around one
+/// document read through `norn-fs` moves the opens and the stats.
+#[test]
+fn a_read_answers_the_body_its_snapshot_holds_and_reads_no_file() {
+    let (_sandbox, vault, host) = a_verb_vault("host-reads-body", &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let mut bodies = std::collections::BTreeMap::new();
+    attach::for_each_derived_path(&mut vault.store(), |path| {
+        let source = std::fs::read_to_string(vault.path().join(path.as_str()))
+            .expect("a derived document reads as text");
+        let body = norn_text::Document::parse(&source).body().to_string();
+        bodies.insert(path.as_str().to_string(), body);
+    });
+    assert!(
+        written().iter().all(|(path, _)| bodies.contains_key(*path)),
+        "the attachment did not derive every written document"
+    );
+
+    let window = ReadWindow::open();
+    let found = host
+        .find(
+            &FindParams::new(address(vault.name()))
+                .with_columns([Column::body()])
+                .with_limit(1000),
+        )
+        .expect("an attached vault answers a find");
+    let mut gotten = Vec::new();
+    for path in bodies.keys() {
+        gotten.push((
+            path.clone(),
+            got(
+                &host,
+                &vault,
+                &GetParams::new(address(vault.name()), a_target(path))
+                    .with_columns([Column::body()]),
+            ),
+        ));
+    }
+    let read = window.finish();
+
+    assert!(found.answer.report.next.is_none(), "the find paged");
+    let mut listed = paths_of(&found.answer.report);
+    listed.sort();
+    assert_eq!(
+        listed,
+        bodies.keys().cloned().collect::<Vec<_>>(),
+        "the find answered other documents than the attachment derived"
+    );
+    for row in &found.answer.report.rows {
+        let path = row.path.as_str();
+        let body = row.body.as_ref().expect("the find projected the body");
+        assert_body(body, &bodies[path], path);
+    }
+    for (path, report) in &gotten {
+        let GetReport::Record { document, .. } = report else {
+            panic!("`{path}` answered {report:?}");
+        };
+        let body = document.body.as_ref().expect("the get projected the body");
+        assert_body(body, &bodies[path], path);
+    }
+    assert_eq!(
+        read,
+        ReadTally::default(),
+        "a find and a get read through norn-fs on this thread"
+    );
+
+    // The other half of the zero: the same window around one document read.
+    let window = ReadWindow::open();
+    norn_fs::read_and_hash(vault.path(), Path::new("zz-guide/zz-handbook.md"))
+        .expect("reading a document the attachment derived");
+    let reached = window.finish();
+    assert!(
+        reached.document_opens > 0 && reached.stats > 0,
+        "a document read through norn-fs did not move the window: {reached:?}"
     );
 }
 
