@@ -79,6 +79,7 @@
 use std::cell::Cell;
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use norn_db::rusqlite::types::Value;
@@ -162,6 +163,9 @@ pub struct SnapshotReader {
     /// carries it from the mint, and every snapshot it establishes reads under
     /// it.
     order: StoredPathOrder,
+    /// Statements the connection has run since this handle was minted, counted
+    /// where each one runs. See [`SnapshotReader::statements_run`].
+    statements_run: AtomicU64,
 }
 
 impl fmt::Debug for SnapshotReader {
@@ -226,6 +230,26 @@ impl SnapshotReader {
     /// The database this handle reads, from its creation to its discard.
     pub fn epoch(&self) -> &str {
         &self.epoch
+    }
+
+    /// Statements this handle's connection has run against the database since
+    /// the handle was minted: every snapshot's establishing statement, and
+    /// every statement a read ran on a snapshot, each counted where it runs.
+    /// The mint's own statements ran before the handle existed and are not
+    /// among them.
+    ///
+    /// **The reading is the connection's, not a snapshot's.** One connection
+    /// serves every read of the handle in turn, so a caller that holds the
+    /// connection's turn and reads this twice has, in the difference, exactly
+    /// what ran on the connection between the two readings. A caller holding
+    /// a lock across that stretch learns what ran under its lock from its own
+    /// two readings rather than from a count the establishment reports.
+    pub fn statements_run(&self) -> u64 {
+        self.statements_run.load(Ordering::Relaxed)
+    }
+
+    fn count_statement_run(&self) {
+        self.statements_run.fetch_add(1, Ordering::Relaxed);
     }
 
     fn give_the_connection_back(&self, database: Database) {
@@ -314,7 +338,7 @@ impl ConnectionTurn {
             .expect("a turn holds the connection until it establishes or drops");
         let reader = Arc::clone(&self.reader);
         let mut counters = SnapshotCounters::default();
-        let established = establish_on(&mut database, &reader.epoch, &mut counters);
+        let established = establish_on(&mut database, &reader, &mut counters);
         let snapshot = match established {
             Ok(reading) => Ok(Snapshot {
                 order: reader.order,
@@ -351,15 +375,16 @@ impl Drop for ConnectionTurn {
 /// run.
 fn establish_on(
     database: &mut Database,
-    epoch: &str,
+    reader: &SnapshotReader,
     counters: &mut SnapshotCounters,
 ) -> Result<StoreReading, StoreError> {
     database.open_snapshot()?;
     counters.count_snapshot();
     counters.count_statement();
+    reader.count_statement_run();
     let write_generation = last_write_generation(database.connection())?;
     Ok(StoreReading {
-        epoch: epoch.to_string(),
+        epoch: reader.epoch.clone(),
         write_generation,
     })
 }
@@ -509,6 +534,7 @@ impl Snapshot {
         let mut counters = self.counters.get();
         counters.count_statement();
         self.counters.set(counters);
+        self.reader.count_statement_run();
     }
 
     /// Add what SQLite counted stepping one statement run on this snapshot's
@@ -819,6 +845,7 @@ impl Store {
                 order: self.order,
                 connection: Mutex::new(Some(database)),
                 returned: Condvar::new(),
+                statements_run: AtomicU64::new(0),
             });
         ReaderMint {
             reader,
@@ -1600,6 +1627,59 @@ mod tests {
             snapshot.reading().epoch(),
             store.epoch(),
             "the snapshot names a database its handle was not minted from"
+        );
+    }
+
+    /// **The handle counts what its connection ran, whoever reads it.** An
+    /// establishment moves the count by its one statement and a statement a
+    /// read runs on the snapshot moves it again, so two readings around a
+    /// stretch of the connection's use are what that stretch ran. A turn that
+    /// establishes nothing ran nothing, which is the control: a count that
+    /// moved with every turn would say nothing about statements.
+    #[test]
+    fn a_handle_counts_every_statement_its_connection_runs() {
+        let scratch = Scratch::new("norn-store-reader-statements-run");
+        let store = Store::open(
+            scratch.join("derived").join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .expect("a store opens");
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
+        assert_eq!(
+            reader.statements_run(),
+            0,
+            "the mint's statements were counted as the handle's"
+        );
+
+        drop(reader.try_take().expect("a free handle hands out its turn"));
+        assert_eq!(
+            reader.statements_run(),
+            0,
+            "a turn that established nothing was counted as a statement"
+        );
+
+        let snapshot = reader
+            .try_take()
+            .expect("the dropped turn gave the connection back")
+            .establish()
+            .snapshot
+            .expect("a snapshot");
+        assert_eq!(
+            reader.statements_run(),
+            1,
+            "the establishing statement is missing from the handle's count"
+        );
+        snapshot.count_statement();
+        assert_eq!(
+            reader.statements_run(),
+            2,
+            "a statement run on the snapshot is missing from the handle's count"
         );
     }
 

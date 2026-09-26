@@ -507,6 +507,12 @@ mod tests {
 /// it held the entry gate, and what concurrent reads of one entry paid for
 /// sharing the one connection that entry holds.
 ///
+/// **What an establishment ran under the gate is the gate holder's reading.**
+/// The acquisition reads its handle's statement count once it holds the gate
+/// and the connection's turn, and again as it gives the gate back, and the
+/// difference is what is counted; the establishment reports no count of its
+/// own. A statement moved outside the hold is outside those two readings.
+///
 /// **What an acquisition runs under the gate is three readings, not one.** The
 /// establishing statement of a read that was served is exactly one, and the
 /// bar on gate-held query work is read off that; the repair a read runs when
@@ -520,9 +526,9 @@ mod tests {
 /// **Every act is counted where the acquisition pays for it, never where the
 /// read leaves**, so what an acquisition did is in the account whichever way it
 /// left. The mint is counted where the mint returns, the establishment where
-/// the establishment returns, and the wait for the entry's connection where
-/// that wait begins — each of them before the branch that decides how the read
-/// leaves, so the refusals are accounted exactly as the answers are. A wait
+/// the hold it ran under gives the gate back, and the wait for the entry's
+/// connection where that wait begins, so the refusals are accounted exactly as
+/// the answers are. A wait
 /// that begins cannot be abandoned: it returns only with the connection, so a
 /// wait counted where it begins is a wait that ends. No path out of an
 /// acquisition runs a statement under the gate, or waits out another read, and
@@ -547,7 +553,9 @@ pub(crate) struct ReadEvidence {
 pub struct ReadReading {
     /// Reads that took a hold, over every entry.
     pub reads_served: u64,
-    /// Snapshot-establishing statements run while the entry gate was held.
+    /// Snapshot-establishing statements run while the entry gate was held, as
+    /// the holder of that gate read them off the read's connection on both
+    /// sides of its hold.
     ///
     /// **One per read served**, so this moves with `reads_served`, and any
     /// other number is a read that ran query work under the lock every other
@@ -699,33 +707,51 @@ impl ReadEvidence {
             .fetch_max(statements, Ordering::Relaxed);
     }
 
-    /// Record what one acquisition's establishment ran under the entry gate.
+    /// Record what one served acquisition's establishing hold ran under the
+    /// entry gate.
     ///
-    /// **This is called where the establishment returns and not where the read
-    /// leaves**, for the reason [`ReadEvidence::count_mint_under_the_gate`] is:
-    /// the statement ran under the gate whichever answer came back, and the
-    /// refusal path out is a path that already paid for it. Which of the two
-    /// readings it lands in is the answer, because `statements_under_the_gate`
-    /// claims to be the reads it served.
+    /// **`statements` is the gate holder's own reading**, not a count the
+    /// establishment reports: the acquisition read its handle's statement
+    /// count once it held the gate and the connection's turn, and again as it
+    /// gave the gate back, and this is the difference. An establishing
+    /// statement run outside that hold is not in it, so the exactly-one bar
+    /// read off `statements_under_the_gate` fails for a read that established
+    /// outside the lock.
     ///
     /// The mint's statements are passed in again, already counted by the mint,
     /// because the widest reading is per acquisition: what one acquisition ran
     /// under the gate is its mint's statements and its establishment's, and a
     /// ceiling read off two separate maxima would be a sum of two different
     /// acquisitions.
-    pub(crate) fn count_establishment_under_the_gate<S>(
+    pub(crate) fn count_establishment_under_the_gate(&self, statements: u64, mint_statements: u64) {
+        self.statements_under_the_gate
+            .fetch_add(statements, Ordering::Relaxed);
+        self.widen(statements, mint_statements);
+    }
+
+    /// Record what one acquisition whose establishment refused ran under the
+    /// entry gate, read the way [`ReadEvidence::count_establishment_under_the_gate`]
+    /// reads it.
+    ///
+    /// **It is counted apart from the served reading** because
+    /// `statements_under_the_gate` claims to be the reads it served, and this
+    /// acquisition served none; it held the gate for what it ran all the same,
+    /// so the refusal is a path that paid for it.
+    pub(crate) fn count_refused_establishment_under_the_gate(
         &self,
-        establishment: &crate::Establishment<S>,
+        statements: u64,
         mint_statements: u64,
     ) {
-        let landing = if establishment.established.is_ok() {
-            &self.statements_under_the_gate
-        } else {
-            &self.refused_establishment_statements_under_the_gate
-        };
-        landing.fetch_add(establishment.statements, Ordering::Relaxed);
+        self.refused_establishment_statements_under_the_gate
+            .fetch_add(statements, Ordering::Relaxed);
+        self.widen(statements, mint_statements);
+    }
+
+    /// Widen the per-acquisition reading to what one acquisition ran under the
+    /// gate: its mint's statements and its establishing hold's together.
+    fn widen(&self, establishing_statements: u64, mint_statements: u64) {
         self.widest_statements_under_the_gate.fetch_max(
-            mint_statements.saturating_add(establishment.statements),
+            mint_statements.saturating_add(establishing_statements),
             Ordering::Relaxed,
         );
     }

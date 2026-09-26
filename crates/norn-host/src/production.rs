@@ -354,13 +354,15 @@ impl ReadSource for norn_store::SnapshotReader {
         norn_store::SnapshotReader::wait_for_the_connection(self)
     }
 
-    /// The store establishes the snapshot and reports what it cost: the
-    /// reading it was established at, and the one statement that established
-    /// it.
-    ///
-    /// The statements come from the attempt's own counters rather than the
-    /// snapshot's, because an attempt that refused has no snapshot to read
-    /// them off and ran the statement all the same.
+    /// The store's own count of what the connection ran, taken where each
+    /// statement runs, so the gate's holder reads the connection rather than
+    /// a number this seam composed.
+    fn statements_run(&self) -> u64 {
+        norn_store::SnapshotReader::statements_run(self)
+    }
+
+    /// The store establishes the snapshot and reports the reading it was
+    /// established at. What the attempt ran is on the handle's own count.
     fn establish(turn: Self::Turn) -> Establishment<Self::Snapshot> {
         let attempt = turn.establish();
         Establishment {
@@ -371,7 +373,6 @@ impl ReadSource for norn_store::SnapshotReader {
                     snapshot,
                 })
                 .map_err(|error| reader_unavailable(&error)),
-            statements: attempt.counters.statements_executed(),
         }
     }
 }
