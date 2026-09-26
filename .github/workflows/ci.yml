@@ -199,10 +199,11 @@ jobs:
   # larger scale. And under the overlapping-reads-on-one-entry workload, eight
   # reads start while a ninth holds the entry's one connection, and the hold is
   # let go once the host's reader-wait reading names all eight as waiting:
-  # each read runs exactly one statement under the entry gate, the one that
-  # establishes its snapshot, as the gate holder reads it off the handle on
-  # both sides of its hold, and the gate's own take count reads no retake
-  # inside that hold; the reader-wait reading is eight; and each contended
+  # each read runs exactly its snapshot's establishment under the entry gate,
+  # the deferred BEGIN and the one statement that establishes the snapshot, as
+  # the gate holder reads SQLite's own count of what it began on the holding
+  # thread on both sides of its hold, and the gate's own take count reads no
+  # retake inside that hold; the reader-wait reading is eight; and each contended
   # read took exactly one re-reading of the published demand, none past a
   # ceiling authored in norn-host's baselines. Its control runs the same
   # reads one after another and must fail on contention alone. All four are
