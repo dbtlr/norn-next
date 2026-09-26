@@ -46,7 +46,9 @@ pub enum GroupKey {
         /// The frontmatter key.
         key: String,
     },
-    /// The tags a document carries, one group per tag.
+    /// The tags a document carries, one group per tag with Unicode case
+    /// folded and accents kept, labelled by the spelling its documents write
+    /// first.
     Tag {},
 }
 

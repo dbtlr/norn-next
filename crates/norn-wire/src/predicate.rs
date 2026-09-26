@@ -130,7 +130,8 @@ pub enum Predicate {
         /// The target being resolved.
         target: ResolutionTarget,
     },
-    /// The document carries the tag `name`.
+    /// The document carries the tag `name`, with Unicode case folded and
+    /// accents kept: `Work` finds `#work` and `#WORK`.
     #[non_exhaustive]
     Tag {
         /// The tag, without its `#`.
