@@ -5284,8 +5284,8 @@ mod tests {
         assert_eq!(
             tags,
             vec![
-                ("draft", TagSource::Body),
-                ("project", TagSource::Frontmatter)
+                ("project", TagSource::Frontmatter),
+                ("draft", TagSource::Body)
             ],
             "the facet took a tag row away, or added one"
         );
@@ -5324,6 +5324,61 @@ mod tests {
             .map(|finding| finding.target)
             .collect();
         assert_eq!(targets, vec![Some("Draft".to_string())]);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A tag's first occurrence is the one the file writes first**: the
+    /// frontmatter stands before the body, so a note carrying `tags: [Draft]`
+    /// and a body `#draft` writes `Draft` first. Its one undeclared-tag
+    /// finding names `Draft`, and a count grouped by tag labels the tag
+    /// `Draft`.
+    #[test]
+    fn a_frontmatter_tag_occurs_before_a_body_tag() {
+        let f = Fixture::new("tag-first-occurrence");
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\ntags:\n  declared: [work]\n  undeclared: report\n",
+        )
+        .unwrap();
+        fs::write(
+            f.vault().join("note.md"),
+            "---\ntags: [Draft]\n---\n# body\n#draft\n",
+        )
+        .unwrap();
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        let targets: Vec<Option<String>> = findings_at(&mut attachment.store, "note.md")
+            .into_iter()
+            .map(|finding| finding.target)
+            .collect();
+        assert_eq!(targets, vec![Some("Draft".to_string())]);
+
+        let declared = crate::derivation::Declared::pinned(
+            VaultSchema::parse(attachment.controls.schema_bytes()).unwrap(),
+            attachment.controls.fingerprints().schema.to_string(),
+        );
+        let reader = Arc::new(attachment.open_reader().reader.expect("a reader"));
+        let snapshot = reader
+            .try_take()
+            .expect("an idle reader")
+            .establish()
+            .expect("a snapshot");
+        let params = norn_wire::CountParams::new(norn_wire::VaultAddress::name(
+            attachment.registration.name.clone(),
+        ))
+        .with_by([norn_wire::GroupKey::tag()]);
+        let labels: Vec<Vec<Option<String>>> = snapshot
+            .count(&params, declared.content_model())
+            .expect("a count grouped by tag")
+            .tallies
+            .into_iter()
+            .map(|tally| tally.group)
+            .collect();
+        assert_eq!(labels, vec![vec![Some("Draft".to_string())]]);
+        drop(snapshot);
+        drop(reader);
         ops.detach(&name, attachment);
     }
 

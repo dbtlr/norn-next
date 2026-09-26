@@ -711,17 +711,19 @@ pub(crate) fn map_document(
             span: Some(span(b.span)),
         })
         .collect();
-    facts.tags = scan
-        .tags()
+    // The file's order: the frontmatter stands before the body, so its tags
+    // come first, and a tag's ordinal is where the file writes it.
+    facts.tags = document
+        .frontmatter_tags()
         .into_iter()
         .map(|t| TagFact {
             name: t.name,
-            source: TagSource::Body,
+            source: TagSource::Frontmatter,
             span: t.span.map(span),
         })
-        .chain(document.frontmatter_tags().into_iter().map(|t| TagFact {
+        .chain(scan.tags().into_iter().map(|t| TagFact {
             name: t.name,
-            source: TagSource::Frontmatter,
+            source: TagSource::Body,
             span: t.span.map(span),
         }))
         .collect();
@@ -1948,9 +1950,9 @@ paths:
             .iter()
             .map(|finding| finding.target.as_deref())
             .collect();
-        // Body tags come before frontmatter tags on the row, and a repeated
-        // name is one finding.
-        assert_eq!(targets, vec![Some("draft"), Some("ephemeral")]);
+        // Frontmatter tags come before body tags on the row, as they do in
+        // the file, and a repeated name is one finding.
+        assert_eq!(targets, vec![Some("ephemeral"), Some("draft")]);
         for finding in &plan.findings {
             assert_eq!(finding.cause, Cause::TagBreach(TagBreach::Undeclared));
             assert_eq!(finding.cause.severity(), Severity::Warning);
@@ -1959,11 +1961,11 @@ paths:
                 DocumentPath::new("note.md").expect("a document path")
             );
         }
-        assert_eq!(plan.findings[0].detail, "`#draft`, written in the body");
         assert_eq!(
-            plan.findings[1].detail,
+            plan.findings[0].detail,
             "`#ephemeral`, written in the frontmatter"
         );
+        assert_eq!(plan.findings[1].detail, "`#draft`, written in the body");
     }
 
     /// The control on the case above: the same bytes under a vault that has
