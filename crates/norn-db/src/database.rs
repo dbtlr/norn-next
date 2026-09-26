@@ -183,6 +183,25 @@ impl Database {
         &self.connection
     }
 
+    /// How many pages the connection has asked its page cache for since it
+    /// was opened: every page SQLite read to answer a statement on it, found
+    /// in the cache or read from the file.
+    ///
+    /// **This sees work no statement's own counts reach.** A statement's step
+    /// counts are the virtual machine's, and a virtual table does its reading
+    /// inside one step: a full-text match walks the index's segments there.
+    /// Every page that walk reads is asked of this connection's cache, so it
+    /// is counted here. A hit and a miss are one page asked for either way, so
+    /// the sum reads the same over a warm cache as over a cold one. The
+    /// connection maps no file into memory, which is the one path on which
+    /// SQLite reads a page without counting it.
+    ///
+    /// The count only grows. What a span of work touched is the difference
+    /// between a reading before it and one after.
+    pub fn pages_touched(&self) -> u64 {
+        page_cache_requests(&self.connection)
+    }
+
     /// Run `prepare`, reporting every column a statement it prepares reads.
     ///
     /// **SQLite's authorizer is what reports a read**, once per column a
@@ -705,6 +724,36 @@ fn refuse_everything_but_reading(context: AuthContext<'_>) -> Authorization {
         } => Authorization::Allow,
         _ => Authorization::Deny,
     }
+}
+
+/// The pages `connection` has asked its page cache for since it was opened:
+/// its cache hits and its cache misses, as SQLite counts them.
+///
+/// **This is the one call into the driver's C interface the crate makes**,
+/// because the driver wraps no per-connection status. It is sound on any open
+/// connection: the handle is the one `connection` owns and outlives the call,
+/// a `Connection` is never shared across threads, both outputs are locals
+/// SQLite writes and nothing retains, and a zero reset flag leaves the counts
+/// as they stand. SQLite refuses only an unknown status or a missing handle,
+/// neither of which this can pass, so a refusal is a broken driver.
+#[allow(unsafe_code)]
+fn page_cache_requests(connection: &Connection) -> u64 {
+    use rusqlite::ffi;
+
+    let read = |status| {
+        let (mut current, mut highwater) = (0_i64, 0_i64);
+        // SAFETY: as the function's own documentation states.
+        let answered = unsafe {
+            ffi::sqlite3_db_status64(connection.handle(), status, &mut current, &mut highwater, 0)
+        };
+        assert_eq!(
+            answered,
+            ffi::SQLITE_OK,
+            "SQLite refused a page-cache status on an open connection"
+        );
+        u64::try_from(current).expect("SQLite counts page-cache requests from zero")
+    };
+    read(ffi::SQLITE_DBSTATUS_CACHE_HIT) + read(ffi::SQLITE_DBSTATUS_CACHE_MISS)
 }
 
 /// Mint an epoch for a database being created.
