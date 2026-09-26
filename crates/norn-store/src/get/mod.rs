@@ -142,6 +142,12 @@ pub trait DocumentText {
     /// The section `anchor` names among `headings` — the document's headings
     /// in document order — in `body`, taking the first heading the anchor
     /// matches, and `None` where it matches none.
+    ///
+    /// **An implementation makes at most four linear passes over
+    /// `headings`**, visiting each heading at most once a pass, and reads no
+    /// heading it is not handed, so what the match compares is at most four
+    /// times what [`GetWork::anchor_headings`] counts.
+    /// `norn_text::resolve_section` states the same bound of itself.
     fn section(&self, headings: &[HeadingFact], body: &str, anchor: &str) -> Option<SectionAt>;
 
     /// The bytes of `body` the block holds whose definition's `^` marker
@@ -202,12 +208,10 @@ pub struct GetWork {
     /// Virtual-machine operations the statements ran.
     pub vm_steps: u64,
     /// The heading rows the section lookup handed the document reader to
-    /// match its anchor over, as the document's headings statement handed
-    /// them back. The reader compares no heading it is not handed, and
-    /// compares each at most once per anchor reading it tries, so what the
-    /// in-memory match compares is a constant multiple of this count, which
-    /// is at most the named document's headings. Zero where the get looks up
-    /// no section.
+    /// match its anchor over: the named document's headings, each once. What
+    /// the in-memory match compares is bounded by this count times the
+    /// passes [`DocumentText::section`] is held to. Zero where the get looks
+    /// up no section.
     pub anchor_headings: u64,
 }
 
