@@ -25,7 +25,7 @@ use norn_wire::{
     VaultAddress, VaultName,
 };
 
-use crate::common::{Scratch, document, span, unread_block, write_documents};
+use crate::common::{Scratch, document, planned_get_work, span, unread_block, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 
 use StoredPathOrder::{AsciiCaseInsensitive as Folding, Sensitive};
@@ -1441,17 +1441,7 @@ fn a_gets_work_follows_its_document_not_the_vault() {
 /// The work the statements a get of `params` ran counted, summed, read off
 /// its plans.
 fn planned_work(vault: &Vault, params: &GetParams) -> GetWork {
-    vault
-        .plans(params)
-        .iter()
-        .fold(GetWork::default(), |sum, plan| GetWork {
-            statements: sum.statements + plan.work.statements,
-            full_scan_steps: sum.full_scan_steps + plan.work.full_scan_steps,
-            sorts: sum.sorts + plan.work.sorts,
-            vm_steps: sum.vm_steps + plan.work.vm_steps,
-            anchor_headings: sum.anchor_headings + plan.work.anchor_headings,
-            link_candidates_read: sum.link_candidates_read + plan.work.link_candidates_read,
-        })
+    planned_get_work(&vault.plans(params))
 }
 
 // ---- the plan bars ----

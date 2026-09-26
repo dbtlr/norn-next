@@ -10,9 +10,10 @@ use std::path::PathBuf;
 
 use norn_store::{
     BlockFact, CandidateFact, Change, ClassKey, ContentModel, DerivationCounters, DocumentFacts,
-    DocumentPath, EmittedPlan, FieldOrder, FindingFacts, FrontmatterValue, HeadingFact,
-    IncrementOutcome, IncrementProvenance, LinkFact, LinkFamily, OffsetSpelling, Provenance,
-    ReadFilter, Request, Span, Store, SuffixKey, TagFact, TagSource, TypedOrder, suffix_probe,
+    DocumentPath, EmittedPlan, FieldOrder, FindingFacts, FrontmatterValue, GetPlan, GetWork,
+    HeadingFact, IncrementOutcome, IncrementProvenance, LinkFact, LinkFamily, OffsetSpelling,
+    Provenance, ReadFilter, Request, Span, Store, SuffixKey, TagFact, TagSource, TypedOrder,
+    suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::explain::StatementReads;
@@ -47,6 +48,19 @@ pub fn reads_of(emitted: &EmittedPlan) -> StatementReads {
             .iter()
             .map(|read| (read.table.clone(), read.column.clone())),
     )
+}
+
+/// The work each of a get's `plans` counted, summed field by field: what the
+/// get's own work reads where its plans sum to it.
+pub fn planned_get_work(plans: &[GetPlan]) -> GetWork {
+    plans.iter().fold(GetWork::default(), |sum, plan| GetWork {
+        statements: sum.statements + plan.work.statements,
+        full_scan_steps: sum.full_scan_steps + plan.work.full_scan_steps,
+        sorts: sum.sorts + plan.work.sorts,
+        vm_steps: sum.vm_steps + plan.work.vm_steps,
+        anchor_headings: sum.anchor_headings + plan.work.anchor_headings,
+        link_candidates_read: sum.link_candidates_read + plan.work.link_candidates_read,
+    })
 }
 
 /// A snapshot of a request's reading, in the shape the harness compares.
