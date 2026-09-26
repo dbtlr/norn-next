@@ -2403,7 +2403,10 @@ paths:
         use norn_wire::Predicate;
 
         let documents: Vec<(&str, String)> = vec![
-            ("bare.md", "---\nweight: 9\ncode: a\n---\nbody\n".to_string()),
+            (
+                "bare.md",
+                "---\nweight: 9\ncode: a\n---\nbody\n".to_string(),
+            ),
             (
                 "bracketed.md",
                 "---\nweight: [9]\ncode: [a]\n---\nbody\n".to_string(),
@@ -2416,7 +2419,10 @@ paths:
                 "block.md",
                 "---\nweight:\n  - 9\n  - 3\ncode:\n  - b\n  - a\n---\nbody\n".to_string(),
             ),
-            ("other.md", "---\nweight: 3\ncode: b\n---\nbody\n".to_string()),
+            (
+                "other.md",
+                "---\nweight: 3\ncode: b\n---\nbody\n".to_string(),
+            ),
         ];
         let vault = DerivedVault::new(
             "norn-host-stored-shape",
