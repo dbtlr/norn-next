@@ -27,21 +27,21 @@
 //!
 //! **A link row's health is computed, never stored on the row.** Resolution
 //! runs at read time over syntactic link facts, so the health a row carries is
-//! a fact about the vault at the instant of the read (the link-health findings
-//! a validate reads are a separate, stored reading, per ADR 0027): one target
-//! is healthy, none is broken, and more than one is ambiguous. **A link is
-//! judged by resolving it first** ([`LinkHealth::of_link`]): a link addressed
-//! elsewhere — a protocol other than `vault`, or a Markdown target opening with
-//! a URI scheme — is not judged and names no document, and one that resolves to
-//! no document is not judged where its target names an attachment. How a target
-//! reaches documents is [`LinkAddress`], the one addressing selector. What the
-//! target resolved to crosses as a [`CandidateHead`] — the same bounded head of
-//! paths and total that a finding and the ambiguous-target refusal carry — so a
-//! short link a large vault resolves many ways puts a bounded head and a count
-//! on the row rather than the whole ambiguity class. [`LinkRow`] derives its
-//! health in its constructor from the link's addressing and that total, and
-//! reads it back the same way, so the two halves of one fact cannot arrive
-//! disagreeing.
+//! a fact about the vault at the instant of the read (link-health findings,
+//! which ADR 0027 rules into the stored findings a validate reads, are a
+//! separate reading): one target is healthy, none is broken, and more than one
+//! is ambiguous. **A link is judged by resolving it first**
+//! ([`LinkHealth::of_link`]): a link addressed elsewhere — a protocol other
+//! than `vault`, or a Markdown target opening with a URI scheme — is not judged
+//! and names no document, and one that resolves to no document is not judged
+//! where its target names an attachment. How a target reaches documents is
+//! [`LinkAddress`], the one addressing selector. What the target resolved to
+//! crosses as a [`CandidateHead`] — the same bounded head of paths and total
+//! that a finding and the ambiguous-target refusal carry — so a short link a
+//! large vault resolves many ways puts a bounded head and a count on the row
+//! rather than the whole ambiguity class. [`LinkRow`] derives its health in its
+//! constructor from the link's addressing and that total, and reads it back the
+//! same way, so the two halves of one fact cannot arrive disagreeing.
 //!
 //! **A frontmatter value crosses as the tree it is written as.** The content
 //! model — which fields are numbers, which are dates, how two of them compare
