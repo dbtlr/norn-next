@@ -107,6 +107,7 @@ const BOUND_CASES: &[&str] = &[
     "a-sidecar-is-keyed-by-its-own-model-and-scoped-by-the-store-epoch",
     "cache-identity-is-total",
     "cache-is-authoritative-for-content",
+    "comparison-semantics-are-one-rule",
     "cost-is-independent-of-vault-size",
     "encoding-prefix-transparency",
     "existence-probes-and-per-request-allocation-are-bounded",

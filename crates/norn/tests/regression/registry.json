@@ -1275,21 +1275,19 @@
       "name": "comparison-semantics-are-one-rule",
       "kind": "defect-class",
       "venue": 3,
-      "property": "One comparison semantics governs every engine: SQL-bound and in-process comparison agree on every case, including numeric-versus-text equality, pinned by explicit tests. Matching is symmetric in the shape of the stored value, so a bracket-wrapped and a plain spelling of one value compare alike in both directions, and date filters are chronologically correct regardless of offset — or the lexical contract is explicit and signalled on mixed-offset input.",
+      "property": "One comparison semantics governs every engine: SQL-bound and in-process comparison agree on every case, including numeric-versus-text equality, pinned by explicit tests. A request's value is literal text, so bracket text written inside it compares as that text; a membership part's values are the request's own typed, bracketed shape, and meet a bare and a sequence-held stored value alike; and date filters are chronologically correct regardless of offset — or the lexical contract is explicit and signalled on mixed-offset input.",
       "sources": ["NRN-110", "NRN-28", "NRN-427", "norn-legacy annoyances log", "norn-legacy engineering learnings"],
       "binding": {
-        "status": "dormant",
-        "reason": "one rule is carried across both engines: crates/norn-host/src/derivation.rs::the_stores_typed_order_and_the_in_process_comparison_are_one_rule runs one set of raw values through the store's typed sort, bound, equality, inequality and membership parts and through the in-process comparison, and holds them to one answer across numeric-versus-text equality, a boolean-typed field and a mixed-offset pair; crates/norn-config/tests/config/schema.rs::equality_ordering_and_the_sort_key_are_one_relation holds equality, ordering and the sort key to one relation; crates/norn-config/tests/config/schema.rs::a_date_orders_chronologically_where_its_text_does_not holds a date ordered chronologically where its text is not; crates/norn-config/tests/config/schema.rs::a_comparison_between_a_stated_and_an_unstated_offset_is_signalled holds the comparison of a stated and an unstated offset signalled; crates/norn-host/src/derivation.rs::a_find_is_advised_exactly_where_the_in_process_comparison_signals carries that signal to the answer, holding a find's crates/norn-wire/src/product.rs::AnswerAdvisory raised on a sort and on each comparing part exactly where the in-process comparison signals over the same raw values; crates/norn-store/tests/store/find_advisory.rs::a_date_predicate_comparing_across_spellings_is_advised holds the advisory raised for a part whose mixed-offset comparison decided documents that never reach the page; and crates/norn-host/src/derivation.rs::a_value_written_bare_and_inside_a_sequence_meet_one_part_alike holds the stored side of the symmetry, a value written bare and inside a sequence meeting one part alike. One clause does not hold, so no test can carry it yet: the request side of the symmetry. A predicate's value is text on the wire and is read as one value, so a request that spells a text value in brackets compares the bracketed text and meets no document holding the bare value, and one that spells a number in brackets is refused as a value its declared type cannot read. Holding it changes how a request's value is read, which is more than a test beside the builder, and it waits on crates/norn-host/src/derivation.rs::a_value_requested_in_brackets_meets_the_bare_stored_value, beside the stored side's carrier, which is the name that carrier takes when it lands.",
-        "grounds": [
-          { "symbol-present": "crates/norn-host/src/derivation.rs::the_stores_typed_order_and_the_in_process_comparison_are_one_rule" },
-          { "symbol-present": "crates/norn-config/tests/config/schema.rs::equality_ordering_and_the_sort_key_are_one_relation" },
-          { "symbol-present": "crates/norn-config/tests/config/schema.rs::a_date_orders_chronologically_where_its_text_does_not" },
-          { "symbol-present": "crates/norn-config/tests/config/schema.rs::a_comparison_between_a_stated_and_an_unstated_offset_is_signalled" },
-          { "symbol-present": "crates/norn-host/src/derivation.rs::a_find_is_advised_exactly_where_the_in_process_comparison_signals" },
-          { "symbol-present": "crates/norn-wire/src/product.rs::AnswerAdvisory" },
-          { "symbol-present": "crates/norn-store/tests/store/find_advisory.rs::a_date_predicate_comparing_across_spellings_is_advised" },
-          { "symbol-present": "crates/norn-host/src/derivation.rs::a_value_written_bare_and_inside_a_sequence_meet_one_part_alike" },
-          { "symbol-absent": "crates/norn-host/src/derivation.rs::a_value_requested_in_brackets_meets_the_bare_stored_value" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/derivation.rs::the_stores_typed_order_and_the_in_process_comparison_are_one_rule",
+          "crates/norn-config/tests/config/schema.rs::equality_ordering_and_the_sort_key_are_one_relation",
+          "crates/norn-config/tests/config/schema.rs::a_date_orders_chronologically_where_its_text_does_not",
+          "crates/norn-config/tests/config/schema.rs::a_comparison_between_a_stated_and_an_unstated_offset_is_signalled",
+          "crates/norn-host/src/derivation.rs::a_find_is_advised_exactly_where_the_in_process_comparison_signals",
+          "crates/norn-store/tests/store/find_advisory.rs::a_date_predicate_comparing_across_spellings_is_advised",
+          "crates/norn-host/src/derivation.rs::a_value_written_bare_and_inside_a_sequence_meet_one_part_alike",
+          "crates/norn-host/src/derivation.rs::a_value_requested_in_brackets_meets_the_bare_stored_value"
         ]
       }
     },
