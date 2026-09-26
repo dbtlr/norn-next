@@ -546,6 +546,7 @@ pub(crate) struct ReadEvidence {
     widest_statements_under_the_gate: AtomicU64,
     reader_waits: AtomicU64,
     widest_reader_wait: AtomicU64,
+    demand_rereadings: AtomicU64,
 }
 
 /// One reading of a host's read account, over the whole of its life.
@@ -608,9 +609,9 @@ pub struct ReadReading {
     /// connection, so each one counted here also ends. An acquisition that
     /// waited and was then refused — because its entry stopped serving, or
     /// because its handle was replaced while it waited — paid the whole of that
-    /// wait, so it is one of these and is not among `reads_served`. Those are the paths contention is most likely to be
-    /// interesting on, and a reading that held only served reads would
-    /// under-report exactly there.
+    /// wait, so it is one of these and is not among `reads_served`. Those are
+    /// the paths contention is most likely to be interesting on, and a reading
+    /// that held only served reads would under-report exactly there.
     ///
     /// It is a wait for the reader's connection and not for a gate: no
     /// acquisition waits for that connection while it holds the entry gate,
@@ -624,6 +625,18 @@ pub struct ReadReading {
     /// than waiting a second time. A reading above one is a round this
     /// acquisition does not have.
     pub widest_reader_wait: u64,
+    /// Readings of the published demand an acquisition took again after it
+    /// waited for its entry's connection and took the gate back.
+    ///
+    /// **One per contended acquisition, served or refused.** The demand an
+    /// acquisition read before its wait describes an instant the answer is no
+    /// longer given under, so the hold that establishes reads it afresh; that
+    /// second reading is the priced cost of contention. It is counted where it
+    /// is taken, beside the act, so these over [`ReadReading::reader_waits`]
+    /// are the re-readings a contended acquisition took, and a count above
+    /// `reader_waits` is an acquisition that read the demand again more than
+    /// once. An acquisition that found the connection free re-reads nothing.
+    pub demand_rereadings: u64,
 }
 
 /// What happened between an earlier reading of a host's read account and a
@@ -651,6 +664,9 @@ pub struct ReadsSince {
     /// Acquisitions in this window that gave the entry gate back and waited
     /// for the one connection their entry holds, served and refused alike.
     pub reader_waits: u64,
+    /// Readings of the published demand this window's contended acquisitions
+    /// took again after they took the gate back.
+    pub demand_rereadings: u64,
 }
 
 impl ReadReading {
@@ -668,6 +684,9 @@ impl ReadReading {
                 .refused_establishment_statements_under_the_gate
                 .saturating_sub(earlier.refused_establishment_statements_under_the_gate),
             reader_waits: self.reader_waits.saturating_sub(earlier.reader_waits),
+            demand_rereadings: self
+                .demand_rereadings
+                .saturating_sub(earlier.demand_rereadings),
         }
     }
 }
@@ -686,6 +705,7 @@ impl ReadEvidence {
             widest_statements_under_the_gate: get(&self.widest_statements_under_the_gate),
             reader_waits: get(&self.reader_waits),
             widest_reader_wait: get(&self.widest_reader_wait),
+            demand_rereadings: get(&self.demand_rereadings),
         }
     }
 
@@ -774,6 +794,15 @@ impl ReadEvidence {
     pub(crate) fn count_reader_wait(&self) {
         self.reader_waits.fetch_add(1, Ordering::Relaxed);
         self.widest_reader_wait.fetch_max(1, Ordering::Relaxed);
+    }
+
+    /// Record that one contended acquisition read its entry's published demand
+    /// again, having taken the gate back after its wait.
+    ///
+    /// **This is called beside the re-reading itself**, so the count is the
+    /// act's: an acquisition that read the demand again twice moves it twice.
+    pub(crate) fn count_demand_rereading(&self) {
+        self.demand_rereadings.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record that one read was served.

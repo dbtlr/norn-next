@@ -4385,6 +4385,7 @@ impl<O: EntryOps> Host<O> {
                 // handle its reads run on — a rung-3 rebuild swaps one for
                 // another while the entry goes on serving, and a teardown
                 // takes the entry out of service while the handle stands.
+                self.shared.reads.count_demand_rereading();
                 let published = state.published_demand();
                 if published != Demand::State(TrustState::Ready) {
                     // The connection goes back with the turn, before the gate
@@ -17736,6 +17737,11 @@ mod tests {
                 !waiting.is_finished(),
                 "the read counted as waiting finished while the connection was still held"
             );
+            assert_eq!(
+                host.read_evidence().since(before).demand_rereadings,
+                0,
+                "a read still waiting for the connection read the published demand again"
+            );
             drop(first);
             drop(waiting.join().expect("the waiting read finished"));
         });
@@ -17744,6 +17750,11 @@ mod tests {
             (reading.reads_served, reading.reader_waits),
             (2, 1),
             "letting the waiting read through moved the contention reading again"
+        );
+        assert_eq!(
+            reading.demand_rereadings, 1,
+            "the contended read did not read the published demand again exactly once, or the \
+             read that found the connection free read it again"
         );
     }
 
@@ -17805,6 +17816,10 @@ mod tests {
         assert_eq!(
             reading.reader_waits, 1,
             "the wait the refused acquisition paid is missing from the account"
+        );
+        assert_eq!(
+            reading.demand_rereadings, 1,
+            "the re-reading that refused the acquisition is missing from the account"
         );
         assert_eq!(
             host.read_evidence().widest_reader_wait,
