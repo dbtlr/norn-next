@@ -267,11 +267,9 @@ pub enum CursorKey {
         /// as that type.
         group: Vec<Option<String>>,
     },
-    /// A finding row: its kind, its path, the ordinal of the link it is
-    /// about, and its identifier. A validate orders findings by the kind, in
-    /// the byte order of its code, then the path, the ordinal and the
-    /// identifier; a document's findings page orders them by the ordinal, then
-    /// the kind and the identifier.
+    /// A finding row as a validate pages findings: the kind, in the byte
+    /// order of its code, then the path, then the ordinal of the link the
+    /// finding is about, then the finding's identifier.
     #[non_exhaustive]
     Finding {
         /// The kind the finding is filed under.
@@ -282,6 +280,23 @@ pub enum CursorKey {
         /// path, and `null` for a finding about the document itself, which
         /// orders before every finding about one of its links.
         ordinal: Option<u64>,
+        /// The finding's identifier, which orders the findings that share
+        /// everything before it.
+        id: u64,
+    },
+    /// A finding row as a get pages one document's findings: at the
+    /// document's path, the ordinal of the link the finding is about, then the
+    /// kind, in the byte order of its code, then the finding's identifier.
+    #[non_exhaustive]
+    DocumentFinding {
+        /// The path of the document whose findings the page read.
+        path: String,
+        /// The ordinal of the link the finding is about in the document, and
+        /// `null` for a finding about the document itself, which orders before
+        /// every finding about one of its links.
+        ordinal: Option<u64>,
+        /// The kind the finding is filed under.
+        kind: FindingKind,
         /// The finding's identifier, which orders the findings that share
         /// everything before it.
         id: u64,
@@ -352,6 +367,23 @@ impl CursorKey {
         }
     }
 
+    /// A finding row of the document at `path`, stopped at `id`, under
+    /// `kind`, about the link at `ordinal` or, where it is `None`, about the
+    /// document.
+    pub fn document_finding(
+        path: impl Into<String>,
+        ordinal: Option<u64>,
+        kind: FindingKind,
+        id: u64,
+    ) -> Self {
+        CursorKey::DocumentFinding {
+            path: path.into(),
+            ordinal,
+            kind,
+            id,
+        }
+    }
+
     /// A facet row stopped at `key`, under `kind`.
     pub fn facet(kind: FacetKind, key: impl Into<String>) -> Self {
         CursorKey::Facet {
@@ -372,6 +404,7 @@ impl CursorKey {
             CursorKey::Hit { .. } => PagedRows::Hit,
             CursorKey::Tally { .. } => PagedRows::Tally,
             CursorKey::Finding { .. } => PagedRows::Finding,
+            CursorKey::DocumentFinding { .. } => PagedRows::DocumentFinding,
             CursorKey::Facet { .. } => PagedRows::Facet,
             CursorKey::Ordinal { of, .. } => PagedRows::Collection { of: *of },
         }
@@ -383,8 +416,9 @@ impl CursorKey {
 ///
 /// On the wire it is an object tagged `row`, the tag a cursor key carries:
 /// `{"row":"document"}`, `{"row":"collection","of":"links"}`. A get paging a
-/// document's findings pages `{"row":"finding"}`, the rows a finding's cursor
-/// names a position among, and every other collection by its position in it.
+/// document's findings pages `{"row":"document_finding"}`, the rows a
+/// document finding's cursor names a position among, and every other
+/// collection by its position in it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "row", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -395,8 +429,10 @@ pub enum PagedRows {
     Hit,
     /// Tallies, as a count pages them.
     Tally,
-    /// Findings, as a validate pages them and a get pages one document's.
+    /// Findings, as a validate pages them.
     Finding,
+    /// One document's findings, as a get pages them.
+    DocumentFinding,
     /// Facets, as a describe pages them.
     Facet,
     /// One nested collection of a document, by position in it, as a get

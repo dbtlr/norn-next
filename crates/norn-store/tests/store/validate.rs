@@ -994,31 +994,40 @@ fn a_part_on_an_unknown_key_admits_no_finding_without_a_document() {
 }
 
 /// **A cursor that names no position among a validate's findings is
-/// refused**: a document's.
+/// refused**: a document's, and a document finding's, which a get's page of
+/// one document's findings mints in an order that is not a validate's.
 #[test]
 fn a_cursor_that_is_no_position_among_the_findings_is_refused() {
     let validating_store = Validating::new("validate-cursor");
     let reading = validating_store.validate(&validating()).snapshot;
-    assert_eq!(
-        validating_store
-            .snapshot()
-            .validate(
-                &validating().with_after(Cursor::new(
-                    reading,
-                    CursorKey::document(
-                        Sort::new(SortKey::path(), Direction::Ascending),
-                        None,
-                        "a.md"
-                    )
-                )),
-                &declared()
-            )
-            .expect_err("the cursor is refused"),
-        PageRefusal::CursorNotTaken {
-            cursor: PagedRows::Document,
-            paged: PagedRows::Finding,
-        }
-    );
+    for (key, rows) in [
+        (
+            CursorKey::document(
+                Sort::new(SortKey::path(), Direction::Ascending),
+                None,
+                "a.md",
+            ),
+            PagedRows::Document,
+        ),
+        (
+            CursorKey::document_finding("a.md", None, FindingKind::UndeclaredTag, 1),
+            PagedRows::DocumentFinding,
+        ),
+    ] {
+        assert_eq!(
+            validating_store
+                .snapshot()
+                .validate(
+                    &validating().with_after(Cursor::new(reading.clone(), key)),
+                    &declared()
+                )
+                .expect_err("the cursor is refused"),
+            PageRefusal::CursorNotTaken {
+                cursor: rows,
+                paged: PagedRows::Finding,
+            }
+        );
+    }
     assert_eq!(
         PageRefusal::CursorNotTaken {
             cursor: PagedRows::Document,

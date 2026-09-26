@@ -361,6 +361,7 @@ fn rows_named(rows: PagedRows) -> String {
         PagedRows::Hit => "hits".to_string(),
         PagedRows::Tally => "tallies".to_string(),
         PagedRows::Finding => "findings".to_string(),
+        PagedRows::DocumentFinding => "one document's findings".to_string(),
         PagedRows::Facet => "facets".to_string(),
         PagedRows::Collection { of } => format!("a document's {}", collection_named(of)),
         _ => "rows".to_string(),

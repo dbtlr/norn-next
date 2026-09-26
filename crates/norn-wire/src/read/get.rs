@@ -31,7 +31,7 @@ use crate::target::ResolutionTarget;
 /// collection and the position. Findings are paged in the order of the links
 /// they are about — the findings about the document first, then each link's
 /// by the link's position — then by kind and id, and their cursor is a
-/// finding's.
+/// document finding's.
 ///
 /// On the wire a selector is the flat string itself: `"links"`,
 /// `"headings"`.

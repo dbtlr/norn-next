@@ -1164,11 +1164,15 @@ fn each_collection_paged_at_one_two_and_three_is_its_one_whole_page() {
 }
 
 /// **A cursor names a position in the collection it was minted in**: an
-/// ordinal continues the collection it names, and a finding's cursor
+/// ordinal continues the collection it names, and a document finding's cursor
 /// continues the findings at the document's own path. A cursor minted paging
 /// one collection refuses on another, naming both; anything else is refused
 /// as no position in the collection paged, an ordinal naming the findings
-/// among it, since the findings are paged by a finding's cursor.
+/// among it, since the findings are paged by a document finding's cursor.
+/// **A validate's cursor names no position among a document's findings**,
+/// though it names a finding at the document's path: a validate orders
+/// findings by kind first, and a document's findings page by the link each is
+/// about first.
 #[test]
 fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
     let vault = paged_vault("get-cursors", 0);
@@ -1202,12 +1206,12 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
             CollectionSelector::Findings,
             &headings,
             collection(CollectionSelector::Headings),
-            PagedRows::Finding,
+            PagedRows::DocumentFinding,
         ),
         (
             CollectionSelector::Tags,
             &finding,
-            PagedRows::Finding,
+            PagedRows::DocumentFinding,
             collection(CollectionSelector::Tags),
         ),
         (
@@ -1230,15 +1234,40 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
             "{selector:?}"
         );
     }
+    let validated = match vault
+        .snapshot()
+        .validate(
+            &ValidateParams::new(address())
+                .with_predicates([Predicate::path("paged.md")])
+                .with_limit(1),
+            &declared(),
+        )
+        .expect("a validate")
+        .answer
+    {
+        Validation::Findings { next, .. } => next.expect("a next page of findings"),
+        Validation::Summary { .. } => panic!("a page of findings answered a summary"),
+    };
+    assert!(
+        matches!(validated.key(), CursorKey::Finding { path, .. } if path == "paged.md"),
+        "a validate's cursor names a finding at the document's path: {:?}",
+        validated.key()
+    );
     for (selector, cursor, minted, paged) in [
+        (
+            CollectionSelector::Findings,
+            validated,
+            PagedRows::Finding,
+            PagedRows::DocumentFinding,
+        ),
         (
             CollectionSelector::Findings,
             Cursor::new(
                 snapshot.clone(),
-                CursorKey::finding(FindingKind::UndeclaredTag, "other.md", None, 1),
+                CursorKey::document_finding("other.md", None, FindingKind::UndeclaredTag, 1),
             ),
-            PagedRows::Finding,
-            PagedRows::Finding,
+            PagedRows::DocumentFinding,
+            PagedRows::DocumentFinding,
         ),
         (
             CollectionSelector::Findings,
@@ -1247,7 +1276,7 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
                 CursorKey::ordinal(CollectionSelector::Findings, 1),
             ),
             collection(CollectionSelector::Findings),
-            PagedRows::Finding,
+            PagedRows::DocumentFinding,
         ),
         (
             CollectionSelector::Tags,
@@ -1279,10 +1308,11 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
     assert_eq!(
         PageRefusal::CursorNotTaken {
             cursor: collection(CollectionSelector::Headings),
-            paged: PagedRows::Finding,
+            paged: PagedRows::DocumentFinding,
         }
         .to_string(),
-        "the cursor names a position among a document's headings, and the request pages findings"
+        "the cursor names a position among a document's headings, and the request pages one \
+         document's findings"
     );
 }
 
@@ -1317,13 +1347,13 @@ fn a_cursor_past_what_the_store_counts_names_no_position_in_the_collection() {
         ),
         (
             CollectionSelector::Findings,
-            CursorKey::finding(FindingKind::UndeclaredTag, "paged.md", None, past),
-            PagedRows::Finding,
+            CursorKey::document_finding("paged.md", None, FindingKind::UndeclaredTag, past),
+            PagedRows::DocumentFinding,
         ),
         (
             CollectionSelector::Findings,
-            CursorKey::finding(FindingKind::UndeclaredTag, "paged.md", Some(past), 1),
-            PagedRows::Finding,
+            CursorKey::document_finding("paged.md", Some(past), FindingKind::UndeclaredTag, 1),
+            PagedRows::DocumentFinding,
         ),
     ] {
         assert_eq!(
@@ -1378,8 +1408,8 @@ fn a_collection_cursor_carrying_a_fingerprint_is_not_taken() {
         ),
         (
             CollectionSelector::Findings,
-            CursorKey::finding(FindingKind::UndeclaredTag, "paged.md", None, 1),
-            PagedRows::Finding,
+            CursorKey::document_finding("paged.md", None, FindingKind::UndeclaredTag, 1),
+            PagedRows::DocumentFinding,
         ),
     ] {
         let refusal = vault.refusal(

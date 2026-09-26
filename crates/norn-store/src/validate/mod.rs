@@ -330,7 +330,7 @@ impl Snapshot {
             let (bases, next) =
                 self.page_findings(&narrowing, limit, resume, lookups, &mut work)?;
             let next = next
-                .map(|last| Ok::<_, StoreError>(Cursor::new(snapshot.clone(), last.cursor_key()?)))
+                .map(|last| Ok::<_, StoreError>(Cursor::new(snapshot.clone(), last.finding_key()?)))
                 .transpose()?;
             let rows = self.finding_rows(&mut lookups.ran, bases)?;
             Validation::Findings { rows, next, moved }

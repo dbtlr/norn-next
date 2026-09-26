@@ -75,8 +75,27 @@ impl FindingBase {
         self.ordinal.unwrap_or(Self::DOCUMENT_POSITION)
     }
 
-    /// The cursor key a page that stopped at this finding continues from.
-    pub(crate) fn cursor_key(&self) -> Result<CursorKey, StoreError> {
+    /// The cursor key a validate's page that stopped at this finding
+    /// continues from.
+    pub(crate) fn finding_key(&self) -> Result<CursorKey, StoreError> {
+        let (kind, ordinal, id) = self.key_parts()?;
+        Ok(CursorKey::finding(kind, self.path.clone(), ordinal, id))
+    }
+
+    /// The cursor key a get's page of one document's findings that stopped at
+    /// this finding continues from.
+    pub(crate) fn document_finding_key(&self) -> Result<CursorKey, StoreError> {
+        let (kind, ordinal, id) = self.key_parts()?;
+        Ok(CursorKey::document_finding(
+            self.path.clone(),
+            ordinal,
+            kind,
+            id,
+        ))
+    }
+
+    /// The kind, the ordinal and the id as a cursor carries them.
+    fn key_parts(&self) -> Result<(FindingKind, Option<u64>, u64), StoreError> {
         let kind = FindingKind::try_from(self.kind.as_str())
             .map_err(|_| unreadable("findings.kind", &self.kind))?;
         let ordinal = self
@@ -88,7 +107,7 @@ impl FindingBase {
             .transpose()?;
         let id =
             u64::try_from(self.id).map_err(|_| unreadable("findings.id", &self.id.to_string()))?;
-        Ok(CursorKey::finding(kind, self.path.clone(), ordinal, id))
+        Ok((kind, ordinal, id))
     }
 }
 

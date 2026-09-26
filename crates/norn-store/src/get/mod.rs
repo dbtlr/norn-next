@@ -79,14 +79,15 @@
 //! answers an empty page. The findings standing over the document are paged
 //! in `(position, kind, id)` order at its path — the findings about the
 //! document first, then each link's in the link's order — the order a find's
-//! findings column reads them in, with a finding's cursor
-//! ([`norn_wire::CursorKey::Finding`]). That cursor names the path it was
-//! minted at, so at another document's path it names no position
-//! ([`PageRefusal::CursorNotTaken`], a finding's cursor on findings paged),
-//! and an ordinal cursor naming the findings names none either, since the
-//! findings are paged by a finding's cursor. Either reads one row past its bound to learn a next page
-//! exists, through the keyset page every read builder reads
-//! ([`Snapshot::read_page`]).
+//! findings column reads them in, with a document finding's cursor
+//! ([`norn_wire::CursorKey::DocumentFinding`]). That cursor names the path it
+//! was minted at, so at another document's path it names no position
+//! ([`PageRefusal::CursorNotTaken`], a document finding's cursor on a
+//! document's findings paged). A validate's finding cursor names a place in
+//! the validate's kind-first order, and an ordinal cursor naming the findings
+//! was minted by no page, so neither names a position either. Either page
+//! reads one row past its bound to learn a next page exists, through the
+//! keyset page every read builder reads ([`Snapshot::read_page`]).
 //!
 //! A page of links resolves the links it holds as a find's links column
 //! resolves a page's: what each link names now, and the health that gives it,
@@ -798,14 +799,17 @@ impl Snapshot {
         let (resume, moved) = match after {
             None => (None, Vec::new()),
             Some(cursor) => {
-                // The findings are paged by a finding's cursor, so an ordinal
-                // naming them was minted by no page, and one at another path
-                // names no position among this document's findings.
-                let not_taken = || PageRefusal::cursor_not_taken(cursor, PagedRows::Finding);
-                let CursorKey::Finding {
-                    kind,
+                // The findings are paged by a document finding's cursor, so an
+                // ordinal naming them was minted by no page, a validate's
+                // finding cursor names a place in another order, and one at
+                // another path names no position among this document's
+                // findings.
+                let not_taken =
+                    || PageRefusal::cursor_not_taken(cursor, PagedRows::DocumentFinding);
+                let CursorKey::DocumentFinding {
                     path,
                     ordinal,
+                    kind,
                     id,
                     ..
                 } = cursor.key()
@@ -817,7 +821,8 @@ impl Snapshot {
                 }
                 let position = cursor_position(*ordinal).ok_or_else(not_taken)?;
                 let id = i64::try_from(*id).map_err(|_| not_taken())?;
-                let moved = self.judge_unordered_reading(cursor, PagedRows::Finding, lookups)?;
+                let moved =
+                    self.judge_unordered_reading(cursor, PagedRows::DocumentFinding, lookups)?;
                 (Some((position, kind.as_str(), id)), moved)
             }
         };
@@ -835,7 +840,9 @@ impl Snapshot {
         })?;
         let next = page
             .next
-            .map(|last| Ok::<_, StoreError>(Cursor::new(snapshot.clone(), last.cursor_key()?)))
+            .map(|last| {
+                Ok::<_, StoreError>(Cursor::new(snapshot.clone(), last.document_finding_key()?))
+            })
             .transpose()?;
         let rows = self.finding_rows(&mut lookups.ran, page.rows)?;
         Ok(Page::new(rows, next, moved))
