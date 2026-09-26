@@ -314,13 +314,18 @@ impl ConnectionTurn {
             .expect("a turn holds the connection until it establishes or drops");
         let reader = Arc::clone(&self.reader);
         let mut counters = SnapshotCounters::default();
-        let snapshot = match establish_on(&mut database, &reader.epoch, &mut counters) {
+        let pages_at_open = database.pages_touched();
+        let established = establish_on(&mut database, &reader.epoch, &mut counters);
+        let counters =
+            counters.with_pages_touched(database.pages_touched().saturating_sub(pages_at_open));
+        let snapshot = match established {
             Ok(reading) => Ok(Snapshot {
                 order: reader.order,
                 reader,
                 database: Some(database),
                 reading,
                 counters: Cell::new(counters),
+                pages_at_open,
             }),
             Err(error) => {
                 let _ = database.close_snapshot();
@@ -434,6 +439,9 @@ pub struct Snapshot {
     /// mutably. The connection already makes a snapshot `!Sync`, so a `Cell`
     /// costs it nothing.
     counters: Cell<SnapshotCounters>,
+    /// The connection's count of pages asked for before the snapshot opened,
+    /// which the pages it touched are read against.
+    pages_at_open: u64,
 }
 
 impl fmt::Debug for Snapshot {
@@ -463,10 +471,15 @@ impl Snapshot {
         self.order
     }
 
-    /// What this read's snapshot cost: the snapshot itself, and the statements
-    /// run on it.
+    /// What this read's snapshot cost: the snapshot itself, the statements
+    /// run on it and what SQLite counted stepping them, and the pages its
+    /// connection touched since it opened.
     pub fn counters(&self) -> SnapshotCounters {
-        self.counters.get()
+        let touched = self
+            .database()
+            .pages_touched()
+            .saturating_sub(self.pages_at_open);
+        self.counters.get().with_pages_touched(touched)
     }
 
     /// The connection this snapshot's statements run on.
@@ -507,6 +520,14 @@ impl Snapshot {
     pub(crate) fn count_statement(&self) {
         let mut counters = self.counters.get();
         counters.count_statement();
+        self.counters.set(counters);
+    }
+
+    /// Add what SQLite counted stepping one statement run on this snapshot's
+    /// connection.
+    pub(crate) fn count_steps(&self, stepped: crate::read::Stepped) {
+        let mut counters = self.counters.get();
+        counters.count_steps(stepped.vm_steps, stepped.full_scan_steps);
         self.counters.set(counters);
     }
 }

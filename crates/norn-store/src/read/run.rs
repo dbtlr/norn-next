@@ -125,8 +125,9 @@ impl Snapshot {
     /// Every statement a read runs is run here, and what is prepared is the
     /// text the record holds, bound to the values it holds:
     /// [`Snapshot::explained`] explains the record, so the plan of a
-    /// statement is the plan of what ran. Once every row is read, the record
-    /// takes what SQLite counted stepping it ([`Stepped`]).
+    /// statement is the plan of what ran. Once every row is read, or the
+    /// stepping failed, the record takes what SQLite counted stepping it
+    /// ([`Stepped`]) and the snapshot adds it to its own counts.
     pub(crate) fn run_statement<T>(
         &self,
         record: &mut Vec<Ran>,
@@ -156,10 +157,10 @@ impl Snapshot {
         let rows = statement
             .query_map(params_from_iter(ran.values.iter()), read)
             .map_err(StatementFailure::Preparing)?
-            .collect::<rusqlite::Result<Vec<T>>>()
-            .map_err(StatementFailure::Stepping)?;
+            .collect::<rusqlite::Result<Vec<T>>>();
         ran.stepped = Stepped::of(&statement);
-        Ok(rows)
+        self.count_steps(ran.stepped);
+        rows.map_err(StatementFailure::Stepping)
     }
 
     /// Run one yes-or-no probe, which answers exactly one row.
