@@ -1727,7 +1727,9 @@ the acquisition gives the gate back and waits outside it — the demand it has a
 holds the entry across that wait — then takes the gate again and reads the published demand
 afresh before it establishes, because the instant it first read is not the instant it answers
 under; an entry that has stopped serving, or whose reader is no longer the one the acquisition
-waited for, takes the connection back and the read refuses with what the entry now publishes.
+waited for, takes the connection back, and the read then waits where the entry settles,
+acquires the reader the entry serves now where it serves another, and refuses with what the
+entry publishes where it neither settles nor serves.
 The priced cost of contention is that second reading, and measured contention is still what
 mints more readers through the carved pool seam. The reader is torn down before the store
 closes on every closing path, and a read's hold is demand on the entry: it holds the entry's
@@ -1749,8 +1751,9 @@ and records nothing against anything. Over an entry, the acquisition reads the p
 demand and the entry's retained reader fact under a hold of that entry's gate, and mints a
 hold only where the demand is a serving state and a reader stands beside it; what the hold
 carries with the handle is the published demand read in the gate hold that established its
-snapshot, never the trust label a park outranks. An acquisition that mints no hold serves
-nothing and hands back one of two shapes, and the demand takes precedence: the published
+snapshot, never the trust label a park outranks. An acquisition over an entry that settles
+waits for it as the paragraph below states, and one that mints no hold serves nothing and
+hands back one of two shapes, and the demand takes precedence: the published
 demand itself — a warming entry with its phase, coverage on its way back, an untrusted
 state, or a park under its own code — rendered through the mapping every other surface
 renders that demand through, with one refusal added because a read cannot answer with a
@@ -1762,14 +1765,15 @@ it found, refused as `host/entry-untrusted` with its reason, only where no work 
 A park keeps its own code. Where the demand is serving, the refusal is reader-unavailable,
 which is an entry serving every surface but this one.
 
-**A read that meets a change waits for it — ruled by [ADR
-0028](decisions/0028-a-read-waits-out-a-change-it-was-served-over.md) and not yet built.**
-Today every warming entry refuses a read as above. The ruling splits warming by stance, read
-under the entry gate beside the published demand: an entry that entered warming from
-`Ready` with no withdrawal of trust in between — a polled batch, a reconcile turn, a schema
-reload — settles, and every other state refuses at once with its reason, including the
-warming of a recovery or a rebuild entered from untrusted. The trust label does not say how
-warming was entered, so the entry's own state holds that fact. The bound runs from the
+**A read that meets a change waits for it, as [ADR
+0028](decisions/0028-a-read-waits-out-a-change-it-was-served-over.md) rules.** Warming splits
+by stance, read under the entry gate beside the published demand: an entry that entered
+warming from `Ready` with no withdrawal of trust in between — a polled batch, a reconcile
+turn, a schema reload — settles, and every other state refuses at once with its reason,
+including the warming of a recovery or a rebuild entered from untrusted, as above. The trust
+label does not say how warming was entered, so the entry's own state holds that fact: every
+hold of the entry gate ends by recording whether trust has stood unbroken since `Ready`, and
+moves the gate's stance signal where the hold changed the stance. The bound runs from the
 read's first hold of the entry gate and covers the wait for the connection and the wait for
 `Ready` together. A settling read gives the gate back,
 waits outside it on a signal that moves only when the stance changes, takes the gate again
@@ -1779,7 +1783,8 @@ schema reload minted a new reader once `Ready` returned, the read acquires that 
 answers from it, and it refuses only where the entry is no longer settling or `Ready`. Past a
 bound, a lifecycle policy value whose production value is the 5-second settle ceiling, it
 refuses as `host/entry-not-ready` with the message "this vault is still indexing a change". A
-teardown's publication wakes a waiting read and refuses it. While a maintenance scan holds
+teardown's publication wakes a waiting read, which takes the gate again and refuses with what
+the entry then publishes; no teardown waits for it. While a maintenance scan holds
 the entry, the entry stays `Ready` without yet seeing an edit made moments before, so a read
 in that window can miss it.
 

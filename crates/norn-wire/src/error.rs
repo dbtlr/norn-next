@@ -307,7 +307,8 @@ pub enum ReasonCode {
     #[serde(rename = "host/entry-held")]
     HostEntryHeld,
     /// `host/entry-not-ready` — the entry holds nothing the request can be
-    /// answered from yet. The detail is where the entry stands.
+    /// answered from yet, or a read waited out its bound on a change the
+    /// entry was still indexing. The detail is where the entry stands.
     #[serde(rename = "host/entry-not-ready")]
     HostEntryNotReady,
     /// `host/reader-unavailable` — the entry is serving and its read seam is
