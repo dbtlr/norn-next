@@ -327,6 +327,20 @@ pub mod induced_failure {
         )));
     }
 
+    /// Unwind the next snapshot this thread establishes, after its `BEGIN`
+    /// opened the transaction and before the snapshot is handed out.
+    ///
+    /// **A panic inside an establishment is the one moment a read's
+    /// connection is inside a transaction and inside no snapshot**, so it is
+    /// where a handle could be left empty, or handed a connection whose
+    /// transaction is still open, and no statement the store runs panics
+    /// there to arrange it. The arm is the panic and nothing else; what the
+    /// turn does with its connection as the unwind passes is the code under
+    /// test. Per-thread and one-shot.
+    pub fn unwind_after_the_next_snapshot_opens() {
+        super::UNWIND_AFTER_SNAPSHOT_OPENS.set(true);
+    }
+
     fn arm_the_store_schema(database: &std::path::Path, code: i32) {
         *super::ARMED_STORE_SCHEMA
             .lock()
@@ -336,11 +350,13 @@ pub mod induced_failure {
 
     /// Disarm every process-wide arrangement above — the page cap, the store
     /// schema's armed condition, and the two tears — plus the calling
-    /// thread's busy one-shot and its armed feed-page write.
+    /// thread's busy one-shot, its armed feed-page write and its armed
+    /// establishment unwind.
     ///
     /// The per-thread tears are absent by design: nothing survives the abort
     /// they arm. The busy one-shot is per-thread too but arms an error rather
-    /// than an abort, so it is swept here for the calling thread — an arm a
+    /// than an abort, so it is swept here for the calling thread, and so are
+    /// the other per-thread arms a process survives — an arm a
     /// case left unconsumed must not fail whatever opens next on this thread. The committed-changeset count is absent for a different
     /// reason — it is a counter rather than an arm, it is what a tear is armed
     /// *against*, and a run that reset it would move the boundary every arm
@@ -351,6 +367,7 @@ pub mod induced_failure {
         norn_db::faults::set_page_cap(0);
         norn_db::faults::clear_the_meta_read_arm();
         super::WRITE_AFTER_FEED_PAGES.set(None);
+        super::UNWIND_AFTER_SNAPSHOT_OPENS.set(false);
         *super::ARMED_STORE_SCHEMA
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
@@ -371,6 +388,21 @@ std::thread_local! {
     /// and taken by the page read it fires after.
     static WRITE_AFTER_FEED_PAGES: std::cell::RefCell<Option<FeedPageWrite>> =
         const { std::cell::RefCell::new(None) };
+
+    /// Whether the next establishment on this thread unwinds after its
+    /// `BEGIN`. Set only by
+    /// [`induced_failure::unwind_after_the_next_snapshot_opens`] and taken by
+    /// the establishment it fires in.
+    static UNWIND_AFTER_SNAPSHOT_OPENS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Unwind this establishment where an arrangement asked for one after its
+/// `BEGIN`.
+pub(crate) fn unwind_if_the_snapshot_open_is_armed() {
+    if UNWIND_AFTER_SNAPSHOT_OPENS.replace(false) {
+        panic!("an establishment unwound after its BEGIN, as an arrangement asked");
+    }
 }
 
 /// The countdown and the write a feed-page arm holds.

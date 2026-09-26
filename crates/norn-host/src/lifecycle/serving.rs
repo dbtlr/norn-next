@@ -33,7 +33,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use norn_config::registry::Entry as Registration;
 use norn_fs::Refusal;
@@ -165,6 +165,29 @@ impl<A: SnapshotSource> ServingSet<A> {
             .expect("serving set poisoned")
             .get(name)
             .cloned()
+    }
+
+    /// The entry serving `name`, as [`ServingSet::get`] answers it, for a
+    /// caller inside a drop.
+    ///
+    /// **On an unwinding thread it reads through a poisoned set**, because a
+    /// second panic there aborts the process; on any other thread it panics on
+    /// the poison as [`ServingSet::get`] does. A poisoned set's map is the map
+    /// the unwind that poisoned it left, and a lookup in it reads no more than
+    /// that.
+    pub(crate) fn get_in_a_drop(&self, name: &VaultName) -> Option<Arc<Entry<A>>> {
+        let entries = if std::thread::panicking() {
+            self.entries.read().unwrap_or_else(PoisonError::into_inner)
+        } else {
+            self.entries.read().expect("serving set poisoned")
+        };
+        entries.get(name).cloned()
+    }
+
+    /// Clear a poisoned set, for a case that poisoned it on purpose.
+    #[cfg(test)]
+    pub(crate) fn clear_poison(&self) {
+        self.entries.clear_poison();
     }
 
     /// Every entry the set serves at this instant, ascending by name.
