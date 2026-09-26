@@ -422,9 +422,9 @@ fn a_reading_past_a_ceiling_is_refused_by_the_comparison_every_bar_makes() {
     assert!(baselines::fits(retention, retention));
     assert!(!baselines::fits(retention + 1, retention));
 
-    // The re-reading ceiling is a count per contended acquisition, and the
-    // counter lane compares a window's re-readings against it times the
-    // window's waits: a count against a count.
+    // The re-reading ceiling is a count per acquisition, and the counter lane
+    // compares the widest any one acquisition took against it: a count
+    // against a count.
     let rereadings = baselines::READ_DEMAND_REREADINGS_PER_CONTENDED_ACQUISITION;
     assert!(baselines::fits(rereadings, rereadings));
     assert!(!baselines::fits(rereadings + 1, rereadings));

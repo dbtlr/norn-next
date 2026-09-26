@@ -1821,32 +1821,36 @@ an establishment ran under the gate is the gate holder's own reading**, not a co
 establishment reports: the acquisition reads its handle's statement count once it holds both
 the gate and the connection's turn, and again as it gives the gate back, and nothing else runs
 on a connection whose turn is taken, so the difference is what ran under that hold and an
-establishing statement moved outside the hold reads zero. Beside
+establishing statement moved before or after the hold reads zero. The entry gate counts every
+time it is taken, inside the lock and at the one lock site every holder goes through, and the
+acquisition reads that count at the same two points: a continuous hold reads no retake, and a
+hold that let the gate go and took it back around the establishment reads one. Beside
 them the account keeps the widest reading any one acquisition produced, its mint and its
 establishment together, which is the number a ceiling over one read is stated against.
 Beside the three the account also keeps the contention it measured: the acquisitions that
-gave the gate back and waited for the entry's one connection, and the widest such wait any
-one acquisition paid — which is one or none, because an acquisition waits once and holds the
-connection from there. That wait is counted where it begins, once the acquisition has given
+gave the gate back and waited for the entry's one connection. That wait is counted where it begins, once the acquisition has given
 the gate back and found the connection taken: the wait returns only with the connection, so
 every wait counted ends, and a reading taken while reads contend already names each one
 waiting. An acquisition refused after it waited is in the contention reading and not in the
 served one; those are the paths contention is most likely to be interesting on, and a reading
-of served reads alone would under-report exactly there. The account also counts each
-re-reading of the published demand a contended acquisition takes once it has the gate back,
-beside the act, so the re-readings over the waits are the second readings contention cost.
+of served reads alone would under-report exactly there. An acquisition reads the published
+demand in every round of the gate it takes and counts its own rounds, so the account keeps
+the re-readings, the rounds after each acquisition's first, and the widest number of them
+any one acquisition took. A contended acquisition takes exactly one: it holds the connection
+from its second round on, so that round cannot contend again.
 **No act an acquisition runs is reported by no reading, whichever way the acquisition
 left**: the mint is accounted where the mint returns, the establishment where the hold it ran
 under gives the gate back, the wait where the wait begins, and a re-reading where it is taken.
 
 **The read-concurrency bar holds these readings under contention, over a production
-attachment.** The per-PR counter lane runs the overlapping-reads-on-one-entry workload: eight
-reads start while a ninth holds the entry's one connection, and the hold is let go only once
-the reader-wait reading names all eight as waiting. Each read served runs exactly one statement
-under the gate by the holder's own reading, with the establishments' own reports checked
-apart; the reader-wait reading is eight; and the re-readings of the published demand stay
-under a per-wait ceiling authored in `norn-host`'s baselines under the `read-` prefix. The
-same reads run one after another are the control, and the bar fails them on contention
+attachment.** The per-PR counter lane runs the overlapping-reads-on-one-entry workload:
+several reads start while one more holds the entry's one connection, and the hold is let go
+only once the reader-wait reading names every one of them as waiting. Each read served runs
+exactly one statement under the gate by the holder's own reading, with the establishments'
+own reports checked apart, and no establishing hold reads a retake of the gate; the
+reader-wait reading is every overlapping read; and the re-readings equal the waits, with no
+one acquisition past a ceiling authored in `norn-host`'s baselines under the `read-` prefix.
+The same reads run one after another are the control, and the bar fails them on contention
 alone.
 
 A leg's publication runs the same mint as a read's repair, and its statements land in the

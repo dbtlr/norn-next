@@ -16,7 +16,7 @@ use norn_wire::{
     VaultName, WarmingPhase, WatcherLossCause,
 };
 
-use crate::evidence::{ReadEvidence, ReadReading};
+use crate::evidence::{EstablishingHold, ReadEvidence, ReadReading};
 use crate::registry::{
     AliasConflict, RecordRefusal, RegistrationRefusal, RegistryRead, RegistryUnwritable,
     RetireRefusal,
@@ -29,9 +29,11 @@ use crate::{
 };
 
 mod claim;
+mod gate;
 mod serving;
 
 use claim::{Claim, Coverage, Leg};
+use gate::EntryGate;
 pub(crate) use serving::ServingRefusal;
 use serving::ServingSet;
 
@@ -885,7 +887,7 @@ struct Entry<A: SnapshotSource> {
     /// it: an entry serves the registration it was inserted with for as long as
     /// the set serves the entry.
     registration: Registration,
-    gate: Mutex<EntryState<A>>,
+    gate: EntryGate<EntryState<A>>,
 }
 
 impl<A: SnapshotSource> Entry<A> {
@@ -895,7 +897,7 @@ impl<A: SnapshotSource> Entry<A> {
     fn unattached(registration: Registration, epoch: u64) -> Self {
         Self {
             registration,
-            gate: Mutex::new(EntryState {
+            gate: EntryGate::new(EntryState {
                 trust: TrustState::Unattached,
                 coverage: Coverage::none(),
                 reader: None,
@@ -4288,6 +4290,10 @@ impl<O: EntryOps> Host<O> {
             return Err(ReadRefusal::NotServing(Demand::UnknownVault));
         };
         let mut state = entry.gate.lock().expect("entry gate poisoned");
+        // This acquisition's own count of the rounds of the gate it takes,
+        // moved at each take: the published demand is read once per round, so
+        // every round after the first is a re-reading contention cost.
+        let mut gate_rounds: u64 = 1;
         // An entry taken out of service after the lookup above answers with
         // its out-of-service answer, and records nothing against itself.
         if let Some(answer) = state.withdrawal_answer() {
@@ -4371,6 +4377,7 @@ impl<O: EntryOps> Host<O> {
                 self.shared.reads.count_reader_wait();
                 let turn = reader.wait_for_the_connection();
                 state = entry.gate.lock().expect("entry gate poisoned");
+                gate_rounds += 1;
                 // The connection is this read's from here, so this hold is the
                 // hold that establishes and nothing else can be establishing
                 // under it. What may have moved is the entry: re-read what it
@@ -4378,7 +4385,7 @@ impl<O: EntryOps> Host<O> {
                 // handle its reads run on — a rung-3 rebuild swaps one for
                 // another while the entry goes on serving, and a teardown
                 // takes the entry out of service while the handle stands.
-                self.shared.reads.count_demand_rereading();
+                self.shared.reads.count_demand_rereading(gate_rounds);
                 let published = state.published_demand();
                 if published != Demand::State(TrustState::Ready) {
                     // The connection goes back with the turn, before the gate
@@ -4407,10 +4414,11 @@ impl<O: EntryOps> Host<O> {
         };
         // The gate and the connection's turn are both this read's from here,
         // so nothing runs on the connection but what this hold runs: the
-        // handle's count read now and again where the gate goes back is what
-        // ran under the hold, attested by the hold rather than reported by
-        // the establishment.
-        let ran_before_the_hold = reader.statements_run();
+        // handle's count and the gate's take count, read now and again where
+        // the gate goes back, are what ran under the hold and whether it
+        // stayed one hold, attested by the hold rather than reported by the
+        // establishment.
+        let opening = HoldOpening::read(&entry.gate, &*reader);
         // The model is the entry's under this same hold, so it and the
         // snapshot established below describe one declaration.
         let content_model = Arc::clone(&state.active_content_model);
@@ -4419,18 +4427,18 @@ impl<O: EntryOps> Host<O> {
             Err(unavailable) => {
                 // A refused establishment ran its statement under this hold
                 // all the same, so the refusal is a path that paid for it.
-                let ran = give_the_establishing_hold_back(state, &*reader, ran_before_the_hold);
+                let hold = opening.give_the_gate_back(state, &entry.gate, &*reader);
                 self.shared
                     .reads
-                    .count_refused_establishment_under_the_gate(ran, minted.statements);
+                    .count_refused_establishment_under_the_gate(hold, minted.statements);
                 return Err(ReadRefusal::ReaderUnavailable(unavailable));
             }
         };
         state.pin();
-        let ran = give_the_establishing_hold_back(state, &*reader, ran_before_the_hold);
+        let hold = opening.give_the_gate_back(state, &entry.gate, &*reader);
         self.shared
             .reads
-            .count_establishment_under_the_gate(ran, minted.statements);
+            .count_establishment_under_the_gate(hold, minted.statements);
         self.shared.reads.count_read();
         Ok(ReadHold {
             entry,
@@ -4528,23 +4536,46 @@ impl<O: EntryOps> Host<O> {
     }
 }
 
-/// Give back the entry gate a read established under, and answer what the
-/// read's connection ran while that hold stood.
-///
-/// **The count is read before the gate goes, by construction**: the guard is
-/// taken by value and dropped here after the handle is read, so a statement
-/// run after this returns is outside the reading, and a statement run before
-/// `ran_before_the_hold` was read is outside it too. The caller read that
-/// count once it held both the gate and the connection's turn, and nothing
-/// else runs on a connection whose turn is taken.
-fn give_the_establishing_hold_back<G, R: ReadSource>(
-    gate: G,
-    reader: &R,
-    ran_before_the_hold: u64,
-) -> u64 {
-    let ran = reader.statements_run().saturating_sub(ran_before_the_hold);
-    drop(gate);
-    ran
+/// The readings a read's establishing hold opens on: its handle's statement
+/// count and its entry gate's take count, read once the read holds both the
+/// gate and the connection's turn.
+struct HoldOpening {
+    statements_run: u64,
+    gate_taken: u64,
+}
+
+impl HoldOpening {
+    fn read<T, R: ReadSource>(gate: &EntryGate<T>, reader: &R) -> Self {
+        HoldOpening {
+            statements_run: reader.statements_run(),
+            gate_taken: gate.times_taken(),
+        }
+    }
+
+    /// Give back the entry gate a read established under, and answer what the
+    /// read's connection ran while that hold stood and whether it stood as one
+    /// hold.
+    ///
+    /// **Both counts are read before the gate goes, by construction**: the
+    /// guard is taken by value and dropped here after they are read, so a
+    /// statement run after this returns is outside the reading, and one run
+    /// before the opening was read is outside it too. Nothing else runs on a
+    /// connection whose turn is taken, and nothing else takes a gate this hold
+    /// holds, so a take between the two readings is this read letting the gate
+    /// go and taking it back.
+    fn give_the_gate_back<T, R: ReadSource>(
+        self,
+        state: MutexGuard<'_, T>,
+        gate: &EntryGate<T>,
+        reader: &R,
+    ) -> EstablishingHold {
+        let hold = EstablishingHold {
+            statements: reader.statements_run().saturating_sub(self.statements_run),
+            gate_retakes: gate.times_taken().saturating_sub(self.gate_taken),
+        };
+        drop(state);
+        hold
+    }
 }
 
 fn reap_idle_shared<O: EntryOps>(shared: &Arc<Shared<O>>, now: Instant) -> Result<(), HostError> {
@@ -17677,8 +17708,9 @@ mod tests {
             "the account did not name the read that waited for the connection"
         );
         assert_eq!(
-            reading.widest_reader_wait, 1,
-            "a read waited for the entry's connection more than once"
+            (reading.demand_rereadings, reading.widest_demand_rereadings),
+            (1, 1),
+            "the read that waited took other than one round of the gate after its first"
         );
     }
 
@@ -17810,9 +17842,9 @@ mod tests {
             "the re-reading that refused the acquisition is missing from the account"
         );
         assert_eq!(
-            host.read_evidence().widest_reader_wait,
+            host.read_evidence().widest_demand_rereadings,
             1,
-            "an acquisition waited for the entry's connection more than once"
+            "an acquisition took more than one round of the gate after its first"
         );
     }
 
@@ -17992,9 +18024,9 @@ mod tests {
             "the wait the refused acquisition paid is missing from the account"
         );
         assert_eq!(
-            host.read_evidence().widest_reader_wait,
+            host.read_evidence().widest_demand_rereadings,
             1,
-            "an acquisition waited for the entry's connection more than once"
+            "an acquisition took more than one round of the gate after its first"
         );
     }
 

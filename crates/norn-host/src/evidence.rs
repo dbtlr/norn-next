@@ -508,10 +508,14 @@ mod tests {
 /// sharing the one connection that entry holds.
 ///
 /// **What an establishment ran under the gate is the gate holder's reading.**
-/// The acquisition reads its handle's statement count once it holds the gate
-/// and the connection's turn, and again as it gives the gate back, and the
-/// difference is what is counted; the establishment reports no count of its
-/// own. A statement moved outside the hold is outside those two readings.
+/// The acquisition reads its handle's statement count and its entry gate's
+/// take count once it holds the gate and the connection's turn, and both again
+/// as it gives the gate back. The statement difference is what is counted, and
+/// the establishment reports no count of its own; the take difference is
+/// whether those two readings bound one continuous hold, because a gate given
+/// back and taken again between them is a retake the gate itself counted. A
+/// statement moved outside the hold is outside the two readings, and one run
+/// while the gate was let go and taken back is a retake.
 ///
 /// **What an acquisition runs under the gate is three readings, not one.** The
 /// establishing statement of a read that was served is exactly one, and the
@@ -528,11 +532,10 @@ mod tests {
 /// left. The mint is counted where the mint returns, the establishment where
 /// the hold it ran under gives the gate back, and the wait for the entry's
 /// connection where that wait begins, so the refusals are accounted exactly as
-/// the answers are. A wait
-/// that begins cannot be abandoned: it returns only with the connection, so a
-/// wait counted where it begins is a wait that ends. No path out of an
-/// acquisition runs a statement under the gate, or waits out another read, and
-/// reports nothing.
+/// the answers are. A wait that begins cannot be abandoned: it returns only
+/// with the connection, so a wait counted where it begins is a wait that ends.
+/// No path out of an acquisition runs a statement under the gate, or waits out
+/// another read, and reports nothing.
 ///
 /// Every field is a running total for the host's whole life. Two of them are
 /// maxima rather than sums, which is why a window over this account carries
@@ -544,9 +547,22 @@ pub(crate) struct ReadEvidence {
     mint_statements_under_the_gate: AtomicU64,
     refused_establishment_statements_under_the_gate: AtomicU64,
     widest_statements_under_the_gate: AtomicU64,
+    gate_retakes_within_establishing_holds: AtomicU64,
     reader_waits: AtomicU64,
-    widest_reader_wait: AtomicU64,
     demand_rereadings: AtomicU64,
+    widest_demand_rereadings: AtomicU64,
+}
+
+/// What one acquisition's establishing hold read off its handle and its entry
+/// gate, between the reading it opened on and the one it gave the gate back
+/// with.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EstablishingHold {
+    /// Statements the handle counted between the two readings.
+    pub(crate) statements: u64,
+    /// Times the entry gate was taken between the two readings. Zero for a
+    /// hold that never let the gate go.
+    pub(crate) gate_retakes: u64,
 }
 
 /// One reading of a host's read account, over the whole of its life.
@@ -598,6 +614,17 @@ pub struct ReadReading {
     /// mint's alone where the mint refused; and its mint's plus the refused
     /// establishment's where the establishment is what refused.
     pub widest_statements_under_the_gate: u64,
+    /// Times an entry gate was taken again inside an establishing hold: between
+    /// the reading an acquisition opened its establishing hold on and the one
+    /// it gave the gate back with.
+    ///
+    /// **Zero.** An establishing hold is one continuous hold of the gate, so
+    /// the gate's own take count reads the same at both ends of it. Any other
+    /// number is an acquisition that let the gate go and took it back around
+    /// what it counted, which is an establishment that may have run outside
+    /// the lock however many statements the count across it reads. Served and
+    /// refused establishments alike are in it.
+    pub gate_retakes_within_establishing_holds: u64,
     /// Acquisitions that gave the entry gate back and waited for the one
     /// connection their entry holds. Nonzero is reader contention, measured
     /// rather than assumed.
@@ -607,8 +634,8 @@ pub struct ReadReading {
     /// reading taken during contention already names every acquisition that
     /// found the connection taken. A wait that begins returns only with the
     /// connection, so each one counted here also ends. An acquisition that
-    /// waited and was then refused — because its entry stopped serving, or
-    /// because its handle was replaced while it waited — paid the whole of that
+    /// waited and was then refused, because its entry stopped serving or
+    /// because its handle was replaced while it waited, paid the whole of that
     /// wait, so it is one of these and is not among `reads_served`. Those are
     /// the paths contention is most likely to be interesting on, and a reading
     /// that held only served reads would under-report exactly there.
@@ -617,26 +644,27 @@ pub struct ReadReading {
     /// acquisition waits for that connection while it holds the entry gate,
     /// and nothing here counts a wait for the gate itself.
     pub reader_waits: u64,
-    /// The most times any one acquisition waited for its entry's connection.
+    /// Readings of the published demand acquisitions took again, each in a
+    /// round of the entry gate taken after the acquisition's first.
     ///
-    /// **One, or none.** An acquisition that finds the connection taken waits
-    /// for it once and holds it from there, so the hold that establishes
-    /// cannot contend again and a refused one gives the connection back rather
-    /// than waiting a second time. A reading above one is a round this
-    /// acquisition does not have.
-    pub widest_reader_wait: u64,
-    /// Readings of the published demand an acquisition took again after it
-    /// waited for its entry's connection and took the gate back.
-    ///
-    /// **One per contended acquisition, served or refused.** The demand an
-    /// acquisition read before its wait describes an instant the answer is no
-    /// longer given under, so the hold that establishes reads it afresh; that
-    /// second reading is the priced cost of contention. It is counted where it
-    /// is taken, beside the act, so these over [`ReadReading::reader_waits`]
-    /// are the re-readings a contended acquisition took, and a count above
-    /// `reader_waits` is an acquisition that read the demand again more than
-    /// once. An acquisition that found the connection free re-reads nothing.
+    /// **One per contended acquisition, served or refused.** An acquisition
+    /// reads the published demand in every round of the gate it takes. The
+    /// first round is the one every acquisition takes; one that found the
+    /// connection taken gives the gate back, waits, and takes a second round,
+    /// whose reading of the demand is the priced cost of contention because
+    /// the instant it first read is not the instant it answers under. So this
+    /// equals [`ReadReading::reader_waits`], and a count below it is a
+    /// contended acquisition that re-read nothing.
     pub demand_rereadings: u64,
+    /// The most re-readings any one acquisition took: the rounds of the entry
+    /// gate it took, less its first.
+    ///
+    /// **One, or none.** A contended acquisition holds the connection from
+    /// its second round on, so that round cannot contend and ends in the
+    /// establishment or a refusal. A reading above one is an acquisition that
+    /// took a round the read path does not have, and it is counted per
+    /// acquisition so that one taking two cannot hide beside one taking none.
+    pub widest_demand_rereadings: u64,
 }
 
 /// What happened between an earlier reading of a host's read account and a
@@ -664,8 +692,11 @@ pub struct ReadsSince {
     /// Acquisitions in this window that gave the entry gate back and waited
     /// for the one connection their entry holds, served and refused alike.
     pub reader_waits: u64,
-    /// Readings of the published demand this window's contended acquisitions
-    /// took again after they took the gate back.
+    /// Times an entry gate was taken again inside this window's establishing
+    /// holds.
+    pub gate_retakes_within_establishing_holds: u64,
+    /// Readings of the published demand this window's acquisitions took in a
+    /// round of the gate after their first.
     pub demand_rereadings: u64,
 }
 
@@ -684,6 +715,9 @@ impl ReadReading {
                 .refused_establishment_statements_under_the_gate
                 .saturating_sub(earlier.refused_establishment_statements_under_the_gate),
             reader_waits: self.reader_waits.saturating_sub(earlier.reader_waits),
+            gate_retakes_within_establishing_holds: self
+                .gate_retakes_within_establishing_holds
+                .saturating_sub(earlier.gate_retakes_within_establishing_holds),
             demand_rereadings: self
                 .demand_rereadings
                 .saturating_sub(earlier.demand_rereadings),
@@ -703,9 +737,12 @@ impl ReadEvidence {
                 &self.refused_establishment_statements_under_the_gate
             ),
             widest_statements_under_the_gate: get(&self.widest_statements_under_the_gate),
+            gate_retakes_within_establishing_holds: get(
+                &self.gate_retakes_within_establishing_holds
+            ),
             reader_waits: get(&self.reader_waits),
-            widest_reader_wait: get(&self.widest_reader_wait),
             demand_rereadings: get(&self.demand_rereadings),
+            widest_demand_rereadings: get(&self.widest_demand_rereadings),
         }
     }
 
@@ -730,23 +767,29 @@ impl ReadEvidence {
     /// Record what one served acquisition's establishing hold ran under the
     /// entry gate.
     ///
-    /// **`statements` is the gate holder's own reading**, not a count the
+    /// **`hold` is the gate holder's own reading**, not a count the
     /// establishment reports: the acquisition read its handle's statement
-    /// count once it held the gate and the connection's turn, and again as it
-    /// gave the gate back, and this is the difference. An establishing
-    /// statement run outside that hold is not in it, so the exactly-one bar
-    /// read off `statements_under_the_gate` fails for a read that established
-    /// outside the lock.
+    /// count and its gate's take count once it held the gate and the
+    /// connection's turn, and again as it gave the gate back, and these are
+    /// the differences. An establishing statement run before or after that
+    /// hold is not in its statements, so the exactly-one bar read off
+    /// `statements_under_the_gate` fails for it; one run while the gate was
+    /// let go and taken back inside the hold is a retake, and the zero bar
+    /// read off `gate_retakes_within_establishing_holds` fails for that.
     ///
     /// The mint's statements are passed in again, already counted by the mint,
     /// because the widest reading is per acquisition: what one acquisition ran
     /// under the gate is its mint's statements and its establishment's, and a
     /// ceiling read off two separate maxima would be a sum of two different
     /// acquisitions.
-    pub(crate) fn count_establishment_under_the_gate(&self, statements: u64, mint_statements: u64) {
+    pub(crate) fn count_establishment_under_the_gate(
+        &self,
+        hold: EstablishingHold,
+        mint_statements: u64,
+    ) {
         self.statements_under_the_gate
-            .fetch_add(statements, Ordering::Relaxed);
-        self.widen(statements, mint_statements);
+            .fetch_add(hold.statements, Ordering::Relaxed);
+        self.count_the_hold(hold, mint_statements);
     }
 
     /// Record what one acquisition whose establishment refused ran under the
@@ -759,19 +802,23 @@ impl ReadEvidence {
     /// so the refusal is a path that paid for it.
     pub(crate) fn count_refused_establishment_under_the_gate(
         &self,
-        statements: u64,
+        hold: EstablishingHold,
         mint_statements: u64,
     ) {
         self.refused_establishment_statements_under_the_gate
-            .fetch_add(statements, Ordering::Relaxed);
-        self.widen(statements, mint_statements);
+            .fetch_add(hold.statements, Ordering::Relaxed);
+        self.count_the_hold(hold, mint_statements);
     }
 
-    /// Widen the per-acquisition reading to what one acquisition ran under the
-    /// gate: its mint's statements and its establishing hold's together.
-    fn widen(&self, establishing_statements: u64, mint_statements: u64) {
+    /// Count what served and refused establishing holds share: whether the
+    /// hold stayed one hold, and the per-acquisition reading of what one
+    /// acquisition ran under the gate, its mint's statements and its
+    /// establishing hold's together.
+    fn count_the_hold(&self, hold: EstablishingHold, mint_statements: u64) {
+        self.gate_retakes_within_establishing_holds
+            .fetch_add(hold.gate_retakes, Ordering::Relaxed);
         self.widest_statements_under_the_gate.fetch_max(
-            mint_statements.saturating_add(establishing_statements),
+            mint_statements.saturating_add(hold.statements),
             Ordering::Relaxed,
         );
     }
@@ -788,21 +835,23 @@ impl ReadEvidence {
     ///
     /// The wait is the host's own count rather than a number the establishment
     /// reports: the acquisition is what waited, and the establishment it
-    /// eventually ran waited for nothing. The widest is a structural reading
-    /// rather than a sum — an acquisition waits once and then holds the
-    /// connection — so one is the only value above zero this can produce.
+    /// eventually ran waited for nothing.
     pub(crate) fn count_reader_wait(&self) {
         self.reader_waits.fetch_add(1, Ordering::Relaxed);
-        self.widest_reader_wait.fetch_max(1, Ordering::Relaxed);
     }
 
-    /// Record that one contended acquisition read its entry's published demand
-    /// again, having taken the gate back after its wait.
+    /// Record that one acquisition took a round of its entry gate after its
+    /// first and read the published demand again in it.
     ///
-    /// **This is called beside the re-reading itself**, so the count is the
-    /// act's: an acquisition that read the demand again twice moves it twice.
-    pub(crate) fn count_demand_rereading(&self) {
+    /// **`gate_rounds` is the acquisition's own count** of the rounds it has
+    /// taken, this one included, so one call is one re-reading in the total
+    /// and the widest is what one acquisition took rather than a ratio over
+    /// many: an acquisition taking two re-readings reads two there however
+    /// many beside it took none.
+    pub(crate) fn count_demand_rereading(&self, gate_rounds: u64) {
         self.demand_rereadings.fetch_add(1, Ordering::Relaxed);
+        self.widest_demand_rereadings
+            .fetch_max(gate_rounds.saturating_sub(1), Ordering::Relaxed);
     }
 
     /// Record that one read was served.
