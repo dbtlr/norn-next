@@ -78,7 +78,7 @@ use crate::facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, FeedDocument, FeedTombstone, FindingFacts,
     HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport, Provenance,
     SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredLinkKey, StoredPathOrder,
-    StoredSuffixKeys, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    StoredSuffixKeys, StoredTag, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 use crate::fields::{FieldContainer, FieldRow, FieldRows, OffsetSpelling};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
@@ -694,19 +694,6 @@ impl<'a> Request<'a> {
         let Some((id, body, document)) = found else {
             return Ok(None);
         };
-        let (tags, folded_tags) = Self::read_all_on(
-            &transaction,
-            &self.read_work,
-            DOCUMENT_TAGS_SQL,
-            params![id],
-            |row| {
-                let folded: String = row.get(5)?;
-                Ok(stored_tag(row)?.map(|tag| (tag, folded)))
-            },
-            "reading a document's tags",
-        )?
-        .into_iter()
-        .unzip();
         Ok(Some(StoredFacts {
             document,
             body,
@@ -749,8 +736,17 @@ impl<'a> Request<'a> {
                 stored_block,
                 "reading a document's block ids",
             )?,
-            tags,
-            folded_tags,
+            tags: Self::read_all_on(
+                &transaction,
+                &self.read_work,
+                DOCUMENT_TAGS_SQL,
+                params![id],
+                |row| {
+                    let folded_name: String = row.get(5)?;
+                    Ok(stored_tag(row)?.map(|fact| StoredTag { fact, folded_name }))
+                },
+                "reading a document's tags",
+            )?,
             fields: FieldRows::stored(Self::read_all_on(
                 &transaction,
                 &self.read_work,

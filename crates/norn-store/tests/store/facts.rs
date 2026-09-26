@@ -8,6 +8,7 @@
 
 use crate::common::{
     Scratch, document, document_with_every_fact, path, record_death, span, write_document,
+    written_tags,
 };
 use norn_store::{
     BlockFact, Change, ContentModel, DocumentFacts, FrontmatterValue, HeadingFact,
@@ -43,7 +44,7 @@ fn every_fact_shape_survives_the_round_trip() {
     assert_eq!(stored.links, facts.links);
     assert_eq!(stored.headings, facts.headings);
     assert_eq!(stored.blocks, facts.blocks);
-    assert_eq!(stored.tags, facts.tags);
+    assert_eq!(written_tags(&stored), facts.tags);
 
     // The projection is the one thing that does not come back as it went in: it
     // is JSON, and it is canonical.
@@ -990,9 +991,13 @@ fn a_tag_is_stored_as_written_and_says_which_home_it_came_from() {
         .stored_facts(&facts.path)
         .expect("reading a document")
         .expect("a document");
-    assert_eq!(stored.tags, facts.tags);
+    assert_eq!(written_tags(&stored), facts.tags);
     assert_eq!(
-        stored.folded_tags,
+        stored
+            .tags
+            .iter()
+            .map(|tag| tag.folded_name.as_str())
+            .collect::<Vec<&str>>(),
         ["work", "work", "area/sub-project", "über"]
     );
 }

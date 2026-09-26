@@ -3726,7 +3726,7 @@ mod tests {
     use norn_config::schema::FieldType;
     use norn_store::{
         BlockFact, ContentModel, FieldRow, FieldRows, HeadingFact, LinkFact, OpenOutcome,
-        RebuildReason, TagFact,
+        RebuildReason, StoredTag,
     };
     use norn_testkit::scratch::Scratch;
     use norn_testkit::wait::{Budget, Observed, wait_until};
@@ -5279,7 +5279,7 @@ mod tests {
         let tags: Vec<(&str, TagSource)> = facts
             .tags
             .iter()
-            .map(|tag| (tag.name.as_str(), tag.source))
+            .map(|tag| (tag.fact.name.as_str(), tag.fact.source))
             .collect();
         assert_eq!(
             tags,
@@ -11177,8 +11177,7 @@ mod tests {
         link_keys: Vec<norn_store::StoredLinkKey>,
         headings: Vec<HeadingFact>,
         blocks: Vec<BlockFact>,
-        tags: Vec<TagFact>,
-        folded_tags: Vec<String>,
+        tags: Vec<StoredTag>,
         fields: FieldRows,
     }
 
@@ -11192,7 +11191,6 @@ mod tests {
                 headings,
                 blocks,
                 tags,
-                folded_tags,
                 fields,
             } = facts;
             Self {
@@ -11209,7 +11207,6 @@ mod tests {
                 headings,
                 blocks,
                 tags,
-                folded_tags,
                 fields,
             }
         }

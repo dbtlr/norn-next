@@ -12,8 +12,8 @@ use norn_store::{
     BlockFact, CandidateFact, Change, ClassKey, ContentModel, DerivationCounters, DocumentFacts,
     DocumentPath, EmittedPlan, FieldOrder, FindingFacts, FrontmatterValue, GetPlan, GetWork,
     HeadingFact, IncrementOutcome, IncrementProvenance, LinkFact, LinkFamily, OffsetSpelling,
-    Provenance, ReadFilter, Request, Span, Store, StoredPathOrder, SuffixKey, TagFact, TagSource,
-    TypedOrder, suffix_probe,
+    Provenance, ReadFilter, Request, Span, Store, StoredFacts, StoredPathOrder, SuffixKey, TagFact,
+    TagSource, TypedOrder, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::explain::StatementReads;
@@ -269,6 +269,12 @@ pub fn span(line: u64, column: u64, byte_offset: u64) -> Span {
         column,
         byte_offset,
     }
+}
+
+/// The tags a stored document carries as written, without the folds stored
+/// beside them.
+pub fn written_tags(stored: &StoredFacts) -> Vec<TagFact> {
+    stored.tags.iter().map(|tag| tag.fact.clone()).collect()
 }
 
 /// A document with a body and nothing derived from it. Its body is the whole

@@ -130,8 +130,8 @@ pub use facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, DerivationVersion, DocumentFacts, FeedDocument,
     FeedTombstone, FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily,
     PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding,
-    StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTombstone, TagFact, TagSource,
-    VaultSchemaPin,
+    StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone, TagFact,
+    TagSource, VaultSchemaPin,
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;

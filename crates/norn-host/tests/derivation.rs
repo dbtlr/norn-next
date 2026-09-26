@@ -609,19 +609,21 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
     );
     for source in [TagSource::Body, TagSource::Frontmatter] {
         assert!(
-            glossary.tags.iter().any(|tag| tag.source == source),
+            glossary.tags.iter().any(|tag| tag.fact.source == source),
             "no {source:?} tag is exercised"
         );
     }
     assert!(
-        glossary.tags.iter().any(|tag| tag.name.contains('\u{301}')),
+        glossary
+            .tags
+            .iter()
+            .any(|tag| tag.fact.name.contains('\u{301}')),
         "no tag whose name carries a combining mark is exercised"
     );
     let spellings: Vec<(&str, &str)> = glossary
         .tags
         .iter()
-        .zip(&glossary.folded_tags)
-        .map(|(tag, folded)| (tag.name.as_str(), folded.as_str()))
+        .map(|tag| (tag.fact.name.as_str(), tag.folded_name.as_str()))
         .collect();
     assert!(
         spellings.iter().any(|(name, folded)| name != folded
@@ -838,7 +840,7 @@ fn assert_the_allowing_vault_exercises_its_stance(rows: &DerivedRows) {
             allowed
                 .tags
                 .iter()
-                .any(|tag| tag.name == name && tag.source == source),
+                .any(|tag| tag.fact.name == name && tag.fact.source == source),
             "no undeclared {source:?} tag `{name}` is exercised"
         );
     }
