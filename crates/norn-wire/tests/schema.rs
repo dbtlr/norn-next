@@ -1119,7 +1119,15 @@ fn a_cursor_key_advertises_its_row_tag() {
     let schema = schema_of::<CursorKey>();
     assert_eq!(
         sorted(tag_constants(&schema, "row")),
-        sorted(["document", "hit", "tally", "finding", "facet", "ordinal"])
+        sorted([
+            "document",
+            "hit",
+            "tally",
+            "finding",
+            "document_finding",
+            "facet",
+            "ordinal"
+        ])
     );
     let document = branches(&schema)
         .iter()
@@ -1647,7 +1655,15 @@ fn a_read_refusal_advertises_the_typed_facts_it_carries() {
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<PagedRows>(), "row")),
-        sorted(["document", "hit", "tally", "finding", "facet", "collection"])
+        sorted([
+            "document",
+            "hit",
+            "tally",
+            "finding",
+            "document_finding",
+            "facet",
+            "collection"
+        ])
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<ReadFailure>(), "kind")),

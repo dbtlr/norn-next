@@ -14,7 +14,7 @@ use crate::common::{
     write_document, write_documents,
 };
 use norn_store::{
-    CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, StoreError,
+    CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, Store, StoreError,
     induced_failure, suffix_probe,
 };
 use std::num::NonZeroUsize;
@@ -386,6 +386,125 @@ fn a_finding_keeps_a_bounded_head_and_the_total() {
     assert_eq!(stored.candidates_total, 400);
     assert_eq!(stored.message, finding.message);
     assert!(stored.generation > 0);
+}
+
+/// **A finding keeps the ordinal of the link it is about, and a finding about
+/// the document keeps none**, and the store orders both by a position with no
+/// `NULL` in it. A row value that reaches `NULL` is `NULL`, so a bound past
+/// the first finding about the document on `(path, ordinal, id)` passes no
+/// finding at its path — not the second finding about the document, not the
+/// one about link 1 — where the same bound on `(path, position, id)` passes
+/// both.
+#[test]
+fn a_findings_position_is_its_ordinal_with_the_documents_first() {
+    let scratch = Scratch::new("finding-ordinal");
+    let mut store = scratch.open();
+    let at = path("a.md");
+    let about = |ordinal: Option<u64>| {
+        let mut finding = violation(at.as_str());
+        finding.ordinal = ordinal;
+        finding
+    };
+    let ordinals = |store: &mut Store| -> Vec<Option<u64>> {
+        store
+            .begin_request()
+            .stored_findings(&at)
+            .expect("reading findings")
+            .into_iter()
+            .map(|finding| finding.ordinal)
+            .collect()
+    };
+    {
+        let mut request = store.begin_request();
+        for ordinal in [None, None, Some(1)] {
+            request
+                .record_finding(&about(ordinal))
+                .expect("recording a finding");
+        }
+    }
+    assert_eq!(ordinals(&mut store), [None, None, Some(1)]);
+
+    induced_failure::execute_out_of_band(
+        &mut store,
+        "DELETE FROM findings
+         WHERE (path, ordinal, id) > ('a.md', NULL, (SELECT min(id) FROM findings))",
+    )
+    .expect("a bound on the ordinal");
+    assert_eq!(
+        ordinals(&mut store),
+        [None, None, Some(1)],
+        "a bound reaching NULL passed a finding"
+    );
+    induced_failure::execute_out_of_band(
+        &mut store,
+        "DELETE FROM findings
+         WHERE (path, position, id) > ('a.md', -1, (SELECT min(id) FROM findings))",
+    )
+    .expect("a bound on the position");
+    assert_eq!(
+        ordinals(&mut store),
+        [None],
+        "a bound on the position passes every finding after it"
+    );
+}
+
+/// **One link holds at most one finding.** The kinds a finding about a link is
+/// filed under exclude one another, so a second finding about a link that
+/// already holds one is refused where it is written, whatever its kind, and
+/// the first stands. Another link of the same document takes its own finding,
+/// and the findings about the document itself are as many as are filed.
+#[test]
+fn a_second_finding_about_one_link_is_refused() {
+    let scratch = Scratch::new("finding-one-per-link");
+    let mut store = scratch.open();
+    let at = path("a.md");
+    let about = |kind: FindingKind, ordinal: Option<u64>| {
+        let mut finding = violation(at.as_str());
+        finding.kind = kind;
+        finding.ordinal = ordinal;
+        finding
+    };
+    let mut request = store.begin_request();
+    request
+        .record_finding(&about(FindingKind::Broken, Some(1)))
+        .expect("recording the first finding about link 1");
+    for kind in [FindingKind::Ambiguous, FindingKind::Broken] {
+        let refused = request
+            .record_finding(&about(kind, Some(1)))
+            .expect_err("a second finding about link 1");
+        let StoreError::Sql {
+            operation, message, ..
+        } = &refused
+        else {
+            panic!("the second finding was refused as {refused:?}");
+        };
+        assert_eq!(*operation, "writing a finding");
+        assert!(message.contains("UNIQUE"), "{message}");
+    }
+    for finding in [
+        about(FindingKind::Broken, Some(2)),
+        about(FindingKind::BodyBytesNotUtf8, None),
+        about(FindingKind::BodyBytesNotUtf8, None),
+    ] {
+        request
+            .record_finding(&finding)
+            .expect("recording a finding");
+    }
+    let stored: Vec<(String, Option<u64>)> = request
+        .stored_findings(&at)
+        .expect("reading findings")
+        .into_iter()
+        .map(|finding| (finding.kind, finding.ordinal))
+        .collect();
+    assert_eq!(
+        stored,
+        [
+            (FindingKind::Broken.as_str().to_string(), Some(1)),
+            (FindingKind::Broken.as_str().to_string(), Some(2)),
+            (FindingKind::BodyBytesNotUtf8.as_str().to_string(), None),
+            (FindingKind::BodyBytesNotUtf8.as_str().to_string(), None),
+        ]
+    );
 }
 
 /// A head handed more than it holds is refused rather than truncated. A silently

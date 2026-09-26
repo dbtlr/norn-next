@@ -55,7 +55,7 @@ pub(crate) use answer_order::{AnswerSeek, Term, answer_ordering, answer_place, a
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
 pub(crate) use filter::{Binder, Filter, PathPart};
 pub use filter::{READ_FILTERS, ReadFilter};
-pub(crate) use finding::{FINDING_ROW_COLUMNS, FindingBase, finding_base};
+pub(crate) use finding::{FINDING_ROW_COLUMNS, FindingBase, cursor_position, finding_base};
 pub(crate) use glob::register_functions;
 pub(crate) use keys::key_walk;
 pub(crate) use naming::{Naming, wire_path};
@@ -361,6 +361,7 @@ fn rows_named(rows: PagedRows) -> String {
         PagedRows::Hit => "hits".to_string(),
         PagedRows::Tally => "tallies".to_string(),
         PagedRows::Finding => "findings".to_string(),
+        PagedRows::DocumentFinding => "one document's findings".to_string(),
         PagedRows::Facet => "facets".to_string(),
         PagedRows::Collection { of } => format!("a document's {}", collection_named(of)),
         _ => "rows".to_string(),

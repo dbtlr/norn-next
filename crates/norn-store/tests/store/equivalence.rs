@@ -29,7 +29,8 @@
 
 use norn_store::{Provenance, Store, induced_failure};
 use norn_testkit::equivalence::{
-    Divergence, PAGE, Population, StoreProjection, assert_operationally_valid, tombstones,
+    DerivedRows, Divergence, PAGE, Population, StoreProjection, assert_operationally_valid,
+    tombstones,
 };
 
 use super::common::{
@@ -407,6 +408,92 @@ fn a_finding_at_a_path_without_a_document_row_is_a_divergence() {
             .expect("recording a finding about a path nothing derived");
     });
     assert_names(&divergence, "finding[nowhere/absent.md][0]");
+}
+
+/// **A finding's ordinal is projected.** The same finding about link 1 in
+/// one store and about link 2 in the other is two findings a reader tells
+/// apart by where each stands among its path's findings.
+#[test]
+fn a_changed_finding_ordinal_is_a_divergence() {
+    let mut pair = Pair::new("pin-finding-ordinal");
+    let about_link = |ordinal: u64| {
+        let mut finding = unread_block("one/glossary.md");
+        finding.ordinal = Some(ordinal);
+        finding
+    };
+    pair.left
+        .begin_request()
+        .record_finding(&about_link(1))
+        .expect("recording a finding");
+    let divergence = pair.diverged(|store| {
+        store
+            .begin_request()
+            .record_finding(&about_link(2))
+            .expect("recording a finding");
+    });
+    assert_names(&divergence, "finding[one/glossary.md][0].ordinal");
+}
+
+/// **A path's findings about its links are compared in link order, whatever
+/// order they were filed in.** One store files findings about links 1 and 2
+/// in that order and the other in the reverse. A reader reads them by the
+/// link each is about in both, so the two stores are equal, and each renders
+/// the finding about link 1 first among the path's derived rows.
+#[test]
+fn findings_about_two_links_filed_in_two_orders_leave_two_stores_equal() {
+    let mut pair = Pair::new("pin-link-finding-order");
+    let about_link = |ordinal: u64| {
+        let mut finding = unread_block("one/glossary.md");
+        finding.ordinal = Some(ordinal);
+        finding
+    };
+    for (store, ordinals) in [(&mut pair.left, [1, 2]), (&mut pair.right, [2, 1])] {
+        let mut request = store.begin_request();
+        for ordinal in ordinals {
+            request
+                .record_finding(&about_link(ordinal))
+                .expect("recording a finding");
+        }
+    }
+    pair.assert_equivalent();
+    let derived = |store: &mut Store| {
+        DerivedRows::read(store)
+            .expect("reading the derived rows")
+            .fields()
+            .clone()
+    };
+    let (left, right) = (derived(&mut pair.left), derived(&mut pair.right));
+    assert_eq!(
+        left.get("finding[one/glossary.md][0].ordinal")
+            .map(String::as_str),
+        Some("1"),
+        "the finding about link 1 renders first"
+    );
+    assert_eq!(left, right, "the derived rows of the two stores");
+}
+
+/// **Findings about a document are compared by their content, whatever order
+/// they were filed in.** Two findings about the document itself, of one kind,
+/// filed in one order in one store and in the other order in the other, leave
+/// the two equal: nothing but filing time orders them, and two derivations of
+/// one vault file them at two times.
+#[test]
+fn findings_about_a_document_filed_in_two_orders_leave_two_stores_equal() {
+    let mut pair = Pair::new("pin-document-finding-order");
+    let about_document = |target: &str| {
+        let mut finding = unread_block("one/glossary.md");
+        finding.target = Some(target.to_string());
+        finding
+    };
+    for (store, targets) in [(&mut pair.left, ["x", "y"]), (&mut pair.right, ["y", "x"])] {
+        let mut request = store.begin_request();
+        for target in targets {
+            request
+                .record_finding(&about_document(target))
+                .expect("recording a finding");
+        }
+    }
+    pair.assert_equivalent();
 }
 
 /// **The exclusions, pinned the other way round.** A row identifier, a write

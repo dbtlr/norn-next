@@ -9,6 +9,7 @@
 
 use norn_db::rusqlite::types::Value;
 
+use crate::ddl::findings::DOCUMENT_POSITION;
 use crate::find::Nested;
 use crate::read::{Binder, FINDING_ROW_COLUMNS, Ran};
 use crate::request::DOCUMENT_HEADINGS_SQL;
@@ -43,10 +44,9 @@ pub enum GetStatement {
     /// ordinal the page continues after, that stops at the page's bound.
     CollectionPage(Nested),
     /// One page of the findings standing at the document's path under the
-    /// active fingerprint, in `(kind, id)` order: a seek of `findings_path`
-    /// at `(path, fingerprint)` from the kind the page continues in — the id
-    /// it continues after tested within that kind — that stops at the page's
-    /// bound.
+    /// active fingerprint, in `(position, kind, id)` order: a seek of
+    /// `findings_path` at `(path, fingerprint)` past the position, the kind
+    /// and the id the page continues after, that stops at the page's bound.
     FindingPage,
 }
 
@@ -102,12 +102,12 @@ pub(crate) enum Spelled<'a> {
         rows: usize,
     },
     /// [`GetStatement::FindingPage`]: at most `rows` findings at `path` under
-    /// `fingerprint`, after the `(kind, id)` `after`, or from the first where
-    /// it is `None`.
+    /// `fingerprint`, after the `(position, kind, id)` `after`, or from the
+    /// first where it is `None`.
     FindingPage {
         path: &'a str,
         fingerprint: &'a str,
-        after: Option<(&'a str, i64)>,
+        after: Option<(i64, &'a str, i64)>,
         rows: usize,
     },
 }
@@ -129,9 +129,14 @@ impl Spelled<'_> {
 /// text states, ready to run.
 ///
 /// **A page resumes from its lower bound**, not from a test of the rows it
-/// read: an unset position binds a bound below every row — the ordinal `-1`,
-/// the empty kind — so the text does not branch on whether the page
-/// continues, and the plan is the same either way.
+/// read: an unset position binds a bound below every row — the ordinal `-1`;
+/// the least position a finding stands at, [`DOCUMENT_POSITION`], with the
+/// empty kind, which no kind is — so the
+/// text does not branch on whether the page continues, and the plan is the
+/// same either way. The finding id's bound is spelled `COLLATE BINARY` for the
+/// reason [`crate::read::AnswerSeek::spelled`] gives, so the seek runs through
+/// the id and a page among many findings at one position and kind rereads
+/// none before it.
 pub(crate) fn compose(spelled: &Spelled<'_>) -> Ran {
     let integer =
         |value: usize| Value::Integer(i64::try_from(value).expect("a row count fits i64"));
@@ -181,9 +186,10 @@ pub(crate) fn compose(spelled: &Spelled<'_>) -> Ran {
             rows,
         } => {
             let mut binder = Binder::default();
-            let (kind, id) = after.unwrap_or(("", 0));
+            let (position, kind, id) = after.unwrap_or((DOCUMENT_POSITION, "", 0));
             let path = binder.bind(Value::Text((*path).to_string()));
             let fingerprint = binder.bind(Value::Text((*fingerprint).to_string()));
+            let position = binder.bind(Value::Integer(position));
             let kind = binder.bind(Value::Text(kind.to_string()));
             let id = binder.bind(Value::Integer(id));
             let limit = binder.bind(integer(*rows));
@@ -191,8 +197,8 @@ pub(crate) fn compose(spelled: &Spelled<'_>) -> Ran {
                 format!(
                     "SELECT {FINDING_ROW_COLUMNS} FROM findings AS f
                      WHERE f.path = {path} AND f.vault_schema_fingerprint = {fingerprint}
-                       AND (f.kind, f.id) > ({kind}, {id})
-                     ORDER BY f.kind, f.id
+                       AND (f.position, f.kind, f.id) > ({position}, {kind}, {id} COLLATE BINARY)
+                     ORDER BY f.position, f.kind, f.id
                      LIMIT {limit}"
                 ),
                 binder.into_values(),

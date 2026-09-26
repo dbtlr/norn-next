@@ -449,6 +449,7 @@ fn finding_about_foo(resolution: &TargetClass, class: &[String]) -> FindingFacts
         class_keys: resolution.class_keys(),
         target: Some("Foo".to_string()),
         span: None,
+        ordinal: None,
         candidates: class
             .iter()
             .map(|at| CandidateFact {
@@ -561,6 +562,7 @@ fn finding_filed_under(class_keys: &[&str]) -> FindingFacts {
             .collect(),
         target: Some("Foo".to_string()),
         span: None,
+        ordinal: None,
         candidates: Vec::new(),
         candidates_total: 0,
         message: "`Foo` names more than one document".to_string(),

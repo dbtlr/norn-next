@@ -785,7 +785,7 @@ full-text index through its `MATCH` selection, which is where a query the engine
 parse is met before the page runs; and the hydration of the rows a page returns — the
 document rows by id, each projected nested collection's head and total by its
 `(document, ordinal)` index, and the findings column's head and total by `findings_path` at
-each row's path and the active fingerprint, with the candidate heads and classes of the
+each row's path and the active fingerprint, the head in `(position, kind, id)` order, with the candidate heads and classes of the
 findings it kept by their primary keys; and the reads that resolve targets — a class's head
 and, where the head filled, its total, each a seek of the suffix key the root probes, run
 for a get's target and a links-to part's target; what every link a page carries names, one
@@ -868,9 +868,14 @@ judged on the columns the plan handout reports each statement reads.
 **The findings-for-path shape has a builder** too: the validate builder reads the findings
 standing under the active fingerprint — every finding recorded under the schema the
 snapshot pins — and runs no rule and emits no plan. It answers a page of finding rows in
-`(kind, path, id)` order, one kind after another, with paths in `(path COLLATE NOCASE, path)`
-order on every root — the order a find answers paths in — or a summary of one tally per kind and
-severity, which is one aggregate and is not paged. Its conjunction is compiled by the same
+`(kind, path, position, id)` order, one kind after another, with paths in `(path COLLATE NOCASE, path)`
+order on every root — the order a find answers paths in — and a path's findings by their
+position, the ordinal of the link each is about with a finding about the document ahead of
+every link's; or a summary of one tally per kind and severity, which is one aggregate and is
+not paged. The position is a generated column, the ordinal with `NULL` read as `-1`, because a
+row-value seek that reaches a `NULL` passes no row. A link holds at most one finding under one
+fingerprint, a partial unique index refusing a second, so only findings about the document
+share a position at one path. Its conjunction is compiled by the same
 compilation, with a `resolves` part reported as not applicable and a mixed-offset comparison
 advised as a find's is, and one rule decides what a
 part judges: a path part judges the path a finding stands at, so a finding where no document
@@ -881,8 +886,8 @@ candidate head and total the pillar stores and a hint naming the `find` that enu
 class, read through the one accessor a find's findings column reads through, so a finding
 is the same row on either verb. It names two statements under the same discipline, each
 carrying a plan bar with a negative control and held by a census to exactly one bar: a
-kind's page, a seek of `(fingerprint, kind)` in `(path COLLATE NOCASE, path, id)` order past
-the page's position on all three — of `(fingerprint, kind, severity)` where a severity floor admits one
+kind's page, a seek of `(fingerprint, kind)` in `(path COLLATE NOCASE, path, position, id)` order past
+the page's position on all four — of `(fingerprint, kind, severity)` where a severity floor admits one
 severity — over the indexes that hold the path under `NOCASE` with a bytewise tie-break, that
 a path part's folded range bounds on every root, and that a document part keeping what it
 seeks drives instead from the documents it matched; and the summary, a covering seek of
@@ -994,8 +999,10 @@ discipline, each carrying a plan bar with a negative control and held by a censu
 document's headings and its block definition, seeks of their
 `(document, ordinal)` indexes at the document; its body, by row id; a collection's page, a
 seek of its `(document, ordinal)` index from the cursor's ordinal; and the findings' page, a
-seek of `findings_path` at the document's path and the active fingerprint from the cursor's
-kind. Resolving a target costs its class: the head sorts every document the class's ranges
+seek of `findings_path` at the document's path and the active fingerprint past the cursor's
+position, kind and id, in the `(position, kind, id)` order a find's findings column reads a
+document's findings in, under a cursor key of its own, since a validate's finding cursor is a
+place in the validate's kind-first order. Resolving a target costs its class: the head sorts every document the class's ranges
 reach, so the class grows with the vault only where the vault adds documents the target
 names. A work bar reads the SQLite counters of every statement a get ran over two vault
 sizes whose classes did not grow: every shape costs the same at both, an ambiguous target's

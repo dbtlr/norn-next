@@ -1081,9 +1081,11 @@ fn ordinal_index(nested: Nested) -> String {
 /// for a document whose head the ceiling filled, so the page holds one whose
 /// every collection fills it, and each total runs. **The findings column is
 /// read by path**: its head seeks `findings_path` at each page path and the
-/// active fingerprint, stopping at the ceiling, and reaches each finding it
-/// kept by row id; its total counts the same index; and the candidate heads
-/// and classes of the findings it read are primary-key seeks of their ids.
+/// active fingerprint, in `(position, kind, id)` order with nothing sorted,
+/// stopping at the ceiling, and reaches each finding it kept by row id; its
+/// total counts the same index; and the candidate heads and classes of the
+/// findings it read are primary-key seeks of their ids. Each holds on either
+/// root.
 ///
 /// Controls: the document plan rebuilt with its row-id seek as a scan; each
 /// ordinal index dropped, its head and total read something else;
@@ -1091,7 +1093,17 @@ fn ordinal_index(nested: Nested) -> String {
 /// the candidate and class reads rebuilt as scans.
 #[test]
 fn hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index() {
-    let mut seeded = Seeded::new("find-hydration");
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        judge_hydration(Seeded::under("find-hydration", order));
+    }
+}
+
+/// [`hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index`]
+/// on one store.
+fn judge_hydration(mut seeded: Seeded) {
     let mut full = document("long/full.md", "hash-full", "a body\n");
     full.tags = (0..NESTED_ROW_CEILING)
         .map(|index| TagFact {

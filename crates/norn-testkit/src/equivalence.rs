@@ -84,6 +84,7 @@
 //! digest compares one build's derivation with another's, where the function
 //! itself is what may have moved.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
@@ -158,6 +159,9 @@ pub struct ProjectedDocument {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProjectedFinding {
     pub path: String,
+    /// The ordinal of the link the finding is about, and `None` for a finding
+    /// about the document at its path.
+    pub ordinal: Option<u64>,
     pub kind: String,
     pub severity: String,
     pub target: Option<String>,
@@ -303,7 +307,7 @@ impl StoreProjection {
     /// so a pillar that comes back empty is an empty pillar and never a read
     /// that asked about nothing.
     pub fn read(store: &mut Store) -> Result<Self, StoreError> {
-        Self::read_in(store, FindingOrder::Content)
+        Self::read_in(store, FindingOrder::Comparable)
     }
 
     /// [`StoreProjection::read`], holding the findings in `order`.
@@ -400,13 +404,17 @@ impl StoreProjection {
                     .map(|(_, finding)| project_finding(finding)),
             );
         }
-        // A finding carries no key that survives being written to a second
-        // store, so the order two stores hand them back in is the order each
-        // wrote them. Sorting by the finding's own content is what makes the
-        // two comparable at all.
-        if order == FindingOrder::Content {
-            projection.findings.sort();
-        }
+        // The page hands the findings back in the order they were written,
+        // which the stable sort keeps in the stored order among findings the
+        // reader's order does not tell apart.
+        projection.findings.sort_by(|one, other| {
+            one.reader_place()
+                .cmp(&other.reader_place())
+                .then_with(|| match order {
+                    FindingOrder::Comparable => one.cmp(other),
+                    FindingOrder::Stored => Ordering::Equal,
+                })
+        });
 
         let mut term: Option<String> = None;
         loop {
@@ -427,8 +435,11 @@ impl StoreProjection {
         &self.documents
     }
 
-    /// The findings, in content order for a projection [`StoreProjection::read`]
-    /// took and in row-key order for one [`DerivedRows`] holds.
+    /// The findings, each path's in the order a reader reads them: by the
+    /// ordinal of the link each is about, a finding about the document first,
+    /// then by kind. Findings that tie on those stand in content order for a
+    /// projection [`StoreProjection::read`] took, and in row-key order for one
+    /// [`DerivedRows`] holds.
     pub fn findings(&self) -> &[ProjectedFinding] {
         &self.findings
     }
@@ -653,15 +664,35 @@ impl StoreProjection {
 }
 
 /// The order a projection holds its findings in.
+///
+/// Both are the order a reader reads a path's findings in — by the ordinal of
+/// the link each is about, a finding about the document first, then by kind —
+/// with the paths in byte order. The store holds at most one finding about a
+/// link under one schema fingerprint, so under one fingerprint only findings
+/// about the document can tie on all of that. A reader orders those by row
+/// key, which is the order they were written in, and the two differ in what
+/// they put in its place.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FindingOrder {
-    /// Sorted by each finding's own content: what two stores that wrote their
-    /// findings in different orders are compared in.
-    Content,
-    /// The order the rows are keyed in, which is the order they were written
-    /// in. A reader that pages a subject's findings reads them in this order
-    /// among themselves, so one derivation's output includes it.
+    /// Every tie is ordered by the findings' own content. This is the one
+    /// place the order departs from a reader's: findings about the document
+    /// of one kind tie by content here, where a reader ties them by id. Two
+    /// stores derived by two routes write a document's findings at two times,
+    /// so row key is not comparable between them.
+    Comparable,
+    /// Every tie is ordered by row key. One derivation writes its findings in
+    /// one order, and a reader answers the ones that tie in it, so one
+    /// derivation's output includes it.
     Stored,
+}
+
+impl ProjectedFinding {
+    /// Where a reader places this finding, up to the row key that breaks a tie:
+    /// its path, the ordinal of its link with the document's findings first,
+    /// and its kind.
+    fn reader_place(&self) -> (&str, Option<u64>, &str) {
+        (&self.path, self.ordinal, &self.kind)
+    }
 }
 
 /// Every derived row one store holds, rendered field by field in field order.
@@ -676,13 +707,13 @@ enum FindingOrder {
 /// **Every ordered read is rendered in the order a reader observes.** The
 /// links, headings, blocks and tags carry their stored ordinal, the field rows
 /// their key and ordinal, a finding's candidates their rank and its classes
-/// their key, and every one of those is a column the row holds. A finding
-/// carries no such column: validate pages a subject's findings by row key, and
-/// find's head reads them by kind and then row key, so the order one subject's
-/// findings were written in reaches an answer. Each subject's findings are
-/// therefore rendered in row-key order, by their rank among that subject's
-/// findings; the absolute keys, and the interleaving of two subjects, reach no
-/// answer and stay out.
+/// their key, and every one of those is a column the row holds. A subject's
+/// findings are read by the ordinal of the link each is about and by kind,
+/// which are columns too, and then by row key, so the order two findings that
+/// tie on those were written in reaches an answer. Each subject's findings are
+/// therefore rendered in the reader's order with ties in row-key order, by
+/// their rank among that subject's findings; the absolute keys, and the
+/// interleaving of two subjects, reach no answer and stay out.
 #[derive(Clone, Debug)]
 pub struct DerivedRows {
     projection: StoreProjection,
@@ -985,6 +1016,7 @@ fn pillar_report(store: &mut Store) -> Result<PillarReport, StoreError> {
 fn project_finding(finding: StoredFinding) -> ProjectedFinding {
     ProjectedFinding {
         path: finding.path.as_str().to_string(),
+        ordinal: finding.ordinal,
         kind: finding.kind,
         severity: finding.severity,
         target: finding.target,
@@ -1059,6 +1091,8 @@ const NULL: &str = "(none)";
 ///   which.
 /// - **`generation`** on `findings` and on `documents`, and on the vault-schema
 ///   pin — write generations, dropped for [`ProjectedFinding`]'s own reason.
+/// - **`position`** on `findings` — a generated column the database computes
+///   from `ordinal`, which is rendered.
 /// - **`derived_at`** on `documents` and every other timestamp — when a row was
 ///   written, never a fact about the vault.
 ///
@@ -1189,6 +1223,11 @@ impl StoredColumns for ProjectedFinding {
             ("kind", quoted(&self.kind)),
             ("severity", quoted(&self.severity)),
             ("target", optional_text(self.target.as_deref())),
+            (
+                "ordinal",
+                self.ordinal
+                    .map_or_else(|| NULL.to_string(), |ordinal| ordinal.to_string()),
+            ),
         ];
         columns.extend(span_columns(self.span.map(
             |(line, column, byte_offset)| Span {

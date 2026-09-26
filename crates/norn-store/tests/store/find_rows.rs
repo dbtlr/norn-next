@@ -947,19 +947,35 @@ fn a_row_carries_the_columns_it_names_read_off_the_projection() {
 }
 
 /// **A row's findings column carries the findings standing at its path, each
-/// the row `validate` answers for it**: the same head, total and hint, in the
-/// `(kind, id)` order a validate narrowed to that path answers. A document
-/// with no finding carries an empty collection of none. **The column is
-/// bounded by the per-row ceiling and says how many stood**: a document with
-/// more findings than [`NESTED_ROW_CEILING`] carries the first that-many and
-/// the whole count, and the head statement read no more than it kept. Under
-/// no schema pinned, a row carries the findings recorded under none.
+/// the row `validate` answers for it**: the same head, total and hint. The
+/// column reads them in `(position, kind, id)` order, where a validate
+/// narrowed to that path reads them kind first, `(kind, position, id)`: at
+/// `notes/a.md` a `link/broken` finding about link 0 and a `link/ambiguous`
+/// finding about link 1 stand after the two findings about the document, and
+/// the column holds link 0's before link 1's where the validate holds them
+/// the other way round. So the column is the validate's findings put in the
+/// column's order. A document with no finding carries an empty collection of
+/// none. **The column is bounded by the per-row ceiling and says how many
+/// stood**: a document with more findings than [`NESTED_ROW_CEILING`] carries
+/// the first that-many and the whole count, and the head statement read no
+/// more than it kept. Under no schema pinned, a row carries the findings
+/// recorded under none.
 #[test]
 fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
     let mut seeded = Seeded::new("find-findings-column");
     seeded.write(&[document("long/doc.md", "hash-long", "a body\n")]);
     let mut writing = seeded.store.begin_request();
+    // The link each finding at `notes/a.md` is about, by its kind; every
+    // other finding here is about its document.
+    let about_links = [(FindingKind::Broken, 0), (FindingKind::Ambiguous, 1)];
+    let about_link = |kind: FindingKind, ordinal: u64| {
+        let mut finding = unread_block("notes/a.md");
+        finding.kind = kind;
+        finding.ordinal = Some(ordinal);
+        finding
+    };
     for finding in [
+        about_link(FindingKind::Ambiguous, 1),
         ambiguity(
             "notes/a.md",
             "glossary",
@@ -967,6 +983,7 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
             &["other/glossary.md"],
             3,
         ),
+        about_link(FindingKind::Broken, 0),
         unread_block("notes/a.md"),
     ] {
         writing
@@ -984,7 +1001,7 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
     let mut kept = 0;
     for row in &found.rows {
         let findings = row.findings.clone().expect("the findings column");
-        let validated = match seeded
+        let mut validated = match seeded
             .snapshot()
             .validate(
                 &ValidateParams::new(vault.clone())
@@ -998,6 +1015,15 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
             Validation::Findings { rows, .. } => rows,
             Validation::Summary { .. } => panic!("a page answered a summary"),
         };
+        // The validate's findings in the column's order: by the link each is
+        // about, a finding about the document first, then by kind and id.
+        validated.sort_by_key(|finding| {
+            let ordinal = about_links
+                .iter()
+                .find(|(kind, _)| row.path.as_str() == "notes/a.md" && *kind == finding.kind)
+                .map(|(_, ordinal)| *ordinal);
+            (ordinal, finding.kind.as_str(), finding.id)
+        });
         assert_eq!(
             findings.total,
             validated.len() as u64,
@@ -1034,8 +1060,11 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
         a.items.iter().map(|item| item.kind).collect::<Vec<_>>(),
         vec![
             FindingKind::FrontmatterUnreadable,
-            FindingKind::PathNamesNoDocument
-        ]
+            FindingKind::PathNamesNoDocument,
+            FindingKind::Broken,
+            FindingKind::Ambiguous,
+        ],
+        "the findings about the document, then link 0's, then link 1's"
     );
     assert_eq!(a.items[1].head.total(), 3);
     assert!(a.items[1].hint.is_some());

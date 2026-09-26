@@ -126,7 +126,8 @@ pub(crate) type Reading<T> = rusqlite::Result<Result<T, StoreError>>;
 /// The columns every finding reader selects, in the order [`stored_finding`]
 /// reads them.
 const FINDING_COLUMNS: &str = "id, kind, severity, path, target, span_line, span_column,
-            span_offset, candidates_total, message, detail, vault_schema_fingerprint, generation";
+            span_offset, candidates_total, message, detail, vault_schema_fingerprint, generation,
+            ordinal";
 
 /// The columns every reader of a document row selects, in the order
 /// [`stored_document`] reads them. A reader that wants the row's id or its body
@@ -1546,8 +1547,9 @@ pub(crate) fn write_finding(
         .query_row(
             "INSERT INTO findings (
                  vault_schema_fingerprint, generation, kind, severity, path, target,
-                 span_line, span_column, span_offset, candidates_total, message, detail
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 span_line, span_column, span_offset, candidates_total, message, detail,
+                 ordinal
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              RETURNING id",
             params![
                 fingerprint,
@@ -1562,6 +1564,7 @@ pub(crate) fn write_finding(
                 finding.candidates_total,
                 finding.message,
                 finding.detail,
+                finding.ordinal,
             ],
             |row| row.get(0),
         )
@@ -2421,6 +2424,13 @@ fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
     let detail: Option<String> = row.get(10)?;
     let vault_schema_fingerprint: String = row.get(11)?;
     let generation: i64 = row.get(12)?;
+    let ordinal: Option<i64> = row.get(13)?;
+    let Some(ordinal) = ordinal.map(u64::try_from).transpose().ok() else {
+        return Ok(Err(unreadable(
+            "findings.ordinal",
+            &ordinal.map(|at| at.to_string()).unwrap_or_default(),
+        )));
+    };
     Ok(DocumentPath::new(&path).map(|path| {
         (
             id,
@@ -2431,6 +2441,7 @@ fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
                 class_keys: BTreeSet::new(),
                 target,
                 span,
+                ordinal,
                 candidates: Vec::new(),
                 candidates_total,
                 message,
@@ -2635,6 +2646,7 @@ mod tests {
                     class_keys: [class_key].into_iter().collect(),
                     target: None,
                     span: None,
+                    ordinal: None,
                     candidates: vec![CandidateFact {
                         path: DocumentPath::new(&format!("candidate-{index}.md")).unwrap(),
                         suffix: format!("candidate-{index}"),
@@ -2697,6 +2709,7 @@ mod tests {
                         .collect(),
                     target: None,
                     span: None,
+                    ordinal: None,
                     candidates: Vec::new(),
                     candidates_total: 0,
                     message: format!("finding {index}"),

@@ -25,10 +25,11 @@ use std::collections::{BTreeSet, HashMap};
 
 use norn_db::rusqlite::Row;
 use norn_wire::{
-    Candidate, CandidateHead, FindingKind, FindingRow, Hint, ResolutionTarget, Severity,
+    Candidate, CandidateHead, CursorKey, FindingKind, FindingRow, Hint, ResolutionTarget, Severity,
 };
 
 use super::Ran;
+use crate::ddl::findings::DOCUMENT_POSITION;
 use crate::error::{self, StoreError};
 use crate::facts::Span;
 use crate::find::{FindStatement, compose_finding_candidates, compose_finding_classes};
@@ -39,7 +40,8 @@ use crate::store::Snapshot;
 /// A finding's own columns, in the order [`finding_base`] reads them, under
 /// the alias `f`.
 pub(crate) const FINDING_ROW_COLUMNS: &str = "f.id, f.kind, f.severity, f.path, f.target, \
-     f.span_line, f.span_column, f.span_offset, f.candidates_total, f.message, f.generation";
+     f.span_line, f.span_column, f.span_offset, f.candidates_total, f.message, f.generation, \
+     f.ordinal, f.position";
 
 /// A finding's own columns, as a statement read them, before its head and its
 /// hint are read beside them.
@@ -57,6 +59,65 @@ pub(crate) struct FindingBase {
     candidates_total: u64,
     message: String,
     generation: i64,
+    /// The ordinal of the link the finding is about, and `None` for a finding
+    /// about the document at its path.
+    ordinal: Option<i64>,
+    /// Where the finding stands among its path's findings, as the column
+    /// `findings.position` holds it.
+    position: i64,
+}
+
+impl FindingBase {
+    /// Where the finding stands among its path's findings, as the column
+    /// `findings.position` holds it: the link's ordinal, or
+    /// [`DOCUMENT_POSITION`] for a finding about the document.
+    pub(crate) const fn position(&self) -> i64 {
+        self.position
+    }
+
+    /// The cursor key a validate's page that stopped at this finding
+    /// continues from.
+    pub(crate) fn finding_key(&self) -> Result<CursorKey, StoreError> {
+        let (kind, ordinal, id) = self.key_parts()?;
+        Ok(CursorKey::finding(kind, self.path.clone(), ordinal, id))
+    }
+
+    /// The cursor key a get's page of one document's findings that stopped at
+    /// this finding continues from.
+    pub(crate) fn document_finding_key(&self) -> Result<CursorKey, StoreError> {
+        let (kind, ordinal, id) = self.key_parts()?;
+        Ok(CursorKey::document_finding(
+            self.path.clone(),
+            ordinal,
+            kind,
+            id,
+        ))
+    }
+
+    /// The kind, the ordinal and the id as a cursor carries them.
+    fn key_parts(&self) -> Result<(FindingKind, Option<u64>, u64), StoreError> {
+        let kind = FindingKind::try_from(self.kind.as_str())
+            .map_err(|_| unreadable("findings.kind", &self.kind))?;
+        let ordinal = self
+            .ordinal
+            .map(|ordinal| {
+                u64::try_from(ordinal)
+                    .map_err(|_| unreadable("findings.ordinal", &ordinal.to_string()))
+            })
+            .transpose()?;
+        let id =
+            u64::try_from(self.id).map_err(|_| unreadable("findings.id", &self.id.to_string()))?;
+        Ok((kind, ordinal, id))
+    }
+}
+
+/// Where a finding a cursor names stands among its path's findings, as the
+/// column `findings.position` holds it, and `None` for an ordinal no stored
+/// finding carries.
+pub(crate) fn cursor_position(ordinal: Option<u64>) -> Option<i64> {
+    ordinal.map_or(Some(DOCUMENT_POSITION), |ordinal| {
+        i64::try_from(ordinal).ok()
+    })
 }
 
 /// One row of a statement selecting [`FINDING_ROW_COLUMNS`] first.
@@ -79,6 +140,8 @@ pub(crate) fn finding_base(row: &Row<'_>) -> Reading<FindingBase> {
         candidates_total: row.get(8)?,
         message: row.get(9)?,
         generation: row.get(10)?,
+        ordinal: row.get(11)?,
+        position: row.get(12)?,
     }))
 }
 

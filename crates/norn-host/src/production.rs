@@ -3374,6 +3374,8 @@ impl<'s> Pending<'s> {
                 class_keys: BTreeSet::new(),
                 target,
                 span: None,
+                // Every cause here is about the document, not one of its links.
+                ordinal: None,
                 candidates: Vec::new(),
                 candidates_total: 0,
                 detail: Some(detail),

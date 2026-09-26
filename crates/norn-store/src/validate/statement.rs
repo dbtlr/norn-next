@@ -12,6 +12,7 @@ use norn_db::rusqlite::types::Value;
 
 use norn_wire::Severity;
 
+use crate::ddl::findings::DOCUMENT_POSITION;
 use crate::read::{
     AnswerSeek, Binder, FINDING_ROW_COLUMNS, Filter, PathPart, Term, answer_ordering, answer_place,
     answer_range,
@@ -29,12 +30,14 @@ use crate::read::{
 ///
 /// A page of findings reads one kind after another, in the byte order of the
 /// kind's code, so each kind is a section whose findings stand in the answer's
-/// path order and then by id — `(path COLLATE NOCASE, path, id)`, on every
-/// root — and the page is in `(kind, path, id)` order.
+/// path order, then by position among their path's findings and then by id —
+/// `(path COLLATE NOCASE, path, position, id)`, on every root — and the page
+/// is in `(kind, path, position, id)` order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidateStatement {
     /// One kind's findings standing under the active fingerprint, from the
-    /// page's position on, in `(path COLLATE NOCASE, path, id)` order: a seek
+    /// page's position on, in `(path COLLATE NOCASE, path, position, id)`
+    /// order: a seek
     /// of `findings_fingerprint_kind_nocase` at `(fingerprint, kind)` bounded
     /// below by the position, or of `findings_fingerprint_kind_severity_nocase`
     /// at `(fingerprint, kind, severity)` where the request admits one
@@ -91,9 +94,9 @@ pub(crate) struct Findings<'a> {
     pub(crate) kinds: &'a [&'a str],
     /// The severities admitted, as stored; `None` where every severity is.
     pub(crate) severities: Option<&'a [&'a str]>,
-    /// The `(path, id)` a section resumes after; `None` starts at its first
-    /// finding.
-    pub(crate) after: Option<(&'a str, i64)>,
+    /// The `(path, position, id)` a section resumes after; `None` starts at
+    /// its first finding.
+    pub(crate) after: Option<(&'a str, i64, i64)>,
     /// The conjunction's parts: a path part judges the finding's own path,
     /// and every other part the document row at it.
     pub(crate) filters: &'a [Filter],
@@ -114,7 +117,7 @@ pub(crate) struct Findings<'a> {
 /// answer's path order and the index that holds that order compares paths under
 /// `NOCASE`. Every path part's range, and on a page the position a section
 /// resumes after, fold into one lower bound on `(path COLLATE NOCASE, path,
-/// id)` and one upper bound on `path COLLATE NOCASE` — the greatest lower and
+/// position, id)` and one upper bound on `path COLLATE NOCASE` — the greatest lower and
 /// the least upper — so a section seeks its kind's findings exactly past the
 /// tightest place whichever the request named ([`AnswerSeek`]), sorts nothing,
 /// and costs the findings its page reads. Where the root tells spellings apart,
@@ -177,23 +180,23 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     // The greatest lower bound and the least upper bound of the path parts'
     // ranges in the answer order, and on a page, the section's position. A
     // lower bound is a place in the answer order — the folded path, the path,
-    // then an id — and a text orders below the empty blob a range with no
-    // upper bound is bounded by. Each bound picked is one some part's own
-    // range states, so the range holds every path all the parts admit; a
-    // part's range opens at the least place its folded prefix begins, before
-    // every path folding to it whatever its bytes, which the empty path and
-    // id 0 name.
-    let mut lower: (String, String, i64) = match findings.after {
-        Some((path, id)) => {
+    // a position among the path's findings, then an id — and a text orders
+    // below the empty blob a range with no upper bound is bounded by. Each
+    // bound picked is one some part's own range states, so the range holds
+    // every path all the parts admit; a part's range opens at the least place
+    // its folded prefix begins, before every path folding to it whatever its
+    // bytes, which the empty path, the document's position and id 0 name.
+    let mut lower: (String, String, i64, i64) = match findings.after {
+        Some((path, position, id)) => {
             let (folded, path) = answer_place(path);
-            (folded, path, id)
+            (folded, path, position, id)
         }
-        None => (String::new(), String::new(), 0),
+        None => (String::new(), String::new(), DOCUMENT_POSITION, 0),
     };
     let mut upper: Option<Value> = None;
     for part in &parts {
         let (from, to) = answer_range(&part.pattern);
-        let opening = (from, String::new(), 0);
+        let opening = (from, String::new(), DOCUMENT_POSITION, 0);
         if opening > lower {
             lower = opening;
         }
@@ -207,14 +210,15 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     // sought at its path by equality on both path columns, which leaves the
     // position and the range no column to seek, so they test what that seek
     // reaches.
-    let (folded, path, id) = lower;
+    let (folded, path, position, id) = lower;
     match findings.statement {
         // The position and the range's lower bound are one place in the
         // answer order, which the kind's index is sought past.
         ValidateStatement::KindPage => {
-            let (folded, path, id) = (
+            let (folded, path, position, id) = (
                 binder.bind(Value::Text(folded)),
                 binder.bind(Value::Text(path)),
+                binder.bind(Value::Integer(position)),
                 binder.bind(Value::Integer(id)),
             );
             conditions.push(
@@ -225,6 +229,10 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
                     path: "f.path",
                     folded: &folded,
                     bytewise: &path,
+                    trail: Some(Term {
+                        column: "f.position",
+                        bound: &position,
+                    }),
                     id: Some(Term {
                         column: "f.id",
                         bound: &id,
@@ -284,7 +292,7 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
             let limit = binder.bind(Value::Integer(
                 i64::try_from(findings.rows).expect("a page's row count fits i64"),
             ));
-            let ordered = format!("{}, f.id", answer_ordering("f.path", ""));
+            let ordered = format!("{}, f.position, f.id", answer_ordering("f.path", ""));
             (
                 format!(
                     "SELECT {FINDING_ROW_COLUMNS} {from}

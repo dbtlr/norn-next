@@ -83,9 +83,9 @@ pub enum FindStatement {
     /// the ceiling cut: an index-only count over the same index.
     NestedTotal(Nested),
     /// The head of the findings standing at each path a page found, under the
-    /// active fingerprint: the findings below the per-row ceiling, in `(kind,
-    /// id)` order, one seek of `findings_path` per path, each finding then
-    /// reached by its row id.
+    /// active fingerprint: the findings below the per-row ceiling, in
+    /// `(position, kind, id)` order, one seek of `findings_path` per path, each
+    /// finding then reached by its row id.
     FindingHead,
     /// How many findings stand at each path whose head the ceiling cut: an
     /// index-only count over `findings_path`.
@@ -384,6 +384,7 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
                 path: "f.path",
                 folded: &place,
                 bytewise: &place,
+                trail: None,
                 id: None,
             };
             (
@@ -451,6 +452,7 @@ fn path_seek(reach: &str, comparison: &str, place: &str) -> String {
         path: "d.path",
         folded: place,
         bytewise: place,
+        trail: None,
         id: None,
     }
     .spelled()
@@ -645,8 +647,8 @@ pub(crate) fn path_list(paths: &[&str]) -> Result<Value, StoreError> {
 }
 
 /// [`FindStatement::FindingHead`]: the findings standing at each of `paths`
-/// under `fingerprint`, at most `ceiling` of them per path in `(kind, id)`
-/// order, each as [`FINDING_ROW_COLUMNS`].
+/// under `fingerprint`, at most `ceiling` of them per path in `(position,
+/// kind, id)` order, each as [`FINDING_ROW_COLUMNS`].
 ///
 /// The paths drive the statement — `CROSS JOIN` keeps them the outer loop —
 /// and each path's head is a seek of `findings_path` at `(path, fingerprint)`
@@ -663,7 +665,7 @@ pub(crate) fn compose_finding_head(
              CROSS JOIN findings AS f
              WHERE f.id IN (SELECT h.id FROM findings AS h
                  WHERE h.path = j.value AND h.vault_schema_fingerprint = ?2
-                 ORDER BY h.kind, h.id
+                 ORDER BY h.position, h.kind, h.id
                  LIMIT ?3)"
         ),
         vec![
