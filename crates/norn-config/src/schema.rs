@@ -344,21 +344,17 @@ impl TagFacet {
         self.undeclared
     }
 
-    /// Whether `name` is in the declared vocabulary: a declared name, or a
-    /// name one of the patterns matches under `case`.
+    /// Whether `name` is in the declared vocabulary.
     ///
-    /// A declared name is compared as written, because deciding that `#Work`
-    /// and `#work` are one tag is a matching policy the syntax layer
-    /// deliberately leaves open and a schema that wants both declares both.
-    /// The patterns are globs, and a glob's case is its caller's to name:
-    /// derivation names the case the store's recorded path order gives every
-    /// glob, so a pattern folds ASCII case exactly where the vault root does.
-    pub fn admits(&self, name: &str, case: CaseFold) -> bool {
+    /// Case is compared as written, because deciding that `#Work` and `#work`
+    /// are one tag is a matching policy the syntax layer deliberately leaves
+    /// open and a schema that wants both declares both.
+    pub fn admits(&self, name: &str) -> bool {
         self.declared.contains(name)
             || self
                 .patterns
                 .iter()
-                .any(|pattern| pattern.matches(name, case))
+                .any(|pattern| pattern.matches(name, CaseFold::Exact))
     }
 
     /// Whether a tag outside the vocabulary is a finding.

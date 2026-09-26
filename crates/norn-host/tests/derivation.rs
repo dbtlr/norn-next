@@ -60,7 +60,7 @@ use norn_wire::FindingKind;
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(5),
+    DerivationVersion::new(4),
     "d420b32c4184911719c63bfffa46af59b27d4f6edac9d6de500ad31a1471de33",
 );
 

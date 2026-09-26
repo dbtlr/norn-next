@@ -1965,8 +1965,8 @@ that does not tell the two apart. Every glob matches under that one rule: a path
 find, a count or a validate matches with ASCII case folded where the store's order folds and
 bytewise where it does not, and its range is read in the same order, so `find --path
 'archive/**'` reaches `Archive/x.md` on a root that folds and not on one that tells the two
-apart; and a derivation judges a document's tags by the tag facet's patterns under the order
-of the store it derives into, while a declared tag name is compared as written. Class-scoped findings maintenance names a changed path's
+apart. A tag facet's patterns name tags, not paths, and match bytewise on every root.
+Class-scoped findings maintenance names a changed path's
 class in the key space the store's order selects, the space every finding in the store is
 filed in, so a finding is re-decided when a document joins or leaves its class. A class and a
 class probe are compiled only under the store's recorded order, never under one a caller

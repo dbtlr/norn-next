@@ -45,21 +45,20 @@
 //!
 //! # Its callers' fold
 //!
-//! Every caller names the same fold, taken from one rule: [`CaseFold::Ascii`]
-//! where the vault store's recorded path order folds ASCII case, which is where
-//! the vault root was proven to treat two spellings as one name, and
-//! [`CaseFold::Exact`] where it does not. The store states the rule once
-//! (`norn_store::StoredPathOrder::glob_case`), and each caller reads it there:
+//! Every glob over a path names the same fold, taken from one rule:
+//! [`CaseFold::Ascii`] where the vault store's recorded path order folds ASCII
+//! case, which is where the vault root was proven to treat two spellings as
+//! one name, and [`CaseFold::Exact`] where it does not. The store states the
+//! rule once (`norn_store::StoredPathOrder::glob_case`), and each path caller
+//! reads it there:
 //!
 //! - the ambiguity-ignore set, where the store's resolver reads a class;
 //! - the path part of a find, a count and a validate, where the store's read
 //!   builders run the glob inside a statement, under the order the snapshot
-//!   reads;
-//! - the tag facet's patterns, where derivation judges a document's tags, under
-//!   the order of the store it derives into.
+//!   reads.
 //!
-//! A store derived under one order is rebuilt under another, so no stored
-//! answer was matched under a fold its root no longer proves.
+//! A tag facet's patterns name tags, not paths, and match under
+//! [`CaseFold::Exact`] on every root.
 //!
 //! # What matching costs
 //!

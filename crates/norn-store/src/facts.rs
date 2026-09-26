@@ -380,9 +380,8 @@ pub struct StoredSuffixKeys {
 ///   classes are filed in.
 /// - **Every glob's fold** ([`StoredPathOrder::glob_case`]): bytewise where the
 ///   root tells spellings apart and with ASCII case folded where it folds them.
-///   The ambiguity-ignore globs ([`crate::AmbiguityIgnore::admits`]), the path
-///   part of a find, a count and a validate, and the tag facet's patterns a
-///   derivation judges a document's tags by all match under it.
+///   The ambiguity-ignore globs ([`crate::AmbiguityIgnore::admits`]) and the
+///   path part of a find, a count and a validate match under it.
 /// - **The collation a path part's range seeks under**: `documents_path` and
 ///   the findings indexes' bytewise path where the root tells spellings apart,
 ///   and `documents_path_nocase` and the findings indexes that compare the path
@@ -424,11 +423,11 @@ impl StoredPathOrder {
         }
     }
 
-    /// How a glob's literal letters compare with a path's, or a tag's, under
-    /// this order: as themselves where the root tells spellings apart, and
-    /// with ASCII case folded where it folds them. Every glob a store's rows
-    /// are matched against takes its case here, so no glob consumer decides
-    /// the fold for itself.
+    /// How a glob's literal letters compare with a path's under this order:
+    /// as themselves where the root tells spellings apart, and with ASCII case
+    /// folded where it folds them. Every glob a store's paths are matched
+    /// against takes its case here, so no glob consumer decides the fold for
+    /// itself.
     pub const fn glob_case(self) -> CaseFold {
         match self {
             StoredPathOrder::Sensitive => CaseFold::Exact,

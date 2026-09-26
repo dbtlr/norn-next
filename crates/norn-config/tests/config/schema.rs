@@ -124,8 +124,8 @@ fn a_declared_vocabulary_alone_judges_no_document() {
     let schema =
         VaultSchema::parse(b"version: 1\ntags:\n  declared: [area]\n").expect("a listed facet");
 
-    assert!(schema.tags().admits("area", CaseFold::Exact));
-    assert!(!schema.tags().admits("project", CaseFold::Exact));
+    assert!(schema.tags().admits("area"));
+    assert!(!schema.tags().admits("project"));
     assert!(!schema.tags().reports_undeclared());
     assert!(!schema.rederives_documents());
 }
@@ -178,38 +178,17 @@ fn a_reporting_facet_admits_its_names_and_its_patterns() {
     let schema = VaultSchema::parse(WHOLE).expect("a whole schema");
     let facet = schema.tags();
 
-    for case in [CaseFold::Exact, CaseFold::Ascii] {
-        assert!(facet.admits("area", case));
-        assert!(facet.admits("project", case));
-        assert!(facet.admits("person/ada", case));
-        assert!(facet.admits("person/ada/notes", case));
-        // `**` covers the run of no segments, so the pattern admits its own
-        // root.
-        assert!(facet.admits("person", case));
-        assert!(!facet.admits("ephemeral", case));
-        // A declared name is compared as written under either case.
-        assert!(!facet.admits("Area", case));
-    }
+    assert!(facet.admits("area"));
+    assert!(facet.admits("project"));
+    assert!(facet.admits("person/ada"));
+    assert!(facet.admits("person/ada/notes"));
+    // `**` covers the run of no segments, so the pattern admits its own root.
+    assert!(facet.admits("person"));
+    assert!(!facet.admits("ephemeral"));
+    // Case is compared as written.
+    assert!(!facet.admits("Area"));
     assert!(facet.reports_undeclared());
     assert!(schema.rederives_documents());
-}
-
-/// **A tag pattern matches under the case its caller names, and a declared
-/// name as written.** The patterns are globs, and every glob takes its case
-/// from the root the vault's store was derived on: under the ASCII fold,
-/// `person/**` admits `Person/Ada`; matched exactly, it does not. A declared
-/// name is a literal, not a glob, so `Area` is not `area` under either.
-#[test]
-fn a_tag_pattern_matches_under_the_case_its_caller_names() {
-    let schema = VaultSchema::parse(WHOLE).expect("a whole schema");
-    let facet = schema.tags();
-
-    for name in ["Person/Ada", "PERSON", "PERSON/ada/notes"] {
-        assert!(facet.admits(name, CaseFold::Ascii), "{name} folded");
-        assert!(!facet.admits(name, CaseFold::Exact), "{name} exactly");
-    }
-    assert!(!facet.admits("Area", CaseFold::Ascii));
-    assert!(!facet.admits("Ephemeral", CaseFold::Ascii));
 }
 
 #[test]

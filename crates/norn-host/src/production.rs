@@ -3320,16 +3320,8 @@ impl<'s> Pending<'s> {
         stored: Option<&DocumentPath>,
     ) {
         count_document_derived();
-        let order = self.store.path_order();
-        let Plan { change, findings } = plan_document(
-            path,
-            spelling,
-            bytes,
-            hash,
-            stored,
-            &self.declared.model,
-            order,
-        );
+        let Plan { change, findings } =
+            plan_document(path, spelling, bytes, hash, stored, &self.declared.model);
         if let Some(change) = change {
             self.push(change);
         }
@@ -10119,54 +10111,6 @@ mod tests {
             foo_resolves_under(proven)
         );
         ops.detach(&name, attachment);
-    }
-
-    /// **A derivation judges a document's tags by the facet's patterns under
-    /// the path order its store records**: the same bytes derived into a store
-    /// recording each order, `area/**` admits `#Area/work` where the order
-    /// folds ASCII case, and where it tells spellings apart the tag is an
-    /// undeclared-tag finding. The store's order is set by reopening it, so
-    /// the case judges both orders on any host.
-    #[test]
-    fn a_derivation_judges_tag_patterns_under_the_order_its_store_records() {
-        let f = Fixture::watcherless("derive-tag-pattern-case");
-        fs::write(
-            f.vault().join(".norn/schema.yaml"),
-            "version: 1\ntags:\n  patterns: [\"area/**\"]\n  undeclared: report\n",
-        )
-        .unwrap();
-        let bytes = b"# body\n#Area/work\n";
-        let root = f.vault();
-        let mut store = Store::open(
-            f.root.join("tag-pattern-case.sqlite3"),
-            StoredPathOrder::Sensitive,
-            crate::DERIVATION_VERSION,
-        )
-        .unwrap();
-        for (order, expected) in [
-            (
-                StoredPathOrder::Sensitive,
-                vec![Some("Area/work".to_string())],
-            ),
-            (StoredPathOrder::AsciiCaseInsensitive, Vec::new()),
-        ] {
-            store = store.discard_and_reopen(order).unwrap();
-            ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
-            let mut account = Account::default();
-            let mut pending =
-                Pending::new(&mut store, 64, root.as_path(), &[], &mut account).unwrap();
-            pending.derive(
-                "note.md",
-                bytes,
-                norn_fs::ContentHash::of(bytes).to_string(),
-            );
-            pending.flush().unwrap();
-            let targets: Vec<Option<String>> = findings_at(&mut store, "note.md")
-                .into_iter()
-                .map(|finding| finding.target)
-                .collect();
-            assert_eq!(targets, expected, "under {order:?}");
-        }
     }
 
     /// **A store an earlier derivation wrote is rebuilt from zero at the
