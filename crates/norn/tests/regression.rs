@@ -80,7 +80,7 @@ use norn_testkit::regression::{
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 109;
+const CASE_TOTAL: usize = 112;
 
 /// The whole registry's contract, as one value.
 ///
@@ -89,7 +89,7 @@ const CASE_TOTAL: usize = 109;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "8c3c383c1e2108fd7588e7e3c283162dd1e5c7485a2d2597872e1df29d00028e";
+const CONTRACT_DIGEST: &str = "59b30cceb7ba8b437f043aae83830271dec2af803c306317b32f0fb6b41e351d";
 
 /// The cases carried by tests today, by name.
 ///
@@ -103,10 +103,13 @@ const BOUND_CASES: &[&str] = &[
     "a-limit-bounds-hydration-through-one-paging-seam",
     "a-measurement-lane-proves-it-measured",
     "a-mutation-confirms-the-file-it-holds-before-it-publishes",
+    "a-page-continues-at-the-successor-of-its-last-row",
     "a-sidecar-is-keyed-by-its-own-model-and-scoped-by-the-store-epoch",
     "cache-identity-is-total",
+    "cache-is-authoritative-for-content",
     "cost-is-independent-of-vault-size",
     "encoding-prefix-transparency",
+    "existence-probes-and-per-request-allocation-are-bounded",
     "finding-candidates-are-capped-with-a-total",
     "fixtures-carry-real-content-volume",
     "frontmatter-roundtrip-or-refuse",
@@ -120,6 +123,7 @@ const BOUND_CASES: &[&str] = &[
     "predicate-filtering-in-sql-is-the-known-good-shape",
     "set-valued-answers-are-pushed-down",
     "text-search-is-indexed",
+    "unknown-sort-or-projection-keys-never-silently-no-op",
     "vault-root-containment",
 ];
 

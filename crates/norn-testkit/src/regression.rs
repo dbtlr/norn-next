@@ -76,11 +76,15 @@ use crate::json::{JsonError, read_json};
 ///
 /// Pinned here rather than read from the registry, for the reason the corpus
 /// pins its category lists: a case named in the data alone could be dropped
-/// by editing the data. These five were ratified individually, and the audit
-/// requires the registry to mark exactly these `mandatory` — so removing one
-/// fails the gate whichever file the edit lands in.
+/// by editing the data. Five were ratified individually. The sixth is the
+/// unknown-key class's surface half: that class is two cases, the diagnostic a
+/// query answers on the wire and the surfaces that render it and exit on it,
+/// and both halves are mandatory. The audit requires the registry to mark
+/// exactly these `mandatory`, so removing one fails the gate whichever file
+/// the edit lands in.
 pub const MANDATORY_CASES: &[&str] = &[
     "error-variant-matches-the-operation-reported",
+    "every-surface-tells-an-unsatisfiable-request-from-an-empty-answer",
     "forecast-and-apply-are-one-classifier",
     "mutation-honors-its-planned-flags",
     "one-display-source-per-semantic",
@@ -2454,7 +2458,7 @@ fn a_carrier() {}
     }
 
     /// A registry that audits clean against [`scratch`] and [`index`]: the
-    /// pinned venue scale, the five mandatory cases, one bound case, and one
+    /// pinned venue scale, the mandatory cases, one bound case, and one
     /// dormant layer-0 case with its reason.
     fn sound() -> Registry {
         let mut cases: Vec<Case> = MANDATORY_CASES
