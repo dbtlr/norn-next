@@ -779,7 +779,8 @@ typed order's least-value marker index from a `(value, path)` position, and the 
 section, a walk of the case-insensitive path index from a path position that probes each
 document's marker row; the known-key probe and the field-universe walk, both reading the
 presence rows alone;
-the bare-directory probe, two seeks of the path index; the match probe, one read of the
+the bare-directory probe, two seeks of the path index the root's order selects —
+`documents_path`, or `documents_path_nocase` where the root folds ASCII case; the match probe, one read of the
 full-text index through its `MATCH` selection, which is where a query the engine cannot
 parse is met before the page runs; and the hydration of the rows a page returns — the
 document rows by id, each projected nested collection's head and total by its
@@ -880,8 +881,8 @@ candidate head and total the pillar stores and a hint naming the `find` that enu
 class, read through the one accessor a find's findings column reads through, so a finding
 is the same row on either verb. It names two statements under the same discipline, each
 carrying a plan bar with a negative control and held by a census to exactly one bar: a
-kind's page, a seek of `(fingerprint, kind)` in `(path COLLATE NOCASE, path, id)` order from
-the page's position — of `(fingerprint, kind, severity)` where a severity floor admits one
+kind's page, a seek of `(fingerprint, kind)` in `(path COLLATE NOCASE, path, id)` order past
+the page's position on all three — of `(fingerprint, kind, severity)` where a severity floor admits one
 severity — over the indexes that hold the path under `NOCASE` with a bytewise tie-break, that
 a path part's folded range bounds on every root, and that a document part keeping what it
 seeks drives instead from the documents it matched; and the summary, a covering seek of
@@ -890,7 +891,8 @@ cell it admits grouped in the index's order, or, where a document part keeping w
 drives it, one covering seek per matched document and cell, its groups sorted. A work bar
 reads their SQLite counters over two vault sizes: a validate narrowed by kind, severity, a
 path part or a document part costs the same at both and steps through no full scan, on
-either root, and a page of a range that matches every finding costs the same at both. On a
+either root, a page of a range that matches every finding costs the same at both, and a page
+deep among many findings at one path costs what the page one page in costs. On a
 root that tells spellings apart a path part's folded range also reads the findings at paths
 spelling its prefix in another case, which its glob rejects. A
 payload bar holds that no statement a page or a summary runs, under every narrowing the drain
@@ -1963,9 +1965,12 @@ the whole place. The globs match under the store's order — with ASCII case fol
 folds, bytewise where it does not — so `archive/**` ignores `Archive/notes.md` on a root
 that does not tell the two apart. Every glob matches under that one rule: a path part of a
 find, a count or a validate matches with ASCII case folded where the store's order folds and
-bytewise where it does not, and its range is read in the same order, so `find --path
-'archive/**'` reaches `Archive/x.md` on a root that folds and not on one that tells the two
-apart. A tag facet's patterns name tags, not paths, and match bytewise on every root.
+bytewise where it does not, so `find --path 'archive/**'` reaches `Archive/x.md` on a root
+that folds and not on one that tells the two apart. A find's and a count's path range is read
+in the same order; a validate's is its glob's folded range in the answer order, as the
+validate builder's paragraph above states. A glob's work follows its
+literal prefix's range, so a glob with no literal prefix, such as `**/*.MD`, reads every path
+on either root. A tag facet's patterns name tags, not paths, and match bytewise on every root.
 **An answer orders paths one way on every root**: a find's pages, both sections of a field
 sort and a validate's findings stand in `(path COLLATE NOCASE, path)` order whether the root
 folds ASCII case or not. That order is the read machinery's, not the root's: a heal pages

@@ -36,8 +36,9 @@
 //!
 //! **The missing section's walk is the price of ordering missing as `NULL`.**
 //! The valued section is a seek of the marker index, and stops at the page's
-//! bound. The missing section is a walk of the path index that probes each
-//! document's marker row, so it passes every document carrying the key to
+//! bound. The missing section is a walk of `documents_path_nocase`, which
+//! holds the answer's path order on every root, that probes each document's
+//! marker row, so it passes every document carrying the key to
 //! reach the next one that does not. An ascending first page reads the missing
 //! section first, so where few or no documents miss the key it costs a walk
 //! proportional to the documents that carry it. A drain pays that walk at most

@@ -36,8 +36,9 @@
 //!
 //! - `findings_fingerprint_kind_nocase` is `(fingerprint, kind, path COLLATE
 //!   NOCASE, path)`: one kind's findings in `(path COLLATE NOCASE, path, id)`
-//!   order, sought from a page's position and bounded by a path part's folded
-//!   range.
+//!   order, sought past a page's position on all three and bounded by a path
+//!   part's folded range, and a page a document part drives seeks it at each
+//!   matched document's path.
 //! - `findings_fingerprint_kind_severity_nocase` is `(fingerprint, kind,
 //!   severity, path COLLATE NOCASE, path)`. A request narrowed to one severity
 //!   seeks it in the same order within that severity, so the findings of
@@ -47,10 +48,16 @@
 //!   each matched document's path.
 //! - `findings_path` is `(path, fingerprint, kind)`: the findings standing at
 //!   one path, in `(kind, id)` order, which is how a find's findings column
-//!   reads a document's head and stops at its ceiling, and how a validate a
-//!   document part narrows reaches the findings at the documents it matched.
-//!   Its leading `path` is also every subject read and discard's seek, and a
-//!   walked-scope prune's bytewise page of subjects.
+//!   reads a document's head and stops at its ceiling. Its leading `path` is
+//!   also every subject read and discard's seek, and a walked-scope prune's
+//!   bytewise page of subjects.
+//!
+//! A statement a document part drives joins each matched document to its
+//! findings on the path compared folded and bytewise. The folded equality is
+//! implied by the bytewise one, and it is what lets the seek at a matched
+//! document's path run down the `NOCASE` column of the two indexes above. The
+//! bytewise equality is what matches a finding to the one document at its
+//! exact path, where the root tells `a.md` and `A.md` apart.
 //!
 //! # `generation` is what a repair plan cites
 //!

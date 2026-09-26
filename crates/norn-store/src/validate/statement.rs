@@ -109,15 +109,15 @@ pub(crate) struct Findings<'a> {
 ///
 /// **A path part judges the finding's own path**, so it reaches a finding
 /// standing where no document row does. Its glob matches under the root's
-/// fold, as every path part's does, and its range is its glob's folded range
-/// on every root, because a section's findings stand in the answer's path
-/// order and the index that holds that order compares paths under `NOCASE`.
-/// Every path part's range, and on a page the position a section resumes
-/// after, fold into one lower bound on `(path COLLATE NOCASE, path, id)` and
-/// one upper bound on `path COLLATE NOCASE` — the greatest lower and the least
-/// upper — so a section seeks its kind's findings from the tightest place
-/// whichever the request named, sorts nothing, and costs the findings its page
-/// reads. Where the root tells spellings apart, the folded range also reaches
+/// fold, as every path part's does, and its range is the answer order's
+/// ([`answer_range`]) on every root, because a section's findings stand in the
+/// answer's path order and the index that holds that order compares paths
+/// under `NOCASE`. Every path part's range, and on a page the position a
+/// section resumes after, fold into one lower bound on `(path COLLATE NOCASE,
+/// path, id)` and one upper bound on `path COLLATE NOCASE` — the greatest
+/// lower and the least upper — so a section seeks its kind's findings exactly
+/// past the tightest place whichever the request named ([`AnswerSeek`]), sorts
+/// nothing, and costs the findings its page reads. Where the root tells spellings apart, the folded range also reaches
 /// the findings at paths that spell the glob's prefix in another case, which
 /// the glob then rejects.
 ///
@@ -203,6 +203,10 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
             (_, to) => to,
         });
     }
+    // Where matched documents drive the statement, each one's findings are
+    // sought at its path by equality on both path columns, which leaves the
+    // position and the range no column to seek, so they test what that seek
+    // reaches.
     let (folded, path, id) = lower;
     match findings.statement {
         // The position and the range's lower bound are one place in the
@@ -254,7 +258,9 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
         // The path compared folded as well as bytewise: the folded equality
         // is implied by the bytewise one, and it is what lets a seek at a
         // matched document's path run down an index holding the answer's
-        // path order, so a summary's cell stays covered at each document.
+        // path order, so a summary's cell stays covered at each document. The
+        // bytewise equality matches a finding to the document at its exact
+        // path.
         "FROM documents AS dv
                      CROSS JOIN findings AS f
                          ON f.path = dv.path COLLATE NOCASE AND f.path = dv.path"
