@@ -42,8 +42,8 @@
 //! `tags.patterns` match a tag with Unicode case folded and accents kept, over
 //! the whole nested name: `declared: [Work]` admits `#work`, `patterns:
 //! ["area/**"]` admits `#Area/Work`, and neither admits `#Wörk`. Two declared
-//! names that fold to one are one declaration, held at the spelling written
-//! first. See [`TagFacet`].
+//! names that fold to one are one declaration, and so are two patterns, each
+//! held at the spelling written first. See [`TagFacet`].
 //!
 //! Every section is optional. A schema that declares nothing — which is what
 //! `version: 1` alone is — is a valid schema that judges no document, and
@@ -333,12 +333,16 @@ impl DeclaredFolder {
 /// **Every comparison here reads the tag fold** ([`fold_tag`]): a declared
 /// name, a pattern and the tag judged against them are each folded before
 /// they are compared, so `#Work` is admitted by a declared `work` and
-/// `#Area/Work` by the pattern `area/**`. A name declared twice under the fold
-/// is one declaration, held at the spelling the schema writes first.
+/// `#Area/Work` by the pattern `area/**`. The fold takes each character alone,
+/// so a pattern's literal characters fold as a tag's do whatever wildcard
+/// stands beside them. A name or a pattern written twice under the fold is
+/// one declaration, held at the spelling the schema writes first.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TagFacet {
     /// Each declared name's first spelling, keyed by its fold.
     declared: BTreeMap<String, String>,
+    /// Each pattern at its first spelling under the tag fold, in the order
+    /// written.
     patterns: Vec<Pattern>,
     /// Each pattern with its text folded, in the order of `patterns`: the
     /// reading a folded tag is matched against.
@@ -353,7 +357,8 @@ impl TagFacet {
         self.declared.values().map(String::as_str)
     }
 
-    /// The patterns the facet admits beyond its literal names, as written.
+    /// The patterns the facet admits beyond its literal names, each at its
+    /// first spelling under the tag fold, in the order written.
     pub fn patterns(&self) -> &[Pattern] {
         &self.patterns
     }
@@ -650,17 +655,10 @@ fn read_tags(document: &serde_yaml::Mapping) -> Result<TagFacet, VaultSchemaErro
         None => BTreeMap::new(),
         Some(value) => read_tag_names("tags.declared", value)?,
     };
-    let patterns = match at(tags, "patterns") {
-        None => Vec::new(),
-        Some(value) => read_patterns("tags.patterns", value)?,
+    let (patterns, folded_patterns) = match at(tags, "patterns") {
+        None => (Vec::new(), Vec::new()),
+        Some(value) => fold_tag_patterns(read_patterns("tags.patterns", value)?),
     };
-    let folded_patterns = patterns
-        .iter()
-        .map(|pattern| {
-            Pattern::parse(&fold_tag(pattern.as_str()))
-                .expect("a pattern's fold is as long as the pattern, so it is not empty")
-        })
-        .collect();
     let undeclared = match at(tags, "undeclared") {
         None => UndeclaredTags::default(),
         Some(value) => match value.as_str() {
@@ -786,6 +784,24 @@ fn read_tag_names(
             .or_insert_with(|| name.to_string());
     }
     Ok(names)
+}
+
+/// Tag patterns held once under the tag fold, each at its first spelling, in
+/// the order written: the patterns as written, and beside each its text
+/// folded, which is what a folded tag is matched against.
+fn fold_tag_patterns(patterns: Vec<Pattern>) -> (Vec<Pattern>, Vec<Pattern>) {
+    let mut seen = BTreeSet::new();
+    patterns
+        .into_iter()
+        .filter_map(|pattern| {
+            let folded = fold_tag(pattern.as_str());
+            seen.insert(folded.clone()).then(|| {
+                let folded = Pattern::parse(&folded)
+                    .expect("a pattern's fold is as long as the pattern, so it is not empty");
+                (pattern, folded)
+            })
+        })
+        .unzip()
 }
 
 fn read_patterns(at_path: &str, value: &Value) -> Result<Vec<Pattern>, VaultSchemaError> {

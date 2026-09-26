@@ -1196,6 +1196,26 @@ mod tests {
         );
     }
 
+    /// **A tag pattern written twice under the tag fold is one tag-pattern
+    /// facet**, at the spelling the schema writes first.
+    #[test]
+    fn a_tag_pattern_written_in_two_spellings_is_one_facet_at_its_first() {
+        use norn_wire::{Facet, FacetKind};
+
+        let declared = Declared::pinned(
+            VaultSchema::parse(b"version: 1\ntags:\n  patterns: [\"Area/**\", \"area/**\"]\n")
+                .expect("a schema repeating a pattern"),
+            "repeating",
+        );
+        assert_eq!(
+            declared
+                .content_model()
+                .facets_of(FacetKind::TagPattern, None)
+                .collect::<Vec<Facet>>(),
+            vec![Facet::tag_pattern("Area/**")]
+        );
+    }
+
     /// **A pinned schema's declaration reports every declaration the schema
     /// makes**, each as the facet `describe` answers with, in the order of the
     /// text that keys it: each field with its type, whether it is required and
