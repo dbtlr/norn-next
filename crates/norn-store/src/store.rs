@@ -322,8 +322,12 @@ impl ConnectionTurn {
     /// the act is the transaction and the statement and no acquisition, which
     /// is what makes it safe to run under a caller's lock.
     ///
-    /// The connection goes back to the handle when the [`Snapshot`] is
-    /// dropped, or here where the establishment refuses.
+    /// **The connection stays in the turn until the snapshot takes it**, so
+    /// the turn's drop is what gives it back from every way out before that:
+    /// the refusal, and an unwind between the `BEGIN` and the handing out. The
+    /// drop ends the transaction the `BEGIN` opened before it gives the
+    /// connection back. From the handing out on, the connection goes back to
+    /// the handle when the [`Snapshot`] is dropped.
     ///
     /// The snapshot carries the case behaviour the handle's store rows were
     /// derived under, which the handle carries from its mint, and a find's
@@ -340,33 +344,33 @@ impl ConnectionTurn {
     /// the establishing statement alone and are that one read's view of its
     /// query work.
     pub fn establish(mut self) -> Result<Snapshot, StoreError> {
-        let mut database = self
-            .database
-            .take()
-            .expect("a turn holds the connection until it establishes or drops");
         let reader = Arc::clone(&self.reader);
         let mut counters = SnapshotCounters::default();
-        let established = establish_on(&mut database, &reader, &mut counters);
-        match established {
-            Ok(reading) => Ok(Snapshot {
-                order: reader.order,
-                reader,
-                database: Some(database),
-                reading,
-                counters: Cell::new(counters),
-            }),
-            Err(error) => {
-                let _ = database.close_snapshot();
-                reader.give_the_connection_back(database);
-                Err(error)
-            }
-        }
+        let database = self
+            .database
+            .as_mut()
+            .expect("a turn holds the connection until it establishes or drops");
+        let reading = establish_on(database, &reader, &mut counters)?;
+        Ok(Snapshot {
+            order: reader.order,
+            reader,
+            database: self.database.take(),
+            reading,
+            counters: Cell::new(counters),
+        })
     }
 }
 
 impl Drop for ConnectionTurn {
+    /// **The connection goes back with no transaction open on it.** A turn
+    /// dropped inside its establishment holds the transaction the `BEGIN`
+    /// opened, and a connection given back inside one would refuse the next
+    /// read's `BEGIN`. Ending a transaction that is not open runs nothing, so
+    /// a turn dropped before it established gives the connection back
+    /// without a statement.
     fn drop(&mut self) {
-        if let Some(database) = self.database.take() {
+        if let Some(mut database) = self.database.take() {
+            let _ = database.close_snapshot();
             self.reader.give_the_connection_back(database);
         }
     }
@@ -400,6 +404,8 @@ fn establish_on(
     counters: &mut SnapshotCounters,
 ) -> Result<StoreReading, StoreError> {
     database.open_snapshot()?;
+    #[cfg(feature = "induced-failure")]
+    crate::faults::unwind_if_the_snapshot_open_is_armed();
     counters.count_snapshot();
     counters.count_statement();
     let write_generation = last_write_generation(database.connection())?;
@@ -1733,6 +1739,53 @@ mod tests {
             .expect("the unwound turn kept the handle's connection")
             .establish()
             .expect("a snapshot");
+        assert_eq!(
+            snapshot.counters().snapshots_opened(),
+            1,
+            "the read after the unwind established no snapshot"
+        );
+    }
+
+    /// **An unwind between an establishment's `BEGIN` and its snapshot being
+    /// handed out gives the connection back, with no transaction open on
+    /// it.** The connection is inside a transaction and inside no snapshot
+    /// there, so a turn that let it go with the unwind would leave the handle
+    /// empty for good, and one that gave it back as it stood would hand the
+    /// next read a connection whose `BEGIN` refuses. The read after the unwind
+    /// establishing on the same handle is what holds both.
+    #[test]
+    fn an_establishment_an_unwind_leaves_after_its_begin_gives_the_connection_back() {
+        let scratch = Scratch::new("norn-store-reader-unwind-after-begin");
+        let store = Store::open(
+            scratch.join("derived").join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .expect("a store opens");
+        let reader = Arc::new(
+            store
+                .open_reader()
+                .reader
+                .expect("a live store mints a reader"),
+        );
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::induced_failure::unwind_after_the_next_snapshot_opens();
+            reader
+                .try_take()
+                .expect("a free handle hands out its turn")
+                .establish()
+        }));
+        assert!(
+            unwound.is_err(),
+            "the establishment armed to unwind after its BEGIN returned instead"
+        );
+
+        let snapshot = reader
+            .try_take()
+            .expect("the unwound establishment kept the handle's connection")
+            .establish()
+            .expect("the connection came back with the unwound establishment's transaction open");
         assert_eq!(
             snapshot.counters().snapshots_opened(),
             1,
