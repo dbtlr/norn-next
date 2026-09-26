@@ -448,7 +448,8 @@ fn cursor_keys() -> Vec<CursorKey> {
         CursorKey::hit(RungSet::lexical(), score(0.5), "notes/a.md"),
         CursorKey::hit(fused_ladder(), score(0.5), "notes/a.md"),
         CursorKey::tally([Some("note".to_string()), None]),
-        CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", 7),
+        CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", None, 7),
+        CursorKey::finding(FindingKind::Broken, "notes/a.md", Some(3), 7),
     ];
     keys.extend(
         [
@@ -1841,7 +1842,7 @@ fn a_cursor_key_names_the_rows_it_is_a_position_among() {
             PagedRows::Tally,
         ),
         (
-            CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", 1),
+            CursorKey::finding(FindingKind::UndeclaredTag, "notes/a.md", None, 1),
             PagedRows::Finding,
         ),
         (

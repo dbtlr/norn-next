@@ -48,7 +48,7 @@
 //! - [`Snapshot::validate`] — the validate builder: the findings standing
 //!   under the active fingerprint, narrowed by kind, severity and a
 //!   conjunction compiled as a find compiles it, answering a page of finding
-//!   rows in `(kind, path, id)` order or one tally per kind and severity.
+//!   rows in `(kind, path, position, id)` order or one tally per kind and severity.
 //!   [`Snapshot::validate_plans`] explains what it ran.
 //! - [`Snapshot::describe`] — the describe builder: the vault's content model
 //!   as a page of facets in `(kind, key)` order, the declared facets read off

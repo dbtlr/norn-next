@@ -10,15 +10,19 @@
 //! every finding recorded under the active fingerprint — the fingerprint of
 //! the schema the snapshot pins, and the empty text where none is pinned.
 //!
-//! # A page is the findings in `(kind, path, id)` order
+//! # A page is the findings in `(kind, path, position, id)` order
 //!
 //! A page reads one kind after another, in the byte order of the kind's code,
-//! and each kind is a section in the answer's path order and then by id —
-//! `(path COLLATE NOCASE, path, id)` on every root, the order a find answers
-//! paths in: a seek of the kind's findings from the page's position that
+//! and each kind is a section in the answer's path order, then by the
+//! finding's position among its path's findings and then by id — `(path
+//! COLLATE NOCASE, path, position, id)` on every root, with paths in the order
+//! a find answers them in. A finding's position is the ordinal of the link it
+//! is about, and a finding about the document stands ahead of every link's.
+//! Each section is a seek of the kind's findings from the page's position that
 //! stops at the page's bound, so nothing sorts. A page reads at most one
 //! finding past its bound to learn a next page exists, and the cursor it mints
-//! names the last finding's kind, path and id, where the next page resumes.
+//! names the last finding's kind, path, ordinal and id, where the next page
+//! resumes.
 //! The kinds are the request's, or every kind where it names none; a severity
 //! floor admits the severities at it or above, and where that is one severity
 //! the section seeks the findings of that severity alone. [`ValidateStatement`]
@@ -72,7 +76,7 @@ use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
     Conjunction, FindingBase, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, ResolvesPart,
-    Stepped, finding_base, page_limit,
+    Stepped, cursor_position, finding_base, page_limit,
 };
 use crate::request::unreadable;
 use crate::store::Snapshot;
@@ -102,8 +106,8 @@ pub struct Validated {
 /// What a validate answers with.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Validation {
-    /// A page of findings, in `(kind, path, id)` order with the path in the
-    /// answer's path order.
+    /// A page of findings, in `(kind, path, position, id)` order with the path
+    /// in the answer's path order.
     Findings {
         /// The findings, at most the page bound of them.
         rows: Vec<FindingRow>,
@@ -205,9 +209,9 @@ struct Narrowing {
 }
 
 impl Snapshot {
-    /// The findings `params` asks for, as a page in `(kind, path, id)` order
-    /// with the path in the answer's path order, continuing its cursor, or as
-    /// one tally per kind and severity.
+    /// The findings `params` asks for, as a page in `(kind, path, position,
+    /// id)` order with the path in the answer's path order, continuing its
+    /// cursor, or as one tally per kind and severity.
     ///
     /// `declared` is the vault's declaration, read from the schema the
     /// snapshot pins: it decides how a conjunction's part compares and —
@@ -306,28 +310,27 @@ impl Snapshot {
                 None => (None, Vec::new()),
                 Some(cursor) => {
                     let not_taken = || PageRefusal::cursor_not_taken(cursor, PagedRows::Finding);
-                    let CursorKey::Finding { kind, path, id, .. } = cursor.key() else {
+                    let CursorKey::Finding {
+                        kind,
+                        path,
+                        ordinal,
+                        id,
+                        ..
+                    } = cursor.key()
+                    else {
                         return Err(not_taken());
                     };
                     let moved =
                         self.judge_unordered_reading(cursor, PagedRows::Finding, lookups)?;
+                    let position = cursor_position(*ordinal).ok_or_else(not_taken)?;
                     let id = i64::try_from(*id).map_err(|_| not_taken())?;
-                    (Some((kind.as_str(), path.as_str(), id)), moved)
+                    (Some((kind.as_str(), (path.as_str(), position, id))), moved)
                 }
             };
             let (bases, next) =
                 self.page_findings(&narrowing, limit, resume, lookups, &mut work)?;
             let next = next
-                .map(|last| -> Result<Cursor, StoreError> {
-                    let kind = FindingKind::try_from(last.kind.as_str())
-                        .map_err(|_| unreadable("findings.kind", &last.kind))?;
-                    let id = u64::try_from(last.id)
-                        .map_err(|_| unreadable("findings.id", &last.id.to_string()))?;
-                    Ok(Cursor::new(
-                        snapshot.clone(),
-                        CursorKey::finding(kind, last.path, id),
-                    ))
-                })
+                .map(|last| Ok::<_, StoreError>(Cursor::new(snapshot.clone(), last.cursor_key()?)))
                 .transpose()?;
             let rows = self.finding_rows(&mut lookups.ran, bases)?;
             Validation::Findings { rows, next, moved }
@@ -351,11 +354,11 @@ impl Snapshot {
         &self,
         narrowing: &Narrowing,
         limit: usize,
-        at: Option<(&str, &str, i64)>,
+        at: Option<(&str, Resume<'_>)>,
         lookups: &mut Lookups,
         work: &mut ValidateWork,
     ) -> Result<(Vec<FindingBase>, Option<FindingBase>), StoreError> {
-        let sections: Vec<(&'static str, Option<(&str, i64)>)> =
+        let sections: Vec<(&'static str, Option<Resume<'_>>)> =
             if narrowing.conjunction.matches_nothing {
                 Vec::new()
             } else {
@@ -466,21 +469,25 @@ fn kinds_read(requested: &[FindingKind]) -> Vec<&'static str> {
     kinds
 }
 
+/// Where a section resumes: after the finding at this path, position among
+/// the path's findings and id.
+type Resume<'a> = (&'a str, i64, i64);
+
 /// The sections a page reads from `at` on, in order: one per kind, each with
-/// the `(path, id)` it resumes after.
+/// the place it resumes after.
 ///
 /// A position stands in its kind's section and resumes there; every kind after
 /// it starts at its first finding, and every kind before it has been read.
 fn sections<'a>(
     kinds: &[&'static str],
-    at: Option<(&str, &'a str, i64)>,
-) -> Vec<(&'static str, Option<(&'a str, i64)>)> {
+    at: Option<(&str, Resume<'a>)>,
+) -> Vec<(&'static str, Option<Resume<'a>>)> {
     kinds
         .iter()
         .filter_map(|kind| match at {
             None => Some((*kind, None)),
-            Some((at_kind, path, id)) if *kind == at_kind => Some((*kind, Some((path, id)))),
-            Some((at_kind, ..)) if *kind > at_kind => Some((*kind, None)),
+            Some((at_kind, resume)) if *kind == at_kind => Some((*kind, Some(resume))),
+            Some((at_kind, _)) if *kind > at_kind => Some((*kind, None)),
             Some(_) => None,
         })
         .collect()

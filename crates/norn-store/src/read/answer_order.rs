@@ -55,15 +55,18 @@ pub(crate) struct AnswerSeek<'a> {
     pub(crate) folded: &'a str,
     /// The bound on the path compared bytewise.
     pub(crate) bytewise: &'a str,
+    /// A column the index orders after the path and ahead of the row id — a
+    /// finding's position among its path's findings — or `None`.
+    pub(crate) trail: Option<Term<'a>>,
     /// The row id, where rows share a path, or `None` where the path is unique.
     pub(crate) id: Option<Term<'a>>,
 }
 
 impl AnswerSeek<'_> {
     /// The rows standing past the place in the answer order, as one row-value
-    /// comparison: `(lead, path, path, id) > (lead, folded, bytewise, id)`, the
-    /// folded bound compared under `NOCASE`, each term optional as the seek
-    /// states it.
+    /// comparison: `(lead, path, path, trail, id) > (lead, folded, bytewise,
+    /// trail, id)`, the folded bound compared under `NOCASE`, each term
+    /// optional as the seek states it.
     ///
     /// **SQLite seeks the whole row value**, so a continuation starts exactly
     /// past its place and rereads no row at its path. A row-value range runs as
@@ -85,6 +88,10 @@ impl AnswerSeek<'_> {
             format!("{} COLLATE NOCASE", self.folded),
             self.bytewise.to_string(),
         ]);
+        if let Some(trail) = &self.trail {
+            columns.push(trail.column);
+            bounds.push(trail.bound.to_string());
+        }
         if let Some(id) = &self.id {
             columns.push(id.column);
             bounds.push(format!("{} COLLATE BINARY", id.bound));
@@ -150,8 +157,9 @@ mod tests {
         assert_eq!(range("**/*.MD"), (String::new(), Value::Blob(Vec::new())));
     }
 
-    /// A seek names every term it is given, the folded bound under `NOCASE`
-    /// and the id's under `BINARY`, with the reach before the first column.
+    /// A seek names every term it is given, in the index's order, the folded
+    /// bound under `NOCASE` and the id's under `BINARY`, with the reach before
+    /// the first column.
     #[test]
     fn a_seek_spells_one_row_value() {
         let seek = AnswerSeek {
@@ -161,14 +169,18 @@ mod tests {
             path: "f.path",
             folded: "?1",
             bytewise: "?2",
+            trail: Some(Term {
+                column: "f.position",
+                bound: "?3",
+            }),
             id: Some(Term {
                 column: "f.id",
-                bound: "?3",
+                bound: "?4",
             }),
         };
         assert_eq!(
             seek.spelled(),
-            "(+f.path, f.path, f.id) > (?1 COLLATE NOCASE, ?2, ?3 COLLATE BINARY)"
+            "(+f.path, f.path, f.position, f.id) > (?1 COLLATE NOCASE, ?2, ?3, ?4 COLLATE BINARY)"
         );
         let led = AnswerSeek {
             reach: "",
@@ -180,6 +192,7 @@ mod tests {
             path: "f.path",
             folded: "?2",
             bytewise: "?2",
+            trail: None,
             id: None,
         };
         assert_eq!(

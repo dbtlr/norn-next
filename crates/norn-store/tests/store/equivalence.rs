@@ -409,6 +409,83 @@ fn a_finding_at_a_path_without_a_document_row_is_a_divergence() {
     assert_names(&divergence, "finding[nowhere/absent.md][0]");
 }
 
+/// **A finding's ordinal is projected.** The same finding about link 1 in
+/// one store and about link 2 in the other is two findings a reader tells
+/// apart by where each stands among its path's findings.
+#[test]
+fn a_changed_finding_ordinal_is_a_divergence() {
+    let mut pair = Pair::new("pin-finding-ordinal");
+    let about_link = |ordinal: u64| {
+        let mut finding = unread_block("one/glossary.md");
+        finding.ordinal = Some(ordinal);
+        finding
+    };
+    pair.left
+        .begin_request()
+        .record_finding(&about_link(1))
+        .expect("recording a finding");
+    let divergence = pair.diverged(|store| {
+        store
+            .begin_request()
+            .record_finding(&about_link(2))
+            .expect("recording a finding");
+    });
+    assert_names(&divergence, "finding[one/glossary.md][0].ordinal");
+}
+
+/// **A path's findings are compared in the order a reader reads them.** Two
+/// findings about link 1, filed in one order in one store and in the other
+/// order in the other, hold the same facts, and a get's findings page reads
+/// them in two orders: by the link's ordinal and kind, which they share, and
+/// then by id, which is the order each store filed them in. So the two stores
+/// are unequal, where a projection sorting a path's findings by their content
+/// would find them equal.
+#[test]
+fn two_findings_about_one_link_filed_in_two_orders_are_a_divergence() {
+    let mut pair = Pair::new("pin-finding-order");
+    let about_link = |target: &str| {
+        let mut finding = unread_block("one/glossary.md");
+        finding.ordinal = Some(1);
+        finding.target = Some(target.to_string());
+        finding
+    };
+    let file = |store: &mut Store, targets: [&str; 2]| {
+        let mut request = store.begin_request();
+        for target in targets {
+            request
+                .record_finding(&about_link(target))
+                .expect("recording a finding");
+        }
+    };
+    file(&mut pair.left, ["x", "y"]);
+    let divergence = pair.diverged(|store| file(store, ["y", "x"]));
+    assert_names(&divergence, "finding[one/glossary.md][0]");
+}
+
+/// **Findings about a document are compared by their content, whatever order
+/// they were filed in.** Two findings about the document itself, of one kind,
+/// filed in one order in one store and in the other order in the other, leave
+/// the two equal: nothing but filing time orders them, and two derivations of
+/// one vault file them at two times.
+#[test]
+fn findings_about_a_document_filed_in_two_orders_leave_two_stores_equal() {
+    let mut pair = Pair::new("pin-document-finding-order");
+    let about_document = |target: &str| {
+        let mut finding = unread_block("one/glossary.md");
+        finding.target = Some(target.to_string());
+        finding
+    };
+    for (store, targets) in [(&mut pair.left, ["x", "y"]), (&mut pair.right, ["y", "x"])] {
+        let mut request = store.begin_request();
+        for target in targets {
+            request
+                .record_finding(&about_document(target))
+                .expect("recording a finding");
+        }
+    }
+    pair.assert_equivalent();
+}
+
 /// **The exclusions, pinned the other way round.** A row identifier, a write
 /// generation and a timestamp differ between two honest derivations of one
 /// vault, so a comparator that read any of them would fail every pair it was

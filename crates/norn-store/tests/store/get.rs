@@ -14,15 +14,16 @@ use norn_store::{
     BODY_ROW_CEILING, BlockFact, ContentModel, DocumentFacts, DocumentText, FindStatement,
     FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, HeadingFact, LinkFact,
     LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, SectionAt, Snapshot,
-    SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity, induced_failure,
+    SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity, Validation,
+    induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
 use norn_wire::{
     AnswerShape, Candidate, CollectionPage, CollectionSelector, Column, Cursor, CursorKey,
-    Direction, DocumentRow, FindParams, FindingKind, GetParams, GetReport, Hint, PagedRows,
-    Pattern, Predicate, RequestPart, ResolutionTarget, Severity, Sort, SortKey, Unsatisfied,
-    VaultAddress, VaultName,
+    Direction, DocumentRow, FindParams, FindingKind, FindingRow, GetParams, GetReport, Hint,
+    PagedRows, Pattern, Predicate, RequestPart, ResolutionTarget, Severity, Sort, SortKey,
+    Unsatisfied, ValidateParams, VaultAddress, VaultName,
 };
 
 use crate::common::{Scratch, document, planned_get_work, span, unread_block, write_documents};
@@ -886,6 +887,11 @@ const HELD: usize = 5;
 /// A vault whose `paged.md` holds [`HELD`] rows of every collection, beside
 /// two documents the target `twin` names and `bulk` more documents.
 fn paged_vault(label: &str, bulk: usize) -> Vault {
+    paged_vault_under(label, bulk, Sensitive)
+}
+
+/// [`paged_vault`] over a root proven to have `order`'s case behaviour.
+fn paged_vault_under(label: &str, bulk: usize, order: StoredPathOrder) -> Vault {
     let body: String = (0..HELD)
         .map(|at| format!("## Heading {at}\npara {at} ^b{at}\n\n"))
         .collect();
@@ -926,7 +932,7 @@ fn paged_vault(label: &str, bulk: usize) -> Vault {
             "a body\n",
         )
     }));
-    let mut vault = Vault::holding(label, Sensitive, &documents);
+    let mut vault = Vault::holding(label, order, &documents);
     for at in 0..HELD {
         let mut finding = unread_block("paged.md");
         finding.kind = if at % 2 == 0 {
@@ -968,6 +974,155 @@ fn page_of(report: &GetReport) -> (Vec<String>, Option<Cursor>) {
         CollectionPage::Findings { page, .. } => (read(&page.rows), page.next.clone()),
         other => panic!("a page of no collection this suite knows: {other:?}"),
     }
+}
+
+/// A finding about the link at `ordinal` in the document at `at`: `target`
+/// names it, and `kind` files it.
+fn about_link(at: &str, kind: FindingKind, ordinal: u64, target: &str) -> FindingFacts {
+    let mut finding = unread_block(at);
+    finding.kind = kind;
+    finding.severity = Severity::Warning;
+    finding.ordinal = Some(ordinal);
+    finding.target = Some(target.to_string());
+    finding
+}
+
+/// A finding about the document at `at` itself, filed under `kind` and named
+/// by `target`.
+fn about_document(at: &str, kind: FindingKind, target: &str) -> FindingFacts {
+    let mut finding = unread_block(at);
+    finding.kind = kind;
+    finding.severity = Severity::Warning;
+    finding.target = Some(target.to_string());
+    finding
+}
+
+/// The targets of `rows`, in their order.
+fn targets(rows: &[FindingRow]) -> Vec<String> {
+    rows.iter()
+        .map(|row| {
+            row.target
+                .clone()
+                .expect("every finding here names a target")
+        })
+        .collect()
+}
+
+/// **A path's findings follow the position of the link each is about, never
+/// the order they were filed in**, on either root. At `linked.md` a
+/// `link/broken` finding about link 2 is filed first, then one about the
+/// document itself, then one about link 1, and last an undeclared tag about
+/// the document. The findings about the document stand ahead of the findings
+/// about its links, and a link's stand in the link's order. So a validate
+/// reads the `link/broken` findings at the path in `(ordinal, id)` order, and
+/// a get's findings page and a find's findings column read the path's
+/// findings in `(ordinal, kind, id)` order — whole, and a get's page drained
+/// one finding at a time.
+#[test]
+fn a_paths_findings_follow_link_position_not_filing_order() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::at("get-link-position", order, &["linked.md"]);
+        for finding in [
+            about_link("linked.md", FindingKind::Broken, 2, "second"),
+            about_document("linked.md", FindingKind::Broken, "document"),
+            about_link("linked.md", FindingKind::Broken, 1, "first"),
+            about_document("linked.md", FindingKind::UndeclaredTag, "tag"),
+        ] {
+            vault.stand(&finding);
+        }
+        let per_path = ["tag", "document", "first", "second"];
+
+        let findings = getting("linked").with_collection(CollectionSelector::Findings);
+        let page = |params: &GetParams| {
+            let gotten = vault.get(params);
+            let GetReport::Collection {
+                page: CollectionPage::Findings { page, .. },
+                ..
+            } = gotten.report
+            else {
+                panic!("a get of the findings answered {:?}", gotten.report);
+            };
+            (page.rows, page.next)
+        };
+        assert_eq!(
+            targets(&page(&findings).0),
+            per_path,
+            "a get's page under {order:?}"
+        );
+        let mut drained = Vec::new();
+        let mut after: Option<Cursor> = None;
+        loop {
+            let mut params = findings.clone().with_limit(1);
+            if let Some(cursor) = after.take() {
+                params = params.with_after(cursor);
+            }
+            let (rows, next) = page(&params);
+            drained.extend(rows);
+            match next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+            assert!(drained.len() <= per_path.len(), "the drain does not end");
+        }
+        assert_eq!(
+            targets(&drained),
+            per_path,
+            "a get drained one at a time under {order:?}"
+        );
+
+        let column = vault
+            .found("linked.md", vec![Column::findings()])
+            .findings
+            .expect("the findings column");
+        assert_eq!(
+            targets(&column.items),
+            per_path,
+            "a find's column under {order:?}"
+        );
+
+        let validated = vault
+            .snapshot()
+            .validate(
+                &ValidateParams::new(address()).with_kinds([FindingKind::Broken]),
+                &declared(),
+            )
+            .expect("a validate");
+        let Validation::Findings { rows, .. } = validated.answer else {
+            panic!("a validate of one kind answered a summary");
+        };
+        assert_eq!(
+            targets(&rows),
+            ["document", "first", "second"],
+            "a validate of one kind under {order:?}"
+        );
+    }
+}
+
+/// **A find's findings column cuts its head in link order.** The ceiling's
+/// worth of findings about links 1 onward are filed before one about link 0,
+/// so the head the ceiling cuts leads with link 0's finding and drops the one
+/// about the last link, and the total counts them all.
+#[test]
+fn a_find_columns_head_is_cut_in_link_order() {
+    let mut vault = Vault::at("get-column-head", Sensitive, &["linked.md"]);
+    for at in 1..=NESTED_ROW_CEILING as u64 {
+        vault.stand(&about_link(
+            "linked.md",
+            FindingKind::Broken,
+            at,
+            &format!("link-{at:03}"),
+        ));
+    }
+    vault.stand(&about_link("linked.md", FindingKind::Broken, 0, "link-000"));
+    let column = vault
+        .found("linked.md", vec![Column::findings()])
+        .findings
+        .expect("the findings column");
+    assert_eq!(column.total, NESTED_ROW_CEILING as u64 + 1);
+    let expected: Vec<String> = (0..NESTED_ROW_CEILING)
+        .map(|at| format!("link-{at:03}"))
+        .collect();
+    assert_eq!(targets(&column.items), expected);
 }
 
 /// **Every collection paged at one, two and three rows a page is its one
@@ -1080,7 +1235,7 @@ fn a_cursor_that_names_no_position_in_the_collection_is_refused() {
             CollectionSelector::Findings,
             Cursor::new(
                 snapshot.clone(),
-                CursorKey::finding(FindingKind::UndeclaredTag, "other.md", 1),
+                CursorKey::finding(FindingKind::UndeclaredTag, "other.md", None, 1),
             ),
             PagedRows::Finding,
             PagedRows::Finding,
@@ -1162,7 +1317,12 @@ fn a_cursor_past_what_the_store_counts_names_no_position_in_the_collection() {
         ),
         (
             CollectionSelector::Findings,
-            CursorKey::finding(FindingKind::UndeclaredTag, "paged.md", past),
+            CursorKey::finding(FindingKind::UndeclaredTag, "paged.md", None, past),
+            PagedRows::Finding,
+        ),
+        (
+            CollectionSelector::Findings,
+            CursorKey::finding(FindingKind::UndeclaredTag, "paged.md", Some(past), 1),
             PagedRows::Finding,
         ),
     ] {
@@ -1218,7 +1378,7 @@ fn a_collection_cursor_carrying_a_fingerprint_is_not_taken() {
         ),
         (
             CollectionSelector::Findings,
-            CursorKey::finding(FindingKind::UndeclaredTag, "paged.md", 1),
+            CursorKey::finding(FindingKind::UndeclaredTag, "paged.md", None, 1),
             PagedRows::Finding,
         ),
     ] {
@@ -1699,15 +1859,21 @@ fn a_get_resolves_its_target_once_and_reads_its_document_once() {
 /// paged by ordinal is one seek of its table's `(document, ordinal)` index
 /// bounded below by the ordinal the page continues after, and the findings
 /// are one seek of `findings_path` at the document's path and the active
-/// fingerprint, bounded below by the kind the page continues in, the id
-/// tested within it.
-/// Either hands its rows back in page order, so nothing sorts.
+/// fingerprint, bounded below by the position, the kind and the id the page
+/// continues after.
+/// Either hands its rows back in page order, so nothing sorts, on either root.
 ///
 /// Controls: a continuation's plan with its position taken out of the seek
 /// fails; each index dropped, the page reads something else and fails.
 #[test]
 fn a_collection_page_seeks_the_document_from_its_cursor() {
-    let mut vault = paged_vault("get-page-plan", 0);
+    for order in [Sensitive, Folding] {
+        judge_collection_pages(paged_vault_under("get-page-plan", 0, order));
+    }
+}
+
+/// [`a_collection_page_seeks_the_document_from_its_cursor`] on one vault.
+fn judge_collection_pages(mut vault: Vault) {
     let continued = |vault: &Vault, selector| {
         let (_, next) = page_of(
             &vault
@@ -1729,7 +1895,7 @@ fn a_collection_page_seeks_the_document_from_its_cursor() {
         rows.assert_searches_through(table, Access::Index(&format!("{table}_document_ordinal")));
         rows.assert_search_constraint(table, "(document=? AND ordinal>?)");
     };
-    let findings_seek = "(path=? AND vault_schema_fingerprint=? AND kind>?)";
+    let findings_seek = "(path=? AND vault_schema_fingerprint=? AND (position,kind,rowid)>(?,?,?))";
     let judge_findings = |plan: &QueryPlan| {
         plan.assert_no_full_scan();
         plan.assert_no_temp_btree();
@@ -1764,7 +1930,9 @@ fn a_collection_page_seeks_the_document_from_its_cursor() {
     failure_of("a continuation that seeks from no ordinal", || {
         judge_ordinal(&unbounded, collection.table())
     });
-    let unpositioned = rewritten(&findings, |detail| detail.replace(" AND kind>?", ""));
+    let unpositioned = rewritten(&findings, |detail| {
+        detail.replace(" AND (position,kind,rowid)>(?,?,?)", "")
+    });
     failure_of("a findings continuation that seeks from no finding", || {
         judge_findings(&unpositioned)
     });

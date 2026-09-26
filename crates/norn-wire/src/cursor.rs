@@ -267,15 +267,23 @@ pub enum CursorKey {
         /// as that type.
         group: Vec<Option<String>>,
     },
-    /// A finding row: the kind, in the byte order of its code, then the path,
-    /// then the finding's identifier.
+    /// A finding row: its kind, its path, the ordinal of the link it is
+    /// about, and its identifier. A validate orders findings by the kind, in
+    /// the byte order of its code, then the path, the ordinal and the
+    /// identifier; a document's findings page orders them by the ordinal, then
+    /// the kind and the identifier.
     #[non_exhaustive]
     Finding {
         /// The kind the finding is filed under.
         kind: FindingKind,
         /// The path the finding stands at.
         path: String,
-        /// The finding's identifier within that path.
+        /// The ordinal of the link the finding is about in the document at its
+        /// path, and `null` for a finding about the document itself, which
+        /// orders before every finding about one of its links.
+        ordinal: Option<u64>,
+        /// The finding's identifier, which orders the findings that share
+        /// everything before it.
         id: u64,
     },
     /// A facet row: the kind, in the byte order of its code, then the key in
@@ -328,11 +336,18 @@ impl CursorKey {
         }
     }
 
-    /// A finding row stopped at `id`, under `kind`, at `path`.
-    pub fn finding(kind: FindingKind, path: impl Into<String>, id: u64) -> Self {
+    /// A finding row stopped at `id`, under `kind`, at `path`, about the link
+    /// at `ordinal` or, where it is `None`, about the document.
+    pub fn finding(
+        kind: FindingKind,
+        path: impl Into<String>,
+        ordinal: Option<u64>,
+        id: u64,
+    ) -> Self {
         CursorKey::Finding {
             kind,
             path: path.into(),
+            ordinal,
             id,
         }
     }

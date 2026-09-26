@@ -484,6 +484,7 @@ pub fn ambiguity_for_target(
             .class_keys(),
         target: Some(target.to_string()),
         span: Some(span(2, 1, 10)),
+        ordinal: None,
         candidates: candidates
             .iter()
             .map(|candidate| CandidateFact {
@@ -507,6 +508,7 @@ pub fn unread_block(at: &str) -> FindingFacts {
         class_keys: BTreeSet::new(),
         target: None,
         span: None,
+        ordinal: None,
         candidates: Vec::new(),
         candidates_total: 0,
         message: format!("`{at}` derives without its frontmatter"),
@@ -523,6 +525,7 @@ pub fn violation(at: &str) -> FindingFacts {
         class_keys: BTreeSet::new(),
         target: None,
         span: None,
+        ordinal: None,
         candidates: Vec::new(),
         candidates_total: 0,
         message: "the `status` field is required".to_string(),

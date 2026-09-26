@@ -319,20 +319,28 @@ impl Snapshot {
             .into_iter()
             .collect::<Result<Vec<_>, StoreError>>()?;
         work.finding_rows += bases.len() as u64;
-        // The index hands each path's findings back in `(kind, id)` order and
-        // the paths in the order they were named; the statement states
-        // neither, so the order is taken here, over heads the ceiling bounded.
+        // The index hands each path's findings back in `(position, kind, id)`
+        // order and the paths in the order they were named; the statement
+        // states neither, so the order is taken here, over heads the ceiling
+        // bounded.
         let order: HashMap<&str, usize> = paths
             .iter()
             .enumerate()
             .map(|(at, path)| (*path, at))
             .collect();
         bases.sort_by(|one, other| {
-            (order.get(one.path.as_str()), &one.kind, one.id).cmp(&(
-                order.get(other.path.as_str()),
-                &other.kind,
-                other.id,
-            ))
+            (
+                order.get(one.path.as_str()),
+                one.position(),
+                &one.kind,
+                one.id,
+            )
+                .cmp(&(
+                    order.get(other.path.as_str()),
+                    other.position(),
+                    &other.kind,
+                    other.id,
+                ))
         });
         let mut filled: HashMap<String, usize> = HashMap::new();
         for base in &bases {

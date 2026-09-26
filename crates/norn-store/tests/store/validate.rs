@@ -546,7 +546,7 @@ fn requests() -> Vec<ValidateParams> {
 
 /// **A drain a page at a time answers the findings one page does**, in the
 /// same order, whatever the bound: a continuation resumes after the last
-/// finding's kind, path and id, inside a kind and across kinds, among two
+/// finding's kind, path, ordinal and id, inside a kind and across kinds, among two
 /// findings of one kind at one path, and under every narrowing. The page
 /// stops at its last finding, **and reads one finding past its bound** to
 /// learn a next page exists: a page of two with more behind it reads three.
@@ -569,9 +569,10 @@ fn a_drain_a_page_at_a_time_answers_the_findings_one_page_does() {
         Some(&CursorKey::finding(
             FindingKind::FrontmatterUnreadable,
             "notes/d.md",
+            None,
             rows[1].id
         )),
-        "a page stops at its last finding's kind, path and id"
+        "a page stops at its last finding's kind, path, ordinal and id"
     );
     let read = validating_store
         .validate(&validating().with_limit(2))
@@ -581,6 +582,62 @@ fn a_drain_a_page_at_a_time_answers_the_findings_one_page_does() {
         read, 3,
         "a page of two with a next page reads one past its bound"
     );
+}
+
+/// **A validate's drain resumes between two findings at one path**, on
+/// either root. Five `link/broken` findings stand at `a.md`, filed about link
+/// 3, the document, link 1, the document again and link 2. The two about the
+/// document stand first, by id, and then links 1, 2 and 3. Drained one, two
+/// and three at a time, the validate answers each once in that order: a
+/// cursor resumes past its finding's ordinal as well as its path and id, from
+/// a finding about the document and from one about a link, and it carries
+/// that ordinal.
+#[test]
+fn a_validate_drain_resumes_between_two_findings_of_one_path() {
+    for order in ROOTS {
+        let mut validating_store = Validating::under("validate-one-path-drain", order);
+        for (ordinal, target) in [
+            (Some(3), "three"),
+            (None, "document"),
+            (Some(1), "one"),
+            (None, "again"),
+            (Some(2), "two"),
+        ] {
+            let mut finding = undeclared("a.md", target);
+            finding.kind = FindingKind::Broken;
+            finding.ordinal = ordinal;
+            validating_store.stand(&finding);
+        }
+        let broken = validating().with_kinds([FindingKind::Broken]);
+        let expected: Vec<(FindingKind, String, Option<String>)> =
+            ["document", "again", "one", "two", "three"]
+                .into_iter()
+                .map(|target| finding(FindingKind::Broken, "a.md", Some(target)))
+                .collect();
+        assert_eq!(
+            names(&validating_store.rows(&broken)),
+            expected,
+            "one page under {order:?}"
+        );
+        for limit in [1, 2, 3] {
+            assert_eq!(
+                names(&drained(&validating_store, &broken, limit)),
+                expected,
+                "drained {limit} at a time under {order:?}"
+            );
+        }
+        let (rows, next) = validating_store.page(&broken.clone().with_limit(3));
+        assert_eq!(
+            next.as_ref().map(Cursor::key),
+            Some(&CursorKey::finding(
+                FindingKind::Broken,
+                "a.md",
+                Some(1),
+                rows[2].id
+            )),
+            "a page stops at its last finding's ordinal under {order:?}"
+        );
+    }
 }
 
 /// A finding row's place in a page, computed here rather than read off the
@@ -972,29 +1029,32 @@ fn a_cursor_that_is_no_position_among_the_findings_is_refused() {
     );
 }
 
-/// **A finding's cursor whose id is past what the store counts is refused**
-/// as no position among the findings.
+/// **A finding's cursor whose id or ordinal is past what the store counts is
+/// refused** as no position among the findings.
 #[test]
 fn a_finding_cursor_past_what_the_store_counts_is_refused() {
     let validating_store = Validating::new("validate-cursor-past");
     let reading = validating_store.validate(&validating()).snapshot;
     let past = u64::try_from(i64::MAX).expect("a positive bound") + 1;
-    assert_eq!(
-        validating_store
-            .snapshot()
-            .validate(
-                &validating().with_after(Cursor::new(
-                    reading,
-                    CursorKey::finding(FindingKind::UndeclaredTag, "a.md", past)
-                )),
-                &declared()
-            )
-            .expect_err("the cursor is refused"),
-        PageRefusal::CursorNotTaken {
-            cursor: PagedRows::Finding,
-            paged: PagedRows::Finding,
-        }
-    );
+    for key in [
+        CursorKey::finding(FindingKind::UndeclaredTag, "a.md", None, past),
+        CursorKey::finding(FindingKind::UndeclaredTag, "a.md", Some(past), 1),
+    ] {
+        assert_eq!(
+            validating_store
+                .snapshot()
+                .validate(
+                    &validating().with_after(Cursor::new(reading.clone(), key.clone())),
+                    &declared()
+                )
+                .expect_err("the cursor is refused"),
+            PageRefusal::CursorNotTaken {
+                cursor: PagedRows::Finding,
+                paged: PagedRows::Finding,
+            },
+            "{key:?}"
+        );
+    }
 }
 
 /// **A finding's cursor carrying a schema fingerprint is refused as not
@@ -1011,7 +1071,7 @@ fn a_finding_cursor_carrying_a_fingerprint_is_not_taken() {
             Some(VALIDATE_SCHEMA.to_string()),
             None,
         ),
-        CursorKey::finding(FindingKind::UndeclaredTag, "a.md", 1),
+        CursorKey::finding(FindingKind::UndeclaredTag, "a.md", None, 1),
     );
     assert_eq!(
         validating_store
@@ -1204,20 +1264,21 @@ fn judge_driven(page: &QueryPlan) {
 const KIND_INDEX: &str = "findings_fingerprint_kind_nocase";
 
 /// That index's seek from a page's position: the folded path, the path
-/// bytewise, then the id.
-const KIND_SEEK: &str = "(vault_schema_fingerprint=? AND kind=? AND (path,path,rowid)>(?,?,?))";
+/// bytewise, the finding's position among its path's findings, then the id.
+const KIND_SEEK: &str =
+    "(vault_schema_fingerprint=? AND kind=? AND (path,path,position,rowid)>(?,?,?,?))";
 
 /// The same seek bounded above by a path part's folded range.
 const KIND_RANGE_SEEK: &str =
-    "(vault_schema_fingerprint=? AND kind=? AND (path,path,rowid)>(?,?,?) AND path<?)";
+    "(vault_schema_fingerprint=? AND kind=? AND (path,path,position,rowid)>(?,?,?,?) AND path<?)";
 
 /// The index a page admitting one severity seeks its kind's findings through,
 /// and a summary its `(kind, severity)` cells.
 const SEVERITY_INDEX: &str = "findings_fingerprint_kind_severity_nocase";
 
 /// That index's seek of one kind at one severity from a page's position.
-const SEVERITY_SEEK: &str =
-    "(vault_schema_fingerprint=? AND kind=? AND severity=? AND (path,path,rowid)>(?,?,?))";
+const SEVERITY_SEEK: &str = "(vault_schema_fingerprint=? AND kind=? AND severity=? AND \
+     (path,path,position,rowid)>(?,?,?,?))";
 
 /// Both roots, each bar judged on a store over each.
 const ROOTS: [StoredPathOrder; 2] = [
@@ -1228,10 +1289,10 @@ const ROOTS: [StoredPathOrder; 2] = [
 /// **A kind page seeks its kind from the page's position, on either root.**
 /// Each section is one seek of `findings_fingerprint_kind_nocase` at
 /// `(fingerprint, kind)` bounded below by the page's position — the folded
-/// path, the path bytewise, then the id — on a first page and a continuation
-/// alike,
-/// and its findings come off the index in `(path COLLATE NOCASE, path, id)`
-/// order, so nothing sorts. **A path part bounds the same seek** by its
+/// path, the path bytewise, the finding's position among its path's findings,
+/// then the id — on a first page and a continuation alike, and its findings
+/// come off the index in `(path COLLATE NOCASE, path, position, id)` order, so
+/// nothing sorts. **A path part bounds the same seek** by its
 /// glob's folded range, whether its glob matches bytes or folds, and in
 /// either case. **A severity floor admitting one severity seeks
 /// `findings_fingerprint_kind_severity_nocase` at `(fingerprint, kind,
@@ -1240,9 +1301,11 @@ const ROOTS: [StoredPathOrder; 2] = [
 /// from the documents it matched, each reaching its findings by one seek at
 /// its path.
 ///
-/// Controls: a continuation's plan rebuilt without its position bound fails;
-/// a driven section rebuilt to seek its kind, or to walk the documents,
-/// fails; each index dropped, the sections it served read something else.
+/// Controls: a continuation's plan rebuilt without its position bound fails,
+/// and so does one whose seek stops at the path, short of the finding's
+/// position; a driven section rebuilt to seek its kind, or to walk the
+/// documents, fails; each index dropped, the sections it served read something
+/// else.
 #[test]
 fn a_kind_page_seeks_its_kind_from_the_pages_position() {
     for order in ROOTS {
@@ -1298,8 +1361,8 @@ fn judge_kind_pages(mut validating_store: Validating) {
         judge_kind_seek(
             &page,
             SEVERITY_INDEX,
-            "(vault_schema_fingerprint=? AND kind=? AND severity=? AND (path,path,rowid)>(?,?,?) AND \
-             path<?)",
+            "(vault_schema_fingerprint=? AND kind=? AND severity=? AND \
+             (path,path,position,rowid)>(?,?,?,?) AND path<?)",
         );
     }
     for glob in ["notes/**", "*.md"] {
@@ -1368,10 +1431,17 @@ fn judge_kind_pages(mut validating_store: Validating) {
 
     // Control: the continuation's position taken out of the seek.
     let unbounded = rewritten(&continued[0], |detail| {
-        detail.replace(" AND (path,path,rowid)>(?,?,?)", "")
+        detail.replace(" AND (path,path,position,rowid)>(?,?,?,?)", "")
     });
     failure_of("a continuation that seeks from no position", || {
         judge_kind_seek(&unbounded, KIND_INDEX, KIND_SEEK)
+    });
+    // Control: the continuation's seek stopped at the path.
+    let short = rewritten(&continued[0], |detail| {
+        detail.replace("(path,path,position,rowid)>(?,?,?,?)", "(path,path)>(?,?)")
+    });
+    failure_of("a continuation that seeks to its path alone", || {
+        judge_kind_seek(&short, KIND_INDEX, KIND_SEEK)
     });
     // Control: a driven section that seeks its kind from a position.
     let undriven = rewritten(&driven[0], |detail| {

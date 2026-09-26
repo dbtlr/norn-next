@@ -14,7 +14,7 @@ use crate::common::{
     write_document, write_documents,
 };
 use norn_store::{
-    CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, StoreError,
+    CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, Store, StoreError,
     induced_failure, suffix_probe,
 };
 use std::num::NonZeroUsize;
@@ -386,6 +386,66 @@ fn a_finding_keeps_a_bounded_head_and_the_total() {
     assert_eq!(stored.candidates_total, 400);
     assert_eq!(stored.message, finding.message);
     assert!(stored.generation > 0);
+}
+
+/// **A finding keeps the ordinal of the link it is about, and a finding about
+/// the document keeps none**, and the store orders both by a position with no
+/// `NULL` in it. A row value that reaches `NULL` is `NULL`, so a bound past
+/// the first finding about the document on `(path, ordinal, id)` passes no
+/// finding at its path — not the second finding about the document, not the
+/// one about link 1 — where the same bound on `(path, position, id)` passes
+/// both.
+#[test]
+fn a_findings_position_is_its_ordinal_with_the_documents_first() {
+    let scratch = Scratch::new("finding-ordinal");
+    let mut store = scratch.open();
+    let at = path("a.md");
+    let about = |ordinal: Option<u64>| {
+        let mut finding = violation(at.as_str());
+        finding.ordinal = ordinal;
+        finding
+    };
+    let ordinals = |store: &mut Store| -> Vec<Option<u64>> {
+        store
+            .begin_request()
+            .stored_findings(&at)
+            .expect("reading findings")
+            .into_iter()
+            .map(|finding| finding.ordinal)
+            .collect()
+    };
+    {
+        let mut request = store.begin_request();
+        for ordinal in [None, None, Some(1)] {
+            request
+                .record_finding(&about(ordinal))
+                .expect("recording a finding");
+        }
+    }
+    assert_eq!(ordinals(&mut store), [None, None, Some(1)]);
+
+    induced_failure::execute_out_of_band(
+        &mut store,
+        "DELETE FROM findings
+         WHERE (path, ordinal, id) > ('a.md', NULL, (SELECT min(id) FROM findings))",
+    )
+    .expect("a bound on the ordinal");
+    assert_eq!(
+        ordinals(&mut store),
+        [None, None, Some(1)],
+        "a bound reaching NULL passed a finding"
+    );
+    induced_failure::execute_out_of_band(
+        &mut store,
+        "DELETE FROM findings
+         WHERE (path, position, id) > ('a.md', -1, (SELECT min(id) FROM findings))",
+    )
+    .expect("a bound on the position");
+    assert_eq!(
+        ordinals(&mut store),
+        [None],
+        "a bound on the position passes every finding after it"
+    );
 }
 
 /// A head handed more than it holds is refused rather than truncated. A silently

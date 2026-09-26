@@ -25,32 +25,53 @@
 //! walk's page of subjects — is not offered a kind-led index in place of the
 //! path it seeks.
 //!
-//! # A validate reads the findings in `(kind, path, id)` order, off three indexes
+//! # A path's findings stand in the order of the links they are about
+//!
+//! `ordinal` is the ordinal of the link a finding is about in the document at
+//! its path, and `NULL` for a finding about the document itself. Within one
+//! path, findings stand by that ordinal and then by id, and a finding about the
+//! document stands ahead of every finding about one of its links. So the order
+//! of a path's findings is a function of the links they are about, and the id,
+//! which is the order they were filed in, decides only between findings that
+//! share everything before it.
+//!
+//! **The indexes order `position`, never `ordinal`.** `position` is a
+//! generated column, `coalesce(ordinal, -1)`, which no write names. SQLite
+//! orders `NULL` before every integer in an index and an `ORDER BY`, but a
+//! row-value comparison that reaches a `NULL` term is `NULL`, and a seek
+//! applies the comparison to the rows it reaches. So a continuation from a
+//! finding about the document, bound on `ordinal`, would pass no finding at its
+//! path; a first page bound below every ordinal would pass none about a
+//! document. `position` holds the same order with no `NULL` in it, so every
+//! page seeks it as a row value.
+//!
+//! # A validate reads the findings in `(kind, path, position, id)` order, off three indexes
 //!
 //! `validate` pages the findings standing under the active fingerprint in
-//! `(kind, path, id)` order, one kind at a time, with the path in the answer's
-//! path order on every root — `path COLLATE NOCASE`, then `path` bytewise,
-//! which makes the order total over two paths that fold together. Every index
-//! here carries the row id as its last column, so each order below continues
-//! by the id with nothing sorted:
+//! `(kind, path, position, id)` order, one kind at a time, with the path in the
+//! answer's path order on every root — `path COLLATE NOCASE`, then `path`
+//! bytewise, which makes the order total over two paths that fold together.
+//! Every index here carries the row id as its last column, so each order below
+//! continues by the id with nothing sorted:
 //!
 //! - `findings_fingerprint_kind_nocase` is `(fingerprint, kind, path COLLATE
-//!   NOCASE, path)`: one kind's findings in `(path COLLATE NOCASE, path, id)`
-//!   order, sought past a page's position on all three and bounded by a path
-//!   part's folded range, and a page a document part drives seeks it at each
-//!   matched document's path.
+//!   NOCASE, path, position)`: one kind's findings in `(path COLLATE NOCASE,
+//!   path, position, id)` order, sought past a page's position on all four and
+//!   bounded by a path part's folded range, and a page a document part drives
+//!   seeks it at each matched document's path.
 //! - `findings_fingerprint_kind_severity_nocase` is `(fingerprint, kind,
-//!   severity, path COLLATE NOCASE, path)`. A request narrowed to one severity
-//!   seeks it in the same order within that severity, so the findings of
-//!   another severity cost nothing; and it covers a summary, whose tallies
+//!   severity, path COLLATE NOCASE, path, position)`. A request narrowed to one
+//!   severity seeks it in the same order within that severity, so the findings
+//!   of another severity cost nothing; and it covers a summary, whose tallies
 //!   group by `(kind, severity)` in the index's own order, a path part's
 //!   folded range bounding each cell's seek, and a document part's seek at
 //!   each matched document's path.
-//! - `findings_path` is `(path, fingerprint, kind)`: the findings standing at
-//!   one path, in `(kind, id)` order, which is how a find's findings column
-//!   reads a document's head and stops at its ceiling. Its leading `path` is
-//!   also every subject read and discard's seek, and a walked-scope prune's
-//!   bytewise page of subjects.
+//! - `findings_path` is `(path, fingerprint, position, kind)`: the findings
+//!   standing at one path, in `(position, kind, id)` order, which is how a get
+//!   pages a document's findings and a find's findings column reads a
+//!   document's head and stops at its ceiling. Its leading `path` is also every
+//!   subject read and discard's seek, and a walked-scope prune's bytewise page
+//!   of subjects.
 //!
 //! A statement a document part drives joins each matched document to its
 //! findings on the path compared folded and bytewise. The folded equality is
@@ -230,16 +251,18 @@ const STATEMENTS: &[&str] = &[
     candidates_total         INTEGER NOT NULL,
     message                  TEXT    NOT NULL,
     detail                   TEXT,
+    ordinal                  INTEGER CHECK (ordinal >= 0),
+    position                 INTEGER GENERATED ALWAYS AS (coalesce(ordinal, -1)) VIRTUAL,
     CHECK ((span_line IS NULL) = (span_column IS NULL)
        AND (span_line IS NULL) = (span_offset IS NULL))
 )",
     "CREATE INDEX findings_fingerprint_kind_severity_nocase ON findings(
-    vault_schema_fingerprint, kind, severity, path COLLATE NOCASE, path
+    vault_schema_fingerprint, kind, severity, path COLLATE NOCASE, path, position
 )",
     "CREATE INDEX findings_fingerprint_kind_nocase ON findings(
-    vault_schema_fingerprint, kind, path COLLATE NOCASE, path
+    vault_schema_fingerprint, kind, path COLLATE NOCASE, path, position
 )",
-    "CREATE INDEX findings_path ON findings(path, vault_schema_fingerprint, kind)",
+    "CREATE INDEX findings_path ON findings(path, vault_schema_fingerprint, position, kind)",
     "CREATE TABLE finding_classes (
     finding   INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
     class_key TEXT    NOT NULL,

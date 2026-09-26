@@ -77,8 +77,9 @@
 //! collection and a position in it, and no document, so it continues the same
 //! collection of any document from that position, and one past the last row
 //! answers an empty page. The findings standing over the document are paged
-//! in `(kind, id)` order at its path, the order a find's findings column and a
-//! validate read them in at one path, with a finding's cursor
+//! in `(position, kind, id)` order at its path — the findings about the
+//! document first, then each link's in the link's order — the order a find's
+//! findings column reads them in, with a finding's cursor
 //! ([`norn_wire::CursorKey::Finding`]). That cursor names the path it was
 //! minted at, so at another document's path it names no position
 //! ([`PageRefusal::CursorNotTaken`], a finding's cursor on findings paged),
@@ -100,8 +101,8 @@ use norn_db::EmittedPlan;
 use norn_db::rusqlite::Row;
 use norn_wire::{
     Anchor, AnswerShape, BodyText, CollectionPage, CollectionSelector, Cursor, CursorKey,
-    DocumentRow, FindingKind, GetParams, GetReport, Hint, Page, PagedRows, RequestPart,
-    ResolutionTarget, Unsatisfied,
+    DocumentRow, GetParams, GetReport, Hint, Page, PagedRows, RequestPart, ResolutionTarget,
+    Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
@@ -113,9 +114,9 @@ use crate::find::{
 };
 use crate::read::{
     Lookups, Naming, PageRefusal, ReadFilter, ReadStatement, Stepped, TargetAmbiguity,
-    finding_base, page_limit, wire_path,
+    cursor_position, finding_base, page_limit, wire_path,
 };
-use crate::request::{Reading, stored_block, stored_heading, unreadable};
+use crate::request::{Reading, stored_block, stored_heading};
 use crate::store::Snapshot;
 
 pub use statement::{GET_STATEMENTS, GetStatement};
@@ -801,15 +802,23 @@ impl Snapshot {
                 // naming them was minted by no page, and one at another path
                 // names no position among this document's findings.
                 let not_taken = || PageRefusal::cursor_not_taken(cursor, PagedRows::Finding);
-                let CursorKey::Finding { kind, path, id, .. } = cursor.key() else {
+                let CursorKey::Finding {
+                    kind,
+                    path,
+                    ordinal,
+                    id,
+                    ..
+                } = cursor.key()
+                else {
                     return Err(not_taken());
                 };
                 if *path != named.path {
                     return Err(not_taken());
                 }
+                let position = cursor_position(*ordinal).ok_or_else(not_taken)?;
                 let id = i64::try_from(*id).map_err(|_| not_taken())?;
                 let moved = self.judge_unordered_reading(cursor, PagedRows::Finding, lookups)?;
-                (Some((kind.as_str(), id)), moved)
+                (Some((position, kind.as_str(), id)), moved)
             }
         };
         let page = self.read_page([resume], limit, &mut lookups.ran, |record, after, rows| {
@@ -826,16 +835,7 @@ impl Snapshot {
         })?;
         let next = page
             .next
-            .map(|last| -> Result<Cursor, StoreError> {
-                let kind = FindingKind::try_from(last.kind.as_str())
-                    .map_err(|_| unreadable("findings.kind", &last.kind))?;
-                let id = u64::try_from(last.id)
-                    .map_err(|_| unreadable("findings.id", &last.id.to_string()))?;
-                Ok(Cursor::new(
-                    snapshot.clone(),
-                    CursorKey::finding(kind, last.path, id),
-                ))
-            })
+            .map(|last| Ok::<_, StoreError>(Cursor::new(snapshot.clone(), last.cursor_key()?)))
             .transpose()?;
         let rows = self.finding_rows(&mut lookups.ran, page.rows)?;
         Ok(Page::new(rows, next, moved))

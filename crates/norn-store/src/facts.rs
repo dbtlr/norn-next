@@ -681,6 +681,15 @@ pub struct FindingFacts {
     /// own validated paths.
     pub target: Option<String>,
     pub span: Option<Span>,
+    /// The ordinal of the link the finding is about in the document at
+    /// [`FindingFacts::path`], and `None` for a finding about the document
+    /// itself. A path's findings stand in this order, a finding about the
+    /// document ahead of every finding about one of its links.
+    ///
+    /// The link-health findings the link-health unit of Layer 3 files carry
+    /// it; every finding the host files today is about its document and
+    /// carries `None`.
+    pub ordinal: Option<u64>,
     /// The candidates, in deterministic resolution-ladder order, bounded at
     /// [`CANDIDATE_HEAD`].
     pub candidates: Vec<CandidateFact>,
@@ -714,6 +723,9 @@ pub struct StoredFinding {
     pub class_keys: BTreeSet<ClassKey>,
     pub target: Option<String>,
     pub span: Option<Span>,
+    /// The ordinal of the link the finding is about, and `None` for a finding
+    /// about the document at its path.
+    pub ordinal: Option<u64>,
     pub candidates: Vec<CandidateFact>,
     pub candidates_total: u64,
     pub message: String,
