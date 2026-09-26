@@ -80,7 +80,7 @@ use norn_testkit::regression::{
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 112;
+const CASE_TOTAL: usize = 113;
 
 /// The whole registry's contract, as one value.
 ///
@@ -89,7 +89,7 @@ const CASE_TOTAL: usize = 112;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "59b30cceb7ba8b437f043aae83830271dec2af803c306317b32f0fb6b41e351d";
+const CONTRACT_DIGEST: &str = "9968154a5fbe8c0d04f3aa85bf12b47f823b2c832f4bc027f6782c2f1bade1aa";
 
 /// The cases carried by tests today, by name.
 ///
@@ -118,6 +118,7 @@ const BOUND_CASES: &[&str] = &[
     "harness-processes-are-bounded-and-exec-safe",
     "harness-runs-under-isolated-state-roots",
     "harness-waits-have-deadlines",
+    "narrowing-arguments-narrow-work",
     "one-field-edit-is-a-one-field-diff",
     "per-file-atomicity-and-durability",
     "predicate-filtering-in-sql-is-the-known-good-shape",

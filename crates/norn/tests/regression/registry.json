@@ -1314,16 +1314,19 @@
       "name": "narrowing-arguments-narrow-work",
       "kind": "defect-class",
       "venue": 3,
-      "property": "A narrowing argument on any verb narrows the work, not just the output: scoped counters are strictly below unscoped ones, and a narrowing predicate never increases cost. Filtering after evaluating every document — validate over one path costing what the whole tree costs, repair evaluating 1593 documents then filtering to the requested paths — is the shape this forbids.",
+      "property": "A narrowing argument bounds a read verb's work to what it admits, not just its output. A driving part is one that seeks what it keeps, a search's full-text query among them, and the statements a request narrowed by one runs do work that follows the size of what it admits: that work holds flat as the vault grows by documents the part does not admit and grows as the part admits more, while the same request unnarrowed grows with the vault wherever it steps a row per document. A candidate a narrowing part rejects is never scored: a full-text match it rejects is neither scored nor sorted, and the vector rung scores only the documents the conjunction admits. A request narrowed by a driving part never evaluates every document and then filters: a validate over one path costing what the whole tree costs is the shape this forbids.",
       "sources": ["NORN-a1", "NRN-a60", "NRN-a61", "NRN-a63"],
       "binding": {
-        "status": "dormant",
-        "reason": "a find's parts narrow its work rather than its output: crates/norn-store/src/read/conjunction.rs compiles each part into a membership test one index seek answers, inside the page statement it narrows. The validate builder, crates/norn-store/src/validate/mod.rs, is narrowed the same way: a path part bounds the seek of the findings' own path, a kind or a severity is a seek of its own, and a document part drives the statement from the documents it matched. A describe's kinds narrow it by section: crates/norn-store/tests/store/describe.rs::an_observed_field_page_walks_the_presence_index_key_by_key holds a describe naming only declared kinds running no statement of its own. The property is stated over every verb — validate over one path, repair over the requested paths — and no verb takes a narrowing argument, because crates/norn-serve is not in the workspace.",
-        "grounds": [
-          { "present": "crates/norn-store/src/read/conjunction.rs" },
-          { "present": "crates/norn-store/src/validate/mod.rs" },
-          { "symbol-present": "crates/norn-store/tests/store/describe.rs::an_observed_field_page_walks_the_presence_index_key_by_key" },
-          { "absent": "crates/norn-serve" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/count.rs::a_narrowing_part_narrows_a_counts_work_to_the_documents_it_matches",
+          "crates/norn-store/tests/store/validate.rs::a_narrowing_part_narrows_a_validates_work_to_the_findings_it_matches",
+          "crates/norn-store/tests/store/links.rs::a_links_to_parts_work_follows_its_backlinks_not_the_vault",
+          "crates/norn-store/tests/store/search.rs::a_search_costs_the_documents_its_query_matches_and_never_the_vault",
+          "crates/norn-store/tests/store/search.rs::ranking_costs_every_match_and_a_narrowing_part_narrows_what_is_scored",
+          "crates/norn-store/tests/store/find.rs::a_page_steps_through_no_full_scan_and_sorts_only_where_a_filter_narrows_it",
+          "crates/norn-store/tests/store/find.rs::a_filtered_page_drives_from_its_filter_and_an_unfiltered_page_seeks_its_order",
+          "crates/norn-host/tests/search.rs::a_predicate_narrows_the_vector_rung_to_the_documents_it_admits"
         ]
       }
     },
@@ -1579,6 +1582,17 @@
       "venue": 5,
       "property": "Link repair can target text that does not resolve — that is the case repair exists for — and repair guidance is not gated on membership of the validation scope, so a document outside that scope still receives it.",
       "sources": ["norn-legacy annoyances log"],
+      "binding": {
+        "status": "dormant",
+        "reason": "no repair planner exists."
+      }
+    },
+    {
+      "name": "repair-evaluates-only-the-paths-it-is-asked-for",
+      "kind": "defect-class",
+      "venue": 5,
+      "property": "A repair narrowed to requested paths evaluates the documents those paths admit and no others, so its work follows the requested set rather than the vault. Repair evaluating 1593 documents and then filtering to the requested paths is the shape this forbids.",
+      "sources": ["NORN-a1", "NRN-a60", "NRN-a61", "NRN-a63"],
       "binding": {
         "status": "dormant",
         "reason": "no repair planner exists."
