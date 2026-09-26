@@ -58,7 +58,7 @@ _Avoid_: Candidate (unqualified)
 The set of vault documents satisfying the same resolution target when that target does not identify exactly one document.
 
 **Link health**:
-Whether a link in a vault document names exactly one document, and whether that document holds the heading or block the link names. A link that fails is broken (it names no document), ambiguous (it names several), or has a missing anchor; each failure is a finding about that one link.
+Whether a link in a vault document that addresses a document names exactly one, and whether that one holds the heading or block the link names. A link that fails is broken (it names none, and names no attachment), ambiguous (it names several), or has a missing anchor; each failure is a finding about that one link. A link addressed outside the vault, or to an attachment it does not find, is not judged.
 
 **Answer reading**:
 The trust state and store generation a vault report was answered under, carried on the report so a consumer judges the answer without a second request. Every search answer also declares the search ladder it ran, the lexical floor alone included, so no consumer infers a ladder from an absence: each rung that ran, each model and, for a model that holds derived state, how far that state trailed the store; a model applied at request time holds none and reports no lag.
@@ -183,4 +183,4 @@ Which sidecar state an answer came from: a count of committed sidecar mutations,
 Converging derived state after a contract change by re-deriving only what the change invalidates rather than rebuilding the whole.
 
 **Inference firewall**:
-The rule that inferred or higher-order derived state, meaning any whose inputs include a model or another index's output, answers queries only, and never becomes a finding, a plan, or a repair input. The one exception is a link-health finding judged inside the changeset's own transaction, which is exact at that snapshot and is about exactly one link.
+The rule that inferred or higher-order derived state answers queries only, and never becomes a finding, a plan, or a repair input. State derived from lane-1 pillars is not higher-order.

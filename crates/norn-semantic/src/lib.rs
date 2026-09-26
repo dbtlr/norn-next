@@ -4,7 +4,7 @@
 //!
 //! An **engine** is a domain that owns a **sidecar database** and derives
 //! from committed lane-1 records, never from vault files ([ADR
-//! 0027](../../../docs/decisions/0027-class-scoped-link-health-rides-the-changeset.md)).
+//! 0027](../../../docs/decisions/0027-link-health-rides-the-changeset.md)).
 //! This crate is that shape, proven end to end with the deterministic stub
 //! embedder: it consumes the store's change feed through consumer-owned
 //! cursors, embeds changed bodies through [`norn_embed`], retracts deaths,
