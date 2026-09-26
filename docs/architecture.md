@@ -377,10 +377,12 @@ where that read began, not where it returned**, because a read observes the stor
 its start — so the several hundred milliseconds it takes to materialise a ≥5k projection
 are the instrument's and not the subject's. The settle then lies between the start of the last
 poll that found the store unsettled and that instant, and the reading is the top of that
-window; how wide the window was is measured per leg and recorded beside the reading. **There is no second clock.** The entry does not leave `Ready` under churn, so a duration to it would measure a
-`state()` call; what is recorded beside each reading is the boolean that the attachment
-was publishing `Ready` at the poll that confirmed the reading, one projection read and one
-poll gap after it — the churn withdrew no trust across the settle. Readings are recorded as each family lands, and compared against
+window; how wide the window was is measured per leg and recorded beside the reading. **There is no second clock.** The entry leaves `Ready` for each polled
+batch it takes in and returns to it when that batch drains, so it is already back at `Ready`
+by the confirming poll and a duration to it would measure a `state()` call; what is recorded
+beside each reading is the boolean that the attachment was publishing `Ready` at the poll
+that confirmed the reading, one projection read and one poll gap after it — the churn left
+no trust withdrawn at the settle. Readings are recorded as each family lands, and compared against
 `SOAK_SETTLE_CEILING` only where one is authored. It stands at 5 seconds, three times the
 widest leg of the calibration series rounded up to a whole second. **What that bar is, is
 one census walk**: the instrument walks the whole tree to build the census its polls
@@ -1718,7 +1720,8 @@ without consulting a read, and a read in flight stops none of them. Through such
 read keeps answering from the handle it holds until it completes, and nothing promises the
 database file outlives the teardown for it: that is the contract the read path states, and its
 price is the accepted one: a read holds no coverage, so no teardown waits on it. [ADR
-0025](decisions/0025-a-reads-hold-is-demand.md) records the rationale and the priced costs.
+0028](decisions/0028-a-read-waits-out-a-change-it-was-served-over.md) records the rationale
+and the priced costs.
 
 **Hold acquisition is the read path's one adjudication, and the handle is its proof.** A
 read reaches a reader only through a hold. A name the serving set does not hold is decided
@@ -1739,6 +1742,21 @@ the warming of the recovery, refused as `host/entry-not-ready` — and under the
 it found, refused as `host/entry-untrusted` with its reason, only where no work is scheduled.
 A park keeps its own code. Where the demand is serving, the refusal is reader-unavailable,
 which is an entry serving every surface but this one.
+
+**A read that meets a change waits for it — ruled by [ADR
+0028](decisions/0028-a-read-waits-out-a-change-it-was-served-over.md) and not yet built.**
+Today every warming entry refuses a read as above. The ruling splits warming by stance, read
+under the entry gate beside the published demand: an entry warming over coverage it has
+already published as `Ready` — a polled batch, a reconcile turn, a schema reload — settles,
+and every other state refuses at once with its reason. A settling read gives the gate back,
+waits outside it on a signal that moves only when the stance changes, takes the gate again
+and reads the published demand afresh, and answers from the snapshot it establishes at the
+first `Ready` it observes after it began, never from the state before the change. Past a
+bound, a lifecycle policy value whose production value is the 5-second settle ceiling, it
+refuses as `host/entry-not-ready` with the message "this vault is still indexing a change". A
+teardown's publication wakes a waiting read and refuses it. While a maintenance scan holds
+the entry, the entry stays `Ready` without yet seeing an edit made moments before, so a read
+in that window can miss it.
 
 **A read whose store finds its derived data damaged is answered by the entry.** After the
 builder returns, one hold of the entry gate withdraws trust under the store-damaged-rebuilding

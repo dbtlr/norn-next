@@ -70,15 +70,16 @@
 //!
 //! # `Ready` is a property, not a second clock
 //!
-//! The entry is already publishing `Ready` when the final change lands, and
-//! ordinary churn never takes that away: a poll therefore cannot time a
-//! *transition* to `Ready`, and a duration to it would be the cost of one
-//! `state()` call rather than a fact about the subject. So the second term is
-//! recorded as what it is — a boolean per leg, sampled at the poll that
-//! confirmed the reading: **the attachment is publishing `Ready` where the
-//! store has reached equivalence**, which says the churn the family applied
-//! withdrew no trust. It is not a claim that the entry held `Ready` at every
-//! instant in between; nothing here samples between polls.
+//! The entry leaves `Ready` for each polled batch it takes in and returns to
+//! it when that batch drains, so by the poll that confirms a reading it is
+//! already back: a poll therefore cannot time a *transition* to `Ready`, and a
+//! duration to it would be the cost of one `state()` call rather than a fact
+//! about the subject. So the second term is recorded as what it is — a boolean
+//! per leg, sampled at the poll that confirmed the reading: **the attachment is
+//! publishing `Ready` where the store has reached equivalence**, which says the
+//! churn the family applied left no trust withdrawn. It is not a claim that the
+//! entry held `Ready` at every instant in between; nothing here samples between
+//! polls.
 //!
 //! # Every leg of every family
 //!
