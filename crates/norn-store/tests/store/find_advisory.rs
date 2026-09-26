@@ -138,7 +138,6 @@ impl Vault {
             .try_take()
             .expect("an idle reader")
             .establish()
-            .snapshot
             .expect("a snapshot")
     }
 

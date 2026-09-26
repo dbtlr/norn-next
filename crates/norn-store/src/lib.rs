@@ -167,8 +167,8 @@ pub use search::{
     SearchStatement, SearchWork, Searched,
 };
 pub use store::{
-    ConnectionTurn, ReaderMint, RecordedStoreSchema, Snapshot, SnapshotAttempt, SnapshotReader,
-    Store, StoreMode, StoreReading,
+    ConnectionTurn, ReaderMint, RecordedStoreSchema, Snapshot, SnapshotReader, Store, StoreMode,
+    StoreReading,
 };
 pub use validate::{
     VALIDATE_STATEMENTS, ValidatePlan, ValidateStatement, ValidateWork, Validated, Validation,

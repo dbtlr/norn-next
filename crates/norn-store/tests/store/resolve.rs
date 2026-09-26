@@ -68,7 +68,6 @@ impl Vault {
             .try_take()
             .expect("a free handle")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert_eq!(snapshot.path_order(), self.store.path_order());
         let found = snapshot

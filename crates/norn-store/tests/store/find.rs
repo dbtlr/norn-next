@@ -246,7 +246,6 @@ impl Seeded {
             .try_take()
             .expect("a handle nothing is reading holds its connection")
             .establish()
-            .snapshot
             .expect("a snapshot")
     }
 
@@ -2580,7 +2579,6 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
         .try_take()
         .expect("a free handle")
         .establish()
-        .snapshot
         .expect("a snapshot");
 
     let mut pairs = 0;

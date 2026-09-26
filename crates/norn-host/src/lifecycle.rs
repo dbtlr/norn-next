@@ -193,20 +193,13 @@ pub trait ReadSource: Send + Sync + 'static {
     /// targets are compared under is the order the rows it reads were derived
     /// under, which is the store's own record and travels with the handle the
     /// store minted.
-    fn establish(turn: Self::Turn) -> Establishment<Self::Snapshot>;
-}
-
-/// One read's attempt to establish its snapshot.
-///
-/// [`Established`] is what an attempt that answered produced; this is the
-/// attempt. **It carries no count of what it ran.** The statements an attempt
-/// runs are the gate holder's to attest, off the handle's
-/// [`ReadSource::statements_run`] read on both sides of its hold, so the
-/// gate-held statement bar is not a number the establishment reports about
-/// itself.
-pub struct Establishment<S> {
-    /// The snapshot and the reading it carries, or why the read has neither.
-    pub established: Result<Established<S>, ReaderUnavailable>,
+    ///
+    /// **The answer carries no count of what it ran.** The statements an
+    /// attempt runs are the gate holder's to attest, off the handle's
+    /// [`ReadSource::statements_run`] read on both sides of its hold, so the
+    /// gate-held statement bar is not a number the establishment reports about
+    /// itself.
+    fn establish(turn: Self::Turn) -> Result<Established<Self::Snapshot>, ReaderUnavailable>;
 }
 
 /// What establishing one read's snapshot produced.
@@ -4421,8 +4414,7 @@ impl<O: EntryOps> Host<O> {
         // The model is the entry's under this same hold, so it and the
         // snapshot established below describe one declaration.
         let content_model = Arc::clone(&state.active_content_model);
-        let establishment = <O::Attachment as SnapshotSource>::Reader::establish(turn);
-        let established = match establishment.established {
+        let established = match <O::Attachment as SnapshotSource>::Reader::establish(turn) {
             Ok(established) => established,
             Err(unavailable) => {
                 // A refused establishment ran its statement under this hold
@@ -6682,7 +6674,7 @@ mod tests {
             self.statements_run.load(Ordering::SeqCst)
         }
 
-        fn establish(mut turn: FakeTurn) -> Establishment<Self::Snapshot> {
+        fn establish(mut turn: FakeTurn) -> Result<Established<Self::Snapshot>, ReaderUnavailable> {
             let ledger = Arc::clone(&turn.reader.ledger);
             park_here_if_the_case_asked(&ledger);
             // Counted on both answers, the way a real handle counts it: an
@@ -6695,11 +6687,9 @@ mod tests {
                 // The turn goes back with the refusal, which is the drop
                 // below: a refused establishment leaves the handle where the
                 // next read finds it.
-                return Establishment {
-                    established: Err(ReaderUnavailable::new(
-                        "this handle establishes no snapshot",
-                    )),
-                };
+                return Err(ReaderUnavailable::new(
+                    "this handle establishes no snapshot",
+                ));
             }
             let established = ledger.established.fetch_add(1, Ordering::SeqCst) + 1;
             turn.holds_the_connection = false;
@@ -6707,12 +6697,10 @@ mod tests {
                 reader: Arc::clone(&turn.reader),
                 holds_the_connection: true,
             };
-            Establishment {
-                established: Ok(Established {
-                    reading: fake_reading(established as i64),
-                    snapshot: FakeSnapshot(held),
-                }),
-            }
+            Ok(Established {
+                reading: fake_reading(established as i64),
+                snapshot: FakeSnapshot(held),
+            })
         }
     }
 

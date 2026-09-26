@@ -233,17 +233,19 @@ impl SnapshotReader {
     }
 
     /// Statements this handle's connection has run against the database since
-    /// the handle was minted: every snapshot's establishing statement, and
-    /// every statement a read ran on a snapshot, each counted where it runs.
-    /// The mint's own statements ran before the handle existed and are not
-    /// among them.
+    /// the handle was minted, as its snapshots count them: each snapshot's
+    /// establishing statement, and each statement a read builder counts on a
+    /// snapshot through [`Snapshot::count_statement`]. The transaction control
+    /// around them, the `BEGIN` that opens a snapshot and the rollback that
+    /// closes it, is not counted. The mint's own statements ran before the
+    /// handle existed and are not among them.
     ///
-    /// **The reading is the connection's, not a snapshot's.** One connection
+    /// **The reading is the handle's, not a snapshot's.** One connection
     /// serves every read of the handle in turn, so a caller that holds the
-    /// connection's turn and reads this twice has, in the difference, exactly
-    /// what ran on the connection between the two readings. A caller holding
-    /// a lock across that stretch learns what ran under its lock from its own
-    /// two readings rather than from a count the establishment reports.
+    /// connection's turn and reads this twice has, in the difference, what its
+    /// snapshots counted between the two readings. A caller holding a lock
+    /// across that stretch learns what ran under its lock from its own two
+    /// readings rather than from a count the establishment reports.
     pub fn statements_run(&self) -> u64 {
         self.statements_run.load(Ordering::Relaxed)
     }
@@ -327,11 +329,14 @@ impl ConnectionTurn {
     /// `resolves` part compiles its class under it, so no read detects one and
     /// no caller hands one over. It costs no statement.
     ///
-    /// **It reports what it ran whichever way it ended.** An establishment
-    /// that refused ran the statement that refused it, rolled the transaction
-    /// back and gave the connection up, and a caller holding a lock across all
-    /// of that waited for every part of it.
-    pub fn establish(mut self) -> SnapshotAttempt {
+    /// **What it ran is on the handle's count whichever way it ended.** An
+    /// establishment that refused ran the statement that refused it, rolled
+    /// the transaction back and gave the connection up, and a caller holding a
+    /// lock across all of that reads what it ran off
+    /// [`SnapshotReader::statements_run`] on both sides of that lock. A
+    /// snapshot's own [`Snapshot::counters`] start from the establishing
+    /// statement and are that one read's view.
+    pub fn establish(mut self) -> Result<Snapshot, StoreError> {
         let mut database = self
             .database
             .take()
@@ -339,7 +344,7 @@ impl ConnectionTurn {
         let reader = Arc::clone(&self.reader);
         let mut counters = SnapshotCounters::default();
         let established = establish_on(&mut database, &reader, &mut counters);
-        let snapshot = match established {
+        match established {
             Ok(reading) => Ok(Snapshot {
                 order: reader.order,
                 reader,
@@ -352,8 +357,7 @@ impl ConnectionTurn {
                 reader.give_the_connection_back(database);
                 Err(error)
             }
-        };
-        SnapshotAttempt { snapshot, counters }
+        }
     }
 }
 
@@ -398,26 +402,6 @@ pub(crate) fn last_write_generation(connection: &Connection) -> Result<i64, Stor
         what: "the database records no write generation, so no read can say what it read"
             .to_string(),
     })
-}
-
-/// One read's attempt to establish its snapshot, and what that attempt ran.
-///
-/// **The counters are reported on both answers**, because the caller holding a
-/// lock across the attempt paid for the statements either way: an attempt that
-/// refused opened its transaction, ran the statement that refused it and
-/// rolled back, all inside that lock.
-///
-/// On the snapshot arm these are the reading [`Snapshot::counters`] starts
-/// from. The two stop being equal as soon as a read builder runs a statement
-/// on the snapshot: this reading is what establishing cost, and the snapshot's
-/// own is what that snapshot has cost so far.
-#[derive(Debug)]
-pub struct SnapshotAttempt {
-    /// The snapshot the read answers from, or why there is none.
-    pub snapshot: Result<Snapshot, StoreError>,
-    /// What the attempt ran: the snapshot it opened, and the statements it ran
-    /// against the database.
-    pub counters: SnapshotCounters,
 }
 
 /// One read's snapshot: the connection it answers on, the reading it was
@@ -1498,7 +1482,6 @@ mod tests {
             .try_take()
             .expect("a handle nothing is reading holds its connection")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert!(
             snapshot
@@ -1579,7 +1562,6 @@ mod tests {
             .try_take()
             .expect("the dropped turn kept the connection")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert!(
             reader.try_take().is_none(),
@@ -1615,7 +1597,6 @@ mod tests {
             .try_take()
             .expect("a free handle hands out its turn")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert_eq!(snapshot.counters().snapshots_opened(), 1);
         assert_eq!(
@@ -1630,14 +1611,14 @@ mod tests {
         );
     }
 
-    /// **The handle counts what its connection ran, whoever reads it.** An
+    /// **The handle counts what its snapshots ran, whoever reads it.** An
     /// establishment moves the count by its one statement and a statement a
     /// read runs on the snapshot moves it again, so two readings around a
     /// stretch of the connection's use are what that stretch ran. A turn that
     /// establishes nothing ran nothing, which is the control: a count that
     /// moved with every turn would say nothing about statements.
     #[test]
-    fn a_handle_counts_every_statement_its_connection_runs() {
+    fn a_handle_counts_the_statements_its_snapshots_run() {
         let scratch = Scratch::new("norn-store-reader-statements-run");
         let store = Store::open(
             scratch.join("derived").join("store.sqlite3"),
@@ -1668,7 +1649,6 @@ mod tests {
             .try_take()
             .expect("the dropped turn gave the connection back")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert_eq!(
             reader.statements_run(),
@@ -1718,7 +1698,6 @@ mod tests {
             .try_take()
             .expect("the unwound turn kept the handle's connection")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert_eq!(
             snapshot.counters().snapshots_opened(),
@@ -1779,7 +1758,6 @@ mod tests {
             .try_take()
             .expect("a handle nothing is reading holds its connection")
             .establish()
-            .snapshot
             .expect("a snapshot");
         let connection = snapshot.connection();
 
@@ -1852,7 +1830,6 @@ mod tests {
             .try_take()
             .expect("a handle nothing is reading holds its connection")
             .establish()
-            .snapshot
             .expect("a snapshot");
         let connection = snapshot.connection();
 

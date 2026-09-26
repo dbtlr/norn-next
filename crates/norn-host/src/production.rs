@@ -27,9 +27,9 @@ use crate::derivation::{
 use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
-    AttachmentAdvisory, EntryOps, Established, Establishment, Healing, JobFailure, MintedReader,
-    ProgressReporter, ReadSource, ReaderUnavailable, ReconcileWork, RecordRefusal,
-    RegistryUnwritable, ReloadError, ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
+    AttachmentAdvisory, EntryOps, Established, Healing, JobFailure, MintedReader, ProgressReporter,
+    ReadSource, ReaderUnavailable, ReconcileWork, RecordRefusal, RegistryUnwritable, ReloadError,
+    ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
 };
 
 /// The derived database's file, inside the vault's derived directory.
@@ -354,26 +354,22 @@ impl ReadSource for norn_store::SnapshotReader {
         norn_store::SnapshotReader::wait_for_the_connection(self)
     }
 
-    /// The store's own count of what the connection ran, taken where each
-    /// statement runs, so the gate's holder reads the connection rather than
-    /// a number this seam composed.
+    /// The store's count of what the handle's snapshots ran, taken where each
+    /// statement runs, so the gate's holder reads the handle rather than a
+    /// number this seam composed.
     fn statements_run(&self) -> u64 {
         norn_store::SnapshotReader::statements_run(self)
     }
 
     /// The store establishes the snapshot and reports the reading it was
     /// established at. What the attempt ran is on the handle's own count.
-    fn establish(turn: Self::Turn) -> Establishment<Self::Snapshot> {
-        let attempt = turn.establish();
-        Establishment {
-            established: attempt
-                .snapshot
-                .map(|snapshot| Established {
-                    reading: snapshot.reading().clone(),
-                    snapshot,
-                })
-                .map_err(|error| reader_unavailable(&error)),
-        }
+    fn establish(turn: Self::Turn) -> Result<Established<Self::Snapshot>, ReaderUnavailable> {
+        turn.establish()
+            .map(|snapshot| Established {
+                reading: snapshot.reading().clone(),
+                snapshot,
+            })
+            .map_err(|error| reader_unavailable(&error))
     }
 }
 
@@ -10014,7 +10010,6 @@ mod tests {
             .try_take()
             .expect("an idle reader")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert_eq!(
             snapshot.path_order(),

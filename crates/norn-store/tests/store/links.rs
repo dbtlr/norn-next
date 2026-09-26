@@ -193,7 +193,6 @@ impl Linked {
             .try_take()
             .expect("a handle nothing is reading holds its connection")
             .establish()
-            .snapshot
             .expect("a snapshot")
     }
 

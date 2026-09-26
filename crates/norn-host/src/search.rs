@@ -966,7 +966,6 @@ mod tests {
                 .try_take()
                 .expect("a handle nothing reads")
                 .establish()
-                .snapshot
                 .expect("a snapshot")
         }
 
