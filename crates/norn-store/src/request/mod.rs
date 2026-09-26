@@ -1954,8 +1954,8 @@ fn scope_page_predicate(
     scope_order: StoredPathOrder,
 ) -> String {
     let bounded = scope.bounds().is_some();
-    let seek = collation(index_order);
-    let fold = collation(scope_order);
+    let seek = index_order.collation();
+    let fold = scope_order.collation();
     let floor_holds_the_scope = bounded && index_order == scope_order;
     let arguments = if floor_holds_the_scope {
         "?1, ?2, ?3"
@@ -1985,15 +1985,6 @@ fn scope_page_predicate(
         .chain(terms)
         .collect::<Vec<String>>()
         .join("\n               AND ")
-}
-
-/// How a comparison is spelled under one order: the store's default collation
-/// needs no spelling, and the vault's ASCII fold is SQLite's `NOCASE`.
-fn collation(order: StoredPathOrder) -> &'static str {
-    match order {
-        StoredPathOrder::Sensitive => "",
-        StoredPathOrder::AsciiCaseInsensitive => " COLLATE NOCASE",
-    }
 }
 
 /// The first parameter a scoped page numbers after its cursor and bounds.

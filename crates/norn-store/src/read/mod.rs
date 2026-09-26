@@ -52,7 +52,7 @@ use crate::validate::ValidateStatement;
 pub(crate) use advisory::{Compared, DateComparison};
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
 pub(crate) use filter::glob_test;
-pub(crate) use filter::{Binder, Filter};
+pub(crate) use filter::{Binder, Filter, PathGlob};
 pub use filter::{READ_FILTERS, ReadFilter};
 pub(crate) use finding::{FINDING_ROW_COLUMNS, FindingBase, finding_base};
 pub(crate) use glob::register_functions;

@@ -820,7 +820,9 @@ handed it and sorts at most once per page statement. Each filter is one index se
 on the rows its own subquery reads: equality, inequality and membership on `(key, raw)`, or
 on `(key, typed)` where the key carries a typed order; presence and absence on the presence
 rows; a `before` or `after` bound on the order's value column; full text through the index's
-own `MATCH` selection; a path glob on the range its literal prefix opens in the path index;
+own `MATCH` selection; a path glob on the range its literal prefix opens in the path index,
+`documents_path` where the root tells spellings apart and the folded prefix's range of
+`documents_path_nocase` where it folds ASCII case;
 a resolution target on each suffix range its class opens, over the raw suffix key where the
 root tells spellings apart and the folded one where it folds ASCII case; a tag by name; a finding by
 kind under the active fingerprint; and a links-to part on the link index, below. The full-text match shape is barred as that filter, and
@@ -879,7 +881,9 @@ carrying a plan bar with a negative control and held by a census to exactly one 
 kind's page, a seek of `(fingerprint, kind)` in `(path, id)` order from the page's position —
 of `(fingerprint, kind, severity)` where a severity floor admits one severity — that a path
 part's range bounds, and that a document part keeping what it seeks drives instead from the
-documents it matched; and the summary, a covering seek of `(fingerprint, kind, severity)` per
+documents it matched; where the root folds ASCII case, a path part's folded range is sought
+at each `(fingerprint, kind, severity)` cell of the index that compares the path under
+`NOCASE`, and the section sorts what that range reached; and the summary, a covering seek of `(fingerprint, kind, severity)` per
 cell it admits grouped in the index's order, or, where a document part keeping what it seeks
 drives it, one covering seek per matched document and cell, its groups sorted. A work bar
 reads their SQLite counters over two vault sizes: a validate narrowed by kind, severity, a
@@ -1952,8 +1956,11 @@ ignored place: a target does where its segments reach that place's last segment,
 one-segment target does only where the ignored document stands at the root, whose name is
 the whole place. The globs match under the store's order — with ASCII case folded where it
 folds, bytewise where it does not — so `archive/**` ignores `Archive/notes.md` on a root
-that does not tell the two apart; a path part of a find, a count or a validate matches the
-same grammar bytewise on every root. Class-scoped findings maintenance names a changed path's
+that does not tell the two apart. Every glob matches under that one rule: a path part of a
+find, a count or a validate matches with ASCII case folded where the store's order folds and
+bytewise where it does not, and its range is read in the same order, so `find --path
+'archive/**'` reaches `Archive/x.md` on a root that folds and not on one that tells the two
+apart. Class-scoped findings maintenance names a changed path's
 class in the key space the store's order selects, the space every finding in the store is
 filed in, so a finding is re-decided when a document joins or leaves its class. A class and a
 class probe are compiled only under the store's recorded order, never under one a caller

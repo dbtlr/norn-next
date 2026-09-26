@@ -51,9 +51,9 @@
 //! case folded, so `archive/**` ignores `Archive/notes.md` there as the root
 //! itself does not tell the two apart; where it tells spellings apart a glob
 //! matches bytes. The fold is [`CaseFold::Ascii`], so a letter outside ASCII
-//! keeps its case in a glob as it does in a key. The path parts of a find, a
-//! count and a validate, and a tag facet's patterns, match the same grammar
-//! bytewise on every root.
+//! keeps its case in a glob as it does in a key. It is the one fold every glob
+//! takes from the order ([`StoredPathOrder::glob_case`]), so an ignore glob and
+//! a find's path part written alike name the same places on any root.
 
 use std::collections::BTreeSet;
 
@@ -153,7 +153,7 @@ impl AmbiguityIgnore {
     /// The globs match with ASCII case folded where `order` folds it, and
     /// bytewise where it does not.
     pub fn admits(&self, path: &str, target_segments: usize, order: StoredPathOrder) -> bool {
-        let Some(ignored) = self.ignored_place(path, glob_case(order)) else {
+        let Some(ignored) = self.ignored_place(path, order.glob_case()) else {
             return true;
         };
         let depth = path.split(SEPARATOR).count();
@@ -209,14 +209,6 @@ impl AmbiguityIgnore {
             text = &rest[length..];
         }
         Ok(AmbiguityIgnore { patterns })
-    }
-}
-
-/// The case an ignore glob matches under on a root whose path order is `order`.
-fn glob_case(order: StoredPathOrder) -> CaseFold {
-    match order {
-        StoredPathOrder::Sensitive => CaseFold::Exact,
-        StoredPathOrder::AsciiCaseInsensitive => CaseFold::Ascii,
     }
 }
 

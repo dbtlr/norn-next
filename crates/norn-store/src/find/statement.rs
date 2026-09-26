@@ -52,8 +52,10 @@ pub enum FindStatement {
     /// where some key a request named is unknown.
     FieldUniverse,
     /// Whether a path part with no wildcard names a directory documents stand
-    /// under and no document: one seek of `documents_path` at the path, and
-    /// one of the range beneath it.
+    /// under and no document, under the root's path order: one seek of
+    /// `documents_path` at the path, and one of the range beneath it, where
+    /// the root tells spellings apart, and the same two of
+    /// `documents_path_nocase` at the folded path where it folds ASCII case.
     BareDirectory,
     /// Whether a date key holds a typed date stating no offset, and whether it
     /// holds one stating an offset: one seek of `document_fields_offset` at
@@ -466,12 +468,21 @@ pub(crate) fn compose_universe() -> (String, Vec<Value>) {
 
 /// [`FindStatement::BareDirectory`]: true where no document stands at `path`
 /// and some document stands in `[lower, upper)`, the range of paths beneath
-/// it.
-pub(crate) fn compose_bare_directory(path: &str, lower: &str, upper: &str) -> (String, Vec<Value>) {
+/// it, each compared under `order`'s collation. Where `order` folds ASCII
+/// case, the path and the bounds are the folded spelling's.
+pub(crate) fn compose_bare_directory(
+    path: &str,
+    lower: &str,
+    upper: &str,
+    order: StoredPathOrder,
+) -> (String, Vec<Value>) {
+    let collation = order.collation();
     (
-        "SELECT NOT EXISTS (SELECT 1 FROM documents AS da WHERE da.path = ?1)
-            AND EXISTS (SELECT 1 FROM documents AS du WHERE du.path >= ?2 AND du.path < ?3)"
-            .to_string(),
+        format!(
+            "SELECT NOT EXISTS (SELECT 1 FROM documents AS da WHERE da.path = ?1{collation})
+            AND EXISTS (SELECT 1 FROM documents AS du
+                WHERE du.path >= ?2{collation} AND du.path < ?3{collation})"
+        ),
         vec![
             Value::Text(path.to_string()),
             Value::Text(lower.to_string()),

@@ -26,12 +26,12 @@
 //! discard, a walk's page of subjects — is not offered a kind-led index in
 //! place of the path it seeks.
 //!
-//! # A validate reads the findings in `(kind, path, id)` order, off three indexes
+//! # A validate reads the findings in `(kind, path, id)` order, off four indexes
 //!
 //! `validate` pages the findings standing under the active fingerprint in
 //! `(kind, path, id)` order, one kind at a time, and every index here carries
-//! the row id as its last column, so each order below continues by the id
-//! with nothing sorted:
+//! the row id as its last column, so each bytewise order below continues by
+//! the id with nothing sorted:
 //!
 //! - `findings_vault_schema_fingerprint` is `(fingerprint, kind, path)`: one
 //!   kind's findings in `(path, id)` order, sought from a page's position.
@@ -40,6 +40,13 @@
 //!   within that severity, so the findings of another severity cost nothing;
 //!   and it covers a summary, whose tallies group by `(kind, severity)` in the
 //!   index's own order.
+//! - `findings_fingerprint_kind_severity_nocase` is the same key with the path
+//!   compared under `NOCASE`: what a path part's folded range seeks on a root
+//!   that folds ASCII case, at each `(fingerprint, kind, severity)` cell, so a
+//!   path part narrows a validate there as it does where the root tells
+//!   spellings apart. It holds a kind's findings in folded path order, so a
+//!   page section it serves sorts the findings its range reached into `(path,
+//!   id)` order; it covers a summary as the bytewise index does.
 //! - `findings_path` is `(path, fingerprint, kind)`: the findings standing at
 //!   one path, in `(kind, id)` order, which is how a find's findings column
 //!   reads a document's head and stops at its ceiling, and how a validate a
@@ -220,6 +227,11 @@ const STATEMENTS: &[&str] = &[
     CHECK ((span_line IS NULL) = (span_column IS NULL)
        AND (span_line IS NULL) = (span_offset IS NULL))
 )",
+    // Created ahead of the bytewise indexes: SQLite weighs a table's indexes
+    // newest first and keeps the first of two that cost the same, so a
+    // statement no folded range bounds reads the bytewise index it ties with.
+    "CREATE INDEX findings_fingerprint_kind_severity_nocase
+    ON findings(vault_schema_fingerprint, kind, severity, path COLLATE NOCASE)",
     "CREATE INDEX findings_path ON findings(path, vault_schema_fingerprint, kind)",
     "CREATE INDEX findings_vault_schema_fingerprint ON findings(vault_schema_fingerprint, kind, path)",
     "CREATE INDEX findings_fingerprint_kind_severity

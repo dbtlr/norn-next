@@ -43,11 +43,10 @@
 //! both, because none of them compares a character. The pattern stays the text
 //! it was written as, so one grammar and one matcher answer both.
 //!
-//! The store's ambiguity-ignore set matches under [`CaseFold::Ascii`] where
-//! the store's recorded path order folds ASCII case, and under
-//! [`CaseFold::Exact`] where it does not. The path parts of a find, a count
-//! and a validate, and a tag facet's patterns, match under [`CaseFold::Exact`]
-//! on every root.
+//! The store's ambiguity-ignore set, and the path parts of a find, a count and
+//! a validate, match under [`CaseFold::Ascii`] where the store's recorded path
+//! order folds ASCII case, and under [`CaseFold::Exact`] where it does not. A
+//! tag facet's patterns match under [`CaseFold::Exact`] on every root.
 //!
 //! # What matching costs
 //!

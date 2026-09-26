@@ -427,7 +427,7 @@ fn filter_barred_by(filter: ReadFilter) -> &'static str {
         | ReadFilter::Before(_)
         | ReadFilter::After(_)
         | ReadFilter::FullText
-        | ReadFilter::PathGlob
+        | ReadFilter::PathGlob(_)
         | ReadFilter::Resolves(_)
         | ReadFilter::Tag
         | ReadFilter::Finding
@@ -452,10 +452,15 @@ fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
         ReadFilter::LinksTo(_) => [SuffixKey::Raw, SuffixKey::Folded]
             .map(ReadFilter::LinksTo)
             .to_vec(),
+        ReadFilter::PathGlob(_) => [
+            StoredPathOrder::Sensitive,
+            StoredPathOrder::AsciiCaseInsensitive,
+        ]
+        .map(ReadFilter::PathGlob)
+        .to_vec(),
         ReadFilter::Present
         | ReadFilter::Absent
         | ReadFilter::FullText
-        | ReadFilter::PathGlob
         | ReadFilter::Tag
         | ReadFilter::Finding => vec![filter],
     }
@@ -859,39 +864,51 @@ fn a_known_key_and_the_field_universe_read_the_presence_rows_alone() {
     });
 }
 
-/// **A bare-directory probe is two seeks of the path index**: one at the path,
-/// which finds no document there, and one of the range beneath it, which finds
-/// one that stands under it. Each is judged on the rows its own subquery reads.
+/// **A bare-directory probe is two seeks of the path index the root's order
+/// selects**: one at the path, which finds no document there, and one of the
+/// range beneath it, which finds one that stands under it — on
+/// `documents_path` where the root tells spellings apart, and on
+/// `documents_path_nocase` where it folds ASCII case. Each is judged on the
+/// rows its own subquery reads.
 ///
-/// Controls: `documents_path` dropped, neither seek is one.
+/// Controls: on each root, its index dropped, neither seek is one.
 #[test]
 fn a_bare_directory_probe_is_two_seeks_of_the_path_index() {
-    let mut seeded = Seeded::new("find-bare-directory");
-    let params = request().with_predicates([Predicate::path("notes")]);
-    let judge = |plan: &QueryPlan| {
-        plan.assert_no_full_scan();
-        let at = rows_of(plan, "da");
-        at.assert_searches_through("documents", Access::Index("documents_path"));
-        at.assert_search_constraint("documents", "(path=?)");
-        let under = rows_of(plan, "du");
-        under.assert_searches_through("documents", Access::Index("documents_path"));
-        under.assert_search_constraint("documents", "(path>? AND path<?)");
-    };
-    judge(&plan_of(
-        &seeded.plans(&params),
-        FindStatement::BareDirectory,
-    ));
-    // A glob with a wildcard is no directory, and asks nothing.
-    assert!(
-        seeded
-            .plans(&request().with_predicates([Predicate::path("notes/*")]))
-            .iter()
-            .all(|plan| plan.statement != FindStatement::BareDirectory)
-    );
+    for (order, index, spelled) in [
+        (StoredPathOrder::Sensitive, "documents_path", "notes"),
+        (
+            StoredPathOrder::AsciiCaseInsensitive,
+            "documents_path_nocase",
+            "NOTES",
+        ),
+    ] {
+        let mut seeded = Seeded::under(&format!("find-bare-directory-{}", order.as_str()), order);
+        let params = request().with_predicates([Predicate::path(spelled)]);
+        let judge = |plan: &QueryPlan| {
+            plan.assert_no_full_scan();
+            let at = rows_of(plan, "da");
+            at.assert_searches_through("documents", Access::Index(index));
+            at.assert_search_constraint("documents", "(path=?)");
+            let under = rows_of(plan, "du");
+            under.assert_searches_through("documents", Access::Index(index));
+            under.assert_search_constraint("documents", "(path>? AND path<?)");
+        };
+        judge(&plan_of(
+            &seeded.plans(&params),
+            FindStatement::BareDirectory,
+        ));
+        // A glob with a wildcard is no directory, and asks nothing.
+        assert!(
+            seeded
+                .plans(&request().with_predicates([Predicate::path("notes/*")]))
+                .iter()
+                .all(|plan| plan.statement != FindStatement::BareDirectory)
+        );
 
-    seeded.drop_index("documents_path");
-    let plan = plan_of(&seeded.plans(&params), FindStatement::BareDirectory);
-    failure_of("documents_path dropped", || judge(&plan));
+        seeded.drop_index(index);
+        let plan = plan_of(&seeded.plans(&params), FindStatement::BareDirectory);
+        failure_of(&format!("{index} dropped"), || judge(&plan));
+    }
 }
 
 /// **An existence check is one select-one-shaped statement.** Whether a key is
@@ -1383,18 +1400,31 @@ fn filter_bars() -> Vec<FilterBar> {
             )],
         },
         FilterBar {
-            shape: ReadFilter::PathGlob,
-            probes: vec![(
-                Predicate::path("notes/*.md"),
-                ReadFilter::PathGlob,
-                Seek::Index {
-                    alias: "dg",
-                    table: "documents",
-                    access: Access::Index("documents_path"),
-                    constraint: "(path>? AND path<?)",
-                    dropped: "documents_path",
-                },
-            )],
+            shape: ReadFilter::PathGlob(StoredPathOrder::Sensitive),
+            probes: vec![
+                (
+                    Predicate::path("notes/*.md"),
+                    ReadFilter::PathGlob(StoredPathOrder::Sensitive),
+                    Seek::Index {
+                        alias: "dg",
+                        table: "documents",
+                        access: Access::Index("documents_path"),
+                        constraint: "(path>? AND path<?)",
+                        dropped: "documents_path",
+                    },
+                ),
+                (
+                    Predicate::path("Notes/*.md"),
+                    ReadFilter::PathGlob(StoredPathOrder::AsciiCaseInsensitive),
+                    Seek::Index {
+                        alias: "dg",
+                        table: "documents",
+                        access: Access::Index("documents_path_nocase"),
+                        constraint: "(path>? AND path<?)",
+                        dropped: "documents_path_nocase",
+                    },
+                ),
+            ],
         },
         FilterBar {
             shape: ReadFilter::Resolves(SuffixKey::Raw),
@@ -1487,13 +1517,15 @@ fn filter_bars() -> Vec<FilterBar> {
 }
 
 /// The case behaviour of the root a filter form is compiled on: the folded
-/// resolution form is what a root that folds ASCII case compiles, and every
-/// other form is the same on either root.
+/// resolution and links-to forms, and the path form under the folding order,
+/// are what a root that folds ASCII case compiles, and every other form is the
+/// same on either root.
 fn root_of(shape: ReadFilter) -> StoredPathOrder {
     match shape {
         ReadFilter::Resolves(SuffixKey::Folded) | ReadFilter::LinksTo(SuffixKey::Folded) => {
             StoredPathOrder::AsciiCaseInsensitive
         }
+        ReadFilter::PathGlob(order) => order,
         _ => StoredPathOrder::Sensitive,
     }
 }
@@ -1536,7 +1568,9 @@ fn judge_filter(page: &QueryPlan, seek: &Seek) {
 /// seek `(key, raw)`, or `(key, typed)` on a key with a typed order; presence and absence the presence rows by key; a bound
 /// the order's value column from the key; the full-text part the index's own
 /// `MATCH` selection; the path part the glob's literal-prefix range on
-/// `documents_path`; the resolution part each suffix range the target opens;
+/// `documents_path` where the root tells spellings apart, and the folded
+/// prefix's range on `documents_path_nocase` where it folds ASCII case; the
+/// resolution part each suffix range the target opens;
 /// the tag part `(name)`; the finding part `(kind, fingerprint)`; and the
 /// links-to part the link index at each key the named document is named by,
 /// raw or folded as the root probes. No step
@@ -2242,6 +2276,44 @@ fn each_filter_answers_the_documents_its_part_names() {
     );
 }
 
+/// **A path part folds ASCII case exactly where the root does.** On a root
+/// that folds ASCII case, a glob's literal letters match either case of
+/// themselves, so `NOTES/**` reaches every document under `notes/` and
+/// `notes/b.md` names `notes/B.md`; on a root that tells spellings apart the
+/// same globs match bytes and reach none of them. A literal glob naming a
+/// directory in another case is that directory where the root folds, so it is
+/// reported as bare there, and it is no directory where the root does not.
+#[test]
+fn a_path_part_folds_ascii_case_exactly_where_the_root_does() {
+    let sensitive = Seeded::under("find-path-case", StoredPathOrder::Sensitive);
+    let folding = Seeded::under(
+        "find-path-case-folded",
+        StoredPathOrder::AsciiCaseInsensitive,
+    );
+    let with = |seeded: &Seeded, glob: &str| {
+        seeded.paths(&request().with_predicates([Predicate::path(glob)]))
+    };
+    let notes = ["notes/a.md", "notes/B.md", "notes/c.md"];
+    for glob in ["NOTES/**", "Notes/*.MD", "n?TES/*"] {
+        assert_eq!(with(&folding, glob), notes, "`{glob}` on a folding root");
+        assert!(
+            with(&sensitive, glob).is_empty(),
+            "`{glob}` on a root that tells spellings apart"
+        );
+    }
+    assert_eq!(with(&folding, "notes/b.md"), ["notes/B.md"]);
+    assert!(with(&sensitive, "notes/b.md").is_empty());
+    assert_eq!(with(&sensitive, "notes/B.md"), ["notes/B.md"]);
+
+    let bare = |seeded: &Seeded| {
+        seeded
+            .page(&request().with_predicates([Predicate::path("NOTES")]))
+            .unsatisfied
+    };
+    assert_eq!(bare(&folding), vec![Unsatisfied::bare_directory("NOTES")]);
+    assert!(bare(&sensitive).is_empty());
+}
+
 /// **A part no document can satisfy is reported, and the page is empty.** A
 /// resolution target that is not a suffix address names no document, and
 /// neither does a glob that does not parse.
@@ -2537,15 +2609,32 @@ impl Choices {
 /// of generated paths is written, and every generated pattern is asked of it
 /// through a find: the page is exactly the paths [`Pattern::matches`] accepts.
 /// The patterns mix literal prefixes, `?`, `*`, whole-segment `**` in every
-/// position and non-ASCII characters, so the range each one seeks and the
+/// position, letters of either ASCII case, the characters beside the ASCII
+/// letters and non-ASCII characters, so the range each one seeks and the
 /// function run over it are both on trial — a range narrower than the pattern
-/// drops a path the matcher keeps.
+/// drops a path the matcher keeps. The corpus runs on a root that tells
+/// spellings apart and on one that folds ASCII case, the matcher taking the
+/// case each root gives a glob.
 #[test]
 fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
-    const SEGMENTS: &[&str] = &["a", "b", "ab", "ba", "é", "a.md", "ab.md", "B.md", "é.md"];
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        glob_corpus_agrees_under(order);
+    }
+}
+
+/// The corpus [`the_glob_a_statement_runs_agrees_with_the_in_process_matcher`]
+/// runs, over a store whose root has `order`'s case behaviour, each path
+/// matched in process under the case that order gives a glob.
+fn glob_corpus_agrees_under(order: StoredPathOrder) {
+    const SEGMENTS: &[&str] = &[
+        "a", "b", "ab", "ba", "A", "Ab", "é", "É", "a.md", "ab.md", "B.md", "é.md", "É.MD",
+    ];
     const PARTS: &[&str] = &[
         "a", "b", "ab", "é", "*", "?", "**", "a*", "*b", "?.md", "*.md", "a?", "é*", "*.*", "a**",
-        "?b*",
+        "?b*", "A", "B*", "*.MD", "É*", "@", "[",
     ];
     let mut choices = Choices(0x9E37_79B9_7F4A_7C15);
     let mut paths: Vec<String> = Vec::new();
@@ -2563,8 +2652,8 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
         }
     }
 
-    let scratch = Scratch::new("find-glob-corpus");
-    let mut store = scratch.open();
+    let scratch = Scratch::new(&format!("find-glob-corpus-{}", order.as_str()));
+    let mut store = scratch.open_under(order);
     let mut writes = store.begin_request();
     write_documents(
         &mut writes,
@@ -2588,7 +2677,7 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
         let mut expected: Vec<&str> = paths
             .iter()
             .map(String::as_str)
-            .filter(|path| pattern.matches(path, norn_wire::CaseFold::Exact))
+            .filter(|path| pattern.matches(path, order.glob_case()))
             .collect();
         expected.sort_unstable();
         let page = snapshot
@@ -2603,7 +2692,7 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
         answered.sort_unstable();
         assert_eq!(
             answered, expected,
-            "the statement and the matcher part on `{source}`"
+            "the statement and the matcher part on `{source}` under {order:?}"
         );
         pairs += paths.len();
         matched += expected.len();

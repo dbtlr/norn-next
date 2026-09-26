@@ -4,6 +4,7 @@
 use norn_db::rusqlite::types::Value;
 
 use super::FieldOrder;
+use crate::facts::StoredPathOrder;
 use crate::path::SuffixKey;
 use crate::resolve;
 
@@ -35,9 +36,12 @@ pub enum ReadFilter {
     After(FieldOrder),
     /// The body matches a full-text query, through `documents_fts`.
     FullText,
-    /// The path matches a glob: the glob's literal-prefix range on
-    /// `documents_path`, and the glob function over the paths it reaches.
-    PathGlob,
+    /// The path matches a glob under the root's path order: the glob's
+    /// literal-prefix range on `documents_path` where the root tells
+    /// spellings apart, and the folded prefix's `NOCASE` range on
+    /// `documents_path_nocase` where it folds ASCII case, and the glob
+    /// function, under the same order, over the paths the range reaches.
+    PathGlob(StoredPathOrder),
     /// The document is in the class a resolution target opens on the root:
     /// the target's suffix ranges on `documents_suffix_key` where the root
     /// tells spellings apart, and on `documents_folded_suffix_key` where it
@@ -70,7 +74,9 @@ pub const READ_FILTERS: usize = 13;
 
 impl ReadFilter {
     /// Every filter shape, in slot order. A filter that compares values is
-    /// named under the raw order; the typed order is the same slot.
+    /// named under the raw order, and a filter a root's case behaviour selects
+    /// under the order that tells spellings apart; the other form is the same
+    /// slot.
     pub fn all() -> [Self; READ_FILTERS] {
         [
             Self::Equal(FieldOrder::Raw),
@@ -81,7 +87,7 @@ impl ReadFilter {
             Self::Before(FieldOrder::Raw),
             Self::After(FieldOrder::Raw),
             Self::FullText,
-            Self::PathGlob,
+            Self::PathGlob(StoredPathOrder::Sensitive),
             Self::Resolves(SuffixKey::Raw),
             Self::Tag,
             Self::Finding,
@@ -109,7 +115,7 @@ impl ReadFilter {
             Self::Before(_) => 5,
             Self::After(_) => 6,
             Self::FullText => 7,
-            Self::PathGlob => 8,
+            Self::PathGlob(_) => 8,
             Self::Resolves(_) => 9,
             Self::Tag => 10,
             Self::Finding => 11,
@@ -138,13 +144,35 @@ pub(crate) struct Filter {
     pub(crate) values: Vec<Value>,
 }
 
+/// A path part as the values it binds, read back by a statement that spells
+/// its range and its glob other than as a membership test of a document.
+pub(crate) struct PathGlob<'a> {
+    /// The order the range is compared under and the glob matches under.
+    pub(crate) order: StoredPathOrder,
+    /// The range's lower bound, inclusive.
+    pub(crate) lower: &'a Value,
+    /// The range's upper bound, exclusive.
+    pub(crate) upper: &'a Value,
+    /// The glob's text.
+    pub(crate) pattern: &'a Value,
+    /// The recorded spelling of the order, as the glob function reads it.
+    pub(crate) recorded_order: &'a Value,
+}
+
 impl Filter {
-    /// A path part's range and glob, as the values it binds — the range's
-    /// lower bound, its upper bound, and the pattern — and `None` for any
-    /// other part.
-    pub(crate) fn path_glob(&self) -> Option<(&Value, &Value, &Value)> {
+    /// A path part's order, range and glob, as the values it binds, and
+    /// `None` for any other part.
+    pub(crate) fn path_glob(&self) -> Option<PathGlob<'_>> {
         match (self.shape, self.values.as_slice()) {
-            (ReadFilter::PathGlob, [lower, upper, pattern]) => Some((lower, upper, pattern)),
+            (ReadFilter::PathGlob(order), [lower, upper, pattern, recorded_order]) => {
+                Some(PathGlob {
+                    order,
+                    lower,
+                    upper,
+                    pattern,
+                    recorded_order,
+                })
+            }
             _ => None,
         }
     }
@@ -214,13 +242,14 @@ impl Filter {
                     "{id} IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH {query})"
                 )
             }
-            ReadFilter::PathGlob => {
-                let (lower, upper, pattern) = (next(), next(), next());
+            ReadFilter::PathGlob(order) => {
+                let (lower, upper, pattern, recorded) = (next(), next(), next(), next());
+                let collation = order.collation();
                 format!(
                     "{id} IN (SELECT dg.id FROM documents AS dg
-                     WHERE dg.path >= {lower} AND dg.path < {upper}
+                     WHERE dg.path >= {lower}{collation} AND dg.path < {upper}{collation}
                        AND {})",
-                    glob_test(&pattern, "dg.path")
+                    glob_test(&pattern, "dg.path", &recorded)
                 )
             }
             ReadFilter::Resolves(key) => {
@@ -292,9 +321,10 @@ impl Filter {
 pub(crate) const LINKS_TO_PARAMETERS: usize = 4;
 
 /// The test that `path`, a column holding a path, matches the glob bound at
-/// `pattern`: the one spelling of a glob match every statement runs.
-pub(crate) fn glob_test(pattern: &str, path: &str) -> String {
-    format!("{}({pattern}, {path})", super::glob::GLOB_FUNCTION)
+/// `pattern` under the path order whose recorded spelling is bound at
+/// `order`: the one spelling of a glob match every statement runs.
+pub(crate) fn glob_test(pattern: &str, path: &str, order: &str) -> String {
+    format!("{}({pattern}, {path}, {order})", super::glob::GLOB_FUNCTION)
 }
 
 /// Numbers placeholders as they are written, holding the values in that order.

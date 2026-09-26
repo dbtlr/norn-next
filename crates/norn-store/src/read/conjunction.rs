@@ -12,13 +12,14 @@ use super::naming::Naming;
 use super::run::StatementFailure;
 use super::{FieldOrder, IN_VALUES_CEILING, Lookups, PageRefusal, Ran, ReadBound, glob, suggest};
 use crate::error::{self, StoreError};
+use crate::facts::StoredPathOrder;
 use crate::fields::ContentModel;
 use crate::find::{
     FindStatement, compose_bare_directory, compose_known_key, compose_match_probe, compose_universe,
 };
 use crate::json::{FrontmatterValue, canonical_json};
 use crate::link::keys_naming;
-use crate::path::{DirectoryPrefix, DocumentPath, SuffixKey};
+use crate::path::{DirectoryPrefix, DocumentPath, SuffixKey, fold_ascii_case};
 use crate::resolve::TargetClass;
 use crate::store::Snapshot;
 
@@ -298,10 +299,11 @@ impl Snapshot {
                     if let Some(part) = self.unmatchable_path(&pattern, lookups)? {
                         return Ok(Part::MatchesNothing(part));
                     }
-                    let (lower, upper) = glob::path_range(&pattern);
+                    let order = self.path_order();
+                    let (lower, upper) = glob::path_range(&pattern, order);
                     filter(
-                        ReadFilter::PathGlob,
-                        vec![Value::Text(lower), upper, text(glob)],
+                        ReadFilter::PathGlob(order),
+                        vec![Value::Text(lower), upper, text(glob), text(order.as_str())],
                     )
                 }
             },
@@ -392,8 +394,9 @@ impl Snapshot {
     /// construction, or `None` where it can be applied.
     ///
     /// A glob with no wildcard is asked first whether it is a bare directory —
-    /// no document at the path, and some beneath it — because that is the
-    /// report that says what the request meant. Then any glob is impossible
+    /// no document at the path, and some beneath it, each under the snapshot's
+    /// path order as the glob itself matches — because that is the report that
+    /// says what the request meant. Then any glob is impossible
     /// where, read with each wildcard as a letter, it is no document path the
     /// store accepts: every path the glob could match is spelled that way with
     /// other characters in the holes, and the refusals the grammar makes are
@@ -405,13 +408,18 @@ impl Snapshot {
     ) -> Result<Option<Unsatisfied>, StoreError> {
         let source = pattern.as_str();
         let literal = !source.contains(['*', '?']);
-        if literal && let Ok(directory) = DirectoryPrefix::new(source) {
+        let order = self.path_order();
+        let spelled = match order {
+            StoredPathOrder::Sensitive => source.to_string(),
+            StoredPathOrder::AsciiCaseInsensitive => fold_ascii_case(source),
+        };
+        if literal && let Ok(directory) = DirectoryPrefix::new(&spelled) {
             let (lower, upper) = directory.descendant_bounds();
             let bare = self.ask(
                 &mut lookups.ran,
                 Ran::new(
                     FindStatement::BareDirectory,
-                    compose_bare_directory(source, &lower, &upper),
+                    compose_bare_directory(&spelled, &lower, &upper, order),
                 ),
                 "asking whether a path names a bare directory",
             )?;

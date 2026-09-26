@@ -480,11 +480,11 @@ impl Snapshot {
 
     /// The case behaviour the rows this snapshot reads were derived under.
     ///
-    /// A find's `resolves` part is the one reader of it: the order selects the
-    /// suffix key the resolution probes and the case its ignore globs match
-    /// under. No other read builder consults it: a find's, a count's and a
-    /// validate's path parts match bytes and their pages order paths the same
-    /// way on every root.
+    /// Every read that compiles a class or a glob reads it: the order selects
+    /// the suffix key a resolution probes, and the case every glob matches
+    /// under — a class's ignore globs, and the path part of a find, a count
+    /// and a validate — with the index a path part's range seeks. A find's
+    /// pages order paths the same way on every root.
     pub fn path_order(&self) -> StoredPathOrder {
         self.order
     }

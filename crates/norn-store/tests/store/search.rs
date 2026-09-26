@@ -1628,7 +1628,10 @@ fn filtered() -> Vec<(Predicate, ReadFilter)> {
             ReadFilter::After(norn_store::FieldOrder::Raw),
         ),
         (Predicate::matches("harbor"), ReadFilter::FullText),
-        (Predicate::path("notes/*"), ReadFilter::PathGlob),
+        (
+            Predicate::path("notes/*"),
+            ReadFilter::PathGlob(norn_store::StoredPathOrder::Sensitive),
+        ),
         (Predicate::tag("draft"), ReadFilter::Tag),
         (
             Predicate::has_finding(FindingKind::BodyBytesNotUtf8),
