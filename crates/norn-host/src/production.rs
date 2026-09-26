@@ -3217,10 +3217,9 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
 /// filled, and the findings its defective documents record.
 ///
 /// One flush call applies the increment first and records the findings after
-/// it, each in its own transaction: a flush torn between the two leaves the
-/// increment landed — a tombstone where a quarantined path had a row, the row
-/// where a document derived without its frontmatter — with no finding until the
-/// next heal re-derives the path and records it. The order matters because a
+/// it, in one transaction, so no tear lands between a row and what is wrong
+/// with it — a tombstone where a quarantined path had a row, the row where a
+/// document derived without its frontmatter. The order matters because a
 /// changeset entry discards the findings recorded about the path it names, so a
 /// finding written ahead of the increment is a finding the increment takes. It
 /// is also what makes the co-resident case work: an act that writes a row and

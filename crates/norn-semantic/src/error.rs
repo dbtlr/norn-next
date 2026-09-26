@@ -39,7 +39,7 @@ pub enum EngineError {
     /// The sidecar file's own contents are wrong. Discarding and rebuilding
     /// the sidecar is the resolution — derived state is rebuildable by
     /// construction, and the wholesale rebuild is the permanent
-    /// always-correct floor (ADR 0021).
+    /// always-correct floor (ADR 0027).
     SidecarDamaged { what: String },
     /// A nearest answer scored a row with no relevance score: NaN or an
     /// infinity. Judged for every row the scan scores, kept or not, so a
