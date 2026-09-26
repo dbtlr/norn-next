@@ -2609,8 +2609,9 @@ impl Choices {
 /// of generated paths is written, and every generated pattern is asked of it
 /// through a find: the page is exactly the paths [`Pattern::matches`] accepts.
 /// The patterns mix literal prefixes, `?`, `*`, whole-segment `**` in every
-/// position, letters of either ASCII case, the characters beside the ASCII
-/// letters and non-ASCII characters, so the range each one seeks and the
+/// position, letters of either ASCII case — `Z` among them, whose successor
+/// sorts between the two cases — the characters beside the ASCII letters and
+/// non-ASCII characters, so the range each one seeks and the
 /// function run over it are both on trial — a range narrower than the pattern
 /// drops a path the matcher keeps. The corpus runs on a root that tells
 /// spellings apart and on one that folds ASCII case, the matcher taking the
@@ -2630,11 +2631,12 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
 /// matched in process under the case that order gives a glob.
 fn glob_corpus_agrees_under(order: StoredPathOrder) {
     const SEGMENTS: &[&str] = &[
-        "a", "b", "ab", "ba", "A", "Ab", "é", "É", "a.md", "ab.md", "B.md", "é.md", "É.MD",
+        "a", "b", "ab", "ba", "A", "Ab", "z", "Zb", "é", "É", "a.md", "ab.md", "B.md", "é.md",
+        "É.MD",
     ];
     const PARTS: &[&str] = &[
         "a", "b", "ab", "é", "*", "?", "**", "a*", "*b", "?.md", "*.md", "a?", "é*", "*.*", "a**",
-        "?b*", "A", "B*", "*.MD", "É*", "@", "[",
+        "?b*", "A", "B*", "*.MD", "É*", "@", "[", "Z*", "z?",
     ];
     let mut choices = Choices(0x9E37_79B9_7F4A_7C15);
     let mut paths: Vec<String> = Vec::new();
