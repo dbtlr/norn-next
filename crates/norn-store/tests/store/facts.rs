@@ -547,12 +547,12 @@ fn a_field_index_holds_only_the_rows_its_reads_match() {
         ("document_fields_typed", "key, typed", "typed IS NOT NULL"),
         (
             "document_fields_least_raw",
-            "key, raw, path",
+            "key, raw, path COLLATE NOCASE, path",
             "least_raw = 1",
         ),
         (
             "document_fields_least_typed",
-            "key, typed, path",
+            "key, typed, path COLLATE NOCASE, path",
             "least_typed = 1",
         ),
         ("document_fields_presence", "key, container", "ordinal = 0"),

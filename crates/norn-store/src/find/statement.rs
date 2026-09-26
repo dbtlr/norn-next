@@ -13,7 +13,9 @@ use crate::error::StoreError;
 use crate::facts::StoredPathOrder;
 use crate::json::{FrontmatterValue, canonical_json};
 use crate::path::SuffixKey;
-use crate::read::{Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter, key_walk};
+use crate::read::{
+    Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter, answer_after, answer_ordering, key_walk,
+};
 use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 
 /// Every statement shape the find builder runs, named.
@@ -30,17 +32,19 @@ pub enum FindStatement {
     /// The pinned vault-schema fingerprint, read on the snapshot: what a
     /// finding filter is judged under.
     ActiveFingerprint,
-    /// A page in path order: ASCII case folded, with the bytewise path as the
-    /// tie-break, on `documents_path_nocase`.
+    /// A page in the answer's path order — ASCII case folded, with the
+    /// bytewise path as the tie-break — on `documents_path_nocase`.
     PathPage(PageDirection),
     /// The documents a field sort orders by value: one marker row per document,
-    /// its least value under the order, in `(value, path)` order on that
-    /// order's marker index.
+    /// its least value under the order, in `(value, path COLLATE NOCASE, path)`
+    /// order on that order's marker index, so documents tied at one value
+    /// stand in the answer's path order.
     FieldValuePage(FieldOrder, PageDirection),
-    /// The documents a field sort holds no value for under the order, in path
-    /// order on `documents_path`: a walk of it that probes each document's
-    /// marker row, passing every document that carries the key. They stand
-    /// before every valued document ascending and after every one descending.
+    /// The documents a field sort holds no value for under the order, in the
+    /// answer's path order on `documents_path_nocase`: a walk of it that
+    /// probes each document's marker row, passing every document that carries
+    /// the key. They stand before every valued document ascending and after
+    /// every one descending.
     FieldMissingPage(FieldOrder, PageDirection),
     /// Whether any document carries a key the declaration does not name: one
     /// existence seek of `document_fields_presence`.
@@ -349,12 +353,10 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             (
                 format!(
                     "SELECT d.id, d.path, NULL FROM documents AS d
-                     WHERE {order_seek}d.path {comparison}= COALESCE({after}, {beyond})
-                           COLLATE NOCASE
-                       AND ({after} IS NULL OR d.path {comparison} {after} COLLATE NOCASE
-                            OR d.path {comparison} {after})"
+                     WHERE {}",
+                    answer_after(order_seek, "d.path", comparison, &after, beyond)
                 ),
-                format!("d.path COLLATE NOCASE{descending}, d.path{descending}"),
+                answer_ordering("d.path", descending),
                 "d.id",
             )
         }
@@ -368,10 +370,15 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
                 format!(
                     "SELECT f.document, f.path, f.{column} FROM document_fields AS f
                      WHERE f.key = {key} AND {order_seek}f.{marker} = 1
-                       AND (f.{column}, f.path) {comparison}
-                           (COALESCE({sort}, {beyond}), COALESCE({after}, {beyond}))"
+                       AND (f.{column}, f.path, f.path) {comparison}
+                           (COALESCE({sort}, {beyond}),
+                            COALESCE({after}, {beyond}) COLLATE NOCASE,
+                            COALESCE({after}, {beyond}))"
                 ),
-                format!("f.{column}{descending}, f.path{descending}"),
+                format!(
+                    "f.{column}{descending}, {}",
+                    answer_ordering("f.path", descending)
+                ),
                 "f.document",
             )
         }
@@ -383,11 +390,12 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             (
                 format!(
                     "SELECT d.id, d.path, NULL FROM documents AS d
-                     WHERE {order_seek}d.path {comparison} COALESCE({after}, {beyond})
+                     WHERE {}
                        AND NOT EXISTS (SELECT 1 FROM document_fields AS m
-                           WHERE m.document = d.id AND m.key = {key} AND m.{marker} = 1)"
+                           WHERE m.document = d.id AND m.key = {key} AND m.{marker} = 1)",
+                    answer_after(order_seek, "d.path", comparison, &after, beyond)
                 ),
-                format!("d.path{descending}"),
+                answer_ordering("d.path", descending),
                 "d.id",
             )
         }

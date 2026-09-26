@@ -684,7 +684,7 @@ const FIELD_BARS: &[FieldBar] = &[
         missing: FindStatement::FieldMissingPage(FieldOrder::Raw, PageDirection::Ascending),
         direction: Direction::Ascending,
         marker_index: "document_fields_least_raw",
-        valued_constraint: "(key=? AND (raw,path)>(?,?))",
+        valued_constraint: "(key=? AND (raw,path,path)>(?,?,?))",
         missing_constraint: "(path>?)",
     },
     FieldBar {
@@ -693,7 +693,7 @@ const FIELD_BARS: &[FieldBar] = &[
         missing: FindStatement::FieldMissingPage(FieldOrder::Raw, PageDirection::Descending),
         direction: Direction::Descending,
         marker_index: "document_fields_least_raw",
-        valued_constraint: "(key=? AND (raw,path)<(?,?))",
+        valued_constraint: "(key=? AND (raw,path,path)<(?,?,?))",
         missing_constraint: "(path<?)",
     },
     FieldBar {
@@ -702,7 +702,7 @@ const FIELD_BARS: &[FieldBar] = &[
         missing: FindStatement::FieldMissingPage(FieldOrder::Typed, PageDirection::Ascending),
         direction: Direction::Ascending,
         marker_index: "document_fields_least_typed",
-        valued_constraint: "(key=? AND (typed,path)>(?,?))",
+        valued_constraint: "(key=? AND (typed,path,path)>(?,?,?))",
         missing_constraint: "(path>?)",
     },
     FieldBar {
@@ -711,7 +711,7 @@ const FIELD_BARS: &[FieldBar] = &[
         missing: FindStatement::FieldMissingPage(FieldOrder::Typed, PageDirection::Descending),
         direction: Direction::Descending,
         marker_index: "document_fields_least_typed",
-        valued_constraint: "(key=? AND (typed,path)<(?,?))",
+        valued_constraint: "(key=? AND (typed,path,path)<(?,?,?))",
         missing_constraint: "(path<?)",
     },
 ];
@@ -725,11 +725,12 @@ fn judge_valued(page: &QueryPlan, bar: &FieldBar) {
     page.assert_no_temp_btree();
 }
 
-/// Judge a field sort's missing section: path order off `documents_path` from
-/// the page's position, and one primary-key seek per document for its marker.
+/// Judge a field sort's missing section: the answer's path order off
+/// `documents_path_nocase` from the page's position, and one primary-key seek
+/// per document for its marker.
 fn judge_missing(page: &QueryPlan, bar: &FieldBar) {
     page.assert_no_full_scan();
-    page.assert_searches_through("documents", Access::Index("documents_path"));
+    page.assert_searches_through("documents", Access::Index("documents_path_nocase"));
     page.assert_search_constraint("documents", bar.missing_constraint);
     page.assert_searches_through("document_fields", Access::PrimaryKey);
     page.assert_search_constraint("document_fields", "(document=? AND key=?)");
@@ -737,19 +738,32 @@ fn judge_missing(page: &QueryPlan, bar: &FieldBar) {
 }
 
 /// **A field sort seeks its marker rows, and pages its missing section by
-/// path.** The valued section reads the order's marker index — one row per
-/// document, its least value — from the page's `(value, path)` position, so the
-/// page reads its own rows and none ahead of it, and nothing sorts. The missing
-/// section walks `documents_path` from the page's path and seeks each
-/// document's marker by primary key. Both are judged on a first page and on a
-/// continuation into each section, which is where a keyset position is bound.
+/// path, on either root.** The valued section reads the order's marker index —
+/// one row per document, its least value, then the path folded and bytewise —
+/// from the page's `(value, path)` position, so the page reads its own rows and
+/// none ahead of it, and nothing sorts. The missing section walks
+/// `documents_path_nocase` from the page's path and seeks each document's
+/// marker by primary key. Both are judged on a first page and on a
+/// continuation into each section, which is where a keyset position is bound,
+/// on a root that tells spellings apart and on one that folds them.
 ///
 /// Controls: each marker index dropped, the valued section reads something
+/// else; `documents_path_nocase` dropped, the missing section reads something
 /// else; a continuation's plan rebuilt without its `(value, path)` bound fails
 /// the constraint bar.
 #[test]
 fn a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path() {
-    let mut seeded = Seeded::new("find-field-sort");
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        judge_field_sort_plans(Seeded::under("find-field-sort", order));
+    }
+}
+
+/// [`a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path`]
+/// on one store.
+fn judge_field_sort_plans(mut seeded: Seeded) {
     for bar in FIELD_BARS {
         let params = sorted(SortKey::field(bar.key), bar.direction);
         let in_valued = seeded.resumed(&params, Some("m"), "notes/a.md");
@@ -794,6 +808,13 @@ fn a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path() {
                 judge_valued(&plan_of(&plans, bar.valued), bar)
             });
         }
+    }
+    seeded.drop_index("documents_path_nocase");
+    for bar in FIELD_BARS {
+        let plans = seeded.plans(&sorted(SortKey::field(bar.key), bar.direction));
+        failure_of("documents_path_nocase dropped", || {
+            judge_missing(&plan_of(&plans, bar.missing), bar)
+        });
     }
 }
 
@@ -2145,6 +2166,87 @@ fn a_continuation_resumes_exactly_between_paths_that_differ_only_by_case() {
             "other/v1.2.md"
         ]
     );
+}
+
+/// **A field sort answers both its sections in the answer's path order on
+/// either root.** The documents missing the sort key stand in `(path COLLATE
+/// NOCASE, path)` order, and so do the documents tied at one value, whether
+/// the root tells spellings apart or folds them. The fixture's paths order
+/// differently bytewise: `Z` below `_` and `b`, and `Miss/` below `miss/`.
+/// Drained a row at a time and two rows at a time, in either direction and
+/// under the raw and the typed order, each sort answers the rows this test
+/// lists, the descending one as the ascending one reversed.
+#[test]
+fn a_field_sort_answers_its_missing_and_tied_documents_in_folded_path_order_on_either_root() {
+    let declared = declared();
+    let tied = |path: &str| {
+        document(path, &format!("hash-{path}"), "a body\n").with_frontmatter(
+            Some(map(vec![
+                ("status", string("tied")),
+                ("count", FrontmatterValue::Int(7)),
+            ])),
+            &declared,
+        )
+    };
+    let missing = |path: &str| document(path, &format!("hash-{path}"), "a body\n");
+    let missing_in_order = ["miss/_.md", "Miss/B.md", "miss/b.md", "Miss/Z.md"];
+    let tied_in_order = ["tie/_.md", "tie/B.md", "tie/b.md", "tie/Z.md"];
+    let by_status: Vec<&str> = missing_in_order
+        .iter()
+        .copied()
+        .chain([
+            "other/glossary.md",
+            "notes/B.md",
+            "other/v1.2.md",
+            "notes/a.md",
+            "notes/c.md",
+        ])
+        .chain(tied_in_order)
+        .collect();
+    let by_count: Vec<&str> = missing_in_order
+        .iter()
+        .copied()
+        .chain([
+            "notes/c.md",
+            "other/glossary.md",
+            "other/v1.2.md",
+            "notes/a.md",
+        ])
+        .chain(tied_in_order)
+        .chain(["notes/B.md"])
+        .collect();
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        let mut seeded = Seeded::under("find-field-sort-answer-order", order);
+        let mut added: Vec<_> = ["tie/Z.md", "tie/b.md", "tie/_.md", "tie/B.md"]
+            .into_iter()
+            .map(tied)
+            .collect();
+        added.extend(
+            ["Miss/Z.md", "miss/b.md", "miss/_.md", "Miss/B.md"]
+                .into_iter()
+                .map(missing),
+        );
+        write_documents(&mut seeded.store.begin_request(), &added);
+        for (key, ascending) in [("status", &by_status), ("count", &by_count)] {
+            let descending: Vec<&str> = ascending.iter().rev().copied().collect();
+            for (direction, expected) in [
+                (Direction::Ascending, ascending.clone()),
+                (Direction::Descending, descending),
+            ] {
+                let params = sorted(SortKey::field(key), direction);
+                for limit in [100, 1, 2] {
+                    assert_eq!(
+                        drained(&seeded, &params, limit),
+                        expected,
+                        "{key} {direction:?} under {order:?}, drained {limit} at a time"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// **A find resolves a `links_to` part's target once.** Whether the target

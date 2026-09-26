@@ -776,8 +776,8 @@ every statement slot and every filter slot to exactly one bar. The statements ar
 active-fingerprint point read; the path page, a seek of the case-insensitive path index in
 either direction; a field sort's two sections — the valued section, a seek of the raw or the
 typed order's least-value marker index from a `(value, path)` position, and the missing
-section, a walk of the path index from a path position that probes each document's marker
-row; the known-key probe and the field-universe walk, both reading the presence rows alone;
+section, a walk of the case-insensitive path index from a path position that probes each
+document's marker row; the known-key probe and the field-universe walk, both reading the presence rows alone;
 the bare-directory probe, two seeks of the path index; the match probe, one read of the
 full-text index through its `MATCH` selection, which is where a query the engine cannot
 parse is met before the page runs; and the hydration of the rows a page returns — the
