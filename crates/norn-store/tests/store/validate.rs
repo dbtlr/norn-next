@@ -525,6 +525,76 @@ fn a_drain_a_page_at_a_time_answers_the_findings_one_page_does() {
     );
 }
 
+/// **On a root that folds ASCII case, a drain of a path part answers every
+/// finding it matches once, in bytewise `(kind, path, id)` order.** The
+/// findings stand at paths whose folded and bytewise orders differ: `Z` sorts
+/// below `[`, `_` and `` ` `` bytewise and above them folded, and `Notes/`
+/// sorts with `notes/` folded. `NOTES/**` drained one and two findings at a
+/// time answers what the unnarrowed validate answers under `notes/` in any
+/// case, with no finding skipped and none repeated.
+#[test]
+fn a_drain_of_a_path_part_on_a_folding_root_answers_each_finding_once_in_bytewise_order() {
+    let mut validating_store = Validating::under(
+        "validate-folded-drain",
+        StoredPathOrder::AsciiCaseInsensitive,
+    );
+    let mixed = [
+        "Notes/A.md",
+        "notes/_x.md",
+        "notes/[y.md",
+        "notes/`b.md",
+        "notes/b.md",
+        "notes/Z.md",
+    ];
+    for at in mixed {
+        validating_store.stand(&violation(at));
+    }
+    validating_store.stand(&undeclared("notes/Z.md", "one"));
+    validating_store.stand(&undeclared("notes/Z.md", "two"));
+    let under_notes =
+        |row: &FindingRow| row.path.as_str().to_ascii_lowercase().starts_with("notes/");
+    let expected: Vec<FindingRow> = validating_store
+        .rows(&validating().with_limit(1000))
+        .into_iter()
+        .filter(under_notes)
+        .collect();
+    let violations: Vec<&str> = expected
+        .iter()
+        .filter(|row| row.kind == FindingKind::BodyBytesNotUtf8)
+        .map(|row| row.path.as_str())
+        .collect();
+    assert_eq!(
+        violations,
+        [
+            "Notes/A.md",
+            "notes/Z.md",
+            "notes/[y.md",
+            "notes/_x.md",
+            "notes/`b.md",
+            "notes/b.md"
+        ],
+        "the unnarrowed validate answers in bytewise path order"
+    );
+    let params = validating().with_predicates([Predicate::path("NOTES/**")]);
+    for limit in [1, 2] {
+        let rows = drained(&validating_store, &params, limit);
+        let mut ids: Vec<u64> = rows.iter().map(|row| row.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            rows.len(),
+            "a drain of {limit} repeated a finding"
+        );
+        assert_eq!(
+            names(&rows),
+            names(&expected),
+            "NOTES/** drained {limit} at a time"
+        );
+        assert_eq!(rows, expected, "NOTES/** drained {limit} at a time");
+    }
+}
+
 /// **A finding row carries the bounded head the pillar stores, the total it
 /// heads, and the hint that names the `find` enumerating its class.** The
 /// `glossary` finding heads five of seven candidates in the order they were
