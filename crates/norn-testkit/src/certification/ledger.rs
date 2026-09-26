@@ -480,8 +480,8 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
-        name: "read-pair-heap-peak-ratio",
-        authored_at: "crates/norn-host/tests/baselines/mod.rs::READ_PAIR_HEAP_PEAK_PER_MILLE",
+        name: "read-pair-heap-growth-allowance",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES",
         armed: true,
     },
     ExitBar {

@@ -308,7 +308,7 @@ fn the_gate_profile_reads_inside_its_memory_bar() {
 /// and a shape that grew the process by a large fraction of the attach shows
 /// as a multiple of it however generous the ceiling above it is. A shape that
 /// holds the vault's rows inside the headroom the attach left is
-/// [`the_read_mix_holds_its_heap_flat_from_the_ambiguity_profile_to_the_gate_profile`]'s
+/// [`the_read_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile`]'s
 /// to refuse.
 #[test]
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
@@ -345,32 +345,38 @@ fn reading_the_gate_profile_holds_the_process_near_its_attach_peak() {
     );
 }
 
-/// **What the read shapes hold on the heap, as a slope across two scales.**
+/// **What the read shapes hold on the heap, as a difference across two
+/// scales.**
 ///
 /// A reading child at each per-PR profile runs the same read mix and reports
 /// the most its shapes raised the live heap above the attach beneath them.
-/// `realistic` holds 6.7x the documents `ambiguous` does. A shape that answers
-/// a page, a target or what a narrowing part admits holds about the same rows
-/// at both scales, and a shape that held the vault's rows would show the
-/// spread. The heap reading counts bytes the code asked for, so neither page
-/// size nor what the attach left resident moves it, which is what lets it see
-/// a vault's rows a whole-process peak absorbs.
+/// `realistic` holds 1,700 more documents than `ambiguous`. A shape that
+/// answers a page, a target or what a narrowing part admits holds about the
+/// same bytes at both scales, and a shape that held something for each
+/// document of the vault holds that many more of it at `realistic`. The heap
+/// reading counts bytes the code asked for and repeats to within eight bytes
+/// from run to run, so the bar bounds the difference in bytes rather than a
+/// ratio: a ratio over the find's pages moves only once a retention climbs
+/// past a fraction of them.
 #[test]
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
-fn the_read_mix_holds_its_heap_flat_from_the_ambiguity_profile_to_the_gate_profile() {
+fn the_read_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile() {
     let small = read_child("read-heap-ambiguous", "ambiguous").heap_peak;
     let large = read_child("read-heap-realistic", "realistic").heap_peak;
-    let observed = baselines::per_mille(large, small);
+    let growth = large.saturating_sub(small);
 
     baselines::record(
         "heap the read mix holds across the two per-PR scales",
         &[
             ("ambiguous, 300 documents (bytes)", small.to_string()),
             ("realistic, 2000 documents (bytes)", large.to_string()),
-            ("observed ratio", baselines::multiple(observed)),
             (
-                "ratio bar",
-                baselines::multiple(baselines::READ_PAIR_HEAP_PEAK_PER_MILLE),
+                "realistic minus ambiguous (bytes)",
+                (i128::from(large) - i128::from(small)).to_string(),
+            ),
+            (
+                "growth allowance (bytes)",
+                baselines::READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES.to_string(),
             ),
         ],
     );
@@ -380,12 +386,11 @@ fn the_read_mix_holds_its_heap_flat_from_the_ambiguity_profile_to_the_gate_profi
         "a reading child reported no heap reading above its attach, so the pair compares nothing"
     );
     assert!(
-        baselines::fits(observed, baselines::READ_PAIR_HEAP_PEAK_PER_MILLE),
-        "going from `ambiguous` (300 documents) to `realistic` (2000 documents) moved the heap the \
-         read mix holds by {}x, past the {}x bar: `ambiguous` held {small} bytes and \
-         `realistic` {large}",
-        baselines::multiple(observed),
-        baselines::multiple(baselines::READ_PAIR_HEAP_PEAK_PER_MILLE),
+        baselines::fits(growth, baselines::READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES),
+        "going from `ambiguous` (300 documents) to `realistic` (2000 documents) grew the heap the \
+         read mix holds by {growth} bytes, past the {} byte allowance: `ambiguous` held {small} \
+         bytes and `realistic` {large}",
+        baselines::READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES,
     );
 }
 

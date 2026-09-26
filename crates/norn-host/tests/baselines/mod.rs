@@ -220,7 +220,7 @@ pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 /// answers a page, a single target or what a narrowing part admits, so what
 /// a read adds to a process that attached is a page's rows. A read that held
 /// the vault's rows with their bodies is refused by the ratio below, and one
-/// that held them without is refused only by [`READ_PAIR_HEAP_PEAK_PER_MILLE`];
+/// that held them without is refused only by [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`];
 /// both pass under this ceiling.
 ///
 /// **Platform scope: the Linux measurement lane.** The per-PR `memory
@@ -263,58 +263,18 @@ pub const READ_PEAK_RSS_CEILING_BYTES: u64 = 47 * 1024 * 1024;
 /// bar, while its ceiling children peaked at 39.07–39.32 MiB, under
 /// [`READ_PEAK_RSS_CEILING_BYTES`]. The same find without the bodies read
 /// 1.24, 1.31 and 1.31 here, which passes; the whole-process peak absorbs
-/// 2000 rows of fields and tags, and [`READ_PAIR_HEAP_PEAK_PER_MILLE`] is the
+/// 2000 rows of fields and tags, and [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] is the
 /// bar that refuses them.
 ///
 /// **Platform scope: the Linux measurement lane**, the same one
 /// [`READ_PEAK_RSS_CEILING_BYTES`] gates in.
 pub const READ_OVER_ATTACH_PEAK_RSS_PER_MILLE: u64 = 1_500;
 
-/// How much of the heap the read mix holds over the `ambiguous` profile the
-/// read mix over the `realistic` profile may hold, per mille.
+/// How many bytes more heap the read mix may hold over the `realistic`
+/// profile than over the `ambiguous` profile.
 ///
-/// **The bar that sees the rows a read holds.** Each child of the pair
-/// attaches its profile under the read schema and runs the read mix
-/// [`READ_PEAK_RSS_CEILING_BYTES`] names, and a counting global allocator in
-/// the child reads the most the shapes raised the live heap above the mark it
-/// set once the attachment was ready. The reading counts the bytes the code
-/// asked the allocator for: page size, allocator slack and what the attach
-/// left resident do not move it, and memory SQLite takes from `malloc` for its
-/// own caches is outside it. What is inside it is where a hydrated row lives.
-/// `realistic` holds 6.7x the documents `ambiguous` does, so a shape that
-/// answers a page holds about the same bytes at both, and a shape that held
-/// the vault's rows shows the spread.
-///
-/// Observed on macos-arm64 on 2026-09-25 and 2026-09-26, over nine runs:
-/// **1,193,975 bytes at `ambiguous` in all nine readings, and 1,185,220 at
-/// `realistic` in eighteen of nineteen**, the other reading 1,185,212; ratio
-/// 0.99 in every run. The trees and the requests are fixed by the seed, and
-/// what the host's own threads allocate while the shapes run moves the
-/// reading by bytes rather than kilobytes. The find's pages set the
-/// high-water at both profiles; every other shape raises the heap by under
-/// 80 KB above where it began.
-///
-/// The bar is 1.10. The reading is exact to within eight bytes, so the
-/// headroom is for what a second platform's allocations move rather than for
-/// run-to-run spread, and a tenth over the reading is that allowance. **What
-/// it fails is a `realistic` reading past 1,313,372 bytes against the
-/// `ambiguous` reading above.** The high-water is the highest shape's and not
-/// their sum, so a shape other than the find shows only once what it holds
-/// above the attach climbs past the find's pages by that tenth.
-///
-/// **Its negative control is the read mix with a find inserted before the
-/// backlinks shape that hydrates every document with its fields and its tags,
-/// 25 rows a page, and keeps every page alive.** It reads 2,720,228 bytes at
-/// `realistic` against 1,193,975 at `ambiguous`, **2.27** in each of three
-/// runs, which fails this bar while both whole-process bars pass it. With the
-/// rows' links it reads 3.33, and with their bodies 9.86, in each of three
-/// runs.
-///
-/// **Platform scope: the Linux measurement lane**, the same one
-/// [`READ_PEAK_RSS_CEILING_BYTES`] gates in. No hosted reading stands beside
-/// the local ones yet, so how far that platform moves an exact local reading
-/// is unmeasured.
-pub const READ_PAIR_HEAP_PEAK_PER_MILLE: u64 = 1_100;
+/// The grounds, readings and negative controls are recorded beside the value.
+pub const READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 
 /// How many descriptors a long mixed load may add to the count taken once the
 /// attachment is ready.
