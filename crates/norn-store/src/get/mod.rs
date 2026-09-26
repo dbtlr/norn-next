@@ -143,11 +143,11 @@ pub trait DocumentText {
     /// in document order — in `body`, taking the first heading the anchor
     /// matches, and `None` where it matches none.
     ///
-    /// **An implementation makes at most four linear passes over
+    /// **An implementation makes a constant number of linear passes over
     /// `headings`**, visiting each heading at most once a pass, and reads no
-    /// heading it is not handed, so what the match compares is at most four
-    /// times what [`GetWork::anchor_headings`] counts.
-    /// `norn_text::resolve_section` states the same bound of itself.
+    /// heading it is not handed, so what the match compares is at most that
+    /// constant times what [`GetWork::anchor_headings`] counts. The host's
+    /// reader states its own count of passes beside its implementation.
     fn section(&self, headings: &[HeadingFact], body: &str, anchor: &str) -> Option<SectionAt>;
 
     /// The bytes of `body` the block holds whose definition's `^` marker
