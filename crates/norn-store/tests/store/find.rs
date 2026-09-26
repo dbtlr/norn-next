@@ -2168,6 +2168,54 @@ fn a_continuation_resumes_exactly_between_paths_that_differ_only_by_case() {
     );
 }
 
+/// **A heal pages a root that tells spellings apart bytewise, while a find
+/// answers the same store folded.** The heal merges its page against a walk
+/// in the root's proven order, so its order is the root's, not the answer's:
+/// over the fixture on such a root, the heal's pages, drained one and two
+/// rows at a time, hold `notes/B.md` ahead of `notes/a.md`, and a find's path
+/// page holds it after.
+#[test]
+fn a_heal_pages_a_case_sensitive_root_bytewise_while_a_find_answers_it_folded() {
+    let mut seeded = Seeded::under("find-heal-order", StoredPathOrder::Sensitive);
+    let answered = [
+        "notes/a.md",
+        "notes/B.md",
+        "notes/c.md",
+        "other/glossary.md",
+        "other/v1.2.md",
+    ];
+    assert_eq!(
+        drained(&seeded, &sorted(SortKey::path(), Direction::Ascending), 1),
+        answered
+    );
+    let request = seeded.store.begin_request();
+    for limit in [1, 2, 10] {
+        let mut healed: Vec<String> = Vec::new();
+        let mut after = None;
+        loop {
+            let page = request
+                .stored_documents_after_ordered(after.as_ref(), limit, StoredPathOrder::Sensitive)
+                .expect("a heal's page");
+            healed.extend(page.iter().map(|row| row.path.as_str().to_string()));
+            match page.last() {
+                Some(last) if page.len() == limit => after = Some(last.path.clone()),
+                _ => break,
+            }
+        }
+        assert_eq!(
+            healed,
+            [
+                "notes/B.md",
+                "notes/a.md",
+                "notes/c.md",
+                "other/glossary.md",
+                "other/v1.2.md"
+            ],
+            "a heal drained {limit} at a time"
+        );
+    }
+}
+
 /// **A field sort answers both its sections in the answer's path order on
 /// either root.** The documents missing the sort key stand in `(path COLLATE
 /// NOCASE, path)` order, and so do the documents tied at one value, whether
