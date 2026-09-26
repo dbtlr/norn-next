@@ -697,7 +697,10 @@ fn a_finding_kind_advertises_its_flat_namespaced_string() {
             "document/frontmatter-too-large",
             "document/frontmatter-unclosed",
             "document/frontmatter-unreadable",
-            "document/undeclared-tag"
+            "document/undeclared-tag",
+            "link/broken",
+            "link/ambiguous",
+            "link/missing-anchor"
         ])
     );
     // The derived schema enumerates the enum itself, so holding ALL equal to

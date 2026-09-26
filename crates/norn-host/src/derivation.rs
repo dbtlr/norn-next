@@ -361,11 +361,20 @@ const CAUSES: [Cause; 7] = [
 /// The finding kinds no cause above carries.
 ///
 /// Quarantine, the unread block and the tag facet are the producers recording
-/// findings today, so the list is empty. A kind minted for another producer —
-/// an ambiguity a resolution reads, a field a schema refuses — is named here, which
-/// is the one line that keeps the classification below a reading of the registry
-/// rather than a claim that every kind the registry holds is this crate's.
-const KINDS_NO_CAUSE_CARRIES: [FindingKind; 0] = [];
+/// findings today. Link health's three kinds — broken, ambiguous, missing
+/// anchor — are named here because they have no cause in this crate: ADR 0027
+/// rules the store to judge link health in SQL and file those findings itself,
+/// inside the changeset, over per-document facts this crate's derivation
+/// already writes, so no per-document act here ever concludes one. A kind
+/// minted for another producer — a field a schema refuses — is named here too,
+/// which is the one line that keeps the classification below a reading of the
+/// registry rather than a claim that every kind the registry holds is this
+/// crate's.
+const KINDS_NO_CAUSE_CARRIES: [FindingKind; 3] = [
+    FindingKind::Broken,
+    FindingKind::Ambiguous,
+    FindingKind::MissingAnchor,
+];
 
 // Every kind [`FindingKind::ALL`] advertises is carried by one cause or is
 // named as no cause's, and no two causes carry one kind. The registry is a

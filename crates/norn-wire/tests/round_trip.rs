@@ -1899,6 +1899,9 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         "document/frontmatter-unclosed",
         "document/frontmatter-unreadable",
         "document/undeclared-tag",
+        "link/broken",
+        "link/ambiguous",
+        "link/missing-anchor",
     ];
     assert_eq!(finding_kinds().len(), strings.len());
     for (kind, string) in finding_kinds().into_iter().zip(strings) {
@@ -1945,9 +1948,29 @@ fn the_two_scopes_partition_the_finding_kinds() {
             "document/frontmatter-unclosed",
             "document/frontmatter-unreadable",
             "document/undeclared-tag",
+            "link/ambiguous",
+            "link/broken",
+            "link/missing-anchor",
         ]
     );
     assert_eq!(place.len() + document.len(), FindingKind::ALL.len());
+}
+
+/// ADR 0027's three link-health kinds are each about one link in a document
+/// that still derives whole, so each stands beside that document's row rather
+/// than withheld in its place, and each is a warning rather than an error: a
+/// broken, ambiguous, or anchor-missing link deserves attention, not the
+/// correction a document norn cannot read demands.
+#[test]
+fn link_kinds_are_document_scoped_warnings() {
+    for kind in [
+        FindingKind::Broken,
+        FindingKind::Ambiguous,
+        FindingKind::MissingAnchor,
+    ] {
+        assert_eq!(kind.scope(), FindingScope::Document, "{kind}");
+        assert_eq!(kind.default_severity(), Severity::Warning, "{kind}");
+    }
 }
 
 /// A scope is the bare string it serializes as. A string outside the pair is
@@ -5287,7 +5310,7 @@ fn every_validate_setter_lands_in_the_bytes() {
             PINNED_VAULT,
             r##","predicates":"##,
             PINNED_PREDICATES,
-            r##","kinds":["document/path-bytes-not-utf8","document/path-names-no-document","document/body-bytes-not-utf8","document/frontmatter-too-large","document/frontmatter-unclosed","document/frontmatter-unreadable","document/undeclared-tag"],"severity":"error","summary":true,"limit":20,"after":""##,
+            r##","kinds":["document/path-bytes-not-utf8","document/path-names-no-document","document/body-bytes-not-utf8","document/frontmatter-too-large","document/frontmatter-unclosed","document/frontmatter-unreadable","document/undeclared-tag","link/broken","link/ambiguous","link/missing-anchor"],"severity":"error","summary":true,"limit":20,"after":""##,
             PINNED_AFTER,
             r##""}"##,
         ]
