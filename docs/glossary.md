@@ -58,7 +58,7 @@ _Avoid_: Candidate (unqualified)
 The set of vault documents satisfying the same resolution target when that target does not identify exactly one document.
 
 **Link health**:
-Whether a link in a vault document that addresses a document names exactly one, and whether that one holds the heading or block the link names. A link that fails is broken (it names none, and names no attachment), ambiguous (it names several), or has a missing anchor; each failure is a finding about that one link. A link addressed outside the vault, or to an attachment it does not find, is not judged.
+Whether a link in a vault document that addresses a document names exactly one, and whether that one holds the heading or block the link names. A link that fails is broken (it names none, and names no attachment), ambiguous (it names several), or has a missing anchor; each failure is a finding about that one link. A link addressed outside the vault, or one that names an attachment and finds no document, is not judged.
 
 **Answer reading**:
 The trust state and store generation a vault report was answered under, carried on the report so a consumer judges the answer without a second request. Every search answer also declares the search ladder it ran, the lexical floor alone included, so no consumer infers a ladder from an absence: each rung that ran, each model and, for a model that holds derived state, how far that state trailed the store; a model applied at request time holds none and reports no lag.

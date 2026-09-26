@@ -78,7 +78,7 @@ lane-1 pillars — stored links, headings, blocks and document keys — in the s
 facet's findings read stored tag rows, so it is not a projection over another index's output
 and the inference firewall below applies to it unchanged.
 
-Five obligations bind these findings. A validate is a pure read over the lane-1 findings
+Five requirements bind these findings. A validate is a pure read over the lane-1 findings
 pillar: it runs no rule and derives nothing. Findings are one of the four protected surfaces
 behind the correctness boundary
 ([ADR 0024](0024-search-enhancement-is-a-query-surface-tier.md)), so a link-health finding
@@ -165,11 +165,12 @@ every finding keyed by the fingerprint it replaced — whether or not the schema
 anything link health reads. The existing re-derivation does not cover this: a pin re-derives
 unchanged rows only where the schema declares a reporting tag vocabulary or a field whose
 type does not order as text, so a vault holding a broken link whose schema edit adds one
-text-typed field would lose that finding while a rebuild files it. That predicate's own rule
-is that a declaration gaining a consumer joins it in the same change, so link health joins
-it as a consumer, and findings keep equalling a from-zero rebuild. The cost is stated
-plainly: each schema pin re-decides every link in the vault, chunked as a heal is. Schema
-edits are rare, and exactness is kept. This obligation is not yet built.
+text-typed field would lose that finding while a rebuild files it. The mechanism that
+discharges the obligation is left open, and its cost has a floor: every link in the vault
+is re-decided, chunked as a heal is. Link health reads only stored per-document facts, so
+the re-decision needs no document to be read again; a mechanism that re-reads every
+document to reach it pays a heal's cost on every pin as well. Schema edits are rare, and
+exactness is kept. This obligation is not yet built.
 
 **The store's contract changes at one point.** Today the store records only the findings the
 host hands it with a changeset, and decides none. Link-health findings are the first it
