@@ -7,12 +7,14 @@
 //! one spelling. Derivation records kinds; it does not name them, and a kind
 //! nobody can enumerate here is a kind no surface can advertise.
 //!
-//! The set is `document/…` because each member is a fact about one document:
-//! a vault holding a document norn cannot fully read stays serviceable, and the
+//! The set holds two namespaces. `document/…` is a fact about one document: a
+//! vault holding a document norn cannot fully read stays serviceable, and the
 //! finding is where what is missing from derived state is stated. A kind may
 //! also state that a document derived *whole* and disagrees with what the vault
 //! declares about itself, which is what the vault schema's content model
-//! judges.
+//! judges. `link/…` is a fact about one link a document holds — broken,
+//! ambiguous, or missing the heading or block its target names — per ADR 0027;
+//! the document it stands in still derives whole.
 //!
 //! **A kind also says where its findings may stand**, as [`FindingScope`]. A
 //! kind whose cause leaves nothing derivable is about the *place* and stands
@@ -144,6 +146,20 @@ pub enum FindingKind {
     /// name. The tag is the finding's `target`.
     #[serde(rename = "document/undeclared-tag")]
     UndeclaredTag,
+    /// `link/broken` — a link in the document names no document. The document
+    /// derives whole; the link is the finding's `target`.
+    #[serde(rename = "link/broken")]
+    Broken,
+    /// `link/ambiguous` — a link in the document names two or more documents.
+    /// The document derives whole; the link is the finding's `target`, and its
+    /// row carries a bounded head of the candidates it resolves to.
+    #[serde(rename = "link/ambiguous")]
+    Ambiguous,
+    /// `link/missing-anchor` — a link in the document names one document, but
+    /// that document lacks the link's `#heading` or `#^block`. The document
+    /// derives whole; the link is the finding's `target`.
+    #[serde(rename = "link/missing-anchor")]
+    MissingAnchor,
 }
 
 /// Where the findings of a kind may stand.
@@ -170,7 +186,7 @@ impl FindingKind {
     /// Reading a kind back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [FindingKind; 7] = [
+    pub const ALL: [FindingKind; 10] = [
         FindingKind::PathBytesNotUtf8,
         FindingKind::PathNamesNoDocument,
         FindingKind::BodyBytesNotUtf8,
@@ -178,6 +194,9 @@ impl FindingKind {
         FindingKind::FrontmatterUnclosed,
         FindingKind::FrontmatterUnreadable,
         FindingKind::UndeclaredTag,
+        FindingKind::Broken,
+        FindingKind::Ambiguous,
+        FindingKind::MissingAnchor,
     ];
 
     /// The kind as the string it is on the wire.
@@ -190,6 +209,32 @@ impl FindingKind {
             FindingKind::FrontmatterUnclosed => "document/frontmatter-unclosed",
             FindingKind::FrontmatterUnreadable => "document/frontmatter-unreadable",
             FindingKind::UndeclaredTag => "document/undeclared-tag",
+            FindingKind::Broken => "link/broken",
+            FindingKind::Ambiguous => "link/ambiguous",
+            FindingKind::MissingAnchor => "link/missing-anchor",
+        }
+    }
+
+    /// The severity a producer files this kind at when it holds no severity of
+    /// its own to state: warning for every link-health kind, per ADR 0027, and
+    /// otherwise the one severity every current producer of that kind uses.
+    pub const fn default_severity(&self) -> Severity {
+        match self {
+            // Nothing is derivable, or the document's frontmatter block was
+            // read by nothing: the document's own facts are the ones missing.
+            FindingKind::PathBytesNotUtf8
+            | FindingKind::PathNamesNoDocument
+            | FindingKind::BodyBytesNotUtf8
+            | FindingKind::FrontmatterTooLarge
+            | FindingKind::FrontmatterUnclosed
+            | FindingKind::FrontmatterUnreadable => Severity::Error,
+            // The document derives whole; what the finding states is a
+            // judgment about one fact on its row, at a severity that deserves
+            // attention rather than correction.
+            FindingKind::UndeclaredTag
+            | FindingKind::Broken
+            | FindingKind::Ambiguous
+            | FindingKind::MissingAnchor => Severity::Warning,
         }
     }
 
@@ -213,7 +258,13 @@ impl FindingKind {
             | FindingKind::FrontmatterUnreadable
             // The document is derived whole, and what the finding states is a
             // judgment about one of the facts on its row.
-            | FindingKind::UndeclaredTag => FindingScope::Document,
+            | FindingKind::UndeclaredTag
+            // A link-health finding is a judgment about one link the document
+            // holds; the document itself derives whole regardless of what its
+            // links resolve to.
+            | FindingKind::Broken
+            | FindingKind::Ambiguous
+            | FindingKind::MissingAnchor => FindingScope::Document,
         }
     }
 }

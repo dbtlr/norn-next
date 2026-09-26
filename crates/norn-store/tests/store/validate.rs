@@ -990,8 +990,9 @@ fn a_kind_page_seeks_its_kind_from_the_pages_position() {
     );
     assert_eq!(
         continued.len(),
-        2,
-        "a continuation in the third kind reads that kind and the one after it"
+        5,
+        "a continuation in the third kind reads that kind and every kind after it \
+         in the registry"
     );
     for page in &continued {
         judge_kind_seek(page, "findings_vault_schema_fingerprint", KIND_SEEK);
