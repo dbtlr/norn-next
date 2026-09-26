@@ -200,6 +200,19 @@ pub struct GetWork {
 }
 
 impl GetWork {
+    /// The whole reading, name by name, every count present: the shape a
+    /// harness compares, for the reason
+    /// [`FindWork::readings`](crate::FindWork::readings) gives.
+    pub fn readings(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
+        [
+            ("get_statements", self.statements),
+            ("get_full_scan_steps", self.full_scan_steps),
+            ("get_sorts", self.sorts),
+            ("get_vm_steps", self.vm_steps),
+        ]
+        .into_iter()
+    }
+
     /// The work of one statement SQLite counted `stepped` for.
     fn of(stepped: Stepped) -> Self {
         let mut work = GetWork {

@@ -160,6 +160,20 @@ pub struct ValidateWork {
 }
 
 impl ValidateWork {
+    /// The whole reading, name by name, every count present: the shape a
+    /// harness compares, for the reason
+    /// [`FindWork::readings`](crate::FindWork::readings) gives.
+    pub fn readings(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
+        [
+            ("validate_statements", self.statements),
+            ("validate_rows_read", self.rows_read),
+            ("validate_full_scan_steps", self.full_scan_steps),
+            ("validate_sorts", self.sorts),
+            ("validate_vm_steps", self.vm_steps),
+        ]
+        .into_iter()
+    }
+
     fn stepped(&mut self, stepped: Stepped) {
         self.full_scan_steps += stepped.full_scan_steps;
         self.sorts += stepped.sorts;

@@ -253,6 +253,29 @@ pub struct SearchWork {
     pub finding_rows: u64,
 }
 
+impl SearchWork {
+    /// The whole reading, name by name, every count present: the shape a
+    /// harness compares, for the reason
+    /// [`FindWork::readings`](crate::FindWork::readings) gives. The nested
+    /// rows are one reading per table, as a find's are.
+    pub fn readings(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
+        [
+            ("search_statements", self.statements),
+            ("search_hits_read", self.hits_read),
+            ("search_page_full_scan_steps", self.page_full_scan_steps),
+            ("search_page_sorts", self.page_sorts),
+            ("search_page_vm_steps", self.page_vm_steps),
+            ("search_documents_hydrated", self.documents_hydrated),
+            ("search_tag_rows", self.nested_rows.tags),
+            ("search_heading_rows", self.nested_rows.headings),
+            ("search_block_rows", self.nested_rows.blocks),
+            ("search_link_rows", self.nested_rows.links),
+            ("search_finding_rows", self.finding_rows),
+        ]
+        .into_iter()
+    }
+}
+
 /// A statement a search ran, with the plan SQLite reported for the text and
 /// the values it ran with.
 #[derive(Clone, Debug)]
