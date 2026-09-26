@@ -29,11 +29,14 @@
 //!
 //! `ordinal` is the ordinal of the link a finding is about in the document at
 //! its path, and `NULL` for a finding about the document itself. Within one
-//! path, findings stand by that ordinal and then by id, and a finding about the
-//! document stands ahead of every finding about one of its links. So the order
-//! of a path's findings is a function of the links they are about, and the id,
-//! which is the order they were filed in, decides only between findings that
-//! share everything before it.
+//! path, findings stand by that ordinal, and a finding about the document
+//! stands ahead of every finding about one of its links: a validate, which
+//! pages kind by kind, orders a kind's findings at a path by ordinal and then
+//! id, and a get and the find findings column, which page one document's
+//! findings, order them by ordinal, then kind, then id. So the order of a
+//! path's findings is a function of the links they are about, and the id, which
+//! is the order they were filed in, decides only between findings that share
+//! everything before it.
 //!
 //! **One link holds at most one finding.** The kinds a finding about a link
 //! is filed under exclude one another, so `findings_one_per_link` holds
