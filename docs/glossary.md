@@ -180,4 +180,4 @@ Which sidecar state an answer came from: a count of committed sidecar mutations,
 Converging derived state after a contract change by re-deriving only what the change invalidates rather than rebuilding the whole.
 
 **Inference firewall**:
-The rule that inferred or higher-order derived state answers queries only, and never becomes a finding, a plan, or a repair input.
+The rule that inferred derived state, and derived state computed outside lane 1 from another index's output, answers queries only, and never becomes a finding, a plan, or a repair input.

@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0027-class-scoped-link-health-rides-the-changeset.md
 date: 2026-08-21
 ---
 
