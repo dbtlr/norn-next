@@ -33,11 +33,11 @@
 //! thread, the guard empties that tally as it is made, and the entry point
 //! folds in what stands when the job leaves.
 //!
-//! The reader mint a leg's publication runs is not scoped by a window either,
-//! and is counted where it runs, as the rung and poll counts are. The lifecycle mints the handle over the coverage a leg hands
-//! back in the gate hold that publishes the leg's outcome, after the entry
-//! point has returned, and what the mint ran is added to this account where
-//! the mint returns.
+//! No window scopes the reader mint a leg's publication runs. It is counted at
+//! the act, as a rung or a watcher poll is: the lifecycle mints the handle over
+//! the coverage a leg hands back in the gate hold that publishes the leg's
+//! outcome, after the entry point has returned, and what the mint ran is added
+//! to this account where the mint returns.
 //!
 //! [window]: norn_fs::reads::ReadWindow
 //!
