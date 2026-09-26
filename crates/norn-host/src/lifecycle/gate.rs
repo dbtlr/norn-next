@@ -303,6 +303,9 @@ mod tests {
             let waiter = scope.spawn(|| {
                 gate.wait_for_the_stance_to_move(seen, Instant::now() + Duration::from_secs(60))
             });
+            // The waiter is given time to be waiting before the change, so the
+            // change is what wakes it rather than a generation already moved.
+            std::thread::sleep(Duration::from_millis(100));
             let started = Instant::now();
             gate.lock().expect("a fresh gate").stance = 1;
             assert!(
