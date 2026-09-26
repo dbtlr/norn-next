@@ -2060,6 +2060,18 @@ paths:
                 .map(|row| row.path.as_str().to_string())
                 .collect()
         }
+
+        /// The refusal a find over `params` answers, where the request is
+        /// expected to be refused rather than answered.
+        fn find_refusal(&self, params: norn_wire::FindParams) -> norn_store::PageRefusal {
+            self.reader
+                .try_take()
+                .expect("an idle reader")
+                .establish()
+                .expect("a snapshot")
+                .find(&params, self.declared.content_model())
+                .expect_err("a find refused")
+        }
     }
 
     /// One compared document: its path, then the raw text it writes under
@@ -2420,6 +2432,80 @@ paths:
                 find(Predicate::not_equal_to(key, value)),
                 ["other.md"],
                 "`{key}` not equal to {value}"
+            );
+        }
+    }
+
+    /// **A predicate's value is text on the wire, read as one value; a
+    /// membership part's `values` is the wire's typed, bracketed shape.** An
+    /// equality asking for a scalar and a one-value membership asking for the
+    /// same scalar each meet a document holding it bare, inside a flow
+    /// sequence, inside a multi-element flow sequence and inside a block
+    /// sequence, alike — the request side of the symmetry the stored side
+    /// already holds. Brackets spelled inside a value's own text are that
+    /// value's literal text and nothing else: an equality asking for
+    /// `[draft]` meets only a document whose stored value is the quoted YAML
+    /// text `[draft]`, and meets no document holding the bare word `draft`.
+    /// On a field declared a number, that same bracketed spelling names no
+    /// number and stays refused as unreadable rather than read as a list.
+    #[test]
+    fn a_value_requested_in_brackets_meets_the_bare_stored_value() {
+        use norn_wire::Predicate;
+
+        let documents: Vec<(&str, &str)> = vec![
+            ("bare.md", "code: a\n"),
+            ("bracketed.md", "code: [a]\n"),
+            ("among.md", "code: [a, b]\n"),
+            ("block.md", "code:\n  - a\n  - b\n"),
+            ("other.md", "code: b\n"),
+            ("quoted.md", "code: \"[draft]\"\n"),
+            ("draft.md", "code: draft\n"),
+        ];
+        let documents: Vec<(&str, String)> = documents
+            .into_iter()
+            .map(|(path, frontmatter)| (path, format!("---\n{frontmatter}---\nbody\n")))
+            .collect();
+        let vault = DerivedVault::new(
+            "norn-host-bracketed-request-value",
+            b"version: 1\nfields:\n  weight:\n    type: number\n  code:\n    type: text\n",
+            &documents,
+        );
+        let find = |part: Predicate| vault.find(DerivedVault::request().with_predicates([part]));
+
+        let holds_bare_a = ["among.md", "bare.md", "block.md", "bracketed.md"];
+        assert_eq!(
+            find(Predicate::equal_to("code", "a")),
+            holds_bare_a,
+            "`code` equal to a"
+        );
+        assert_eq!(
+            find(Predicate::in_any("code", ["a".to_string()])),
+            holds_bare_a,
+            "`code` in [a]"
+        );
+
+        assert_eq!(
+            find(Predicate::equal_to("code", "[draft]")),
+            ["quoted.md"],
+            "`code` equal to the literal text [draft]"
+        );
+        assert_eq!(
+            find(Predicate::in_any("code", ["[draft]".to_string()])),
+            ["quoted.md"],
+            "`code` in the literal text [draft]"
+        );
+
+        for part in [
+            Predicate::equal_to("weight", "[9]"),
+            Predicate::in_any("weight", ["[9]".to_string()]),
+        ] {
+            assert_eq!(
+                vault.find_refusal(DerivedVault::request().with_predicates([part.clone()])),
+                norn_store::PageRefusal::UnreadableBound {
+                    key: "weight".to_string(),
+                    value: "[9]".to_string(),
+                },
+                "{part:?}"
             );
         }
     }
