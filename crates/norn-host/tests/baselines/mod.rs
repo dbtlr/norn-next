@@ -166,74 +166,91 @@ pub const ATTACH_PEAK_RSS_CEILING_BYTES: u64 = 40 * 1024 * 1024;
 /// cancels the fixed addend but not the allocator that produced both.
 pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 
-/// Peak resident set attaching the `realistic` profile and reading it through
-/// a live hold must stay under.
+/// Peak resident set attaching the `realistic` profile and running the read
+/// mix over it must stay under.
 ///
-/// The subject is a child process that adopts a tree the parent generated,
-/// attaches it through a production host, keeps it attached, and reads eight
-/// pages of 25 rows through a live hold — newest `created` first, each row
-/// carrying its fields and its tags, one page resident at a time. So the
-/// reading is the attach's cost, the live host's, and the read's, plus the
-/// test binary that carried them.
+/// The subject is a child process that adopts a tree the parent generated
+/// under a schema whose tag vocabulary leaves two of the generated tags out
+/// and reports them, attaches it through a production host, keeps it
+/// attached, and runs every read shape through the host's read verbs, each
+/// under its own live hold: a find of eight pages of 25 rows, newest `created`
+/// first, each row carrying its fields, its tags and its links; a count
+/// grouped by `type`; a get of a bare stem resolved as a suffix, answered as
+/// its whole record; a links-to count and a backlinks find narrowed to the
+/// documents linking to that stem; a validate page of 25 findings; a lexical
+/// search page of 25 hits; and a describe page of facets. So the reading is
+/// the attach's cost, the live host's, and the highest any shape reached,
+/// plus the test binary that carried them. The kernel reports one peak per
+/// child, which is why the shapes share one.
 ///
-/// Observed on macos-arm64 through 2026-09-23: **25.10–25.85 MiB** over twelve
-/// readings, six from this bar's own case and six from the reading child of
-/// the ratio beside it, across six runs of the lane — an indicative band from
-/// repeated local runs, not a fixed measurement. The attach-only child at the
-/// same profile read inside the 22.40–23.39 MiB band
-/// [`ATTACH_PEAK_RSS_CEILING_BYTES`] states. On `ubuntu-latest` x86_64-glibc
-/// the `memory invariant` run 35858094556 read **21.83 MiB** from this case
-/// and 21.67 from the ratio's reading child, against 21.53 from its attach-only
-/// child: below the local band, as the attach readings are, as 4 KiB pages
-/// against 16 KiB predict.
+/// Observed on macos-arm64 on 2026-09-25: **28.43–28.95 MiB** over eight
+/// readings, four from this bar's own case and four from the reading child of
+/// the ratio beside it, across four runs of the lane. The same host read
+/// the find-only read this subject grew from at 26.06 and 26.15 MiB that
+/// day, and the attach-only child under the read schema at 24.43–24.84 MiB,
+/// level with the minimal schema's 24.39–24.64 in the same runs: the findings
+/// the schema reports cost the attach nothing a peak shows. Through 2026-09-23 the
+/// find-only read had read **25.10–25.85 MiB** over twelve local readings,
+/// and on `ubuntu-latest` x86_64-glibc the `memory invariant` run
+/// 35858094556 read it at **21.83 MiB** from this case and 21.67 from the
+/// ratio's reading child, against 21.53 from its attach-only child. The read
+/// mix has no hosted reading yet.
 ///
-/// **This ceiling bounds the process.** It is 42 MiB, 1.92x the highest hosted
-/// reading and 1.62x the local band's top. It is authored from the hosted
-/// reading at the proportion [`ATTACH_PEAK_RSS_CEILING_BYTES`] keeps over its
-/// own highest hosted reading, 1.86x, which puts it at 40.6 MiB; 42 MiB holds
-/// that proportion with 1.4 MiB more, and stays below the 2.13x the attach
-/// ceiling was authored at. The readings are whole-process peaks carrying the
-/// child binary and its runtime as a fixed addend, and a bar that flakes
-/// teaches people to rerun rather than to look.
+/// **This ceiling bounds the process.** It is 42 MiB, 1.45x the local band's
+/// top. It was authored from the find-only hosted reading at the proportion
+/// [`ATTACH_PEAK_RSS_CEILING_BYTES`] keeps over its own highest hosted
+/// reading, 1.86x, which put it at 40.6 MiB; 42 MiB held that proportion with
+/// 1.4 MiB more. The mix adds 2.8 MiB locally over the find-only read, and
+/// the ceiling stays where it is until the mix has a hosted reading to author
+/// it from. The readings are whole-process peaks carrying the child binary
+/// and its runtime as a fixed addend, and a bar that flakes teaches people to
+/// rerun rather than to look.
 ///
-/// **It is not what refuses a read whose cost is the vault.** A find hydrates
-/// the rows of one page, so what a read adds to a process that attached is a
-/// page's rows; a read that held the vault's rows instead is refused by the
-/// ratio below, whose negative control passes under this ceiling.
+/// **It is not what refuses a read whose cost is the vault.** Every shape
+/// answers a page, a single target or what a narrowing part admits, so what
+/// a read adds to a process that attached is a page's rows; a read that held
+/// the vault's rows instead is refused by the ratio below, whose negative
+/// control passes under this ceiling.
 ///
 /// **Platform scope: the Linux measurement lane.** The per-PR `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates.
 pub const READ_PEAK_RSS_CEILING_BYTES: u64 = 42 * 1024 * 1024;
 
-/// How much of the attach-only peak at the `realistic` profile the attach-and-
-/// read peak at the same profile may reach, per mille.
+/// How much of the attach-only peak at the `realistic` profile the peak of
+/// attaching it and running the read mix may reach, per mille.
 ///
-/// **What a read adds, as a ratio.** Both children attach the same tree the
-/// same way, and the reading one then reads through a live hold, so the ratio
-/// cancels the attach and the fixed addend both readings carry and is left
-/// with the live host and the read. A ceiling passes a read that grew the
-/// process by anything that fits under it; this fails a read that holds the
+/// **What a read adds, as a ratio.** Both children attach the same tree under
+/// the same schema the same way, and the reading one then runs the read mix
+/// [`READ_PEAK_RSS_CEILING_BYTES`] names, so the ratio cancels the attach and
+/// the fixed addend both readings carry and is left with the live host and
+/// the highest any shape reached. A ceiling passes a read that grew the
+/// process by anything that fits under it; this fails a shape that holds the
 /// vault's rows rather than a page's.
 ///
-/// Observed ratios **1.07–1.13 on macos-arm64** over six runs — 1.10 (22.96
-/// against 25.35 MiB), 1.13 (22.84 against 25.85) and 1.09 (22.89 against
-/// 25.10), then on 2026-09-23 1.07 (23.26 against 25.10), 1.10 (23.35 against
-/// 25.76) and 1.10 (23.29 against 25.76). On `ubuntu-latest` x86_64-glibc the
-/// `memory invariant` run 35858094556 read **1.00** (21.53 against 21.67 MiB).
+/// Observed ratios for the read mix on macos-arm64 on 2026-09-25: **1.15–1.18**
+/// over four runs, 1.16 (24.53 against 28.46 MiB), 1.18 (24.43 against 28.90),
+/// 1.15 (24.56 against 28.46) and 1.16 (24.84 against 28.87). The find-only read it grew from read
+/// **1.07–1.13 on macos-arm64** over six runs through 2026-09-23 and 1.10
+/// (23.76 against 26.15) on 2026-09-25, and on `ubuntu-latest` x86_64-glibc
+/// the `memory invariant` run 35858094556 read it at **1.00** (21.53 against
+/// 21.67 MiB). The read mix has no hosted reading yet.
 ///
-/// The bar is 1.45, the headroom [`ATTACH_PAIR_PEAK_RSS_PER_MILLE`] gives its
-/// highest reading — a quarter over it — over this ratio's highest, rounded
-/// up. A read that doubled the process reads 2.0 and fails it.
+/// The bar is 1.5, the headroom [`ATTACH_PAIR_PEAK_RSS_PER_MILLE`] gives its
+/// highest reading, a quarter over it, over this ratio's highest, rounded up
+/// to the next twentieth: 1.18 by a quarter is 1.475. A read that doubled the
+/// process reads 2.0 and fails it.
 ///
 /// **This is the bar that refuses a read whose cost is the vault.** Its
-/// negative control is a child that hydrated every document of the vault with
-/// its fields, its tags and its body and kept every page alive: locally it
-/// peaked at 37.76–38.04 MiB, under [`READ_PEAK_RSS_CEILING_BYTES`], and read
-/// **1.62** over its attach-only child, which fails this bar.
+/// negative control is the read mix with its backlinks shape swapped for a
+/// find that hydrates every document of the vault with its fields, its tags
+/// and its body, 25 rows a page, and keeps every page alive: on 2026-09-25 on
+/// macos-arm64 its ratio child peaked at 40.14 MiB and read **1.60** over its
+/// attach-only child's 25.07, which fails this bar, while its ceiling child
+/// peaked at 39.70 MiB, under [`READ_PEAK_RSS_CEILING_BYTES`].
 ///
 /// **Platform scope: the Linux measurement lane**, the same one
 /// [`READ_PEAK_RSS_CEILING_BYTES`] gates in.
-pub const READ_OVER_ATTACH_PEAK_RSS_PER_MILLE: u64 = 1_450;
+pub const READ_OVER_ATTACH_PEAK_RSS_PER_MILLE: u64 = 1_500;
 
 /// How many descriptors a long mixed load may add to the count taken once the
 /// attachment is ready.
