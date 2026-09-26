@@ -89,7 +89,7 @@ const CASE_TOTAL: usize = 113;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "232b51a7e7e1fd8b7c4fcc56828f2089c0848522d775006fb8fc00eda22d689c";
+const CONTRACT_DIGEST: &str = "18d2599b535b2d1032aea02f22dc628546ce2f15edd50f1c77d9cdb5f61cbf5f";
 
 /// The cases carried by tests today, by name.
 ///
@@ -107,6 +107,7 @@ const BOUND_CASES: &[&str] = &[
     "a-sidecar-is-keyed-by-its-own-model-and-scoped-by-the-store-epoch",
     "cache-identity-is-total",
     "cache-is-authoritative-for-content",
+    "comparison-semantics-are-one-rule",
     "cost-is-independent-of-vault-size",
     "encoding-prefix-transparency",
     "existence-probes-and-per-request-allocation-are-bounded",
