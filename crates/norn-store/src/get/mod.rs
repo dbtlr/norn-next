@@ -203,10 +203,11 @@ pub struct GetWork {
     pub vm_steps: u64,
     /// The heading rows the section lookup handed the document reader to
     /// match its anchor over, as the document's headings statement handed
-    /// them back: the reader compares no heading it is not handed, so what
-    /// the in-memory match compares is bounded by this count, which is at
-    /// most the named document's headings. Zero where the get looks up no
-    /// section.
+    /// them back. The reader compares no heading it is not handed, and
+    /// compares each at most once per anchor reading it tries, so what the
+    /// in-memory match compares is a constant multiple of this count, which
+    /// is at most the named document's headings. Zero where the get looks up
+    /// no section.
     pub anchor_headings: u64,
 }
 

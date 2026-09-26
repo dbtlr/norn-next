@@ -972,7 +972,8 @@ folded; the text of an ATX-shaped anchor (`## X` names the heading `X`), folded 
 and the heading's slug, exactly. Headings the fold makes one are one anchor's matches, so a
 write of `dup` over `## Dup` and `## dup` refuses as ambiguous where a read takes the first.
 No index orders by the folded text, so matching an anchor reads the document's headings and
-costs them, a pass bounded by the one document. A section or a
+costs them, a pass bounded by the one document; a get's work counts the heading rows the match
+was handed, at most that document's headings. A section or a
 block the document does not carry is answered in band beside the record of its path alone.
 It resolves its target through the find builder's class statements, the reads every
 resolution of a target runs, and names five statements of its own under the same
