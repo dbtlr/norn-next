@@ -310,6 +310,10 @@ pub struct FindPlan {
     /// The filters the statement narrows by, in the request's order.
     pub filters: Vec<ReadFilter>,
     pub plan: EmittedPlan,
+    /// Virtual-machine operations SQLite ran stepping the statement as the
+    /// find ran it: the whole of what the statement did, whatever it did it
+    /// on.
+    pub vm_steps: u64,
 }
 
 /// The order a page runs in.
@@ -480,7 +484,8 @@ impl Snapshot {
     }
 
     /// Every statement [`Snapshot::find`] runs for `params`, in the order it
-    /// runs them, each with the plan SQLite reported for it.
+    /// runs them, each with the plan SQLite reported for it and the
+    /// operations it ran.
     ///
     /// This is the find itself: the same request, judged, compiled, paged and
     /// hydrated on this snapshot, its cursor `params.after` judged as the find
@@ -499,6 +504,12 @@ impl Snapshot {
     ) -> Result<Vec<FindPlan>, PageRefusal> {
         let mut lookups = Lookups::default();
         self.run_find(params, declared, ResolvesPart::Answered, &mut lookups)?;
+        let mut stepped = lookups
+            .ran
+            .iter()
+            .map(|ran| ran.stepped.vm_steps)
+            .collect::<Vec<_>>()
+            .into_iter();
         Ok(self.explained(lookups.ran, |statement, filters, plan| {
             let ReadStatement::Find(statement) = statement else {
                 unreachable!("a find runs only the statements find names")
@@ -507,6 +518,7 @@ impl Snapshot {
                 statement,
                 filters,
                 plan,
+                vm_steps: stepped.next().unwrap_or_default(),
             }
         })?)
     }

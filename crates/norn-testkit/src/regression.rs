@@ -76,11 +76,14 @@ use crate::json::{JsonError, read_json};
 ///
 /// Pinned here rather than read from the registry, for the reason the corpus
 /// pins its category lists: a case named in the data alone could be dropped
-/// by editing the data. These five were ratified individually, and the audit
-/// requires the registry to mark exactly these `mandatory` — so removing one
-/// fails the gate whichever file the edit lands in.
+/// by editing the data. The unknown-key class is two of these cases, the
+/// diagnostic a query answers on the wire and the surfaces that render it and
+/// exit on it, and both halves are mandatory. The audit requires the registry
+/// to mark exactly these `mandatory`, so removing one fails the gate
+/// whichever file the edit lands in.
 pub const MANDATORY_CASES: &[&str] = &[
     "error-variant-matches-the-operation-reported",
+    "every-surface-tells-an-unsatisfiable-request-from-an-empty-answer",
     "forecast-and-apply-are-one-classifier",
     "mutation-honors-its-planned-flags",
     "one-display-source-per-semantic",
@@ -1085,8 +1088,10 @@ impl Registry {
     }
 
     fn audit_bindings(&self, workspace_root: &Path, tests: &TestIndex, problems: &mut Vec<String>) {
-        // One read per file, however many cases name it.
+        // One read per file, however many cases name it, and one read of the
+        // lane steps, the first time an ignored carrier asks for them.
         let mut sources: BTreeMap<PathBuf, Option<String>> = BTreeMap::new();
+        let mut adoptions: Option<Adoptions> = None;
         for case in &self.cases {
             let name = case.name.as_str();
             match case.binding.status {
@@ -1107,6 +1112,7 @@ impl Registry {
                             workspace_root,
                             tests,
                             &mut sources,
+                            &mut adoptions,
                             reference.as_str(),
                         ) {
                             problems.push(format!("`{name}` {problem}"));
@@ -1249,12 +1255,17 @@ impl Registry {
     ///
     /// An ignored carrier passes only when a lane adopts it, because a lane
     /// running a suite's ignored cases wholesale is the only thing that makes
-    /// an ignored test run.
+    /// an ignored test run. Adoption is two facts, and both are read: its
+    /// reason opens with a lane prefix, and a CI step under
+    /// `.github/workflows` runs its target's ignored cases wholesale. The
+    /// target's own lane guard ([`crate::lanes`]) holds the prefix to the
+    /// lane that step runs.
     fn audit_carrier(
         &self,
         workspace_root: &Path,
         tests: &TestIndex,
         sources: &mut BTreeMap<PathBuf, Option<String>>,
+        adoptions: &mut Option<Adoptions>,
         reference: &str,
     ) -> Vec<String> {
         let test = match TestRef::parse(reference) {
@@ -1305,11 +1316,32 @@ impl Registry {
                         reason.map_or("none".to_string(), |reason| format!("{reason:?}"))
                     ));
                 }
+                let stepped = adoptions.get_or_insert_with(|| {
+                    crate::lanes::adoptions_in(&workspace_root.join(".github").join("workflows"))
+                });
+                match (stepped, &target.target) {
+                    (Err(problem), _) => problems.push(format!(
+                        "names `{test}`, which cargo compiled as ignored, and the lane steps that \
+                         would run it could not be read: {problem}"
+                    )),
+                    (Ok(stepped), Target::Integration(stem))
+                        if stepped.contains(&(target.package.clone(), stem.clone())) => {}
+                    (Ok(_), selected) => problems.push(format!(
+                        "names `{test}`, which cargo compiled as ignored, and no CI step runs the \
+                         ignored cases of `{} {selected}` wholesale. An ignored carrier runs only \
+                         where a lane step adopts its target",
+                        target.package
+                    )),
+                }
             }
         }
         problems
     }
 }
+
+/// The targets whose ignored cases a CI lane step runs wholesale, as
+/// `(package, test target)`, or why the workflows could not be read.
+type Adoptions = Result<BTreeSet<(String, String)>, String>;
 
 /// What is wrong with the module path a carrier reference implies, or nothing.
 ///
@@ -2266,7 +2298,25 @@ pub(crate) fn foo(count: u64) -> u64 {
         // A second target, deliberately absent from `index`, so a binding
         // reaching a target nothing was listed for has somewhere to point.
         std::fs::write(tests.join("other.rs"), CARRIER_SOURCE).expect("a second carrier source");
+        adopt(&root, &["demo suite"]);
         root
+    }
+
+    /// Write the scratch workspace's one workflow: a lane step running each
+    /// `package target` in `targets` through the lane script.
+    #[allow(clippy::disallowed_methods)] // Builds the workflow the lane-step reader is tested against.
+    fn adopt(root: &Scratch, targets: &[&str]) {
+        let workflows = root.join(".github/workflows");
+        std::fs::create_dir_all(&workflows).expect("a workflows directory");
+        let steps: String = targets
+            .iter()
+            .map(|target| format!("      - run: .github/scripts/lane-suite.sh {target}\n"))
+            .collect();
+        std::fs::write(
+            workflows.join("lanes.yml"),
+            format!("jobs:\n  lanes:\n    steps:\n{steps}"),
+        )
+        .expect("a workflow");
     }
 
     /// The module beside the carriers, and the file module under it: a
@@ -2454,7 +2504,7 @@ fn a_carrier() {}
     }
 
     /// A registry that audits clean against [`scratch`] and [`index`]: the
-    /// pinned venue scale, the five mandatory cases, one bound case, and one
+    /// pinned venue scale, the mandatory cases, one bound case, and one
     /// dormant layer-0 case with its reason.
     fn sound() -> Registry {
         let mut cases: Vec<Case> = MANDATORY_CASES
@@ -3444,6 +3494,43 @@ fn a_carrier() {}
                     vec!["crates/demo/tests/suite.rs::an_orphan_carrier".to_string()];
             },
             "An ignored carrier runs only where a lane adopts it",
+        );
+    }
+
+    /// A carrier whose reason names a lane, in a target no lane step runs
+    /// the ignored cases of, is run by nothing.
+    #[test]
+    fn an_ignored_carrier_in_a_target_no_lane_step_runs_is_caught() {
+        let root = scratch();
+        adopt(&root, &["demo other", "elsewhere suite"]);
+        let mut registry = sound();
+        find(&mut registry, "a-bound-case").binding.tests =
+            vec!["crates/demo/tests/suite.rs::an_adopted_carrier".to_string()];
+        let found = registry.audit(root.root(), &index());
+        assert!(
+            found.iter().any(|problem| problem
+                .contains("no CI step runs the ignored cases of `demo --test suite`")),
+            "{found:#?}"
+        );
+    }
+
+    /// Workflows that cannot be read are no evidence that a lane step runs
+    /// an ignored carrier.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Removes the scratch workspace's own workflow.
+    fn an_ignored_carrier_without_readable_lane_steps_is_caught() {
+        let root = scratch();
+        std::fs::remove_file(root.join(".github/workflows/lanes.yml"))
+            .expect("removing the workflow");
+        let mut registry = sound();
+        find(&mut registry, "a-bound-case").binding.tests =
+            vec!["crates/demo/tests/suite.rs::an_adopted_carrier".to_string()];
+        let found = registry.audit(root.root(), &index());
+        assert!(
+            found
+                .iter()
+                .any(|problem| problem.contains("holds no workflow")),
+            "{found:#?}"
         );
     }
 

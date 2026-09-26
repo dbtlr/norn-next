@@ -895,6 +895,68 @@ fn a_bare_directory_probe_is_two_seeks_of_the_path_index() {
     failure_of("documents_path dropped", || judge(&plan));
 }
 
+/// **An existence check is one select-one-shaped statement.** Whether a key is
+/// known, whether a path is a bare directory, and whether the full-text engine
+/// reads a query are each asked once per request, as a single `EXISTS` over a
+/// `SELECT 1` subquery: one row answers, and the subquery stops at the first
+/// row it finds rather than reading every row that would. So each probe's work
+/// holds flat as the rows it would find grow: over 50 and over 500 documents
+/// that all carry an undeclared key, stand beneath the directory and match the
+/// query, the probe runs the same number of operations.
+#[test]
+fn an_existence_check_is_one_select_exists_statement() {
+    let seeded = Seeded::new("find-existence-shape");
+    for (part, statement) in [
+        (Predicate::has("seen"), FindStatement::KnownKey),
+        (Predicate::path("notes"), FindStatement::BareDirectory),
+        (Predicate::matches("interloper"), FindStatement::MatchProbe),
+    ] {
+        let probe = plan_of(
+            &seeded.plans(&request().with_predicates([part.clone()])),
+            statement,
+        );
+        let sql = probe.sql().split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            sql.starts_with("SELECT EXISTS (SELECT 1 ")
+                || sql.starts_with("SELECT NOT EXISTS (SELECT 1 "),
+            "{part:?} asked {statement:?} as something other than one EXISTS: {sql}"
+        );
+        probe.assert_no_full_scan();
+    }
+
+    let (small, large) = (
+        Seeded::with_bulk("find-existence-work-small", 50),
+        Seeded::with_bulk("find-existence-work-large", 500),
+    );
+    // `count` left undeclared, so whether a document carries it is asked.
+    let undeclared = ContentModel::under(SEED_SCHEMA).declare("status");
+    let probe_steps = |seeded: &Seeded, part: &Predicate, statement: FindStatement| {
+        let plans = seeded.plans_under(&request().with_predicates([part.clone()]), &undeclared);
+        let steps: Vec<u64> = plans
+            .iter()
+            .filter(|plan| plan.statement == statement)
+            .map(|plan| plan.vm_steps)
+            .collect();
+        assert_eq!(steps.len(), 1, "{part:?} ran {statement:?} {steps:?}");
+        steps[0]
+    };
+    for (part, statement) in [
+        (Predicate::has("count"), FindStatement::KnownKey),
+        (Predicate::path("bulk"), FindStatement::BareDirectory),
+        (Predicate::matches("body"), FindStatement::MatchProbe),
+    ] {
+        let (at_small, at_large) = (
+            probe_steps(&small, &part, statement),
+            probe_steps(&large, &part, statement),
+        );
+        assert!(at_small > 0, "{part:?} ran {statement:?} as no work");
+        assert_eq!(
+            at_small, at_large,
+            "{part:?} asked {statement:?} with work that grew with the rows it would find"
+        );
+    }
+}
+
 /// **A match probe is one read of the full-text index through its `MATCH`
 /// selection**, which is the step at which the engine parses the query: the
 /// probe reads no relation end to end, and asks the index nothing but the
@@ -2008,6 +2070,83 @@ fn a_continuation_resumes_exactly_where_its_page_stopped() {
             "other/v1.2.md"
         ]
     );
+}
+
+/// **A continuation resumes exactly between paths that differ only by case.**
+/// Under a case-sensitive root `notes/A.md` and `notes/a.md` are two
+/// documents that the case-insensitive path order ties, and the exact bytes
+/// break the tie. Drained a row at a time and two rows at a time in either
+/// direction, the path order yields the same rows as one page holding them
+/// all, so a position at one of a tied pair resumes at the other.
+#[test]
+fn a_continuation_resumes_exactly_between_paths_that_differ_only_by_case() {
+    let mut seeded = Seeded::new("find-continuation-case-pairs");
+    write_documents(
+        &mut seeded.store.begin_request(),
+        &[
+            document("notes/A.md", "hash-upper-a", "a body\n"),
+            document("notes/b.md", "hash-lower-b", "a body\n"),
+        ],
+    );
+    for direction in [Direction::Ascending, Direction::Descending] {
+        let params = sorted(SortKey::path(), direction);
+        let whole = drained(&seeded, &params, 100);
+        assert_eq!(whole.len(), 7, "{direction:?}: {whole:?}");
+        for limit in [1, 2] {
+            assert_eq!(
+                drained(&seeded, &params, limit),
+                whole,
+                "the path order {direction:?} drained {limit} at a time"
+            );
+        }
+    }
+    assert_eq!(
+        drained(&seeded, &sorted(SortKey::path(), Direction::Ascending), 1),
+        [
+            "notes/A.md",
+            "notes/a.md",
+            "notes/B.md",
+            "notes/b.md",
+            "notes/c.md",
+            "other/glossary.md",
+            "other/v1.2.md"
+        ]
+    );
+}
+
+/// **A find resolves a `links_to` part's target once.** Whether the target
+/// names one document or none, and whether the page's rows carry their links
+/// too, the target's class is read by one statement.
+#[test]
+fn a_find_resolves_a_links_to_parts_target_once() {
+    let seeded = Seeded::new("find-links-to-once");
+    let links_to = |text: &str| {
+        request().with_predicates([Predicate::links_to(
+            ResolutionTarget::new(text).expect("a target"),
+        )])
+    };
+    for (named, params) in [
+        ("a target naming one document", links_to("glossary")),
+        ("a target naming no document", links_to("nowhere")),
+        (
+            "a target naming one document, rows carrying their links",
+            links_to("glossary").with_columns([Column::links()]),
+        ),
+    ] {
+        let ran: Vec<FindStatement> = seeded
+            .plans(&params)
+            .into_iter()
+            .map(|plan| plan.statement)
+            .collect();
+        let resolved = ran
+            .iter()
+            .filter(|statement| **statement == FindStatement::ClassHead)
+            .count();
+        assert_eq!(
+            resolved, 1,
+            "{named}: the find resolved its target {resolved} times: {ran:?}"
+        );
+    }
 }
 
 /// **Each filter answers the documents its part names.**

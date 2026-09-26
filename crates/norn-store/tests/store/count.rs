@@ -9,7 +9,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::common::{DOCUMENT_PAYLOAD, Scratch, document, reads_of, write_documents};
+use crate::common::{
+    DOCUMENT_PAYLOAD, Scratch, assert_covers_every_driving_shape, document, driving_parts,
+    narrowable, reads_of, violation, write_documents,
+};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
     COUNT_STATEMENTS, ContentModel, CountPlan, CountStatement, Counted, FieldDeclaration,
@@ -1467,6 +1470,56 @@ fn a_narrowing_part_narrows_a_counts_work_to_the_documents_it_matches() {
         failure_of("document_tags_name dropped", || {
             judge_narrow(&small, &large, &tagged)
         });
+    }
+}
+
+/// **Every part that keeps what it seeks drives a count.** Over the fixture,
+/// [`narrowable`] with a violation standing over it, and 50, then 500, bulk
+/// documents, a count narrowed by one part of each shape that keeps what it
+/// seeks narrows every tally statement by that shape, runs the same
+/// statements and the same VM steps at both sizes under every grouping, and
+/// steps through no full scan.
+#[test]
+fn every_driving_part_narrows_a_counts_work_to_the_documents_it_admits() {
+    let table = driving_parts();
+    assert_covers_every_driving_shape(&table);
+    let with_narrowable = |label: &str, bulk: usize| {
+        let mut counting_store = Counting::with_bulk(label, bulk);
+        let mut request = counting_store.store.begin_request();
+        write_documents(&mut request, &[narrowable()]);
+        request
+            .record_finding(&violation("narrowed.md"))
+            .expect("recording a finding");
+        counting_store
+    };
+    let small = with_narrowable("count-driving-small", 50);
+    let large = with_narrowable("count-driving-large", 500);
+    for (shape, part) in &table {
+        for by in work_groupings() {
+            let params = counting(by.clone()).with_predicates([part.clone()]);
+            for plan in small.plans(&params) {
+                if matches!(plan.statement, ReadStatement::Count(_)) {
+                    assert!(
+                        plan.filters
+                            .iter()
+                            .any(|filter| filter.slot() == shape.slot()),
+                        "a {shape:?} part did not narrow {:?} under {by:?}: {:?}",
+                        plan.statement,
+                        plan.filters
+                    );
+                }
+            }
+            let (at_small, at_large) = (small.count(&params).work, large.count(&params).work);
+            assert_eq!(
+                at_small, at_large,
+                "a count narrowed by a {shape:?} part grew with the vault under {by:?}"
+            );
+            assert_eq!(
+                at_large.full_scan_steps, 0,
+                "a count narrowed by a {shape:?} part stepped through a full scan under {by:?}: \
+                 {at_large:?}"
+            );
+        }
     }
 }
 

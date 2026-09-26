@@ -346,7 +346,10 @@ fn a_hybrid_search_fuses_both_rungs_by_reciprocal_rank() {
 /// **The vector rung scores only the documents the conjunction admits.** Over
 /// the whole vault the document that is the query's word repeated answers
 /// first; under a path part keeping one folder, no document outside it is
-/// answered, and the engine scored only the folder's documents.
+/// answered, and the engine scored only the folder's documents and held at
+/// most the rung's depth of them. Its scan still read every row of the
+/// model: the rung is answered by the engine's scan, not by a seek of what
+/// the part admits.
 #[test]
 fn a_predicate_narrows_the_vector_rung_to_the_documents_it_admits() {
     let (_sandbox, vault) = a_vault("search-restricted", Some("[engine.semantic]\n"));
@@ -366,7 +369,49 @@ fn a_predicate_narrows_the_vector_rung_to_the_documents_it_admits() {
     assert_eq!(paths(&narrowed), ["keep/kept.md", "keep/other.md"]);
     let work = narrowed.work.vector.expect("the vector rung ran");
     assert_eq!(work.rows_scored, 2);
+    assert!(work.peak_held <= u64::from(norn_wire::RUNG_DEPTH));
     assert_eq!(work.rows_read, DOCUMENTS.len() as u64);
+}
+
+/// **A narrowed vector rung holds its depth of scored rows when the
+/// conjunction admits more than the depth.** Under a path part keeping one
+/// folder that holds more documents than the rung's depth, the engine scores
+/// every document the folder holds and none outside it, holds exactly the
+/// depth of them, and its scan reads every row of the model.
+#[test]
+fn a_narrowed_vector_rung_holds_its_depth_of_what_it_admits() {
+    let depth = norn_wire::RUNG_DEPTH as usize;
+    let kept = depth + 16;
+    let dropped = 16;
+    let documents: Vec<(String, String)> = (0..kept)
+        .map(|at| (format!("keep/{at:05}.md"), format!("alpha w{at}\n")))
+        .chain((0..dropped).map(|at| (format!("drop/{at:05}.md"), format!("alpha w{at}\n"))))
+        .collect();
+    let (_sandbox, vault) = a_vault_holding(
+        "search-narrowed-depth",
+        &documents,
+        Some("[engine.semantic]\n"),
+    );
+    let serving = serve(&vault);
+
+    let narrowed = answered(
+        &serving,
+        &searching(&vault, "alpha")
+            .with_rungs(exactly([Rung::Vector]))
+            .with_limit(norn_wire::RUNG_DEPTH)
+            .with_predicates([Predicate::path("keep/**")]),
+    );
+    let delivered = paths(&narrowed);
+    assert_eq!(delivered.len(), depth);
+    assert!(
+        delivered.iter().all(|path| path.starts_with("keep/")),
+        "the rung answered a document the part does not admit"
+    );
+    assert_eq!(narrowed.work.candidates, kept as u64);
+    let work = narrowed.work.vector.expect("the vector rung ran");
+    assert_eq!(work.rows_scored, kept as u64);
+    assert_eq!(work.peak_held, depth as u64);
+    assert_eq!(work.rows_read, (kept + dropped) as u64);
 }
 
 /// The sidecar state `serving`'s engine answers from.

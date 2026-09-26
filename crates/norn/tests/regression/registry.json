@@ -1229,18 +1229,43 @@
       }
     },
     {
+      "name": "a-page-continues-at-the-successor-of-its-last-row",
+      "kind": "defect-class",
+      "venue": 3,
+      "property": "A page continues from its cursor at the successor of the last row returned, with no gap and no overlap, against the snapshot the cursor was minted on.",
+      "sources": ["NRN-452", "NRN-451", "NRN-332"],
+      "binding": {
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/find_rows.rs::a_cursor_continues_exactly_against_the_snapshot_it_was_minted_on",
+          "crates/norn-store/tests/store/find.rs::a_continuation_resumes_exactly_where_its_page_stopped",
+          "crates/norn-store/tests/store/find.rs::a_continuation_resumes_exactly_between_paths_that_differ_only_by_case",
+          "crates/norn-store/tests/store/find_rows.rs::a_typed_cursor_refuses_after_a_re_pin_and_a_raw_one_survives_it",
+          "crates/norn-store/tests/store/count.rs::a_cursor_that_is_no_position_among_the_requests_tallies_is_refused",
+          "crates/norn-store/tests/store/count.rs::a_drain_a_page_at_a_time_answers_the_tallies_one_page_does",
+          "crates/norn-store/tests/store/validate.rs::a_drain_a_page_at_a_time_answers_the_findings_one_page_does",
+          "crates/norn-store/tests/store/describe.rs::a_drain_a_page_at_a_time_answers_the_facets_one_page_does",
+          "crates/norn-store/tests/store/search.rs::a_drain_a_page_at_a_time_answers_the_ranking_one_page_does",
+          "crates/norn-store/tests/store/get.rs::each_collection_paged_at_one_two_and_three_is_its_one_whole_page",
+          "crates/norn-store/tests/store/links.rs::backlinks_drained_at_one_two_and_three_are_the_whole",
+          "crates/norn-host/tests/reads.rs::a_find_pages_exactly_and_refuses_a_cursor_under_another_order",
+          "crates/norn-wire/tests/round_trip.rs::every_cursor_survives_the_round_trip"
+        ]
+      }
+    },
+    {
       "name": "cache-is-authoritative-for-content",
       "kind": "defect-class",
       "venue": 3,
       "property": "Where the substrate stores content, request paths read it from the substrate: the warm filesystem-read counter for a read verb is zero. A passing test pinning that stored text reproduces a file byte for byte is an invariant the read path uses, not a fact it ignores.",
       "sources": ["NRN-a62"],
       "binding": {
-        "status": "dormant",
-        "reason": "the substrate stores the content and a read takes it from there: the documents table in crates/norn-store/src/ddl/documents.rs carries a body column that is TEXT NOT NULL, and the find builder reads a projected body off that column in crates/norn-store/src/find/hydrate.rs, with no filesystem read. What has no subject is the verb the property bills a warm filesystem read to: no read verb is dispatched, because crates/norn-serve is not in the workspace, so there is no warm request whose filesystem-read counter could be read at zero.",
-        "grounds": [
-          { "present": "crates/norn-store/src/ddl/documents.rs" },
-          { "present": "crates/norn-store/src/find/hydrate.rs" },
-          { "absent": "crates/norn-serve" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/tests/reads.rs::a_read_answers_the_body_its_snapshot_holds_and_reads_no_file",
+          "crates/norn-host/tests/reads.rs::every_read_verb_answers_with_no_file_read_on_its_thread",
+          "crates/norn-host/tests/reads.rs::a_gets_sections_and_blocks_are_the_text_layers_reading",
+          "crates/norn-host/tests/counter_gate.rs::warm_requests_under_a_live_attachment_finish_at_zero"
         ]
       }
     },
@@ -1252,7 +1277,7 @@
       "sources": ["NRN-110", "NRN-28", "NRN-427", "norn-legacy annoyances log", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "one rule is carried across both engines: crates/norn-host/src/derivation.rs::the_stores_typed_order_and_the_in_process_comparison_are_one_rule runs one set of raw values through the store's typed sort, bound, equality, inequality and membership parts and through the in-process comparison, and holds them to one answer across numeric-versus-text equality, a boolean-typed field and a mixed-offset pair; crates/norn-config/tests/config/schema.rs::equality_ordering_and_the_sort_key_are_one_relation holds equality, ordering and the sort key to one relation; crates/norn-config/tests/config/schema.rs::a_date_orders_chronologically_where_its_text_does_not holds a date ordered chronologically where its text is not; crates/norn-config/tests/config/schema.rs::a_comparison_between_a_stated_and_an_unstated_offset_is_signalled holds the comparison of a stated and an unstated offset signalled; crates/norn-host/src/derivation.rs::a_find_is_advised_exactly_where_the_in_process_comparison_signals carries that signal to the answer, holding a find's crates/norn-wire/src/product.rs::AnswerAdvisory raised on a sort and on each comparing part exactly where the in-process comparison signals over the same raw values; crates/norn-store/tests/store/find_advisory.rs::a_date_predicate_comparing_across_spellings_is_advised holds the advisory raised for a part whose mixed-offset comparison decided documents that never reach the page; and crates/norn-host/src/derivation.rs::a_value_written_bare_and_inside_a_sequence_meet_one_part_alike holds the stored side of the symmetry, a value written bare and inside a sequence meeting one part alike. One clause has no carrier: the request side of the symmetry. A predicate's value is text on the wire, and nothing holds a request that spells a value in brackets to meet the document holding the bare value. It waits on crates/norn-host/src/derivation.rs::a_value_requested_in_brackets_meets_the_bare_stored_value, beside the stored side's carrier, which is the name that carrier takes when it lands.",
+        "reason": "one rule is carried across both engines: crates/norn-host/src/derivation.rs::the_stores_typed_order_and_the_in_process_comparison_are_one_rule runs one set of raw values through the store's typed sort, bound, equality, inequality and membership parts and through the in-process comparison, and holds them to one answer across numeric-versus-text equality, a boolean-typed field and a mixed-offset pair; crates/norn-config/tests/config/schema.rs::equality_ordering_and_the_sort_key_are_one_relation holds equality, ordering and the sort key to one relation; crates/norn-config/tests/config/schema.rs::a_date_orders_chronologically_where_its_text_does_not holds a date ordered chronologically where its text is not; crates/norn-config/tests/config/schema.rs::a_comparison_between_a_stated_and_an_unstated_offset_is_signalled holds the comparison of a stated and an unstated offset signalled; crates/norn-host/src/derivation.rs::a_find_is_advised_exactly_where_the_in_process_comparison_signals carries that signal to the answer, holding a find's crates/norn-wire/src/product.rs::AnswerAdvisory raised on a sort and on each comparing part exactly where the in-process comparison signals over the same raw values; crates/norn-store/tests/store/find_advisory.rs::a_date_predicate_comparing_across_spellings_is_advised holds the advisory raised for a part whose mixed-offset comparison decided documents that never reach the page; and crates/norn-host/src/derivation.rs::a_value_written_bare_and_inside_a_sequence_meet_one_part_alike holds the stored side of the symmetry, a value written bare and inside a sequence meeting one part alike. One clause does not hold, so no test can carry it yet: the request side of the symmetry. A predicate's value is text on the wire and is read as one value, so a request that spells a text value in brackets compares the bracketed text and meets no document holding the bare value, and one that spells a number in brackets is refused as a value its declared type cannot read. Holding it changes how a request's value is read, which is more than a test beside the builder, and it waits on crates/norn-host/src/derivation.rs::a_value_requested_in_brackets_meets_the_bare_stored_value, beside the stored side's carrier, which is the name that carrier takes when it lands.",
         "grounds": [
           { "symbol-present": "crates/norn-host/src/derivation.rs::the_stores_typed_order_and_the_in_process_comparison_are_one_rule" },
           { "symbol-present": "crates/norn-config/tests/config/schema.rs::equality_ordering_and_the_sort_key_are_one_relation" },
@@ -1270,30 +1295,22 @@
       "name": "existence-probes-and-per-request-allocation-are-bounded",
       "kind": "defect-class",
       "venue": 3,
-      "property": "An existence check executes a select-one-shaped statement, and does-any-error-exist is one existence query rather than a scan. Within one request each target is resolved at most once and each document loaded at most once, and per-request allocation of derived collections is bounded by response size rather than by corpus size.",
+      "property": "An existence check executes a select-one-shaped statement. Within one request each target is resolved at most once and each document loaded at most once, and per-request allocation of derived collections is bounded by response size rather than by corpus size.",
       "sources": ["NRN-a60", "NRN-a61", "NRN-a63"],
       "binding": {
-        "status": "dormant",
-        "reason": "the existence checks that exist are select-one-shaped: crates/norn-store/src/find/statement.rs spells a find's known-key probe and its bare-directory probe as EXISTS over index seeks, and a find hydrates each document its page holds once, with each nested collection and the body cut to a per-row ceiling. What has no subject is the rest of the property: nothing asks whether any error exists, nothing resolves a target within a request, and there is no request whose allocation could be measured against its response, because crates/norn-serve, which dispatches a read verb, is not in the workspace.",
-        "grounds": [
-          { "present": "crates/norn-store/src/find/statement.rs" },
-          { "absent": "crates/norn-serve" }
-        ]
-      }
-    },
-    {
-      "name": "machine-formats-carry-completeness-in-band",
-      "kind": "defect-class",
-      "venue": 3,
-      "property": "Every machine format carries an in-band completeness signal, so a consumer reading stdout alone knows whether the set was truncated. An echoed offset round-trips exactly: the next page begins at the successor of the last record returned, with no gap and no overlap.",
-      "sources": ["NRN-452", "NRN-451", "NRN-332"],
-      "binding": {
-        "status": "dormant",
-        "reason": "the wire answer carries completeness in band: crates/norn-wire/src/document.rs spells a nested collection's total and a cut body's whole length beside what a row carries, crates/norn-wire/src/cursor.rs spells the cursor a page continues from, and a find's cursor resumes at the successor of the last row it returned, against the snapshot it was minted on. What has no subject is a machine format: what reaches stdout is rendered by crates/norn-client, which is not in the workspace.",
-        "grounds": [
-          { "present": "crates/norn-wire/src/document.rs" },
-          { "present": "crates/norn-wire/src/cursor.rs" },
-          { "absent": "crates/norn-client" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/find.rs::an_existence_check_is_one_select_exists_statement",
+          "crates/norn-store/tests/store/find.rs::a_known_key_and_the_field_universe_read_the_presence_rows_alone",
+          "crates/norn-store/tests/store/find.rs::a_bare_directory_probe_is_two_seeks_of_the_path_index",
+          "crates/norn-store/tests/store/find.rs::a_match_probe_reads_the_full_text_index_through_its_selection",
+          "crates/norn-store/tests/store/get.rs::a_get_resolves_its_target_once_and_reads_its_document_once",
+          "crates/norn-store/tests/store/find.rs::a_find_resolves_a_links_to_parts_target_once",
+          "crates/norn-store/tests/store/find.rs::hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index",
+          "crates/norn-store/tests/store/find_rows.rs::a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table",
+          "crates/norn-store/tests/store/get.rs::a_whole_record_holds_each_collection_and_the_body_to_the_row_ceiling",
+          "crates/norn-store/tests/store/find_rows.rs::a_row_cut_by_a_ceiling_says_how_much_the_whole_held",
+          "crates/norn-host/tests/memory.rs::reading_the_gate_profile_holds_the_process_near_its_attach_peak"
         ]
       }
     },
@@ -1301,16 +1318,24 @@
       "name": "narrowing-arguments-narrow-work",
       "kind": "defect-class",
       "venue": 3,
-      "property": "A narrowing argument on any verb narrows the work, not just the output: scoped counters are strictly below unscoped ones, and a narrowing predicate never increases cost. Filtering after evaluating every document — validate over one path costing what the whole tree costs, repair evaluating 1593 documents then filtering to the requested paths — is the shape this forbids.",
+      "property": "A narrowing argument bounds a store read builder's work to what it admits, not just its output. A driving part seeks what it keeps: every predicate but an inequality and an absence, a search's full-text query among them. The statements a store read builder runs for a request narrowed by a driving part do work that follows the size of what it admits: that work holds flat as the vault grows by documents the part does not admit and grows as the part admits more, while the same request unnarrowed grows with the vault wherever it steps a row per document. Such a request never evaluates every document and then filters: a validate over one path costing what the whole tree costs is the shape this forbids. An exclusion part, an inequality or an absence, admits every document but the ones it names, so work that follows what it admits is near the vault's size: a find page narrowed only by exclusion parts reads its order index as an unnarrowed page does and tests each row it reads. A describe narrowed to declared facets reads them off the pinned declaration and runs no describe statement. A candidate a narrowing part rejects is never scored: a full-text match it rejects is neither scored nor sorted. The vector rung is the declared exception to work that follows what a part admits, because the semantic engine answers it rather than a store read builder: under a narrowing predicate it scores only the documents the conjunction admits and holds at most the rung's depth of scored rows, however many the conjunction admits, while its scan reads every row of the engine's model.",
       "sources": ["NORN-a1", "NRN-a60", "NRN-a61", "NRN-a63"],
       "binding": {
-        "status": "dormant",
-        "reason": "a find's parts narrow its work rather than its output: crates/norn-store/src/read/conjunction.rs compiles each part into a membership test one index seek answers, inside the page statement it narrows. The validate builder, crates/norn-store/src/validate/mod.rs, is narrowed the same way: a path part bounds the seek of the findings' own path, a kind or a severity is a seek of its own, and a document part drives the statement from the documents it matched. A describe's kinds narrow it by section: crates/norn-store/tests/store/describe.rs::an_observed_field_page_walks_the_presence_index_key_by_key holds a describe naming only declared kinds running no statement of its own. The property is stated over every verb — validate over one path, repair over the requested paths — and no verb takes a narrowing argument, because crates/norn-serve is not in the workspace.",
-        "grounds": [
-          { "present": "crates/norn-store/src/read/conjunction.rs" },
-          { "present": "crates/norn-store/src/validate/mod.rs" },
-          { "symbol-present": "crates/norn-store/tests/store/describe.rs::an_observed_field_page_walks_the_presence_index_key_by_key" },
-          { "absent": "crates/norn-serve" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/count.rs::a_narrowing_part_narrows_a_counts_work_to_the_documents_it_matches",
+          "crates/norn-store/tests/store/count.rs::every_driving_part_narrows_a_counts_work_to_the_documents_it_admits",
+          "crates/norn-store/tests/store/validate.rs::a_narrowing_part_narrows_a_validates_work_to_the_findings_it_matches",
+          "crates/norn-store/tests/store/validate.rs::every_driving_part_narrows_a_validates_work_to_the_findings_it_admits",
+          "crates/norn-store/tests/store/links.rs::a_links_to_parts_work_follows_its_backlinks_not_the_vault",
+          "crates/norn-store/tests/store/search.rs::a_search_costs_the_documents_its_query_matches_and_never_the_vault",
+          "crates/norn-store/tests/store/search.rs::ranking_costs_every_match_and_a_narrowing_part_narrows_what_is_scored",
+          "crates/norn-store/tests/store/find.rs::a_page_steps_through_no_full_scan_and_sorts_only_where_a_filter_narrows_it",
+          "crates/norn-store/tests/store/find.rs::a_filtered_page_drives_from_its_filter_and_an_unfiltered_page_seeks_its_order",
+          "crates/norn-store/tests/store/describe.rs::an_observed_field_page_walks_the_presence_index_key_by_key",
+          "crates/norn-host/tests/search.rs::a_predicate_narrows_the_vector_rung_to_the_documents_it_admits",
+          "crates/norn-host/tests/search.rs::a_narrowed_vector_rung_holds_its_depth_of_what_it_admits",
+          "crates/norn-semantic/tests/engine/nearest.rs::the_scan_holds_no_more_than_its_limit_at_any_size"
         ]
       }
     },
@@ -1322,7 +1347,7 @@
       "sources": ["NRN-a59", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the landed read builders, find, count, validate, describe, search and get, answer in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others; crates/norn-store/src/count/mod.rs answers a count's tallies as aggregate SQL and hydrates no document row; crates/norn-store/src/validate/mod.rs pages the findings standing under the active fingerprint in SQL, one kind's seek at a time, reading one finding past the bound and the candidate heads of the findings it returns and no others, and answers its summary as one aggregate statement; crates/norn-store/src/describe/mod.rs pages the keys documents carry in SQL, reading one key past the bound, and draws the declared facets from the page's position off the declaration the host holds in memory, building none past the one that says a next page exists, so that draw is no post-pass over rows SQL answered; crates/norn-store/src/search/mod.rs scores, sorts and pages a search's lexical hits in SQL, reading one hit past the bound, and hydrates the rows of the hits it returns and no others; crates/norn-store/src/read/naming.rs resolves what the links a find's page or a get's links page returns name as one set in SQL, each link's head bounded at five documents in the statement, so what it materializes follows the links returned; and crates/norn-store/src/get/mod.rs resolves a target, pages a collection and hydrates a record in SQL, with one declared exception: a heading anchor is matched in memory over the one document's heading rows, because the anchor's text reading folds case and whitespace, which no index orders by, so what a section lookup materializes is bounded by one document's headings rather than by the rows it returns. The property is stated over each read verb, and no read verb exists: the exception carries no counter ceiling, and nothing dispatches a verb, because crates/norn-serve is not in the workspace.",
+        "reason": "the landed read builders, find, count, validate, describe, search and get, answer in SQL: crates/norn-store/src/find/mod.rs pages a find's keys in SQL, reading one key past the bound, and hydrates the rows it returns and no others; crates/norn-store/src/count/mod.rs answers a count's tallies as aggregate SQL and hydrates no document row; crates/norn-store/src/validate/mod.rs pages the findings standing under the active fingerprint in SQL, one kind's seek at a time, reading one finding past the bound and the candidate heads of the findings it returns and no others, and answers its summary as one aggregate statement; crates/norn-store/src/describe/mod.rs pages the keys documents carry in SQL, reading one key past the bound, and draws the declared facets from the page's position off the declaration the host holds in memory, building none past the one that says a next page exists, so that draw is no post-pass over rows SQL answered; crates/norn-store/src/search/mod.rs scores, sorts and pages a search's lexical hits in SQL, reading one hit past the bound, and hydrates the rows of the hits it returns and no others; crates/norn-store/src/read/naming.rs resolves what the links a find's page or a get's links page returns name as one set in SQL, each link's head bounded at five documents in the statement, so what it materializes follows the links returned; and crates/norn-store/src/get/mod.rs resolves a target, pages a collection and hydrates a record in SQL, with one declared exception: a heading anchor is matched in memory over the one document's heading rows, because the anchor's text reading folds case and whitespace, which no index orders by, so what a section lookup materializes is bounded by one document's headings rather than by the rows it returns. Each read verb the host answers, in crates/norn-host/src/read.rs and crates/norn-host/src/search.rs, runs one of these builders on one snapshot and wraps what it answered, with one declared exception: a search's vector rung is answered by the semantic engine rather than by a store builder, and crates/norn-semantic/src/engine.rs answers it with an in-memory scan that reads every row of the engine's model and scores only the documents the conjunction admits, counting the rows it read, the rows it scored and the most it held. A filtered search's scan holds at most the rung's depth of scored rows, as crates/norn-host/tests/search.rs::a_narrowed_vector_rung_holds_its_depth_of_what_it_admits holds; an unfiltered search's scan holds at most the depth plus a margin capped at VECTOR_MARGIN_CAP, as crates/norn-host/tests/search.rs::an_undrained_mass_delete_costs_the_vector_rung_its_margin_until_the_cap holds. What does not hold is the exception's half of the property: no counter reads how many heading rows a section lookup compares in memory, so the declared exception carries no counter ceiling. It waits on crates/norn-store/tests/store/get.rs::a_heading_anchor_is_matched_in_memory_under_its_counter_ceiling, beside the section lookup's own carrier, which is the name that carrier takes when it lands.",
         "grounds": [
           { "present": "crates/norn-store/src/find/mod.rs" },
           { "present": "crates/norn-store/src/count/mod.rs" },
@@ -1331,7 +1356,12 @@
           { "present": "crates/norn-store/src/search/mod.rs" },
           { "present": "crates/norn-store/src/get/mod.rs" },
           { "present": "crates/norn-store/src/read/naming.rs" },
-          { "absent": "crates/norn-serve" }
+          { "present": "crates/norn-host/src/read.rs" },
+          { "present": "crates/norn-host/src/search.rs" },
+          { "present": "crates/norn-semantic/src/engine.rs" },
+          { "symbol-present": "crates/norn-host/tests/search.rs::a_narrowed_vector_rung_holds_its_depth_of_what_it_admits" },
+          { "symbol-present": "crates/norn-host/tests/search.rs::an_undrained_mass_delete_costs_the_vector_rung_its_margin_until_the_cap" },
+          { "symbol-absent": "crates/norn-store/tests/store/get.rs::a_heading_anchor_is_matched_in_memory_under_its_counter_ceiling" }
         ]
       }
     },
@@ -1379,23 +1409,23 @@
       "kind": "defect-class",
       "mandatory": true,
       "venue": 3,
-      "property": "The field universe is exact — schema keys united with observed keys — and the diagnostic is a biconditional: a request component is reported unsatisfiable exactly when it is unsatisfiable. An unknown sort, column or predicate key never silently degrades a result, a malformed glob is never swallowed into a zero-match answer, a path filter that cannot match by construction — a bare directory where the grammar matches globs — is reported rather than answered with a silent empty set, and a missing named section is a distinguishable miss rather than a silent whole-document substitution. The diagnostic reaches every surface, and the exit code distinguishes not-fully-satisfiable from satisfiable-with-zero-matches, which stays success.",
+      "property": "The field universe is exact — schema keys united with observed keys — and the diagnostic is a biconditional: a request component is reported unsatisfiable exactly when it is unsatisfiable. An unknown sort, column or predicate key never silently degrades a result, a malformed glob is never swallowed into a zero-match answer, a path filter that cannot match by construction — a bare directory where the grammar matches globs — is reported rather than answered with a silent empty set, and a missing named section is a distinguishable miss rather than a silent whole-document substitution. The diagnostic crosses the wire in band, on the answer beside what the request could answer.",
       "sources": ["NRN-s14", "NRN-367", "NRN-374", "NRN-428", "NRN-427", "NRN-44", "NRN-392", "NRN-452", "NRN-399", "norn-legacy annoyances log"],
       "binding": {
-        "status": "dormant",
-        "reason": "the find builder carries the request-side half: crates/norn-store/tests/store/find_rows.rs::every_unknown_key_is_reported_with_the_keys_near_it holds an unknown sort, projection and predicate key reported with the keys near it rather than applied in silence, drawn from the field universe by the one rule crates/norn-store/src/read/suggest.rs::nearest_first_then_by_key_and_three_at_most holds; crates/norn-store/tests/store/find_rows.rs::a_path_part_that_cannot_match_is_reported_and_one_matching_nothing_is_not holds a bare directory and a glob no path can spell reported, and a literal path matching nothing answered empty with no report; crates/norn-store/tests/store/find.rs::a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault holds a glob that does not parse reported rather than swallowed into an empty page, and crates/norn-store/tests/store/find.rs::a_malformed_full_text_query_is_reported_and_empties_the_page holds the same of a full-text query the engine cannot parse; crates/norn-store/tests/store/find.rs::a_known_key_and_the_field_universe_read_the_presence_rows_alone holds the universe read off the keys the documents carry, and crates/norn-store/tests/store/find_rows.rs::every_unknown_key_is_reported_with_the_keys_near_it draws suggestions from a key only the declaration names. The universe is answered whole by describe: crates/norn-store/tests/store/describe.rs::an_observed_field_carries_every_container_its_documents_hold_it_in holds a key observed and declared nowhere answered as an observed field, and a key declared and carried by nothing answered as a declared one. Two clauses have no carrier. The diagnostic reaching every surface, and an exit code that tells a request not fully satisfiable from one satisfiable with zero matches, are properties of a surface rendering an answer, and neither crates/norn-serve, which dispatches a read verb, nor crates/norn-client, which renders one and exits, is in the workspace. A missing named section is produced by the get builder as a distinguishable miss: crates/norn-store/tests/store/get.rs::a_heading_anchor_answers_the_section_it_names holds it answered in band as crates/norn-wire/src/product.rs::MissingSection beside the record of the document's path alone, never the whole document.",
-        "grounds": [
-          { "symbol-present": "crates/norn-store/tests/store/find_rows.rs::every_unknown_key_is_reported_with_the_keys_near_it" },
-          { "symbol-present": "crates/norn-store/src/read/suggest.rs::nearest_first_then_by_key_and_three_at_most" },
-          { "symbol-present": "crates/norn-store/tests/store/find_rows.rs::a_path_part_that_cannot_match_is_reported_and_one_matching_nothing_is_not" },
-          { "symbol-present": "crates/norn-store/tests/store/find.rs::a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault" },
-          { "symbol-present": "crates/norn-store/tests/store/find.rs::a_malformed_full_text_query_is_reported_and_empties_the_page" },
-          { "symbol-present": "crates/norn-store/tests/store/find.rs::a_known_key_and_the_field_universe_read_the_presence_rows_alone" },
-          { "symbol-present": "crates/norn-store/tests/store/describe.rs::an_observed_field_carries_every_container_its_documents_hold_it_in" },
-          { "symbol-present": "crates/norn-wire/src/product.rs::MissingSection" },
-          { "symbol-present": "crates/norn-store/tests/store/get.rs::a_heading_anchor_answers_the_section_it_names" },
-          { "absent": "crates/norn-serve" },
-          { "absent": "crates/norn-client" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/find_rows.rs::every_unknown_key_is_reported_with_the_keys_near_it",
+          "crates/norn-store/tests/store/find_rows.rs::a_path_part_that_cannot_match_is_reported_and_one_matching_nothing_is_not",
+          "crates/norn-store/tests/store/find.rs::a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault",
+          "crates/norn-store/tests/store/find.rs::a_malformed_full_text_query_is_reported_and_empties_the_page",
+          "crates/norn-store/tests/store/count.rs::a_by_key_outside_the_field_universe_answers_null_and_is_reported",
+          "crates/norn-store/tests/store/validate.rs::a_part_a_validate_cannot_apply_is_reported_as_a_find_reports_it",
+          "crates/norn-store/tests/store/search.rs::a_part_a_search_cannot_apply_is_reported_as_a_find_reports_it",
+          "crates/norn-store/tests/store/get.rs::an_unknown_projected_key_is_reported",
+          "crates/norn-store/tests/store/get.rs::a_heading_anchor_answers_the_section_it_names",
+          "crates/norn-store/tests/store/describe.rs::an_observed_field_carries_every_container_its_documents_hold_it_in",
+          "crates/norn-wire/tests/round_trip.rs::an_unsatisfied_part_is_an_object_tagged_part",
+          "crates/norn-host/tests/reads.rs::a_part_a_verb_could_not_apply_is_answered_unsatisfied"
         ]
       }
     },
@@ -1572,6 +1602,17 @@
       }
     },
     {
+      "name": "repair-evaluates-only-the-paths-it-is-asked-for",
+      "kind": "defect-class",
+      "venue": 5,
+      "property": "A repair narrowed to requested paths evaluates the documents those paths admit and no others, so its work follows the requested set rather than the vault. Repair evaluating 1593 documents and then filtering to the requested paths is the shape this forbids.",
+      "sources": ["NORN-a1", "NRN-a60", "NRN-a61", "NRN-a63"],
+      "binding": {
+        "status": "dormant",
+        "reason": "no repair planner exists."
+      }
+    },
+    {
       "name": "argv-accepts-leading-hyphen-content",
       "kind": "defect-class",
       "venue": 6,
@@ -1613,6 +1654,24 @@
       "binding": {
         "status": "dormant",
         "reason": "there is no grammar and no behavior seam for a flag to reach."
+      }
+    },
+    {
+      "name": "every-surface-tells-an-unsatisfiable-request-from-an-empty-answer",
+      "kind": "defect-class",
+      "mandatory": true,
+      "venue": 6,
+      "property": "A request component the answer reports unsatisfiable reaches every surface that renders the answer, and the exit code distinguishes a request that is not fully satisfiable from one satisfiable with zero matches, which stays success.",
+      "sources": ["NRN-s14", "NRN-367", "NRN-374", "NRN-428", "NRN-427", "NRN-44", "NRN-392", "NRN-452", "NRN-399", "norn-legacy annoyances log"],
+      "binding": {
+        "status": "dormant",
+        "reason": "the diagnostic reaches the answer: crates/norn-wire/src/product.rs::VaultAnswer carries the parts a request could not apply beside its report and says whether the answer is complete. What has no subject is a surface: nothing renders an answer or exits with an outcome, because crates/norn-client, crates/norn-serve and crates/norn-mcp are not in the workspace.",
+        "grounds": [
+          { "symbol-present": "crates/norn-wire/src/product.rs::VaultAnswer" },
+          { "absent": "crates/norn-client" },
+          { "absent": "crates/norn-serve" },
+          { "absent": "crates/norn-mcp" }
+        ]
       }
     },
     {
@@ -1660,6 +1719,22 @@
       }
     },
     {
+      "name": "machine-formats-carry-completeness-in-band",
+      "kind": "defect-class",
+      "venue": 6,
+      "property": "Every machine format carries an in-band completeness signal, so a consumer reading stdout alone knows whether the set was truncated.",
+      "sources": ["NRN-452", "NRN-451", "NRN-332"],
+      "binding": {
+        "status": "dormant",
+        "reason": "the wire answer carries completeness in band: crates/norn-wire/src/document.rs spells a nested collection's total and a cut body's whole length beside what a row carries, and crates/norn-wire/src/cursor.rs spells the cursor a page continues from, so an answer says whether it holds the whole set. What has no subject is a machine format: what reaches stdout is rendered by crates/norn-client, which is not in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-wire/src/document.rs" },
+          { "present": "crates/norn-wire/src/cursor.rs" },
+          { "absent": "crates/norn-client" }
+        ]
+      }
+    },
+    {
       "name": "one-spelling-per-identity-everywhere",
       "kind": "defect-class",
       "venue": 6,
@@ -1701,6 +1776,21 @@
       "binding": {
         "status": "dormant",
         "reason": "no suite runs against an installed binary: the `norn` binary is a stub with no version to pin a reference to. The first suite that compares against one is the subject."
+      }
+    },
+    {
+      "name": "whether-any-error-stands-is-one-existence-query",
+      "kind": "defect-class",
+      "venue": 6,
+      "property": "Whether any error-severity finding stands is answered by one existence query rather than by a scan or a tally of the findings.",
+      "sources": ["NRN-a60", "NRN-a61", "NRN-a63"],
+      "binding": {
+        "status": "dormant",
+        "reason": "the findings are answered as pages and as a tally: crates/norn-store/src/validate/mod.rs pages the findings a severity floor admits and answers a summary as one aggregate statement, and neither is the question whether any error stands. That question is asked by a surface deciding the outcome it exits with, and nothing decides one: crates/norn-client is not in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-store/src/validate/mod.rs" },
+          { "absent": "crates/norn-client" }
+        ]
       }
     }
   ]
