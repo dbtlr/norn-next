@@ -1048,23 +1048,31 @@ and growing with the target's backlinks; a payload bar holds that
 no statement a link's resolution or a links-to part runs reads a document's body or its
 frontmatter.
 
-The count shape carries no memory or timing bar yet, and neither do the validate, describe
-and search builders. The warm-zero counter bar gates per PR, and the find shape carries four
-bars of its own. In the counter lane, a find through a live read hold reads nothing through
-`norn-fs` on its own thread and lands nothing in the host's account of its jobs, at a pinned
-number of statements a page; and an unfiltered find, paged newest first, counts the same
-work at 300 documents as at 2000. Count-by-field, suffix / stem resolve, links-to,
-findings-for-path and full-text match carry the same two counter bars, and so do a get's
-page of a document's links and a describe page, each asked through its host verb in the
-bounded form its contract makes flat and at a pinned number of statements. A shape's work
-counts the virtual-machine and full-scan steps of every statement run on its snapshot, and
-holds them equal across the pair. These statement counters do not see work a virtual table
-does inside a statement, so a full-text match's posting-list walk is not among them; a
-search's page cost is read off the matches the module hands back instead. Each pair
-has a control that grows with the vault and reads more at the larger scale. In the memory
-lane, the two `read-` bars hold a process that attached the ~2k-document profile and read it
-through a live hold to an absolute peak ceiling, and to a ratio over the peak of the same
-attach without the read. No query shape carries a timing bar.
+The warm-zero counter bar gates per PR, and the find shape carries four bars of its own. In
+the counter lane, a find through a live read hold reads nothing through `norn-fs` on its own
+thread and lands nothing in the host's account of its jobs, at a pinned number of statements
+a page; and an unfiltered find, paged newest first, counts the same work at 300 documents as
+at 2000. Count-by-field, suffix / stem resolve, links-to, findings-for-path and full-text
+match carry the same two counter bars, and so do a get's page of a document's links and a
+describe page, each asked through its host verb in the bounded form its contract makes flat
+and at a pinned number of statements. A shape's work counts the virtual-machine and
+full-scan steps of every statement run on its snapshot, and holds them equal across the
+pair. These statement counters do not see work a virtual table does inside a statement, so a
+full-text match's posting-list walk is not among them; a search's page cost is read off the
+matches the module hands back instead. Each pair has a control that grows with the vault and
+reads more at the larger scale. In the memory lane, three `read-` bars hold one process that
+attached a per-PR profile and ran the read mix through the host's read verbs: a find under a
+predicate, sorted and paged; a count by field; a get with suffix resolve; links-to and
+backlinks; a validate narrowed by a path part, which is findings-for-path; lexical search;
+and describe. Two bars hold the ~2k-document profile's process to an absolute peak ceiling
+and to a ratio over the peak of the same attach without the reads. The kernel reports one
+peak per process, so they hold the highest peak any shape reached rather than each shape's
+own. The third reads the most the shapes raised the live heap above the attached host,
+counted by the process's own allocator, at the 300-document and ~2k-document profiles, and
+bounds in bytes how far the second reading may exceed the first: a shape that keeps an
+eight-byte id for every document while the find's pages are held fails it, even where the
+whole-process peak absorbs whole rows. The reading is a high-water, so a retention that
+stays under the find's pages is not seen. No query shape carries a timing bar.
 
 ### 4. One obvious path
 

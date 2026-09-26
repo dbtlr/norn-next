@@ -480,6 +480,11 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
+        name: "read-pair-heap-growth-allowance",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES",
+        armed: true,
+    },
+    ExitBar {
         name: "soak-host-peak-rss-ceiling",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_PEAK_RSS_CEILING_BYTES",
         armed: true,
