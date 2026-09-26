@@ -52,10 +52,12 @@
 //! answers only for the one it renders — so a descent handed a caller's
 //! spelling on a folding root passes a component only where its parent lists
 //! it (see `walk`). Widening the fold is a change to this module, to the
-//! store's collation, its folded suffix key and its ambiguity-ignore glob
-//! fold, and to the contract sample each of them is pinned to — this module's
-//! copy and the store's, one sample written twice — never a local choice made
-//! at a comparison site.
+//! store's collation, its folded suffix key and every glob's fold, which the
+//! store's `StoredPathOrder::glob_case` gives the ambiguity-ignore globs, the
+//! path parts of a find, a count and a validate, and the tag facet's patterns,
+//! and to the contract sample each of them is pinned to — this module's copy
+//! and the store's, one sample written twice — never a local choice made at a
+//! comparison site.
 //!
 //! **Whether the fold is applied at all is proven, not assumed.** The key
 //! folds only where an existing directory entry demonstrates that the root
