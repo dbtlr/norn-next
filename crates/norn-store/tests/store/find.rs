@@ -2037,6 +2037,48 @@ fn a_continuation_resumes_exactly_where_its_page_stopped() {
     );
 }
 
+/// **A continuation resumes exactly between paths that differ only by case.**
+/// Under a case-sensitive root `notes/A.md` and `notes/a.md` are two
+/// documents that the case-insensitive path order ties, and the exact bytes
+/// break the tie. Drained a row at a time and two rows at a time in either
+/// direction, the path order yields the same rows as one page holding them
+/// all, so a position at one of a tied pair resumes at the other.
+#[test]
+fn a_continuation_resumes_exactly_between_paths_that_differ_only_by_case() {
+    let mut seeded = Seeded::new("find-continuation-case-pairs");
+    write_documents(
+        &mut seeded.store.begin_request(),
+        &[
+            document("notes/A.md", "hash-upper-a", "a body\n"),
+            document("notes/b.md", "hash-lower-b", "a body\n"),
+        ],
+    );
+    for direction in [Direction::Ascending, Direction::Descending] {
+        let params = sorted(SortKey::path(), direction);
+        let whole = drained(&seeded, &params, 100);
+        assert_eq!(whole.len(), 7, "{direction:?}: {whole:?}");
+        for limit in [1, 2] {
+            assert_eq!(
+                drained(&seeded, &params, limit),
+                whole,
+                "the path order {direction:?} drained {limit} at a time"
+            );
+        }
+    }
+    assert_eq!(
+        drained(&seeded, &sorted(SortKey::path(), Direction::Ascending), 1),
+        [
+            "notes/A.md",
+            "notes/a.md",
+            "notes/B.md",
+            "notes/b.md",
+            "notes/c.md",
+            "other/glossary.md",
+            "other/v1.2.md"
+        ]
+    );
+}
+
 /// **Each filter answers the documents its part names.**
 #[test]
 fn each_filter_answers_the_documents_its_part_names() {
