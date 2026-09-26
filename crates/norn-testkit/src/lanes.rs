@@ -592,6 +592,41 @@ fn workflows_directory(manifest_dir: &Path) -> PathBuf {
         })
 }
 
+/// Every wholesale adoption the workflows in `directory` declare, as
+/// `(package, test target)`: the targets whose ignored cases some CI step
+/// runs through [`LANE_SCRIPT`].
+///
+/// A directory that cannot be read, a workflow that cannot be read, and a
+/// directory holding no workflow are each an error rather than an empty set,
+/// so a caller asking whether a target is adopted never reads "nothing was
+/// read" as "nothing is adopted".
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: reads this repository's own workflow files.
+pub(crate) fn adoptions_in(directory: &Path) -> Result<BTreeSet<(String, String)>, String> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|e| format!("reading {} for workflows: {e}", directory.display()))?;
+    let mut workflows = 0usize;
+    let mut adoptions = BTreeSet::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("reading {} for workflows: {e}", directory.display()))?
+            .path();
+        if !path.extension().is_some_and(|e| e == "yml" || e == "yaml") {
+            continue;
+        }
+        workflows += 1;
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        adoptions.extend(lane_steps(&text));
+    }
+    if workflows == 0 {
+        return Err(format!(
+            "{} holds no workflow, so nothing was read",
+            directory.display()
+        ));
+    }
+    Ok(adoptions)
+}
+
 /// The packages a step adopts ignored cases from that
 /// [`LANE_PREFIXES_BY_PACKAGE`] names no row for.
 ///
@@ -623,35 +658,17 @@ fn packages_outside_the_rows(adopting: &BTreeSet<String>) -> Vec<String> {
 /// a step naming a package the rows do not know adopts a whole suite that no
 /// guard reads at all, which is the first two hazards with nothing standing
 /// where they would be caught.
-#[allow(clippy::disallowed_methods)] // Harness scaffolding: reads this repository's own workflow files.
 pub fn assert_lane_steps_agree(manifest_dir: &Path, package: &str, lanes: &[(&str, &str)]) {
-    let directory = workflows_directory(manifest_dir);
-    let entries = std::fs::read_dir(&directory)
-        .unwrap_or_else(|e| panic!("reading {} for workflows: {e}", directory.display()));
-
-    let mut workflows = 0usize;
+    let adoptions = adoptions_in(&workflows_directory(manifest_dir))
+        .unwrap_or_else(|problem| panic!("{problem}"));
     let mut adopted: BTreeSet<String> = BTreeSet::new();
     let mut adopting: BTreeSet<String> = BTreeSet::new();
-    for entry in entries {
-        let path = entry.expect("a directory entry").path();
-        if !path.extension().is_some_and(|e| e == "yml" || e == "yaml") {
-            continue;
+    for (named, target) in adoptions {
+        if named == package {
+            adopted.insert(target);
         }
-        workflows += 1;
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-        for (named, target) in lane_steps(&text) {
-            if named == package {
-                adopted.insert(target);
-            }
-            adopting.insert(named);
-        }
+        adopting.insert(named);
     }
-    assert!(
-        workflows > 0,
-        "{} holds no workflow, so nothing was read",
-        directory.display()
-    );
 
     let unaccounted = packages_outside_the_rows(&adopting);
     assert!(
