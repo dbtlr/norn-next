@@ -475,6 +475,11 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
+        name: "read-contended-demand-rereadings-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::READ_DEMAND_REREADINGS_PER_CONTENDED_ACQUISITION",
+        armed: true,
+    },
+    ExitBar {
         name: "soak-host-peak-rss-ceiling",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_PEAK_RSS_CEILING_BYTES",
         armed: true,
