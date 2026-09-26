@@ -16993,7 +16993,7 @@ mod tests {
     ///
     /// The other two readings are asserted here and not left implied: the
     /// claim is that the establishment is all these reads ran under the gate,
-    /// and the served-read reading alone cannot say that — a mint or a refused
+    /// and the served-read reading alone cannot say that: a mint or a refused
     /// establishment would be gate-held work it does not carry.
     #[test]
     fn a_read_runs_only_its_establishment_under_the_gate() {
