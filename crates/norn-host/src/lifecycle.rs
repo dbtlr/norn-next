@@ -18061,6 +18061,47 @@ mod tests {
         );
     }
 
+    /// **A read whose query work unwinds over a gate another thread poisoned
+    /// gives its hold back.** The hold's drop takes the gate to unpin the
+    /// entry and its lease takes it again, both on the unwinding thread, where
+    /// a panic on the poison is a second panic inside a drop and aborts the
+    /// process.
+    #[test]
+    fn a_read_that_unwinds_over_a_poisoned_gate_gives_its_hold_back() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+        let read = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+
+        poison_the_gate(&entry);
+        let unwound = std::panic::catch_unwind(AssertUnwindSafe(move || {
+            let _read = read;
+            panic!("a read's query work unwinding over a poisoned gate");
+        }));
+        assert!(
+            unwound.is_err(),
+            "the query work the case asked to unwind returned"
+        );
+        entry.gate.clear_poison();
+        let (leases, pinned) = {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            (state.demand_leases, state.pinned())
+        };
+        assert_eq!(
+            (leases, pinned),
+            (0, false),
+            "the unwound read left its lease or its pin on the entry"
+        );
+    }
+
     /// **An unwind under the gate an acquisition took again after its wait
     /// gives its lease back and poisons that gate rather than holding it.** A
     /// lease that took the gate from its drop there would block on the gate
