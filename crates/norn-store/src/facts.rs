@@ -391,9 +391,11 @@ pub struct StoredSuffixKeys {
 ///   `NOCASE` with a bytewise tie-break, as the walk it merges against orders
 ///   paths. The heal hands the page its walk's proven order.
 /// - **The order a validate answers a kind's findings in**
-///   ([`StoredPathOrder::path_keys`]): `(path, id)` where the root tells
+///   ([`crate::Snapshot::validate`]): `(path, id)` where the root tells
 ///   spellings apart, and `(path COLLATE NOCASE, path, id)` where it folds
-///   them, each read off an index that holds it.
+///   them, each read off an index that holds it. One function names that
+///   order's path keys, and the page's order and the position it resumes
+///   after are both stated from it.
 ///
 /// This crate depends on nothing in the filesystem seam, so each fold here —
 /// the `NOCASE` collation, the folded suffix key, and the globs'
