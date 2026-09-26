@@ -1746,9 +1746,13 @@ which is an entry serving every surface but this one.
 **A read that meets a change waits for it — ruled by [ADR
 0028](decisions/0028-a-read-waits-out-a-change-it-was-served-over.md) and not yet built.**
 Today every warming entry refuses a read as above. The ruling splits warming by stance, read
-under the entry gate beside the published demand: an entry warming over coverage it has
-already published as `Ready` — a polled batch, a reconcile turn, a schema reload — settles,
-and every other state refuses at once with its reason. A settling read gives the gate back,
+under the entry gate beside the published demand: an entry that entered warming from
+`Ready` with no withdrawal of trust in between — a polled batch, a reconcile turn, a schema
+reload — settles, and every other state refuses at once with its reason, including the
+warming of a recovery or a rebuild entered from untrusted. The trust label does not say how
+warming was entered, so the entry's own state holds that fact. The bound runs from the
+read's first hold of the entry gate and covers the wait for the connection and the wait for
+`Ready` together. A settling read gives the gate back,
 waits outside it on a signal that moves only when the stance changes, takes the gate again
 and reads the published demand afresh, and answers from the snapshot it establishes at the
 first `Ready` it observes after it began, never from the state before the change; where a

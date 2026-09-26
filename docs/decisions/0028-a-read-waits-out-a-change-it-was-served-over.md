@@ -30,8 +30,10 @@ lifecycle job holds for its whole duration — so a wire read borrowing it would
 behind every warm job that holds the store while trust stays `Ready` (polls, maintenance,
 plan application), and the timing-barred query shapes would measure orchestration where the
 acceptance contract bars SQL. Heals are not the motivating case: the first heal runs before
-any reader exists, and every later heal takes trust out of `Ready`, where a read either waits
-for it or refuses under the stance ruled below. A shared borrow of the live store cannot
+any reader exists, and every later heal takes trust out of `Ready`. Under the stance ruled
+below, a read waits out the heals that take in a change — a watcher batch's reconcile and a
+schema reload's — and refuses at once during the heals that follow withdrawn trust — a
+recovery's and a rebuild's. A shared borrow of the live store cannot
 serve reads either — a `&self` cannot exist while a job holds the attachment mutably. Wire
 reads therefore run on dedicated read-only handles `norn-store` mints from a live `Store` —
 opened read-only with `query_only` set, carrying the read builders and their `EXPLAIN` seam
@@ -122,12 +124,18 @@ maintainer contention alike — and schedules nothing.
 **Whether a read waits is its stance, and the stance is read under the entry gate, in the
 same critical section that reads the published demand.** There are two stances.
 
-- **Settle.** An entry that is warming over coverage it has already published as `Ready`
-  settles, and a read that meets it waits. That is an entry taking in a change: a polled
-  watcher batch, a reconcile turn, or a schema reload.
+- **Settle.** An entry that entered warming from `Ready`, with no withdrawal of trust in
+  between, settles, and a read that meets it waits. That is an entry taking in a change: a
+  polled watcher batch, a reconcile turn, or a schema reload.
 - **Refuse.** Everything else refuses at once, with its reason: an entry that has never
   served, an entry that lost trust — a watcher overflow or loss, an environmental refusal,
-  damaged derived state — a release, a detach or a drop, and every park.
+  damaged derived state — a release, a detach or a drop, and every park. Warming entered
+  from untrusted, which is a recovery's or a rebuild's, refuses at once, although it too runs
+  over coverage that was once `Ready`.
+
+Warming published by a reconcile and warming published by a recovery or a rebuild carry the
+same trust label, so the label does not say how warming was entered. The entry's own state
+holds that fact, beside the published demand, and the stance is read from it.
 
 **The wait obeys ADR 0025's standing rule: no acquisition waits while it holds the entry
 gate.** A settling read gives the gate back, waits outside it on a signal that moves only
@@ -154,7 +162,9 @@ refuses with what that publication states.
 **The bound is operational containment, not a performance threshold.** It keeps a read from
 waiting on a change that does not converge, and it states nothing about how fast a change
 should settle. It is a lifecycle policy value, and its production value equals the settle
-ceiling already authored for one vault walk: 5 seconds.
+ceiling already authored for one vault walk: 5 seconds. The bound runs from the read's
+first hold of the entry gate and covers every wait the read takes, the wait for the
+connection and the wait for `Ready` together.
 
 The wait is ruled and not yet built.
 
