@@ -10,14 +10,16 @@ use std::path::PathBuf;
 
 use norn_store::{
     BlockFact, CandidateFact, Change, ClassKey, ContentModel, DerivationCounters, DocumentFacts,
-    DocumentPath, EmittedPlan, FindingFacts, FrontmatterValue, HeadingFact, IncrementOutcome,
-    IncrementProvenance, LinkFact, LinkFamily, OffsetSpelling, Provenance, Request, Span, Store,
-    TagFact, TagSource, TypedOrder, suffix_probe,
+    DocumentPath, EmittedPlan, FieldOrder, FindingFacts, FrontmatterValue, HeadingFact,
+    IncrementOutcome, IncrementProvenance, LinkFact, LinkFamily, OffsetSpelling, Provenance,
+    ReadFilter, Request, Span, Store, SuffixKey, TagFact, TagSource, TypedOrder, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::explain::StatementReads;
 use norn_testkit::scratch::Scratch as TestkitScratch;
-use norn_wire::{FindParams, FindingKind, Predicate, Severity, VaultAddress, VaultName};
+use norn_wire::{
+    FindParams, FindingKind, Predicate, ResolutionTarget, Severity, VaultAddress, VaultName,
+};
 
 /// The columns that hold a document's payload: what a document says, rather
 /// than an index entry about it. `documents.body` is the body text and
@@ -259,6 +261,91 @@ pub fn span(line: u64, column: u64, byte_offset: u64) -> Span {
 /// document, so its size is the body's length.
 pub fn document(text: &str, hash: &str, body: &str) -> DocumentFacts {
     DocumentFacts::new(path(text), hash, body, body.len() as u64)
+}
+
+/// A document every driving part in [`driving_parts`] can narrow to by a fact
+/// no bulk document holds: `narrowed.md`, carrying the undeclared key `noted`,
+/// the word `interloper` in its body, and a wikilink to `a`.
+pub fn narrowable() -> DocumentFacts {
+    let mut facts = document("narrowed.md", "hash-narrowed", "the interloper\n").with_frontmatter(
+        Some(FrontmatterValue::Map(vec![(
+            "noted".to_string(),
+            FrontmatterValue::String("yes".to_string()),
+        )])),
+        &ContentModel::none(),
+    );
+    facts.links.push(LinkFact {
+        family: LinkFamily::Wikilink,
+        embed: false,
+        protocol: None,
+        target: "a".to_string(),
+        title: None,
+        anchor: None,
+        block_ref: None,
+        span: span(1, 1, 0),
+    });
+    facts
+}
+
+/// Every filter shape that keeps what it seeks, each as a part admitting a
+/// set of documents that is the same whatever number of bulk documents
+/// stands under `bulk/` beside a fixture holding `a.md`, a `status` of
+/// `open` and of `closed` and none sorting between `d` and `g`, and the tag
+/// `draft`, together with [`narrowable`] and a [`violation`] standing over
+/// it. A bulk document's `status` is `filed`, and it holds no link, no tag
+/// `draft` and no word `interloper`.
+///
+/// [`ReadFilter::Resolves`] is absent: a count and a validate do not apply a
+/// `resolves` part, so it drives neither. Each builder's work bar asserts the
+/// table covers every other shape that keeps what it seeks, so a shape added
+/// to the enumeration joins it.
+pub fn driving_parts() -> Vec<(ReadFilter, Predicate)> {
+    let target = |text: &str| ResolutionTarget::new(text).expect("a target");
+    vec![
+        (
+            ReadFilter::Equal(FieldOrder::Raw),
+            Predicate::equal_to("status", "open"),
+        ),
+        (
+            ReadFilter::Member(FieldOrder::Raw),
+            Predicate::in_any("status", ["open".to_string(), "closed".to_string()]),
+        ),
+        (ReadFilter::Present, Predicate::has("noted")),
+        (
+            ReadFilter::Before(FieldOrder::Raw),
+            Predicate::before("status", "d"),
+        ),
+        (
+            ReadFilter::After(FieldOrder::Raw),
+            Predicate::after("status", "g"),
+        ),
+        (ReadFilter::FullText, Predicate::matches("interloper")),
+        (ReadFilter::PathGlob, Predicate::path("a*")),
+        (ReadFilter::Tag, Predicate::tag("draft")),
+        (
+            ReadFilter::Finding,
+            Predicate::has_finding(FindingKind::BodyBytesNotUtf8),
+        ),
+        (
+            ReadFilter::LinksTo(SuffixKey::Raw),
+            Predicate::links_to(target("a")),
+        ),
+    ]
+}
+
+/// Assert `table` names every filter shape that keeps what it seeks but
+/// [`ReadFilter::Resolves`], and each once.
+pub fn assert_covers_every_driving_shape(table: &[(ReadFilter, Predicate)]) {
+    let named: Vec<usize> = table.iter().map(|(shape, _)| shape.slot()).collect();
+    let driving: Vec<usize> = ReadFilter::all()
+        .into_iter()
+        .filter(|shape| !shape.excludes() && !matches!(shape, ReadFilter::Resolves(_)))
+        .map(ReadFilter::slot)
+        .collect();
+    assert_eq!(
+        named, driving,
+        "the table names other shapes than every one that keeps what it seeks"
+    );
 }
 
 /// A document carrying one of every fact shape the store holds, including the

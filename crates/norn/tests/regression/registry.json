@@ -1324,7 +1324,9 @@
         "status": "bound",
         "tests": [
           "crates/norn-store/tests/store/count.rs::a_narrowing_part_narrows_a_counts_work_to_the_documents_it_matches",
+          "crates/norn-store/tests/store/count.rs::every_driving_part_narrows_a_counts_work_to_the_documents_it_admits",
           "crates/norn-store/tests/store/validate.rs::a_narrowing_part_narrows_a_validates_work_to_the_findings_it_matches",
+          "crates/norn-store/tests/store/validate.rs::every_driving_part_narrows_a_validates_work_to_the_findings_it_admits",
           "crates/norn-store/tests/store/links.rs::a_links_to_parts_work_follows_its_backlinks_not_the_vault",
           "crates/norn-store/tests/store/search.rs::a_search_costs_the_documents_its_query_matches_and_never_the_vault",
           "crates/norn-store/tests/store/search.rs::ranking_costs_every_match_and_a_narrowing_part_narrows_what_is_scored",

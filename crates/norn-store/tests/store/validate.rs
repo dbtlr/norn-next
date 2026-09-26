@@ -18,8 +18,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::common::{
-    DOCUMENT_PAYLOAD, Scratch, ambiguity, ambiguity_for_target, document, reads_of, unread_block,
-    violation, write_documents,
+    DOCUMENT_PAYLOAD, Scratch, ambiguity, ambiguity_for_target, assert_covers_every_driving_shape,
+    document, driving_parts, narrowable, reads_of, unread_block, violation, write_documents,
 };
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
@@ -1229,6 +1229,56 @@ fn a_narrowing_part_narrows_a_validates_work_to_the_findings_it_matches() {
     failure_of("findings_fingerprint_kind_severity dropped", || {
         judge_narrow(&small, &large, &validating().with_severity(Severity::Error))
     });
+}
+
+/// **Every part that keeps what it seeks narrows a validate.** Over the
+/// fixture, [`narrowable`] with a violation standing over it, and 50, then
+/// 500, bulk documents each with a warning standing over it, a validate
+/// narrowed by one part of each shape that keeps what it seeks narrows every
+/// page and summary statement by that shape, runs the same statements and
+/// the same VM steps at both sizes, as a page and as a summary, and steps
+/// through no full scan.
+#[test]
+fn every_driving_part_narrows_a_validates_work_to_the_findings_it_admits() {
+    let table = driving_parts();
+    assert_covers_every_driving_shape(&table);
+    let with_narrowable = |label: &str, bulk: usize| {
+        let mut validating_store = Validating::with_bulk(label, bulk);
+        let mut request = validating_store.store.begin_request();
+        write_documents(&mut request, &[narrowable()]);
+        request
+            .record_finding(&violation("narrowed.md"))
+            .expect("recording a finding");
+        validating_store
+    };
+    let small = with_narrowable("validate-driving-small", 50);
+    let large = with_narrowable("validate-driving-large", 500);
+    for (shape, part) in &table {
+        let narrowed = validating().with_predicates([part.clone()]);
+        for params in [narrowed.clone(), narrowed.summarized()] {
+            for plan in small.plans(&params) {
+                if matches!(plan.statement, ReadStatement::Validate(_)) {
+                    assert!(
+                        plan.filters
+                            .iter()
+                            .any(|filter| filter.slot() == shape.slot()),
+                        "a {shape:?} part did not narrow {:?}: {:?}",
+                        plan.statement,
+                        plan.filters
+                    );
+                }
+            }
+            let (at_small, at_large) = (small.validate(&params).work, large.validate(&params).work);
+            assert_eq!(
+                at_small, at_large,
+                "a validate narrowed by a {shape:?} part grew with the vault: {params:?}"
+            );
+            assert_eq!(
+                at_large.full_scan_steps, 0,
+                "a validate narrowed by a {shape:?} part stepped through a full scan: {at_large:?}"
+            );
+        }
+    }
 }
 
 // ---- the payload bar ----
