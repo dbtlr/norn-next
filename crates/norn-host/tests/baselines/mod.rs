@@ -74,13 +74,13 @@
 //! That lane's record therefore carries a watcher-backend answer and no
 //! reading, and nothing in it should be read as a measurement of the candidate.
 //!
-//! Four integration binaries compile this module — `memory.rs` for the per-PR
-//! memory lane, `fd_budget.rs` for the per-PR workspace suite, `host_soak.rs`
-//! for the scheduled lane and `settle.rs` for the scheduled lane's churn
-//! clock — and each asserts against the values its lane owns, so the remainder
-//! being unused in any one of them is the layout rather than a defect. The
-//! values stay in one file because the file is the trend's whole memory, and a
-//! reviewer reads it as one diff.
+//! Five integration binaries compile this module: `memory.rs` for the per-PR
+//! memory lane, `counter_gate.rs` for the per-PR counter lane, `fd_budget.rs`
+//! for the per-PR workspace suite, `host_soak.rs` for the scheduled lane and
+//! `settle.rs` for the scheduled lane's churn clock. Each asserts against
+//! the values its lane owns, so the remainder being unused in any one of them
+//! is the layout rather than a defect. The values stay in one file because the
+//! file is the trend's whole memory, and a reviewer reads it as one diff.
 #![allow(dead_code)]
 // The rendering helpers are re-exported for every lane at once, so a binary
 // that uses two of the four is the layout rather than a stale import.
@@ -787,6 +787,39 @@ pub const FD_BUDGET: usize = 12;
 /// measured — so the registry holds this bar `armed` and there is no
 /// calibration window for it to open.
 pub const SOAK_RECOVERY_DOSE: u32 = 1;
+
+/// How many rounds of its entry gate any one read acquisition may take after
+/// its first.
+///
+/// **The contention-rounds term of the read-concurrency bar.** No acquisition
+/// waits for its entry's connection while it holds the entry gate: one that
+/// finds the connection taken gives the gate back, waits, and takes the gate
+/// again, and in that round it reads afresh the demand its entry publishes,
+/// because the demand it read first describes an instant it no longer answers
+/// under. That round, a hold of the gate taken again, is the priced cost of
+/// contention. Each acquisition counts its own rounds and records them where
+/// it leaves, and `counter_gate.rs`'s `overlapping reads on one entry`
+/// workload reads the widest any one acquisition took off the host's read
+/// account and holds it to this. Beside the ceiling the workload holds a
+/// floor: the window's rounds after the first equal its waits, so a contended
+/// acquisition that answered under the demand it read before it waited fails
+/// too.
+///
+/// Observed: **one round after the first per contended acquisition**, a widest
+/// of 1 and 8 such rounds over 8 waits, in every local run of that case on
+/// macos-arm64. It is a count rather than a clock or a resident set, so it
+/// reads the same on a loaded runner as on an idle one, and there is no band
+/// to author around.
+///
+/// The ceiling is 1, which is what the acquisition performs. A widest above it
+/// is an acquisition that took a round the read path does not have, and the
+/// bar fails it rather than pricing it, however many acquisitions beside it
+/// took fewer.
+///
+/// **Platform scope: every platform.** A count is not a machine's reading, so
+/// under ADR 0004 it may gate a pull request. The per-PR `counter gates` job on
+/// `ubuntu-latest` x86_64-glibc is where it gates.
+pub const READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION: u64 = 1;
 
 /// Whether a reading fits under an authored ceiling.
 ///

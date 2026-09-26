@@ -43,6 +43,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 
 use crate::error::{self, DbError};
@@ -250,6 +251,37 @@ impl Database {
         }
     }
 
+    /// Count every statement SQLite begins on this connection from here on,
+    /// on the thread that begins it. [`statements_begun_on_this_thread`] reads
+    /// the count.
+    ///
+    /// **SQLite is what counts.** The count moves in SQLite's statement trace,
+    /// which fires as SQLite begins running a statement, so a statement run on
+    /// the connection is counted whoever composed it and whether or not it
+    /// answered, and nothing beside the statement has to remember to count it.
+    /// Transaction control is among what it counts: a `BEGIN`, a `COMMIT` and
+    /// a `ROLLBACK` are each a statement SQLite runs. So are the statements a
+    /// virtual table such as FTS5 runs on the connection inside a statement of
+    /// the caller's: the trace reports each as a statement of its own. A
+    /// statement refused before SQLite begins it, at preparation or by a
+    /// caller that answered without running it, is not counted, and neither
+    /// is an `EXPLAIN`, which compiles its query and does not run it, or the
+    /// reading of its schema SQLite runs when it loads the schema again: the
+    /// trace reports neither.
+    ///
+    /// **The count is the running thread's**, and a connection is `!Sync`, so
+    /// a thread that holds a connection's only turn and reads the count on
+    /// both sides of a stretch has, in the difference, what SQLite began on
+    /// that thread in that stretch. Statements this connection ran before this
+    /// call are not counted, which is how an open's own statements stay out of
+    /// the count of a connection that starts counting once it is opened.
+    pub fn count_statements_begun(&self) {
+        self.connection.trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(count_one_statement_begun),
+        );
+    }
+
     /// The database file this handle is holding.
     pub fn path(&self) -> &Path {
         &self.path
@@ -359,6 +391,31 @@ impl Database {
             .execute_batch("ROLLBACK")
             .map_err(|error| error::sql("ending a read snapshot", error))
     }
+}
+
+thread_local! {
+    /// Statements SQLite has begun on this thread over every connection that
+    /// counts them. See [`Database::count_statements_begun`].
+    static STATEMENTS_BEGUN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The statement trace [`Database::count_statements_begun`] installs: one
+/// statement begun, counted on the thread SQLite began it on.
+fn count_one_statement_begun(event: TraceEvent<'_>) {
+    if let TraceEvent::Stmt(..) = event {
+        STATEMENTS_BEGUN.with(|begun| begun.set(begun.get().saturating_add(1)));
+    }
+}
+
+/// Statements SQLite has begun on the calling thread over every connection
+/// that counts them, over the thread's life.
+///
+/// The count only grows, so a caller reads it twice and subtracts. A
+/// connection that does not count its statements moves nothing here, so the
+/// difference is what the counting connections the thread ran statements on
+/// began between the two readings.
+pub fn statements_begun_on_this_thread() -> u64 {
+    STATEMENTS_BEGUN.with(std::cell::Cell::get)
 }
 
 /// Refuse a name SQLite would read as something other than the file it spells.
@@ -880,5 +937,69 @@ mod tests {
             write.is_err(),
             "a write is still refused on a sealed connection after the panic"
         );
+    }
+
+    /// **A counting connection counts what SQLite begins on it, on the thread
+    /// that begins it.** A snapshot's `BEGIN`, the read inside it and the
+    /// `ROLLBACK` that ends it are three statements SQLite runs, and each is
+    /// counted. The controls are what the count does not move for: a statement
+    /// run before the connection counted, a statement refused at preparation,
+    /// and a statement run on the connection by another thread, which is
+    /// counted on that thread instead.
+    #[test]
+    fn a_counting_connection_counts_each_statement_sqlite_begins_on_the_thread_running_it() {
+        let (_scratch, mut database) = sealed_database("statements-begun", "trial", "value");
+        let read_the_epoch = |database: &Database| {
+            meta::get_meta::<String>(database.connection(), meta::STORE_EPOCH)
+                .expect("the trial database records an epoch")
+        };
+
+        let before = statements_begun_on_this_thread();
+        read_the_epoch(&database);
+        assert_eq!(
+            statements_begun_on_this_thread(),
+            before,
+            "a connection that does not count its statements moved the count"
+        );
+
+        database.count_statements_begun();
+        let before = statements_begun_on_this_thread();
+        database.open_snapshot().expect("a snapshot opens");
+        read_the_epoch(&database);
+        database.close_snapshot().expect("the snapshot closes");
+        assert_eq!(
+            statements_begun_on_this_thread() - before,
+            3,
+            "the count is not the BEGIN, the read and the ROLLBACK SQLite ran"
+        );
+
+        let before = statements_begun_on_this_thread();
+        assert!(
+            database
+                .connection()
+                .execute_batch("PRAGMA query_only = 0")
+                .is_err(),
+            "a sealed connection relaxed its own settings"
+        );
+        assert_eq!(
+            statements_begun_on_this_thread(),
+            before,
+            "a statement refused at preparation was counted as begun"
+        );
+
+        let (database, elsewhere) = std::thread::spawn(move || {
+            let before = statements_begun_on_this_thread();
+            read_the_epoch(&database);
+            let elsewhere = statements_begun_on_this_thread() - before;
+            (database, elsewhere)
+        })
+        .join()
+        .expect("the other thread read the epoch");
+        assert_eq!(
+            (elsewhere, statements_begun_on_this_thread()),
+            (1, before),
+            "a statement was counted on a thread other than the one that ran it"
+        );
+        drop(database);
     }
 }

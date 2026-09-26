@@ -2048,7 +2048,6 @@ paths:
                 .try_take()
                 .expect("an idle reader")
                 .establish()
-                .snapshot
                 .expect("a snapshot")
                 .find(&params, self.declared.content_model())
                 .expect("a find")

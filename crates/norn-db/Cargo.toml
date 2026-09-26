@@ -39,6 +39,11 @@ publish.workspace = true
 #   — runs inside the statement that pages the rows rather than over rows the
 #   statement already read. The authorizer admits a function call as it admits
 #   a read.
+# - `trace` carries SQLite's statement trace. A connection that counts its
+#   statements, `Database::count_statements_begun`, counts each one where
+#   SQLite begins it, transaction control included, so a caller holding a lock
+#   reads what ran under it off SQLite rather than off a tally the code beside
+#   each statement keeps by hand.
 # - Nothing else. No `serde_json`, no `time`, no `chrono`: a value's shape at
 #   rest is the client's own projection, and a driver convenience that decided
 #   it would be a second spelling of one.

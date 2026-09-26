@@ -110,7 +110,6 @@ pub fn full_text_matches(store: &Store, expression: &str) -> Vec<String> {
         .try_take()
         .expect("a handle nothing is reading holds its connection")
         .establish()
-        .snapshot
         .expect("a snapshot");
     let found = snapshot
         .find(

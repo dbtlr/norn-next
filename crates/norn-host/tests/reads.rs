@@ -119,31 +119,21 @@ fn a_read_over_an_entry_that_is_not_serving_refuses_with_its_published_demand() 
 }
 
 /// **The per-read gate discipline, over a real attachment.** Each read here
-/// finds the entry's handle standing and is served, so each runs exactly one
-/// statement while it holds the entry gate — the statement that establishes
-/// its snapshot, with no mint and no refused attempt beside it — and a read
-/// that found the entry's connection free waited for nothing on its way to
-/// it.
+/// finds the entry's handle standing and is served, so what SQLite runs while
+/// it holds the entry gate is its snapshot's establishment and nothing else:
+/// the deferred `BEGIN` and the one statement that establishes the snapshot,
+/// [`norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS`], with no mint and no
+/// refused attempt beside them. A read that found the entry's connection free
+/// waited for nothing on its way to it.
 ///
-/// **The contention half of the instrument is not asserted here, because it
-/// cannot be asserted here without a race.** Saying "a read waited" requires
-/// observing a read while it is waiting, and the host records a wait only once
-/// that wait has ended — the reading moves when the waiter takes the
-/// connection — so a case cannot hold the connection and watch the account for
-/// a waiter at the same time. No production signal reports a read that is
-/// currently waiting, and this suite runs against the production attachment,
-/// so it has no hook to synchronize on. Sleeping and hoping the other threads
-/// reached the wait first is what that gap tempts a case into, and a reading
-/// that only sometimes observes contention fails on a loaded machine while the
-/// code is perfectly correct.
-///
-/// Where the contention reading is pinned instead is the lifecycle suite,
-/// against a reader fake that counts a wait when the wait begins: a case there
-/// blocks until a waiter has provably reached the occupied-connection path,
-/// then releases the connection and asserts the wait was one. That is the same
-/// claim, held where it can be held deterministically.
+/// **The contention half of the instrument is asserted in the counter lane**,
+/// over the same production attachment: `counter_gate.rs` holds the entry's
+/// connection, starts reads against it, and lets the hold go once the host's
+/// reader-wait reading names every one of them as waiting. The host counts a
+/// wait where it begins, so that reading moves while the reads are still
+/// waiting and the case observes contention rather than sleeping for it.
 #[test]
-fn reads_over_one_entry_each_run_one_statement_under_the_gate() {
+fn reads_over_one_entry_each_run_only_their_establishment_under_the_gate() {
     let (_sandbox, vault) = a_vault("host-reads-overlap");
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
@@ -162,9 +152,11 @@ fn reads_over_one_entry_each_run_one_statement_under_the_gate() {
         reading.reads_served, readers,
         "the account missed one of the reads"
     );
+    let per_read = norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS;
     assert_eq!(
-        reading.statements_under_the_gate, readers,
-        "a read ran something other than one statement under the gate"
+        reading.statements_under_the_gate,
+        readers * per_read,
+        "a read ran something other than its establishment under the gate"
     );
     // Every one of these reads found the entry's handle standing and was
     // served, so none of them healed and none of them had an establishment
@@ -181,8 +173,8 @@ fn reads_over_one_entry_each_run_one_statement_under_the_gate() {
     );
     assert_eq!(
         host.read_evidence().widest_statements_under_the_gate,
-        1,
-        "one read ran more than the establishing statement under the gate"
+        per_read,
+        "one read ran something other than its establishment under the gate"
     );
     // **The control on the contention reading.** Each read here gave the
     // connection back before the next one asked for it, so none of them waited.

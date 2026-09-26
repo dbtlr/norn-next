@@ -228,6 +228,32 @@ impl SnapshotReader {
         &self.epoch
     }
 
+    /// Statements SQLite has begun on the calling thread over every snapshot
+    /// reader's connection, over the thread's life.
+    ///
+    /// **SQLite counts them, not the code beside each statement.** A handle's
+    /// connection counts its statements from the moment the handle is minted,
+    /// through [`Database::count_statements_begun`], so every statement
+    /// SQLite's statement trace reports on it is counted as SQLite begins it:
+    /// a snapshot's `BEGIN`, its establishing statement, each statement a read
+    /// builder runs on it, the statements FTS5 runs inside a full-text match,
+    /// and the `ROLLBACK` that ends it. The trace does not report an
+    /// `EXPLAIN`, which compiles its query and does not run it, or the reading
+    /// of its schema SQLite runs when it loads the schema again, so neither is
+    /// counted. The mint's own statements run before the connection counts and
+    /// are not among them; [`ReaderMint::statements`] carries those.
+    ///
+    /// **The count is the thread's, not the handle's.** A connection runs on
+    /// one thread at a time and a turn is one read's, so a caller that holds a
+    /// handle's turn and reads this on both sides of a stretch of its own
+    /// thread has, in the difference, every statement SQLite began for it in
+    /// that stretch. A caller holding a lock across the stretch learns what
+    /// ran under its lock from its own two readings, however the statements
+    /// were composed and whoever ran them on that thread.
+    pub fn statements_run_on_this_thread() -> u64 {
+        norn_db::statements_begun_on_this_thread()
+    }
+
     fn give_the_connection_back(&self, database: Database) {
         let mut held = self
             .connection
@@ -284,12 +310,13 @@ impl ConnectionTurn {
     /// Establish the write-ahead-log snapshot one read answers from, and
     /// sample the store reading it is answered under.
     ///
-    /// **One statement against the database, and it is the establishing one.**
-    /// A deferred `BEGIN` takes no snapshot, so the snapshot is the first
-    /// statement's — and that statement is the read of the store's write
-    /// generation, which is the reading the answer carries. A caller that runs
-    /// this where the published demand is read gets a demand and a snapshot
-    /// describing one instant, and pays one statement for both.
+    /// **Two statements SQLite runs, and one of them reads the database.** A
+    /// deferred `BEGIN` opens the transaction and takes no snapshot and reads
+    /// no row, so the snapshot is the next statement's, the establishing one,
+    /// and that statement is the read of the store's write generation, which
+    /// is the reading the answer carries. A caller that runs this where the
+    /// published demand is read gets a demand and a snapshot describing one
+    /// instant, and pays one read of the database for both.
     ///
     /// **This waits for nothing.** The connection is already this turn's, so
     /// the act is the transaction and the statement and no acquisition, which
@@ -303,19 +330,24 @@ impl ConnectionTurn {
     /// `resolves` part compiles its class under it, so no read detects one and
     /// no caller hands one over. It costs no statement.
     ///
-    /// **It reports what it ran whichever way it ended.** An establishment
-    /// that refused ran the statement that refused it, rolled the transaction
-    /// back and gave the connection up, and a caller holding a lock across all
-    /// of that waited for every part of it.
-    pub fn establish(mut self) -> SnapshotAttempt {
+    /// **What it ran is counted by SQLite whichever way it ended.** An
+    /// establishment runs the deferred `BEGIN` and the establishing statement,
+    /// and one that refused also rolled the transaction back before it gave
+    /// the connection up; a caller holding a lock across all of that reads
+    /// what SQLite began off [`SnapshotReader::statements_run_on_this_thread`]
+    /// on both sides of that lock. A statement refused before SQLite ran it
+    /// is not among them. A snapshot's own [`Snapshot::counters`] start from
+    /// the establishing statement alone and are that one read's view of its
+    /// query work.
+    pub fn establish(mut self) -> Result<Snapshot, StoreError> {
         let mut database = self
             .database
             .take()
             .expect("a turn holds the connection until it establishes or drops");
         let reader = Arc::clone(&self.reader);
         let mut counters = SnapshotCounters::default();
-        let established = establish_on(&mut database, &reader.epoch, &mut counters);
-        let snapshot = match established {
+        let established = establish_on(&mut database, &reader, &mut counters);
+        match established {
             Ok(reading) => Ok(Snapshot {
                 order: reader.order,
                 reader,
@@ -328,8 +360,7 @@ impl ConnectionTurn {
                 reader.give_the_connection_back(database);
                 Err(error)
             }
-        };
-        SnapshotAttempt { snapshot, counters }
+        }
     }
 }
 
@@ -341,6 +372,20 @@ impl Drop for ConnectionTurn {
     }
 }
 
+/// Statements SQLite runs to establish one snapshot that answers: the deferred
+/// `BEGIN`, which opens the transaction and reads no row, and the establishing
+/// statement, which reads the store's write generation and so takes the
+/// snapshot.
+///
+/// **This is what [`SnapshotReader::statements_run_on_this_thread`] moves by
+/// across [`ConnectionTurn::establish`] when it answers**, and so what a
+/// caller holding a lock across the establishment reads it ran under that
+/// lock. An establishment that refused ran what SQLite began before it
+/// refused and the `ROLLBACK` that ended its transaction, which need not be
+/// this number. A snapshot's own [`Snapshot::counters`] count the
+/// establishing statement alone, because they count the read's query work.
+pub const SNAPSHOT_ESTABLISHMENT_STATEMENTS: u64 = 2;
+
 /// Open the snapshot and run the one statement that establishes it.
 ///
 /// The two counts are taken at different moments, because they answer
@@ -351,7 +396,7 @@ impl Drop for ConnectionTurn {
 /// run.
 fn establish_on(
     database: &mut Database,
-    epoch: &str,
+    reader: &SnapshotReader,
     counters: &mut SnapshotCounters,
 ) -> Result<StoreReading, StoreError> {
     database.open_snapshot()?;
@@ -359,7 +404,7 @@ fn establish_on(
     counters.count_statement();
     let write_generation = last_write_generation(database.connection())?;
     Ok(StoreReading {
-        epoch: epoch.to_string(),
+        epoch: reader.epoch.clone(),
         write_generation,
     })
 }
@@ -373,26 +418,6 @@ pub(crate) fn last_write_generation(connection: &Connection) -> Result<i64, Stor
         what: "the database records no write generation, so no read can say what it read"
             .to_string(),
     })
-}
-
-/// One read's attempt to establish its snapshot, and what that attempt ran.
-///
-/// **The counters are reported on both answers**, because the caller holding a
-/// lock across the attempt paid for the statements either way: an attempt that
-/// refused opened its transaction, ran the statement that refused it and
-/// rolled back, all inside that lock.
-///
-/// On the snapshot arm these are the reading [`Snapshot::counters`] starts
-/// from. The two stop being equal as soon as a read builder runs a statement
-/// on the snapshot: this reading is what establishing cost, and the snapshot's
-/// own is what that snapshot has cost so far.
-#[derive(Debug)]
-pub struct SnapshotAttempt {
-    /// The snapshot the read answers from, or why there is none.
-    pub snapshot: Result<Snapshot, StoreError>,
-    /// What the attempt ran: the snapshot it opened, and the statements it ran
-    /// against the database.
-    pub counters: SnapshotCounters,
 }
 
 /// One read's snapshot: the connection it answers on, the reading it was
@@ -812,6 +837,10 @@ impl Store {
             .and_then(|database| {
                 crate::read::register_functions(database.connection())?;
                 crate::resolve::register_functions(database.connection())?;
+                // The connection counts from here, as it becomes a snapshot
+                // reader's: the open's statements above are the mint's, and
+                // are carried on the mint rather than on the count.
+                database.count_statements_begun();
                 Ok(database)
             })
             .map(|database| SnapshotReader {
@@ -1471,7 +1500,6 @@ mod tests {
             .try_take()
             .expect("a handle nothing is reading holds its connection")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert!(
             snapshot
@@ -1552,7 +1580,6 @@ mod tests {
             .try_take()
             .expect("the dropped turn kept the connection")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert!(
             reader.try_take().is_none(),
@@ -1588,7 +1615,6 @@ mod tests {
             .try_take()
             .expect("a free handle hands out its turn")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert_eq!(snapshot.counters().snapshots_opened(), 1);
         assert_eq!(
@@ -1600,6 +1626,73 @@ mod tests {
             snapshot.reading().epoch(),
             store.epoch(),
             "the snapshot names a database its handle was not minted from"
+        );
+    }
+
+    /// **SQLite counts what a handle's connection runs, on the thread that
+    /// runs it.** The mint's statements run before the connection counts, so
+    /// minting moves nothing. An establishment is the deferred `BEGIN` and the
+    /// establishing statement, a statement a read runs on the snapshot is one
+    /// more whether or not anything counted it by hand, and the drop that ends
+    /// the snapshot is its `ROLLBACK`. A turn that establishes nothing ran
+    /// nothing, and a statement the store's own writing connection runs is not
+    /// a reader's: those are the controls, because a count that moved with
+    /// every turn or every statement on the thread would say nothing about the
+    /// reader.
+    #[test]
+    fn a_readers_connection_counts_each_statement_sqlite_runs_on_it() {
+        let scratch = Scratch::new("norn-store-reader-statements-run");
+        let store = Store::open(
+            scratch.join("derived").join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .expect("a store opens");
+        let run = SnapshotReader::statements_run_on_this_thread;
+        let before = run();
+        let minted = store.open_reader();
+        let reader = Arc::new(minted.reader.expect("a live store mints a reader"));
+        assert_eq!(
+            (run() - before, minted.statements),
+            (0, 2),
+            "the mint's statements were counted as the reader's, or the mint carried none"
+        );
+
+        drop(reader.try_take().expect("a free handle hands out its turn"));
+        assert_eq!(
+            run() - before,
+            0,
+            "a turn that established nothing was counted as a statement"
+        );
+
+        let snapshot = reader
+            .try_take()
+            .expect("the dropped turn gave the connection back")
+            .establish()
+            .expect("a snapshot");
+        let established = SNAPSHOT_ESTABLISHMENT_STATEMENTS;
+        assert_eq!(
+            (run() - before, established),
+            (2, 2),
+            "establishing ran something other than the BEGIN and the establishing statement"
+        );
+        last_write_generation(snapshot.connection()).expect("a generation read");
+        assert_eq!(
+            run() - before,
+            established + 1,
+            "a statement run on the snapshot and counted by nothing else is missing"
+        );
+        last_write_generation(store.database.connection()).expect("the writer reads its own");
+        assert_eq!(
+            run() - before,
+            established + 1,
+            "a statement on the store's own connection was counted as the reader's"
+        );
+        drop(snapshot);
+        assert_eq!(
+            run() - before,
+            established + 2,
+            "the ROLLBACK that ends the snapshot is missing"
         );
     }
 
@@ -1638,7 +1731,6 @@ mod tests {
             .try_take()
             .expect("the unwound turn kept the handle's connection")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert_eq!(
             snapshot.counters().snapshots_opened(),
@@ -1699,7 +1791,6 @@ mod tests {
             .try_take()
             .expect("a handle nothing is reading holds its connection")
             .establish()
-            .snapshot
             .expect("a snapshot");
         let connection = snapshot.connection();
 
@@ -1772,7 +1863,6 @@ mod tests {
             .try_take()
             .expect("a handle nothing is reading holds its connection")
             .establish()
-            .snapshot
             .expect("a snapshot");
         let connection = snapshot.connection();
 

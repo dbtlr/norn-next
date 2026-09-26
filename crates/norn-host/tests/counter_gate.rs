@@ -7,7 +7,7 @@
 //! production attachment that walked it, and the derived store that attachment
 //! left behind.
 //!
-//! Three bars, all counts:
+//! Four bars, all counts:
 //!
 //! - **Zero on warm.** A request that only reads derives nothing, over the
 //!   ~2k-document `realistic` profile — the scale the gates assert against. It
@@ -53,6 +53,20 @@
 //!   the two scales stop moving together. Every read pair has a control that
 //!   grows with the vault, run at the same two attachments, and each control
 //!   must read more at the larger scale on the counts it names.
+//! - **Reads contend on one entry and run only their establishment under its
+//!   gate.** Under the `overlapping reads on one entry` workload, eight reads
+//!   start while a ninth holds the entry's one connection, and the hold is let
+//!   go only once the host's reader-wait reading names all eight as waiting.
+//!   Each read served runs exactly its snapshot's establishment under the
+//!   entry gate, the deferred `BEGIN` and the one statement that establishes
+//!   the snapshot, as the gate holder reads SQLite's own count of what it
+//!   began on the holding thread on both sides of its hold rather than as the
+//!   establishment reports it, and the gate's own take count reads no retake
+//!   between those two readings, so the hold they bound is one hold; the
+//!   reader-wait reading is eight; and each contended acquisition took exactly
+//!   one round of the entry gate after its first, no one of them more than the
+//!   ceiling authored in this crate's baselines. The control runs the same
+//!   reads one after another and must fail on contention alone.
 //!
 //! **Every reading is recorded, zero included.** A gate that passes says only
 //! that nothing moved; which counters were asked and what each read is the
@@ -75,6 +89,7 @@
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
 mod attach;
+mod baselines;
 
 use std::path::Path;
 
@@ -1486,4 +1501,337 @@ fn a_derived_document(store: &mut Store) -> StoredDocument {
     page.into_iter()
         .next()
         .expect("an attachment over a generated tree derives documents")
+}
+
+/// How many reads overlap on one entry in the read-concurrency workload, beside
+/// the one read whose hold they overlap.
+const OVERLAPPING_READS: u64 = 8;
+
+/// Whether the read-concurrency workload overlaps its reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Overlap {
+    /// One read holds the entry's connection while the others start, and lets
+    /// it go only once every one of them is waiting for it.
+    Held,
+    /// The same reads, one after another: each ends before the next begins.
+    Removed,
+}
+
+/// What one run of the read-concurrency workload read off the host's read
+/// account, and what the reads' own snapshots reported.
+#[derive(Clone, Copy, Debug)]
+struct ConcurrencyReadings {
+    /// The host's read account over the workload's window.
+    window: norn_host::ReadsSince,
+    /// The most statements any one acquisition ran under the gate, over the
+    /// host's life. The host is the workload's own, so its life is the window.
+    widest_statements_under_the_gate: u64,
+    /// The most rounds of the entry gate any one acquisition took after its
+    /// first, over the host's life.
+    widest_gate_rounds_after_the_first: u64,
+    /// What the establishments reported about themselves: the statements each
+    /// served read's snapshot had run when its hold was handed over, summed.
+    /// A snapshot counts its query work, so this is the establishing
+    /// statement alone, one per read.
+    established_statements: u64,
+    /// Every statement SQLite began for the served reads, on the thread each
+    /// read ran on, from before its acquisition to after its hold was dropped:
+    /// its establishment, the count it ran on its snapshot, and the
+    /// `ROLLBACK` that ended the snapshot.
+    connection_statements: u64,
+}
+
+/// **The read-concurrency workload**, `overlapping reads on one entry`: one
+/// read takes the entry's hold, [`OVERLAPPING_READS`] more start on threads of
+/// their own, and each served read runs one count on its snapshot before it
+/// ends.
+///
+/// Under [`Overlap::Held`] the first hold is let go only once the host's own
+/// contention reading names every overlapping read as waiting. The reading
+/// moves where an acquisition finds the connection taken and gives the gate
+/// back, and the wait it then begins returns only with the connection, so a
+/// reading of [`OVERLAPPING_READS`] with the hold still held is every one of
+/// them contended, observed rather than slept for. The wait for it is bounded,
+/// and a read that never contends exhausts it naming the reading it stopped at.
+///
+/// The count each read runs after its hold is handed over is outside the gate,
+/// and so is the `ROLLBACK` that ends its snapshot, so for every read SQLite
+/// runs more statements than the gate held: the reading of what ran under the
+/// gate is told apart from what the connection ran, off the same count.
+fn overlapping_reads(
+    host: &attach::ServingHost,
+    name: &VaultName,
+    overlap: Overlap,
+) -> ConcurrencyReadings {
+    let before = host.read_evidence();
+    let run = norn_store::SnapshotReader::statements_run_on_this_thread;
+    // Take a read's hold on the calling thread, reading SQLite's count of
+    // that thread first.
+    let acquire = |refused: &str| {
+        let started = run();
+        (started, host.begin_read(name).expect(refused))
+    };
+    // What a served read's snapshot reported when its hold was handed over,
+    // and every statement SQLite began for the read on its thread once the
+    // read's own statement ran and its hold was dropped. The hold is read on
+    // the thread that acquired it.
+    let read_once = |(started, hold): (u64, norn_host::ReadHold<norn_host::ProductionEntryOps>)| {
+        let established = hold.snapshot().counters().statements_executed();
+        hold.snapshot()
+            .count(
+                &CountParams::new(VaultAddress::name(name.clone())),
+                hold.content_model(),
+            )
+            .expect("a count over the hold's own declaration");
+        drop(hold);
+        (established, run() - started)
+    };
+    let answered: Vec<(u64, u64)> = match overlap {
+        Overlap::Removed => (0..=OVERLAPPING_READS)
+            .map(|_| read_once(acquire("an attached vault answers a read")))
+            .collect(),
+        Overlap::Held => {
+            let first = acquire("an attached vault answers a read");
+            std::thread::scope(|scope| {
+                let overlapping: Vec<_> = (0..OVERLAPPING_READS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            read_once(acquire(
+                                "a read waiting for the entry's connection was refused",
+                            ))
+                        })
+                    })
+                    .collect();
+                wait_until(
+                    "every overlapping read to be waiting for the entry's connection",
+                    attach::state_budget(READS_CONTEND_LIMIT),
+                    || match host.read_evidence().since(before).reader_waits {
+                        waits if waits >= OVERLAPPING_READS => Observed::Met(()),
+                        waits => Observed::pending(format!(
+                            "{waits} of {OVERLAPPING_READS} reads are waiting"
+                        )),
+                    },
+                )
+                .unwrap_or_else(|failure| panic!("{failure}"));
+                let mut answered = vec![read_once(first)];
+                answered.extend(
+                    overlapping
+                        .into_iter()
+                        .map(|read| read.join().expect("an overlapping read finished")),
+                );
+                answered
+            })
+        }
+    };
+    let life = host.read_evidence();
+    ConcurrencyReadings {
+        window: life.since(before),
+        widest_statements_under_the_gate: life.widest_statements_under_the_gate,
+        widest_gate_rounds_after_the_first: life.widest_gate_rounds_after_the_first,
+        established_statements: answered.iter().map(|(established, _)| established).sum(),
+        connection_statements: answered.iter().map(|(_, ran)| ran).sum(),
+    }
+}
+
+/// How long the overlapping reads may take to reach the wait for the entry's
+/// connection. A runaway bound: each one takes the gate once and finds the
+/// connection taken.
+const READS_CONTEND_LIMIT: Duration = Duration::from_secs(60);
+
+/// What the read-concurrency bar finds wrong with one run of the workload, one
+/// line per failed term; empty where the bar holds.
+///
+/// - **Each read served runs its establishment under the gate and nothing
+///   else.** The host's reading of what SQLite ran under the gate is
+///   [`norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS`] per read served, the
+///   deferred `BEGIN` and the establishing statement, nothing was minted and
+///   no establishment refused, and no one acquisition ran other than that.
+///   The reading is the gate holder's, so it is checked apart from what the
+///   establishments reported about themselves, which is the establishing
+///   statement alone, one each, and from what SQLite ran for the reads, which
+///   is more.
+/// - **Under one continuous hold.** The entry gate's own take count reads no
+///   retake inside any establishing hold, so the two readings the statement
+///   term is read between bound one hold of the gate.
+/// - **Contention, measured.** Every overlapping read is in the reader-wait
+///   reading: exactly [`OVERLAPPING_READS`], and so nonzero.
+/// - **Each contended acquisition took exactly one round after its first.**
+///   No one acquisition took more than the authored ceiling,
+///   [`baselines::READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION`], and the
+///   window's rounds after the first equal its waits, so a contended
+///   acquisition that answered under the demand it read before it waited
+///   fails as surely as one that took two rounds after its first.
+fn the_read_concurrency_bar_fails(readings: &ConcurrencyReadings) -> Vec<String> {
+    let window = readings.window;
+    let served = OVERLAPPING_READS + 1;
+    let per_read = norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS;
+    let mut failed = Vec::new();
+    if window.reads_served != served {
+        failed.push(format!(
+            "the host served {} reads of the {served} the workload asked for",
+            window.reads_served
+        ));
+    }
+    if window.statements_under_the_gate != window.reads_served * per_read
+        || (
+            window.mint_statements_under_the_gate,
+            window.refused_establishment_statements_under_the_gate,
+        ) != (0, 0)
+        || readings.widest_statements_under_the_gate != per_read
+    {
+        failed.push(format!(
+            "the gate holder read {} statements under the gate for {} reads served (minted {}, \
+             refused {}, widest acquisition {}), where each read runs exactly its \
+             establishment's {per_read}",
+            window.statements_under_the_gate,
+            window.reads_served,
+            window.mint_statements_under_the_gate,
+            window.refused_establishment_statements_under_the_gate,
+            readings.widest_statements_under_the_gate
+        ));
+    }
+    if window.gate_retakes_within_establishing_holds != 0 {
+        failed.push(format!(
+            "the entry gate was taken {} times inside establishing holds, where each is one \
+             continuous hold",
+            window.gate_retakes_within_establishing_holds
+        ));
+    }
+    if readings.established_statements != window.reads_served {
+        failed.push(format!(
+            "the establishments reported {} statements for {} reads served",
+            readings.established_statements, window.reads_served
+        ));
+    }
+    if readings.connection_statements <= window.statements_under_the_gate {
+        failed.push(format!(
+            "the connections ran {} statements for the reads, no more than the {} under the \
+             gate, so the reading under the gate is not told apart from the connection's",
+            readings.connection_statements, window.statements_under_the_gate
+        ));
+    }
+    if window.reader_waits != OVERLAPPING_READS {
+        failed.push(format!(
+            "the reader-wait reading is {} where {OVERLAPPING_READS} reads contended for the \
+             entry's connection",
+            window.reader_waits
+        ));
+    }
+    let ceiling = baselines::READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION;
+    if !baselines::fits(readings.widest_gate_rounds_after_the_first, ceiling)
+        || window.gate_rounds_after_the_first != window.reader_waits
+    {
+        failed.push(format!(
+            "{} contended acquisitions took {} rounds of the gate after their first, one of \
+             them {}, where each takes exactly one and none more than the ceiling of {ceiling}",
+            window.reader_waits,
+            window.gate_rounds_after_the_first,
+            readings.widest_gate_rounds_after_the_first
+        ));
+    }
+    failed
+}
+
+/// Record one run of the read-concurrency workload where a person will find
+/// it.
+fn record_the_concurrency_readings(heading: &str, readings: &ConcurrencyReadings) {
+    let window = readings.window;
+    let rows: Vec<(&str, String)> = [
+        ("reads_served", window.reads_served),
+        (
+            "statements_under_the_gate",
+            window.statements_under_the_gate,
+        ),
+        (
+            "mint_statements_under_the_gate",
+            window.mint_statements_under_the_gate,
+        ),
+        (
+            "refused_establishment_statements_under_the_gate",
+            window.refused_establishment_statements_under_the_gate,
+        ),
+        (
+            "widest_statements_under_the_gate",
+            readings.widest_statements_under_the_gate,
+        ),
+        ("established_statements", readings.established_statements),
+        ("connection_statements", readings.connection_statements),
+        (
+            "gate_retakes_within_establishing_holds",
+            window.gate_retakes_within_establishing_holds,
+        ),
+        ("reader_waits", window.reader_waits),
+        (
+            "gate_rounds_after_the_first",
+            window.gate_rounds_after_the_first,
+        ),
+        (
+            "widest_gate_rounds_after_the_first",
+            readings.widest_gate_rounds_after_the_first,
+        ),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name, value.to_string()))
+    .collect();
+    norn_testkit::readings::record(heading, &rows);
+}
+
+/// **The read-concurrency bar**, under the `overlapping reads on one entry`
+/// workload over a production attachment: [`OVERLAPPING_READS`] reads start
+/// while another holds the entry's one connection, every one of them is
+/// observed waiting before that hold is let go, and then each is served.
+///
+/// Each read runs exactly its snapshot's establishment under the entry gate,
+/// the deferred `BEGIN` and the one statement that establishes the snapshot,
+/// and the count is the gate holder's: the host reads SQLite's count of what
+/// it began on the holding thread on both sides of the hold, so a statement
+/// SQLite runs on the connection under the gate is counted however it was
+/// composed, and an establishing statement moved before or after the hold is
+/// not, while the establishment's own report still reads one. The gate's own
+/// take count is read at the same two points, so an establishment run while
+/// the hold let the gate go and took it back reads a retake. Reader contention
+/// is the reader-wait reading, and it names every overlapping read. Each
+/// contended acquisition took exactly one round of the entry gate after its
+/// first, none more than
+/// [`baselines::READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION`].
+///
+/// **The control removes the overlap.** The same reads run one after another
+/// on the same entry, and the bar must then fail on contention and on nothing
+/// else: a contention reading that stood without overlapping reads would
+/// attest nothing about sharing the connection, and a control that failed on
+/// another term would say nothing about this one.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn overlapping_reads_on_one_entry_each_run_only_their_establishment_under_the_gate() {
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "counter-gate-read-concurrency",
+    )
+    .expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny");
+
+    let overlapped = {
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        overlapping_reads(&host, vault.name(), Overlap::Held)
+    };
+    record_the_concurrency_readings("overlapping reads on one entry", &overlapped);
+    let failed = the_read_concurrency_bar_fails(&overlapped);
+    assert!(
+        failed.is_empty(),
+        "the read-concurrency bar failed under overlapping reads: {failed:#?}"
+    );
+
+    let sequential = {
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        overlapping_reads(&host, vault.name(), Overlap::Removed)
+    };
+    record_the_concurrency_readings("the same reads with the overlap removed", &sequential);
+    let failed = the_read_concurrency_bar_fails(&sequential);
+    assert!(
+        failed.len() == 1 && failed[0].contains("reader-wait"),
+        "with the overlap removed the bar must fail on contention alone, and it found: \
+         {failed:#?}"
+    );
 }

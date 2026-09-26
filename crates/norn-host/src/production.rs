@@ -27,9 +27,9 @@ use crate::derivation::{
 use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
-    AttachmentAdvisory, EntryOps, Established, Establishment, Healing, JobFailure, MintedReader,
-    ProgressReporter, ReadSource, ReaderUnavailable, ReconcileWork, RecordRefusal,
-    RegistryUnwritable, ReloadError, ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
+    AttachmentAdvisory, EntryOps, Established, Healing, JobFailure, MintedReader, ProgressReporter,
+    ReadSource, ReaderUnavailable, ReconcileWork, RecordRefusal, RegistryUnwritable, ReloadError,
+    ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
 };
 
 /// The derived database's file, inside the vault's derived directory.
@@ -354,25 +354,23 @@ impl ReadSource for norn_store::SnapshotReader {
         norn_store::SnapshotReader::wait_for_the_connection(self)
     }
 
-    /// The store establishes the snapshot and reports what it cost: the
-    /// reading it was established at, and the one statement that established
-    /// it.
-    ///
-    /// The statements come from the attempt's own counters rather than the
-    /// snapshot's, because an attempt that refused has no snapshot to read
-    /// them off and ran the statement all the same.
-    fn establish(turn: Self::Turn) -> Establishment<Self::Snapshot> {
-        let attempt = turn.establish();
-        Establishment {
-            established: attempt
-                .snapshot
-                .map(|snapshot| Established {
-                    reading: snapshot.reading().clone(),
-                    snapshot,
-                })
-                .map_err(|error| reader_unavailable(&error)),
-            statements: attempt.counters.statements_executed(),
-        }
+    /// SQLite's count of what it began on this thread over every handle's
+    /// connection, as the store reads it, so the gate's holder reads SQLite
+    /// rather than a number this seam or the establishment composed.
+    fn statements_run_on_this_thread() -> u64 {
+        norn_store::SnapshotReader::statements_run_on_this_thread()
+    }
+
+    /// The store establishes the snapshot and reports the reading it was
+    /// established at. What the attempt ran is on SQLite's count of the
+    /// establishing thread.
+    fn establish(turn: Self::Turn) -> Result<Established<Self::Snapshot>, ReaderUnavailable> {
+        turn.establish()
+            .map(|snapshot| Established {
+                reading: snapshot.reading().clone(),
+                snapshot,
+            })
+            .map_err(|error| reader_unavailable(&error))
     }
 }
 
@@ -10013,7 +10011,6 @@ mod tests {
             .try_take()
             .expect("an idle reader")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert_eq!(
             snapshot.path_order(),

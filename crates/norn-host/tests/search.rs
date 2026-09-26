@@ -147,7 +147,6 @@ fn a_bare_search_on_a_vault_without_an_engine_is_the_lexical_page() {
         .try_take()
         .expect("a handle nothing reads")
         .establish()
-        .snapshot
         .expect("a snapshot");
     let page = snapshot
         .search(&LexicalQuery::new("alpha").with_limit(2), &declared)

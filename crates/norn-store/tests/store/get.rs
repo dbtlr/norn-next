@@ -161,7 +161,6 @@ impl Vault {
             .try_take()
             .expect("a handle nothing is reading holds its connection")
             .establish()
-            .snapshot
             .expect("a snapshot");
         assert_eq!(snapshot.path_order(), self.store.path_order());
         snapshot
