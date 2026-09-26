@@ -16,16 +16,51 @@
 //! `{"change":"clear"}` is not a `Replace` a reader accepts.
 //!
 //! **An edit under a standing park is refused under the park's own code**, so
-//! a `vault set` never silently withdraws a park.
+//! a `vault set` never silently withdraws a park. A vault parked
+//! `host/duplicate-root` therefore cannot be moved off the shared root by a
+//! `vault set`; `vault unregister` of one of the names is the remedy.
+//!
+//! **The registry file changes first, and the serving set after.** From the
+//! moment the edit finds the vault idle until it commits or is refused, every
+//! request that asks the vault for anything is refused `host/entry-held`, while
+//! `vault list` and `vault resolve` go on naming the registration as it stood.
+//! Once the file records the edit, the vault is served under the registration
+//! as edited, and the next attach reads its root, its schema source and its
+//! watch backend. An edit that changes nothing answers the registration as it
+//! stands and writes nothing.
+//!
+//! **A root is compared as the registry records it.** A root whose canonical
+//! spelling differs from the recorded root is a root move to the canonical
+//! spelling, even where the recorded spelling (a link, a trailing `/`)
+//! reaches the same directory: the store does not record the directory it
+//! was derived from, so the host re-derives rather than trust it. A root
+//! whose canonical spelling is the recorded root is no move.
+//!
+//! **The host's served registrations are authoritative over a hand edit of
+//! the registry file.** The edit is made to the registration the host serves,
+//! and the file is written with that registration as edited: over a root or a
+//! field a hand edit changed, and under a served name a hand edit took out. A
+//! hand edit takes effect when the host next starts.
+//!
+//! **A root move discards the derived state the old root left** — the derived
+//! database, its sidecars, the semantic sidecar and the shadow homes, as
+//! `vault unregister` discards them — so nothing the old root held is answered
+//! from the new one, and the next attach derives the new root under a new
+//! store epoch. The vault's own documents, at either root, are never touched.
 //!
 //! The other refusals are `host/unknown-vault` where no such registration
 //! exists, `host/entry-held` where the entry is in use,
-//! `host/registry-unwritable` where the registry file could not be replaced,
-//! and the pre-check codes a register meets where the edit moves the root:
-//! `host/duplicate-root` where another registration already reaches the new
-//! root, and `host/entry-untrusted` where the new root itself could not be
+//! `host/registry-unwritable` where the registry file could not be read or
+//! replaced, and the pre-check codes a register meets where the edit moves the
+//! root: `host/duplicate-root` where another registration already reaches the
+//! new root, and `host/entry-untrusted` where the new root itself could not be
 //! read — carrying the environmental-refusal reason, which is the rendering
-//! the registry recheck gives such a root.
+//! the registry recheck gives such a root. A root move is also refused as
+//! `vault unregister` is refused over the derived state it discards:
+//! `host/maintainer-contended` where another process maintains it, and
+//! `host/entry-untrusted` carrying the environmental-refusal reason where the
+//! data directory refused the maintainer lock or the discard. After any
+//! refusal the registration that stood before still stands.
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -71,6 +106,19 @@ impl<T: JsonSchema + Serialize + DeserializeOwned> Change<T> {
     pub const fn clear() -> Self {
         Change::Clear {}
     }
+
+    /// What the field holds once this edit is made to `field`: `field` as it
+    /// stands for a keep, the value for a set, and nothing for a clear.
+    pub fn applied_to(&self, field: Option<T>) -> Option<T>
+    where
+        T: Clone,
+    {
+        match self {
+            Change::Keep {} => field,
+            Change::Set { value } => Some(value.clone()),
+            Change::Clear {} => None,
+        }
+    }
 }
 
 impl<T: JsonSchema + Serialize + DeserializeOwned> Default for Change<T> {
@@ -110,6 +158,15 @@ impl<T: JsonSchema + Serialize + DeserializeOwned> Replace<T> {
     /// Put `value` in the field.
     pub const fn set(value: T) -> Self {
         Replace::Set { value }
+    }
+
+    /// The value this edit puts in the field, and nothing where it keeps the
+    /// field as it stands.
+    pub const fn value(&self) -> Option<&T> {
+        match self {
+            Replace::Keep {} => None,
+            Replace::Set { value } => Some(value),
+        }
     }
 }
 
@@ -191,5 +248,42 @@ impl SetReport {
             registration,
             published,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend() -> Option<PollBackend> {
+        Some(PollBackend::Poll)
+    }
+
+    /// A keep leaves the field as it stands, whatever it holds.
+    #[test]
+    fn a_kept_field_stands_as_it_was() {
+        assert_eq!(Change::keep().applied_to(backend()), backend());
+        assert_eq!(Change::<PollBackend>::keep().applied_to(None), None);
+    }
+
+    /// A set puts its value in the field, over a value or over nothing.
+    #[test]
+    fn a_set_field_holds_the_value() {
+        assert_eq!(Change::set(PollBackend::Poll).applied_to(None), backend());
+    }
+
+    /// A clear empties the field, which falls back to its default.
+    #[test]
+    fn a_cleared_field_holds_nothing() {
+        assert_eq!(Change::<PollBackend>::clear().applied_to(backend()), None);
+    }
+
+    /// A replacement names the value it puts in the field, and a keep names
+    /// none.
+    #[test]
+    fn a_replacement_names_its_value_and_a_keep_names_none() {
+        let root = VaultRoot::new("/srv/vaults/notes").unwrap();
+        assert_eq!(Replace::set(root.clone()).value(), Some(&root));
+        assert_eq!(Replace::<VaultRoot>::keep().value(), None);
     }
 }

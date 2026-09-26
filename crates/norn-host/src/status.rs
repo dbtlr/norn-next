@@ -23,7 +23,7 @@
 //! park in its own code, in band, rather than being refused: the park is what
 //! an operator asks a status about. The two answers that are refusals are the
 //! two a status has nothing to report for — a name the host serves nothing
-//! under, and an entry an unregistration holds — and a root, which addresses
+//! under, and an entry a registration change holds — and a root, which addresses
 //! a throwaway attach no lifecycle stands behind.
 //!
 //! The roll-up is computed from the same per-entry statuses, and `doctor`'s
@@ -126,9 +126,10 @@ impl<O: EntryOps> Host<O> {
     /// or, naming none, the roll-up over every entry this host serves.
     ///
     /// A named vault is refused `host/unknown-vault` where the host serves no
-    /// entry under the name, `host/entry-held` while an unregistration holds
-    /// the entry, and `host/unsupported-attach-mode` where the address names
-    /// a root. Everything else about an entry — a park, an untrusted state, a
+    /// entry under the name, `host/entry-held` while a registration change —
+    /// an unregistration or a `vault set` — holds the entry, and
+    /// `host/unsupported-attach-mode` where the address names a root.
+    /// Everything else about an entry — a park, an untrusted state, a
     /// read seam that refuses, a reload that failed — is reported in the
     /// status rather than refused. The roll-up refuses nothing.
     pub fn vault_status(&self, params: &StatusParams) -> Result<StatusReport, ErrorEnvelope> {
@@ -144,12 +145,13 @@ impl<O: EntryOps> Host<O> {
     /// The status of every entry this host serves, ascending by name: the
     /// list a roll-up is computed from.
     ///
-    /// An entry an unregistration holds is still served until the change
+    /// An entry a registration change holds is still served until the change
     /// commits, as `vault list` shows it, so it is counted here too: as
     /// published under the refusal every request against it meets,
     /// `host/entry-held`, which is how the roll-up counts it among the parked
     /// and names it as wanting attention under that code. An entry the set
-    /// let go of while this ran is left out.
+    /// let go of while this ran is left out, and one an edit replaced while
+    /// this ran is counted held in place of the entry replacing it.
     pub(crate) fn statuses(&self) -> Vec<VaultStatus> {
         self.observe_all()
             .into_iter()

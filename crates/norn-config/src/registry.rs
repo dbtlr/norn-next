@@ -140,6 +140,17 @@ impl Registry {
         self.entries.insert(entry.name.clone(), entry)
     }
 
+    /// Change the entry registered under `entry`'s name to `entry`, keeping
+    /// the keys this build does not model that it was read with.
+    ///
+    /// An amendment is the entry going on, where [`Registry::insert`] is a
+    /// new one arriving: its fields are the ones `entry` holds, and a key a
+    /// newer build wrote beside them stays with it. A name nothing is
+    /// registered under is registered as new.
+    pub fn amend(&mut self, entry: Entry) -> Option<Entry> {
+        self.entries.insert(entry.name.clone(), entry)
+    }
+
     /// Remove the entry registered under `name`.
     ///
     /// The keys this build does not model go with it. **Unknown-key retention
