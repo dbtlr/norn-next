@@ -810,6 +810,12 @@ fn a_heading_anchor_is_matched_in_memory_under_its_counter_ceiling() {
             for (vault, vault_is) in [(&few, "beside one"), (&many, "beside forty")] {
                 let (gotten, handed) = vault.get_recorded(&params);
                 assert_eq!(
+                    handed.iter().map(Vec::len).collect::<Vec<_>>(),
+                    [own.len()],
+                    "`{anchor}` {vault_is} under {order:?}: the heading rows handed the reader, \
+                     call by call, held to the ceiling of its document's headings"
+                );
+                assert_eq!(
                     handed,
                     [own.clone()],
                     "`{anchor}` {vault_is} under {order:?} hands the reader its document's \
