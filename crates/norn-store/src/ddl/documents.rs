@@ -77,11 +77,12 @@
 //! `documents_path` bytewise. A path part of a find or a count, and a
 //! bare-directory probe, seek the glob's literal prefix under `NOCASE` here
 //! where the root folds, so a glob reaches every spelling of that prefix the
-//! vault treats as one name, and `documents_path` where it does not. A validate's path part judges a finding's path, and seeks the
-//! findings' folded indexes ([`crate::ddl::findings`]). The index is declared
-//! for every store: the schema is one statement list, the root's fold is a
-//! per-read parameter, and DDL conditional on a vault the store has not been
-//! shown is a shape no fingerprint could state.
+//! vault treats as one name, and `documents_path` where it does not. A
+//! validate's path part judges a finding's path, and seeks the findings' folded
+//! indexes ([`crate::ddl::findings`]). The index is declared for every store:
+//! the schema is one statement list, the root's fold is a per-read parameter,
+//! and DDL conditional on a vault the store has not been shown is a shape no
+//! fingerprint could state.
 //!
 //! The bytewise tie-break is load-bearing rather than decorative. `documents_path`
 //! is unique under `BINARY`, so `A.md` and `a.md` can both hold rows even on a

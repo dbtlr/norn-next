@@ -108,18 +108,18 @@ pub(crate) struct Findings<'a> {
 /// states.
 ///
 /// **A path part judges the finding's own path**, so it reaches a finding
-/// standing where no document row does. Its glob matches under the root's
-/// fold, as every path part's does, and its range is the answer order's
+/// standing where no document row does. Its glob matches under the root's fold,
+/// as every path part's does, and its range is the answer order's
 /// ([`answer_range`]) on every root, because a section's findings stand in the
-/// answer's path order and the index that holds that order compares paths
-/// under `NOCASE`. Every path part's range, and on a page the position a
-/// section resumes after, fold into one lower bound on `(path COLLATE NOCASE,
-/// path, id)` and one upper bound on `path COLLATE NOCASE` — the greatest
-/// lower and the least upper — so a section seeks its kind's findings exactly
-/// past the tightest place whichever the request named ([`AnswerSeek`]), sorts
-/// nothing, and costs the findings its page reads. Where the root tells spellings apart, the folded range also reaches
-/// the findings at paths that spell the glob's prefix in another case, which
-/// the glob then rejects.
+/// answer's path order and the index that holds that order compares paths under
+/// `NOCASE`. Every path part's range, and on a page the position a section
+/// resumes after, fold into one lower bound on `(path COLLATE NOCASE, path,
+/// id)` and one upper bound on `path COLLATE NOCASE` — the greatest lower and
+/// the least upper — so a section seeks its kind's findings exactly past the
+/// tightest place whichever the request named ([`AnswerSeek`]), sorts nothing,
+/// and costs the findings its page reads. Where the root tells spellings apart,
+/// the folded range also reaches the findings at paths that spell the glob's
+/// prefix in another case, which the glob then rejects.
 ///
 /// **Every other part judges the document row at the finding's path**, which
 /// a finding standing where no document row does never satisfies — a part
