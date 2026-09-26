@@ -35,6 +35,14 @@
 //! which is the order they were filed in, decides only between findings that
 //! share everything before it.
 //!
+//! **One link holds at most one finding.** The kinds a finding about a link
+//! is filed under exclude one another, so `findings_one_per_link` holds
+//! `(fingerprint, path, ordinal)` unique wherever `ordinal` is set, and a
+//! second finding about a link is refused where it is written. Two findings at
+//! one path under one fingerprint therefore share a position only where both
+//! are about the document, and the id decides only between those. The index is
+//! partial, so no read that does not name a set ordinal can seek it.
+//!
 //! **The indexes order `position`, never `ordinal`.** `position` is a
 //! generated column, `coalesce(ordinal, -1)`, which no write names. SQLite
 //! orders `NULL` before every integer in an index and an `ORDER BY`, but a
@@ -263,6 +271,9 @@ const STATEMENTS: &[&str] = &[
     vault_schema_fingerprint, kind, path COLLATE NOCASE, path, position
 )",
     "CREATE INDEX findings_path ON findings(path, vault_schema_fingerprint, position, kind)",
+    "CREATE UNIQUE INDEX findings_one_per_link ON findings(
+    vault_schema_fingerprint, path, ordinal
+) WHERE ordinal IS NOT NULL",
     "CREATE TABLE finding_classes (
     finding   INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
     class_key TEXT    NOT NULL,

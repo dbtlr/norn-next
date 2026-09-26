@@ -684,7 +684,9 @@ pub struct FindingFacts {
     /// The ordinal of the link the finding is about in the document at
     /// [`FindingFacts::path`], and `None` for a finding about the document
     /// itself. A path's findings stand in this order, a finding about the
-    /// document ahead of every finding about one of its links.
+    /// document ahead of every finding about one of its links. A link holds at
+    /// most one finding under one schema fingerprint, so a second finding
+    /// about a link that holds one is refused where it is written.
     ///
     /// The link-health findings the link-health unit of Layer 3 files carry
     /// it; every finding the host files today is about its document and

@@ -405,14 +405,14 @@ impl StoreProjection {
             );
         }
         // The page hands the findings back in the order they were written,
-        // which the stable sort keeps among findings the reader's order does
-        // not tell apart.
+        // which the stable sort keeps in the stored order among findings the
+        // reader's order does not tell apart.
         projection.findings.sort_by(|one, other| {
             one.reader_place()
                 .cmp(&other.reader_place())
                 .then_with(|| match order {
-                    FindingOrder::Comparable if one.ordinal.is_none() => one.cmp(other),
-                    FindingOrder::Comparable | FindingOrder::Stored => Ordering::Equal,
+                    FindingOrder::Comparable => one.cmp(other),
+                    FindingOrder::Stored => Ordering::Equal,
                 })
         });
 
@@ -437,9 +437,9 @@ impl StoreProjection {
 
     /// The findings, each path's in the order a reader reads them: by the
     /// ordinal of the link each is about, a finding about the document first,
-    /// then by kind. Findings about the document that tie on those stand in
-    /// content order for a projection [`StoreProjection::read`] took, and
-    /// every other tie in row-key order.
+    /// then by kind. Findings that tie on those stand in content order for a
+    /// projection [`StoreProjection::read`] took, and in row-key order for one
+    /// [`DerivedRows`] holds.
     pub fn findings(&self) -> &[ProjectedFinding] {
         &self.findings
     }
@@ -667,17 +667,18 @@ impl StoreProjection {
 ///
 /// Both are the order a reader reads a path's findings in — by the ordinal of
 /// the link each is about, a finding about the document first, then by kind —
-/// with the paths in byte order. A reader orders the findings that tie on all
-/// of that by row key, which is the order they were written in, and the two
-/// differ in what they put in its place.
+/// with the paths in byte order. The store holds at most one finding about a
+/// link under one schema fingerprint, so under one fingerprint only findings
+/// about the document can tie on all of that. A reader orders those by row
+/// key, which is the order they were written in, and the two differ in what
+/// they put in its place.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FindingOrder {
-    /// Findings about the document that tie are ordered by their own content,
-    /// and findings about one link that tie by row key. Two stores derived by
-    /// two routes write a document's findings at two times, so row key is not
-    /// comparable among them; a link's findings stand in the reader's order,
-    /// so two stores whose reader would answer them in two orders compare
-    /// unequal.
+    /// Every tie is ordered by the findings' own content. This is the one
+    /// place the order departs from a reader's: findings about the document
+    /// of one kind tie by content here, where a reader ties them by id. Two
+    /// stores derived by two routes write a document's findings at two times,
+    /// so row key is not comparable between them.
     Comparable,
     /// Every tie is ordered by row key. One derivation writes its findings in
     /// one order, and a reader answers the ones that tie in it, so one

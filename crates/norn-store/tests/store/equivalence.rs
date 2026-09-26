@@ -29,7 +29,8 @@
 
 use norn_store::{Provenance, Store, induced_failure};
 use norn_testkit::equivalence::{
-    Divergence, PAGE, Population, StoreProjection, assert_operationally_valid, tombstones,
+    DerivedRows, Divergence, PAGE, Population, StoreProjection, assert_operationally_valid,
+    tombstones,
 };
 
 use super::common::{
@@ -433,33 +434,42 @@ fn a_changed_finding_ordinal_is_a_divergence() {
     assert_names(&divergence, "finding[one/glossary.md][0].ordinal");
 }
 
-/// **A path's findings are compared in the order a reader reads them.** Two
-/// findings about link 1, filed in one order in one store and in the other
-/// order in the other, hold the same facts, and a get's findings page reads
-/// them in two orders: by the link's ordinal and kind, which they share, and
-/// then by id, which is the order each store filed them in. So the two stores
-/// are unequal, where a projection sorting a path's findings by their content
-/// would find them equal.
+/// **A path's findings about its links are compared in link order, whatever
+/// order they were filed in.** One store files findings about links 1 and 2
+/// in that order and the other in the reverse. A reader reads them by the
+/// link each is about in both, so the two stores are equal, and each renders
+/// the finding about link 1 first among the path's derived rows.
 #[test]
-fn two_findings_about_one_link_filed_in_two_orders_are_a_divergence() {
-    let mut pair = Pair::new("pin-finding-order");
-    let about_link = |target: &str| {
+fn findings_about_two_links_filed_in_two_orders_leave_two_stores_equal() {
+    let mut pair = Pair::new("pin-link-finding-order");
+    let about_link = |ordinal: u64| {
         let mut finding = unread_block("one/glossary.md");
-        finding.ordinal = Some(1);
-        finding.target = Some(target.to_string());
+        finding.ordinal = Some(ordinal);
         finding
     };
-    let file = |store: &mut Store, targets: [&str; 2]| {
+    for (store, ordinals) in [(&mut pair.left, [1, 2]), (&mut pair.right, [2, 1])] {
         let mut request = store.begin_request();
-        for target in targets {
+        for ordinal in ordinals {
             request
-                .record_finding(&about_link(target))
+                .record_finding(&about_link(ordinal))
                 .expect("recording a finding");
         }
+    }
+    pair.assert_equivalent();
+    let derived = |store: &mut Store| {
+        DerivedRows::read(store)
+            .expect("reading the derived rows")
+            .fields()
+            .clone()
     };
-    file(&mut pair.left, ["x", "y"]);
-    let divergence = pair.diverged(|store| file(store, ["y", "x"]));
-    assert_names(&divergence, "finding[one/glossary.md][0]");
+    let (left, right) = (derived(&mut pair.left), derived(&mut pair.right));
+    assert_eq!(
+        left.get("finding[one/glossary.md][0].ordinal")
+            .map(String::as_str),
+        Some("1"),
+        "the finding about link 1 renders first"
+    );
+    assert_eq!(left, right, "the derived rows of the two stores");
 }
 
 /// **Findings about a document are compared by their content, whatever order

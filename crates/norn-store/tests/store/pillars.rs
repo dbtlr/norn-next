@@ -448,6 +448,65 @@ fn a_findings_position_is_its_ordinal_with_the_documents_first() {
     );
 }
 
+/// **One link holds at most one finding.** The kinds a finding about a link is
+/// filed under exclude one another, so a second finding about a link that
+/// already holds one is refused where it is written, whatever its kind, and
+/// the first stands. Another link of the same document takes its own finding,
+/// and the findings about the document itself are as many as are filed.
+#[test]
+fn a_second_finding_about_one_link_is_refused() {
+    let scratch = Scratch::new("finding-one-per-link");
+    let mut store = scratch.open();
+    let at = path("a.md");
+    let about = |kind: FindingKind, ordinal: Option<u64>| {
+        let mut finding = violation(at.as_str());
+        finding.kind = kind;
+        finding.ordinal = ordinal;
+        finding
+    };
+    let mut request = store.begin_request();
+    request
+        .record_finding(&about(FindingKind::Broken, Some(1)))
+        .expect("recording the first finding about link 1");
+    for kind in [FindingKind::Ambiguous, FindingKind::Broken] {
+        let refused = request
+            .record_finding(&about(kind, Some(1)))
+            .expect_err("a second finding about link 1");
+        let StoreError::Sql {
+            operation, message, ..
+        } = &refused
+        else {
+            panic!("the second finding was refused as {refused:?}");
+        };
+        assert_eq!(*operation, "writing a finding");
+        assert!(message.contains("UNIQUE"), "{message}");
+    }
+    for finding in [
+        about(FindingKind::Broken, Some(2)),
+        about(FindingKind::BodyBytesNotUtf8, None),
+        about(FindingKind::BodyBytesNotUtf8, None),
+    ] {
+        request
+            .record_finding(&finding)
+            .expect("recording a finding");
+    }
+    let stored: Vec<(String, Option<u64>)> = request
+        .stored_findings(&at)
+        .expect("reading findings")
+        .into_iter()
+        .map(|finding| (finding.kind, finding.ordinal))
+        .collect();
+    assert_eq!(
+        stored,
+        [
+            (FindingKind::Broken.as_str().to_string(), Some(1)),
+            (FindingKind::Broken.as_str().to_string(), Some(2)),
+            (FindingKind::BodyBytesNotUtf8.as_str().to_string(), None),
+            (FindingKind::BodyBytesNotUtf8.as_str().to_string(), None),
+        ]
+    );
+}
+
 /// A head handed more than it holds is refused rather than truncated. A silently
 /// truncated payload is indistinguishable from a complete one.
 #[test]
