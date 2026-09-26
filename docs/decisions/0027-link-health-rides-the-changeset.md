@@ -67,7 +67,8 @@ link's health by:
 - a link that resolves to one document lacking the link's `#heading` or `#^block` has a
   **missing anchor**.
 
-An embed is a link and carries the same kinds.
+An embed is a link and carries the same kinds. Every link-health finding has warning
+severity.
 
 Each finding's truth depends on documents the link is not written in: which documents its
 target names, and what headings and blocks the one it names holds. Creating, deleting,
@@ -96,8 +97,10 @@ registry states the rest:
 it changes and, inside its own transaction, discards every finding filed under a class key
 that class prefixes. That discard predates ADR 0021, which neither admitted nor forbade it,
 and the store's findings contract and this repository's architecture already assume
-link-health findings filed under class keys. What was missing is the other half: the
-re-decision that files the findings again, in the same act.
+link-health findings filed under class keys. Two things are not built. The re-decision that
+files the findings again, in the same act, is one. A path-key axis is the other: a finding
+today can carry only class keys, which end in a separator, so neither the storage nor the
+discard can yet key a finding by the exact path a path-addressed link spells.
 
 **A link reaches documents through one of two key spaces, and they are not
 interchangeable.** A suffix-addressed link — `[[glossary]]`, `[[norn/glossary]]` — is keyed
@@ -126,7 +129,8 @@ pillar. It is never an aggregate over the set, and never a write to another pill
 
 Every link-health finding carries invalidation keys in the key space its link is addressed
 in, so the changeset's discard reaches it through the same keys the re-decided set is found
-by. Within that family, the exception admits only re-decision that is:
+by. The path half of that discard, and the path keys it ranges over, are part of what this
+decision rules and does not yet exist. Within that family, the exception admits only re-decision that is:
 
 1. **indexed** — every link in the re-decided set is reached by an index seek: a written
    document's links by that document, and every other link by its stored keys in its own key
