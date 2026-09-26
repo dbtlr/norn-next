@@ -117,7 +117,10 @@ impl GroupMember {
     }
 
     /// The aggregate a group's label is selected by, over the member's rows
-    /// under `alias`.
+    /// under `alias`. `path` is the holding document's path where the
+    /// statement already joins `documents` to each row, and `None` where it
+    /// reads the member's rows alone, so the path is looked up by the row's
+    /// document.
     ///
     /// A field's label is the least raw spelling in the group. A tag's is the
     /// spelling written first in the answer order — the holding document's
@@ -129,14 +132,22 @@ impl GroupMember {
     /// so a shorter path sorts first as it does unencoded; and the ordinal is
     /// zero-padded to a fixed width. [`GroupMember::read_label`] reads the
     /// name back off the least one.
-    fn label(self, alias: &str) -> String {
+    fn label(self, alias: &str, path: Option<&str>) -> String {
+        let ordered_path = |path: &str| format!("hex(lower({path})) || ' ' || hex({path})");
         match self {
             GroupMember::Field(_) => format!("MIN({alias}.raw)"),
-            GroupMember::Tag => format!(
-                "MIN((SELECT hex(lower(lp.path)) || ' ' || hex(lp.path)
-                         FROM documents AS lp WHERE lp.id = {alias}.document)
-                     || ' ' || printf('%020d', {alias}.ordinal) || ' ' || {alias}.name)"
-            ),
+            GroupMember::Tag => {
+                let path = match path {
+                    Some(path) => ordered_path(path),
+                    None => format!(
+                        "(SELECT {} FROM documents AS lp WHERE lp.id = {alias}.document)",
+                        ordered_path("lp.path")
+                    ),
+                };
+                format!(
+                    "MIN({path} || ' ' || printf('%020d', {alias}.ordinal) || ' ' || {alias}.name)"
+                )
+            }
         }
     }
 
@@ -256,15 +267,25 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
     };
 
     let mut conditions: Vec<String> = Vec::new();
-    let (from, id) = match (tallies.statement, lead) {
-        (CountStatement::Total, _) => ("FROM documents AS d".to_string(), "d.id".to_string()),
+    // The document path is `d.path` in every form that joins `documents` as
+    // `d`, and `None` in the one that reads the leading member's rows alone.
+    let (from, id, path) = match (tallies.statement, lead) {
+        (CountStatement::Total, _) => (
+            "FROM documents AS d".to_string(),
+            "d.id".to_string(),
+            Some("d.path"),
+        ),
         (CountStatement::NullLead(_), Some(lead)) => {
             let probe = lead.of_document("m", "d.id", &mut binder);
             conditions.push(format!(
                 "NOT EXISTS (SELECT 1 FROM {table} AS m WHERE {probe})",
                 table = lead.shape.table()
             ));
-            ("FROM documents AS d".to_string(), "d.id".to_string())
+            (
+                "FROM documents AS d".to_string(),
+                "d.id".to_string(),
+                Some("d.path"),
+            )
         }
         (CountStatement::ValuedLead(_), Some(lead)) => {
             let (table, sort) = (lead.shape.table(), lead.shape.sort());
@@ -288,13 +309,18 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
                        ON g1.document = d.id{key} AND +g1.{sort} >= {from_position}"
                     ),
                     "d.id".to_string(),
+                    Some("d.path"),
                 )
             } else {
                 if let GroupMember::Field(_) = lead.shape {
                     conditions.push(format!("g1.key = {}", binder.bind(key_value(lead.key))));
                 }
                 conditions.push(format!("g1.{sort} >= {from_position}"));
-                (format!("FROM {table} AS g1"), "g1.document".to_string())
+                (
+                    format!("FROM {table} AS g1"),
+                    "g1.document".to_string(),
+                    None,
+                )
             }
         }
         (CountStatement::NullLead(_) | CountStatement::ValuedLead(_), None) => {
@@ -326,7 +352,7 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
         .collect();
     let mut columns: Vec<String> = grouped
         .iter()
-        .map(|(at, member)| member.shape.label(&alias(*at)))
+        .map(|(at, member)| member.shape.label(&alias(*at), path))
         .collect();
     columns.push(match tallies.statement {
         // One row per document: the table's own count.

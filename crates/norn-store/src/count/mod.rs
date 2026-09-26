@@ -33,7 +33,8 @@
 //! **A tag groups by its fold** (`norn_wire::fold_tag`): `#Work` and `#work`
 //! are one group, ordered by the folded name. **A tag member's label is the
 //! spelling the tally's own documents write first in the answer order** —
-//! folded path, then position in the document — so two tallies, or two
+//! the document path with its ASCII case folded, then the path's bytes as the
+//! tie-break, then the tag's position in the file — so two tallies, or two
 //! conjunctions, may label one tag with two spellings, and a continuation
 //! names a tag's group by any spelling of it.
 //!

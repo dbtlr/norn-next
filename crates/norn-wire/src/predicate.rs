@@ -10,7 +10,10 @@
 //! here as it is written, and whether two values compare as numbers, as dates
 //! or as strings is decided behind the vault's content model in the store,
 //! against the field's declared type. Spelling a typed value here would make
-//! this crate the second place the content model lives.
+//! this crate the second place the content model lives. A tag is the one
+//! part compared by a rule spelled here: its name crosses as written and
+//! compares under the wire's tag fold, [`crate::fold_tag`], not behind the
+//! content model.
 //!
 //! **A match query is carried verbatim.** The full-text syntax belongs to the
 //! engine that answers it, and this layer neither parses nor rewrites it. It

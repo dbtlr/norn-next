@@ -127,17 +127,22 @@
 //!
 //! `name` is the tag as written, case included, because a report shows the
 //! spelling an author used. `folded_name` is the same name under the tag fold
-//! (`norn_wire::fold_tag`: Unicode lowercase, accents kept, over the whole
-//! nested name), computed at the write, and it is the column every comparison
-//! reads: `#Work` and `#work` are two rows of one tag. SQLite's `NOCASE`
-//! folds ASCII alone, so the fold is computed in Rust rather than left to a
-//! collation. `document_tags_folded_name` is the index a find's tag part
-//! seeks and a count's tag grouping walks: the documents carrying one folded
-//! name, read off the index without touching the rows. `source` says which
-//! home the tag came from — a body token or the frontmatter `tags` field —
-//! because the two are read by different grammars and a consumer may care
-//! which one an author used. Frontmatter tags may have no locatable span, so
-//! the span columns are nullable here too.
+//! (`norn_wire::fold_tag`: each character's Unicode lowercase, accents kept,
+//! over the whole nested name), computed at the write, and it is the column
+//! every comparison reads: `#Work` and `#work` are two rows of one tag.
+//! SQLite's `NOCASE` folds ASCII alone, so the fold is computed in Rust rather
+//! than left to a collation. `document_tags_folded_name` is the index a find's
+//! tag part seeks, read off the index without touching the rows, and the one
+//! a count's tag grouping walks in group order. A count's tag label reads
+//! past the index: each row's `ordinal` and `name`, and the holding
+//! document's path, which is where the label's first occurrence is judged.
+//! `ordinal` is the tag's position in the order the writer hands the tags,
+//! which the host's derivation makes the file's: frontmatter entries first,
+//! then body tokens in body order. `source` says which home the tag came
+//! from — a body token or the frontmatter `tags` field — because the two are
+//! read by different grammars and a consumer may care which one an author
+//! used. Frontmatter tags may have no locatable span, so the span columns are
+//! nullable here too.
 //!
 //! # A nullable span triple is all three or none
 //!
