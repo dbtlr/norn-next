@@ -47,7 +47,10 @@ regex = "1"
 # `functions` registers application-defined SQL functions: the path-glob match a
 # read runs inside its statement, so a filter narrows the rows a page reads
 # rather than a page being filtered after it was read. It adds no crate.
-rusqlite = { version = "0.40", features = ["bundled", "fallible_uint", "functions", "hooks"] }
+# `trace` carries SQLite's statement trace, which is how a snapshot reader's
+# connection counts every statement SQLite begins on it, transaction control
+# included, on the thread that begins it. It adds no crate.
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint", "functions", "hooks", "trace"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 # The content hash the system concludes "unchanged" from. Declared here rather
