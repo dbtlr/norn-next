@@ -11,7 +11,7 @@
 use crate::common::{
     Scratch, ambiguity, ambiguity_for_target, class, class_named, classes, document,
     document_with_every_fact, drained, full_text_matches, path, record_death, violation,
-    write_document, write_documents,
+    write_document, write_documents, written_tags,
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, Store, StoreError,
@@ -3485,7 +3485,7 @@ fn a_vault_schema_change_discards_findings_and_nothing_else() {
         .expect("a document");
     assert_eq!(after.links, facts.links, "a schema edit reached the links");
     assert_eq!(after.headings, facts.headings);
-    assert_eq!(after.tags, facts.tags);
+    assert_eq!(written_tags(&after), facts.tags);
     assert_eq!(
         after.document.frontmatter.as_deref(),
         Some(r#"{"draft":false,"title":"Norn"}"#),

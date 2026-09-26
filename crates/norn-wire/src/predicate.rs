@@ -10,7 +10,9 @@
 //! here as it is written, and whether two values compare as numbers, as dates
 //! or as strings is decided behind the vault's content model in the store,
 //! against the field's declared type. Spelling a typed value here would make
-//! this crate the second place the content model lives.
+//! this crate the second place the content model lives. Unlike a field value,
+//! a tag's name crosses as written and compares under the wire's tag fold,
+//! [`crate::fold_tag`], not behind the content model.
 //!
 //! **A match query is carried verbatim.** The full-text syntax belongs to the
 //! engine that answers it, and this layer neither parses nor rewrites it. It
@@ -130,7 +132,8 @@ pub enum Predicate {
         /// The target being resolved.
         target: ResolutionTarget,
     },
-    /// The document carries the tag `name`.
+    /// The document carries the tag `name`, with Unicode case folded and
+    /// accents kept: `Work` finds `#work` and `#WORK`.
     #[non_exhaustive]
     Tag {
         /// The tag, without its `#`.

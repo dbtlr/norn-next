@@ -324,9 +324,11 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 /// its key, a tag by its name, a tag pattern and a path rule by the pattern, a
 /// folder by its path. A schema names each field and each folder once — its
 /// grammar refuses a repeated field key and a folder path written twice — so
-/// the host hands neither twice. A tag, a tag pattern or a path rule written
-/// twice is the same text twice and carries nothing beyond it, so the two
-/// collapse to one and nothing is lost.
+/// the host hands neither twice. A schema reading holds a declared tag once
+/// under the tag fold, at its first spelling, so the host hands each tag
+/// once. A tag, a tag pattern or a path rule written twice is the same text
+/// twice and carries nothing beyond it, so the two collapse to one and
+/// nothing is lost.
 #[derive(Clone, Debug, Default)]
 pub struct ContentModel {
     schema: Option<String>,

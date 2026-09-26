@@ -185,10 +185,94 @@ fn a_reporting_facet_admits_its_names_and_its_patterns() {
     // `**` covers the run of no segments, so the pattern admits its own root.
     assert!(facet.admits("person"));
     assert!(!facet.admits("ephemeral"));
-    // Case is compared as written.
-    assert!(!facet.admits("Area"));
     assert!(facet.reports_undeclared());
     assert!(schema.rederives_documents());
+}
+
+/// **A facet compares tag names under the tag fold.** A declared name admits
+/// every spelling of itself that differs by Unicode case, a pattern admits a
+/// tag whose whole nested name folds into its set, and an accent stays part
+/// of the letter.
+#[test]
+fn a_facet_admits_a_tag_under_the_tag_fold() {
+    let schema = VaultSchema::parse(
+        "version: 1\ntags:\n  declared: [Work, über, café]\n  patterns: [\"area/**\", \"Person/*\"]\n  undeclared: report\n"
+            .as_bytes(),
+    )
+    .expect("a folding facet");
+    let facet = schema.tags();
+
+    for admitted in [
+        "Work",
+        "work",
+        "WORK",
+        "Über",
+        "ÜBER",
+        "café",
+        "CAFÉ",
+        "Area/Work",
+        "AREA",
+        "person/Ada",
+    ] {
+        assert!(facet.admits(admitted), "`{admitted}` is admitted");
+    }
+    for refused in ["cafe", "uber", "Person/Ada/Notes", "Work/Area"] {
+        assert!(!facet.admits(refused), "`{refused}` is not admitted");
+    }
+}
+
+/// **A pattern's literal characters fold as a tag's do**, whatever stands
+/// beside them. A wildcard is not a letter, so a fold that read a letter's
+/// neighbours would fold the sigma before `*` as a final one and the sigma in
+/// the tag as a medial one, or lengthen `İ` in the tag past the one `?` it
+/// stands at.
+#[test]
+fn a_pattern_folds_its_letters_as_a_tag_folds_them() {
+    let schema = VaultSchema::parse(
+        "version: 1\ntags:\n  patterns: [\"ΑΣ*\", \"*Σ\", \"a?b\", \"x/?\"]\n  undeclared: report\n"
+            .as_bytes(),
+    )
+    .expect("a facet of patterns around letters");
+    let facet = schema.tags();
+
+    for admitted in ["ΑΣΒ", "ΒΣ", "aİb", "x/İ", "ασβ", "βσ"] {
+        assert!(facet.admits(admitted), "`{admitted}` is admitted");
+    }
+}
+
+/// **Two patterns that fold to one text are one pattern**, kept at the
+/// spelling the schema writes first, as a declared name is.
+#[test]
+fn a_pattern_written_twice_under_the_fold_keeps_its_first_spelling() {
+    let schema = VaultSchema::parse(
+        b"version: 1\ntags:\n  patterns: [\"Area/**\", \"person/*\", \"area/**\", \"AREA/**\"]\n",
+    )
+    .expect("a facet repeating a pattern");
+
+    assert_eq!(
+        schema
+            .tags()
+            .patterns()
+            .iter()
+            .map(Pattern::as_str)
+            .collect::<Vec<_>>(),
+        ["Area/**", "person/*"]
+    );
+}
+
+/// **A name declared twice under the tag fold is one declaration**, kept at
+/// the spelling the schema writes first, and the names are listed in the
+/// order of their folds.
+#[test]
+fn a_name_declared_twice_under_the_fold_keeps_its_first_spelling() {
+    let schema =
+        VaultSchema::parse(b"version: 1\ntags:\n  declared: [work, Alpha, Work, WORK, alpha]\n")
+            .expect("a facet repeating a name");
+
+    assert_eq!(
+        schema.tags().declared().collect::<Vec<&str>>(),
+        ["Alpha", "work"]
+    );
 }
 
 #[test]

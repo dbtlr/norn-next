@@ -92,7 +92,7 @@ use norn_fixtures::digest::{Sha256, hex};
 use norn_store::{
     BlockFact, DocumentPath, FieldRow, FieldRows, FindingCursor, HeadingFact, IndexedTerm,
     LinkFact, OffsetSpelling, PillarReport, Span, Store, StoreError, StoredFinding, StoredLinkKey,
-    StoredPathOrder, StoredSuffixKeys, StoredTombstone, TagFact, ddl,
+    StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone, ddl,
 };
 use norn_wire::{FindingKind, FindingScope};
 
@@ -144,7 +144,9 @@ pub struct ProjectedDocument {
     pub link_keys: Vec<StoredLinkKey>,
     pub headings: Vec<HeadingFact>,
     pub blocks: Vec<BlockFact>,
-    pub tags: Vec<TagFact>,
+    /// Each tag as written, with the fold stored beside it: a function of
+    /// the name, and what every comparison of two tags reads.
+    pub tags: Vec<StoredTag>,
     /// The field rows, typed half included: a store that healed under a
     /// re-pinned schema and one built from zero under it agree about every
     /// typed value only if the heal refilled what the pin cleared.
@@ -1157,13 +1159,15 @@ impl StoredColumns for BlockFact {
     }
 }
 
-impl StoredColumns for TagFact {
+/// A tag row: the fact as written and the fold stored beside it.
+impl StoredColumns for StoredTag {
     fn columns(&self) -> Vec<(&'static str, String)> {
         let mut columns = vec![
-            ("name", quoted(&self.name)),
-            ("source", quoted(self.source.as_str())),
+            ("name", quoted(&self.fact.name)),
+            ("folded_name", quoted(&self.folded_name)),
+            ("source", quoted(self.fact.source.as_str())),
         ];
-        columns.extend(span_columns(self.span));
+        columns.extend(span_columns(self.fact.span));
         columns
     }
 }

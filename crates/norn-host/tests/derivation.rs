@@ -60,8 +60,8 @@ use norn_wire::FindingKind;
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(4),
-    "195873932d61905179abe090704696e14f4b6a28688321b4163e6fbf3eb4248b",
+    DerivationVersion::new(5),
+    "48dae9123b61c83c6e859aa75bf01448920ed77f3116f8f7c9f4cd4ab3af611e",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -224,8 +224,9 @@ setext title
 /// carrying a query and one an encoded separator, a dotted wikilink, a
 /// same-document anchor, a wikilink no suffix address reads, `vault://` links
 /// of both families, body and frontmatter tags, declared and not, block ids, a
-/// frontmatter wikilink carrying an alias and an anchor, and a tag whose name
-/// carries a combining mark.
+/// frontmatter wikilink carrying an alias and an anchor, a tag whose name
+/// carries a combining mark, and tags written in another case than an earlier
+/// spelling of them, one folding outside ASCII.
 const GLOSSARY: &str = "---
 title: The glossary
 aliases: [gloss, \"Glossary Term\"]
@@ -270,6 +271,7 @@ Sub setext
 
 A paragraph with a #project tag, a (#area/norn) tag, an #undeclared-body tag, not a#tag, and #123.
 A tag whose name carries a combining mark: #cafe\u{301}.
+Tags in another case: #Project, #UNDECLARED-BODY and #Über.
 
 See [[Notes]] and [[notes/Deep Note|shown title]] and [[Glossary#Repeated]] and [[Notes#^para-block]].
 Embed ![[picture.png]] and ![[Notes#Setext|embedded]].
@@ -607,13 +609,34 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
     );
     for source in [TagSource::Body, TagSource::Frontmatter] {
         assert!(
-            glossary.tags.iter().any(|tag| tag.source == source),
+            glossary.tags.iter().any(|tag| tag.fact.source == source),
             "no {source:?} tag is exercised"
         );
     }
     assert!(
-        glossary.tags.iter().any(|tag| tag.name.contains('\u{301}')),
+        glossary
+            .tags
+            .iter()
+            .any(|tag| tag.fact.name.contains('\u{301}')),
         "no tag whose name carries a combining mark is exercised"
+    );
+    let spellings: Vec<(&str, &str)> = glossary
+        .tags
+        .iter()
+        .map(|tag| (tag.fact.name.as_str(), tag.folded_name.as_str()))
+        .collect();
+    assert!(
+        spellings.iter().any(|(name, folded)| name != folded
+            && spellings
+                .iter()
+                .any(|(other, again)| other != name && again == folded)),
+        "no tag written in two spellings of one fold is exercised: {spellings:?}"
+    );
+    assert!(
+        spellings
+            .iter()
+            .any(|(name, folded)| name != folded && !name.is_ascii()),
+        "no tag whose fold moves a letter outside ASCII is exercised: {spellings:?}"
     );
     assert!(
         glossary.frontmatter.is_some() && !glossary.fields.rows().is_empty(),
@@ -817,7 +840,7 @@ fn assert_the_allowing_vault_exercises_its_stance(rows: &DerivedRows) {
             allowed
                 .tags
                 .iter()
-                .any(|tag| tag.name == name && tag.source == source),
+                .any(|tag| tag.fact.name == name && tag.fact.source == source),
             "no undeclared {source:?} tag `{name}` is exercised"
         );
     }

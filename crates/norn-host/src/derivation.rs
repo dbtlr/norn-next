@@ -49,7 +49,7 @@ use norn_store::{
     Provenance, Span, TagFact, TagSource, TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
-use norn_wire::{FindingKind, FindingScope, Severity, TagStance};
+use norn_wire::{FindingKind, FindingScope, Severity, TagStance, fold_tag};
 
 /// The derivation this build writes a store's rows by, recorded in every store
 /// it creates and judged at every open: a store another version wrote is
@@ -66,7 +66,7 @@ use norn_wire::{FindingKind, FindingScope, Severity, TagStance};
 /// pinned corpus from zero and digests every derived row, pinned beside the
 /// version it was taken under, and it fails when the digest moves while this
 /// does not.
-pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(4);
+pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(5);
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -711,17 +711,19 @@ pub(crate) fn map_document(
             span: Some(span(b.span)),
         })
         .collect();
-    facts.tags = scan
-        .tags()
+    // The file's order: the frontmatter stands before the body, so its tags
+    // come first, and a tag's ordinal is where the file writes it.
+    facts.tags = document
+        .frontmatter_tags()
         .into_iter()
         .map(|t| TagFact {
             name: t.name,
-            source: TagSource::Body,
+            source: TagSource::Frontmatter,
             span: t.span.map(span),
         })
-        .chain(document.frontmatter_tags().into_iter().map(|t| TagFact {
+        .chain(scan.tags().into_iter().map(|t| TagFact {
             name: t.name,
-            source: TagSource::Frontmatter,
+            source: TagSource::Body,
             span: t.span.map(span),
         }))
         .collect();
@@ -966,11 +968,12 @@ fn field_declaration(kind: FieldType) -> FieldDeclaration {
 /// makes the tag rows schema-independent parse facts and these findings the
 /// schema-keyed answer about them.
 ///
-/// **One finding per distinct undeclared name, not one per token.** A document
+/// **One finding per distinct undeclared tag, not one per token.** A document
 /// that writes `#draft` in its frontmatter and three more times in its body has
 /// one thing wrong with it, and a reader paging the class wants the names.
-/// Order is the order the names are first written, so equal documents plan
-/// equal writes.
+/// Tags are distinct under the tag fold, so `#Draft` and `#draft` are one
+/// finding, which names the spelling the document writes first. Order is the
+/// order the tags are first written, so equal documents plan equal writes.
 ///
 /// A facet that reports nothing yields nothing here, which includes every vault
 /// that has not declared a tag vocabulary at all.
@@ -988,7 +991,7 @@ fn plan_tag_facet(
         .tags
         .iter()
         .filter(|tag| !facet.admits(&tag.name))
-        .filter(|tag| seen.insert(tag.name.clone()))
+        .filter(|tag| seen.insert(fold_tag(&tag.name)))
         .map(|tag| PlannedFinding {
             subject: subject.clone(),
             cause: Cause::TagBreach(TagBreach::Undeclared),
@@ -1172,6 +1175,46 @@ mod tests {
                 .ambiguity_ignore()
                 .patterns()
                 .is_empty()
+        );
+    }
+
+    /// **A tag declared twice under the tag fold is one declared-tag facet**,
+    /// at the spelling the schema writes first.
+    #[test]
+    fn a_tag_declared_in_two_spellings_is_one_facet_at_its_first() {
+        use norn_wire::{Facet, FacetKind};
+
+        let declared = Declared::pinned(
+            VaultSchema::parse(b"version: 1\ntags:\n  declared: [Work, alpha, work, WORK]\n")
+                .expect("a schema repeating a tag"),
+            "repeating",
+        );
+        assert_eq!(
+            declared
+                .content_model()
+                .facets_of(FacetKind::DeclaredTag, None)
+                .collect::<Vec<Facet>>(),
+            vec![Facet::declared_tag("Work"), Facet::declared_tag("alpha")]
+        );
+    }
+
+    /// **A tag pattern written twice under the tag fold is one tag-pattern
+    /// facet**, at the spelling the schema writes first.
+    #[test]
+    fn a_tag_pattern_written_in_two_spellings_is_one_facet_at_its_first() {
+        use norn_wire::{Facet, FacetKind};
+
+        let declared = Declared::pinned(
+            VaultSchema::parse(b"version: 1\ntags:\n  patterns: [\"Area/**\", \"area/**\"]\n")
+                .expect("a schema repeating a pattern"),
+            "repeating",
+        );
+        assert_eq!(
+            declared
+                .content_model()
+                .facets_of(FacetKind::TagPattern, None)
+                .collect::<Vec<Facet>>(),
+            vec![Facet::tag_pattern("Area/**")]
         );
     }
 
@@ -1907,9 +1950,9 @@ paths:
             .iter()
             .map(|finding| finding.target.as_deref())
             .collect();
-        // Body tags come before frontmatter tags on the row, and a repeated
-        // name is one finding.
-        assert_eq!(targets, vec![Some("draft"), Some("ephemeral")]);
+        // Frontmatter tags come before body tags on the row, as they do in
+        // the file, and a repeated name is one finding.
+        assert_eq!(targets, vec![Some("ephemeral"), Some("draft")]);
         for finding in &plan.findings {
             assert_eq!(finding.cause, Cause::TagBreach(TagBreach::Undeclared));
             assert_eq!(finding.cause.severity(), Severity::Warning);
@@ -1918,11 +1961,11 @@ paths:
                 DocumentPath::new("note.md").expect("a document path")
             );
         }
-        assert_eq!(plan.findings[0].detail, "`#draft`, written in the body");
         assert_eq!(
-            plan.findings[1].detail,
+            plan.findings[0].detail,
             "`#ephemeral`, written in the frontmatter"
         );
+        assert_eq!(plan.findings[1].detail, "`#draft`, written in the body");
     }
 
     /// The control on the case above: the same bytes under a vault that has

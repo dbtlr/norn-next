@@ -3726,7 +3726,7 @@ mod tests {
     use norn_config::schema::FieldType;
     use norn_store::{
         BlockFact, ContentModel, FieldRow, FieldRows, HeadingFact, LinkFact, OpenOutcome,
-        RebuildReason, TagFact,
+        RebuildReason, StoredTag,
     };
     use norn_testkit::scratch::Scratch;
     use norn_testkit::wait::{Budget, Observed, wait_until};
@@ -5279,13 +5279,13 @@ mod tests {
         let tags: Vec<(&str, TagSource)> = facts
             .tags
             .iter()
-            .map(|tag| (tag.name.as_str(), tag.source))
+            .map(|tag| (tag.fact.name.as_str(), tag.fact.source))
             .collect();
         assert_eq!(
             tags,
             vec![
-                ("draft", TagSource::Body),
-                ("project", TagSource::Frontmatter)
+                ("project", TagSource::Frontmatter),
+                ("draft", TagSource::Body)
             ],
             "the facet took a tag row away, or added one"
         );
@@ -5295,6 +5295,90 @@ mod tests {
         assert_eq!(findings[0].kind, FindingKind::UndeclaredTag.as_str());
         assert_eq!(findings[0].target.as_deref(), Some("draft"));
         assert_eq!(findings[0].severity, Severity::Warning.as_str());
+        ops.detach(&name, attachment);
+    }
+
+    /// **A declared name admits every spelling of its tag, in either home.**
+    /// `Work` is declared, so `#work` in the body and `WORK` in the
+    /// frontmatter are the declared tag; `#Draft` and `#draft` are one
+    /// undeclared tag, and its one finding names the spelling written first.
+    #[test]
+    fn a_declared_name_admits_every_spelling_of_its_tag() {
+        let f = Fixture::new("facet-folds");
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\ntags:\n  declared: [Work]\n  undeclared: report\n",
+        )
+        .unwrap();
+        fs::write(
+            f.vault().join("note.md"),
+            "---\ntags: [WORK]\n---\n# body\n#work #Draft #draft\n",
+        )
+        .unwrap();
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        let targets: Vec<Option<String>> = findings_at(&mut attachment.store, "note.md")
+            .into_iter()
+            .map(|finding| finding.target)
+            .collect();
+        assert_eq!(targets, vec![Some("Draft".to_string())]);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A tag's first occurrence is the one the file writes first**: the
+    /// frontmatter stands before the body, so a note carrying `tags: [Draft]`
+    /// and a body `#draft` writes `Draft` first. Its one undeclared-tag
+    /// finding names `Draft`, and a count grouped by tag labels the tag
+    /// `Draft`.
+    #[test]
+    fn a_frontmatter_tag_occurs_before_a_body_tag() {
+        let f = Fixture::new("tag-first-occurrence");
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\ntags:\n  declared: [work]\n  undeclared: report\n",
+        )
+        .unwrap();
+        fs::write(
+            f.vault().join("note.md"),
+            "---\ntags: [Draft]\n---\n# body\n#draft\n",
+        )
+        .unwrap();
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        let targets: Vec<Option<String>> = findings_at(&mut attachment.store, "note.md")
+            .into_iter()
+            .map(|finding| finding.target)
+            .collect();
+        assert_eq!(targets, vec![Some("Draft".to_string())]);
+
+        let declared = crate::derivation::Declared::pinned(
+            VaultSchema::parse(attachment.controls.schema_bytes()).unwrap(),
+            attachment.controls.fingerprints().schema.to_string(),
+        );
+        let reader = Arc::new(attachment.open_reader().reader.expect("a reader"));
+        let snapshot = reader
+            .try_take()
+            .expect("an idle reader")
+            .establish()
+            .expect("a snapshot");
+        let params = norn_wire::CountParams::new(norn_wire::VaultAddress::name(
+            attachment.registration.name.clone(),
+        ))
+        .with_by([norn_wire::GroupKey::tag()]);
+        let labels: Vec<Vec<Option<String>>> = snapshot
+            .count(&params, declared.content_model())
+            .expect("a count grouped by tag")
+            .tallies
+            .into_iter()
+            .map(|tally| tally.group)
+            .collect();
+        assert_eq!(labels, vec![vec![Some("Draft".to_string())]]);
+        drop(snapshot);
+        drop(reader);
         ops.detach(&name, attachment);
     }
 
@@ -10115,21 +10199,22 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// **A tag facet's patterns match a tag's bytes under either path
-    /// order**: the same bytes derived into a store recording each order,
-    /// `area/**` does not admit `#Area/work`, which is an undeclared-tag
-    /// finding on both. A tag names no path, so the root's case behaviour
-    /// does not reach it. The store's order is set by reopening it, so the
-    /// case judges both orders on any host.
+    /// **A tag facet's patterns match a tag under the tag fold, under either
+    /// path order**: the same bytes derived into a store recording each order,
+    /// `area/**` admits `#Area/work` and `#AREA`, and `#Other` and `#OTHER`
+    /// are one undeclared tag, named at the spelling written first. A tag
+    /// names no path, so the root's case behaviour does not reach it. The
+    /// store's order is set by reopening it, so the case judges both orders
+    /// on any host.
     #[test]
-    fn a_tag_pattern_matches_exactly_under_either_path_order() {
+    fn a_tag_pattern_matches_under_the_tag_fold_under_either_path_order() {
         let f = Fixture::watcherless("derive-tag-pattern-case");
         fs::write(
             f.vault().join(".norn/schema.yaml"),
             "version: 1\ntags:\n  patterns: [\"area/**\"]\n  undeclared: report\n",
         )
         .unwrap();
-        let bytes = b"# body\n#Area/work #area/home\n";
+        let bytes = b"# body\n#Area/work #area/home #AREA #Other #OTHER\n";
         let root = f.vault();
         let mut store = Store::open(
             f.root.join("tag-pattern-case.sqlite3"),
@@ -10157,11 +10242,7 @@ mod tests {
                 .into_iter()
                 .map(|finding| finding.target)
                 .collect();
-            assert_eq!(
-                targets,
-                vec![Some("Area/work".to_string())],
-                "under {order:?}"
-            );
+            assert_eq!(targets, vec![Some("Other".to_string())], "under {order:?}");
         }
     }
 
@@ -11096,7 +11177,7 @@ mod tests {
         link_keys: Vec<norn_store::StoredLinkKey>,
         headings: Vec<HeadingFact>,
         blocks: Vec<BlockFact>,
-        tags: Vec<TagFact>,
+        tags: Vec<StoredTag>,
         fields: FieldRows,
     }
 

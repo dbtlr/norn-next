@@ -1500,17 +1500,23 @@ fn filter_bars() -> Vec<FilterBar> {
         },
         FilterBar {
             shape: ReadFilter::Tag,
-            probes: vec![(
-                Predicate::tag("draft"),
-                ReadFilter::Tag,
-                Seek::Index {
-                    alias: "tg",
-                    table: "document_tags",
-                    access: Access::Index("document_tags_name"),
-                    constraint: "(name=?)",
-                    dropped: "document_tags_name",
-                },
-            )],
+            // Every spelling seeks the folded index at the one folded name.
+            probes: ["draft", "DRAFT"]
+                .into_iter()
+                .map(|spelling| {
+                    (
+                        Predicate::tag(spelling),
+                        ReadFilter::Tag,
+                        Seek::Index {
+                            alias: "tg",
+                            table: "document_tags",
+                            access: Access::Index("document_tags_folded_name"),
+                            constraint: "(folded_name=?)",
+                            dropped: "document_tags_folded_name",
+                        },
+                    )
+                })
+                .collect(),
         },
         FilterBar {
             shape: ReadFilter::LinksTo(SuffixKey::Raw),
@@ -1765,9 +1771,9 @@ fn judge_filtered_work(seeded: &Seeded, params: &FindParams) {
 /// either, and sorts at most once per page statement.
 ///
 /// Controls: `documents_path_nocase` dropped, the path page with no filter
-/// reads another order and the unfiltered bar fails; `document_tags_name`
-/// dropped, the tag part reads its table end to end and the filtered bar
-/// fails.
+/// reads another order and the unfiltered bar fails;
+/// `document_tags_folded_name` dropped, the tag part reads its table end to
+/// end and the filtered bar fails.
 #[test]
 fn a_page_steps_through_no_full_scan_and_sorts_only_where_a_filter_narrows_it() {
     let mut seeded = Seeded::with_bulk("find-page-work", 64);
@@ -1799,9 +1805,9 @@ fn a_page_steps_through_no_full_scan_and_sorts_only_where_a_filter_narrows_it() 
     }
 
     // Control: the index the tag part seeks, gone.
-    seeded.drop_index("document_tags_name");
-    let tagged = request().with_predicates([Predicate::tag("bulk")]);
-    failure_of("document_tags_name dropped", || {
+    seeded.drop_index("document_tags_folded_name");
+    let tagged = request().with_predicates([Predicate::tag("BULK")]);
+    failure_of("document_tags_folded_name dropped", || {
         judge_filtered_work(&seeded, &tagged)
     });
 }

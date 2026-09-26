@@ -78,7 +78,7 @@ use crate::facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, FeedDocument, FeedTombstone, FindingFacts,
     HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport, Provenance,
     SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredLinkKey, StoredPathOrder,
-    StoredSuffixKeys, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    StoredSuffixKeys, StoredTag, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 use crate::fields::{FieldContainer, FieldRow, FieldRows, OffsetSpelling};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
@@ -741,7 +741,10 @@ impl<'a> Request<'a> {
                 &self.read_work,
                 DOCUMENT_TAGS_SQL,
                 params![id],
-                stored_tag,
+                |row| {
+                    let folded_name: String = row.get(5)?;
+                    Ok(stored_tag(row)?.map(|fact| StoredTag { fact, folded_name }))
+                },
                 "reading a document's tags",
             )?,
             fields: FieldRows::stored(Self::read_all_on(
@@ -1737,8 +1740,10 @@ pub(crate) const DOCUMENT_HEADINGS_SQL: &str =
 const DOCUMENT_BLOCKS_SQL: &str = "SELECT block_id, span_line, span_column, span_offset
                  FROM blocks WHERE document = ?1 ORDER BY ordinal";
 
-/// The statement [`Request::stored_facts`] reads a document's tags with.
-const DOCUMENT_TAGS_SQL: &str = "SELECT name, source, span_line, span_column, span_offset
+/// The statement [`Request::stored_facts`] reads a document's tags with, each
+/// tag's fold after the columns [`stored_tag`] reads.
+const DOCUMENT_TAGS_SQL: &str =
+    "SELECT name, source, span_line, span_column, span_offset, folded_name
                  FROM document_tags WHERE document = ?1 ORDER BY ordinal";
 
 /// The statement [`Request::stored_facts`] reads a document's field rows with.

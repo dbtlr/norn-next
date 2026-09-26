@@ -173,6 +173,9 @@ pub struct BlockFact {
 }
 
 /// One `#tag`, recorded as written.
+///
+/// The store keeps the name's fold beside it (`norn_wire::fold_tag`), computed
+/// at the write, and every comparison of two tags reads the fold.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TagFact {
     /// The name without the marker, nesting included, case as written.
@@ -510,6 +513,16 @@ pub struct StoredLinkKey {
     pub segments: Option<u64>,
 }
 
+/// One stored tag row: the tag as written and its fold beside it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredTag {
+    pub fact: TagFact,
+    /// The name under the tag fold (`norn_wire::fold_tag`), as stored beside
+    /// it. Derived at the write from the name, so it is not a fact a caller
+    /// hands over.
+    pub folded_name: String,
+}
+
 /// A document's row and every fact row derived from it, in ordinal order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredFacts {
@@ -521,7 +534,7 @@ pub struct StoredFacts {
     pub link_keys: Vec<StoredLinkKey>,
     pub headings: Vec<HeadingFact>,
     pub blocks: Vec<BlockFact>,
-    pub tags: Vec<TagFact>,
+    pub tags: Vec<StoredTag>,
     /// The field rows, typed half included, in key order and then ordinal
     /// order.
     pub fields: FieldRows,

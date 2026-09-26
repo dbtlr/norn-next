@@ -50,7 +50,8 @@ pub enum ReadFilter {
     /// tells spellings apart, and on `documents_folded_suffix_key` where it
     /// folds ASCII case, less the places the schema ignores.
     Resolves(SuffixKey),
-    /// The document carries the tag, on `document_tags_name`.
+    /// The document carries the tag: its folded name, bound folded, on
+    /// `document_tags_folded_name`.
     Tag,
     /// The document holds a link that resolves to exactly the one document a
     /// links-to part's target names: an equality seek of `link_keys_key`
@@ -302,7 +303,9 @@ fn spell_bound(shape: ReadFilter, values: &[Value], id: &str, binder: &mut Binde
         }
         ReadFilter::Tag => {
             let name = next();
-            format!("{id} IN (SELECT tg.document FROM document_tags AS tg WHERE tg.name = {name})")
+            format!(
+                "{id} IN (SELECT tg.document FROM document_tags AS tg WHERE tg.folded_name = {name})"
+            )
         }
         ReadFilter::LinksTo(key) => {
             let listed: Vec<String> = (0..values.len() - LINKS_TO_PARAMETERS)

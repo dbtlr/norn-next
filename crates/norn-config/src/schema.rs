@@ -38,6 +38,13 @@
 //!   ambiguity_ignore: ["archive/**"]
 //! ```
 //!
+//! **A tag is compared under the tag fold.** `tags.declared` names and
+//! `tags.patterns` match a tag with Unicode case folded and accents kept, over
+//! the whole nested name: `declared: [Work]` admits `#work`, `patterns:
+//! ["area/**"]` admits `#Area/Work`, and neither admits `#Wörk`. Two declared
+//! names that fold to one are one declaration, and so are two patterns, each
+//! held at the spelling written first. See [`TagFacet`].
+//!
 //! Every section is optional. A schema that declares nothing — which is what
 //! `version: 1` alone is — is a valid schema that judges no document, and
 //! [`VaultSchema::rederives_documents`] is how a caller asks whether it is
@@ -95,6 +102,7 @@ use std::fmt;
 
 use serde_yaml::Value;
 
+use norn_wire::fold_tag;
 pub use norn_wire::{CaseFold, Pattern, PatternError};
 pub use typed::{Comparison, ComparisonSignal, DateValue, FieldType, Offset, TypedValue};
 
@@ -321,20 +329,36 @@ impl DeclaredFolder {
 }
 
 /// What the vault declares about its `#tag` vocabulary.
+///
+/// **Every comparison here reads the tag fold** ([`fold_tag`]): a declared
+/// name, a pattern and the tag judged against them are each folded before
+/// they are compared, so `#Work` is admitted by a declared `work` and
+/// `#Area/Work` by the pattern `area/**`. The fold takes each character alone,
+/// so a pattern's literal characters fold as a tag's do whatever wildcard
+/// stands beside them. A name or a pattern written twice under the fold is
+/// one declaration, held at the spelling the schema writes first.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TagFacet {
-    declared: BTreeSet<String>,
+    /// Each declared name's first spelling, keyed by its fold.
+    declared: BTreeMap<String, String>,
+    /// Each pattern at its first spelling under the tag fold, in the order
+    /// written.
     patterns: Vec<Pattern>,
+    /// Each pattern with its text folded, in the order of `patterns`: the
+    /// reading a folded tag is matched against.
+    folded_patterns: Vec<Pattern>,
     undeclared: UndeclaredTags,
 }
 
 impl TagFacet {
-    /// The literal tag names the vault declares, in name order.
+    /// The literal tag names the vault declares, each at its first spelling,
+    /// in the order of their folds.
     pub fn declared(&self) -> impl Iterator<Item = &str> {
-        self.declared.iter().map(String::as_str)
+        self.declared.values().map(String::as_str)
     }
 
-    /// The patterns the facet admits beyond its literal names.
+    /// The patterns the facet admits beyond its literal names, each at its
+    /// first spelling under the tag fold, in the order written.
     pub fn patterns(&self) -> &[Pattern] {
         &self.patterns
     }
@@ -344,17 +368,15 @@ impl TagFacet {
         self.undeclared
     }
 
-    /// Whether `name` is in the declared vocabulary.
-    ///
-    /// Case is compared as written, because deciding that `#Work` and `#work`
-    /// are one tag is a matching policy the syntax layer deliberately leaves
-    /// open and a schema that wants both declares both.
+    /// Whether `name` is in the declared vocabulary: its fold is a declared
+    /// name's fold, or matches a pattern's folded text.
     pub fn admits(&self, name: &str) -> bool {
-        self.declared.contains(name)
+        let folded = fold_tag(name);
+        self.declared.contains_key(&folded)
             || self
-                .patterns
+                .folded_patterns
                 .iter()
-                .any(|pattern| pattern.matches(name, CaseFold::Exact))
+                .any(|pattern| pattern.matches(&folded, CaseFold::Exact))
     }
 
     /// Whether a tag outside the vocabulary is a finding.
@@ -630,12 +652,12 @@ fn read_tags(document: &serde_yaml::Mapping) -> Result<TagFacet, VaultSchemaErro
     };
     known_keys_only("tags", tags, TAG_KEYS)?;
     let declared = match at(tags, "declared") {
-        None => BTreeSet::new(),
-        Some(value) => read_strings("tags.declared", value)?,
+        None => BTreeMap::new(),
+        Some(value) => read_tag_names("tags.declared", value)?,
     };
-    let patterns = match at(tags, "patterns") {
-        None => Vec::new(),
-        Some(value) => read_patterns("tags.patterns", value)?,
+    let (patterns, folded_patterns) = match at(tags, "patterns") {
+        None => (Vec::new(), Vec::new()),
+        Some(value) => fold_tag_patterns(read_patterns("tags.patterns", value)?),
     };
     let undeclared = match at(tags, "undeclared") {
         None => UndeclaredTags::default(),
@@ -654,6 +676,7 @@ fn read_tags(document: &serde_yaml::Mapping) -> Result<TagFacet, VaultSchemaErro
     Ok(TagFacet {
         declared,
         patterns,
+        folded_patterns,
         undeclared,
     })
 }
@@ -741,6 +764,44 @@ fn read_strings(at_path: &str, value: &Value) -> Result<BTreeSet<String>, VaultS
                 .ok_or_else(|| section_error(at_path, "a sequence of strings", item))
         })
         .collect()
+}
+
+/// A sequence of tag names, each held at its first spelling under its fold.
+fn read_tag_names(
+    at_path: &str,
+    value: &Value,
+) -> Result<BTreeMap<String, String>, VaultSchemaError> {
+    let Value::Sequence(items) = value else {
+        return Err(section_error(at_path, "a sequence of strings", value));
+    };
+    let mut names = BTreeMap::new();
+    for item in items {
+        let name = item
+            .as_str()
+            .ok_or_else(|| section_error(at_path, "a sequence of strings", item))?;
+        names
+            .entry(fold_tag(name))
+            .or_insert_with(|| name.to_string());
+    }
+    Ok(names)
+}
+
+/// Tag patterns held once under the tag fold, each at its first spelling, in
+/// the order written: the patterns as written, and beside each its text
+/// folded, which is what a folded tag is matched against.
+fn fold_tag_patterns(patterns: Vec<Pattern>) -> (Vec<Pattern>, Vec<Pattern>) {
+    let mut seen = BTreeSet::new();
+    patterns
+        .into_iter()
+        .filter_map(|pattern| {
+            let folded = fold_tag(pattern.as_str());
+            seen.insert(folded.clone()).then(|| {
+                let folded = Pattern::parse(&folded)
+                    .expect("a pattern's fold is as long as the pattern, so it is not empty");
+                (pattern, folded)
+            })
+        })
+        .unzip()
 }
 
 fn read_patterns(at_path: &str, value: &Value) -> Result<Vec<Pattern>, VaultSchemaError> {
