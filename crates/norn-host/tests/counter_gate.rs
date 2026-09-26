@@ -46,14 +46,13 @@
 //!   does every other read shape above, each in the bounded form its verb's
 //!   contract makes flat and each reading above zero on its statements and on
 //!   its rows or its steps. A read shape's cost is its builder's work and the
-//!   steps SQLite took over every statement run on its snapshot. A ceiling
-//!   passes anything under it; a pair fails the moment the two scales stop
-//!   moving together. The pages a read shape's connection touched are held
-//!   apart, because a seek reads a page per level of the tree it descends and
-//!   the trees deepen with the vault: they must grow by a smaller ratio than
-//!   the vault does. Every read pair has a control that grows with the vault,
-//!   run at the same two attachments, and each control must read more at the
-//!   larger scale on the counts it names.
+//!   steps SQLite took over every statement run on its snapshot: statement
+//!   counters, not a clock, and they do not see work a virtual table does
+//!   inside a statement, so a full-text match's posting-list walk is not
+//!   among them. A ceiling passes anything under it; a pair fails the moment
+//!   the two scales stop moving together. Every read pair has a control that
+//!   grows with the vault, run at the same two attachments, and each control
+//!   must read more at the larger scale on the counts it names.
 //!
 //! **Every reading is recorded, zero included.** A gate that passes says only
 //! that nothing moved; which counters were asked and what each read is the
@@ -769,19 +768,18 @@ fn find_shapes(label: &str, profile: &norn_fixtures::Profile) -> FindShapes {
 ///
 /// **The work is read where the verb reports it**: the builder's own work
 /// counts, and the snapshot's. The snapshot counts every statement run on it,
-/// the virtual-machine and full-scan steps SQLite took over each of them
-/// whichever part of the read it answered, and the pages its connection
-/// touched. Each shape runs a pinned number of statements, reads above zero
-/// on its statements, on its rows or its steps, and on the snapshot's
-/// statements, steps and pages, at both scales; and every count but the pages
-/// is compared name by name across the pair. **The pages are held apart**
-/// ([`PAGES_TOUCHED`]): they must grow by a smaller ratio than the vault's
-/// documents did ([`outgrows`]).
+/// and the virtual-machine and full-scan steps SQLite took over each of them
+/// whichever part of the read it answered. Statement counters do not see work
+/// a virtual table does inside a statement, so a full-text match's
+/// posting-list walk is not among them; a search's page cost is read off the
+/// matches the module hands back instead. Each shape runs a pinned number of
+/// statements, reads above zero on its statements, on its rows or its steps,
+/// and on the snapshot's statements and steps, at both scales; and every
+/// count is compared name by name across the pair.
 ///
 /// **Each shape has a control that grows with the vault**, read at the same
 /// two attachments, and each must read more at the larger scale on the counts
-/// its shape names, the snapshot's steps among them; the count-by-field and
-/// full-text match controls' pages must grow as fast as the vault. The
+/// its shape names, the snapshot's steps among them. The
 /// planted crowd is what grows: a tenth of the profile's documents, each
 /// sharing one stem, carrying a key of its own and a word of its own and
 /// linking one hub, beside as many documents whose frontmatter never closes.
@@ -838,23 +836,11 @@ fn every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document() 
         failures.extend(
             SizeIndependencePair::new(
                 shape.name,
-                ScaleObservation::new(&small, paired(&small_reading.bounded)),
-                ScaleObservation::new(&large, paired(&large_reading.bounded)),
+                ScaleObservation::new(&small, small_reading.bounded.clone()),
+                ScaleObservation::new(&large, large_reading.bounded.clone()),
             )
             .violations(),
         );
-        let pages = |reading: &ShapeReading| reading.bounded.get(PAGES_TOUCHED);
-        if outgrows((pages(small_reading), pages(large_reading)), documents) {
-            failures.push(format!(
-                "`{}` touched {} pages over {} documents and {} over {}: its pages grew as fast \
-                 as the vault",
-                shape.name,
-                pages(small_reading),
-                documents.0,
-                pages(large_reading),
-                documents.1
-            ));
-        }
 
         let operation = format!("{}, its control", shape.name);
         let control = SizeIndependencePair::new(
@@ -868,12 +854,7 @@ fn every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document() 
                 small_reading.control.get(grows),
                 large_reading.control.get(grows),
             );
-            let fails_its_bar = if *grows == PAGES_TOUCHED {
-                outgrows(grown, documents)
-            } else {
-                grown.1 > grown.0
-            };
-            if !fails_its_bar {
+            if grown.1 <= grown.0 {
                 failures.push(format!(
                     "`{}`'s control did not grow with the vault on `{grows}`, reading {} over \
                      {} documents and {} over {}",
@@ -1026,7 +1007,7 @@ struct ReadShape {
     /// The control: the same verb over what the crowd grows.
     control: fn(&Reader<'_>) -> CounterSnapshot,
     /// The counts the control must grow across the pair: each reads more at
-    /// the larger scale, and [`PAGES_TOUCHED`] grows as fast as the vault.
+    /// the larger scale.
     grows: &'static [&'static str],
 }
 
@@ -1039,7 +1020,7 @@ const READ_SHAPES: &[ReadShape] = &[
         working: &["count_statements", "count_tallies_read", "count_vm_steps"],
         statements: 5,
         control: |reader| count(reader, []),
-        grows: &["count_full_scan_steps", "vm_steps", PAGES_TOUCHED],
+        grows: &["count_full_scan_steps", "vm_steps"],
     },
     ReadShape {
         name: "suffix / stem resolve",
@@ -1093,7 +1074,7 @@ const READ_SHAPES: &[ReadShape] = &[
         ],
         statements: 4,
         control: |reader| lexical_search(reader, CROWD_WORD, None),
-        grows: &["search_page_vm_steps", "vm_steps", PAGES_TOUCHED],
+        grows: &["search_page_vm_steps", "vm_steps"],
     },
     ReadShape {
         name: "describe",
@@ -1116,39 +1097,8 @@ const READ_SHAPES: &[ReadShape] = &[
 
 /// The snapshot's counts every shape's bounded form must read above zero,
 /// beside the counts of its builder's work its shape names: the statements
-/// it ran, the steps SQLite took stepping them, and the pages its connection
-/// touched.
-const SNAPSHOT_WORKING: &[&str] = &["statements_executed", "vm_steps", PAGES_TOUCHED];
-
-/// The snapshot's count of the pages its connection asked its cache for.
-///
-/// **It is the one count held apart from the pair.** A bounded read seeks
-/// the same rows at every scale, and each seek reads one page per level of
-/// the tree it descends; the trees are a level deeper at 2000 documents than
-/// at 300, and a full-text match reads each segment of its index, which
-/// grows in number as the vault does. So a flat read's pages grow with the
-/// log of the vault, and the bar they carry is [`outgrows`] rather than
-/// equality.
-const PAGES_TOUCHED: &str = "pages_touched";
-
-/// A reading with [`PAGES_TOUCHED`] set aside, the counts the pair holds
-/// equal.
-fn paired(reading: &CounterSnapshot) -> CounterSnapshot {
-    reading
-        .names()
-        .filter(|name| *name != PAGES_TOUCHED)
-        .map(|name| (name, reading.get(name)))
-        .collect()
-}
-
-/// Whether a count read `(small, large)` across the pair grew at least as
-/// fast as the vault did from `documents.0` to `documents.1`: by a ratio as
-/// large as the documents'. A read that grows so reads in proportion to the
-/// vault.
-fn outgrows((small, large): (u64, u64), documents: (usize, usize)) -> bool {
-    let widen = |count: usize| u128::try_from(count).expect("a document count fits");
-    u128::from(large) * widen(documents.0) >= u128::from(small) * widen(documents.1)
-}
+/// it ran and the steps SQLite took stepping them.
+const SNAPSHOT_WORKING: &[&str] = &["statements_executed", "vm_steps"];
 
 /// What a shape's answer cost: the builder's work, then the snapshot's.
 fn cost(

@@ -662,12 +662,12 @@ fn a_cursor_among_other_rows_is_refused() {
 
 // ---- what a row costs ----
 
-/// **A snapshot counts the steps of every statement a find runs on it, and
-/// the pages its connection touches.** The page statement's steps are the
-/// find's own page counts; the fingerprint read beside it is a statement the
-/// page counts do not hold and the snapshot's do.
+/// **A snapshot counts the steps of every statement a find runs on it.** The
+/// page statement's steps are the find's own page counts; the fingerprint
+/// read beside it is a statement the page counts do not hold and the
+/// snapshot's do.
 #[test]
-fn a_snapshot_counts_every_statement_a_find_steps_and_the_pages_it_touches() {
+fn a_snapshot_counts_every_statement_a_find_steps() {
     let seeded = Seeded::new("find-snapshot-steps");
     let snapshot = seeded.snapshot();
     let before = snapshot.counters();
@@ -678,10 +678,6 @@ fn a_snapshot_counts_every_statement_a_find_steps_and_the_pages_it_touches() {
         "the snapshot counted {} steps and the page statement alone ran {}",
         after.vm_steps() - before.vm_steps(),
         found.work.page_vm_steps
-    );
-    assert!(
-        after.pages_touched() > before.pages_touched(),
-        "a find touched no page"
     );
 }
 

@@ -1,7 +1,4 @@
-// Denied rather than forbidden: the page-cache status a snapshot's cost is
-// read from is not wrapped by the driver, and its one call is allowed where it
-// stands, beside the reason it is sound.
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 //! The mechanics of running a SQLite database, and nothing about what one
 //! holds.
 //!

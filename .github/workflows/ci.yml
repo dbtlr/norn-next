@@ -192,12 +192,12 @@ jobs:
   # bounded form its verb's contract makes flat, cost the same at 300 documents
   # as at 2000 — the sharper bar, because a ceiling passes anything under it
   # and a pair fails the moment two scales stop moving together. A shape's cost
-  # counts the steps of every statement run on its snapshot; the pages its
-  # connection touched grow with the depth of the store's trees, so they are
-  # held to growing more slowly than the vault rather than to equality. Each
-  # read pair runs beside a control that grows with the vault and must read
-  # more at the larger scale. All three are counts: a counter says the same
-  # thing on a loaded runner, which a clock does not.
+  # counts the steps of every statement run on its snapshot; those statement
+  # counters do not see work a virtual table does inside a statement, so a
+  # full-text match's posting-list walk is not among them. Each read pair runs
+  # beside a control that grows with the vault and must read more at the
+  # larger scale. All three are counts: a counter says the same thing on a
+  # loaded runner, which a clock does not.
   #
   # The plan bars live in the store's own suites, beside the read builders that
   # emit the SQL they judge. An `EXPLAIN` assertion is worth something only

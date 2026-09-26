@@ -1058,10 +1058,9 @@ findings-for-path and full-text match carry the same two counter bars, and so do
 page of a document's links and a describe page, each asked through its host verb in the
 bounded form its contract makes flat and at a pinned number of statements. A shape's work
 counts the virtual-machine and full-scan steps of every statement run on its snapshot, and
-holds them equal across the pair. The pages the snapshot's connection touched see the
-reading a full-text match does inside its index, which the steps do not; a seek reads a page
-per level of the tree it descends and the trees deepen with the vault, so the pages are held
-to growing by a smaller ratio than the vault's documents rather than to equality. Each pair
+holds them equal across the pair. These statement counters do not see work a virtual table
+does inside a statement, so a full-text match's posting-list walk is not among them; a
+search's page cost is read off the matches the module hands back instead. Each pair
 has a control that grows with the vault and reads more at the larger scale. In the memory
 lane, the two `read-` bars hold a process that attached the ~2k-document profile and read it
 through a live hold to an absolute peak ceiling, and to a ratio over the peak of the same

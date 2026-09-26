@@ -195,7 +195,6 @@ pub struct SnapshotCounters {
     statements_executed: u64,
     vm_steps: u64,
     full_scan_steps: u64,
-    pages_touched: u64,
 }
 
 impl SnapshotCounters {
@@ -207,7 +206,6 @@ impl SnapshotCounters {
             ("statements_executed", self.statements_executed),
             ("vm_steps", self.vm_steps),
             ("full_scan_steps", self.full_scan_steps),
-            ("pages_touched", self.pages_touched),
         ]
         .into_iter()
     }
@@ -241,19 +239,6 @@ impl SnapshotCounters {
         self.full_scan_steps
     }
 
-    /// Pages the snapshot's connection asked its page cache for while the
-    /// snapshot stood, the establishing statement's included.
-    ///
-    /// **This is the count a virtual table's reading shows up in.** A
-    /// full-text match walks its index inside one virtual-machine step, so
-    /// [`SnapshotCounters::vm_steps`] does not grow with that walk and this
-    /// does. It is read off the connection rather than off the statements a
-    /// builder ran, so a statement run on the connection by any path is in
-    /// it. See `norn_db::Database::pages_touched`.
-    pub fn pages_touched(&self) -> u64 {
-        self.pages_touched
-    }
-
     pub(crate) fn count_snapshot(&mut self) {
         self.snapshots_opened = self.snapshots_opened.saturating_add(1);
     }
@@ -266,11 +251,5 @@ impl SnapshotCounters {
     pub(crate) fn count_steps(&mut self, vm_steps: u64, full_scan_steps: u64) {
         self.vm_steps = self.vm_steps.saturating_add(vm_steps);
         self.full_scan_steps = self.full_scan_steps.saturating_add(full_scan_steps);
-    }
-
-    /// This reading, with the pages the connection touched set to `pages`.
-    pub(crate) fn with_pages_touched(mut self, pages: u64) -> Self {
-        self.pages_touched = pages;
-        self
     }
 }

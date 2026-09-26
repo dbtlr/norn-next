@@ -175,8 +175,7 @@ fn a_reader_answers_under_the_store_s_own_epoch_and_generation() {
 /// One read is one snapshot, established by one statement. A deferred `BEGIN`
 /// takes no snapshot, so the statement that reads the store's generation is
 /// both the establishment and the reading — and it is the only statement the
-/// establishment runs. It touches the pages its row sits on, and no read
-/// builder has stepped a statement yet.
+/// establishment runs.
 #[test]
 fn establishing_a_snapshot_costs_one_snapshot_and_one_statement() {
     let scratch = Scratch::new("reader-counters");
@@ -196,10 +195,6 @@ fn establishing_a_snapshot_costs_one_snapshot_and_one_statement() {
         1,
         "establishing the snapshot ran more than the establishing statement"
     );
-    assert!(
-        counters.pages_touched() > 0,
-        "the establishing statement read a row and touched no page"
-    );
     assert_eq!(
         counters.readings().collect::<Vec<_>>(),
         vec![
@@ -207,7 +202,6 @@ fn establishing_a_snapshot_costs_one_snapshot_and_one_statement() {
             ("statements_executed", 1),
             ("vm_steps", 0),
             ("full_scan_steps", 0),
-            ("pages_touched", counters.pages_touched()),
         ],
         "the reading carries another vocabulary, or counts steps no read builder ran"
     );
