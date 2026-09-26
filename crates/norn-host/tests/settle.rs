@@ -294,6 +294,9 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             "READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION" => {
                 always_authored(baselines::READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION)
             }
+            "READ_PAIR_HEAP_PEAK_PER_MILLE" => {
+                always_authored(baselines::READ_PAIR_HEAP_PEAK_PER_MILLE)
+            }
             other => panic!(
                 "the ledger names `{other}` in this crate's baselines and nothing here holds its \
                  armed claim to the constant, so the two may drift apart quietly"

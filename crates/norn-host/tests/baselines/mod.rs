@@ -252,6 +252,35 @@ pub const READ_PEAK_RSS_CEILING_BYTES: u64 = 42 * 1024 * 1024;
 /// [`READ_PEAK_RSS_CEILING_BYTES`] gates in.
 pub const READ_OVER_ATTACH_PEAK_RSS_PER_MILLE: u64 = 1_500;
 
+/// How much of the heap the read mix holds over the `ambiguous` profile the
+/// read mix over the `realistic` profile may hold, per mille.
+///
+/// **The bar that sees the rows a read holds.** Each child of the pair
+/// attaches its profile under the read schema and runs the read mix
+/// [`READ_PEAK_RSS_CEILING_BYTES`] names, and a counting global allocator in
+/// the child reads the most the shapes raised the live heap above the mark it
+/// set once the attachment was ready. The reading counts the bytes the code
+/// asked the allocator for: page size, allocator slack and what the attach
+/// left resident do not move it, and memory SQLite takes from `malloc` for its
+/// own caches is outside it. What is inside it is where a hydrated row lives.
+/// `realistic` holds 6.7x the documents `ambiguous` does, so a shape that
+/// answers a page holds about the same bytes at both, and a shape that held
+/// the vault's rows shows the spread.
+///
+/// Observed on macos-arm64 on 2026-09-25: **1,193,975 bytes at `ambiguous`
+/// and 1,185,220 at `realistic`, ratio 0.99, identical to the byte over three
+/// runs.** The mix and the trees are fixed by the seed, and the attached host
+/// allocates nothing on its own threads while the shapes run.
+///
+/// The bar is 1.10: the reading is exact, so the headroom is for the
+/// difference a second platform's allocations make rather than for run-to-run
+/// spread, and a tenth over the reading holds that while failing any shape
+/// that holds a tenth of a mebibyte more at 2000 documents than at 300.
+///
+/// **Platform scope: the Linux measurement lane**, the same one
+/// [`READ_PEAK_RSS_CEILING_BYTES`] gates in.
+pub const READ_PAIR_HEAP_PEAK_PER_MILLE: u64 = 1_100;
+
 /// How many descriptors a long mixed load may add to the count taken once the
 /// attachment is ready.
 ///

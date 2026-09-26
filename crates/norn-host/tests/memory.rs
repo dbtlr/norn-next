@@ -65,6 +65,7 @@
 
 mod attach;
 mod baselines;
+mod heap;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -74,10 +75,17 @@ use attach::read::{FIND_LIMIT, bounded_find};
 use norn_host::Answered;
 use norn_testkit::process::{Run, Sandbox};
 use norn_wire::{
-    Column, CountParams, DescribeParams, DocumentPath, DocumentRow, ErrorEnvelope, FindParams,
-    GetParams, GetReport, GroupKey, LinkFamily, LinkHealth, Predicate, ResolutionTarget,
-    SearchParams, ValidateParams, ValidateReport, VaultAddress,
+    Column, CountParams, CountReport, DescribeParams, DescribeReport, DocumentPath, DocumentRow,
+    ErrorEnvelope, FindParams, FindReport, GetParams, GetReport, GroupKey, LinkFamily, LinkHealth,
+    Predicate, ResolutionTarget, SearchParams, SearchReport, ValidateParams, ValidateReport,
+    VaultAddress,
 };
+
+/// Every allocation this binary makes goes through the counting allocator, so
+/// a reading child can say how far its read shapes raised the heap above the
+/// attach beneath them.
+#[global_allocator]
+static HEAP: heap::Counting = heap::Counting;
 
 /// The variable that puts this binary in harness mode, carrying the root the
 /// generated tree sits under.
@@ -108,15 +116,30 @@ const READ_PAGES: u64 = 8;
 /// the get at the one document its target names, the links-to count at the
 /// documents its narrowing part admits, and every other shape at one page.
 const READ_SHAPES: [&str; 8] = [
-    "find",
-    "count",
-    "get",
-    "links-to",
-    "backlinks",
-    "validate",
-    "search",
-    "describe",
+    Find::NAME,
+    Count::NAME,
+    Get::NAME,
+    LinksTo::NAME,
+    Backlinks::NAME,
+    Validate::NAME,
+    Search::NAME,
+    Describe::NAME,
 ];
+
+/// What each shape of the mix answers over `profile`'s tree, in
+/// [`READ_SHAPES`] order.
+///
+/// The trees are generated from [`attach::SEED`] and the requests are fixed,
+/// so every answer is a known number and the parent holds the child's report
+/// to it: a shape swapped for a cheaper one, or one whose answer was spelled
+/// rather than read, reports a number other than its own.
+fn pinned_answers(profile: &str) -> [usize; 8] {
+    match profile {
+        "ambiguous" => [200, 6, 1, 10, 10, 18, 25, 15],
+        "realistic" => [200, 6, 1, 5, 5, 25, 25, 15],
+        other => panic!("no read answers are pinned for the `{other}` profile"),
+    }
+}
 
 /// The vault schema the read subjects attach `realistic` under: the minimal
 /// schema and a tag vocabulary that leaves two of the generated tags out and
@@ -243,7 +266,7 @@ fn the_gate_profile_reads_inside_its_memory_bar() {
         return;
     }
 
-    let peak = read_peak("read-gate");
+    let peak = read_child("read-gate", "realistic").peak_rss;
     baselines::record(
         "gate profile read",
         &[
@@ -278,7 +301,7 @@ fn the_gate_profile_reads_inside_its_memory_bar() {
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn reading_the_gate_profile_holds_the_process_near_its_attach_peak() {
     let attached = attach_peak_under("read-pair-attach", "realistic", READ_SCHEMA);
-    let read = read_peak("read-pair-read");
+    let read = read_child("read-pair-read", "realistic").peak_rss;
     let observed = baselines::per_mille(read, attached);
 
     baselines::record(
@@ -309,6 +332,50 @@ fn reading_the_gate_profile_holds_the_process_near_its_attach_peak() {
     );
 }
 
+/// **What the read shapes hold on the heap, as a slope across two scales.**
+///
+/// A reading child at each per-PR profile runs the same read mix and reports
+/// the most its shapes raised the live heap above the attach beneath them.
+/// `realistic` holds 6.7x the documents `ambiguous` does. A shape that answers
+/// a page, a target or what a narrowing part admits holds about the same rows
+/// at both scales, and a shape that held the vault's rows would show the
+/// spread. The heap reading counts bytes the code asked for, so neither page
+/// size nor what the attach left resident moves it, which is what lets it see
+/// a vault's rows a whole-process peak absorbs.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn the_read_mix_holds_its_heap_flat_from_the_ambiguity_profile_to_the_gate_profile() {
+    let small = read_child("read-heap-ambiguous", "ambiguous").heap_peak;
+    let large = read_child("read-heap-realistic", "realistic").heap_peak;
+    let observed = baselines::per_mille(large, small);
+
+    baselines::record(
+        "heap the read mix holds across the two per-PR scales",
+        &[
+            ("ambiguous, 300 documents (bytes)", small.to_string()),
+            ("realistic, 2000 documents (bytes)", large.to_string()),
+            ("observed ratio", baselines::multiple(observed)),
+            (
+                "ratio bar",
+                baselines::multiple(baselines::READ_PAIR_HEAP_PEAK_PER_MILLE),
+            ),
+        ],
+    );
+
+    assert!(
+        small > 0 && large > 0,
+        "a reading child reported no heap reading above its attach, so the pair compares nothing"
+    );
+    assert!(
+        baselines::fits(observed, baselines::READ_PAIR_HEAP_PEAK_PER_MILLE),
+        "going from `ambiguous` (300 documents) to `realistic` (2000 documents) moved the heap the \
+         read mix holds by {}x, past the {}x bar: `ambiguous` held {small} bytes and \
+         `realistic` {large}",
+        baselines::multiple(observed),
+        baselines::multiple(baselines::READ_PAIR_HEAP_PEAK_PER_MILLE),
+    );
+}
+
 /// Generate `profile`'s tree under the minimal schema, attach it in a child,
 /// and hand back the peak resident set the kernel accounted to that child.
 fn attach_peak(label: &str, profile: &str) -> u64 {
@@ -333,35 +400,44 @@ fn attach_peak_under(label: &str, profile: &str, schema: &[u8]) -> u64 {
     peak
 }
 
-/// Generate the `realistic` tree under [`READ_SCHEMA`], attach it in a child
-/// and run the read mix over it, and hand back the peak resident set the kernel accounted to that
-/// child.
+/// What a reading child's run comes to: the peak resident set the kernel
+/// accounted to it, and the most its read shapes raised the heap above the
+/// attach beneath them.
+struct ReadReading {
+    peak_rss: u64,
+    heap_peak: u64,
+}
+
+/// Generate `profile`'s tree under [`READ_SCHEMA`], attach it in a child and
+/// run the read mix over it, and hand back what the child's run came to.
 ///
-/// **A peak is only a statement about a read that happened.** The child
-/// reports the rows each shape answered, and a report that is missing a shape
-/// or carries one that answered nothing fails here rather than reading as a
-/// cheap read. The find's whole pages are checked beside it: `realistic`
-/// holds more documents than [`READ_PAGES`] pages, so a find that read fewer
-/// rows stopped early.
-fn read_peak(label: &str) -> u64 {
-    let (peak, reported) = child_peak(label, "realistic", READ_SCHEMA, READ_HARNESS_CASE);
+/// **A reading is only a statement about a read that happened.** The child
+/// reports the rows each shape answered, and the parent holds that report to
+/// [`pinned_answers`]: a report missing a shape, carrying one the mix does not
+/// name, or answering any shape other than as pinned fails here rather than
+/// reading as a cheap read.
+fn read_child(label: &str, profile: &str) -> ReadReading {
+    let (peak_rss, reported) = child_peak(label, profile, READ_SCHEMA, READ_HARNESS_CASE);
     let read = ReadReport::from_stdout(&reported).unwrap_or_else(|problem| panic!("{problem}"));
-    let whole = usize::try_from(READ_PAGES * u64::from(FIND_LIMIT)).expect("a page count fits");
-    assert_eq!(
-        read.answered.get("find"),
-        Some(&whole),
-        "`realistic` holds more documents than {READ_PAGES} pages, so every page the find \
-         read was a whole one: {reported}"
-    );
-    let answered: Vec<(&str, String)> = READ_SHAPES
+    if let Err(problem) = read.answers_as_pinned(&pinned_answers(profile)) {
+        panic!("over `{profile}`, {problem}");
+    }
+    let heap_peak = read
+        .heap_peak
+        .expect("a parsed report carries its heap reading");
+    let mut readings: Vec<(&str, String)> = READ_SHAPES
         .iter()
         .map(|shape| (*shape, read.answered[*shape].to_string()))
         .collect();
+    readings.push(("heap peak above the attach (bytes)", heap_peak.to_string()));
     baselines::record(
-        &format!("rows each read shape answered ({label})"),
-        &answered,
+        &format!("rows each read shape answered ({label}, {profile})"),
+        &readings,
     );
-    peak
+    ReadReading {
+        peak_rss,
+        heap_peak: u64::try_from(heap_peak).expect("a heap reading fits a u64"),
+    }
 }
 
 /// Generate `profile`'s tree under `schema`, run `case` over it in a child, and
@@ -425,12 +501,19 @@ fn report_line(documents: usize) -> String {
 /// verbs, each bounded as its verb bounds it.
 ///
 /// Each verb takes its own hold on the one live attachment and gives it back
-/// before it returns, which is the path a client's read takes. The find reads
-/// [`READ_PAGES`] pages, one resident at a time. Its first page is also where
-/// the target of the three shapes that name one comes from: a wikilink written
-/// as a bare stem that resolves to one document, so the get resolves that stem
-/// as a suffix, and the links-to count and the backlinks find narrow to the
-/// documents linking to it, the row that carried the link among them.
+/// before it returns, which is the path a client's read takes. **The heap mark
+/// is set once the attachment is ready and before the first shape runs**, so
+/// the heap reading the child reports is the most the shapes raised the live
+/// heap above what the attached host already held.
+///
+/// The find reads [`READ_PAGES`] pages of the documents whose `type` is not
+/// `meeting`, one resident at a time. Its pages are where the other shapes'
+/// narrowing comes from. The first row across them that carries a wikilink
+/// written as a bare stem resolving to one document names the target of the
+/// three shapes that name one: the get resolves that stem as a suffix, and the
+/// links-to count and the backlinks find narrow to the documents linking to
+/// it, the row that carried the link among them. The first row across them
+/// that sits in a directory names the path part the validate is narrowed to.
 #[allow(clippy::disallowed_macros)] // The child's report is a machine-consumed stream its parent reads.
 fn read_and_report(root: &Path) {
     let vault = attach::Vault::adopt(root);
@@ -438,68 +521,66 @@ fn read_and_report(root: &Path) {
     let _lease = attach::attach_and_wait(&host, vault.name());
     let address = || VaultAddress::name(vault.name().clone());
     let mut read = ReadReport::default();
+    let mark = heap::Mark::set();
 
-    let find = bounded_find(vault.name()).with_columns([
-        Column::fields(),
-        Column::tags(),
-        Column::links(),
-    ]);
-    let mut found = 0;
+    let find = bounded_find(vault.name())
+        .with_predicates([Predicate::not_equal_to("type", "meeting")])
+        .with_columns([Column::fields(), Column::tags(), Column::links()]);
     let mut linked = None;
+    let mut directory = None;
     let mut after = None;
     for _ in 0..READ_PAGES {
         let request = match after.take() {
             None => find.clone(),
             Some(cursor) => find.clone().with_after(cursor),
         };
-        let page = complete("find", host.find(&request));
-        found += page.rows.len();
+        let page = complete(Find::NAME, host.find(&request));
+        read.answered::<Find>(&page);
         linked = linked.or_else(|| a_linked_stem(&page.rows));
+        directory = directory.or_else(|| a_directory(&page.rows));
         after = page.next;
         if after.is_none() {
             break;
         }
     }
-    read.answered("find", found);
     let (stem, resolved, linking) = linked
-        .expect("the find's first page carries a wikilink written as a stem naming one document");
+        .expect("a row the find read carries a wikilink written as a stem naming one document");
+    let directory = directory.expect("a row the find read sits in a directory");
     let target = ResolutionTarget::new(&stem).expect("a link's stem is a target");
 
     let tallies = complete(
-        "count",
+        Count::NAME,
         host.count(
             &CountParams::new(address())
                 .with_by([GroupKey::field("type")])
                 .with_limit(FIND_LIMIT),
         ),
     );
-    read.answered("count", tallies.rows.len());
+    read.answered::<Count>(&tallies);
 
-    let GetReport::Record { document, .. } =
-        complete("get", host.get(&GetParams::new(address(), target.clone())))
-    else {
+    let got = complete(
+        Get::NAME,
+        host.get(&GetParams::new(address(), target.clone())),
+    );
+    let GetReport::Record { document, .. } = &got else {
         panic!("a get of `{stem}` with no anchor answered no record");
     };
     assert_eq!(
         document.path, resolved,
         "the get resolved `{stem}` to another document than its link does"
     );
-    read.answered("get", 1);
+    read.answered::<Get>(&got);
 
     let linking_to = complete(
-        "links-to",
+        LinksTo::NAME,
         host.count(
             &CountParams::new(address()).with_predicates([Predicate::links_to(target.clone())]),
         ),
     );
-    let linking_to: u64 = linking_to.rows.iter().map(|tally| tally.count).sum();
-    read.answered(
-        "links-to",
-        usize::try_from(linking_to).expect("a tally fits a usize"),
-    );
+    read.answered::<LinksTo>(&linking_to);
 
     let backlinks = complete(
-        "backlinks",
+        Backlinks::NAME,
         host.find(
             &FindParams::new(address())
                 .with_predicates([Predicate::links_to(target)])
@@ -510,29 +591,44 @@ fn read_and_report(root: &Path) {
         backlinks.rows.iter().any(|row| row.path == linking),
         "the backlinks of `{stem}` leave out `{linking}`, whose link to it named the target"
     );
-    read.answered("backlinks", backlinks.rows.len());
+    // Both shapes narrow by the one links-to part, so where the backlinks fit
+    // one page the count tallies exactly the documents the page lists.
+    if backlinks.next.is_none() {
+        assert_eq!(
+            LinksTo::rows(&linking_to),
+            backlinks.rows.len(),
+            "the links-to count of `{stem}` and its backlinks page disagree on who links to it"
+        );
+    }
+    read.answered::<Backlinks>(&backlinks);
 
-    let findings = match complete(
-        "validate",
-        host.validate(&ValidateParams::new(address()).with_limit(FIND_LIMIT)),
-    ) {
-        ValidateReport::Findings { page, .. } => page.rows.len(),
-        other => panic!("a validate asking for findings answered {other:?}"),
-    };
-    read.answered("validate", findings);
+    let findings = complete(
+        Validate::NAME,
+        host.validate(
+            &ValidateParams::new(address())
+                .with_predicates([Predicate::path(format!("{directory}/**"))])
+                .with_limit(FIND_LIMIT),
+        ),
+    );
+    assert!(
+        matches!(findings, ValidateReport::Findings { .. }),
+        "a validate asking for findings answered {findings:?}"
+    );
+    read.answered::<Validate>(&findings);
 
     let hits = complete(
-        "search",
+        Search::NAME,
         host.search(&SearchParams::new(address(), SEARCH_QUERY).with_limit(FIND_LIMIT)),
     );
-    read.answered("search", hits.page.rows.len());
+    read.answered::<Search>(&hits);
 
     let facets = complete(
-        "describe",
+        Describe::NAME,
         host.describe(&DescribeParams::new(address()).with_limit(FIND_LIMIT)),
     );
-    read.answered("describe", facets.rows.len());
+    read.answered::<Describe>(&facets);
 
+    read.heap_peak = Some(mark.peak_above());
     println!("{}", read.lines());
 }
 
@@ -575,17 +671,133 @@ fn a_linked_stem(rows: &[DocumentRow]) -> Option<(String, DocumentPath, Document
     })
 }
 
+/// The top-level directory the first of `rows` that sits in one sits in.
+fn a_directory(rows: &[DocumentRow]) -> Option<String> {
+    rows.iter()
+        .find_map(|row| row.path.as_str().split_once('/'))
+        .map(|(directory, _)| directory.to_string())
+}
+
+/// One read shape of the mix: the name its report line carries, the report
+/// its verb answers with, and how many rows that report answered.
+///
+/// **The report type ties a shape to its verb.** The child records a shape's
+/// rows only from the report its verb returned, so a count's tallies cannot
+/// stand in for a search's hits or a describe's facets. The two pairs of
+/// shapes that share a verb (find and backlinks, count and links-to) are told
+/// apart by [`pinned_answers`].
+trait Shape {
+    /// The shape's name in the child's report.
+    const NAME: &'static str;
+    /// What the shape's verb answers with.
+    type Report;
+    /// How many rows `report` answered.
+    fn rows(report: &Self::Report) -> usize;
+}
+
+/// A find page, newest `created` first, under a predicate.
+struct Find;
+/// A count grouped by a field.
+struct Count;
+/// A get of a bare stem, resolved as a suffix.
+struct Get;
+/// A count narrowed to the documents linking to one target, as a tally of them.
+struct LinksTo;
+/// A find narrowed to the documents linking to one target.
+struct Backlinks;
+/// A validate page of findings narrowed by a path part.
+struct Validate;
+/// A lexical search page.
+struct Search;
+/// A describe page of facets.
+struct Describe;
+
+impl Shape for Find {
+    const NAME: &'static str = "find";
+    type Report = FindReport;
+    fn rows(report: &FindReport) -> usize {
+        report.rows.len()
+    }
+}
+
+impl Shape for Count {
+    const NAME: &'static str = "count";
+    type Report = CountReport;
+    fn rows(report: &CountReport) -> usize {
+        report.rows.len()
+    }
+}
+
+impl Shape for Get {
+    const NAME: &'static str = "get";
+    type Report = GetReport;
+    fn rows(report: &GetReport) -> usize {
+        usize::from(matches!(report, GetReport::Record { .. }))
+    }
+}
+
+impl Shape for LinksTo {
+    const NAME: &'static str = "links-to";
+    type Report = CountReport;
+    fn rows(report: &CountReport) -> usize {
+        let linking: u64 = report.rows.iter().map(|tally| tally.count).sum();
+        usize::try_from(linking).expect("a tally fits a usize")
+    }
+}
+
+impl Shape for Backlinks {
+    const NAME: &'static str = "backlinks";
+    type Report = FindReport;
+    fn rows(report: &FindReport) -> usize {
+        report.rows.len()
+    }
+}
+
+impl Shape for Validate {
+    const NAME: &'static str = "validate";
+    type Report = ValidateReport;
+    fn rows(report: &ValidateReport) -> usize {
+        match report {
+            ValidateReport::Findings { page, .. } => page.rows.len(),
+            _ => 0,
+        }
+    }
+}
+
+impl Shape for Search {
+    const NAME: &'static str = "search";
+    type Report = SearchReport;
+    fn rows(report: &SearchReport) -> usize {
+        report.page.rows.len()
+    }
+}
+
+impl Shape for Describe {
+    const NAME: &'static str = "describe";
+    type Report = DescribeReport;
+    fn rows(report: &DescribeReport) -> usize {
+        report.rows.len()
+    }
+}
+
 /// What a reading child reports: how many rows each shape of [`READ_SHAPES`]
-/// answered, one line per shape.
+/// answered, one line per shape, and the most the shapes raised the live heap
+/// above the mark set once the attachment was ready.
 #[derive(Debug, Default, Eq, PartialEq)]
 struct ReadReport {
     answered: BTreeMap<String, usize>,
+    heap_peak: Option<usize>,
 }
 
 impl ReadReport {
-    /// Record that `shape` answered `rows`.
-    fn answered(&mut self, shape: &str, rows: usize) {
-        self.answered.insert(shape.to_string(), rows);
+    /// Add the rows `report` answered to shape `S`'s tally.
+    fn answered<S: Shape>(&mut self, report: &S::Report) {
+        self.tally(S::NAME, S::rows(report));
+    }
+
+    /// Add `rows` to `shape`'s tally.
+    fn tally(&mut self, shape: &str, rows: usize) {
+        *self.answered.entry(shape.to_string()).or_default() += rows;
     }
 
     /// The lines the child prints.
@@ -593,42 +805,45 @@ impl ReadReport {
         self.answered
             .iter()
             .map(|(shape, rows)| format!("read {shape} answered {rows}"))
+            .chain(
+                self.heap_peak
+                    .map(|bytes| format!("read heap peak {bytes}")),
+            )
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    /// The report a child's output carries, refused where it carries none, where
-    /// a line is no report, and where a shape of [`READ_SHAPES`] is missing or
-    /// answered nothing: a peak over a shape that did not run is a peak over the
+    /// The report a child's output carries, refused where it carries none,
+    /// where a line is no report, where a shape of [`READ_SHAPES`] is missing
+    /// or one the mix does not name is present, and where the heap reading is
+    /// missing: a reading over a shape that did not run is a reading over the
     /// shapes that did.
     fn from_stdout(stdout: &str) -> Result<Self, String> {
         let mut report = ReadReport::default();
         for line in stdout.lines().filter(|line| line.starts_with("read ")) {
             let tokens: Vec<&str> = line.split_whitespace().collect();
-            let ["read", shape, "answered", rows] = tokens.as_slice() else {
-                return Err(format!(
-                    "the read harness reported `{line}`, which is no read report"
-                ));
+            let number = |text: &str| {
+                text.parse::<usize>()
+                    .map_err(|problem| format!("the read harness reported `{line}`: {problem}"))
             };
-            let rows = rows
-                .parse::<usize>()
-                .map_err(|problem| format!("the read harness reported `{line}`: {problem}"))?;
-            report.answered(shape, rows);
+            match tokens.as_slice() {
+                ["read", "heap", "peak", bytes] => report.heap_peak = Some(number(bytes)?),
+                ["read", shape, "answered", rows] => report.tally(shape, number(rows)?),
+                _ => {
+                    return Err(format!(
+                        "the read harness reported `{line}`, which is no read report"
+                    ));
+                }
+            }
         }
         if report.answered.is_empty() {
             return Err(format!("the read harness reported no read: {stdout}"));
         }
-        for shape in READ_SHAPES {
-            match report.answered.get(shape) {
-                None => return Err(format!("the read harness ran no {shape} shape: {stdout}")),
-                Some(0) => {
-                    return Err(format!(
-                        "the read harness's {shape} shape answered nothing, so its peak is a peak \
-                         over the other shapes"
-                    ));
-                }
-                Some(_) => {}
-            }
+        if let Some(shape) = READ_SHAPES
+            .iter()
+            .find(|shape| !report.answered.contains_key(**shape))
+        {
+            return Err(format!("the read harness ran no {shape} shape: {stdout}"));
         }
         if let Some(stray) = report
             .answered
@@ -639,41 +854,80 @@ impl ReadReport {
                 "the read harness reported a `{stray}` shape the mix does not name"
             ));
         }
+        if report.heap_peak.is_none() {
+            return Err(format!(
+                "the read harness reported no heap reading: {stdout}"
+            ));
+        }
         Ok(report)
+    }
+
+    /// Refuse a report whose shapes did not answer `pinned`, naming the first
+    /// shape of [`READ_SHAPES`] that answered otherwise.
+    fn answers_as_pinned(&self, pinned: &[usize; 8]) -> Result<(), String> {
+        for (shape, expected) in READ_SHAPES.iter().zip(pinned) {
+            let answered = self.answered.get(*shape).copied().unwrap_or(0);
+            if answered != *expected {
+                return Err(format!(
+                    "the read harness's {shape} shape answered {answered} rows where its request \
+                     answers {expected}, so the peak is not a peak over the mix: {:?}",
+                    self.answered
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
-/// **The parent refuses a peak it cannot tie to every shape of the mix.** A
-/// child whose output carries no report, a report missing a shape, or one of
-/// a shape that answered nothing fails the bar rather than passing it as a
-/// cheap read; a report the child printed is read back as printed.
+/// **The parent refuses a reading it cannot tie to every shape of the mix
+/// answering as pinned.** A child whose output carries no report, a report
+/// missing a shape or its heap reading, or one of a shape answering other than
+/// its request answers fails the bar rather than passing it as a cheap read; a
+/// report the child printed is read back as printed.
 #[test]
-fn a_read_peak_stands_only_on_a_report_of_every_shape_answering() {
+fn a_read_reading_stands_only_on_a_report_of_every_shape_answering_as_pinned() {
+    let pinned = pinned_answers("realistic");
     let mut printed = ReadReport::default();
-    for shape in READ_SHAPES {
-        printed.answered(shape, 3);
+    for (shape, rows) in READ_SHAPES.iter().zip(pinned) {
+        printed.tally(shape, rows);
     }
-    assert_eq!(
-        ReadReport::from_stdout(&format!("running 1 test\n{}\ntest ok\n", printed.lines())),
-        Ok(printed)
-    );
+    printed.heap_peak = Some(4096);
+    let read = ReadReport::from_stdout(&format!("running 1 test\n{}\ntest ok\n", printed.lines()));
+    assert_eq!(read, Ok(printed));
+    assert_eq!(read.map(|read| read.answers_as_pinned(&pinned)), Ok(Ok(())));
 
     let missing = ReadReport::from_stdout("running 1 test\ntest ok\n").expect_err("no report");
     assert!(missing.contains("reported no read"), "{missing}");
 
     let mut short = ReadReport::default();
     for shape in &READ_SHAPES[1..] {
-        short.answered(shape, 3);
+        short.tally(shape, 3);
     }
+    short.heap_peak = Some(4096);
     let absent = ReadReport::from_stdout(&short.lines()).expect_err("a shape the child never ran");
     assert!(absent.contains("ran no find shape"), "{absent}");
 
-    let mut idle = ReadReport::default();
+    let mut unmeasured = ReadReport::default();
     for shape in READ_SHAPES {
-        idle.answered(shape, usize::from(shape != "validate"));
+        unmeasured.tally(shape, 3);
     }
-    let empty = ReadReport::from_stdout(&idle.lines()).expect_err("a shape that answered nothing");
-    assert!(empty.contains("validate shape answered nothing"), "{empty}");
+    let unmeasured =
+        ReadReport::from_stdout(&unmeasured.lines()).expect_err("a report with no heap reading");
+    assert!(unmeasured.contains("no heap reading"), "{unmeasured}");
+
+    // A search swapped for a count that answered one tally still reports a
+    // search line; its number is not the search's.
+    let mut swapped = ReadReport::default();
+    for (shape, rows) in READ_SHAPES.iter().zip(pinned) {
+        swapped.tally(shape, if *shape == Search::NAME { 1 } else { rows });
+    }
+    let swapped = swapped
+        .answers_as_pinned(&pinned)
+        .expect_err("a shape answering other than pinned");
+    assert!(
+        swapped.contains("search shape answered 1 rows"),
+        "{swapped}"
+    );
 
     let garbled =
         ReadReport::from_stdout("read everything\n").expect_err("a line that is no report");
