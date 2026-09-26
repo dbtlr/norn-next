@@ -17,13 +17,21 @@
 //! moving together. Both profiles are under 5k documents, so both are this
 //! lane's work under ADR 0004's by-kind split.
 //!
-//! **A read is held the same two ways.** A child attaches `realistic`, keeps
-//! it attached, and reads pages of a find through a live hold, each row
-//! carrying its fields and its tags; a ceiling holds that child's peak, and a
-//! ratio holds it to the attach-only child's peak at the same profile. A find
-//! hydrates a page at a time, so what a read adds to a process that attached
-//! is a page's rows rather than the vault's — and the ratio is what catches a
-//! read that grew the process under a ceiling generous enough to pass it.
+//! **A read is held the same two ways, over one read mix.** A child attaches
+//! `realistic`, keeps it attached, and runs every read shape through the
+//! host's read verbs, each verb taking its own live hold: a find paged newest
+//! first with each row carrying its fields, its tags and its links; a count
+//! grouped by a field; a get of a bare stem, resolved as a suffix; a links-to
+//! count and a backlinks find, each narrowed to the documents linking to that
+//! stem; a validate page of findings; a lexical search page; and a describe
+//! page of facets. A ceiling holds that child's peak, and a ratio holds it to
+//! the peak of an attach-only child of the same tree. The kernel reports one
+//! peak per child, so the mix is one child: what the pair bounds is the
+//! highest any shape reached, over the attach under all of them. Every shape
+//! answers a page, a single target or what a narrowing part admits, so what a
+//! read adds to a process that attached is a page's rows rather than the
+//! vault's, and the ratio is what catches a read that grew the process under
+//! a ceiling generous enough to pass it.
 //!
 //! # What the measurement charges to whom
 //!
@@ -31,7 +39,8 @@
 //! harness, whose peak resident set the kernel accounts and the harness reads.
 //! The child is this test binary re-executed in a harness mode an environment
 //! variable selects: it adopts a tree already on disk, attaches it, waits for
-//! ready, detaches, and reports what it derived. **Generation happens in the
+//! ready, and then either detaches and reports what it derived or runs the
+//! read mix and reports the rows each shape answered. **Generation happens in the
 //! parent**, so the child's peak is the attachment's and not the generator's,
 //! and a peak read off the test process itself would include cargo's runner and
 //! every case running beside it.
@@ -57,12 +66,18 @@
 mod attach;
 mod baselines;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use attach::read::{FIND_LIMIT, bounded_find, each_page, the_pinned_declaration};
+use attach::read::{FIND_LIMIT, bounded_find};
+use norn_host::Answered;
 use norn_testkit::process::{Run, Sandbox};
-use norn_wire::Column;
+use norn_wire::{
+    Column, CountParams, DescribeParams, DocumentPath, DocumentRow, ErrorEnvelope, FindParams,
+    GetParams, GetReport, GroupKey, LinkFamily, LinkHealth, Predicate, ResolutionTarget,
+    SearchParams, ValidateParams, ValidateReport, VaultAddress,
+};
 
 /// The variable that puts this binary in harness mode, carrying the root the
 /// generated tree sits under.
@@ -84,8 +99,40 @@ const HARNESS_CASE: &str = "the_gate_profile_attaches_inside_its_memory_bar";
 /// constant.
 const READ_HARNESS_CASE: &str = "the_gate_profile_reads_inside_its_memory_bar";
 
-/// How many pages the reading child reads through the find's cursor.
+/// How many pages the reading child's find reads through its cursor.
 const READ_PAGES: u64 = 8;
+
+/// The shapes the reading child runs, in the order it runs them.
+///
+/// Each is bounded as its verb bounds it: the find at [`READ_PAGES`] pages,
+/// the get at the one document its target names, the links-to count at the
+/// documents its narrowing part admits, and every other shape at one page.
+const READ_SHAPES: [&str; 8] = [
+    "find",
+    "count",
+    "get",
+    "links-to",
+    "backlinks",
+    "validate",
+    "search",
+    "describe",
+];
+
+/// The vault schema the read subjects attach `realistic` under: the minimal
+/// schema and a tag vocabulary that leaves two of the generated tags out and
+/// reports them.
+///
+/// The generated tree carries no document a finding stands over, so under the
+/// minimal schema a validate answers nothing. The undeclared tags are what give
+/// the validate shape findings to page, the way a vault with a vocabulary it
+/// has outgrown carries them. The attach-only child of the ratio attaches
+/// under the same schema, so the ratio still cancels the attach.
+const READ_SCHEMA: &[u8] = b"version: 1\ntags:\n  declared: [research, writing, infra, reading, \
+personal, planning, review, reference]\n  undeclared: report\n";
+
+/// The word the reading child's lexical search asks for, which the generated
+/// bodies carry in a sentence tail.
+const SEARCH_QUERY: &str = "baseline";
 
 /// How long a child may take to attach before the harness ends it.
 ///
@@ -184,9 +231,10 @@ fn peak_memory_holds_flat_from_the_ambiguity_profile_to_the_gate_profile() {
 /// **The read ceiling**, and the harness a reading child runs.
 ///
 /// With [`HARNESS_ENV`] and its token set this process is the child: it
-/// attaches the tree the variable names, keeps it attached, and reads
-/// [`READ_PAGES`] pages of a find through a live hold instead of measuring
-/// anything.
+/// attaches the tree the variable names, keeps it attached, and runs every
+/// shape of [`READ_SHAPES`] through the host's read verbs instead of
+/// measuring anything. The peak this bars is the highest the process reached
+/// across the attach and all eight shapes.
 #[test]
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn the_gate_profile_reads_inside_its_memory_bar() {
@@ -221,14 +269,15 @@ fn the_gate_profile_reads_inside_its_memory_bar() {
 /// **What a read adds to the process that attached**, as a ratio rather than
 /// a point.
 ///
-/// Both children attach `realistic` the same way; one then reads through a
-/// live hold. A find hydrates a page at a time, so the reading child's peak
-/// sits on the attaching child's, and a read that held the vault's rows would
-/// show as a multiple of it however generous the ceiling above it is.
+/// Both children attach `realistic` under [`READ_SCHEMA`] the same way; one
+/// then runs the read mix. Every shape answers a bounded page, target or
+/// narrowed set, so the reading child's peak sits on the attaching child's,
+/// and a shape that held the vault's rows would show as a multiple of it
+/// however generous the ceiling above it is.
 #[test]
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn reading_the_gate_profile_holds_the_process_near_its_attach_peak() {
-    let attached = attach_peak("read-pair-attach", "realistic");
+    let attached = attach_peak_under("read-pair-attach", "realistic", READ_SCHEMA);
     let read = read_peak("read-pair-read");
     let observed = baselines::per_mille(read, attached);
 
@@ -260,13 +309,19 @@ fn reading_the_gate_profile_holds_the_process_near_its_attach_peak() {
     );
 }
 
-/// Generate `profile`'s tree, attach it in a child, and hand back the peak
-/// resident set the kernel accounted to that child.
+/// Generate `profile`'s tree under the minimal schema, attach it in a child,
+/// and hand back the peak resident set the kernel accounted to that child.
 fn attach_peak(label: &str, profile: &str) -> u64 {
+    attach_peak_under(label, profile, attach::SCHEMA)
+}
+
+/// Generate `profile`'s tree under `schema`, attach it in a child, and hand
+/// back the peak resident set the kernel accounted to that child.
+fn attach_peak_under(label: &str, profile: &str, schema: &[u8]) -> u64 {
     let documents = norn_fixtures::Profile::by_name(profile)
         .unwrap_or_else(|| panic!("no profile named `{profile}`"))
         .docs;
-    let (peak, reported) = child_peak(label, profile, HARNESS_CASE);
+    let (peak, reported) = child_peak(label, profile, schema, HARNESS_CASE);
 
     // A bar is only a statement about an attachment that happened. The child
     // reports what it found derived, so an attach that converged over nothing
@@ -278,41 +333,53 @@ fn attach_peak(label: &str, profile: &str) -> u64 {
     peak
 }
 
-/// Generate the `realistic` tree, attach and read it in a child, and hand back
-/// the peak resident set the kernel accounted to that child.
+/// Generate the `realistic` tree under [`READ_SCHEMA`], attach it in a child
+/// and run the read mix over it, and hand back the peak resident set the kernel accounted to that
+/// child.
 ///
 /// **A peak is only a statement about a read that happened.** The child
-/// reports the rows it hydrated and the pages it read, and a report that is
-/// missing or read no row fails here rather than reading as a cheap read.
+/// reports the rows each shape answered, and a report that is missing a shape
+/// or carries one that answered nothing fails here rather than reading as a
+/// cheap read. The find's whole pages are checked beside it: `realistic`
+/// holds more documents than [`READ_PAGES`] pages, so a find that read fewer
+/// rows stopped early.
 fn read_peak(label: &str) -> u64 {
-    let (peak, reported) = child_peak(label, "realistic", READ_HARNESS_CASE);
+    let (peak, reported) = child_peak(label, "realistic", READ_SCHEMA, READ_HARNESS_CASE);
     let read = ReadReport::from_stdout(&reported).unwrap_or_else(|problem| panic!("{problem}"));
+    let whole = usize::try_from(READ_PAGES * u64::from(FIND_LIMIT)).expect("a page count fits");
     assert_eq!(
-        read,
-        ReadReport {
-            rows: READ_PAGES * u64::from(FIND_LIMIT),
-            pages: READ_PAGES,
-        },
-        "`realistic` holds more documents than {READ_PAGES} pages, so every page the harness \
-         read was a whole one"
+        read.answered.get("find"),
+        Some(&whole),
+        "`realistic` holds more documents than {READ_PAGES} pages, so every page the find \
+         read was a whole one: {reported}"
+    );
+    let answered: Vec<(&str, String)> = READ_SHAPES
+        .iter()
+        .map(|shape| (*shape, read.answered[*shape].to_string()))
+        .collect();
+    baselines::record(
+        &format!("rows each read shape answered ({label})"),
+        &answered,
     );
     peak
 }
 
-/// Generate `profile`'s tree, run `case` over it in a child, and hand back the
-/// peak resident set the kernel accounted to that child with what it printed.
+/// Generate `profile`'s tree under `schema`, run `case` over it in a child, and
+/// hand back the peak resident set the kernel accounted to that child with what
+/// it printed.
 ///
 /// The harness binary is installed into the sandbox before it runs, because the
 /// artifact cargo built is a file a concurrent build may rewrite. The tree goes
 /// inside the sandbox too, so it is removed with it.
-fn child_peak(label: &str, profile: &str, case: &str) -> (u64, String) {
+fn child_peak(label: &str, profile: &str, schema: &[u8], case: &str) -> (u64, String) {
     baselines::assert_the_profile_the_bars_were_authored_on();
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let harness = sandbox
         .install_binary(&std::env::current_exe().expect("this suite's own executable"))
         .expect("installing the harness");
     let root: PathBuf = sandbox.work_dir().join("attached");
-    attach::Vault::generate(&root, profile);
+    let vault = attach::Vault::generate(&root, profile);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), schema).expect("write the vault schema");
     let token = attach::issue_harness_token(&root);
 
     let outcome = Run::new(&sandbox, &harness)
@@ -353,94 +420,260 @@ fn report_line(documents: usize) -> String {
     format!("attached {documents} documents")
 }
 
-/// The reading harness: adopt the tree at `root`, attach it, and read
-/// [`READ_PAGES`] pages of a find through a live hold, each row carrying its
-/// fields and its tags, one page resident at a time.
+/// The reading harness: adopt the tree at `root`, attach it, keep it
+/// attached, and run every shape of [`READ_SHAPES`] through the host's read
+/// verbs, each bounded as its verb bounds it.
+///
+/// Each verb takes its own hold on the one live attachment and gives it back
+/// before it returns, which is the path a client's read takes. The find reads
+/// [`READ_PAGES`] pages, one resident at a time. Its first page is also where
+/// the target of the three shapes that name one comes from: a wikilink written
+/// as a bare stem that resolves to one document, so the get resolves that stem
+/// as a suffix, and the links-to count and the backlinks find narrow to the
+/// documents linking to it, the row that carried the link among them.
 #[allow(clippy::disallowed_macros)] // The child's report is a machine-consumed stream its parent reads.
 fn read_and_report(root: &Path) {
     let vault = attach::Vault::adopt(root);
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
-    let declared = the_pinned_declaration(&mut vault.store());
-
-    let hold = host
-        .begin_read(vault.name())
-        .expect("a live attachment answers a read");
-    let params = bounded_find(vault.name()).with_columns([Column::fields(), Column::tags()]);
+    let address = || VaultAddress::name(vault.name().clone());
     let mut read = ReadReport::default();
-    each_page(hold.snapshot(), &params, &declared, READ_PAGES, |page| {
-        read.rows += page.work.documents_hydrated;
-        read.pages += 1;
-    });
-    println!("{}", read.line());
+
+    let find = bounded_find(vault.name()).with_columns([
+        Column::fields(),
+        Column::tags(),
+        Column::links(),
+    ]);
+    let mut found = 0;
+    let mut linked = None;
+    let mut after = None;
+    for _ in 0..READ_PAGES {
+        let request = match after.take() {
+            None => find.clone(),
+            Some(cursor) => find.clone().with_after(cursor),
+        };
+        let page = complete("find", host.find(&request));
+        found += page.rows.len();
+        linked = linked.or_else(|| a_linked_stem(&page.rows));
+        after = page.next;
+        if after.is_none() {
+            break;
+        }
+    }
+    read.answered("find", found);
+    let (stem, resolved, linking) = linked
+        .expect("the find's first page carries a wikilink written as a stem naming one document");
+    let target = ResolutionTarget::new(&stem).expect("a link's stem is a target");
+
+    let tallies = complete(
+        "count",
+        host.count(
+            &CountParams::new(address())
+                .with_by([GroupKey::field("type")])
+                .with_limit(FIND_LIMIT),
+        ),
+    );
+    read.answered("count", tallies.rows.len());
+
+    let GetReport::Record { document, .. } =
+        complete("get", host.get(&GetParams::new(address(), target.clone())))
+    else {
+        panic!("a get of `{stem}` with no anchor answered no record");
+    };
+    assert_eq!(
+        document.path, resolved,
+        "the get resolved `{stem}` to another document than its link does"
+    );
+    read.answered("get", 1);
+
+    let linking_to = complete(
+        "links-to",
+        host.count(
+            &CountParams::new(address()).with_predicates([Predicate::links_to(target.clone())]),
+        ),
+    );
+    let linking_to: u64 = linking_to.rows.iter().map(|tally| tally.count).sum();
+    read.answered(
+        "links-to",
+        usize::try_from(linking_to).expect("a tally fits a usize"),
+    );
+
+    let backlinks = complete(
+        "backlinks",
+        host.find(
+            &FindParams::new(address())
+                .with_predicates([Predicate::links_to(target)])
+                .with_limit(FIND_LIMIT),
+        ),
+    );
+    assert!(
+        backlinks.rows.iter().any(|row| row.path == linking),
+        "the backlinks of `{stem}` leave out `{linking}`, whose link to it named the target"
+    );
+    read.answered("backlinks", backlinks.rows.len());
+
+    let findings = match complete(
+        "validate",
+        host.validate(&ValidateParams::new(address()).with_limit(FIND_LIMIT)),
+    ) {
+        ValidateReport::Findings { page, .. } => page.rows.len(),
+        other => panic!("a validate asking for findings answered {other:?}"),
+    };
+    read.answered("validate", findings);
+
+    let hits = complete(
+        "search",
+        host.search(&SearchParams::new(address(), SEARCH_QUERY).with_limit(FIND_LIMIT)),
+    );
+    read.answered("search", hits.page.rows.len());
+
+    let facets = complete(
+        "describe",
+        host.describe(&DescribeParams::new(address()).with_limit(FIND_LIMIT)),
+    );
+    read.answered("describe", facets.rows.len());
+
+    println!("{}", read.lines());
 }
 
-/// What a reading child reports: the rows its pages hydrated, and how many
-/// pages it read.
+/// The report of a read verb that answered `shape` with every part applied.
+///
+/// A part a verb could not apply is answered unsatisfied rather than refused,
+/// so an answer with one is a shape that did not run as asked.
+fn complete<R: std::fmt::Debug, W>(
+    shape: &str,
+    answered: Result<Answered<R, W>, ErrorEnvelope>,
+) -> R {
+    let answered =
+        answered.unwrap_or_else(|refusal| panic!("the {shape} shape was refused: {refusal:?}"));
+    assert!(
+        answered.answer.is_complete(),
+        "the {shape} shape left parts unapplied: {:?}",
+        answered.answer.unsatisfied
+    );
+    answered.answer.report
+}
+
+/// A wikilink one of `rows` carries, written as a bare stem that resolves to
+/// exactly one document: the stem, the document it resolves to, and the row
+/// that carries it.
+fn a_linked_stem(rows: &[DocumentRow]) -> Option<(String, DocumentPath, DocumentPath)> {
+    rows.iter().find_map(|row| {
+        let links = row.links.as_ref()?;
+        links.items.iter().find_map(|link| {
+            let bare = link.family == LinkFamily::Wikilink
+                && link.protocol.is_none()
+                && link.anchor.is_none()
+                && !link.target.contains('/');
+            match link.targets.candidates() {
+                [only] if bare && link.health() == LinkHealth::Healthy => {
+                    Some((link.target.clone(), only.path.clone(), row.path.clone()))
+                }
+                _ => None,
+            }
+        })
+    })
+}
+
+/// What a reading child reports: how many rows each shape of [`READ_SHAPES`]
+/// answered, one line per shape.
 #[derive(Debug, Default, Eq, PartialEq)]
 struct ReadReport {
-    rows: u64,
-    pages: u64,
+    answered: BTreeMap<String, usize>,
 }
 
 impl ReadReport {
-    /// The line the child prints.
-    fn line(&self) -> String {
-        format!("read {} rows hydrated over {} pages", self.rows, self.pages)
+    /// Record that `shape` answered `rows`.
+    fn answered(&mut self, shape: &str, rows: usize) {
+        self.answered.insert(shape.to_string(), rows);
     }
 
-    /// The report a child's output carries, refused where it carries none or
-    /// one of a read that hydrated nothing: a peak over a read that did not
-    /// happen is a peak over an attach.
+    /// The lines the child prints.
+    fn lines(&self) -> String {
+        self.answered
+            .iter()
+            .map(|(shape, rows)| format!("read {shape} answered {rows}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The report a child's output carries, refused where it carries none, where
+    /// a line is no report, and where a shape of [`READ_SHAPES`] is missing or
+    /// answered nothing: a peak over a shape that did not run is a peak over the
+    /// shapes that did.
     fn from_stdout(stdout: &str) -> Result<Self, String> {
-        let Some(line) = stdout.lines().find(|line| line.starts_with("read ")) else {
+        let mut report = ReadReport::default();
+        for line in stdout.lines().filter(|line| line.starts_with("read ")) {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let ["read", shape, "answered", rows] = tokens.as_slice() else {
+                return Err(format!(
+                    "the read harness reported `{line}`, which is no read report"
+                ));
+            };
+            let rows = rows
+                .parse::<usize>()
+                .map_err(|problem| format!("the read harness reported `{line}`: {problem}"))?;
+            report.answered(shape, rows);
+        }
+        if report.answered.is_empty() {
             return Err(format!("the read harness reported no read: {stdout}"));
-        };
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        let ["read", rows, "rows", "hydrated", "over", pages, "pages"] = tokens.as_slice() else {
+        }
+        for shape in READ_SHAPES {
+            match report.answered.get(shape) {
+                None => return Err(format!("the read harness ran no {shape} shape: {stdout}")),
+                Some(0) => {
+                    return Err(format!(
+                        "the read harness's {shape} shape answered nothing, so its peak is a peak \
+                         over the other shapes"
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        if let Some(stray) = report
+            .answered
+            .keys()
+            .find(|shape| !READ_SHAPES.contains(&shape.as_str()))
+        {
             return Err(format!(
-                "the read harness reported `{line}`, which is no read report"
-            ));
-        };
-        let count = |text: &str| {
-            text.parse::<u64>()
-                .map_err(|problem| format!("the read harness reported `{line}`: {problem}"))
-        };
-        let report = ReadReport {
-            rows: count(rows)?,
-            pages: count(pages)?,
-        };
-        if report.rows == 0 || report.pages == 0 {
-            return Err(format!(
-                "the read harness reported `{line}`, a read that hydrated nothing, so its peak is \
-                 an attach's"
+                "the read harness reported a `{stray}` shape the mix does not name"
             ));
         }
         Ok(report)
     }
 }
 
-/// **The parent refuses a peak it cannot tie to a read.** A child whose output
-/// carries no report, or a report of a read that hydrated no row, fails the
-/// bar rather than passing it as a cheap read; a report the child printed is
-/// read back as printed.
+/// **The parent refuses a peak it cannot tie to every shape of the mix.** A
+/// child whose output carries no report, a report missing a shape, or one of
+/// a shape that answered nothing fails the bar rather than passing it as a
+/// cheap read; a report the child printed is read back as printed.
 #[test]
-fn a_read_peak_stands_only_on_a_report_of_rows_read() {
-    let printed = ReadReport {
-        rows: 200,
-        pages: 8,
-    };
+fn a_read_peak_stands_only_on_a_report_of_every_shape_answering() {
+    let mut printed = ReadReport::default();
+    for shape in READ_SHAPES {
+        printed.answered(shape, 3);
+    }
     assert_eq!(
-        ReadReport::from_stdout(&format!("running 1 test\n{}\ntest ok\n", printed.line())),
+        ReadReport::from_stdout(&format!("running 1 test\n{}\ntest ok\n", printed.lines())),
         Ok(printed)
     );
 
     let missing = ReadReport::from_stdout("running 1 test\ntest ok\n").expect_err("no report");
     assert!(missing.contains("reported no read"), "{missing}");
 
-    let empty = ReadReport::from_stdout(&ReadReport { rows: 0, pages: 1 }.line())
-        .expect_err("a read of no row");
-    assert!(empty.contains("hydrated nothing"), "{empty}");
+    let mut short = ReadReport::default();
+    for shape in &READ_SHAPES[1..] {
+        short.answered(shape, 3);
+    }
+    let absent = ReadReport::from_stdout(&short.lines()).expect_err("a shape the child never ran");
+    assert!(absent.contains("ran no find shape"), "{absent}");
+
+    let mut idle = ReadReport::default();
+    for shape in READ_SHAPES {
+        idle.answered(shape, usize::from(shape != "validate"));
+    }
+    let empty = ReadReport::from_stdout(&idle.lines()).expect_err("a shape that answered nothing");
+    assert!(empty.contains("validate shape answered nothing"), "{empty}");
 
     let garbled =
         ReadReport::from_stdout("read everything\n").expect_err("a line that is no report");
