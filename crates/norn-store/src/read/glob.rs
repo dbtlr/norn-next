@@ -14,11 +14,13 @@
 //!
 //! A glob matches under the order the snapshot reads, the store's recorded
 //! path order: bytewise where the root tells spellings apart, and with ASCII
-//! case folded where it folds them ([`StoredPathOrder::glob_case`]). The range
-//! follows: a bytewise range of the path as written where the root tells
-//! spellings apart, and where it folds, a `NOCASE` range of the literal prefix
-//! with ASCII case folded, which `documents_path_nocase` and the folded findings
-//! index seek.
+//! case folded where it folds them ([`StoredPathOrder::glob_case`]). A find's
+//! and a count's range follow: a bytewise range of the path as written on
+//! `documents_path` where the root tells spellings apart, and where it folds,
+//! a `NOCASE` range of the literal prefix with ASCII case folded on
+//! `documents_path_nocase`. A validate's range is the folded one on every
+//! root, because its findings answer in the folded order the findings indexes
+//! hold; the glob still decides each path under the root's fold.
 
 use norn_db::rusqlite::functions::FunctionFlags;
 use norn_db::rusqlite::types::{Value, ValueRef};

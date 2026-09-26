@@ -73,15 +73,16 @@
 //! the vault's own order, so the two sides need one total order — and a page
 //! has to *seek* into that order, because a page that sorts for it has read
 //! everything the scope holds before returning its first row. A find's path
-//! page reads it in page order, and on a vault that folds ASCII case the path
-//! part of a find or a count, and a bare-directory probe, seeks the `NOCASE`
-//! range of its glob's folded literal prefix in it, so a glob reaches every
-//! spelling of that prefix the vault treats as one name — a validate's path
-//! part judges a finding's path, and seeks the findings' folded twin
-//! ([`crate::ddl::findings`]). It is
-//! declared for every store, folding vault or not: the schema is one statement list, the
-//! fold is a per-read parameter, and DDL conditional on a vault the store has
-//! not been shown is a shape no fingerprint could state.
+//! page and a field sort's missing section read it in page order on every
+//! root, because an answer orders paths folded wherever it is read; and on a
+//! vault that folds ASCII case the path part of a find or a count, and a
+//! bare-directory probe, seeks the `NOCASE` range of its glob's folded literal
+//! prefix in it, so a glob reaches every spelling of that prefix the vault
+//! treats as one name — a validate's path part judges a finding's path, and
+//! seeks the findings' folded indexes ([`crate::ddl::findings`]). It is
+//! declared for every store, folding vault or not: the schema is one statement
+//! list, the fold is a per-read parameter, and DDL conditional on a vault the
+//! store has not been shown is a shape no fingerprint could state.
 //!
 //! The bytewise tie-break is load-bearing rather than decorative. `documents_path`
 //! is unique under `BINARY`, so `A.md` and `a.md` can both hold rows even on a
