@@ -788,23 +788,25 @@ pub const FD_BUDGET: usize = 12;
 /// calibration window for it to open.
 pub const SOAK_RECOVERY_DOSE: u32 = 1;
 
-/// How many times any one read acquisition may read its entry's published
-/// demand again: the rounds of the entry gate it takes, less its first.
+/// How many rounds of its entry gate any one read acquisition may take after
+/// its first.
 ///
-/// **The re-reading term of the read-concurrency bar.** No acquisition waits
-/// for its entry's connection while it holds the entry gate: one that finds
-/// the connection taken gives the gate back, waits, takes the gate again and
-/// reads the published demand afresh before it establishes, because the demand
-/// it read first describes an instant it no longer answers under. That second
-/// round's reading is the priced cost of contention. Each acquisition counts
-/// its own rounds, and `counter_gate.rs`'s `overlapping reads on one entry`
+/// **The contention-rounds term of the read-concurrency bar.** No acquisition
+/// waits for its entry's connection while it holds the entry gate: one that
+/// finds the connection taken gives the gate back, waits, and takes the gate
+/// again, and in that round it reads afresh the demand its entry publishes,
+/// because the demand it read first describes an instant it no longer answers
+/// under. That round, a hold of the gate taken again, is the priced cost of
+/// contention. Each acquisition counts its own rounds and records them where
+/// it leaves, and `counter_gate.rs`'s `overlapping reads on one entry`
 /// workload reads the widest any one acquisition took off the host's read
 /// account and holds it to this. Beside the ceiling the workload holds a
-/// floor: the window's re-readings equal its waits, so a contended acquisition
-/// that re-read nothing fails too.
+/// floor: the window's rounds after the first equal its waits, so a contended
+/// acquisition that answered under the demand it read before it waited fails
+/// too.
 ///
-/// Observed: **one re-reading per contended acquisition**, a widest of 1 and
-/// 8 re-readings over 8 waits, in every local run of that case on
+/// Observed: **one round after the first per contended acquisition**, a widest
+/// of 1 and 8 such rounds over 8 waits, in every local run of that case on
 /// macos-arm64. It is a count rather than a clock or a resident set, so it
 /// reads the same on a loaded runner as on an idle one, and there is no band
 /// to author around.
@@ -817,7 +819,7 @@ pub const SOAK_RECOVERY_DOSE: u32 = 1;
 /// **Platform scope: every platform.** A count is not a machine's reading, so
 /// under ADR 0004 it may gate a pull request. The per-PR `counter gates` job on
 /// `ubuntu-latest` x86_64-glibc is where it gates.
-pub const READ_DEMAND_REREADINGS_PER_CONTENDED_ACQUISITION: u64 = 1;
+pub const READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION: u64 = 1;
 
 /// Whether a reading fits under an authored ceiling.
 ///

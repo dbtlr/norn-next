@@ -4268,7 +4268,8 @@ impl<O: EntryOps> Host<O> {
     /// this read is holding the connection by then, so nothing else can be
     /// establishing — and it ends either in the establishment or in the
     /// connection going back with a refusal. There is no third outcome, so
-    /// there is no round after it.
+    /// there is no round after it. The acquisition counts the rounds it takes
+    /// and records them once, where it leaves, on every way out.
     ///
     /// **A read is demand the way a client's demand is**, served or refused.
     /// It records a lease, restarts the idle interval, withdraws an idle
@@ -4314,9 +4315,8 @@ impl<O: EntryOps> Host<O> {
             StatementsUnderEarlierRounds::NONE,
         );
         // This acquisition's own count of the rounds of the gate it takes,
-        // moved at each take: the published demand is read once per round, so
-        // every round after the first is a re-reading contention cost.
-        let mut gate_rounds: u64 = 1;
+        // recorded once where the acquisition leaves, whichever way it leaves.
+        let mut rounds = AcquisitionRounds::first(&self.shared.reads);
         // An entry taken out of service after the lookup above answers with
         // its out-of-service answer, and records nothing against itself.
         if let Some(answer) = state.withdrawal_answer() {
@@ -4401,18 +4401,23 @@ impl<O: EntryOps> Host<O> {
                 // waiting rather than once another read has let it through.
                 self.shared.reads.count_reader_wait();
                 let turn = reader.wait_for_the_connection();
-                state = entry.gate.lock().expect("entry gate poisoned");
-                opening = HoldOpening::read(&entry.gate, earlier);
-                gate_rounds += 1;
-                // The connection is this read's from here, so this hold is the
-                // hold that establishes and nothing else can be establishing
-                // under it. What may have moved is the entry: re-read what it
-                // publishes, and check that the handle waited for is still the
-                // handle its reads run on — a rung-3 rebuild swaps one for
-                // another while the entry goes on serving, and a teardown
-                // takes the entry out of service while the handle stands.
-                self.shared.reads.count_demand_rereading(gate_rounds);
-                let published = state.published_demand();
+                // The connection is this read's from here, so this round is
+                // the round that establishes and nothing else can be
+                // establishing under it. What may have moved is the entry: the
+                // round reads afresh what it publishes, and the handle waited
+                // for is checked to still be the handle its reads run on. A
+                // rung-3 rebuild swaps one for another while the entry goes on
+                // serving, and a teardown takes the entry out of service while
+                // the handle stands.
+                //
+                // The two refusals below report nothing of what this round and
+                // the first ran under the gate, because that is zero by
+                // construction. The first round's one act against a database
+                // is the mint, whose connection counts nothing until it is a
+                // handle's and whose statements its own report carries, and
+                // this round runs nothing before either refusal.
+                let published;
+                (state, opening, published) = rounds.take_the_gate_again(&entry.gate, earlier);
                 if published != Demand::State(TrustState::Ready) {
                     // The connection goes back with the turn, before the gate
                     // does: the read waiting for it is woken by that and takes
@@ -4579,6 +4584,62 @@ struct HoldOpening<R> {
     gate_taken: u64,
     earlier: StatementsUnderEarlierRounds,
     reader: PhantomData<fn() -> R>,
+}
+
+/// One read acquisition's rounds of its entry gate.
+///
+/// **The cost of contention is a round of the gate, not a read of the
+/// demand.** An acquisition that finds its entry's connection taken gives the
+/// gate back, waits, and takes the gate again, and in that round it reads
+/// afresh the demand its entry publishes, because the demand it read first
+/// describes an instant it no longer answers under. That reading is an
+/// in-memory read under a hold already taken; the hold is what the acquisition
+/// paid for, so the round is what is counted.
+/// [`AcquisitionRounds::take_the_gate_again`] is the one way an acquisition
+/// takes a round after its first, and it takes the gate, opens the round's
+/// readings and reads the demand together, so a round after the first is
+/// counted and reads the demand by construction.
+///
+/// **The rounds are recorded once, where this drops**, which is where the
+/// acquisition leaves whichever way it leaves: served, refused before the wait
+/// or after it, or unwound. The read account adds the rounds after the first
+/// to its total and widens its per-acquisition maximum with them.
+struct AcquisitionRounds<'r> {
+    reads: &'r ReadEvidence,
+    taken: u64,
+}
+
+impl<'r> AcquisitionRounds<'r> {
+    /// An acquisition that has taken its first round of the gate.
+    fn first(reads: &'r ReadEvidence) -> Self {
+        AcquisitionRounds { reads, taken: 1 }
+    }
+
+    /// Take the entry gate again once the wait for the connection has ended:
+    /// the guard, the round's readings opened on the take and carrying what
+    /// the earlier rounds ran, and the demand the entry publishes now.
+    fn take_the_gate_again<'g, A: SnapshotSource>(
+        &mut self,
+        gate: &'g EntryGate<EntryState<A>>,
+        earlier: StatementsUnderEarlierRounds,
+    ) -> (
+        MutexGuard<'g, EntryState<A>>,
+        HoldOpening<A::Reader>,
+        Demand,
+    ) {
+        let state = gate.lock().expect("entry gate poisoned");
+        let opening = HoldOpening::read(gate, earlier);
+        self.taken = self.taken.saturating_add(1);
+        let published = state.published_demand();
+        (state, opening, published)
+    }
+}
+
+impl Drop for AcquisitionRounds<'_> {
+    fn drop(&mut self) {
+        self.reads
+            .count_gate_rounds_after_the_first(self.taken.saturating_sub(1));
+    }
 }
 
 /// Statements an acquisition's earlier rounds of the entry gate ran, carried
@@ -6619,7 +6680,7 @@ mod tests {
         /// sets it, and the number it sets is that case's own.
         mint_statements: AtomicU64,
         /// Where an establishment is held, so a case can observe what the
-        /// acquisition holds while the one statement runs.
+        /// acquisition holds while the establishment's statements run.
         establishing: Mutex<EstablishGate>,
         /// Woken when a parked establishment arrives, and when one is
         /// released.
@@ -17781,7 +17842,10 @@ mod tests {
             "the account did not name the read that waited for the connection"
         );
         assert_eq!(
-            (reading.demand_rereadings, reading.widest_demand_rereadings),
+            (
+                reading.gate_rounds_after_the_first,
+                reading.widest_gate_rounds_after_the_first
+            ),
             (1, 1),
             "the read that waited took other than one round of the gate after its first"
         );
@@ -17831,9 +17895,12 @@ mod tests {
                 "the read counted as waiting finished while the connection was still held"
             );
             assert_eq!(
-                host.read_evidence().since(before).demand_rereadings,
+                host.read_evidence()
+                    .since(before)
+                    .gate_rounds_after_the_first,
                 0,
-                "a read still waiting for the connection read the published demand again"
+                "a read still waiting for the connection recorded its rounds of the gate before \
+                 it left"
             );
             drop(first);
             drop(waiting.join().expect("the waiting read finished"));
@@ -17845,9 +17912,9 @@ mod tests {
             "letting the waiting read through moved the contention reading again"
         );
         assert_eq!(
-            reading.demand_rereadings, 1,
-            "the contended read did not read the published demand again exactly once, or the \
-             read that found the connection free read it again"
+            reading.gate_rounds_after_the_first, 1,
+            "the contended read did not take exactly one round of the gate after its first, or \
+             the read that found the connection free took one"
         );
     }
 
@@ -17911,13 +17978,13 @@ mod tests {
             "the wait the refused acquisition paid is missing from the account"
         );
         assert_eq!(
-            reading.demand_rereadings, 1,
-            "the re-reading that refused the acquisition is missing from the account"
+            reading.gate_rounds_after_the_first, 1,
+            "the round the refused acquisition took after its wait is missing from the account"
         );
         assert_eq!(
-            host.read_evidence().widest_demand_rereadings,
+            host.read_evidence().widest_gate_rounds_after_the_first,
             1,
-            "an acquisition took more than one round of the gate after its first"
+            "an acquisition took other than one round of the gate after its first"
         );
     }
 
@@ -18097,9 +18164,13 @@ mod tests {
             "the wait the refused acquisition paid is missing from the account"
         );
         assert_eq!(
-            host.read_evidence().widest_demand_rereadings,
+            reading.gate_rounds_after_the_first, 1,
+            "the round the refused acquisition took after its wait is missing from the account"
+        );
+        assert_eq!(
+            host.read_evidence().widest_gate_rounds_after_the_first,
             1,
-            "an acquisition took more than one round of the gate after its first"
+            "an acquisition took other than one round of the gate after its first"
         );
     }
 

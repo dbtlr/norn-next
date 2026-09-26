@@ -260,9 +260,14 @@ impl Database {
     /// the connection is counted whoever composed it and whether or not it
     /// answered, and nothing beside the statement has to remember to count it.
     /// Transaction control is among what it counts: a `BEGIN`, a `COMMIT` and
-    /// a `ROLLBACK` are each a statement SQLite runs. A statement refused
-    /// before SQLite begins it, at preparation or by a caller that answered
-    /// without running it, is not counted.
+    /// a `ROLLBACK` are each a statement SQLite runs. So are the statements a
+    /// virtual table such as FTS5 runs on the connection inside a statement of
+    /// the caller's: the trace reports each as a statement of its own. A
+    /// statement refused before SQLite begins it, at preparation or by a
+    /// caller that answered without running it, is not counted, and neither
+    /// is an `EXPLAIN`, which compiles its query and does not run it, or the
+    /// reading of its schema SQLite runs when it loads the schema again: the
+    /// trace reports neither.
     ///
     /// **The count is the running thread's**, and a connection is `!Sync`, so
     /// a thread that holds a connection's only turn and reads the count on

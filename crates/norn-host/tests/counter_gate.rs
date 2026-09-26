@@ -64,7 +64,7 @@
 //!   establishment reports it, and the gate's own take count reads no retake
 //!   between those two readings, so the hold they bound is one hold; the
 //!   reader-wait reading is eight; and each contended acquisition took exactly
-//!   one re-reading of the published demand, no one of them more than the
+//!   one round of the entry gate after its first, no one of them more than the
 //!   ceiling authored in this crate's baselines. The control runs the same
 //!   reads one after another and must fail on contention alone.
 //!
@@ -1526,9 +1526,9 @@ struct ConcurrencyReadings {
     /// The most statements any one acquisition ran under the gate, over the
     /// host's life. The host is the workload's own, so its life is the window.
     widest_statements_under_the_gate: u64,
-    /// The most re-readings of the published demand any one acquisition took,
-    /// over the host's life.
-    widest_demand_rereadings: u64,
+    /// The most rounds of the entry gate any one acquisition took after its
+    /// first, over the host's life.
+    widest_gate_rounds_after_the_first: u64,
     /// What the establishments reported about themselves: the statements each
     /// served read's snapshot had run when its hold was handed over, summed.
     /// A snapshot counts its query work, so this is the establishing
@@ -1627,7 +1627,7 @@ fn overlapping_reads(
     ConcurrencyReadings {
         window: life.since(before),
         widest_statements_under_the_gate: life.widest_statements_under_the_gate,
-        widest_demand_rereadings: life.widest_demand_rereadings,
+        widest_gate_rounds_after_the_first: life.widest_gate_rounds_after_the_first,
         established_statements: answered.iter().map(|(established, _)| established).sum(),
         connection_statements: answered.iter().map(|(_, ran)| ran).sum(),
     }
@@ -1655,11 +1655,12 @@ const READS_CONTEND_LIMIT: Duration = Duration::from_secs(60);
 ///   term is read between bound one hold of the gate.
 /// - **Contention, measured.** Every overlapping read is in the reader-wait
 ///   reading: exactly [`OVERLAPPING_READS`], and so nonzero.
-/// - **Each contended acquisition took exactly one re-reading.** No one
-///   acquisition took more than the authored ceiling,
-///   [`baselines::READ_DEMAND_REREADINGS_PER_CONTENDED_ACQUISITION`], and the
-///   window's re-readings equal its waits, so a contended acquisition that
-///   re-read nothing fails as surely as one that re-read twice.
+/// - **Each contended acquisition took exactly one round after its first.**
+///   No one acquisition took more than the authored ceiling,
+///   [`baselines::READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION`], and the
+///   window's rounds after the first equal its waits, so a contended
+///   acquisition that answered under the demand it read before it waited
+///   fails as surely as one that took two rounds after its first.
 fn the_read_concurrency_bar_fails(readings: &ConcurrencyReadings) -> Vec<String> {
     let window = readings.window;
     let served = OVERLAPPING_READS + 1;
@@ -1716,14 +1717,16 @@ fn the_read_concurrency_bar_fails(readings: &ConcurrencyReadings) -> Vec<String>
             window.reader_waits
         ));
     }
-    let ceiling = baselines::READ_DEMAND_REREADINGS_PER_CONTENDED_ACQUISITION;
-    if !baselines::fits(readings.widest_demand_rereadings, ceiling)
-        || window.demand_rereadings != window.reader_waits
+    let ceiling = baselines::READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION;
+    if !baselines::fits(readings.widest_gate_rounds_after_the_first, ceiling)
+        || window.gate_rounds_after_the_first != window.reader_waits
     {
         failed.push(format!(
-            "{} contended acquisitions re-read the published demand {} times, one of them {} \
-             times, where each takes exactly one and none more than the ceiling of {ceiling}",
-            window.reader_waits, window.demand_rereadings, readings.widest_demand_rereadings
+            "{} contended acquisitions took {} rounds of the gate after their first, one of \
+             them {}, where each takes exactly one and none more than the ceiling of {ceiling}",
+            window.reader_waits,
+            window.gate_rounds_after_the_first,
+            readings.widest_gate_rounds_after_the_first
         ));
     }
     failed
@@ -1758,10 +1761,13 @@ fn record_the_concurrency_readings(heading: &str, readings: &ConcurrencyReadings
             window.gate_retakes_within_establishing_holds,
         ),
         ("reader_waits", window.reader_waits),
-        ("demand_rereadings", window.demand_rereadings),
         (
-            "widest_demand_rereadings",
-            readings.widest_demand_rereadings,
+            "gate_rounds_after_the_first",
+            window.gate_rounds_after_the_first,
+        ),
+        (
+            "widest_gate_rounds_after_the_first",
+            readings.widest_gate_rounds_after_the_first,
         ),
     ]
     .into_iter()
@@ -1781,12 +1787,13 @@ fn record_the_concurrency_readings(heading: &str, readings: &ConcurrencyReadings
 /// it began on the holding thread on both sides of the hold, so a statement
 /// SQLite runs on the connection under the gate is counted however it was
 /// composed, and an establishing statement moved before or after the hold is
-/// not, while the establishment's own report still reads one. The gate's own take count is
-/// read at the same two points, so an establishment run while the hold let the
-/// gate go and took it back reads a retake. Reader contention is the
-/// reader-wait reading, and it names every overlapping read. Each contended
-/// acquisition took exactly one re-reading of the published demand, none more
-/// than [`baselines::READ_DEMAND_REREADINGS_PER_CONTENDED_ACQUISITION`].
+/// not, while the establishment's own report still reads one. The gate's own
+/// take count is read at the same two points, so an establishment run while
+/// the hold let the gate go and took it back reads a retake. Reader contention
+/// is the reader-wait reading, and it names every overlapping read. Each
+/// contended acquisition took exactly one round of the entry gate after its
+/// first, none more than
+/// [`baselines::READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION`].
 ///
 /// **The control removes the overlap.** The same reads run one after another
 /// on the same entry, and the bar must then fail on contention and on nothing

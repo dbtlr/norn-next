@@ -233,12 +233,15 @@ impl SnapshotReader {
     ///
     /// **SQLite counts them, not the code beside each statement.** A handle's
     /// connection counts its statements from the moment the handle is minted,
-    /// through [`Database::count_statements_begun`], so every statement run on
-    /// it is counted as SQLite begins it: a snapshot's `BEGIN`, its
-    /// establishing statement, each statement a read builder runs on it, and
-    /// the `ROLLBACK` that ends it. The mint's own statements run before the
-    /// connection counts and are not among them; [`ReaderMint::statements`]
-    /// carries those.
+    /// through [`Database::count_statements_begun`], so every statement
+    /// SQLite's statement trace reports on it is counted as SQLite begins it:
+    /// a snapshot's `BEGIN`, its establishing statement, each statement a read
+    /// builder runs on it, the statements FTS5 runs inside a full-text match,
+    /// and the `ROLLBACK` that ends it. The trace does not report an
+    /// `EXPLAIN`, which compiles its query and does not run it, or the reading
+    /// of its schema SQLite runs when it loads the schema again, so neither is
+    /// counted. The mint's own statements run before the connection counts and
+    /// are not among them; [`ReaderMint::statements`] carries those.
     ///
     /// **The count is the thread's, not the handle's.** A connection runs on
     /// one thread at a time and a turn is one read's, so a caller that holds a

@@ -1807,57 +1807,63 @@ and it would make the read path a second spelling of an open the substrate has o
 of. A read pays it at most once: one open per read that meets an empty slot, no retry inside
 it, and a mint that fails there leaves the reason that read refuses with.
 
-**The read account reports what an acquisition runs under the gate act by act, and reports
-it whichever way the acquisition left.** The host keeps three readings: the statements SQLite
-ran to establish the snapshots of the reads it served, which are exactly two each, the
-deferred `BEGIN` that reads no row and the one establishing statement, and are what the
-structural bar on gate-held query work is stated against; the statements the read
-path's mints ran, which are the repair's own cost and are zero on a host whose reads all
-found a handle standing; and the statements establishments ran before refusing, which served
-no read and held the gate all the same. The refusals are in the account for the same reason
-the answers are — a mint or an establishment that met a busy database held the gate for the
-statement it waited on, which is precisely the case a ceiling exists to catch — and they are
-kept apart from the served reading so that reading stays exactly the reads it served. **What
-an establishment ran under the gate is the gate holder's own reading of SQLite's count**, not a
-count the establishment reports or the code beside each statement keeps: a handle's connection
-counts every statement SQLite begins on it, transaction control included, on the thread that
+**The read account reports what an acquisition runs under the gate act by act, and reports it
+whichever way the acquisition left.** The host keeps three readings: the statements SQLite ran
+to establish the snapshots of the reads it served, which are exactly two each, the deferred
+`BEGIN` that reads no row and the one establishing statement, and are what the structural bar
+on gate-held query work is stated against; the statements the read path's mints ran, which are
+the repair's own cost and are zero on a host whose reads all found a handle standing; and the
+statements establishments ran before refusing, which served no read and held the gate all the
+same. The refusals are in the account for the same reason the answers are — a mint or an
+establishment that met a busy database held the gate for the statement it waited on, which is
+precisely the case a ceiling exists to catch — and they are kept apart from the served reading
+so that reading stays exactly the reads it served. **What an establishment ran under the gate
+is the gate holder's own reading of SQLite's count**, not a count the establishment reports or
+the code beside each statement keeps: a handle's connection counts every statement SQLite's
+statement trace reports as it begins on it, transaction control included, on the thread that
 begins it, from the moment the mint makes it a handle, so the mint's own statements stay the
-mint's report. The acquisition reads its thread's count as each round takes the gate and again
-as the establishing round gives it back, carrying a round that let the gate go into the next
-and leaving the wait between them out. The connection's turn is taken under the gate and a
-connection runs on one thread at a time, so every statement SQLite runs on the read's connection
-under the gate is in the difference however it was composed, and an establishing statement
-moved before or after the hold is not. The entry gate counts every
-time it is taken, inside the lock and at the one lock site every holder goes through, and the
-acquisition reads that count at the same two points: a continuous hold reads no retake, and a
-hold that let the gate go and took it back around the establishment reads one. Beside
-them the account keeps the widest reading any one acquisition produced, its mint and its
-establishment together, which is the number a ceiling over one read is stated against.
-Beside the three the account also keeps the contention it measured: the acquisitions that
-gave the gate back and waited for the entry's one connection. That wait is counted where it begins, once the acquisition has given
+mint's report. The trace reports the statements FTS5 runs inside a full-text match as
+statements of their own; it does not report an `EXPLAIN`, which compiles its query and does
+not run it, or the reading of its schema SQLite runs when it loads the schema again. The
+acquisition reads its thread's count as each round takes the gate and again as the
+establishing round gives it back, carrying a round that let the gate go into the next and
+leaving the wait between them out. The connection's turn is taken under the gate and a
+connection runs on one thread at a time, so every statement SQLite runs on the read's
+connection under the gate is in the difference however it was composed, and an establishing
+statement moved before or after the hold is not. The entry gate counts every time it is taken,
+inside the lock and at the one lock site every holder goes through, and the acquisition reads
+that count at the same two points: a continuous hold reads no retake, and a hold that let the
+gate go and took it back around the establishment reads one. Beside them the account keeps the
+widest reading any one acquisition produced, its mint and its establishment together, which is
+the number a ceiling over one read is stated against. Beside the three the account also keeps
+the contention it measured: the acquisitions that gave the gate back and waited for the
+entry's one connection. That wait is counted where it begins, once the acquisition has given
 the gate back and found the connection taken: the wait returns only with the connection, so
 every wait counted ends, and a reading taken while reads contend already names each one
 waiting. An acquisition refused after it waited is in the contention reading and not in the
 served one; those are the paths contention is most likely to be interesting on, and a reading
-of served reads alone would under-report exactly there. An acquisition reads the published
-demand in every round of the gate it takes and counts its own rounds, so the account keeps
-the re-readings, the rounds after each acquisition's first, and the widest number of them
-any one acquisition took. A contended acquisition takes exactly one: it holds the connection
-from its second round on, so that round cannot contend again.
-**No act an acquisition runs is reported by no reading, whichever way the acquisition
-left**: the mint is accounted where the mint returns, the establishment where the hold it ran
-under gives the gate back, the wait where the wait begins, and a re-reading where it is taken.
+of served reads alone would under-report exactly there. A contended acquisition takes the gate
+again after its wait and reads the published demand afresh in that round; the round, a hold of
+the gate taken again, is the cost of contention, and the demand read inside it is an in-memory
+read under that hold. Each acquisition counts its own rounds and records them once, where it
+leaves, so the account keeps the rounds after each acquisition's first and the widest number
+of them any one acquisition took. A contended acquisition takes exactly one: it holds the
+connection from its second round on, so that round cannot contend again. **No act an
+acquisition runs is reported by no reading, whichever way the acquisition left**: the mint is
+accounted where the mint returns, the establishment where the hold it ran under gives the gate
+back, the wait where the wait begins, and the rounds of the gate where the acquisition leaves,
+on every way out.
 
 **The read-concurrency bar holds these readings under contention, over a production
 attachment.** The per-PR counter lane runs the overlapping-reads-on-one-entry workload:
 several reads start while one more holds the entry's one connection, and the hold is let go
 only once the reader-wait reading names every one of them as waiting. Each read served runs
 exactly its establishment's two statements under the gate by the holder's own reading, with
-the establishments' own reports checked apart, and no establishing hold reads a retake of the gate; the
-reader-wait reading is every overlapping read; and the re-readings equal the waits, with no
-one acquisition past a ceiling authored in `norn-host`'s baselines under the `read-` prefix.
-The same reads run one after another are the control, and the bar fails them on contention
-alone.
+the establishments' own reports checked apart, and no establishing hold reads a retake of the
+gate; the reader-wait reading is every overlapping read; and the rounds after the first equal
+the waits, with no one acquisition past a ceiling authored in `norn-host`'s baselines under
+the `read-` prefix. The same reads run one after another are the control, and the bar fails
+them on contention alone.
 
 A leg's publication runs the same mint as a read's repair, and its statements land in the
 host's account of its jobs rather than in the read account, so neither account moves for the

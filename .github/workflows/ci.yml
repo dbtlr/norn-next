@@ -204,8 +204,8 @@ jobs:
   # the gate holder reads SQLite's own count of what it began on the holding
   # thread on both sides of its hold, and the gate's own take count reads no
   # retake inside that hold; the reader-wait reading is eight; and each contended
-  # read took exactly one re-reading of the published demand, none past a
-  # ceiling authored in norn-host's baselines. Its control runs the same
+  # read took exactly one round of the entry gate after its first, none past
+  # a ceiling authored in norn-host's baselines. Its control runs the same
   # reads one after another and must fail on contention alone. All four are
   # counts: a counter says the same thing on a loaded runner, which a clock
   # does not.

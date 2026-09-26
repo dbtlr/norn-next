@@ -543,6 +543,12 @@ mod tests {
 /// No path out of an acquisition runs a statement under the gate, or waits out
 /// another read, and reports nothing.
 ///
+/// **The rounds of the gate an acquisition took are the one reading recorded
+/// where it leaves**, because the count is whole only there. It is recorded
+/// on every way out, served, refused before the wait or after it, and
+/// unwound, so a refused acquisition's rounds are in the account as a served
+/// one's are.
+///
 /// Every field is a running total for the host's whole life. Two of them are
 /// maxima rather than sums, which is why a window over this account carries
 /// neither: see [`ReadsSince`].
@@ -555,8 +561,8 @@ pub(crate) struct ReadEvidence {
     widest_statements_under_the_gate: AtomicU64,
     gate_retakes_within_establishing_holds: AtomicU64,
     reader_waits: AtomicU64,
-    demand_rereadings: AtomicU64,
-    widest_demand_rereadings: AtomicU64,
+    gate_rounds_after_the_first: AtomicU64,
+    widest_gate_rounds_after_the_first: AtomicU64,
 }
 
 /// What one acquisition read off SQLite's count of its thread and off its
@@ -657,27 +663,31 @@ pub struct ReadReading {
     /// acquisition waits for that connection while it holds the entry gate,
     /// and nothing here counts a wait for the gate itself.
     pub reader_waits: u64,
-    /// Readings of the published demand acquisitions took again, each in a
-    /// round of the entry gate taken after the acquisition's first.
+    /// Rounds of the entry gate acquisitions took after their first, summed
+    /// over acquisitions.
     ///
-    /// **One per contended acquisition, served or refused.** An acquisition
-    /// reads the published demand in every round of the gate it takes. The
-    /// first round is the one every acquisition takes; one that found the
+    /// **One per contended acquisition, served or refused.** Every
+    /// acquisition takes a first round of the gate. One that found the
     /// connection taken gives the gate back, waits, and takes a second round,
-    /// whose reading of the demand is the priced cost of contention because
-    /// the instant it first read is not the instant it answers under. So this
-    /// equals [`ReadReading::reader_waits`], and a count below it is a
-    /// contended acquisition that re-read nothing.
-    pub demand_rereadings: u64,
-    /// The most re-readings any one acquisition took: the rounds of the entry
-    /// gate it took, less its first.
+    /// in which it reads afresh the demand its entry publishes, because the
+    /// instant it first read is not the instant it answers under. That round
+    /// is the cost of contention: a hold of the gate taken again. The demand
+    /// read inside it is an in-memory read under that hold, so the round is
+    /// what is counted, and a round is the one way an acquisition reads the
+    /// demand again. Each acquisition counts its own rounds and records them
+    /// once, where it leaves. So this equals [`ReadReading::reader_waits`],
+    /// and a count below it is a contended acquisition that answered under
+    /// the demand it read before it waited.
+    pub gate_rounds_after_the_first: u64,
+    /// The most rounds of the entry gate any one acquisition took after its
+    /// first.
     ///
     /// **One, or none.** A contended acquisition holds the connection from
     /// its second round on, so that round cannot contend and ends in the
     /// establishment or a refusal. A reading above one is an acquisition that
-    /// took a round the read path does not have, and it is counted per
+    /// took a round the read path does not have, and it is read per
     /// acquisition so that one taking two cannot hide beside one taking none.
-    pub widest_demand_rereadings: u64,
+    pub widest_gate_rounds_after_the_first: u64,
 }
 
 /// What happened between an earlier reading of a host's read account and a
@@ -708,9 +718,9 @@ pub struct ReadsSince {
     /// Times an entry gate was taken again inside this window's establishing
     /// holds.
     pub gate_retakes_within_establishing_holds: u64,
-    /// Readings of the published demand this window's acquisitions took in a
-    /// round of the gate after their first.
-    pub demand_rereadings: u64,
+    /// Rounds of the entry gate this window's acquisitions took after their
+    /// first, recorded where each acquisition left.
+    pub gate_rounds_after_the_first: u64,
 }
 
 impl ReadReading {
@@ -731,9 +741,9 @@ impl ReadReading {
             gate_retakes_within_establishing_holds: self
                 .gate_retakes_within_establishing_holds
                 .saturating_sub(earlier.gate_retakes_within_establishing_holds),
-            demand_rereadings: self
-                .demand_rereadings
-                .saturating_sub(earlier.demand_rereadings),
+            gate_rounds_after_the_first: self
+                .gate_rounds_after_the_first
+                .saturating_sub(earlier.gate_rounds_after_the_first),
         }
     }
 }
@@ -754,8 +764,8 @@ impl ReadEvidence {
                 &self.gate_retakes_within_establishing_holds
             ),
             reader_waits: get(&self.reader_waits),
-            demand_rereadings: get(&self.demand_rereadings),
-            widest_demand_rereadings: get(&self.widest_demand_rereadings),
+            gate_rounds_after_the_first: get(&self.gate_rounds_after_the_first),
+            widest_gate_rounds_after_the_first: get(&self.widest_gate_rounds_after_the_first),
         }
     }
 
@@ -855,18 +865,19 @@ impl ReadEvidence {
         self.reader_waits.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record that one acquisition took a round of its entry gate after its
-    /// first and read the published demand again in it.
+    /// Record the rounds of its entry gate one acquisition took after its
+    /// first.
     ///
-    /// **`gate_rounds` is the acquisition's own count** of the rounds it has
-    /// taken, this one included, so one call is one re-reading in the total
+    /// **This is called once per acquisition, where it leaves**, with the
+    /// acquisition's own count of its rounds, so the total is the rounds taken
     /// and the widest is what one acquisition took rather than a ratio over
-    /// many: an acquisition taking two re-readings reads two there however
-    /// many beside it took none.
-    pub(crate) fn count_demand_rereading(&self, gate_rounds: u64) {
-        self.demand_rereadings.fetch_add(1, Ordering::Relaxed);
-        self.widest_demand_rereadings
-            .fetch_max(gate_rounds.saturating_sub(1), Ordering::Relaxed);
+    /// many: an acquisition taking two reads two there however many beside it
+    /// took none.
+    pub(crate) fn count_gate_rounds_after_the_first(&self, rounds: u64) {
+        self.gate_rounds_after_the_first
+            .fetch_add(rounds, Ordering::Relaxed);
+        self.widest_gate_rounds_after_the_first
+            .fetch_max(rounds, Ordering::Relaxed);
     }
 
     /// Record that one read was served.

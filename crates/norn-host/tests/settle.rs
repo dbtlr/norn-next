@@ -291,8 +291,8 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             "READ_OVER_ATTACH_PEAK_RSS_PER_MILLE" => {
                 always_authored(baselines::READ_OVER_ATTACH_PEAK_RSS_PER_MILLE)
             }
-            "READ_DEMAND_REREADINGS_PER_CONTENDED_ACQUISITION" => {
-                always_authored(baselines::READ_DEMAND_REREADINGS_PER_CONTENDED_ACQUISITION)
+            "READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION" => {
+                always_authored(baselines::READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION)
             }
             other => panic!(
                 "the ledger names `{other}` in this crate's baselines and nothing here holds its \
@@ -422,12 +422,12 @@ fn a_reading_past_a_ceiling_is_refused_by_the_comparison_every_bar_makes() {
     assert!(baselines::fits(retention, retention));
     assert!(!baselines::fits(retention + 1, retention));
 
-    // The re-reading ceiling is a count per acquisition, and the counter lane
-    // compares the widest any one acquisition took against it: a count
-    // against a count.
-    let rereadings = baselines::READ_DEMAND_REREADINGS_PER_CONTENDED_ACQUISITION;
-    assert!(baselines::fits(rereadings, rereadings));
-    assert!(!baselines::fits(rereadings + 1, rereadings));
+    // The contention-rounds ceiling is a count per acquisition, and the
+    // counter lane compares the widest any one acquisition took against it: a
+    // count against a count.
+    let rounds = baselines::READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION;
+    assert!(baselines::fits(rounds, rounds));
+    assert!(!baselines::fits(rounds + 1, rounds));
 
     let dose = baselines::SOAK_RECOVERY_DOSE;
     assert!(baselines::fits(dose, dose));
