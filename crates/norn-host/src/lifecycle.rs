@@ -166,9 +166,9 @@ pub trait ReadSource: Send + Sync + 'static {
     /// reads it once it holds both the entry gate and the connection's turn,
     /// and again as it gives the gate back; nothing else runs on the
     /// connection while the turn is the read's, so the difference is what ran
-    /// under that hold. A statement run anywhere else — before the hold, or
-    /// after the gate is given back — is outside the two readings, whatever the
-    /// establishment would say about itself.
+    /// under that hold. A statement run before the hold, or after the gate is
+    /// given back, is outside the two readings, whatever the establishment
+    /// would say about itself.
     fn statements_run(&self) -> u64;
 
     /// Establish the snapshot this read answers from, on a turn already taken,

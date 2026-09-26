@@ -1816,20 +1816,38 @@ found a handle standing; and the statements establishments ran before refusing, 
 no read and held the gate all the same. The refusals are in the account for the same reason
 the answers are — a mint or an establishment that met a busy database held the gate for the
 statement it waited on, which is precisely the case a ceiling exists to catch — and they are
-kept apart from the served reading so that reading stays exactly the reads it served. Beside
+kept apart from the served reading so that reading stays exactly the reads it served. **What
+an establishment ran under the gate is the gate holder's own reading**, not a count the
+establishment reports: the acquisition reads its handle's statement count once it holds both
+the gate and the connection's turn, and again as it gives the gate back, and nothing else runs
+on a connection whose turn is taken, so the difference is what ran under that hold and an
+establishing statement moved outside the hold reads zero. Beside
 them the account keeps the widest reading any one acquisition produced, its mint and its
 establishment together, which is the number a ceiling over one read is stated against.
 Beside the three the account also keeps the contention it measured: the acquisitions that
 gave the gate back and waited for the entry's one connection, and the widest such wait any
 one acquisition paid — which is one or none, because an acquisition waits once and holds the
-connection from there. That wait is counted where the wait ends, so an acquisition refused
-after it waited is in the contention reading and not in the served one; those are the paths
-contention is most likely to be interesting on, and a reading of served reads alone would
-under-report exactly there.
+connection from there. That wait is counted where it begins, once the acquisition has given
+the gate back and found the connection taken: the wait returns only with the connection, so
+every wait counted ends, and a reading taken while reads contend already names each one
+waiting. An acquisition refused after it waited is in the contention reading and not in the
+served one; those are the paths contention is most likely to be interesting on, and a reading
+of served reads alone would under-report exactly there. The account also counts each
+re-reading of the published demand a contended acquisition takes once it has the gate back,
+beside the act, so the re-readings over the waits are the second readings contention cost.
 **No act an acquisition runs is reported by no reading, whichever way the acquisition
-left**: the mint is accounted where the mint returns, the establishment where the
-establishment returns, and the wait where the wait ends, each of them before the branch that
-decides how the read leaves.
+left**: the mint is accounted where the mint returns, the establishment where the hold it ran
+under gives the gate back, the wait where the wait begins, and a re-reading where it is taken.
+
+**The read-concurrency bar holds these readings under contention, over a production
+attachment.** The per-PR counter lane runs the overlapping-reads-on-one-entry workload: eight
+reads start while a ninth holds the entry's one connection, and the hold is let go only once
+the reader-wait reading names all eight as waiting. Each read served runs exactly one statement
+under the gate by the holder's own reading, with the establishments' own reports checked
+apart; the reader-wait reading is eight; and the re-readings of the published demand stay
+under a per-wait ceiling authored in `norn-host`'s baselines under the `read-` prefix. The
+same reads run one after another are the control, and the bar fails them on contention
+alone.
 
 A leg's publication runs the same mint as a read's repair, and its statements land in the
 host's account of its jobs rather than in the read account, so neither account moves for the

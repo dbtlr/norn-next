@@ -7,7 +7,7 @@
 //! production attachment that walked it, and the derived store that attachment
 //! left behind.
 //!
-//! Three bars, all counts:
+//! Four bars, all counts:
 //!
 //! - **Zero on warm.** A request that only reads derives nothing, over the
 //!   ~2k-document `realistic` profile — the scale the gates assert against. It
@@ -53,6 +53,17 @@
 //!   the two scales stop moving together. Every read pair has a control that
 //!   grows with the vault, run at the same two attachments, and each control
 //!   must read more at the larger scale on the counts it names.
+//! - **Reads contend on one entry and run one statement each under its gate.**
+//!   Under the `overlapping reads on one entry` workload, eight reads start
+//!   while a ninth holds the entry's one connection, and the hold is let go
+//!   only once the host's reader-wait reading names all eight as waiting.
+//!   Each read served runs exactly one statement under the entry gate, the one
+//!   that establishes its snapshot, as the gate holder reads it off the
+//!   handle's statement count on both sides of its hold rather than as the
+//!   establishment reports it; the reader-wait reading is eight; and the
+//!   re-readings of the published demand those contended acquisitions took
+//!   stay under the ceiling authored in this crate's baselines. The control
+//!   runs the same reads one after another and must fail on contention alone.
 //!
 //! **Every reading is recorded, zero included.** A gate that passes says only
 //! that nothing moved; which counters were asked and what each read is the
@@ -1627,8 +1638,8 @@ const READS_CONTEND_LIMIT: Duration = Duration::from_secs(60);
 ///   The host's reading of what ran under the gate equals the reads it served,
 ///   nothing was minted and no establishment refused, and no one acquisition
 ///   ran more than one. The reading is the gate holder's, so it is checked
-///   apart from what the establishments reported about themselves — one each
-///   — and from what the connections ran, which is more.
+///   apart from what the establishments reported about themselves, which is
+///   one each, and from what the connections ran, which is more.
 /// - **Contention, measured.** Every overlapping read is in the reader-wait
 ///   reading: exactly [`OVERLAPPING_READS`], and so nonzero.
 /// - **The re-readings a contended acquisition takes stay under the authored

@@ -125,23 +125,12 @@ fn a_read_over_an_entry_that_is_not_serving_refuses_with_its_published_demand() 
 /// that found the entry's connection free waited for nothing on its way to
 /// it.
 ///
-/// **The contention half of the instrument is not asserted here, because it
-/// cannot be asserted here without a race.** Saying "a read waited" requires
-/// observing a read while it is waiting, and the host records a wait only once
-/// that wait has ended — the reading moves when the waiter takes the
-/// connection — so a case cannot hold the connection and watch the account for
-/// a waiter at the same time. No production signal reports a read that is
-/// currently waiting, and this suite runs against the production attachment,
-/// so it has no hook to synchronize on. Sleeping and hoping the other threads
-/// reached the wait first is what that gap tempts a case into, and a reading
-/// that only sometimes observes contention fails on a loaded machine while the
-/// code is perfectly correct.
-///
-/// Where the contention reading is pinned instead is the lifecycle suite,
-/// against a reader fake that counts a wait when the wait begins: a case there
-/// blocks until a waiter has provably reached the occupied-connection path,
-/// then releases the connection and asserts the wait was one. That is the same
-/// claim, held where it can be held deterministically.
+/// **The contention half of the instrument is asserted in the counter lane**,
+/// over the same production attachment: `counter_gate.rs` holds the entry's
+/// connection, starts reads against it, and lets the hold go once the host's
+/// reader-wait reading names every one of them as waiting. The host counts a
+/// wait where it begins, so that reading moves while the reads are still
+/// waiting and the case observes contention rather than sleeping for it.
 #[test]
 fn reads_over_one_entry_each_run_one_statement_under_the_gate() {
     let (_sandbox, vault) = a_vault("host-reads-overlap");
