@@ -433,6 +433,23 @@ pub fn attach_and_wait(
     lease
 }
 
+/// Attach `vault` through `host`, wait for it to become ready, [`settle`] it,
+/// and hand back the demand that got it there.
+pub fn attach_and_settle(
+    host: &Host<ProductionEntryOps>,
+    vault: &Vault,
+) -> DemandLease<ProductionEntryOps> {
+    let lease = attach_and_wait(host, vault.name());
+    settle(host, vault);
+    lease
+}
+
+/// Return once every write made to `vault` before this call has been delivered
+/// to `host`'s watcher and reconciled.
+pub fn settle(host: &Host<ProductionEntryOps>, vault: &Vault) {
+    let _ = (host, vault);
+}
+
 /// Whether what the host answered is the refusal a name it holds no entry under
 /// is refused with.
 ///

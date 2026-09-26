@@ -41,6 +41,35 @@ fn a_vault(label: &str) -> (Sandbox, attach::Vault) {
     (sandbox, vault)
 }
 
+/// **A settled vault has reconciled every write made before it settled.** A
+/// write whose watcher delivery reaches a `Ready` entry takes the entry out of
+/// serving reads until the reconcile it owes lands. A write made after the
+/// attach is that delivery by construction, and so is a write made before the
+/// attach that fseventsd numbers past the watch's history boundary. So a case
+/// reads a vault that [`attach::settle`] handed over, and the write here is
+/// answered as soon as the settle returns, with nothing waited for between.
+#[test]
+fn a_settled_vault_has_reconciled_every_write_made_before_it_settled() {
+    let (_sandbox, vault) = a_vault("host-reads-settled");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    std::fs::write(vault.path().join("zz-late.md"), "late\n").expect("write a late document");
+    attach::settle(&host, &vault);
+
+    let answered = host
+        .get(&GetParams::new(
+            VaultAddress::name(vault.name().clone()),
+            ResolutionTarget::new("zz-late").expect("a target"),
+        ))
+        .expect("a settled vault answers a get of a document written before it settled");
+    let GetReport::Record { document, .. } = &answered.answer.report else {
+        panic!("the late document answered {:?}", answered.answer.report);
+    };
+    assert_eq!(document.path.as_str(), "zz-late.md");
+    assert_eq!(host.state(vault.name()), Ok(TrustState::Ready));
+}
+
 /// A read over a real attachment answers under the demand the entry publishes
 /// and from the database that attachment derived: the epoch is the store's
 /// own, and the generation is the one the heal left it at.
