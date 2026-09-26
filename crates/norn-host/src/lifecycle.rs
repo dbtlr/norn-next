@@ -3403,15 +3403,15 @@ fn give_back_demand<A: SnapshotSource>(state: &mut EntryState<A>, recovery_deman
 /// the drop. Blocking on the gate from that drop is safe because the
 /// unwinding thread holds no hold of it:
 ///
-/// - [`Host::begin_read`] takes the gate as its first act, with a blocking
-///   take of a non-reentrant lock, so no frame beneath it holds that gate;
+/// - [`Host::begin_read`] takes the gate with a blocking take of a
+///   non-reentrant lock before it records the lease, so no caller of it holds
+///   that gate: one that did would never get past that take;
 /// - a callee that took the gate has its guard dropped by the unwind before
 ///   the unwind reaches the acquisition's own locals;
 /// - so the one guard that can be live when the lease drops is the
-///   acquisition's own, and the flag reads given-back only once that guard is
-///   gone. It is set after each give-back of the gate and cleared on the
-///   retake's return, with nothing between the retake and the clearing that
-///   can unwind.
+///   acquisition's own. The acquisition records a give-back only after that
+///   guard is dropped, and records a retake as the retake returns, before
+///   anything that can unwind.
 ///
 /// Nothing the unwinding thread still holds is what a gate holder waits for:
 /// the connection's turn drops before the lease, and no holder of the gate
