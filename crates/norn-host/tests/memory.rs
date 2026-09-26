@@ -77,7 +77,6 @@ mod attach;
 mod baselines;
 mod heap;
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -441,11 +440,11 @@ fn read_child(label: &str, profile: &str) -> ReadReading {
         panic!("over `{profile}`, {problem}");
     }
     let heap_peak = read
-        .heap_peak
+        .heap_peak()
         .expect("a parsed report carries its heap reading");
     let mut readings: Vec<(&str, String)> = READ_SHAPES
         .iter()
-        .map(|shape| (*shape, read.answered[*shape].to_string()))
+        .map(|shape| (*shape, read.rows(shape).to_string()))
         .collect();
     readings.push(("heap peak above the attach (bytes)", heap_peak.to_string()));
     baselines::record(
@@ -646,7 +645,7 @@ fn read_and_report(root: &Path) {
     );
     read.answered::<Describe>(&facets);
 
-    read.heap_peak = Some(mark.peak_above());
+    read.measured(mark.peak_above());
     println!("{}", read.lines());
 }
 
@@ -699,11 +698,12 @@ fn a_directory(rows: &[DocumentRow]) -> Option<String> {
 /// One read shape of the mix: the name its report line carries, the report
 /// its verb answers with, and how many rows that report answered.
 ///
-/// **The report type ties a shape to its verb.** The child records a shape's
-/// rows only from the report its verb returned, so a count's tallies cannot
-/// stand in for a search's hits or a describe's facets. The two pairs of
-/// shapes that share a verb (find and backlinks, count and links-to) are told
-/// apart by [`pinned_answers`].
+/// **The report type ties a shape to its verb.** [`ReadReport::answered`] is
+/// the only way the child records a shape's rows, and it takes them from the
+/// report the shape's verb returned, so a count's tallies cannot stand in for
+/// a search's hits or a describe's facets. The two pairs of shapes that share
+/// a verb (find and backlinks, count and links-to) are told apart by
+/// [`pinned_answers`].
 trait Shape {
     /// The shape's name in the child's report.
     const NAME: &'static str;
@@ -798,104 +798,133 @@ impl Shape for Describe {
     }
 }
 
-/// What a reading child reports: how many rows each shape of [`READ_SHAPES`]
-/// answered, one line per shape, and the most the shapes raised the live heap
-/// above the mark set once the attachment was ready.
-#[derive(Debug, Default, Eq, PartialEq)]
-struct ReadReport {
-    answered: BTreeMap<String, usize>,
-    heap_peak: Option<usize>,
-}
+/// The reading child's report, behind a module boundary so the child can
+/// record a shape's rows only through the typed [`ReadReport::answered`]: the
+/// tally by name that reading a report back uses is private to this module.
+mod read_report {
+    use std::collections::BTreeMap;
 
-impl ReadReport {
-    /// Add the rows `report` answered to shape `S`'s tally.
-    fn answered<S: Shape>(&mut self, report: &S::Report) {
-        self.tally(S::NAME, S::rows(report));
+    use super::{READ_SHAPES, Shape};
+
+    /// What a reading child reports: how many rows each shape of [`READ_SHAPES`]
+    /// answered, one line per shape, and the most the shapes raised the live heap
+    /// above the mark set once the attachment was ready.
+    #[derive(Debug, Default, Eq, PartialEq)]
+    pub struct ReadReport {
+        answered: BTreeMap<String, usize>,
+        heap_peak: Option<usize>,
     }
 
-    /// Add `rows` to `shape`'s tally.
-    fn tally(&mut self, shape: &str, rows: usize) {
-        *self.answered.entry(shape.to_string()).or_default() += rows;
-    }
+    impl ReadReport {
+        /// Add the rows `report` answered to shape `S`'s tally.
+        pub fn answered<S: Shape>(&mut self, report: &S::Report) {
+            self.tally(S::NAME, S::rows(report));
+        }
 
-    /// The lines the child prints.
-    fn lines(&self) -> String {
-        self.answered
-            .iter()
-            .map(|(shape, rows)| format!("read {shape} answered {rows}"))
-            .chain(
-                self.heap_peak
-                    .map(|bytes| format!("read heap peak {bytes}")),
-            )
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
+        /// Record the most the shapes raised the live heap above the mark.
+        pub fn measured(&mut self, heap_peak: usize) {
+            self.heap_peak = Some(heap_peak);
+        }
 
-    /// The report a child's output carries, refused where it carries none,
-    /// where a line is no report, where a shape of [`READ_SHAPES`] is missing
-    /// or one the mix does not name is present, and where the heap reading is
-    /// missing: a reading over a shape that did not run is a reading over the
-    /// shapes that did.
-    fn from_stdout(stdout: &str) -> Result<Self, String> {
-        let mut report = ReadReport::default();
-        for line in stdout.lines().filter(|line| line.starts_with("read ")) {
-            let tokens: Vec<&str> = line.split_whitespace().collect();
-            let number = |text: &str| {
-                text.parse::<usize>()
-                    .map_err(|problem| format!("the read harness reported `{line}`: {problem}"))
-            };
-            match tokens.as_slice() {
-                ["read", "heap", "peak", bytes] => report.heap_peak = Some(number(bytes)?),
-                ["read", shape, "answered", rows] => report.tally(shape, number(rows)?),
-                _ => {
+        /// How many rows `shape` answered, zero where it answered none.
+        pub fn rows(&self, shape: &str) -> usize {
+            self.answered.get(shape).copied().unwrap_or(0)
+        }
+
+        /// The most the shapes raised the live heap above the mark, where the
+        /// report carries it.
+        pub fn heap_peak(&self) -> Option<usize> {
+            self.heap_peak
+        }
+
+        /// Add `rows` to `shape`'s tally, by name. Only a report read back from
+        /// the child's output tallies this way; the child tallies through
+        /// [`ReadReport::answered`].
+        fn tally(&mut self, shape: &str, rows: usize) {
+            *self.answered.entry(shape.to_string()).or_default() += rows;
+        }
+
+        /// The lines the child prints.
+        pub fn lines(&self) -> String {
+            self.answered
+                .iter()
+                .map(|(shape, rows)| format!("read {shape} answered {rows}"))
+                .chain(
+                    self.heap_peak
+                        .map(|bytes| format!("read heap peak {bytes}")),
+                )
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        /// The report a child's output carries, refused where it carries none,
+        /// where a line is no report, where a shape of [`READ_SHAPES`] is missing
+        /// or one the mix does not name is present, and where the heap reading is
+        /// missing: a reading over a shape that did not run is a reading over the
+        /// shapes that did.
+        pub fn from_stdout(stdout: &str) -> Result<Self, String> {
+            let mut report = ReadReport::default();
+            for line in stdout.lines().filter(|line| line.starts_with("read ")) {
+                let tokens: Vec<&str> = line.split_whitespace().collect();
+                let number = |text: &str| {
+                    text.parse::<usize>()
+                        .map_err(|problem| format!("the read harness reported `{line}`: {problem}"))
+                };
+                match tokens.as_slice() {
+                    ["read", "heap", "peak", bytes] => report.heap_peak = Some(number(bytes)?),
+                    ["read", shape, "answered", rows] => report.tally(shape, number(rows)?),
+                    _ => {
+                        return Err(format!(
+                            "the read harness reported `{line}`, which is no read report"
+                        ));
+                    }
+                }
+            }
+            if report.answered.is_empty() {
+                return Err(format!("the read harness reported no read: {stdout}"));
+            }
+            if let Some(shape) = READ_SHAPES
+                .iter()
+                .find(|shape| !report.answered.contains_key(**shape))
+            {
+                return Err(format!("the read harness ran no {shape} shape: {stdout}"));
+            }
+            if let Some(stray) = report
+                .answered
+                .keys()
+                .find(|shape| !READ_SHAPES.contains(&shape.as_str()))
+            {
+                return Err(format!(
+                    "the read harness reported a `{stray}` shape the mix does not name"
+                ));
+            }
+            if report.heap_peak.is_none() {
+                return Err(format!(
+                    "the read harness reported no heap reading: {stdout}"
+                ));
+            }
+            Ok(report)
+        }
+
+        /// Refuse a report whose shapes did not answer `pinned`, naming the first
+        /// shape of [`READ_SHAPES`] that answered otherwise.
+        pub fn answers_as_pinned(&self, pinned: &[usize; 8]) -> Result<(), String> {
+            for (shape, expected) in READ_SHAPES.iter().zip(pinned) {
+                let answered = self.rows(shape);
+                if answered != *expected {
                     return Err(format!(
-                        "the read harness reported `{line}`, which is no read report"
+                        "the read harness's {shape} shape answered {answered} rows where its request \
+                         answers {expected}, so the peak is not a peak over the mix: {:?}",
+                        self.answered
                     ));
                 }
             }
+            Ok(())
         }
-        if report.answered.is_empty() {
-            return Err(format!("the read harness reported no read: {stdout}"));
-        }
-        if let Some(shape) = READ_SHAPES
-            .iter()
-            .find(|shape| !report.answered.contains_key(**shape))
-        {
-            return Err(format!("the read harness ran no {shape} shape: {stdout}"));
-        }
-        if let Some(stray) = report
-            .answered
-            .keys()
-            .find(|shape| !READ_SHAPES.contains(&shape.as_str()))
-        {
-            return Err(format!(
-                "the read harness reported a `{stray}` shape the mix does not name"
-            ));
-        }
-        if report.heap_peak.is_none() {
-            return Err(format!(
-                "the read harness reported no heap reading: {stdout}"
-            ));
-        }
-        Ok(report)
-    }
-
-    /// Refuse a report whose shapes did not answer `pinned`, naming the first
-    /// shape of [`READ_SHAPES`] that answered otherwise.
-    fn answers_as_pinned(&self, pinned: &[usize; 8]) -> Result<(), String> {
-        for (shape, expected) in READ_SHAPES.iter().zip(pinned) {
-            let answered = self.answered.get(*shape).copied().unwrap_or(0);
-            if answered != *expected {
-                return Err(format!(
-                    "the read harness's {shape} shape answered {answered} rows where its request \
-                     answers {expected}, so the peak is not a peak over the mix: {:?}",
-                    self.answered
-                ));
-            }
-        }
-        Ok(())
     }
 }
+
+use read_report::ReadReport;
 
 /// **The parent refuses a reading it cannot tie to every shape of the mix
 /// answering as pinned.** A child whose output carries no report, a report
@@ -905,41 +934,46 @@ impl ReadReport {
 #[test]
 fn a_read_reading_stands_only_on_a_report_of_every_shape_answering_as_pinned() {
     let pinned = pinned_answers("realistic");
-    let mut printed = ReadReport::default();
-    for (shape, rows) in READ_SHAPES.iter().zip(pinned) {
-        printed.tally(shape, rows);
-    }
-    printed.heap_peak = Some(4096);
-    let read = ReadReport::from_stdout(&format!("running 1 test\n{}\ntest ok\n", printed.lines()));
-    assert_eq!(read, Ok(printed));
-    assert_eq!(read.map(|read| read.answers_as_pinned(&pinned)), Ok(Ok(())));
+    let printed = |rows: &dyn Fn(&str, usize) -> Option<usize>, heap: Option<usize>| {
+        READ_SHAPES
+            .iter()
+            .zip(pinned)
+            .filter_map(|(shape, pinned)| {
+                rows(shape, pinned).map(|rows| format!("read {shape} answered {rows}"))
+            })
+            .chain(heap.map(|bytes| format!("read heap peak {bytes}")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let read = ReadReport::from_stdout(&format!(
+        "running 1 test\n{}\ntest ok\n",
+        printed(&|_, rows| Some(rows), Some(4096))
+    ))
+    .expect("a report of every shape");
+    assert_eq!(read.answers_as_pinned(&pinned), Ok(()));
+    assert_eq!(read.heap_peak(), Some(4096));
+    assert_eq!(ReadReport::from_stdout(&read.lines()), Ok(read));
 
     let missing = ReadReport::from_stdout("running 1 test\ntest ok\n").expect_err("no report");
     assert!(missing.contains("reported no read"), "{missing}");
 
-    let mut short = ReadReport::default();
-    for shape in &READ_SHAPES[1..] {
-        short.tally(shape, 3);
-    }
-    short.heap_peak = Some(4096);
-    let absent = ReadReport::from_stdout(&short.lines()).expect_err("a shape the child never ran");
+    let short = printed(&|shape, _| (shape != Find::NAME).then_some(3), Some(4096));
+    let absent = ReadReport::from_stdout(&short).expect_err("a shape the child never ran");
     assert!(absent.contains("ran no find shape"), "{absent}");
 
-    let mut unmeasured = ReadReport::default();
-    for shape in READ_SHAPES {
-        unmeasured.tally(shape, 3);
-    }
-    let unmeasured =
-        ReadReport::from_stdout(&unmeasured.lines()).expect_err("a report with no heap reading");
+    let unmeasured = ReadReport::from_stdout(&printed(&|_, _| Some(3), None))
+        .expect_err("a report with no heap reading");
     assert!(unmeasured.contains("no heap reading"), "{unmeasured}");
 
     // A search swapped for a count that answered one tally still reports a
     // search line; its number is not the search's.
-    let mut swapped = ReadReport::default();
-    for (shape, rows) in READ_SHAPES.iter().zip(pinned) {
-        swapped.tally(shape, if *shape == Search::NAME { 1 } else { rows });
-    }
-    let swapped = swapped
+    let swapped = printed(
+        &|shape, rows| Some(if shape == Search::NAME { 1 } else { rows }),
+        Some(4096),
+    );
+    let swapped = ReadReport::from_stdout(&swapped)
+        .expect("a report of every shape")
         .answers_as_pinned(&pinned)
         .expect_err("a shape answering other than pinned");
     assert!(
