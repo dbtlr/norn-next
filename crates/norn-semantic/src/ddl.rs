@@ -14,7 +14,7 @@
 //! store's `body_hash` of the text that was embedded — is the staleness test:
 //! a row whose hash equals the feed's current one needs no recompute, which is
 //! what lets expensive derived state survive the cheap state's rebuild (ADR
-//! 0021). Nothing here references the main database's rows; the two databases
+//! 0027). Nothing here references the main database's rows; the two databases
 //! share no ids, no transactions and no lifetime.
 //!
 //! # A rowid table, because the rows are wide
@@ -76,7 +76,7 @@ pub(crate) mod meta {
     /// would skip everything the old model already consumed. Recording the
     /// model makes the mismatch inspectable, and the open resolves it by the
     /// wholesale-rebuild floor: a moved model is a fresh sidecar and a full
-    /// recompute (ADR 0021). A finer migration over `(model id, version)` is
+    /// recompute (ADR 0027). A finer migration over `(model id, version)` is
     /// a carved evolution this key leaves room for.
     pub(crate) const ENGINE_MODEL_ID: &str = "engine_model_id";
     /// The version half, beside the id.
