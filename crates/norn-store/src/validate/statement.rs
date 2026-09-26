@@ -12,9 +12,10 @@ use norn_db::rusqlite::types::Value;
 
 use norn_wire::Severity;
 
+use crate::ddl::findings::DOCUMENT_POSITION;
 use crate::read::{
-    AnswerSeek, Binder, FINDING_ROW_COLUMNS, Filter, FindingBase, PathPart, Term, answer_ordering,
-    answer_place, answer_range,
+    AnswerSeek, Binder, FINDING_ROW_COLUMNS, Filter, PathPart, Term, answer_ordering, answer_place,
+    answer_range,
 };
 
 /// Every statement shape the validate builder runs, named.
@@ -190,17 +191,12 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
             let (folded, path) = answer_place(path);
             (folded, path, position, id)
         }
-        None => (
-            String::new(),
-            String::new(),
-            FindingBase::DOCUMENT_POSITION,
-            0,
-        ),
+        None => (String::new(), String::new(), DOCUMENT_POSITION, 0),
     };
     let mut upper: Option<Value> = None;
     for part in &parts {
         let (from, to) = answer_range(&part.pattern);
-        let opening = (from, String::new(), FindingBase::DOCUMENT_POSITION, 0);
+        let opening = (from, String::new(), DOCUMENT_POSITION, 0);
         if opening > lower {
             lower = opening;
         }

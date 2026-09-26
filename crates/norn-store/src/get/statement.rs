@@ -9,8 +9,9 @@
 
 use norn_db::rusqlite::types::Value;
 
+use crate::ddl::findings::DOCUMENT_POSITION;
 use crate::find::Nested;
-use crate::read::{Binder, FINDING_ROW_COLUMNS, FindingBase, Ran};
+use crate::read::{Binder, FINDING_ROW_COLUMNS, Ran};
 use crate::request::DOCUMENT_HEADINGS_SQL;
 
 /// Every statement shape the get builder runs, named.
@@ -129,7 +130,8 @@ impl Spelled<'_> {
 ///
 /// **A page resumes from its lower bound**, not from a test of the rows it
 /// read: an unset position binds a bound below every row — the ordinal `-1`;
-/// a finding's position `-1` with the empty kind, which no kind is — so the
+/// the least position a finding stands at, [`DOCUMENT_POSITION`], with the
+/// empty kind, which no kind is — so the
 /// text does not branch on whether the page continues, and the plan is the
 /// same either way. The finding id's bound is spelled `COLLATE BINARY` for the
 /// reason [`crate::read::AnswerSeek::spelled`] gives, so the seek runs through
@@ -184,7 +186,7 @@ pub(crate) fn compose(spelled: &Spelled<'_>) -> Ran {
             rows,
         } => {
             let mut binder = Binder::default();
-            let (position, kind, id) = after.unwrap_or((FindingBase::DOCUMENT_POSITION, "", 0));
+            let (position, kind, id) = after.unwrap_or((DOCUMENT_POSITION, "", 0));
             let path = binder.bind(Value::Text((*path).to_string()));
             let fingerprint = binder.bind(Value::Text((*fingerprint).to_string()));
             let position = binder.bind(Value::Integer(position));

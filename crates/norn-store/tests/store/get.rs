@@ -1125,6 +1125,113 @@ fn a_find_columns_head_is_cut_in_link_order() {
     assert_eq!(targets(&column.items), expected);
 }
 
+/// **A finding about the document stands ahead of one about the document's
+/// first link**, on either root and at every page bound. At `linked.md` a
+/// `link/broken` finding about link 0 is filed first, then a `link/broken`
+/// and a `link/missing-anchor` finding about the document. The findings about
+/// the document hold no link's ordinal, so no link's position, the first one
+/// included, is theirs: a get's findings page and a find's findings column
+/// read both findings about the document before the one about link 0, though
+/// that one was filed first and its kind sorts first; and a validate reads
+/// the `link/broken` finding about the document before the one about link 0.
+/// Each page drains to the same answer one, two and three findings at a time.
+#[test]
+fn a_finding_about_the_document_stands_ahead_of_one_about_its_first_link() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::at("get-document-before-link", order, &["linked.md"]);
+        for finding in [
+            about_link("linked.md", FindingKind::Broken, 0, "link-0"),
+            about_document("linked.md", FindingKind::Broken, "document-broken"),
+            about_document("linked.md", FindingKind::MissingAnchor, "document-anchor"),
+        ] {
+            vault.stand(&finding);
+        }
+        let per_path = ["document-broken", "document-anchor", "link-0"];
+
+        let findings = getting("linked").with_collection(CollectionSelector::Findings);
+        let get_page = |params: &GetParams| {
+            let gotten = vault.get(params);
+            let GetReport::Collection {
+                page: CollectionPage::Findings { page, .. },
+                ..
+            } = gotten.report
+            else {
+                panic!("a get of the findings answered {:?}", gotten.report);
+            };
+            (page.rows, page.next)
+        };
+        let validating = ValidateParams::new(address())
+            .with_kinds([FindingKind::Broken, FindingKind::MissingAnchor]);
+        let validate_page = |params: &ValidateParams| {
+            let validated = vault
+                .snapshot()
+                .validate(params, &declared())
+                .expect("a validate");
+            let Validation::Findings { rows, next, .. } = validated.answer else {
+                panic!("a validate of two kinds answered a summary");
+            };
+            (rows, next)
+        };
+        for limit in [1, 2, 3] {
+            let drained_get = drain(limit, |after| {
+                let mut params = findings.clone().with_limit(limit);
+                if let Some(cursor) = after {
+                    params = params.with_after(cursor);
+                }
+                get_page(&params)
+            });
+            assert_eq!(
+                targets(&drained_get),
+                per_path,
+                "a get drained {limit} at a time under {order:?}"
+            );
+            let drained_validate = drain(limit, |after| {
+                let mut params = validating.clone().with_limit(limit);
+                if let Some(cursor) = after {
+                    params = params.with_after(cursor);
+                }
+                validate_page(&params)
+            });
+            assert_eq!(
+                targets(&drained_validate),
+                ["document-broken", "link-0", "document-anchor"],
+                "a validate drained {limit} at a time under {order:?}"
+            );
+        }
+
+        let column = vault
+            .found("linked.md", vec![Column::findings()])
+            .findings
+            .expect("the findings column");
+        assert_eq!(
+            targets(&column.items),
+            per_path,
+            "a find's column under {order:?}"
+        );
+    }
+}
+
+/// Every row a paged read answers, `limit` at a time: `page` reads the page
+/// after the cursor it is handed, and the drain ends at the page naming no
+/// next.
+fn drain(
+    limit: u32,
+    mut page: impl FnMut(Option<Cursor>) -> (Vec<FindingRow>, Option<Cursor>),
+) -> Vec<FindingRow> {
+    let mut drained = Vec::new();
+    let mut after = None;
+    loop {
+        let (rows, next) = page(after.take());
+        assert!(rows.len() <= limit as usize, "a page past its bound");
+        drained.extend(rows);
+        match next {
+            Some(next) => after = Some(next),
+            None => return drained,
+        }
+        assert!(drained.len() < 100, "the drain does not end");
+    }
+}
+
 /// **Every collection paged at one, two and three rows a page is its one
 /// whole page**: no row repeated, none dropped, each page within its bound,
 /// and the last page naming no next. The page's own tag names the collection

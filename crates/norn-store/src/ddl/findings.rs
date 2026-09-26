@@ -44,7 +44,9 @@
 //! partial, so no read that does not name a set ordinal can seek it.
 //!
 //! **The indexes order `position`, never `ordinal`.** `position` is a
-//! generated column, `coalesce(ordinal, -1)`, which no write names. SQLite
+//! generated column, `coalesce(ordinal, -1)`, which no write names, and every
+//! reader reads a finding's position off it. The `-1` is
+//! [`DOCUMENT_POSITION`], which the statement is built from. SQLite
 //! orders `NULL` before every integer in an index and an `ORDER BY`, but a
 //! row-value comparison that reaches a `NULL` term is `NULL`, and a seek
 //! applies the comparison to the rows it reaches. So a continuation from a
@@ -239,13 +241,24 @@
 //! whatever composed it and is never forwarded back out as a typed shape.
 
 pub(crate) fn statements() -> Vec<String> {
-    let mut all = super::fixed(STATEMENTS);
+    let mut all = vec![findings()];
+    all.extend(super::fixed(STATEMENTS));
     all.push(finding_candidates());
     all
 }
 
-const STATEMENTS: &[&str] = &[
-    "CREATE TABLE findings (
+/// Where a finding about the document stands among its path's findings: the
+/// `position` the table generates for a `NULL` ordinal, below every link's
+/// ordinal. A reader binds it as the position a cursor naming a finding about
+/// the document resumes after, and as the least position a first page opens
+/// at.
+pub(crate) const DOCUMENT_POSITION: i64 = -1;
+
+/// The findings table, with the position of a finding about the document
+/// taken from [`DOCUMENT_POSITION`] rather than spelled a second time.
+fn findings() -> String {
+    format!(
+        "CREATE TABLE findings (
     id                       INTEGER PRIMARY KEY,
     vault_schema_fingerprint TEXT    NOT NULL,
     generation               INTEGER NOT NULL,
@@ -260,10 +273,14 @@ const STATEMENTS: &[&str] = &[
     message                  TEXT    NOT NULL,
     detail                   TEXT,
     ordinal                  INTEGER CHECK (ordinal >= 0),
-    position                 INTEGER GENERATED ALWAYS AS (coalesce(ordinal, -1)) VIRTUAL,
+    position                 INTEGER GENERATED ALWAYS AS (coalesce(ordinal, {DOCUMENT_POSITION})) VIRTUAL,
     CHECK ((span_line IS NULL) = (span_column IS NULL)
        AND (span_line IS NULL) = (span_offset IS NULL))
-)",
+)"
+    )
+}
+
+const STATEMENTS: &[&str] = &[
     "CREATE INDEX findings_fingerprint_kind_severity_nocase ON findings(
     vault_schema_fingerprint, kind, severity, path COLLATE NOCASE, path, position
 )",

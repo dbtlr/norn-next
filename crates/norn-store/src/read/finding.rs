@@ -29,6 +29,7 @@ use norn_wire::{
 };
 
 use super::Ran;
+use crate::ddl::findings::DOCUMENT_POSITION;
 use crate::error::{self, StoreError};
 use crate::facts::Span;
 use crate::find::{FindStatement, compose_finding_candidates, compose_finding_classes};
@@ -40,7 +41,7 @@ use crate::store::Snapshot;
 /// the alias `f`.
 pub(crate) const FINDING_ROW_COLUMNS: &str = "f.id, f.kind, f.severity, f.path, f.target, \
      f.span_line, f.span_column, f.span_offset, f.candidates_total, f.message, f.generation, \
-     f.ordinal";
+     f.ordinal, f.position";
 
 /// A finding's own columns, as a statement read them, before its head and its
 /// hint are read beside them.
@@ -61,18 +62,17 @@ pub(crate) struct FindingBase {
     /// The ordinal of the link the finding is about, and `None` for a finding
     /// about the document at its path.
     ordinal: Option<i64>,
+    /// Where the finding stands among its path's findings, as the column
+    /// `findings.position` holds it.
+    position: i64,
 }
 
 impl FindingBase {
-    /// Where [`FindingBase::position`] places a finding about the document:
-    /// before the ordinal of every link.
-    pub(crate) const DOCUMENT_POSITION: i64 = -1;
-
     /// Where the finding stands among its path's findings, as the column
     /// `findings.position` holds it: the link's ordinal, or
-    /// [`FindingBase::DOCUMENT_POSITION`].
-    pub(crate) fn position(&self) -> i64 {
-        self.ordinal.unwrap_or(Self::DOCUMENT_POSITION)
+    /// [`DOCUMENT_POSITION`] for a finding about the document.
+    pub(crate) const fn position(&self) -> i64 {
+        self.position
     }
 
     /// The cursor key a validate's page that stopped at this finding
@@ -115,7 +115,7 @@ impl FindingBase {
 /// column `findings.position` holds it, and `None` for an ordinal no stored
 /// finding carries.
 pub(crate) fn cursor_position(ordinal: Option<u64>) -> Option<i64> {
-    ordinal.map_or(Some(FindingBase::DOCUMENT_POSITION), |ordinal| {
+    ordinal.map_or(Some(DOCUMENT_POSITION), |ordinal| {
         i64::try_from(ordinal).ok()
     })
 }
@@ -141,6 +141,7 @@ pub(crate) fn finding_base(row: &Row<'_>) -> Reading<FindingBase> {
         message: row.get(9)?,
         generation: row.get(10)?,
         ordinal: row.get(11)?,
+        position: row.get(12)?,
     }))
 }
 
