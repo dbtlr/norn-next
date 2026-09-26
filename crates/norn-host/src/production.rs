@@ -3320,8 +3320,16 @@ impl<'s> Pending<'s> {
         stored: Option<&DocumentPath>,
     ) {
         count_document_derived();
-        let Plan { change, findings } =
-            plan_document(path, spelling, bytes, hash, stored, &self.declared.model);
+        let order = self.store.path_order();
+        let Plan { change, findings } = plan_document(
+            path,
+            spelling,
+            bytes,
+            hash,
+            stored,
+            &self.declared.model,
+            order,
+        );
         if let Some(change) = change {
             self.push(change);
         }
@@ -10110,6 +10118,39 @@ mod tests {
             foo_resolves_through(&mut attachment),
             foo_resolves_under(proven)
         );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A derivation judges a document's tags by the facet's patterns under
+    /// the path order its store records**, which is the order the root proves:
+    /// `area/**` admits `#Area/work` on a root that folds ASCII case, and on
+    /// one that tells spellings apart the tag is an undeclared-tag finding. A
+    /// root's case behaviour cannot be flipped from here, so the case expects
+    /// the answer of the order this root proves.
+    #[test]
+    fn a_derivation_judges_tag_patterns_under_the_order_its_store_records() {
+        let f = Fixture::new("attach-tag-pattern-case");
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\ntags:\n  patterns: [\"area/**\"]\n  undeclared: report\n",
+        )
+        .unwrap();
+        fs::write(f.vault().join("note.md"), "# body\n#Area/work\n").unwrap();
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let order = attachment.store.path_order();
+        assert_eq!(order, proven_order(&f));
+        let targets: Vec<Option<String>> = findings_at(&mut attachment.store, "note.md")
+            .into_iter()
+            .map(|finding| finding.target)
+            .collect();
+        let expected = match order {
+            StoredPathOrder::Sensitive => vec![Some("Area/work".to_string())],
+            StoredPathOrder::AsciiCaseInsensitive => Vec::new(),
+        };
+        assert_eq!(targets, expected, "under {order:?}");
         ops.detach(&name, attachment);
     }
 

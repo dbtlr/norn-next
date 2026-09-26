@@ -16,13 +16,15 @@
 //! read off it — which finding kinds a re-derivation by spelling or by bytes
 //! takes.
 //!
-//! **A plan is a function of the observation and the vault's declaration.**
-//! [`plan_document`] takes the pinned vault schema's [`Declared`] beside the
-//! document, because a finding keyed by the schema fingerprint — and a typed
-//! value a pin of another fingerprint clears — is derived under the
-//! declaration that fingerprint names. The declaration is read off
-//! the store's own pin, so the model a plan derives under and the fingerprint
-//! its findings are stamped with come from one set of bytes.
+//! **A plan is a function of the observation, the vault's declaration and the
+//! store's path order.** [`plan_document`] takes the pinned vault schema's
+//! [`Declared`] beside the document, because a finding keyed by the schema
+//! fingerprint — and a typed value a pin of another fingerprint clears — is
+//! derived under the declaration that fingerprint names. The declaration is
+//! read off the store's own pin, so the model a plan derives under and the
+//! fingerprint its findings are stamped with come from one set of bytes. The
+//! order is the one the store records, which gives the declaration's globs
+//! their case.
 //!
 //! **Findings are minted here and nowhere else.** [`plan_document`] and
 //! [`plan_quarantine`] are [`PlannedFinding`]'s two constructors, and they are
@@ -42,11 +44,11 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use norn_config::schema::{FieldType, Offset, TypedValue, UndeclaredTags, VaultSchema};
+use norn_config::schema::{CaseFold, FieldType, Offset, TypedValue, UndeclaredTags, VaultSchema};
 use norn_store::{
     BlockFact, Change, ContentModel, DerivationVersion, DiscardScope, DocumentFacts, DocumentPath,
     FieldDeclaration, FrontmatterValue, HeadingFact, LinkFact, LinkFamily, OffsetSpelling,
-    Provenance, Span, TagFact, TagSource, TypedOrder,
+    Provenance, Span, StoredPathOrder, TagFact, TagSource, TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, FindingScope, Severity, TagStance};
@@ -793,6 +795,12 @@ pub(crate) struct Plan {
 /// findings and the typed half of the field rows: a document that does not
 /// decode is judged against nothing, because a vault declaration says what a
 /// document's facts must be and there are no facts.
+///
+/// `order` is the path order the store the plan derives into records, and it
+/// gives the facet's tag patterns their case, as it gives every glob: with
+/// ASCII case folded where the order folds, and bytewise where it does not. A
+/// store derived under one order is rebuilt under another, so every finding a
+/// store holds was judged under the order it records.
 pub(crate) fn plan_document(
     path: &Path,
     spelling: &str,
@@ -800,6 +808,7 @@ pub(crate) fn plan_document(
     hash: String,
     stored: Option<&DocumentPath>,
     declared: &Declared,
+    order: StoredPathOrder,
 ) -> Plan {
     match map_document(spelling, bytes, hash, declared.content_model()) {
         Ok(derived) => {
@@ -817,7 +826,12 @@ pub(crate) fn plan_document(
                     target: None,
                 });
             }
-            findings.extend(plan_tag_facet(&subject, &derived.facts, declared.schema()));
+            findings.extend(plan_tag_facet(
+                &subject,
+                &derived.facts,
+                declared.schema(),
+                order.glob_case(),
+            ));
             Plan {
                 change: Some(Change::Upsert(derived.facts)),
                 findings,
@@ -974,10 +988,14 @@ fn field_declaration(kind: FieldType) -> FieldDeclaration {
 ///
 /// A facet that reports nothing yields nothing here, which includes every vault
 /// that has not declared a tag vocabulary at all.
+///
+/// The facet's patterns match under `case`, and its declared names as written
+/// — see [`norn_config::schema::TagFacet::admits`].
 fn plan_tag_facet(
     subject: &DocumentPath,
     facts: &DocumentFacts,
     declared: &VaultSchema,
+    case: CaseFold,
 ) -> Vec<PlannedFinding> {
     let facet = declared.tags();
     if !facet.reports_undeclared() {
@@ -987,7 +1005,7 @@ fn plan_tag_facet(
     facts
         .tags
         .iter()
-        .filter(|tag| !facet.admits(&tag.name))
+        .filter(|tag| !facet.admits(&tag.name, case))
         .filter(|tag| seen.insert(tag.name.clone()))
         .map(|tag| PlannedFinding {
             subject: subject.clone(),
@@ -1406,7 +1424,15 @@ paths:
             let path = Path::new(spelling);
             let hash = || norn_fs::ContentHash::of(bytes).to_string();
 
-            let unheld = plan_document(path, spelling, bytes, hash(), None, &undeclaring());
+            let unheld = plan_document(
+                path,
+                spelling,
+                bytes,
+                hash(),
+                None,
+                &undeclaring(),
+                StoredPathOrder::Sensitive,
+            );
             let [finding] = &unheld.findings[..] else {
                 panic!("a refused document states why it contributes no facts");
             };
@@ -1422,7 +1448,15 @@ paths:
             );
 
             let stored = DocumentPath::new("note.md").expect("a document path");
-            let held = plan_document(path, spelling, bytes, hash(), Some(&stored), &undeclaring());
+            let held = plan_document(
+                path,
+                spelling,
+                bytes,
+                hash(),
+                Some(&stored),
+                &undeclaring(),
+                StoredPathOrder::Sensitive,
+            );
             assert_eq!(
                 held.change,
                 Some(Change::Death {
@@ -1499,6 +1533,7 @@ paths:
                 hash(),
                 None,
                 &undeclaring(),
+                StoredPathOrder::Sensitive,
             );
             assert!(
                 matches!(plan.change, Some(Change::Upsert(_))),
@@ -1539,6 +1574,7 @@ paths:
             hash.clone(),
             Some(&stored),
             &undeclaring(),
+            StoredPathOrder::Sensitive,
         );
         assert_eq!(
             plan.change,
@@ -1557,7 +1593,8 @@ paths:
                 whole,
                 hash,
                 None,
-                &undeclaring()
+                &undeclaring(),
+                StoredPathOrder::Sensitive
             ),
             "the row the observation replaces changed a plan that still derives"
         );
@@ -1573,6 +1610,7 @@ paths:
             hash.clone(),
             Some(&stored),
             &undeclaring(),
+            StoredPathOrder::Sensitive,
         );
         assert!(
             matches!(plan.change, Some(Change::Upsert(_))),
@@ -1593,7 +1631,8 @@ paths:
                 unread,
                 hash,
                 None,
-                &undeclaring()
+                &undeclaring(),
+                StoredPathOrder::Sensitive
             ),
             "the row the observation replaces changed a plan that still derives"
         );
@@ -1656,6 +1695,7 @@ paths:
                     norn_fs::ContentHash::of(source).to_string(),
                     Some(&stored),
                     &reporting(),
+                    StoredPathOrder::Sensitive,
                 )
             };
             assert_eq!(
@@ -1896,6 +1936,7 @@ paths:
             hash,
             None,
             &reporting(),
+            StoredPathOrder::Sensitive,
         );
 
         assert!(
@@ -1925,6 +1966,39 @@ paths:
         );
     }
 
+    /// **The facet's patterns take their case from the store's path order.**
+    /// Where the order folds ASCII case, `area/**` admits `#Area/work`, as
+    /// the root itself does not tell `Area` from `area`; where it does not, the
+    /// same tag is a finding. A declared name is compared as written under
+    /// either, so `#Front` is a finding on both.
+    #[test]
+    fn a_tag_pattern_folds_ascii_case_exactly_where_the_stores_order_does() {
+        let source = b"# Heading\n#Area/work #Front\n";
+        let targets = |order: StoredPathOrder| {
+            plan_document(
+                Path::new("note.md"),
+                "note.md",
+                source,
+                norn_fs::ContentHash::of(source).to_string(),
+                None,
+                &reporting(),
+                order,
+            )
+            .findings
+            .into_iter()
+            .map(|finding| finding.target)
+            .collect::<Vec<Option<String>>>()
+        };
+        assert_eq!(
+            targets(StoredPathOrder::Sensitive),
+            vec![Some("Area/work".to_string()), Some("Front".to_string())]
+        );
+        assert_eq!(
+            targets(StoredPathOrder::AsciiCaseInsensitive),
+            vec![Some("Front".to_string())]
+        );
+    }
+
     /// The control on the case above: the same bytes under a vault that has
     /// declared no tag vocabulary plan the upsert and nothing else. A facet
     /// finding is the schema's judgment, so a vault that judges nothing has
@@ -1941,6 +2015,7 @@ paths:
             hash,
             None,
             &undeclaring(),
+            StoredPathOrder::Sensitive,
         );
 
         assert!(matches!(plan.change, Some(Change::Upsert(_))));
@@ -1963,6 +2038,7 @@ paths:
             hash,
             None,
             &reporting(),
+            StoredPathOrder::Sensitive,
         );
 
         let [finding] = &plan.findings[..] else {
@@ -2028,6 +2104,7 @@ paths:
                         hash,
                         None,
                         &declared,
+                        StoredPathOrder::Sensitive,
                     )
                     .change
                     .expect("a document that derives")
