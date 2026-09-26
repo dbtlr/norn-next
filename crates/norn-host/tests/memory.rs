@@ -37,11 +37,16 @@
 //! global allocator counts the live heap, and the reading child marks it once
 //! the attachment is ready and before the first shape runs, then reports the
 //! most the shapes raised it above that mark. A child at `ambiguous` and one
-//! at `realistic` each report it, and their ratio holds the heap the mix
-//! holds flat across the two scales. A whole-process peak can absorb a
-//! vault's rows inside the headroom the attach left, and the heap count
-//! cannot, because it counts what the code holds rather than what the kernel
-//! mapped.
+//! at `realistic` each report it, and a bar bounds how many bytes the
+//! `realistic` reading may exceed the `ambiguous` one by. The reading repeats
+//! to within eight bytes, so the bound is a few KiB, and an id of eight bytes
+//! kept for each of the 1,700 documents between the two profiles fails it. A
+//! whole-process peak can absorb a vault's rows inside the headroom the attach
+//! left, and the heap count cannot, because it counts what the code holds
+//! rather than what the kernel mapped. **The heap reading is a high-water**,
+//! the highest the heap stood and not the sum of what each shape held, so a
+//! retention a shape builds after the find's pages are gone shows only once it
+//! climbs past them.
 //!
 //! # What the measurement charges to whom
 //!

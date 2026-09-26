@@ -273,7 +273,11 @@ jobs:
   # them. The read's heap bar is the child's own count: the test binary's
   # global allocator counts the live heap, the child marks it once the attach
   # is ready, and a child at each per-PR profile reports the most the shapes
-  # raised it, so the pair sees rows a whole-process peak absorbs. A child
+  # raised it. The bar bounds in bytes how far the ~2k reading may exceed the
+  # 300-document one, so an eight-byte id kept for every document fails it,
+  # where a whole-process peak absorbs whole rows. The reading is a
+  # high-water, so a retention built after the find's pages are gone shows
+  # only once it climbs past them. A child
   # that attaches adopts a tree its parent generated, so what the kernel
   # accounts to it is the attachment and not the generation.
   # The >=5k scale and the recorded peak-memory readings stay in certify.yml,

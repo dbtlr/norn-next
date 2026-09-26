@@ -1067,10 +1067,12 @@ backlinks; a validate narrowed by a path part, which is findings-for-path; lexic
 and describe. Two bars hold the ~2k-document profile's process to an absolute peak ceiling
 and to a ratio over the peak of the same attach without the reads. The kernel reports one
 peak per process, so they hold the highest peak any shape reached rather than each shape's
-own. The third holds the most the shapes raised the live heap above the attached host,
-counted by the process's own allocator, to a ratio between the 300-document and ~2k-document
-profiles, so a shape that holds the vault's rows fails it even where the whole-process peak
-absorbs them. No query shape carries a timing bar.
+own. The third reads the most the shapes raised the live heap above the attached host,
+counted by the process's own allocator, at the 300-document and ~2k-document profiles, and
+bounds in bytes how far the second reading may exceed the first: a shape that keeps an
+eight-byte id for every document while the find's pages are held fails it, even where the
+whole-process peak absorbs whole rows. The reading is a high-water, so a retention that
+stays under the find's pages is not seen. No query shape carries a timing bar.
 
 ### 4. One obvious path
 
