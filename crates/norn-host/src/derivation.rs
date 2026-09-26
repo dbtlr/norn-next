@@ -2043,14 +2043,22 @@ paths:
             ))
         }
 
-        fn found(&self, params: norn_wire::FindParams) -> norn_store::Found {
+        /// The find a snapshot over this vault answers to `params`, or the
+        /// refusal it answers instead.
+        fn try_find(
+            &self,
+            params: norn_wire::FindParams,
+        ) -> Result<norn_store::Found, norn_store::PageRefusal> {
             self.reader
                 .try_take()
                 .expect("an idle reader")
                 .establish()
                 .expect("a snapshot")
                 .find(&params, self.declared.content_model())
-                .expect("a find")
+        }
+
+        fn found(&self, params: norn_wire::FindParams) -> norn_store::Found {
+            self.try_find(params).expect("a find")
         }
 
         fn find(&self, params: norn_wire::FindParams) -> Vec<String> {
@@ -2064,13 +2072,7 @@ paths:
         /// The refusal a find over `params` answers, where the request is
         /// expected to be refused rather than answered.
         fn find_refusal(&self, params: norn_wire::FindParams) -> norn_store::PageRefusal {
-            self.reader
-                .try_take()
-                .expect("an idle reader")
-                .establish()
-                .expect("a snapshot")
-                .find(&params, self.declared.content_model())
-                .expect_err("a find refused")
+            self.try_find(params).expect_err("a find refused")
         }
     }
 
@@ -2389,43 +2391,50 @@ paths:
     }
 
     /// **Matching is symmetric in the shape of the stored value.** A value
-    /// written bare and the same value written inside a sequence are one value
-    /// to an equality, an inequality and a membership part, under a declared
-    /// number and under text alike: every scalar a key holds is a value of the
-    /// key, so `[9]` holds nine as `9` does, and `[3, 9.0]` holds it too.
+    /// written bare, inside a flow sequence and inside a block sequence are
+    /// one value to an equality, an inequality, a range bound and a
+    /// membership part, under a declared number and under text alike: every
+    /// scalar a key holds is a value of the key wherever it stands among its
+    /// siblings, so `[9]` holds nine as `9` does, `[3, 9.0]` and a block list
+    /// holding nine hold it too, and a bound met by a value stored second in
+    /// a sequence meets the part exactly as one met by its first.
     #[test]
     fn a_value_written_bare_and_inside_a_sequence_meet_one_part_alike() {
         use norn_wire::Predicate;
 
-        let documents: Vec<(&str, String)> = [
-            ("bare.md", "9", "a"),
-            ("bracketed.md", "[9]", "[a]"),
-            ("among.md", "[3, 9.0]", "[b, a]"),
-            ("other.md", "3", "b"),
-        ]
-        .into_iter()
-        .map(|(path, weight, code)| {
+        let documents: Vec<(&str, String)> = vec![
+            ("bare.md", "---\nweight: 9\ncode: a\n---\nbody\n".to_string()),
             (
-                path,
-                format!("---\nweight: {weight}\ncode: {code}\n---\nbody\n"),
-            )
-        })
-        .collect();
+                "bracketed.md",
+                "---\nweight: [9]\ncode: [a]\n---\nbody\n".to_string(),
+            ),
+            (
+                "among.md",
+                "---\nweight: [3, 9.0]\ncode: [b, a]\n---\nbody\n".to_string(),
+            ),
+            (
+                "block.md",
+                "---\nweight:\n  - 9\n  - 3\ncode:\n  - b\n  - a\n---\nbody\n".to_string(),
+            ),
+            ("other.md", "---\nweight: 3\ncode: b\n---\nbody\n".to_string()),
+        ];
         let vault = DerivedVault::new(
             "norn-host-stored-shape",
             b"version: 1\nfields:\n  weight:\n    type: number\n  code:\n    type: text\n",
             &documents,
         );
         let find = |part: Predicate| vault.find(DerivedVault::request().with_predicates([part]));
+
+        let holds_the_value = ["among.md", "bare.md", "block.md", "bracketed.md"];
         for (key, value) in [("weight", "9"), ("code", "a")] {
             assert_eq!(
                 find(Predicate::equal_to(key, value)),
-                ["among.md", "bare.md", "bracketed.md"],
+                holds_the_value,
                 "`{key}` equal to {value}"
             );
             assert_eq!(
                 find(Predicate::in_any(key, [value.to_string()])),
-                ["among.md", "bare.md", "bracketed.md"],
+                holds_the_value,
                 "`{key}` in [{value}]"
             );
             assert_eq!(
@@ -2434,30 +2443,36 @@ paths:
                 "`{key}` not equal to {value}"
             );
         }
+
+        // `weight` holds nine second in `among.md` (`[3, 9.0]`) and `code`
+        // holds `a` second in `among.md` and `block.md` (`[b, a]` and its
+        // block-list twin, `b` then `a`): a range bound met only by that
+        // second value still meets the document.
+        assert_eq!(
+            find(Predicate::after("weight", "5")),
+            holds_the_value,
+            "`weight` after 5"
+        );
+        assert_eq!(
+            find(Predicate::before("code", "ab")),
+            holds_the_value,
+            "`code` before ab"
+        );
     }
 
-    /// **A predicate's value is text on the wire, read as one value; a
-    /// membership part's `values` is the wire's typed, bracketed shape.** An
-    /// equality asking for a scalar and a one-value membership asking for the
-    /// same scalar each meet a document holding it bare, inside a flow
-    /// sequence, inside a multi-element flow sequence and inside a block
-    /// sequence, alike — the request side of the symmetry the stored side
-    /// already holds. Brackets spelled inside a value's own text are that
-    /// value's literal text and nothing else: an equality asking for
-    /// `[draft]` meets only a document whose stored value is the quoted YAML
-    /// text `[draft]`, and meets no document holding the bare word `draft`.
-    /// On a field declared a number, that same bracketed spelling names no
-    /// number and stays refused as unreadable rather than read as a list.
+    /// **A predicate's value is literal text, read as the field's declared
+    /// type.** Brackets spelled inside a value's own text are that value's
+    /// literal text and nothing else: an equality or a one-value membership
+    /// asking for `[draft]` meets a document whose stored value is the quoted
+    /// YAML text `[draft]`, and meets no document holding the bare word
+    /// `draft`. On a field declared a number, that same bracketed spelling
+    /// names no number and is refused as unreadable rather than read as a
+    /// list.
     #[test]
-    fn a_value_requested_in_brackets_meets_the_bare_stored_value() {
+    fn bracket_text_in_a_request_value_is_literal_and_read_as_its_declared_type() {
         use norn_wire::Predicate;
 
         let documents: Vec<(&str, &str)> = vec![
-            ("bare.md", "code: a\n"),
-            ("bracketed.md", "code: [a]\n"),
-            ("among.md", "code: [b, a]\n"),
-            ("block.md", "code:\n  - b\n  - a\n"),
-            ("other.md", "code: b\n"),
             ("quoted.md", "code: \"[draft]\"\n"),
             ("draft.md", "code: draft\n"),
         ];
@@ -2471,18 +2486,6 @@ paths:
             &documents,
         );
         let find = |part: Predicate| vault.find(DerivedVault::request().with_predicates([part]));
-
-        let holds_bare_a = ["among.md", "bare.md", "block.md", "bracketed.md"];
-        assert_eq!(
-            find(Predicate::equal_to("code", "a")),
-            holds_bare_a,
-            "`code` equal to a"
-        );
-        assert_eq!(
-            find(Predicate::in_any("code", ["a".to_string()])),
-            holds_bare_a,
-            "`code` in [a]"
-        );
 
         assert_eq!(
             find(Predicate::equal_to("code", "[draft]")),
