@@ -2,8 +2,10 @@
 //! read builder's composer numbers its parameters with.
 
 use norn_db::rusqlite::types::Value;
+use norn_wire::Pattern;
 
 use super::FieldOrder;
+use crate::facts::StoredPathOrder;
 use crate::path::SuffixKey;
 use crate::resolve;
 
@@ -35,9 +37,14 @@ pub enum ReadFilter {
     After(FieldOrder),
     /// The body matches a full-text query, through `documents_fts`.
     FullText,
-    /// The path matches a glob: the glob's literal-prefix range on
-    /// `documents_path`, and the glob function over the paths it reaches.
-    PathGlob,
+    /// The path matches a glob under the root's path order: the glob's
+    /// literal-prefix range on `documents_path` where the root tells
+    /// spellings apart, and the folded prefix's `NOCASE` range on
+    /// `documents_path_nocase` where it folds ASCII case, and the glob
+    /// function, under the same order, over the paths the range reaches. A
+    /// validate spells the part over a finding's own path instead
+    /// ([`crate::ValidateStatement`]).
+    PathGlob(StoredPathOrder),
     /// The document is in the class a resolution target opens on the root:
     /// the target's suffix ranges on `documents_suffix_key` where the root
     /// tells spellings apart, and on `documents_folded_suffix_key` where it
@@ -57,11 +64,9 @@ pub enum ReadFilter {
     /// the named document's path may name another document at its other one.
     LinksTo(SuffixKey),
     /// A finding of the kind stands over the document under the active
-    /// fingerprint: one covering seek of the findings at `(fingerprint,
-    /// kind)`, which `findings_fingerprint_kind_severity` and
-    /// `findings_vault_schema_fingerprint` both lead with and both carry the
-    /// path in, each finding's path read back to its document on
-    /// `documents_path`.
+    /// fingerprint: one covering seek of `findings_fingerprint_kind_nocase` at
+    /// `(fingerprint, kind)`, which carries the path after them, each
+    /// finding's path read back to its document on `documents_path`.
     Finding,
 }
 
@@ -70,7 +75,9 @@ pub const READ_FILTERS: usize = 13;
 
 impl ReadFilter {
     /// Every filter shape, in slot order. A filter that compares values is
-    /// named under the raw order; the typed order is the same slot.
+    /// named under the raw order, and a filter a root's case behaviour selects
+    /// under the order that tells spellings apart; the other form is the same
+    /// slot.
     pub fn all() -> [Self; READ_FILTERS] {
         [
             Self::Equal(FieldOrder::Raw),
@@ -81,7 +88,7 @@ impl ReadFilter {
             Self::Before(FieldOrder::Raw),
             Self::After(FieldOrder::Raw),
             Self::FullText,
-            Self::PathGlob,
+            Self::PathGlob(StoredPathOrder::Sensitive),
             Self::Resolves(SuffixKey::Raw),
             Self::Tag,
             Self::Finding,
@@ -109,7 +116,7 @@ impl ReadFilter {
             Self::Before(_) => 5,
             Self::After(_) => 6,
             Self::FullText => 7,
-            Self::PathGlob => 8,
+            Self::PathGlob(_) => 8,
             Self::Resolves(_) => 9,
             Self::Tag => 10,
             Self::Finding => 11,
@@ -124,133 +131,187 @@ impl ReadFilter {
     }
 }
 
-/// One filter as a statement spells it: its shape, and the values it binds in
-/// the order its fragment numbers them.
+/// One filter as a statement spells it.
 #[derive(Clone, Debug)]
-pub(crate) struct Filter {
-    pub(crate) shape: ReadFilter,
-    /// The values the fragment binds, in the order [`Filter::spell`] writes
-    /// their placeholders. A resolution filter binds two per suffix range and
-    /// [`crate::resolve::EXCLUSION_PARAMETERS`] more — the ignore set, the
-    /// target's segment count and the path order — so the count also says how
-    /// many ranges it opens. A links-to filter binds each key it seeks and
-    /// [`LINKS_TO_PARAMETERS`] more.
-    pub(crate) values: Vec<Value>,
+pub(crate) enum Filter {
+    /// A path part, typed, so each read derives the range its own order
+    /// seeks from the glob: a find and a count the root's
+    /// ([`super::glob::path_range`]), a validate the answer's
+    /// ([`super::answer_order::answer_range`]).
+    Path(PathPart),
+    /// Every other part: its shape, and the values it binds.
+    Bound {
+        shape: ReadFilter,
+        /// The values the fragment binds, in the order [`Filter::spell`]
+        /// writes their placeholders. A resolution filter binds two per
+        /// suffix range and [`crate::resolve::EXCLUSION_PARAMETERS`] more —
+        /// the ignore set, the target's segment count and the path order — so
+        /// the count also says how many ranges it opens. A links-to filter
+        /// binds each key it seeks and [`LINKS_TO_PARAMETERS`] more.
+        values: Vec<Value>,
+    },
+}
+
+/// A path part as compiled: its glob, parsed, and the root's path order the
+/// glob matches under.
+#[derive(Clone, Debug)]
+pub(crate) struct PathPart {
+    pub(crate) pattern: Pattern,
+    pub(crate) order: StoredPathOrder,
+}
+
+impl PathPart {
+    /// The test that `path`, a column holding a path, matches the glob under
+    /// the root's fold, its two values bound by `binder`.
+    pub(crate) fn glob_test(&self, path: &str, binder: &mut Binder) -> String {
+        let pattern = binder.bind(Value::Text(self.pattern.as_str().to_string()));
+        let order = binder.bind(Value::Text(self.order.as_str().to_string()));
+        glob_test(&pattern, path, &order)
+    }
 }
 
 impl Filter {
-    /// A path part's range and glob, as the values it binds — the range's
-    /// lower bound, its upper bound, and the pattern — and `None` for any
+    /// The shape this filter narrows by.
+    pub(crate) fn shape(&self) -> ReadFilter {
+        match self {
+            Filter::Path(part) => ReadFilter::PathGlob(part.order),
+            Filter::Bound { shape, .. } => *shape,
+        }
+    }
+
+    /// A path part's glob and the order it matches under, and `None` for any
     /// other part.
-    pub(crate) fn path_glob(&self) -> Option<(&Value, &Value, &Value)> {
-        match (self.shape, self.values.as_slice()) {
-            (ReadFilter::PathGlob, [lower, upper, pattern]) => Some((lower, upper, pattern)),
-            _ => None,
+    pub(crate) fn path_part(&self) -> Option<&PathPart> {
+        match self {
+            Filter::Path(part) => Some(part),
+            Filter::Bound { .. } => None,
         }
     }
 
     /// This filter's fragment: a membership test of `id`, the column holding
-    /// the page's document id, its placeholders numbered by `binder`.
+    /// the page's document id, its placeholders numbered by `binder`. A path
+    /// part binds its glob's range under the root's order, then the glob and
+    /// the order.
     pub(crate) fn spell(&self, id: &str, binder: &mut Binder) -> String {
-        // The number this fragment's first value takes: a fragment's values
-        // are bound in the order it names them, so they number from here.
-        let first = binder.next_number();
-        let mut values = self.values.iter().cloned();
-        let mut next = || {
-            binder.bind(
-                values
-                    .next()
-                    .expect("a filter binds every value its fragment names"),
-            )
-        };
-        let bounded = |order: FieldOrder, comparison: &str, next: &mut dyn FnMut() -> String| {
-            let column = order.column();
-            let (key, bound) = (next(), next());
-            format!(
-                "{id} IN (SELECT fb.document FROM document_fields AS fb
-                     WHERE fb.key = {key} AND fb.{column} {comparison} {bound})"
-            )
-        };
-        match self.shape {
-            ReadFilter::Equal(order) | ReadFilter::NotEqual(order) => {
-                let column = order.column();
-                let (key, value) = (next(), next());
-                let membership = if matches!(self.shape, ReadFilter::Equal(_)) {
-                    "IN"
-                } else {
-                    "NOT IN"
-                };
-                format!(
-                    "{id} {membership} (SELECT fv.document FROM document_fields AS fv
-                     WHERE fv.key = {key} AND fv.{column} = {value})"
+        match self {
+            Filter::Path(part) => {
+                let (lower, upper) = super::glob::path_range(&part.pattern, part.order);
+                spell_bound(
+                    self.shape(),
+                    &[
+                        Value::Text(lower),
+                        upper,
+                        Value::Text(part.pattern.as_str().to_string()),
+                        Value::Text(part.order.as_str().to_string()),
+                    ],
+                    id,
+                    binder,
                 )
             }
-            ReadFilter::Member(order) => {
-                let column = order.column();
-                let (key, values) = (next(), next());
-                format!(
-                    "{id} IN (SELECT fv.document FROM document_fields AS fv
+            Filter::Bound { shape, values } => spell_bound(*shape, values, id, binder),
+        }
+    }
+}
+
+/// The fragment of a filter of `shape` binding `values`: a membership test
+/// of `id`, its placeholders numbered by `binder`.
+fn spell_bound(shape: ReadFilter, values: &[Value], id: &str, binder: &mut Binder) -> String {
+    // The number this fragment's first value takes: a fragment's values
+    // are bound in the order it names them, so they number from here.
+    let first = binder.next_number();
+    let mut bound = values.iter().cloned();
+    let mut next = || {
+        binder.bind(
+            bound
+                .next()
+                .expect("a filter binds every value its fragment names"),
+        )
+    };
+    let bounded = |order: FieldOrder, comparison: &str, next: &mut dyn FnMut() -> String| {
+        let column = order.column();
+        let (key, bound) = (next(), next());
+        format!(
+            "{id} IN (SELECT fb.document FROM document_fields AS fb
+                     WHERE fb.key = {key} AND fb.{column} {comparison} {bound})"
+        )
+    };
+    match shape {
+        ReadFilter::Equal(order) | ReadFilter::NotEqual(order) => {
+            let column = order.column();
+            let (key, value) = (next(), next());
+            let membership = if matches!(shape, ReadFilter::Equal(_)) {
+                "IN"
+            } else {
+                "NOT IN"
+            };
+            format!(
+                "{id} {membership} (SELECT fv.document FROM document_fields AS fv
+                     WHERE fv.key = {key} AND fv.{column} = {value})"
+            )
+        }
+        ReadFilter::Member(order) => {
+            let column = order.column();
+            let (key, values) = (next(), next());
+            format!(
+                "{id} IN (SELECT fv.document FROM document_fields AS fv
                      WHERE fv.key = {key}
                        AND fv.{column} IN (SELECT value FROM json_each({values})))"
-                )
-            }
-            ReadFilter::Present | ReadFilter::Absent => {
-                let key = next();
-                let membership = if self.shape == ReadFilter::Present {
-                    "IN"
-                } else {
-                    "NOT IN"
-                };
-                format!(
-                    "{id} {membership} (SELECT fp.document FROM document_fields AS fp
+            )
+        }
+        ReadFilter::Present | ReadFilter::Absent => {
+            let key = next();
+            let membership = if shape == ReadFilter::Present {
+                "IN"
+            } else {
+                "NOT IN"
+            };
+            format!(
+                "{id} {membership} (SELECT fp.document FROM document_fields AS fp
                      WHERE fp.key = {key} AND fp.ordinal = 0)"
-                )
-            }
-            ReadFilter::Before(order) => bounded(order, "<", &mut next),
-            ReadFilter::After(order) => bounded(order, ">", &mut next),
-            ReadFilter::FullText => {
-                let query = next();
-                format!(
-                    "{id} IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH {query})"
-                )
-            }
-            ReadFilter::PathGlob => {
-                let (lower, upper, pattern) = (next(), next(), next());
-                format!(
-                    "{id} IN (SELECT dg.id FROM documents AS dg
-                     WHERE dg.path >= {lower} AND dg.path < {upper}
+            )
+        }
+        ReadFilter::Before(order) => bounded(order, "<", &mut next),
+        ReadFilter::After(order) => bounded(order, ">", &mut next),
+        ReadFilter::FullText => {
+            let query = next();
+            format!("{id} IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH {query})")
+        }
+        ReadFilter::PathGlob(order) => {
+            let (lower, upper, pattern, recorded) = (next(), next(), next(), next());
+            let collation = order.collation();
+            format!(
+                "{id} IN (SELECT dg.id FROM documents AS dg
+                     WHERE dg.path >= {lower}{collation} AND dg.path < {upper}{collation}
                        AND {})",
-                    glob_test(&pattern, "dg.path")
-                )
+                glob_test(&pattern, "dg.path", &recorded)
+            )
+        }
+        ReadFilter::Resolves(key) => {
+            // Each value takes its number in turn, and the resolution's
+            // predicate spells its ranges and its exclusion over those
+            // numbers from `first`: two bounds per range, then the ignore
+            // set, the target's segment count and the path order.
+            for _ in values {
+                next();
             }
-            ReadFilter::Resolves(key) => {
-                // Each value takes its number in turn, and the resolution's
-                // predicate spells its ranges and its exclusion over those
-                // numbers from `first`: two bounds per range, then the ignore
-                // set, the target's segment count and the path order.
-                for _ in &self.values {
-                    next();
-                }
-                let ranges = (self.values.len() - resolve::EXCLUSION_PARAMETERS) / 2;
-                format!(
-                    "{id} IN (SELECT dr.id FROM documents AS dr WHERE {})",
-                    resolve::predicate("dr", key, ranges, first)
-                )
-            }
-            ReadFilter::Tag => {
-                let name = next();
-                format!(
-                    "{id} IN (SELECT tg.document FROM document_tags AS tg WHERE tg.name = {name})"
-                )
-            }
-            ReadFilter::LinksTo(key) => {
-                let listed: Vec<String> = (0..self.values.len() - LINKS_TO_PARAMETERS)
-                    .map(|_| next())
-                    .collect();
-                let (ignored, order, path, document) = (next(), next(), next(), next());
-                let link_key = resolve::link_key_column(key);
-                format!(
-                    "{id} IN (SELECT lk.document FROM link_keys AS lk
+            let ranges = (values.len() - resolve::EXCLUSION_PARAMETERS) / 2;
+            format!(
+                "{id} IN (SELECT dr.id FROM documents AS dr WHERE {})",
+                resolve::predicate("dr", key, ranges, first)
+            )
+        }
+        ReadFilter::Tag => {
+            let name = next();
+            format!("{id} IN (SELECT tg.document FROM document_tags AS tg WHERE tg.name = {name})")
+        }
+        ReadFilter::LinksTo(key) => {
+            let listed: Vec<String> = (0..values.len() - LINKS_TO_PARAMETERS)
+                .map(|_| next())
+                .collect();
+            let (ignored, order, path, document) = (next(), next(), next(), next());
+            let link_key = resolve::link_key_column(key);
+            format!(
+                "{id} IN (SELECT lk.document FROM link_keys AS lk
                      WHERE lk.{link_key} IN ({listed})
                        AND (lk.segments IS NULL OR {named_admitted})
                        AND NOT EXISTS (SELECT 1 FROM link_keys AS lo, documents AS dl
@@ -260,28 +321,27 @@ impl Filter {
                        AND NOT EXISTS (SELECT 1 FROM link_keys AS lp, documents AS dp
                            WHERE lp.link = lk.link AND lp.segments IS NULL
                              AND {other_at_path} AND dp.id <> {document}))",
-                    listed = listed.join(", "),
-                    named_admitted = resolve::admits(&ignored, "lk.segments", &order, &path),
-                    other_in_class = resolve::link_key_class(
-                        "dl",
-                        key,
-                        &format!("lo.{link_key}"),
-                        "lo.segments",
-                        &ignored,
-                        &order,
-                    ),
-                    other_at_path = resolve::link_key_path("dp", key, &format!("lp.{link_key}")),
-                )
-            }
-            ReadFilter::Finding => {
-                let (fingerprint, kind) = (next(), next());
-                format!(
-                    "{id} IN (SELECT df.id FROM documents AS df
+                listed = listed.join(", "),
+                named_admitted = resolve::admits(&ignored, "lk.segments", &order, &path),
+                other_in_class = resolve::link_key_class(
+                    "dl",
+                    key,
+                    &format!("lo.{link_key}"),
+                    "lo.segments",
+                    &ignored,
+                    &order,
+                ),
+                other_at_path = resolve::link_key_path("dp", key, &format!("lp.{link_key}")),
+            )
+        }
+        ReadFilter::Finding => {
+            let (fingerprint, kind) = (next(), next());
+            format!(
+                "{id} IN (SELECT df.id FROM documents AS df
                      WHERE df.path IN (SELECT fg.path FROM findings AS fg
                          WHERE fg.vault_schema_fingerprint = {fingerprint}
                            AND fg.kind = {kind}))"
-                )
-            }
+            )
         }
     }
 }
@@ -292,9 +352,10 @@ impl Filter {
 pub(crate) const LINKS_TO_PARAMETERS: usize = 4;
 
 /// The test that `path`, a column holding a path, matches the glob bound at
-/// `pattern`: the one spelling of a glob match every statement runs.
-pub(crate) fn glob_test(pattern: &str, path: &str) -> String {
-    format!("{}({pattern}, {path})", super::glob::GLOB_FUNCTION)
+/// `pattern` under the path order whose recorded spelling is bound at
+/// `order`: the one spelling of a glob match every statement runs.
+fn glob_test(pattern: &str, path: &str, order: &str) -> String {
+    format!("{}({pattern}, {path}, {order})", super::glob::GLOB_FUNCTION)
 }
 
 /// Numbers placeholders as they are written, holding the values in that order.

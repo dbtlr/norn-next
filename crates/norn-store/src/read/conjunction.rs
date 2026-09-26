@@ -7,10 +7,10 @@ use norn_db::rusqlite::types::Value;
 use norn_wire::{Pattern, Predicate, RequestPart, Unsatisfied};
 
 use super::advisory::{Compared, DateComparison};
-use super::filter::{Filter, ReadFilter};
+use super::filter::{Filter, PathPart, ReadFilter};
 use super::naming::Naming;
 use super::run::StatementFailure;
-use super::{FieldOrder, IN_VALUES_CEILING, Lookups, PageRefusal, Ran, ReadBound, glob, suggest};
+use super::{FieldOrder, IN_VALUES_CEILING, Lookups, PageRefusal, Ran, ReadBound, suggest};
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::find::{
@@ -232,8 +232,9 @@ impl Snapshot {
         lookups: &mut Lookups,
     ) -> Result<Part, PageRefusal> {
         let text = |value: &str| Value::Text(value.to_string());
-        let filter =
-            |shape: ReadFilter, values: Vec<Value>| Ok(Part::Filter(Filter { shape, values }));
+        let filter = |shape: ReadFilter, values: Vec<Value>| {
+            Ok(Part::Filter(Filter::Bound { shape, values }))
+        };
         // The order a key's values compare under, and a request's value as a
         // place in it: its typed sort key where the key carries a typed order,
         // its text where it does not.
@@ -298,11 +299,10 @@ impl Snapshot {
                     if let Some(part) = self.unmatchable_path(&pattern, lookups)? {
                         return Ok(Part::MatchesNothing(part));
                     }
-                    let (lower, upper) = glob::path_range(&pattern);
-                    filter(
-                        ReadFilter::PathGlob,
-                        vec![Value::Text(lower), upper, text(glob)],
-                    )
+                    Ok(Part::Filter(Filter::Path(PathPart {
+                        pattern,
+                        order: self.path_order(),
+                    })))
                 }
             },
             Predicate::LinksTo { target, .. } => {
@@ -392,8 +392,13 @@ impl Snapshot {
     /// construction, or `None` where it can be applied.
     ///
     /// A glob with no wildcard is asked first whether it is a bare directory —
-    /// no document at the path, and some beneath it — because that is the
-    /// report that says what the request meant. Then any glob is impossible
+    /// no document at the path, and some beneath it, each under the snapshot's
+    /// path order as the glob itself matches — because that is the report that
+    /// says what the request meant. The probe is spelled with the glob as
+    /// written on either root: where the root folds, it compares under
+    /// `NOCASE`, which folds both sides, and the descendant range's bounds
+    /// differ from the path only by the separator and its successor, which no
+    /// fold moves. Then any glob is impossible
     /// where, read with each wildcard as a letter, it is no document path the
     /// store accepts: every path the glob could match is spelled that way with
     /// other characters in the holes, and the refusals the grammar makes are
@@ -411,7 +416,7 @@ impl Snapshot {
                 &mut lookups.ran,
                 Ran::new(
                     FindStatement::BareDirectory,
-                    compose_bare_directory(source, &lower, &upper),
+                    compose_bare_directory(source, &lower, &upper, self.path_order()),
                 ),
                 "asking whether a path names a bare directory",
             )?;

@@ -52,30 +52,37 @@
 //! no statement reads and that a bad write could make disagree with the path
 //! beside it.
 //!
-//! # Two indexes over one column, because the vault decides the order
+//! # Two indexes over one column: the root's order and the answer's
 //!
 //! `documents_path` is unique and compares bytes, which is what the store's
 //! default collation gives it. `documents_path_nocase` declares
-//! `path COLLATE NOCASE, path`, which is the order a case-insensitive vault
-//! root proves for its own names, term for term: ASCII case folded, ties broken
-//! bytewise. SQLite's `NOCASE` maps `A`-`Z` to `a`-`z` and leaves every other
-//! byte alone, which is the filesystem seam's fold exactly — including its
-//! refusal to invent a Unicode policy over path bytes that need not be UTF-8.
+//! `path COLLATE NOCASE, path`: ASCII case folded, ties broken bytewise.
+//! SQLite's `NOCASE` maps `A`-`Z` to `a`-`z` and leaves every other byte
+//! alone, which is the filesystem seam's fold exactly — including its refusal
+//! to invent a Unicode policy over path bytes that need not be UTF-8. Nothing
+//! here folds a value on its own account, and the column holds the one
+//! spelling it was given.
 //!
-//! **The fold is still the vault's rather than the store's.** Which of the two
-//! orders applies is a filesystem behaviour, proven at the vault root and
-//! carried here as a parameter of the read; an index serves an order a caller
-//! asked for, and records no truth about a path. Nothing here folds a value on
-//! its own account, and the column holds the one spelling it was given.
+//! **A find's answer reads `documents_path_nocase` on every root.** It holds
+//! the order every read answers paths in, the answer order: a find's path page
+//! and a field sort's missing section seek it in page order, so a page seeks
+//! into that order rather than sorting for it, which would read everything the
+//! scope holds before returning its first row.
 //!
-//! The reader that pays for the second index is the heal's ordered document
-//! page. It merges a bounded page of rows against a walk that yields files in
-//! the vault's own order, so the two sides need one total order — and a page
-//! has to *seek* into that order, because a page that sorts for it has read
-//! everything the scope holds before returning its first row. It is declared
-//! for every store, folding vault or not: the schema is one statement list, the
-//! fold is a per-read parameter, and DDL conditional on a vault the store has
-//! not been shown is a shape no fingerprint could state.
+//! **Where the root folds ASCII case, it is also the root's own order**, term
+//! for term, which a heal and a path part read. The heal's ordered document
+//! page merges a bounded page of rows against a walk that yields files in the
+//! vault's own order, so the two sides need one total order: a folding root's
+//! page seeks this index, and a root that tells spellings apart pages
+//! `documents_path` bytewise. A path part of a find or a count, and a
+//! bare-directory probe, seek the glob's literal prefix under `NOCASE` here
+//! where the root folds, so a glob reaches every spelling of that prefix the
+//! vault treats as one name, and `documents_path` where it does not. A
+//! validate's path part judges a finding's path, and seeks the findings' folded
+//! indexes ([`crate::ddl::findings`]). The index is declared for every store:
+//! the schema is one statement list, the root's fold is a per-read parameter,
+//! and DDL conditional on a vault the store has not been shown is a shape no
+//! fingerprint could state.
 //!
 //! The bytewise tie-break is load-bearing rather than decorative. `documents_path`
 //! is unique under `BINARY`, so `A.md` and `a.md` can both hold rows even on a

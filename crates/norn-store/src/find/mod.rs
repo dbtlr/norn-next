@@ -16,26 +16,29 @@
 //! drives from the filter's seek and sorts the matched set**, so its cost is
 //! bounded by the match count, which is what a narrowing part narrows.
 //!
-//! A path order is one section: `documents_path_nocase`, the path folded by
-//! ASCII case with the bytewise path as the tie-break, so the order is total.
+//! **Paths stand in the answer's path order on every root**: the path folded
+//! by ASCII case with the bytewise path as the tie-break, so the order is
+//! total, whether the root tells spellings apart or folds them. A path order
+//! is one section in it, on `documents_path_nocase`.
 //!
 //! A field order is two. The **valued** section reads the key's marker rows —
 //! each document's least value under the order, one row per document — in
-//! `(value, path)` order, on the order's marker index where no filter drives
-//! the page, so a document whose field holds a set appears once, at its least
-//! value. The **missing** section reads
-//! the documents holding no value under the order — the key absent, every value
-//! null, or, under the typed order, no value that reads as the declared type —
-//! in bytewise path order. The missing section stands before the valued one
-//! ascending and after it descending, which is where the wire says a document
-//! missing the sort field goes. A page reads section after section until it
-//! holds one row more than its bound, and the extra row is what says a next
-//! page exists.
+//! `(value, path)` order with the path in the answer's path order, on the
+//! order's marker index where no filter drives the page, so a document whose
+//! field holds a set appears once, at its least value. The **missing** section
+//! reads the documents holding no value under the order — the key absent, every
+//! value null, or, under the typed order, no value that reads as the declared
+//! type — in the answer's path order. The missing section stands before the
+//! valued one ascending and after it descending, which is where the wire says a
+//! document missing the sort field goes. A page reads section after section
+//! until it holds one row more than its bound, and the extra row is what says a
+//! next page exists.
 //!
 //! **The missing section's walk is the price of ordering missing as `NULL`.**
 //! The valued section is a seek of the marker index, and stops at the page's
-//! bound. The missing section is a walk of the path index that probes each
-//! document's marker row, so it passes every document carrying the key to
+//! bound. The missing section is a walk of `documents_path_nocase`, which
+//! holds the answer's path order on every root, that probes each document's
+//! marker row, so it passes every document carrying the key to
 //! reach the next one that does not. An ascending first page reads the missing
 //! section first, so where few or no documents miss the key it costs a walk
 //! proportional to the documents that carry it. A drain pays that walk at most
@@ -369,7 +372,7 @@ struct Compiled<'a> {
 
 impl Compiled<'_> {
     fn filter_shapes(&self) -> Vec<ReadFilter> {
-        self.filters.iter().map(|filter| filter.shape).collect()
+        self.filters.iter().map(|filter| filter.shape()).collect()
     }
 
     /// The field order a field sort runs in, and `None` for a path order.

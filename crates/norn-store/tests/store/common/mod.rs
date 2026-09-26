@@ -12,8 +12,8 @@ use norn_store::{
     BlockFact, CandidateFact, Change, ClassKey, ContentModel, DerivationCounters, DocumentFacts,
     DocumentPath, EmittedPlan, FieldOrder, FindingFacts, FrontmatterValue, GetPlan, GetWork,
     HeadingFact, IncrementOutcome, IncrementProvenance, LinkFact, LinkFamily, OffsetSpelling,
-    Provenance, ReadFilter, Request, Span, Store, SuffixKey, TagFact, TagSource, TypedOrder,
-    suffix_probe,
+    Provenance, ReadFilter, Request, Span, Store, StoredPathOrder, SuffixKey, TagFact, TagSource,
+    TypedOrder, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::explain::StatementReads;
@@ -96,12 +96,13 @@ impl Scratch {
     }
 
     pub fn open(&self) -> Store {
-        Store::open(
-            self.database(),
-            norn_store::StoredPathOrder::Sensitive,
-            crate::common::DERIVATION,
-        )
-        .expect("opening a store")
+        self.open_under(StoredPathOrder::Sensitive)
+    }
+
+    /// A store over a root proven to have `order`'s case behaviour, which
+    /// every snapshot of it reads under.
+    pub fn open_under(&self, order: StoredPathOrder) -> Store {
+        Store::open(self.database(), order, crate::common::DERIVATION).expect("opening a store")
     }
 }
 
@@ -333,7 +334,10 @@ pub fn driving_parts() -> Vec<(ReadFilter, Predicate)> {
             Predicate::after("status", "g"),
         ),
         (ReadFilter::FullText, Predicate::matches("interloper")),
-        (ReadFilter::PathGlob, Predicate::path("a*")),
+        (
+            ReadFilter::PathGlob(StoredPathOrder::Sensitive),
+            Predicate::path("a*"),
+        ),
         (ReadFilter::Tag, Predicate::tag("draft")),
         (
             ReadFilter::Finding,

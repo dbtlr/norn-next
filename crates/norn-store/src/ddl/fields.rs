@@ -79,10 +79,11 @@
 //!   is the set a pin clears, so the clear reads that index and never the rest
 //!   of the table.
 //! - `document_fields_least_raw` and `document_fields_least_typed` hold the
-//!   marker rows alone, one per document and key, by `(key, value, path)`: a
-//!   field sort's valued section pages one of them from a `(value, path)`
-//!   position with no sort step, and a document whose field holds a set is
-//!   read once.
+//!   marker rows alone, one per document and key, by `(key, value, path
+//!   COLLATE NOCASE, path)`: a field sort's valued section pages one of them
+//!   from a `(value, path)` position with no sort step, its documents tied at
+//!   one value in the answer's path order, and a document
+//!   whose field holds a set is read once.
 //! - `document_fields_presence` holds the presence rows alone, by `(key,
 //!   container)`: `has` and `missing` are one seek on its leading column, the
 //!   keys the vault holds are its distinct leading column, and whether any
@@ -128,11 +129,13 @@ pub(crate) fn statements() -> Vec<String> {
         "CREATE INDEX document_fields_typed ON document_fields(key, typed)
     WHERE typed IS NOT NULL"
             .to_string(),
-        "CREATE INDEX document_fields_least_raw ON document_fields(key, raw, path)
-    WHERE least_raw = 1"
+        "CREATE INDEX document_fields_least_raw ON document_fields(
+    key, raw, path COLLATE NOCASE, path
+) WHERE least_raw = 1"
             .to_string(),
-        "CREATE INDEX document_fields_least_typed ON document_fields(key, typed, path)
-    WHERE least_typed = 1"
+        "CREATE INDEX document_fields_least_typed ON document_fields(
+    key, typed, path COLLATE NOCASE, path
+) WHERE least_typed = 1"
             .to_string(),
         "CREATE INDEX document_fields_presence ON document_fields(key, container)
     WHERE ordinal = 0"

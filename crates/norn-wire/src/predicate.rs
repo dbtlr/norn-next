@@ -108,8 +108,9 @@ pub enum Predicate {
         /// The glob the path must match, anchored at both ends: `?` matches
         /// one character that is not `/`, `*` any run of characters holding
         /// no `/`, and a whole `**` segment any run of segments, none
-        /// included. Every other character matches itself; there is no
-        /// escape.
+        /// included. Every other character matches itself, except that an
+        /// ASCII letter matches either case of itself where the vault root's
+        /// path order folds ASCII case; there is no escape.
         glob: String,
     },
     /// The document holds a link that resolves to exactly the one document

@@ -43,11 +43,22 @@
 //! both, because none of them compares a character. The pattern stays the text
 //! it was written as, so one grammar and one matcher answer both.
 //!
-//! The store's ambiguity-ignore set matches under [`CaseFold::Ascii`] where
-//! the store's recorded path order folds ASCII case, and under
-//! [`CaseFold::Exact`] where it does not. The path parts of a find, a count
-//! and a validate, and a tag facet's patterns, match under [`CaseFold::Exact`]
-//! on every root.
+//! # Its callers' fold
+//!
+//! Every glob over a path names the same fold, taken from one rule:
+//! [`CaseFold::Ascii`] where the vault store's recorded path order folds ASCII
+//! case, which is where the vault root was proven to treat two spellings as
+//! one name, and [`CaseFold::Exact`] where it does not. The store states the
+//! rule once (`norn_store::StoredPathOrder::glob_case`), and each path caller
+//! reads it there:
+//!
+//! - the ambiguity-ignore set, where the store's resolver reads a class;
+//! - the path part of a find, a count and a validate, where the store's read
+//!   builders run the glob inside a statement, under the order the snapshot
+//!   reads.
+//!
+//! A tag facet's patterns name tags, not paths, and match under
+//! [`CaseFold::Exact`] on every root.
 //!
 //! # What matching costs
 //!

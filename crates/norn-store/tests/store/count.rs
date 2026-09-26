@@ -17,7 +17,8 @@ use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
     COUNT_STATEMENTS, ContentModel, CountPlan, CountStatement, Counted, FieldDeclaration,
     FieldOrder, FindStatement, Found, FrontmatterValue, GroupMember, PageRefusal, ReadStatement,
-    Snapshot, SnapshotReader, Store, TagFact, TagSource, TypedOrder, induced_failure,
+    Snapshot, SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TypedOrder,
+    induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -212,6 +213,17 @@ impl Counting {
 
     /// [`Counting::with_bulk`], each bulk document's body `body`.
     fn with_bulk_bodies(label: &str, bulk: usize, body: &str) -> Self {
+        Self::with_bulk_bodies_under(label, bulk, body, StoredPathOrder::Sensitive)
+    }
+
+    /// [`Counting::with_bulk_bodies`] in a store over a root proven to have
+    /// `order`'s case behaviour.
+    fn with_bulk_bodies_under(
+        label: &str,
+        bulk: usize,
+        body: &str,
+        order: StoredPathOrder,
+    ) -> Self {
         let documents: Vec<_> = (0..bulk)
             .map(|at| {
                 tagged(
@@ -232,13 +244,27 @@ impl Counting {
                 )
             })
             .collect();
-        Self::with_documents(label, documents)
+        Self::with_documents_under(label, documents, order)
     }
 
     /// The fixture and `documents` beside it.
     fn with_documents(label: &str, documents: Vec<norn_store::DocumentFacts>) -> Self {
+        Self::with_documents_under(label, documents, StoredPathOrder::Sensitive)
+    }
+
+    /// The fixture in a store over a root proven to have `order`'s case
+    /// behaviour, which every snapshot of it reads under.
+    fn under(label: &str, order: StoredPathOrder) -> Self {
+        Self::with_documents_under(label, Vec::new(), order)
+    }
+
+    fn with_documents_under(
+        label: &str,
+        documents: Vec<norn_store::DocumentFacts>,
+        order: StoredPathOrder,
+    ) -> Self {
         let scratch = Scratch::new(label);
-        let mut store = scratch.open();
+        let mut store = scratch.open_under(order);
         seed(&mut store);
         if !documents.is_empty() {
             write_documents(&mut store.begin_request(), &documents);
@@ -402,6 +428,32 @@ fn an_empty_grouping_answers_one_tally_over_the_whole_match() {
             .tallies,
         vec![tally(&[], 3)]
     );
+}
+
+/// **A path part counts under the root's order.** On a root that folds ASCII
+/// case, `*.MD` counts every document `*.md` counts on a root that tells
+/// spellings apart, and `A.MD` the one `a.md` names, grouped as a find of the
+/// same part reads them; on a root that tells spellings apart, the upper-case
+/// globs count nothing.
+#[test]
+fn a_path_part_counts_under_the_roots_order() {
+    let sensitive = Counting::under("count-path-case", StoredPathOrder::Sensitive);
+    let folding = Counting::under(
+        "count-path-case-folded",
+        StoredPathOrder::AsciiCaseInsensitive,
+    );
+    let tallies = |counting_store: &Counting, glob: &str| {
+        counting_store
+            .count(&counting(vec![field("status")]).with_predicates([Predicate::path(glob)]))
+            .tallies
+    };
+    let nothing = tallies(&sensitive, "absent.md");
+    for (upper, lower) in [("*.MD", "*.md"), ("A.MD", "a.md")] {
+        let bytewise = tallies(&sensitive, lower);
+        assert_ne!(bytewise, nothing, "`{lower}` counts some document");
+        assert_eq!(tallies(&folding, upper), bytewise, "`{upper}` folded");
+        assert_eq!(tallies(&sensitive, upper), nothing, "`{upper}` bytewise");
+    }
 }
 
 /// **A document stands in a group once however many of its values fall
@@ -1062,6 +1114,56 @@ fn an_ungrouped_count_counts_the_documents_or_reaches_them_by_its_filters_seek()
     failure_of("a filtered total that scans the documents", || {
         judge_filtered(&scanned)
     });
+}
+
+/// **A path part narrows a count through the path index its root's order
+/// selects.** On each root, a count narrowed by a glob in the case that root
+/// reads it reaches its documents by row id, handed them by one seek of
+/// `documents_path` where the root tells spellings apart and of
+/// `documents_path_nocase` where it folds ASCII case, and costs the same work
+/// beside 50 and beside 500 more documents the glob does not match.
+///
+/// Controls: on each root, the index its path part seeks dropped, the seek is
+/// no longer one and the bar fails.
+#[test]
+fn a_path_part_narrows_a_count_through_the_path_index_its_roots_order_selects() {
+    for (order, index, glob) in [
+        (StoredPathOrder::Sensitive, "documents_path", "a*"),
+        (
+            StoredPathOrder::AsciiCaseInsensitive,
+            "documents_path_nocase",
+            "A*",
+        ),
+    ] {
+        let label = |size: &str| format!("count-path-{size}-{}", order.as_str());
+        let small = Counting::with_bulk_bodies_under(&label("small"), 50, "a body\n", order);
+        let mut large = Counting::with_bulk_bodies_under(&label("large"), 500, "a body\n", order);
+        let params = counting(vec![field("status")]).with_predicates([Predicate::path(glob)]);
+        let judge = |counting_store: &Counting| {
+            let plans = counting_store.plans(&params);
+            let plan = plans
+                .iter()
+                .find(|plan| matches!(plan.statement, ReadStatement::Count(_)))
+                .map(plan)
+                .expect("a tally statement");
+            plan.assert_no_full_scan();
+            rows_of(&plan, "dg").assert_searches_through("documents", Access::Index(index));
+            rows_of(&plan, "dg").assert_search_constraint("documents", "(path>? AND path<?)");
+        };
+        judge(&small);
+        judge(&large);
+        let (at_small, at_large) = (small.count(&params), large.count(&params));
+        assert_eq!(at_small.tallies, at_large.tallies);
+        assert_eq!(
+            at_small.work, at_large.work,
+            "a count narrowed by `{glob}` grew with the vault under {order:?}"
+        );
+
+        large.drop_index(index);
+        failure_of(&format!("{index} dropped under {order:?}"), || {
+            judge(&large)
+        });
+    }
 }
 
 /// One member a grouping's leading key is read from, and the index its valued

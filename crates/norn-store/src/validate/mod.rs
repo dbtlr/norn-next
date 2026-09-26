@@ -13,15 +13,16 @@
 //! # A page is the findings in `(kind, path, id)` order
 //!
 //! A page reads one kind after another, in the byte order of the kind's code,
-//! and each kind is a section in `(path, id)` order: a seek of the kind's
-//! findings from the page's position that stops at the page's bound, so
-//! nothing sorts. A page reads at most one finding past its bound to learn a
-//! next page exists, and the cursor it mints names the last finding's kind,
-//! path and id, where the next page resumes. The kinds are the request's, or
-//! every kind where it names none; a severity floor admits the severities at
-//! it or above, and where that is one severity the section seeks the findings
-//! of that severity alone. [`ValidateStatement`] names what each statement
-//! reads.
+//! and each kind is a section in the answer's path order and then by id —
+//! `(path COLLATE NOCASE, path, id)` on every root, the order a find answers
+//! paths in: a seek of the kind's findings from the page's position that
+//! stops at the page's bound, so nothing sorts. A page reads at most one
+//! finding past its bound to learn a next page exists, and the cursor it mints
+//! names the last finding's kind, path and id, where the next page resumes.
+//! The kinds are the request's, or every kind where it names none; a severity
+//! floor admits the severities at it or above, and where that is one severity
+//! the section seeks the findings of that severity alone. [`ValidateStatement`]
+//! names what each statement reads.
 //!
 //! Each finding is answered as the row the finding row accessor reads, which
 //! is the one a find's findings column reads: its bounded candidate head, the
@@ -101,7 +102,8 @@ pub struct Validated {
 /// What a validate answers with.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Validation {
-    /// A page of findings, in `(kind, path, id)` order.
+    /// A page of findings, in `(kind, path, id)` order with the path in the
+    /// answer's path order.
     Findings {
         /// The findings, at most the page bound of them.
         rows: Vec<FindingRow>,
@@ -204,7 +206,8 @@ struct Narrowing {
 
 impl Snapshot {
     /// The findings `params` asks for, as a page in `(kind, path, id)` order
-    /// continuing its cursor, or as one tally per kind and severity.
+    /// with the path in the answer's path order, continuing its cursor, or as
+    /// one tally per kind and severity.
     ///
     /// `declared` is the vault's declaration, read from the schema the
     /// snapshot pins: it decides how a conjunction's part compares and —
@@ -362,7 +365,7 @@ impl Snapshot {
             .conjunction
             .filters
             .iter()
-            .map(|filter| filter.shape)
+            .map(|filter| filter.shape())
             .collect();
         let page = self.read_page(
             sections,
@@ -417,7 +420,7 @@ impl Snapshot {
                 .conjunction
                 .filters
                 .iter()
-                .map(|filter| filter.shape)
+                .map(|filter| filter.shape())
                 .collect(),
         );
         let read = self

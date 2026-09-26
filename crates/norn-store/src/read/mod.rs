@@ -1,9 +1,9 @@
 //! What every read builder shares: the refusal a builder answers with instead
 //! of a page, the statements a read runs and records, the reading a cursor is
-//! judged against, the one compilation of a conjunction, the filters it
-//! spells, the advisories its applied parts earn, the one walk of the keys
-//! documents carry, and the one keyset page a builder reads section after
-//! section.
+//! judged against, the one path order every answer stands in, the one
+//! compilation of a conjunction, the filters it spells, the advisories its
+//! applied parts earn, the one walk of the keys documents carry, and the one
+//! keyset page a builder reads section after section.
 //!
 //! A read builder is inherent methods on [`Snapshot`], so every statement it
 //! runs reads the one instant the snapshot was established at and is counted
@@ -22,6 +22,7 @@
 //! statement, and a section a page never reached is never explained.
 
 mod advisory;
+mod answer_order;
 mod conjunction;
 mod filter;
 mod finding;
@@ -50,9 +51,9 @@ use crate::store::Snapshot;
 use crate::validate::ValidateStatement;
 
 pub(crate) use advisory::{Compared, DateComparison};
+pub(crate) use answer_order::{AnswerSeek, Term, answer_ordering, answer_place, answer_range};
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
-pub(crate) use filter::glob_test;
-pub(crate) use filter::{Binder, Filter};
+pub(crate) use filter::{Binder, Filter, PathPart};
 pub use filter::{READ_FILTERS, ReadFilter};
 pub(crate) use finding::{FINDING_ROW_COLUMNS, FindingBase, finding_base};
 pub(crate) use glob::register_functions;

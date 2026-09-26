@@ -10113,6 +10113,56 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **A tag facet's patterns match a tag's bytes under either path
+    /// order**: the same bytes derived into a store recording each order,
+    /// `area/**` does not admit `#Area/work`, which is an undeclared-tag
+    /// finding on both. A tag names no path, so the root's case behaviour
+    /// does not reach it. The store's order is set by reopening it, so the
+    /// case judges both orders on any host.
+    #[test]
+    fn a_tag_pattern_matches_exactly_under_either_path_order() {
+        let f = Fixture::watcherless("derive-tag-pattern-case");
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\ntags:\n  patterns: [\"area/**\"]\n  undeclared: report\n",
+        )
+        .unwrap();
+        let bytes = b"# body\n#Area/work #area/home\n";
+        let root = f.vault();
+        let mut store = Store::open(
+            f.root.join("tag-pattern-case.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        for order in [
+            StoredPathOrder::Sensitive,
+            StoredPathOrder::AsciiCaseInsensitive,
+        ] {
+            store = store.discard_and_reopen(order).unwrap();
+            assert_eq!(store.path_order(), order);
+            ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+            let mut account = Account::default();
+            let mut pending =
+                Pending::new(&mut store, 64, root.as_path(), &[], &mut account).unwrap();
+            pending.derive(
+                "note.md",
+                bytes,
+                norn_fs::ContentHash::of(bytes).to_string(),
+            );
+            pending.flush().unwrap();
+            let targets: Vec<Option<String>> = findings_at(&mut store, "note.md")
+                .into_iter()
+                .map(|finding| finding.target)
+                .collect();
+            assert_eq!(
+                targets,
+                vec![Some("Area/work".to_string())],
+                "under {order:?}"
+            );
+        }
+    }
+
     /// **A store an earlier derivation wrote is rebuilt from zero at the
     /// attach that opens it, and the reason names both versions.** The stale
     /// row stands under the content hash of the bytes the vault holds, which is

@@ -427,7 +427,7 @@ fn filter_barred_by(filter: ReadFilter) -> &'static str {
         | ReadFilter::Before(_)
         | ReadFilter::After(_)
         | ReadFilter::FullText
-        | ReadFilter::PathGlob
+        | ReadFilter::PathGlob(_)
         | ReadFilter::Resolves(_)
         | ReadFilter::Tag
         | ReadFilter::Finding
@@ -452,10 +452,15 @@ fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
         ReadFilter::LinksTo(_) => [SuffixKey::Raw, SuffixKey::Folded]
             .map(ReadFilter::LinksTo)
             .to_vec(),
+        ReadFilter::PathGlob(_) => [
+            StoredPathOrder::Sensitive,
+            StoredPathOrder::AsciiCaseInsensitive,
+        ]
+        .map(ReadFilter::PathGlob)
+        .to_vec(),
         ReadFilter::Present
         | ReadFilter::Absent
         | ReadFilter::FullText
-        | ReadFilter::PathGlob
         | ReadFilter::Tag
         | ReadFilter::Finding => vec![filter],
     }
@@ -571,12 +576,12 @@ const PAGE_BARS: &[(FindStatement, Direction, &str)] = &[
     (
         FindStatement::PathPage(PageDirection::Ascending),
         Direction::Ascending,
-        "(path>?)",
+        "((path,path)>(?,?))",
     ),
     (
         FindStatement::PathPage(PageDirection::Descending),
         Direction::Descending,
-        "(path<?)",
+        "((path,path)<(?,?))",
     ),
 ];
 
@@ -585,7 +590,8 @@ const PAGE_BARS: &[(FindStatement, Direction, &str)] = &[
 /// path folded by ASCII case, the bytewise path breaking the tie — is the order
 /// `documents_path_nocase` holds, so the rows come off the index in page order
 /// and nothing sorts. A continuation is explained with its position bound, and
-/// the position is the search's bound: `(path>?)` ascending, `(path<?)`
+/// the position is the search's bound, the folded path and then the path
+/// bytewise: `((path,path)>(?,?))` ascending, `((path,path)<(?,?))`
 /// descending.
 ///
 /// The fingerprint read a finding filter binds is the snapshot's one point read,
@@ -616,7 +622,7 @@ fn a_path_page_seeks_the_case_insensitive_index_in_either_direction() {
             &seeded.plans(&request()),
             FindStatement::PathPage(PageDirection::Ascending),
         ),
-        "(path>?)",
+        "((path,path)>(?,?))",
     );
 
     let fingerprint = plan_of(
@@ -641,11 +647,17 @@ fn a_path_page_seeks_the_case_insensitive_index_in_either_direction() {
         continued
             .rows()
             .iter()
-            .map(|row| PlanRow::new(row.id, row.parent, row.detail.replace(" (path>?)", "")))
+            .map(|row| {
+                PlanRow::new(
+                    row.id,
+                    row.parent,
+                    row.detail.replace(" ((path,path)>(?,?))", ""),
+                )
+            })
             .collect(),
     );
     failure_of("a continuation that seeks from no bound", || {
-        judge(&unbounded, "(path>?)")
+        judge(&unbounded, "((path,path)>(?,?))")
     });
 
     // Control: the index the order is held by, gone.
@@ -679,8 +691,8 @@ const FIELD_BARS: &[FieldBar] = &[
         missing: FindStatement::FieldMissingPage(FieldOrder::Raw, PageDirection::Ascending),
         direction: Direction::Ascending,
         marker_index: "document_fields_least_raw",
-        valued_constraint: "(key=? AND (raw,path)>(?,?))",
-        missing_constraint: "(path>?)",
+        valued_constraint: "(key=? AND (raw,path,path)>(?,?,?))",
+        missing_constraint: "((path,path)>(?,?))",
     },
     FieldBar {
         key: "status",
@@ -688,8 +700,8 @@ const FIELD_BARS: &[FieldBar] = &[
         missing: FindStatement::FieldMissingPage(FieldOrder::Raw, PageDirection::Descending),
         direction: Direction::Descending,
         marker_index: "document_fields_least_raw",
-        valued_constraint: "(key=? AND (raw,path)<(?,?))",
-        missing_constraint: "(path<?)",
+        valued_constraint: "(key=? AND (raw,path,path)<(?,?,?))",
+        missing_constraint: "((path,path)<(?,?))",
     },
     FieldBar {
         key: "count",
@@ -697,8 +709,8 @@ const FIELD_BARS: &[FieldBar] = &[
         missing: FindStatement::FieldMissingPage(FieldOrder::Typed, PageDirection::Ascending),
         direction: Direction::Ascending,
         marker_index: "document_fields_least_typed",
-        valued_constraint: "(key=? AND (typed,path)>(?,?))",
-        missing_constraint: "(path>?)",
+        valued_constraint: "(key=? AND (typed,path,path)>(?,?,?))",
+        missing_constraint: "((path,path)>(?,?))",
     },
     FieldBar {
         key: "count",
@@ -706,8 +718,8 @@ const FIELD_BARS: &[FieldBar] = &[
         missing: FindStatement::FieldMissingPage(FieldOrder::Typed, PageDirection::Descending),
         direction: Direction::Descending,
         marker_index: "document_fields_least_typed",
-        valued_constraint: "(key=? AND (typed,path)<(?,?))",
-        missing_constraint: "(path<?)",
+        valued_constraint: "(key=? AND (typed,path,path)<(?,?,?))",
+        missing_constraint: "((path,path)<(?,?))",
     },
 ];
 
@@ -720,11 +732,12 @@ fn judge_valued(page: &QueryPlan, bar: &FieldBar) {
     page.assert_no_temp_btree();
 }
 
-/// Judge a field sort's missing section: path order off `documents_path` from
-/// the page's position, and one primary-key seek per document for its marker.
+/// Judge a field sort's missing section: the answer's path order off
+/// `documents_path_nocase` from the page's position, and one primary-key seek
+/// per document for its marker.
 fn judge_missing(page: &QueryPlan, bar: &FieldBar) {
     page.assert_no_full_scan();
-    page.assert_searches_through("documents", Access::Index("documents_path"));
+    page.assert_searches_through("documents", Access::Index("documents_path_nocase"));
     page.assert_search_constraint("documents", bar.missing_constraint);
     page.assert_searches_through("document_fields", Access::PrimaryKey);
     page.assert_search_constraint("document_fields", "(document=? AND key=?)");
@@ -732,19 +745,32 @@ fn judge_missing(page: &QueryPlan, bar: &FieldBar) {
 }
 
 /// **A field sort seeks its marker rows, and pages its missing section by
-/// path.** The valued section reads the order's marker index — one row per
-/// document, its least value — from the page's `(value, path)` position, so the
-/// page reads its own rows and none ahead of it, and nothing sorts. The missing
-/// section walks `documents_path` from the page's path and seeks each
-/// document's marker by primary key. Both are judged on a first page and on a
-/// continuation into each section, which is where a keyset position is bound.
+/// path, on either root.** The valued section reads the order's marker index —
+/// one row per document, its least value, then the path folded and bytewise —
+/// from the page's `(value, path)` position, so the page reads its own rows and
+/// none ahead of it, and nothing sorts. The missing section walks
+/// `documents_path_nocase` from the page's path and seeks each document's
+/// marker by primary key. Both are judged on a first page and on a
+/// continuation into each section, which is where a keyset position is bound,
+/// on a root that tells spellings apart and on one that folds them.
 ///
 /// Controls: each marker index dropped, the valued section reads something
+/// else; `documents_path_nocase` dropped, the missing section reads something
 /// else; a continuation's plan rebuilt without its `(value, path)` bound fails
 /// the constraint bar.
 #[test]
 fn a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path() {
-    let mut seeded = Seeded::new("find-field-sort");
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        judge_field_sort_plans(Seeded::under("find-field-sort", order));
+    }
+}
+
+/// [`a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path`]
+/// on one store.
+fn judge_field_sort_plans(mut seeded: Seeded) {
     for bar in FIELD_BARS {
         let params = sorted(SortKey::field(bar.key), bar.direction);
         let in_valued = seeded.resumed(&params, Some("m"), "notes/a.md");
@@ -789,6 +815,13 @@ fn a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path() {
                 judge_valued(&plan_of(&plans, bar.valued), bar)
             });
         }
+    }
+    seeded.drop_index("documents_path_nocase");
+    for bar in FIELD_BARS {
+        let plans = seeded.plans(&sorted(SortKey::field(bar.key), bar.direction));
+        failure_of("documents_path_nocase dropped", || {
+            judge_missing(&plan_of(&plans, bar.missing), bar)
+        });
     }
 }
 
@@ -859,39 +892,51 @@ fn a_known_key_and_the_field_universe_read_the_presence_rows_alone() {
     });
 }
 
-/// **A bare-directory probe is two seeks of the path index**: one at the path,
-/// which finds no document there, and one of the range beneath it, which finds
-/// one that stands under it. Each is judged on the rows its own subquery reads.
+/// **A bare-directory probe is two seeks of the path index the root's order
+/// selects**: one at the path, which finds no document there, and one of the
+/// range beneath it, which finds one that stands under it — on
+/// `documents_path` where the root tells spellings apart, and on
+/// `documents_path_nocase` where it folds ASCII case. Each is judged on the
+/// rows its own subquery reads.
 ///
-/// Controls: `documents_path` dropped, neither seek is one.
+/// Controls: on each root, its index dropped, neither seek is one.
 #[test]
 fn a_bare_directory_probe_is_two_seeks_of_the_path_index() {
-    let mut seeded = Seeded::new("find-bare-directory");
-    let params = request().with_predicates([Predicate::path("notes")]);
-    let judge = |plan: &QueryPlan| {
-        plan.assert_no_full_scan();
-        let at = rows_of(plan, "da");
-        at.assert_searches_through("documents", Access::Index("documents_path"));
-        at.assert_search_constraint("documents", "(path=?)");
-        let under = rows_of(plan, "du");
-        under.assert_searches_through("documents", Access::Index("documents_path"));
-        under.assert_search_constraint("documents", "(path>? AND path<?)");
-    };
-    judge(&plan_of(
-        &seeded.plans(&params),
-        FindStatement::BareDirectory,
-    ));
-    // A glob with a wildcard is no directory, and asks nothing.
-    assert!(
-        seeded
-            .plans(&request().with_predicates([Predicate::path("notes/*")]))
-            .iter()
-            .all(|plan| plan.statement != FindStatement::BareDirectory)
-    );
+    for (order, index, spelled) in [
+        (StoredPathOrder::Sensitive, "documents_path", "notes"),
+        (
+            StoredPathOrder::AsciiCaseInsensitive,
+            "documents_path_nocase",
+            "NOTES",
+        ),
+    ] {
+        let mut seeded = Seeded::under(&format!("find-bare-directory-{}", order.as_str()), order);
+        let params = request().with_predicates([Predicate::path(spelled)]);
+        let judge = |plan: &QueryPlan| {
+            plan.assert_no_full_scan();
+            let at = rows_of(plan, "da");
+            at.assert_searches_through("documents", Access::Index(index));
+            at.assert_search_constraint("documents", "(path=?)");
+            let under = rows_of(plan, "du");
+            under.assert_searches_through("documents", Access::Index(index));
+            under.assert_search_constraint("documents", "(path>? AND path<?)");
+        };
+        judge(&plan_of(
+            &seeded.plans(&params),
+            FindStatement::BareDirectory,
+        ));
+        // A glob with a wildcard is no directory, and asks nothing.
+        assert!(
+            seeded
+                .plans(&request().with_predicates([Predicate::path("notes/*")]))
+                .iter()
+                .all(|plan| plan.statement != FindStatement::BareDirectory)
+        );
 
-    seeded.drop_index("documents_path");
-    let plan = plan_of(&seeded.plans(&params), FindStatement::BareDirectory);
-    failure_of("documents_path dropped", || judge(&plan));
+        seeded.drop_index(index);
+        let plan = plan_of(&seeded.plans(&params), FindStatement::BareDirectory);
+        failure_of(&format!("{index} dropped"), || judge(&plan));
+    }
 }
 
 /// **An existence check is one select-one-shaped statement.** Whether a key is
@@ -1383,18 +1428,31 @@ fn filter_bars() -> Vec<FilterBar> {
             )],
         },
         FilterBar {
-            shape: ReadFilter::PathGlob,
-            probes: vec![(
-                Predicate::path("notes/*.md"),
-                ReadFilter::PathGlob,
-                Seek::Index {
-                    alias: "dg",
-                    table: "documents",
-                    access: Access::Index("documents_path"),
-                    constraint: "(path>? AND path<?)",
-                    dropped: "documents_path",
-                },
-            )],
+            shape: ReadFilter::PathGlob(StoredPathOrder::Sensitive),
+            probes: vec![
+                (
+                    Predicate::path("notes/*.md"),
+                    ReadFilter::PathGlob(StoredPathOrder::Sensitive),
+                    Seek::Index {
+                        alias: "dg",
+                        table: "documents",
+                        access: Access::Index("documents_path"),
+                        constraint: "(path>? AND path<?)",
+                        dropped: "documents_path",
+                    },
+                ),
+                (
+                    Predicate::path("Notes/*.md"),
+                    ReadFilter::PathGlob(StoredPathOrder::AsciiCaseInsensitive),
+                    Seek::Index {
+                        alias: "dg",
+                        table: "documents",
+                        access: Access::Index("documents_path_nocase"),
+                        constraint: "(path>? AND path<?)",
+                        dropped: "documents_path_nocase",
+                    },
+                ),
+            ],
         },
         FilterBar {
             shape: ReadFilter::Resolves(SuffixKey::Raw),
@@ -1477,9 +1535,9 @@ fn filter_bars() -> Vec<FilterBar> {
                 Seek::Index {
                     alias: "fg",
                     table: "findings",
-                    access: Access::Index("findings_fingerprint_kind_severity"),
+                    access: Access::Index("findings_fingerprint_kind_nocase"),
                     constraint: "(vault_schema_fingerprint=? AND kind=?)",
-                    dropped: "findings_fingerprint_kind_severity",
+                    dropped: "findings_fingerprint_kind_nocase",
                 },
             )],
         },
@@ -1487,13 +1545,15 @@ fn filter_bars() -> Vec<FilterBar> {
 }
 
 /// The case behaviour of the root a filter form is compiled on: the folded
-/// resolution form is what a root that folds ASCII case compiles, and every
-/// other form is the same on either root.
+/// resolution and links-to forms, and the path form under the folding order,
+/// are what a root that folds ASCII case compiles, and every other form is the
+/// same on either root.
 fn root_of(shape: ReadFilter) -> StoredPathOrder {
     match shape {
         ReadFilter::Resolves(SuffixKey::Folded) | ReadFilter::LinksTo(SuffixKey::Folded) => {
             StoredPathOrder::AsciiCaseInsensitive
         }
+        ReadFilter::PathGlob(order) => order,
         _ => StoredPathOrder::Sensitive,
     }
 }
@@ -1536,7 +1596,9 @@ fn judge_filter(page: &QueryPlan, seek: &Seek) {
 /// seek `(key, raw)`, or `(key, typed)` on a key with a typed order; presence and absence the presence rows by key; a bound
 /// the order's value column from the key; the full-text part the index's own
 /// `MATCH` selection; the path part the glob's literal-prefix range on
-/// `documents_path`; the resolution part each suffix range the target opens;
+/// `documents_path` where the root tells spellings apart, and the folded
+/// prefix's range on `documents_path_nocase` where it folds ASCII case; the
+/// resolution part each suffix range the target opens;
 /// the tag part `(name)`; the finding part `(kind, fingerprint)`; and the
 /// links-to part the link index at each key the named document is named by,
 /// raw or folded as the root probes. No step
@@ -2113,6 +2175,193 @@ fn a_continuation_resumes_exactly_between_paths_that_differ_only_by_case() {
     );
 }
 
+/// The page `params` continues to after `pages` pages of `limit`, and the VM
+/// steps its page statements took.
+fn paged_vm_steps(seeded: &Seeded, params: &FindParams, limit: u32, pages: usize) -> u64 {
+    let first = params.clone().with_limit(limit);
+    let mut request = first.clone();
+    for _ in 0..pages {
+        let next = seeded
+            .page(&request)
+            .next
+            .expect("the drain reaches the page it is judged at");
+        request = first.clone().with_after(next);
+    }
+    seeded.page(&request).work.page_vm_steps
+}
+
+/// **A continuation seeks exactly past its position among paths that fold
+/// together.** On a root that tells spellings apart, 512 documents spell
+/// `aaaaaaaaa.md` in every case, so the answer's path order holds them as
+/// one run of equal folded paths, broken bytewise. Each carries `status`
+/// `tied` and no `count`. Paged five at a time, the pages ten, fifty and
+/// ninety pages in cost the VM steps the page two pages in costs, whose
+/// position already stands in the run in every order: the path order, the
+/// valued section of `status`, where the run is tied at one value, and the
+/// missing section of `count`, in either direction. A seek that stopped at
+/// the folded path would reread the run's earlier spellings on every page.
+#[test]
+fn a_continuation_among_paths_that_fold_together_costs_its_page() {
+    let mut seeded = Seeded::under("find-folded-run", StoredPathOrder::Sensitive);
+    let declared = declared();
+    let spellings: Vec<_> = (0..512u32)
+        .map(|bits| {
+            let stem: String = (0..9)
+                .map(|at| if bits & (1 << at) == 0 { 'a' } else { 'A' })
+                .collect();
+            document(&format!("{stem}.md"), &format!("hash-{stem}"), "a body\n")
+                .with_frontmatter(Some(map(vec![("status", string("tied"))])), &declared)
+        })
+        .collect();
+    write_documents(&mut seeded.store.begin_request(), &spellings);
+    for direction in [Direction::Ascending, Direction::Descending] {
+        for key in [
+            SortKey::path(),
+            SortKey::field("status"),
+            SortKey::field("count"),
+        ] {
+            let params = sorted(key.clone(), direction);
+            let steps: Vec<u64> = [2, 10, 50, 90]
+                .into_iter()
+                .map(|pages| paged_vm_steps(&seeded, &params, 5, pages))
+                .collect();
+            assert!(
+                steps.iter().all(|at| *at == steps[0]),
+                "pages 2, 10, 50 and 90 of {key:?} {direction:?} cost {steps:?} VM steps"
+            );
+        }
+    }
+}
+
+/// **A heal pages a root that tells spellings apart bytewise, while a find
+/// answers the same store folded.** The heal merges its page against a walk
+/// in the root's proven order, so its order is the root's, not the answer's:
+/// over the fixture on such a root, the heal's pages, drained one and two
+/// rows at a time, hold `notes/B.md` ahead of `notes/a.md`, and a find's path
+/// page holds it after.
+#[test]
+fn a_heal_pages_a_case_sensitive_root_bytewise_while_a_find_answers_it_folded() {
+    let mut seeded = Seeded::under("find-heal-order", StoredPathOrder::Sensitive);
+    let answered = [
+        "notes/a.md",
+        "notes/B.md",
+        "notes/c.md",
+        "other/glossary.md",
+        "other/v1.2.md",
+    ];
+    assert_eq!(
+        drained(&seeded, &sorted(SortKey::path(), Direction::Ascending), 1),
+        answered
+    );
+    let request = seeded.store.begin_request();
+    for limit in [1, 2, 10] {
+        let mut healed: Vec<String> = Vec::new();
+        let mut after = None;
+        loop {
+            let page = request
+                .stored_documents_after_ordered(after.as_ref(), limit, StoredPathOrder::Sensitive)
+                .expect("a heal's page");
+            healed.extend(page.iter().map(|row| row.path.as_str().to_string()));
+            match page.last() {
+                Some(last) if page.len() == limit => after = Some(last.path.clone()),
+                _ => break,
+            }
+        }
+        assert_eq!(
+            healed,
+            [
+                "notes/B.md",
+                "notes/a.md",
+                "notes/c.md",
+                "other/glossary.md",
+                "other/v1.2.md"
+            ],
+            "a heal drained {limit} at a time"
+        );
+    }
+}
+
+/// **A field sort answers both its sections in the answer's path order on
+/// either root.** The documents missing the sort key stand in `(path COLLATE
+/// NOCASE, path)` order, and so do the documents tied at one value, whether
+/// the root tells spellings apart or folds them. The fixture's paths order
+/// differently bytewise: `Z` below `_` and `b`, and `Miss/` below `miss/`.
+/// Drained a row at a time and two rows at a time, in either direction and
+/// under the raw and the typed order, each sort answers the rows this test
+/// lists, the descending one as the ascending one reversed.
+#[test]
+fn a_field_sort_answers_its_missing_and_tied_documents_in_folded_path_order_on_either_root() {
+    let declared = declared();
+    let tied = |path: &str| {
+        document(path, &format!("hash-{path}"), "a body\n").with_frontmatter(
+            Some(map(vec![
+                ("status", string("tied")),
+                ("count", FrontmatterValue::Int(7)),
+            ])),
+            &declared,
+        )
+    };
+    let missing = |path: &str| document(path, &format!("hash-{path}"), "a body\n");
+    let missing_in_order = ["miss/_.md", "Miss/B.md", "miss/b.md", "Miss/Z.md"];
+    let tied_in_order = ["tie/_.md", "tie/B.md", "tie/b.md", "tie/Z.md"];
+    let by_status: Vec<&str> = missing_in_order
+        .iter()
+        .copied()
+        .chain([
+            "other/glossary.md",
+            "notes/B.md",
+            "other/v1.2.md",
+            "notes/a.md",
+            "notes/c.md",
+        ])
+        .chain(tied_in_order)
+        .collect();
+    let by_count: Vec<&str> = missing_in_order
+        .iter()
+        .copied()
+        .chain([
+            "notes/c.md",
+            "other/glossary.md",
+            "other/v1.2.md",
+            "notes/a.md",
+        ])
+        .chain(tied_in_order)
+        .chain(["notes/B.md"])
+        .collect();
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        let mut seeded = Seeded::under("find-field-sort-answer-order", order);
+        let mut added: Vec<_> = ["tie/Z.md", "tie/b.md", "tie/_.md", "tie/B.md"]
+            .into_iter()
+            .map(tied)
+            .collect();
+        added.extend(
+            ["Miss/Z.md", "miss/b.md", "miss/_.md", "Miss/B.md"]
+                .into_iter()
+                .map(missing),
+        );
+        write_documents(&mut seeded.store.begin_request(), &added);
+        for (key, ascending) in [("status", &by_status), ("count", &by_count)] {
+            let descending: Vec<&str> = ascending.iter().rev().copied().collect();
+            for (direction, expected) in [
+                (Direction::Ascending, ascending.clone()),
+                (Direction::Descending, descending),
+            ] {
+                let params = sorted(SortKey::field(key), direction);
+                for limit in [100, 1, 2] {
+                    assert_eq!(
+                        drained(&seeded, &params, limit),
+                        expected,
+                        "{key} {direction:?} under {order:?}, drained {limit} at a time"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// **A find resolves a `links_to` part's target once.** Whether the target
 /// names one document or none, and whether the page's rows carry their links
 /// too, the target's class is read by one statement.
@@ -2240,6 +2489,44 @@ fn each_filter_answers_the_documents_its_part_names() {
         ])),
         ["notes/a.md", "notes/c.md"]
     );
+}
+
+/// **A path part folds ASCII case exactly where the root does.** On a root
+/// that folds ASCII case, a glob's literal letters match either case of
+/// themselves, so `NOTES/**` reaches every document under `notes/` and
+/// `notes/b.md` names `notes/B.md`; on a root that tells spellings apart the
+/// same globs match bytes and reach none of them. A literal glob naming a
+/// directory in another case is that directory where the root folds, so it is
+/// reported as bare there, and it is no directory where the root does not.
+#[test]
+fn a_path_part_folds_ascii_case_exactly_where_the_root_does() {
+    let sensitive = Seeded::under("find-path-case", StoredPathOrder::Sensitive);
+    let folding = Seeded::under(
+        "find-path-case-folded",
+        StoredPathOrder::AsciiCaseInsensitive,
+    );
+    let with = |seeded: &Seeded, glob: &str| {
+        seeded.paths(&request().with_predicates([Predicate::path(glob)]))
+    };
+    let notes = ["notes/a.md", "notes/B.md", "notes/c.md"];
+    for glob in ["NOTES/**", "Notes/*.MD", "n?TES/*"] {
+        assert_eq!(with(&folding, glob), notes, "`{glob}` on a folding root");
+        assert!(
+            with(&sensitive, glob).is_empty(),
+            "`{glob}` on a root that tells spellings apart"
+        );
+    }
+    assert_eq!(with(&folding, "notes/b.md"), ["notes/B.md"]);
+    assert!(with(&sensitive, "notes/b.md").is_empty());
+    assert_eq!(with(&sensitive, "notes/B.md"), ["notes/B.md"]);
+
+    let bare = |seeded: &Seeded| {
+        seeded
+            .page(&request().with_predicates([Predicate::path("NOTES")]))
+            .unsatisfied
+    };
+    assert_eq!(bare(&folding), vec![Unsatisfied::bare_directory("NOTES")]);
+    assert!(bare(&sensitive).is_empty());
 }
 
 /// **A part no document can satisfy is reported, and the page is empty.** A
@@ -2537,15 +2824,34 @@ impl Choices {
 /// of generated paths is written, and every generated pattern is asked of it
 /// through a find: the page is exactly the paths [`Pattern::matches`] accepts.
 /// The patterns mix literal prefixes, `?`, `*`, whole-segment `**` in every
-/// position and non-ASCII characters, so the range each one seeks and the
+/// position, letters of either ASCII case — `Z` among them, whose successor
+/// sorts between the two cases — the characters beside the ASCII letters and
+/// non-ASCII characters, so the range each one seeks and the
 /// function run over it are both on trial — a range narrower than the pattern
-/// drops a path the matcher keeps.
+/// drops a path the matcher keeps. The corpus runs on a root that tells
+/// spellings apart and on one that folds ASCII case, the matcher taking the
+/// case each root gives a glob.
 #[test]
 fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
-    const SEGMENTS: &[&str] = &["a", "b", "ab", "ba", "é", "a.md", "ab.md", "B.md", "é.md"];
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        glob_corpus_agrees_under(order);
+    }
+}
+
+/// The corpus [`the_glob_a_statement_runs_agrees_with_the_in_process_matcher`]
+/// runs, over a store whose root has `order`'s case behaviour, each path
+/// matched in process under the case that order gives a glob.
+fn glob_corpus_agrees_under(order: StoredPathOrder) {
+    const SEGMENTS: &[&str] = &[
+        "a", "b", "ab", "ba", "A", "Ab", "z", "Zb", "é", "É", "a.md", "ab.md", "B.md", "é.md",
+        "É.MD",
+    ];
     const PARTS: &[&str] = &[
         "a", "b", "ab", "é", "*", "?", "**", "a*", "*b", "?.md", "*.md", "a?", "é*", "*.*", "a**",
-        "?b*",
+        "?b*", "A", "B*", "*.MD", "É*", "@", "[", "Z*", "z?",
     ];
     let mut choices = Choices(0x9E37_79B9_7F4A_7C15);
     let mut paths: Vec<String> = Vec::new();
@@ -2563,8 +2869,8 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
         }
     }
 
-    let scratch = Scratch::new("find-glob-corpus");
-    let mut store = scratch.open();
+    let scratch = Scratch::new(&format!("find-glob-corpus-{}", order.as_str()));
+    let mut store = scratch.open_under(order);
     let mut writes = store.begin_request();
     write_documents(
         &mut writes,
@@ -2588,7 +2894,7 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
         let mut expected: Vec<&str> = paths
             .iter()
             .map(String::as_str)
-            .filter(|path| pattern.matches(path, norn_wire::CaseFold::Exact))
+            .filter(|path| pattern.matches(path, order.glob_case()))
             .collect();
         expected.sort_unstable();
         let page = snapshot
@@ -2603,7 +2909,7 @@ fn the_glob_a_statement_runs_agrees_with_the_in_process_matcher() {
         answered.sort_unstable();
         assert_eq!(
             answered, expected,
-            "the statement and the matcher part on `{source}`"
+            "the statement and the matcher part on `{source}` under {order:?}"
         );
         pairs += paths.len();
         matched += expected.len();

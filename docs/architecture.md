@@ -776,9 +776,11 @@ every statement slot and every filter slot to exactly one bar. The statements ar
 active-fingerprint point read; the path page, a seek of the case-insensitive path index in
 either direction; a field sort's two sections — the valued section, a seek of the raw or the
 typed order's least-value marker index from a `(value, path)` position, and the missing
-section, a walk of the path index from a path position that probes each document's marker
-row; the known-key probe and the field-universe walk, both reading the presence rows alone;
-the bare-directory probe, two seeks of the path index; the match probe, one read of the
+section, a walk of the case-insensitive path index from a path position that probes each
+document's marker row; the known-key probe and the field-universe walk, both reading the
+presence rows alone;
+the bare-directory probe, two seeks of the path index the root's order selects —
+`documents_path`, or `documents_path_nocase` where the root folds ASCII case; the match probe, one read of the
 full-text index through its `MATCH` selection, which is where a query the engine cannot
 parse is met before the page runs; and the hydration of the rows a page returns — the
 document rows by id, each projected nested collection's head and total by its
@@ -820,7 +822,9 @@ handed it and sorts at most once per page statement. Each filter is one index se
 on the rows its own subquery reads: equality, inequality and membership on `(key, raw)`, or
 on `(key, typed)` where the key carries a typed order; presence and absence on the presence
 rows; a `before` or `after` bound on the order's value column; full text through the index's
-own `MATCH` selection; a path glob on the range its literal prefix opens in the path index;
+own `MATCH` selection; a path glob on the range its literal prefix opens in the path index,
+`documents_path` where the root tells spellings apart and the folded prefix's range of
+`documents_path_nocase` where it folds ASCII case;
 a resolution target on each suffix range its class opens, over the raw suffix key where the
 root tells spellings apart and the folded one where it folds ASCII case; a tag by name; a finding by
 kind under the active fingerprint; and a links-to part on the link index, below. The full-text match shape is barred as that filter, and
@@ -864,7 +868,8 @@ judged on the columns the plan handout reports each statement reads.
 **The findings-for-path shape has a builder** too: the validate builder reads the findings
 standing under the active fingerprint — every finding recorded under the schema the
 snapshot pins — and runs no rule and emits no plan. It answers a page of finding rows in
-`(kind, path, id)` order, one kind after another, or a summary of one tally per kind and
+`(kind, path, id)` order, one kind after another, with paths in `(path COLLATE NOCASE, path)`
+order on every root — the order a find answers paths in — or a summary of one tally per kind and
 severity, which is one aggregate and is not paged. Its conjunction is compiled by the same
 compilation, with a `resolves` part reported as not applicable and a mixed-offset comparison
 advised as a find's is, and one rule decides what a
@@ -876,14 +881,20 @@ candidate head and total the pillar stores and a hint naming the `find` that enu
 class, read through the one accessor a find's findings column reads through, so a finding
 is the same row on either verb. It names two statements under the same discipline, each
 carrying a plan bar with a negative control and held by a census to exactly one bar: a
-kind's page, a seek of `(fingerprint, kind)` in `(path, id)` order from the page's position —
-of `(fingerprint, kind, severity)` where a severity floor admits one severity — that a path
-part's range bounds, and that a document part keeping what it seeks drives instead from the
-documents it matched; and the summary, a covering seek of `(fingerprint, kind, severity)` per
+kind's page, a seek of `(fingerprint, kind)` in `(path COLLATE NOCASE, path, id)` order past
+the page's position on all three — of `(fingerprint, kind, severity)` where a severity floor admits one
+severity — over the indexes that hold the path under `NOCASE` with a bytewise tie-break, that
+a path part's folded range bounds on every root, and that a document part keeping what it
+seeks drives instead from the documents it matched; and the summary, a covering seek of
+`(fingerprint, kind, severity)` per
 cell it admits grouped in the index's order, or, where a document part keeping what it seeks
 drives it, one covering seek per matched document and cell, its groups sorted. A work bar
 reads their SQLite counters over two vault sizes: a validate narrowed by kind, severity, a
-path part or a document part costs the same at both and steps through no full scan. A
+path part or a document part costs the same at both and steps through no full scan, on
+either root, a page of a range that matches every finding costs the same at both, and a page
+deep among many findings at one path costs what the page one page in costs. On a
+root that tells spellings apart a path part's folded range also reads the findings at paths
+spelling its prefix in another case, which its glob rejects. A
 payload bar holds that no statement a page or a summary runs, under every narrowing the drain
 reads, reads a document's body, its frontmatter or the full-text body column.
 
@@ -1952,8 +1963,20 @@ ignored place: a target does where its segments reach that place's last segment,
 one-segment target does only where the ignored document stands at the root, whose name is
 the whole place. The globs match under the store's order — with ASCII case folded where it
 folds, bytewise where it does not — so `archive/**` ignores `Archive/notes.md` on a root
-that does not tell the two apart; a path part of a find, a count or a validate matches the
-same grammar bytewise on every root. Class-scoped findings maintenance names a changed path's
+that does not tell the two apart. Every glob matches under that one rule: a path part of a
+find, a count or a validate matches with ASCII case folded where the store's order folds and
+bytewise where it does not, so `find --path 'archive/**'` reaches `Archive/x.md` on a root
+that folds and not on one that tells the two apart. A find's and a count's path range is read
+in the same order; a validate's is its glob's folded range in the answer order, as the
+validate builder's paragraph above states. A glob's work follows its
+literal prefix's range, so a glob with no literal prefix, such as `**/*.MD`, reads every path
+on either root. A tag facet's patterns name tags, not paths, and match bytewise on every root.
+**An answer orders paths one way on every root**: a find's pages, both sections of a field
+sort and a validate's findings stand in `(path COLLATE NOCASE, path)` order whether the root
+folds ASCII case or not. That order is the read machinery's, not the root's: a heal pages
+stored documents in the root's proven order, because it merges them against a walk of the
+root, and on a root that tells spellings apart that order is bytewise.
+Class-scoped findings maintenance names a changed path's
 class in the key space the store's order selects, the space every finding in the store is
 filed in, so a finding is re-decided when a document joins or leaves its class. A class and a
 class probe are compiled only under the store's recorded order, never under one a caller

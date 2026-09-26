@@ -35,7 +35,7 @@
 
 use std::collections::BTreeSet;
 
-use norn_wire::{FindingKind, Severity};
+use norn_wire::{CaseFold, FindingKind, Severity};
 
 use crate::fields::{ContentModel, FieldRows};
 use crate::json::FrontmatterValue;
@@ -368,7 +368,7 @@ pub struct StoredSuffixKeys {
 /// The case behaviour a vault root was **proven** to have at the filesystem
 /// seam, as the store carries it.
 ///
-/// It selects four things, and rewrites no path in any of them — a stored path
+/// It selects five things, and rewrites no path in any of them — a stored path
 /// keeps the spelling the tree carries:
 ///
 /// - **The store's recorded rebuild input.** A store records the order its rows
@@ -378,15 +378,25 @@ pub struct StoredSuffixKeys {
 ///   spellings apart and the ASCII-folded key where it folds them
 ///   ([`crate::SuffixKey::under`]), which is also the key space a finding's
 ///   classes are filed in.
-/// - **The ambiguity-ignore globs' fold**: bytewise where the root tells
-///   spellings apart and with ASCII case folded where it folds them
-///   ([`crate::AmbiguityIgnore::admits`]).
+/// - **Every glob's fold** ([`StoredPathOrder::glob_case`]): bytewise where the
+///   root tells spellings apart and with ASCII case folded where it folds them.
+///   The ambiguity-ignore globs ([`crate::AmbiguityIgnore::admits`]) and the
+///   path part of a find, a count and a validate match under it.
+/// - **The collation a find's or a count's path part seeks its range under**:
+///   `documents_path` where the root tells spellings apart, and
+///   `documents_path_nocase` over the folded prefix where it folds them.
 /// - **The collation a heal pages stored documents under**: bytewise, or
 ///   `NOCASE` with a bytewise tie-break, as the walk it merges against orders
 ///   paths. The heal hands the page its walk's proven order.
 ///
+/// **It does not select the order a read answers paths in.** A find's pages
+/// and a validate's findings answer in one path order on every root — ASCII
+/// case folded, then bytewise — which is the read machinery's, not the root's;
+/// on a root that tells spellings apart it differs from the order a heal pages
+/// in.
+///
 /// This crate depends on nothing in the filesystem seam, so each fold here —
-/// the `NOCASE` collation, the folded suffix key, and the ignore globs'
+/// the `NOCASE` collation, the folded suffix key, and the globs'
 /// [`norn_wire::CaseFold::Ascii`] — is **another implementation of the seam's
 /// rule, not a derivation of it**. The contract all of them are held to is
 /// written once — ASCII lowercase, then bytes, with the byte comparison
@@ -409,6 +419,28 @@ impl StoredPathOrder {
         match self {
             StoredPathOrder::Sensitive => "case-sensitive",
             StoredPathOrder::AsciiCaseInsensitive => "ascii-case-insensitive",
+        }
+    }
+
+    /// How a glob's literal letters compare with a path's under this order:
+    /// as themselves where the root tells spellings apart, and with ASCII case
+    /// folded where it folds them. Every glob a store's paths are matched
+    /// against takes its case here, so no glob consumer decides the fold for
+    /// itself.
+    pub const fn glob_case(self) -> CaseFold {
+        match self {
+            StoredPathOrder::Sensitive => CaseFold::Exact,
+            StoredPathOrder::AsciiCaseInsensitive => CaseFold::Ascii,
+        }
+    }
+
+    /// How a comparison of paths is spelled under this order: the store's
+    /// default collation needs no spelling, and the root's ASCII fold is
+    /// SQLite's `NOCASE`.
+    pub(crate) const fn collation(self) -> &'static str {
+        match self {
+            StoredPathOrder::Sensitive => "",
+            StoredPathOrder::AsciiCaseInsensitive => " COLLATE NOCASE",
         }
     }
 
