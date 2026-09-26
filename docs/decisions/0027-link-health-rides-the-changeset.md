@@ -159,14 +159,17 @@ the bar is what makes condition 5 an enforced property rather than a promise. Th
 not small in every vault. A neighborhood can be most of the vault: a hub stem that most
 documents link to.
 
-**A schema change that changes what link health reads owes the vault a link-health
-re-decision.** The ambiguity-ignore globs decide class membership without any document being
-written, and a schema pin discards every finding keyed by the fingerprint it replaced. The
-existing re-derivation does not cover this: a pin re-derives unchanged rows only where the
-schema declares a reporting tag vocabulary or a field whose type does not order as text,
-and a pin under a vault declaring neither re-derives no row. That predicate's own rule is
-that a declaration gaining a consumer joins it in the same change, so the change that lands
-link health carries this obligation.
+**Every schema pin owes the vault a link-health re-decision over every link.** Link-health
+findings are keyed by the vault schema fingerprint, as every finding is, and a pin discards
+every finding keyed by the fingerprint it replaced — whether or not the schema changed
+anything link health reads. The existing re-derivation does not cover this: a pin re-derives
+unchanged rows only where the schema declares a reporting tag vocabulary or a field whose
+type does not order as text, so a vault holding a broken link whose schema edit adds one
+text-typed field would lose that finding while a rebuild files it. That predicate's own rule
+is that a declaration gaining a consumer joins it in the same change, so link health joins
+it as a consumer, and findings keep equalling a from-zero rebuild. The cost is stated
+plainly: each schema pin re-decides every link in the vault, chunked as a heal is. Schema
+edits are rare, and exactness is kept. This obligation is not yet built.
 
 **The store's contract changes at one point.** Today the store records only the findings the
 host hands it with a changeset, and decides none. Link-health findings are the first it
@@ -204,7 +207,9 @@ headings and blocks, and the firewall stands whole over both.
 
 Every projection names one invalidation key, and the key lives with the state it
 invalidates: the vault schema fingerprint for lane-1 schema-keyed tables, an engine's own
-configuration and model versions for its sidecar. How invalidated state converges is the
+configuration and model versions for its sidecar. Link health's findings carry that
+fingerprint, which any pin moves, and beside it the class and path keys the changeset's
+discard ranges over for the re-decided set. How invalidated state converges is the
 owning side's judgment. Wholesale rebuild is the current implementation and the permanent
 always-correct floor; finer responses — adding one index without a rebuild, a pillar
 carrying its own version key — are carved evolutions taken when something like measured cost
