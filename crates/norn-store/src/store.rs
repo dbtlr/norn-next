@@ -234,8 +234,8 @@ impl SnapshotReader {
 
     /// Statements this handle's connection has run against the database since
     /// the handle was minted, as its snapshots count them: each snapshot's
-    /// establishing statement, and each statement a read builder counts on a
-    /// snapshot through [`Snapshot::count_statement`]. The transaction control
+    /// establishing statement, and each statement a read builder runs on a
+    /// snapshot and counts on its [`Snapshot::counters`]. The transaction control
     /// around them, the `BEGIN` that opens a snapshot and the rollback that
     /// closes it, is not counted. The mint's own statements ran before the
     /// handle existed and are not among them.
