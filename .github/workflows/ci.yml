@@ -264,13 +264,18 @@ jobs:
   # a host attaching a generated vault — the first subject that measures a
   # whole vault's worth of work, where the generator and the walk each measure
   # one pass over a tree — and a host running the read mix over the vault it
-  # attached. The read mix is one child that runs every read shape through the
-  # host's read verbs, each under its own live hold: find, count, get with
-  # suffix resolve, links-to, backlinks, validate, lexical search and
-  # describe. The kernel reports one peak per child, so the read bars hold the
-  # highest peak any shape reached, over the attach beneath them. A child that
-  # attaches adopts a tree its parent generated, so what the kernel accounts
-  # to it is the attachment and not the generation.
+  # attached. The read mix is one child that runs eight shapes through the
+  # host's read verbs, each under its own live hold: a find under a predicate,
+  # sorted and paged, a count by field, a get with suffix resolve, links-to,
+  # backlinks, a validate narrowed by a path part, lexical search and
+  # describe. The kernel reports one peak per child, so the read's resident-set
+  # bars hold the highest peak any shape reached, over the attach beneath
+  # them. The read's heap bar is the child's own count: the test binary's
+  # global allocator counts the live heap, the child marks it once the attach
+  # is ready, and a child at each per-PR profile reports the most the shapes
+  # raised it, so the pair sees rows a whole-process peak absorbs. A child
+  # that attaches adopts a tree its parent generated, so what the kernel
+  # accounts to it is the attachment and not the generation.
   # The >=5k scale and the recorded peak-memory readings stay in certify.yml,
   # where a clock is legal to read.
   memory:

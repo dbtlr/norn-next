@@ -1060,12 +1060,17 @@ full-scan steps of every statement run on its snapshot, and holds them equal acr
 pair. These statement counters do not see work a virtual table does inside a statement, so a
 full-text match's posting-list walk is not among them; a search's page cost is read off the
 matches the module hands back instead. Each pair has a control that grows with the vault and
-reads more at the larger scale. In the memory lane, the two `read-` bars hold one process
-that attached the ~2k-document profile and ran every read shape through the host's read
-verbs (find, count, get with suffix resolve, links-to, backlinks, validate, lexical search
-and describe) to an absolute peak ceiling, and to a ratio over the peak of the same attach
-without the reads. The kernel reports one peak per process, so the bars hold the highest
-peak any shape reached rather than each shape's own. No query shape carries a timing bar.
+reads more at the larger scale. In the memory lane, the `read-` bars hold one process that
+attached a per-PR profile and ran the read mix through the host's read verbs: a find under a
+predicate, sorted and paged; a count by field; a get with suffix resolve; links-to and
+backlinks; a validate narrowed by a path part, which is findings-for-path; lexical search;
+and describe. Two bars hold the ~2k-document profile's process to an absolute peak ceiling
+and to a ratio over the peak of the same attach without the reads. The kernel reports one
+peak per process, so they hold the highest peak any shape reached rather than each shape's
+own. The third holds the most the shapes raised the live heap above the attached host,
+counted by the process's own allocator, to a ratio between the 300-document and ~2k-document
+profiles, so a shape that holds the vault's rows fails it even where the whole-process peak
+absorbs them. No query shape carries a timing bar.
 
 ### 4. One obvious path
 

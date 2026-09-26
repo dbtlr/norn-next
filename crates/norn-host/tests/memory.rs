@@ -17,21 +17,31 @@
 //! moving together. Both profiles are under 5k documents, so both are this
 //! lane's work under ADR 0004's by-kind split.
 //!
-//! **A read is held the same two ways, over one read mix.** A child attaches
-//! `realistic`, keeps it attached, and runs every read shape through the
-//! host's read verbs, each verb taking its own live hold: a find paged newest
-//! first with each row carrying its fields, its tags and its links; a count
-//! grouped by a field; a get of a bare stem, resolved as a suffix; a links-to
-//! count and a backlinks find, each narrowed to the documents linking to that
-//! stem; a validate page of findings; a lexical search page; and a describe
-//! page of facets. A ceiling holds that child's peak, and a ratio holds it to
-//! the peak of an attach-only child of the same tree. The kernel reports one
-//! peak per child, so the mix is one child: what the pair bounds is the
-//! highest any shape reached, over the attach under all of them. Every shape
-//! answers a page, a single target or what a narrowing part admits, so what a
-//! read adds to a process that attached is a page's rows rather than the
-//! vault's, and the ratio is what catches a read that grew the process under
-//! a ceiling generous enough to pass it.
+//! **A read is held three ways, over one read mix.** A child attaches a
+//! profile, keeps it attached, and runs the mix's eight shapes through the
+//! host's read verbs, each verb taking its own live hold: a find under a
+//! predicate, paged newest first, with each row carrying its fields, its tags
+//! and its links; a count grouped by a field; a get of a bare stem, resolved
+//! as a suffix; a links-to count and a backlinks find, each narrowed to the
+//! documents linking to that stem; a validate page of findings narrowed by a
+//! path part; a lexical search page; and a describe page of facets. Every
+//! shape answers a page, a single target or what a narrowing part admits, so
+//! what a read adds to a process that attached is a page's rows rather than
+//! the vault's.
+//!
+//! Two of the three are whole-process peaks at `realistic`: a ceiling on the
+//! reading child's, and a ratio of it to the peak of an attach-only child of
+//! the same tree. The kernel reports one peak per child, so the mix is one
+//! child, and what those bars bound is the highest any shape reached, over
+//! the attach under all of them. **The third is the heap.** This binary's
+//! global allocator counts the live heap, and the reading child marks it once
+//! the attachment is ready and before the first shape runs, then reports the
+//! most the shapes raised it above that mark. A child at `ambiguous` and one
+//! at `realistic` each report it, and their ratio holds the heap the mix
+//! holds flat across the two scales. A whole-process peak can absorb a
+//! vault's rows inside the headroom the attach left, and the heap count
+//! cannot, because it counts what the code holds rather than what the kernel
+//! mapped.
 //!
 //! # What the measurement charges to whom
 //!
@@ -40,10 +50,10 @@
 //! The child is this test binary re-executed in a harness mode an environment
 //! variable selects: it adopts a tree already on disk, attaches it, waits for
 //! ready, and then either detaches and reports what it derived or runs the
-//! read mix and reports the rows each shape answered. **Generation happens in the
-//! parent**, so the child's peak is the attachment's and not the generator's,
-//! and a peak read off the test process itself would include cargo's runner and
-//! every case running beside it.
+//! read mix and reports the rows each shape answered and its heap reading.
+//! **Generation happens in the parent**, so the child's peak is the
+//! attachment's and not the generator's, and a peak read off the test process
+//! itself would include cargo's runner and every case running beside it.
 //!
 //! [`the_gate_profile_attaches_inside_its_memory_bar`] and
 //! [`the_gate_profile_reads_inside_its_memory_bar`] are each both a bar and a
@@ -56,10 +66,10 @@
 //! the tree, so a variable leaked into the lane's own environment fails loudly
 //! here instead of turning every bar into a harness run.
 //!
-//! **Every case here is `#[ignore]`d into the `memory-lane` lane**, and the CI
-//! `memory invariant` job is the only thing that runs them. A measurement
-//! running beside the workspace suite measures the workspace suite too, so
-//! "build and test" stays free of measurement.
+//! **Every measurement case here is `#[ignore]`d into the `memory-lane`
+//! lane**, and the CI `memory invariant` job is the only thing that runs them.
+//! A measurement running beside the workspace suite measures the workspace
+//! suite too, so "build and test" stays free of measurement.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -295,8 +305,11 @@ fn the_gate_profile_reads_inside_its_memory_bar() {
 /// Both children attach `realistic` under [`READ_SCHEMA`] the same way; one
 /// then runs the read mix. Every shape answers a bounded page, target or
 /// narrowed set, so the reading child's peak sits on the attaching child's,
-/// and a shape that held the vault's rows would show as a multiple of it
-/// however generous the ceiling above it is.
+/// and a shape that grew the process by a large fraction of the attach shows
+/// as a multiple of it however generous the ceiling above it is. A shape that
+/// holds the vault's rows inside the headroom the attach left is
+/// [`the_read_mix_holds_its_heap_flat_from_the_ambiguity_profile_to_the_gate_profile`]'s
+/// to refuse.
 #[test]
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn reading_the_gate_profile_holds_the_process_near_its_attach_peak() {
