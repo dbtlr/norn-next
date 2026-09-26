@@ -983,16 +983,23 @@ fn a_kind_page_seeks_its_kind_from_the_pages_position() {
     for page in pages(&validating_store, &validating()) {
         judge_kind_seek(&page, "findings_vault_schema_fingerprint", KIND_SEEK);
     }
-    let (_, next) = validating_store.page(&validating().with_limit(3));
+    let (first, next) = validating_store.page(&validating().with_limit(3));
     let continued = pages(
         &validating_store,
         &validating().with_after(next.expect("a next page")),
     );
+    let mut registry: Vec<&str> = FindingKind::ALL.iter().map(|kind| kind.as_str()).collect();
+    registry.sort_unstable();
+    let resumed_in = first.last().expect("a first page holds rows").kind.as_str();
+    let from = registry
+        .iter()
+        .position(|kind| *kind == resumed_in)
+        .expect("the resumed kind is in the registry");
     assert_eq!(
         continued.len(),
-        5,
-        "a continuation in the third kind reads that kind and every kind after it \
-         in the registry"
+        registry.len() - from,
+        "a continuation reads the kind it resumes in and every kind after it in the \
+         registry's order"
     );
     for page in &continued {
         judge_kind_seek(page, "findings_vault_schema_fingerprint", KIND_SEEK);
