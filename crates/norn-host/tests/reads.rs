@@ -26,8 +26,9 @@ use norn_wire::{
     AnswerAdvisory, AttachMode, BodyText, CollectionPage, CollectionSelector, Column, ComparedBy,
     CountParams, DescribeParams, Direction, ErrorDetail, Facet, FacetKind, FieldType, FindParams,
     FindReport, FindingKind, GetParams, GetReport, GroupKey, Hint, NotReady, Predicate, ReasonCode,
-    ResolutionTarget, Sort, SortKey, TrustState, Unsatisfied, UntrustedReason, ValidateParams,
-    ValidateReport, VaultAddress, VaultName, VaultRoot,
+    ResolutionTarget, Rung, RungSelection, RungSet, SearchParams, Sort, SortKey, TrustState,
+    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultName,
+    VaultRoot,
 };
 
 /// The generated profile every case here attaches.
@@ -1275,6 +1276,97 @@ fn a_read_answers_the_body_its_snapshot_holds_and_reads_no_file() {
         reached.document_opens > 0 && reached.stats > 0,
         "a document read through norn-fs did not move the window: {reached:?}"
     );
+}
+
+/// **Every read verb answers from the snapshot and reads no file on its
+/// thread.** A find, a count, a get, a validate, a describe and a search, each
+/// answering at least one row of the attached vault, read nothing through
+/// `norn-fs` while it runs: no document opened, no stat and no directory
+/// entry. Each verb stands in its own window, so a verb that reads a file is
+/// named by the failure. The other half of the zero, the same window moving
+/// around one document read, is
+/// [`a_read_answers_the_body_its_snapshot_holds_and_reads_no_file`]'s.
+#[test]
+fn every_read_verb_answers_with_no_file_read_on_its_thread() {
+    let (_sandbox, vault, host) = a_verb_vault("host-reads-every-verb", &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let at = || address(vault.name());
+    type Verb<'a> = Box<dyn Fn() -> usize + 'a>;
+    let verbs: [(&str, Verb<'_>); 6] = [
+        (
+            "find",
+            Box::new(|| {
+                let found = host
+                    .find(&FindParams::new(at()).with_columns([Column::body()]))
+                    .expect("an attached vault answers a find");
+                found.answer.report.rows.len()
+            }),
+        ),
+        (
+            "count",
+            Box::new(|| {
+                let counted = host
+                    .count(&a_count(vault.name()))
+                    .expect("an attached vault answers a count");
+                counted.answer.report.rows.len()
+            }),
+        ),
+        (
+            "get",
+            Box::new(|| {
+                let gotten = got(
+                    &host,
+                    &vault,
+                    &GetParams::new(at(), a_target("zz-guide/zz-handbook.md"))
+                        .with_columns([Column::body()]),
+                );
+                usize::from(matches!(gotten, GetReport::Record { .. }))
+            }),
+        ),
+        (
+            "validate",
+            Box::new(|| {
+                let validated = host
+                    .validate(&ValidateParams::new(at()))
+                    .expect("an attached vault answers a validate");
+                match validated.answer.report {
+                    ValidateReport::Findings { page, .. } => page.rows.len(),
+                    other => panic!("a validate answered {other:?}"),
+                }
+            }),
+        ),
+        (
+            "describe",
+            Box::new(|| {
+                let described = host
+                    .describe(&DescribeParams::new(at()))
+                    .expect("an attached vault answers a describe");
+                described.answer.report.rows.len()
+            }),
+        ),
+        (
+            "search",
+            Box::new(|| {
+                let searched =
+                    host.search(&SearchParams::new(at(), "body").with_rungs(
+                        RungSelection::exactly(RungSet::of([Rung::Lexical]).expect("a ladder")),
+                    ))
+                    .expect("an attached vault answers a search");
+                searched.answer.report.page.rows.len()
+            }),
+        ),
+    ];
+    for (verb, read) in &verbs {
+        let window = ReadWindow::open();
+        let answered = read();
+        let reads = window.finish();
+        assert!(answered > 0, "the {verb} answered no row");
+        assert_eq!(
+            reads,
+            ReadTally::default(),
+            "a {verb} read through norn-fs on this thread"
+        );
+    }
 }
 
 /// Assert an answered body is `expected`: whole where it fits the row ceiling,

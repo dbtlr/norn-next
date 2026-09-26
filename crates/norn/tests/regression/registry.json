@@ -1263,6 +1263,7 @@
         "status": "bound",
         "tests": [
           "crates/norn-host/tests/reads.rs::a_read_answers_the_body_its_snapshot_holds_and_reads_no_file",
+          "crates/norn-host/tests/reads.rs::every_read_verb_answers_with_no_file_read_on_its_thread",
           "crates/norn-host/tests/reads.rs::a_gets_sections_and_blocks_are_the_text_layers_reading",
           "crates/norn-host/tests/counter_gate.rs::warm_requests_under_a_live_attachment_finish_at_zero"
         ]
@@ -1409,6 +1410,8 @@
           "crates/norn-store/tests/store/find.rs::a_part_no_document_can_satisfy_is_reported_rather_than_read_as_an_empty_vault",
           "crates/norn-store/tests/store/find.rs::a_malformed_full_text_query_is_reported_and_empties_the_page",
           "crates/norn-store/tests/store/count.rs::a_by_key_outside_the_field_universe_answers_null_and_is_reported",
+          "crates/norn-store/tests/store/validate.rs::a_part_a_validate_cannot_apply_is_reported_as_a_find_reports_it",
+          "crates/norn-store/tests/store/search.rs::a_part_a_search_cannot_apply_is_reported_as_a_find_reports_it",
           "crates/norn-store/tests/store/get.rs::an_unknown_projected_key_is_reported",
           "crates/norn-store/tests/store/get.rs::a_heading_anchor_answers_the_section_it_names",
           "crates/norn-store/tests/store/describe.rs::an_observed_field_carries_every_container_its_documents_hold_it_in",
