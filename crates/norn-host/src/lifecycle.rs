@@ -2896,20 +2896,17 @@ fn serve_in_place<O: EntryOps>(
 /// naming every such vault beside `name`.
 ///
 /// One stat per served root. `name`'s own root reaching `identity` is no
-/// claim: a vault is no duplicate of itself.
+/// claim: a vault is no duplicate of itself. The conflict's names are a set,
+/// so `name` counts once whether or not its own root is among those reaching.
 fn unclaimed_by_another<O: EntryOps>(
     shared: &Shared<O>,
     name: &VaultName,
     identity: Identity,
 ) -> Result<(), RegistrationRefusal> {
-    let others = shared
-        .entries
-        .reaching(identity)
-        .into_iter()
-        .filter(|reaching| reaching != name);
+    let reaching = shared.entries.reaching(identity);
     // One name reaching the root is no conflict, and that is the name asked
     // for alone: the root is one no other served vault reaches.
-    match AliasConflict::new(others.chain([name.clone()])) {
+    match AliasConflict::new(reaching.into_iter().chain([name.clone()])) {
         Ok(conflict) => Err(RegistrationRefusal::DuplicateRoot(conflict)),
         Err(_) => Ok(()),
     }
@@ -2966,8 +2963,9 @@ struct Shared<O: EntryOps> {
     ///
     /// The set's lock is never taken while an entry gate is held. Every read
     /// here clones the entry out and lets the set's lock go before it takes
-    /// that entry's gate, and [`ServingSet::remove`] is the one move that holds
-    /// both — in that order, the set and then the gate.
+    /// that entry's gate. [`ServingSet::remove`] and [`ServingSet::replace`]
+    /// are the two moves that hold both, each in that order — the set and
+    /// then the gate.
     entries: ServingSet<O::Attachment>,
     ops: Arc<O>,
     /// What this host's reads have cost, kept rather than discarded. It is the
@@ -3546,18 +3544,25 @@ impl<O: EntryOps> Host<O> {
     ///
     /// Everything runs under the registration lock, and in this order. A name
     /// the set does not serve is unknown. The edit is made to the registration
-    /// the set serves: a root it moves is taken at its canonical spelling, and
+    /// the set serves, not to what the registry file records under the name:
+    /// the set is authoritative, and a hand edit of the file takes effect at
+    /// the next start. A root it sets is taken at its canonical spelling, and
     /// is refused where it is no readable directory or where another served
     /// vault already reaches it — a root reaching the directory the vault
-    /// already stands at is no duplicate of itself. An edit that leaves every
-    /// field as it stands answers the registration as it stands, and writes
-    /// nothing.
+    /// already stands at is no duplicate of itself. **A canonical root other
+    /// than the recorded root is a move**, even where the recorded spelling
+    /// reaches the same directory: the store does not record the directory it
+    /// was derived from, so nothing proves the old spelling reached the
+    /// directory it reaches now. An edit that leaves every field as it stands
+    /// answers the registration as it stands, and writes nothing.
     ///
     /// **Then the change takes the path an unregistration takes.** The entry
     /// is withdrawn from service under its own gate, in the hold that finds
     /// it holding nothing, held by nothing and standing on no park; an entry
     /// something holds is refused as held, and one on a park is refused in
-    /// the park's own terms, so an edit never withdraws a park unseen. From
+    /// the park's own terms, so an edit never withdraws a park unseen. A name
+    /// parked on a duplicate root therefore cannot be moved off it by an
+    /// edit; an unregistration withdraws that park. From
     /// the withdrawal every door answers the entry as held and schedules
     /// nothing. The ops amend the registry file — retiring the derived state
     /// under the maintainer lock where the root moves — and only once the
@@ -3585,6 +3590,8 @@ impl<O: EntryOps> Host<O> {
         let mut amended = current.clone();
         if let Some(root) = edit.root.value() {
             let root = crate::registry::canonical_root(root)?;
+            // The recorded root is compared as spelled: a canonical root other
+            // than the recorded one is a move, which re-derives the store.
             if root != current.root {
                 let identity = crate::registry::readable_root(&root)?;
                 unclaimed_by_another(shared, name, identity)?;

@@ -16,7 +16,9 @@
 //! `{"change":"clear"}` is not a `Replace` a reader accepts.
 //!
 //! **An edit under a standing park is refused under the park's own code**, so
-//! a `vault set` never silently withdraws a park.
+//! a `vault set` never silently withdraws a park. A vault parked
+//! `host/duplicate-root` therefore cannot be moved off the shared root by a
+//! `vault set`; `vault unregister` of one of the names is the remedy.
 //!
 //! **The registry file changes first, and the serving set after.** From the
 //! moment the edit finds the vault idle until it commits or is refused, every
@@ -26,6 +28,19 @@
 //! as edited, and the next attach reads its root, its schema source and its
 //! watch backend. An edit that changes nothing answers the registration as it
 //! stands and writes nothing.
+//!
+//! **A root is compared as the registry records it.** A root whose canonical
+//! spelling differs from the recorded root is a root move to the canonical
+//! spelling, even where the recorded spelling (a link, a trailing `/`)
+//! reaches the same directory: the store does not record the directory it
+//! was derived from, so the host re-derives rather than trust it. A root
+//! whose canonical spelling is the recorded root is no move.
+//!
+//! **The host's served registrations are authoritative over a hand edit of
+//! the registry file.** The edit is made to the registration the host serves,
+//! and the file is written with that registration as edited: over a root or a
+//! field a hand edit changed, and under a served name a hand edit took out. A
+//! hand edit takes effect when the host next starts.
 //!
 //! **A root move discards the derived state the old root left** — the derived
 //! database, its sidecars, the semantic sidecar and the shadow homes, as

@@ -89,10 +89,11 @@ pub(crate) enum ServingRefusal {
 /// maintainer lock and the watcher that attach acquired standing under a name
 /// nothing reaches to give them back.
 ///
-/// [`ServingSet::remove`] is the one move that holds both locks, and it takes
-/// them in that order — the set, then the entry's gate. Every other holder of
-/// an entry gate reached the entry through a read of the set that has already
-/// let go, so no path takes them the other way round.
+/// [`ServingSet::remove`] and [`ServingSet::replace`] are the two moves that
+/// hold both locks, and each takes them in that order — the set, then the
+/// entry's gate. Every other holder of an entry gate reached the entry
+/// through a read of the set that has already let go, so no path takes them
+/// the other way round.
 ///
 /// The cost of an insertable set over one frozen at construction is one
 /// uncontended read lock and one refcount per lookup, and per pass over every

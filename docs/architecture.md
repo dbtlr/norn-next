@@ -1593,7 +1593,8 @@ seam — the one described in [the heal ladder](#2-the-heal-ladder).
 
 The host's serving set is seeded from the registry file at startup, and the registration
 verbs — `vault register`, `vault unregister` and `vault set` — change both, the file first.
-An unregistration and an edit hold the vault out of service from the moment they find it
+After startup the serving set is authoritative: a hand edit of the file takes effect at the
+next start, and an edit writes the registration served, as edited, over it. An unregistration and an edit hold the vault out of service from the moment they find it
 idle until they commit or are refused; an edit refuses a vault standing on a park, and an
 edit that moves the root discards the derived state the old root left, under the vault's
 maintainer lock, before the edited registration is served. `vault status` and `doctor`

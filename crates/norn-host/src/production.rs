@@ -1608,7 +1608,10 @@ impl EntryOps for ProductionEntryOps {
 
     /// An amendment that leaves the root standing is the file's change
     /// alone: the derived state was derived from the root the amendment
-    /// keeps. One that moves the root retires that state under the lock as
+    /// keeps. The roots are compared as spelled, so an amendment from a
+    /// recorded spelling to the canonical spelling of the same directory is a
+    /// move: the store does not record the directory it was derived from. One
+    /// that moves the root retires that state under the lock as
     /// [`EntryOps::retire`] does, and writes the amendment where a
     /// retirement writes the removal — through [`Registry::amend`], so a key
     /// this build does not model stays with the entry.
@@ -1624,6 +1627,7 @@ impl EntryOps for ProductionEntryOps {
         let amend = |registry: &mut norn_config::registry::Registry| {
             registry.amend(amended.clone());
         };
+        // As spelled: a respelling of the same directory is a move.
         if current.root == amended.root {
             return settled(
                 norn_config::registry::mutate(&self.dirs, |registry| {
@@ -15258,7 +15262,7 @@ mod tests {
             f: &Fixture,
             root: &Path,
         ) -> (crate::Host<ProductionEntryOps>, ConfigDirs) {
-            let dirs = ConfigDirs::new(&f.root.join("config"), &f.root.join("data")).unwrap();
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
             let registration = Registration::new(notes(), VaultRoot::new(root).unwrap());
             norn_config::registry::mutate(&dirs, |registry| {
                 registry.insert(registration.clone());

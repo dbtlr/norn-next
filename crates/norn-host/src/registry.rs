@@ -272,14 +272,27 @@ impl<O: EntryOps> Host<O> {
     /// environmental-refusal reason where it is no readable directory, and
     /// refused `host/duplicate-root` naming every other served vault that
     /// already reaches it. A root reaching the directory the vault stands at
-    /// already is no duplicate of itself. An edit that changes nothing
+    /// already is no duplicate of itself. **A root whose canonical spelling
+    /// is not the recorded root is a move**, even where the recorded spelling
+    /// reaches the same directory: it records the canonical root and discards
+    /// the derived state as every move does, because the store does not
+    /// record the directory it was derived from. An edit that changes nothing
     /// answers the registration as it stands, and writes nothing.
+    ///
+    /// **The serving set is authoritative over a hand edit of the registry
+    /// file.** The edit is made to the registration this host serves, and the
+    /// file is written with that registration as edited: over a root or a
+    /// field a hand edit changed under the name, and under a served name a
+    /// hand edit took out. A hand edit of the file takes effect at the next
+    /// start.
     ///
     /// A name the host serves nothing under is refused `host/unknown-vault`,
     /// and an entry something holds is refused `host/entry-held`; the
     /// operator asks again once it is idle. **An entry standing on a park is
     /// refused in the park's own code**, and the park stands: an edit never
-    /// withdraws a park unseen.
+    /// withdraws a park unseen. So a vault parked `host/duplicate-root` cannot
+    /// be moved off the shared root by an edit; `vault unregister` of one of
+    /// the names is the remedy.
     ///
     /// Otherwise the change takes the path an unregistration takes. The entry
     /// is withdrawn, and from then until the change commits or is refused
