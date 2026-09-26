@@ -542,6 +542,71 @@ fn a_tag_group_is_one_folded_tag_labelled_by_its_first_occurrence() {
     );
 }
 
+/// The labels a count grouped by tag answers over `documents` beside the
+/// fixture, for the tag `work`: once reading every document's tags, and once
+/// narrowed by the tag part `work`, which drives the statement from the
+/// matched documents.
+fn work_labels(label: &str, documents: Vec<norn_store::DocumentFacts>) -> [Vec<Tally>; 2] {
+    let counting_store = Counting::with_documents(label, documents);
+    let by_tag = counting(vec![GroupKey::tag()]).with_limit(100);
+    let work = |tallies: Vec<Tally>| -> Vec<Tally> {
+        tallies
+            .into_iter()
+            .filter(|tally| {
+                tally.group[0]
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("work"))
+            })
+            .collect()
+    };
+    [
+        work(counting_store.count(&by_tag).tallies),
+        work(
+            counting_store
+                .count(&by_tag.with_predicates([Predicate::tag("work")]))
+                .tallies,
+        ),
+    ]
+}
+
+/// **A tag's position orders as a number.** One document writes `Work` at
+/// position 2 and `WORK` at position 10, so `Work` is written first; a
+/// position read as unpadded text would put `10` before `2`.
+#[test]
+fn a_tag_label_orders_positions_as_numbers() {
+    let mut names: Vec<String> = (0..11).map(|at| format!("filler-{at}")).collect();
+    names[2] = "Work".to_string();
+    names[10] = "WORK".to_string();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let documents = vec![tagged(
+        document("pre/x.md", "hash-pre/x.md", "a body\n"),
+        &names,
+    )];
+
+    for tallies in work_labels("count-tag-label-ordinal", documents) {
+        assert_eq!(tallies, vec![tally(&[Some("Work")], 1)]);
+    }
+}
+
+/// **A path that is a prefix of another stands first.** `pre/x.md` writes
+/// `Work` and `pre/x.md0.md` writes `WORK`; the shorter path orders first, so
+/// `Work` is written first, and an encoding whose separator sorted above a
+/// path's next character would put the longer path first.
+#[test]
+fn a_tag_label_orders_a_prefix_path_first() {
+    let documents = vec![
+        tagged(document("pre/x.md", "hash-pre/x.md", "a body\n"), &["Work"]),
+        tagged(
+            document("pre/x.md0.md", "hash-pre/x.md0.md", "a body\n"),
+            &["WORK"],
+        ),
+    ];
+
+    for tallies in work_labels("count-tag-label-prefix", documents) {
+        assert_eq!(tallies, vec![tally(&[Some("Work")], 2)]);
+    }
+}
+
 /// **A request that groups by nothing answers one tally over the whole
 /// match**, and a filter narrows it.
 #[test]
