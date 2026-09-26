@@ -77,7 +77,7 @@ fn a_settled_vault_has_reconciled_every_write_made_before_it_settled() {
 fn a_read_answers_under_the_store_the_attachment_derived() {
     let (_sandbox, vault) = a_vault("host-reads-reading");
     let host = vault.host();
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     let hold = host
         .begin_read(vault.name())
@@ -108,7 +108,7 @@ fn a_read_answers_under_the_store_the_attachment_derived() {
 fn a_reads_snapshot_carries_the_case_behaviour_the_root_proved() {
     let (_sandbox, vault) = a_vault("host-reads-case-behaviour");
     let host = vault.host();
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     let root = std::fs::canonicalize(vault.path()).expect("the vault root");
     let proven = norn_host::stored_path_order(
@@ -140,7 +140,7 @@ fn a_read_over_an_entry_that_is_not_serving_refuses_with_its_published_demand() 
 
     // The read scheduled the attach it was refused for, so the vault serves
     // without anything else asking for it.
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
     assert!(
         host.begin_read(vault.name()).is_ok(),
         "the attach a read scheduled left the entry unreadable"
@@ -165,7 +165,7 @@ fn a_read_over_an_entry_that_is_not_serving_refuses_with_its_published_demand() 
 fn reads_over_one_entry_each_run_only_their_establishment_under_the_gate() {
     let (_sandbox, vault) = a_vault("host-reads-overlap");
     let host = vault.host();
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     let readers = 4;
     let before = host.read_evidence();
@@ -224,7 +224,7 @@ fn reads_over_one_entry_each_run_only_their_establishment_under_the_gate() {
 fn a_hold_carries_the_declaration_its_snapshot_pins_across_a_schema_reload() {
     let (_sandbox, vault) = a_vault("host-reads-declaration");
     let host = vault.host();
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     let pinned = |store: &mut norn_store::Store| {
         store
@@ -299,7 +299,7 @@ fn a_count(name: &VaultName) -> CountParams {
 fn a_count_answers_under_the_reading_of_its_snapshot() {
     let (_sandbox, vault) = a_vault("host-reads-count");
     let host = vault.host();
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     let answered = host
         .count(&a_count(vault.name()))
@@ -522,7 +522,7 @@ fn damage_the_documents_table(database: &Path) {
 fn a_count_that_meets_damage_is_untrusted_and_the_entry_rebuilds() {
     let (_sandbox, vault) = a_vault("host-reads-count-damaged");
     let host = vault.host();
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
     let damaged_epoch = vault.store().epoch().to_string();
 
     damage_the_documents_table(&vault.database());
@@ -723,7 +723,7 @@ fn paths_of(page: &FindReport) -> Vec<String> {
 #[test]
 fn a_find_pages_exactly_and_refuses_a_cursor_under_another_order() {
     let (_sandbox, vault, host) = a_verb_vault("host-reads-find", &[]);
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     let whole = host
         .find(&FindParams::new(address(vault.name())).with_limit(1000))
@@ -803,7 +803,7 @@ fn a_find_ordered_over_mixed_offsets_is_advised() {
     // One host at a time: each holds the real-watcher lease while it serves.
     {
         let (_sandbox, vault, host) = a_verb_vault("host-reads-find-stated", &[]);
-        let _lease = attach::attach_and_wait(&host, vault.name());
+        let _lease = attach::attach_and_settle(&host, &vault);
         let stated = host
             .find(&by_created(vault.name()))
             .expect("a find ordered by a date answers");
@@ -821,7 +821,7 @@ fn a_find_ordered_over_mixed_offsets_is_advised() {
             "---\ncreated: \"2026-03-05\"\n---\nunstated\n",
         )],
     );
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
     let mixed = host
         .find(&by_created(vault.name()))
         .expect("a find ordered by a date answers");
@@ -860,7 +860,7 @@ fn a_find_ordered_over_mixed_offsets_is_advised() {
 #[test]
 fn a_validate_answers_the_findings_its_snapshot_holds() {
     let (_sandbox, vault, host) = a_verb_vault("host-reads-validate", &[]);
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     let answered = host
         .validate(
@@ -895,7 +895,7 @@ fn a_validate_answers_the_findings_its_snapshot_holds() {
 #[test]
 fn a_describe_answers_the_facets_its_snapshot_holds() {
     let (_sandbox, vault, host) = a_verb_vault("host-reads-describe", &[]);
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     let answered = host
         .describe(
@@ -946,7 +946,7 @@ fn got(host: &attach::ServingHost, vault: &attach::Vault, params: &GetParams) ->
 #[test]
 fn a_get_answers_a_record_a_section_a_block_and_a_collection_page() {
     let (_sandbox, vault, host) = a_verb_vault("host-reads-get", &[]);
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
     let getting = |text: &str| GetParams::new(address(vault.name()), a_target(text));
 
     let GetReport::Record { document, .. } = got(
@@ -1017,7 +1017,7 @@ fn a_get_answers_a_record_a_section_a_block_and_a_collection_page() {
 #[test]
 fn a_get_of_an_ambiguous_target_refuses_with_its_head_and_hint() {
     let (_sandbox, vault, host) = a_verb_vault("host-reads-get-ambiguous", &[]);
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     let refused = host
         .get(&GetParams::new(
@@ -1054,7 +1054,7 @@ fn a_get_of_an_ambiguous_target_refuses_with_its_head_and_hint() {
 #[test]
 fn a_get_of_an_unknown_target_refuses_as_unknown() {
     let (_sandbox, vault, host) = a_verb_vault("host-reads-get-unknown", &[]);
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     let refused = host
         .get(&GetParams::new(
@@ -1077,7 +1077,7 @@ fn a_get_of_an_unknown_target_refuses_as_unknown() {
 #[test]
 fn a_part_a_verb_could_not_apply_is_answered_unsatisfied() {
     let (_sandbox, vault, host) = a_verb_vault("host-reads-unsatisfied", &[]);
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     for (target, unsatisfied) in [
         (
@@ -1150,7 +1150,7 @@ fn a_part_a_verb_could_not_apply_is_answered_unsatisfied() {
 #[test]
 fn a_gets_sections_and_blocks_are_the_text_layers_reading() {
     let (_sandbox, vault, host) = a_verb_vault("host-reads-get-text", &[]);
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     let mut paths = Vec::new();
     attach::for_each_derived_path(&mut vault.store(), |path| {
@@ -1226,7 +1226,7 @@ fn a_gets_sections_and_blocks_are_the_text_layers_reading() {
 #[test]
 fn a_read_answers_the_body_its_snapshot_holds_and_reads_no_file() {
     let (_sandbox, vault, host) = a_verb_vault("host-reads-body", &[]);
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
 
     let mut bodies = std::collections::BTreeMap::new();
     attach::for_each_derived_path(&mut vault.store(), |path| {
@@ -1310,7 +1310,7 @@ fn a_read_answers_the_body_its_snapshot_holds_and_reads_no_file() {
 #[test]
 fn every_read_verb_answers_with_no_file_read_on_its_thread() {
     let (_sandbox, vault, host) = a_verb_vault("host-reads-every-verb", &[]);
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
     let at = || address(vault.name());
     type Verb<'a> = Box<dyn Fn() -> usize + 'a>;
     let verbs: [(&str, Verb<'_>); 6] = [
@@ -1488,7 +1488,7 @@ fn assert_untrusted_until_rebuilt<T>(
 #[test]
 fn a_validate_that_meets_a_finding_position_below_zero_is_untrusted_and_the_entry_rebuilds() {
     let (_sandbox, vault, host) = a_verb_vault("host-reads-validate-position-damage", &[]);
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
     let params =
         ValidateParams::new(address(vault.name())).with_kinds([FindingKind::FrontmatterUnclosed]);
     host.validate(&params)
@@ -1514,7 +1514,7 @@ fn a_validate_that_meets_a_finding_position_below_zero_is_untrusted_and_the_entr
 #[test]
 fn a_get_that_meets_an_offset_its_body_cannot_hold_is_untrusted_and_the_entry_rebuilds() {
     let (_sandbox, vault, host) = a_verb_vault("host-reads-get-offset-damage", &[CAFE]);
-    let _lease = attach::attach_and_wait(&host, vault.name());
+    let _lease = attach::attach_and_settle(&host, &vault);
     let section = GetParams::new(address(vault.name()), a_target("zz-cafe#Café ☕"));
     let block = GetParams::new(address(vault.name()), a_target("zz-cafe#^cafe"));
     let collection =

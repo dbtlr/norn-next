@@ -444,10 +444,77 @@ pub fn attach_and_settle(
     lease
 }
 
+/// The document [`settle`] writes and removes to prove the watcher caught up.
+const SETTLE_SENTINEL: &str = "zz-harness-settle.md";
+
 /// Return once every write made to `vault` before this call has been delivered
-/// to `host`'s watcher and reconciled.
+/// to `host`'s watcher and reconciled, with the entry serving again.
+///
+/// **`Ready` alone does not say that.** A watcher delivery that reaches a
+/// `Ready` entry takes it out of serving reads until the reconcile it owes
+/// lands, and a write can still be on its way when the entry first publishes
+/// `Ready`: on macOS, fseventsd numbers an event when it processes it, so a
+/// write made before the attach can be numbered past the watch's history
+/// boundary and arrive after the heal that already took it up.
+///
+/// **The sentinel is the barrier.** It is written after every write this call
+/// covers, so its event is numbered after theirs, and a stream delivers events
+/// in the order they were numbered. Once its row is derived and the entry is
+/// `Ready` again, every earlier delivery has been reconciled. Its removal is
+/// the same barrier over the sentinel's own delivery, and it leaves the vault
+/// holding the documents it held before the call.
 pub fn settle(host: &Host<ProductionEntryOps>, vault: &Vault) {
-    let _ = (host, vault);
+    let sentinel = vault.path().join(SETTLE_SENTINEL);
+    let path = DocumentPath::new(SETTLE_SENTINEL).expect("the sentinel's document path");
+    let mut store = vault.store();
+
+    std::fs::write(&sentinel, "settle\n").expect("write the settle sentinel");
+    wait_for_reconciled(host, vault.name(), &mut store, &path, true);
+    std::fs::remove_file(&sentinel).expect("remove the settle sentinel");
+    wait_for_reconciled(host, vault.name(), &mut store, &path, false);
+}
+
+/// Wait until `store` holds a row at `path` exactly where `derived` says it
+/// does, and then until the entry under `name` publishes `Ready`.
+///
+/// The row is committed inside the reconcile that takes up the delivery, and
+/// the entry publishes `Warming` from the poll that hands that delivery over
+/// until the reconcile ends, so `Ready` read after the row is the end of the
+/// reconcile that committed it.
+fn wait_for_reconciled(
+    host: &Host<ProductionEntryOps>,
+    name: &VaultName,
+    store: &mut Store,
+    path: &DocumentPath,
+    derived: bool,
+) {
+    let wanted = if derived { "derived" } else { "pruned" };
+    wait_until(
+        &format!("the settle sentinel to be {wanted} under `{name}`"),
+        state_budget(READY_LIMIT),
+        || {
+            let held = store
+                .begin_request()
+                .stored_document(path)
+                .expect("reading the settle sentinel's row")
+                .is_some();
+            if held == derived {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("the sentinel's row is held: {held}"))
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    wait_until(
+        &format!("the entry under `{name}` to serve again once the sentinel is {wanted}"),
+        state_budget(READY_LIMIT),
+        || match host.state(name) {
+            Ok(TrustState::Ready) => Observed::Met(()),
+            observed => Observed::pending(format!("the state is {observed:?}")),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
 }
 
 /// Whether what the host answered is the refusal a name it holds no entry under
