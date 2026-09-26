@@ -826,7 +826,8 @@ own `MATCH` selection; a path glob on the range its literal prefix opens in the 
 `documents_path` where the root tells spellings apart and the folded prefix's range of
 `documents_path_nocase` where it folds ASCII case;
 a resolution target on each suffix range its class opens, over the raw suffix key where the
-root tells spellings apart and the folded one where it folds ASCII case; a tag by name; a finding by
+root tells spellings apart and the folded one where it folds ASCII case; a tag by its folded name,
+on the folded-name index; a finding by
 kind under the active fingerprint; and a links-to part on the link index, below. The full-text match shape is barred as that filter, and
 suffix/stem resolve and findings-for-path are read through statements the seam above bars;
 findings-for-path is also a validate narrowed by a path part, below. Suffix/stem resolve to
@@ -839,7 +840,7 @@ request's conjunction through the one compilation every read builder shares — 
 narrows a count exactly as it narrows a find, and is reported the same way where it cannot be
 applied, except that a `resolves` part is reported as not applicable and filters
 nothing — and groups the matched documents into tallies. A key holding a set groups a
-document once per element, a tag grouping once per tag, and several keys by their cross
+document once per element, a tag grouping once per tag under the tag fold, and several keys by their cross
 product, so a tally counts documents and one document may stand in several groups; a
 key the declaration gives a typed order groups by typed equality. A member is `null`
 where the document carries no scalar value under its key — and, under a key with a typed
@@ -851,7 +852,7 @@ and held by a census to exactly one bar: the ungrouped total, the count of `docu
 or of the rows a filter's seek reaches by row id; the tallies whose leading member is
 `null`, a walk of the documents that probes each for a value under the leading key by
 the document; and the tallies whose leading member holds a value, a seek of the leading
-member's value index — `(key, raw)`, `(key, typed)` or the tag's name — from the page's
+member's value index — `(key, raw)`, `(key, typed)` or the tag's folded name — from the page's
 position, where a filter that keeps what it seeks instead drives the statement from the
 matched documents. Every trailing member is reached by the document. A work bar reads
 the same statements' SQLite counters over two vault sizes: a count narrowed to the same
@@ -1977,7 +1978,8 @@ that folds and not on one that tells the two apart. A find's and a count's path 
 in the same order; a validate's is its glob's folded range in the answer order, as the
 validate builder's paragraph above states. A glob's work follows its
 literal prefix's range, so a glob with no literal prefix, such as `**/*.MD`, reads every path
-on either root. A tag facet's patterns name tags, not paths, and match bytewise on every root.
+on either root. A tag facet's patterns name tags, not paths, and match under the tag fold on
+every root.
 **An answer orders paths one way on every root**: a find's pages, both sections of a field
 sort and a validate's findings stand in `(path COLLATE NOCASE, path)` order whether the root
 folds ASCII case or not. That order is the read machinery's, not the root's: a heal pages
@@ -2101,11 +2103,25 @@ the store's separate finding door.
 The **`#tag` facet** is the first derived state keyed that way. Its declaration under [ADR
 0027](decisions/0027-link-health-rides-the-changeset.md): its inputs are a document's
 stored tag rows and the vault's schema content model; derivation is deterministic, one
-finding per distinct tag name the declared vocabulary does not admit; it is maintained
+finding per distinct tag the declared vocabulary does not admit; it is maintained
 inside the document's own changeset; and its invalidation key is the vault schema
 fingerprint. Tag rows themselves stay schema-independent parse facts — what a document says
 is not what the vault declares about it — so a schema edit re-derives the judgment and never
 the facts.
+
+**A tag is compared under the tag fold.** Two tag names are one tag when their Unicode
+lowercase forms, taken with no locale, are equal: `#Work` and `#work` are one tag, and so are
+`#Über` and `#über`, while an accent stays part of its letter, so `#café` is not `#cafe`. The
+fold covers the whole nested name, and a body tag and a frontmatter `tags` entry are folded
+alike. It is a tag's own fold, distinct from the ASCII path fold, and the same on every root.
+Every comparison of two tags reads it: a declared name and a tag pattern in the facet, a
+find's or a count's tag part, and a count's tag grouping. The syntax layer keeps a tag as
+written, and a tag row stores the written name beside its fold, computed at the write, so the
+index a tag part seeks is over the fold. A report that shows one tag spelled several ways
+shows the spelling written first in the answer order — folded path, then position — among the
+rows it reads: a count's tag label among its tally's documents, and an undeclared-tag finding
+within its document. Two declared names that fold to one are one declaration, held at the
+spelling the schema writes first.
 
 The **field projection** is the pillar a find's predicates and field orders read. **Two
 projections share its one table**, each declared under [ADR

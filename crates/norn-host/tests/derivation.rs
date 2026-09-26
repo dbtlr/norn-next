@@ -60,8 +60,8 @@ use norn_wire::FindingKind;
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(4),
-    "195873932d61905179abe090704696e14f4b6a28688321b4163e6fbf3eb4248b",
+    DerivationVersion::new(5),
+    "7d270e8ef6f501a68153a29c0e7cdec8818fe819856f3e669ac2070399105e7a",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -224,8 +224,9 @@ setext title
 /// carrying a query and one an encoded separator, a dotted wikilink, a
 /// same-document anchor, a wikilink no suffix address reads, `vault://` links
 /// of both families, body and frontmatter tags, declared and not, block ids, a
-/// frontmatter wikilink carrying an alias and an anchor, and a tag whose name
-/// carries a combining mark.
+/// frontmatter wikilink carrying an alias and an anchor, a tag whose name
+/// carries a combining mark, and tags written in another case than an earlier
+/// spelling of them, one folding outside ASCII.
 const GLOSSARY: &str = "---
 title: The glossary
 aliases: [gloss, \"Glossary Term\"]
@@ -270,6 +271,7 @@ Sub setext
 
 A paragraph with a #project tag, a (#area/norn) tag, an #undeclared-body tag, not a#tag, and #123.
 A tag whose name carries a combining mark: #cafe\u{301}.
+Tags in another case: #Project, #UNDECLARED-BODY and #Über.
 
 See [[Notes]] and [[notes/Deep Note|shown title]] and [[Glossary#Repeated]] and [[Notes#^para-block]].
 Embed ![[picture.png]] and ![[Notes#Setext|embedded]].
@@ -614,6 +616,25 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
     assert!(
         glossary.tags.iter().any(|tag| tag.name.contains('\u{301}')),
         "no tag whose name carries a combining mark is exercised"
+    );
+    let spellings: Vec<(&str, &str)> = glossary
+        .tags
+        .iter()
+        .zip(&glossary.folded_tags)
+        .map(|(tag, folded)| (tag.name.as_str(), folded.as_str()))
+        .collect();
+    assert!(
+        spellings.iter().any(|(name, folded)| name != folded
+            && spellings
+                .iter()
+                .any(|(other, again)| other != name && again == folded)),
+        "no tag written in two spellings of one fold is exercised: {spellings:?}"
+    );
+    assert!(
+        spellings
+            .iter()
+            .any(|(name, folded)| name != folded && !name.is_ascii()),
+        "no tag whose fold moves a letter outside ASCII is exercised: {spellings:?}"
     );
     assert!(
         glossary.frontmatter.is_some() && !glossary.fields.rows().is_empty(),

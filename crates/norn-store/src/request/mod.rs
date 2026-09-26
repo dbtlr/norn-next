@@ -694,6 +694,19 @@ impl<'a> Request<'a> {
         let Some((id, body, document)) = found else {
             return Ok(None);
         };
+        let (tags, folded_tags) = Self::read_all_on(
+            &transaction,
+            &self.read_work,
+            DOCUMENT_TAGS_SQL,
+            params![id],
+            |row| {
+                let folded: String = row.get(5)?;
+                Ok(stored_tag(row)?.map(|tag| (tag, folded)))
+            },
+            "reading a document's tags",
+        )?
+        .into_iter()
+        .unzip();
         Ok(Some(StoredFacts {
             document,
             body,
@@ -736,14 +749,8 @@ impl<'a> Request<'a> {
                 stored_block,
                 "reading a document's block ids",
             )?,
-            tags: Self::read_all_on(
-                &transaction,
-                &self.read_work,
-                DOCUMENT_TAGS_SQL,
-                params![id],
-                stored_tag,
-                "reading a document's tags",
-            )?,
+            tags,
+            folded_tags,
             fields: FieldRows::stored(Self::read_all_on(
                 &transaction,
                 &self.read_work,
@@ -1737,8 +1744,10 @@ pub(crate) const DOCUMENT_HEADINGS_SQL: &str =
 const DOCUMENT_BLOCKS_SQL: &str = "SELECT block_id, span_line, span_column, span_offset
                  FROM blocks WHERE document = ?1 ORDER BY ordinal";
 
-/// The statement [`Request::stored_facts`] reads a document's tags with.
-const DOCUMENT_TAGS_SQL: &str = "SELECT name, source, span_line, span_column, span_offset
+/// The statement [`Request::stored_facts`] reads a document's tags with, each
+/// tag's fold after the columns [`stored_tag`] reads.
+const DOCUMENT_TAGS_SQL: &str =
+    "SELECT name, source, span_line, span_column, span_offset, folded_name
                  FROM document_tags WHERE document = ?1 ORDER BY ordinal";
 
 /// The statement [`Request::stored_facts`] reads a document's field rows with.

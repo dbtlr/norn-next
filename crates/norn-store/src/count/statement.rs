@@ -86,7 +86,8 @@ pub enum GroupMember {
     /// ordered under the order: the raw text, or the typed sort key where the
     /// declaration gives the key a typed order.
     Field(FieldOrder),
-    /// The document's tags in `document_tags`, by name.
+    /// The document's tags in `document_tags`, by folded name: every
+    /// spelling of one tag under the tag fold is one group.
     Tag,
 }
 
@@ -111,15 +112,46 @@ impl GroupMember {
         match self {
             GroupMember::Field(FieldOrder::Raw) => "raw",
             GroupMember::Field(FieldOrder::Typed) => "typed",
-            GroupMember::Tag => "name",
+            GroupMember::Tag => "folded_name",
         }
     }
 
-    /// The column a group's label is the least of.
-    fn label(self) -> &'static str {
+    /// The aggregate a group's label is selected by, over the member's rows
+    /// under `alias`.
+    ///
+    /// A field's label is the least raw spelling in the group. A tag's is the
+    /// spelling written first in the answer order — the holding document's
+    /// path under `COLLATE NOCASE`, then its bytes, then the tag's position
+    /// in the document — which is the least of one text per row that orders
+    /// as that tuple does and carries the name after it:
+    /// `hex(lower(path)) hex(path) ordinal name`, space-separated. `lower`
+    /// folds ASCII alone, as `NOCASE` does; a hex digit sorts above the space,
+    /// so a shorter path sorts first as it does unencoded; and the ordinal is
+    /// zero-padded to a fixed width. [`GroupMember::read_label`] reads the
+    /// name back off the least one.
+    fn label(self, alias: &str) -> String {
         match self {
-            GroupMember::Field(_) => "raw",
-            GroupMember::Tag => "name",
+            GroupMember::Field(_) => format!("MIN({alias}.raw)"),
+            GroupMember::Tag => format!(
+                "MIN((SELECT hex(lower(lp.path)) || ' ' || hex(lp.path)
+                         FROM documents AS lp WHERE lp.id = {alias}.document)
+                     || ' ' || printf('%020d', {alias}.ordinal) || ' ' || {alias}.name)"
+            ),
+        }
+    }
+
+    /// The label a group reads as, from the value [`GroupMember::label`]
+    /// selected for it: `None` for a `null` member.
+    pub(crate) fn read_label(self, selected: Option<String>) -> Option<String> {
+        match self {
+            GroupMember::Field(_) => selected,
+            GroupMember::Tag => selected.map(|ordered| {
+                ordered
+                    .splitn(4, ' ')
+                    .nth(3)
+                    .expect("a tag label carries its name after three ordering fields")
+                    .to_string()
+            }),
         }
     }
 }
@@ -178,7 +210,8 @@ pub(crate) struct Tallies<'a> {
 /// One tally statement and its parameters, in the numbering the text states.
 ///
 /// Every grouped statement selects each grouped member's label — the least
-/// raw spelling in the group, `NULL` for a `null` member — and then how many
+/// raw spelling in a field's group, the first-written spelling in a tag's
+/// ([`GroupMember::label`]), `NULL` for a `null` member — and then how many
 /// distinct documents the group holds, grouped and ordered by the members'
 /// sort columns in the request's order, which puts `null` first. A document
 /// holding several values under a key joins once per value, so a group counts
@@ -293,7 +326,7 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
         .collect();
     let mut columns: Vec<String> = grouped
         .iter()
-        .map(|(at, member)| format!("MIN({}.{})", alias(*at), member.shape.label()))
+        .map(|(at, member)| member.shape.label(&alias(*at)))
         .collect();
     columns.push(match tallies.statement {
         // One row per document: the table's own count.

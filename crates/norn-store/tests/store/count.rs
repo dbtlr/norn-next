@@ -413,6 +413,135 @@ fn tags_group_one_per_tag_and_several_keys_group_by_their_cross_product() {
     );
 }
 
+/// Documents carrying tags spelled several ways, beside the fixture, each tag
+/// written in the body in the order listed:
+///
+/// | path | tags |
+/// |---|---|
+/// | `tags/a.md` | `work`, `WORK` |
+/// | `Tags/b.md` | `WORK` |
+/// | `tags/c.md` | `Work` |
+/// | `tags/d.md` | `Über` |
+/// | `tags/e.md` | `über` |
+/// | `tags/f.md` | `café` |
+/// | `tags/g.md` | `cafe` |
+/// | `tags/h.md` | `Area/Work` |
+///
+/// `tags/a.md` stands first of the `work` spellings in the answer order —
+/// folded path, then position — while `WORK` is the byte-least spelling and
+/// `Tags/b.md` the byte-least path, so a label read either of those ways
+/// differs from the first occurrence.
+fn spelled_tags() -> Vec<norn_store::DocumentFacts> {
+    [
+        ("tags/a.md", &["work", "WORK"][..]),
+        ("Tags/b.md", &["WORK"]),
+        ("tags/c.md", &["Work"]),
+        ("tags/d.md", &["Über"]),
+        ("tags/e.md", &["über"]),
+        ("tags/f.md", &["café"]),
+        ("tags/g.md", &["cafe"]),
+        ("tags/h.md", &["Area/Work"]),
+    ]
+    .into_iter()
+    .map(|(at, tags)| {
+        let mut facts = document(at, &format!("hash-{at}"), "a body\n");
+        facts.tags = tags
+            .iter()
+            .map(|name| TagFact {
+                name: (*name).to_string(),
+                source: TagSource::Body,
+                span: None,
+            })
+            .collect();
+        facts
+    })
+    .collect()
+}
+
+/// **A tag part compares under the tag fold.** Every spelling of a tag that
+/// differs by Unicode case finds the same documents, and counts them; an
+/// accent is part of the letter, so `café` and `cafe` stay two tags; and the
+/// fold covers the whole nested name while the part stays one identity, so
+/// `area` finds nothing `Area/Work` carries.
+#[test]
+fn a_tag_part_compares_under_the_tag_fold() {
+    let counting_store = Counting::with_documents("count-tag-fold", spelled_tags());
+    let found = |name: &str| {
+        let found = counting_store.find(
+            &FindParams::new(vault())
+                .with_predicates([Predicate::tag(name)])
+                .with_limit(100),
+        );
+        found
+            .rows
+            .iter()
+            .map(|row| row.path.as_str().to_string())
+            .collect::<Vec<String>>()
+    };
+    let counted = |name: &str| {
+        counting_store
+            .count(&counting(Vec::new()).with_predicates([Predicate::tag(name)]))
+            .tallies
+    };
+    for spelling in ["work", "WORK", "Work", "wORK"] {
+        assert_eq!(
+            found(spelling),
+            ["tags/a.md", "Tags/b.md", "tags/c.md"],
+            "`{spelling}`"
+        );
+        assert_eq!(counted(spelling), vec![tally(&[], 3)], "`{spelling}`");
+    }
+    for spelling in ["über", "Über", "ÜBER"] {
+        assert_eq!(found(spelling), ["tags/d.md", "tags/e.md"], "`{spelling}`");
+    }
+    assert_eq!(found("café"), ["tags/f.md"]);
+    assert_eq!(found("CAFÉ"), ["tags/f.md"]);
+    assert_eq!(found("cafe"), ["tags/g.md"]);
+    assert_eq!(found("AREA/work"), ["tags/h.md"]);
+    assert!(found("area").is_empty(), "a tag part names one whole tag");
+}
+
+/// **A tag grouping is one group per folded tag, labelled by its first
+/// occurrence.** The groups are the folded names in byte order; a group's
+/// label is the spelling the tally's own documents write first in the answer
+/// order — folded path, then position. Narrowed to one document, the label is
+/// that document's spelling. A continuation names a group by any of its
+/// spellings.
+#[test]
+fn a_tag_group_is_one_folded_tag_labelled_by_its_first_occurrence() {
+    let counting_store = Counting::with_documents("count-tag-labels", spelled_tags());
+    let by_tag = counting(vec![GroupKey::tag()]).with_limit(100);
+    assert_eq!(
+        counting_store.count(&by_tag).tallies,
+        vec![
+            tally(&[None], 3),
+            tally(&[Some("Area/Work")], 1),
+            tally(&[Some("cafe")], 1),
+            tally(&[Some("café")], 1),
+            tally(&[Some("draft")], 3),
+            tally(&[Some("idea")], 2),
+            tally(&[Some("work")], 3),
+            tally(&[Some("Über")], 2),
+        ]
+    );
+    assert_eq!(
+        counting_store
+            .count(
+                &by_tag
+                    .clone()
+                    .with_predicates([Predicate::path("tags/c.md")])
+            )
+            .tallies,
+        vec![tally(&[Some("Work")], 1)]
+    );
+    assert_eq!(
+        counting_store
+            .count(&counting_store.resumed(&by_tag, &[Some("WORK")]))
+            .tallies,
+        vec![tally(&[Some("Über")], 2)]
+    );
+}
+
 /// **A request that groups by nothing answers one tally over the whole
 /// match**, and a filter narrows it.
 #[test]
@@ -1199,8 +1328,8 @@ const LEAD_BARS: &[LeadBar] = &[
         member: GroupMember::Tag,
         key: GroupKey::tag,
         label: "draft",
-        index: "document_tags_name",
-        constraint: "(name>?)",
+        index: "document_tags_folded_name",
+        constraint: "(folded_name>?)",
     },
 ];
 
@@ -1270,7 +1399,7 @@ fn judge_valued_driven(plan: &QueryPlan, bar: &LeadBar) {
 
 /// **A valued section seeks its leading member's index from the page's
 /// position.** With no filter, the leading member's rows are one seek of its
-/// value index — `(key, raw)`, `(key, typed)`, or the tag's `(name)` — bound
+/// value index — `(key, raw)`, `(key, typed)`, or the tag's `(folded_name)` — bound
 /// below by the page's position, on a first page and a continuation alike;
 /// grouped by one key the groups stream off that index in order and nothing
 /// sorts. Every trailing member is reached by the document. With a filter
@@ -1520,8 +1649,8 @@ fn judge_narrow(small: &Counting, large: &Counting, params: &CountParams) {
 /// which steps no row, so its readings stand still while the pages it counts
 /// grow.
 ///
-/// Control: `document_tags_name` dropped on the larger vault, the tag part
-/// reads its table end to end, and the narrowed bar fails.
+/// Control: `document_tags_folded_name` dropped on the larger vault, the tag
+/// part reads its table end to end, and the narrowed bar fails.
 #[test]
 fn a_narrowing_part_narrows_a_counts_work_to_the_documents_it_matches() {
     let small = Counting::with_bulk("count-work-small", 50);
@@ -1565,10 +1694,10 @@ fn a_narrowing_part_narrows_a_counts_work_to_the_documents_it_matches() {
         }
     }
 
-    large.drop_index("document_tags_name");
+    large.drop_index("document_tags_folded_name");
     for by in work_groupings() {
         let tagged = counting(by).with_predicates([Predicate::tag("draft")]);
-        failure_of("document_tags_name dropped", || {
+        failure_of("document_tags_folded_name dropped", || {
             judge_narrow(&small, &large, &tagged)
         });
     }

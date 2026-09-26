@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use norn_db::rusqlite::types::Value;
-use norn_wire::{Pattern, Predicate, RequestPart, Unsatisfied};
+use norn_wire::{Pattern, Predicate, RequestPart, Unsatisfied, fold_tag};
 
 use super::advisory::{Compared, DateComparison};
 use super::filter::{Filter, PathPart, ReadFilter};
@@ -343,7 +343,7 @@ impl Snapshot {
                     class.parameters(),
                 ),
             },
-            Predicate::Tag { name, .. } => filter(ReadFilter::Tag, vec![text(name)]),
+            Predicate::Tag { name, .. } => filter(ReadFilter::Tag, vec![text(&fold_tag(name))]),
             Predicate::HasFinding { kind, .. } => filter(
                 ReadFilter::Finding,
                 // A finding recorded under no schema is stamped with the

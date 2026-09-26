@@ -185,10 +185,55 @@ fn a_reporting_facet_admits_its_names_and_its_patterns() {
     // `**` covers the run of no segments, so the pattern admits its own root.
     assert!(facet.admits("person"));
     assert!(!facet.admits("ephemeral"));
-    // Case is compared as written.
-    assert!(!facet.admits("Area"));
     assert!(facet.reports_undeclared());
     assert!(schema.rederives_documents());
+}
+
+/// **A facet compares tag names under the tag fold.** A declared name admits
+/// every spelling of itself that differs by Unicode case, a pattern admits a
+/// tag whose whole nested name folds into its set, and an accent stays part
+/// of the letter.
+#[test]
+fn a_facet_admits_a_tag_under_the_tag_fold() {
+    let schema = VaultSchema::parse(
+        "version: 1\ntags:\n  declared: [Work, über, café]\n  patterns: [\"area/**\", \"Person/*\"]\n  undeclared: report\n"
+            .as_bytes(),
+    )
+    .expect("a folding facet");
+    let facet = schema.tags();
+
+    for admitted in [
+        "Work",
+        "work",
+        "WORK",
+        "Über",
+        "ÜBER",
+        "café",
+        "CAFÉ",
+        "Area/Work",
+        "AREA",
+        "person/Ada",
+    ] {
+        assert!(facet.admits(admitted), "`{admitted}` is admitted");
+    }
+    for refused in ["cafe", "uber", "Person/Ada/Notes", "Work/Area"] {
+        assert!(!facet.admits(refused), "`{refused}` is not admitted");
+    }
+}
+
+/// **A name declared twice under the tag fold is one declaration**, kept at
+/// the spelling the schema writes first, and the names are listed in the
+/// order of their folds.
+#[test]
+fn a_name_declared_twice_under_the_fold_keeps_its_first_spelling() {
+    let schema =
+        VaultSchema::parse(b"version: 1\ntags:\n  declared: [work, Alpha, Work, WORK, alpha]\n")
+            .expect("a facet repeating a name");
+
+    assert_eq!(
+        schema.tags().declared().collect::<Vec<&str>>(),
+        ["Alpha", "work"]
+    );
 }
 
 #[test]

@@ -57,8 +57,10 @@
 //!   builders run the glob inside a statement, under the order the snapshot
 //!   reads.
 //!
-//! A tag facet's patterns name tags, not paths, and match under
-//! [`CaseFold::Exact`] on every root.
+//! A tag facet's patterns name tags, not paths, and no root's fold reaches
+//! them: the facet folds the pattern and the tag by the tag fold
+//! ([`crate::fold_tag`]) and matches the folded pair under
+//! [`CaseFold::Exact`], on every root.
 //!
 //! # What matching costs
 //!

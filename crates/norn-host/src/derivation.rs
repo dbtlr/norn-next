@@ -49,7 +49,7 @@ use norn_store::{
     Provenance, Span, TagFact, TagSource, TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
-use norn_wire::{FindingKind, FindingScope, Severity, TagStance};
+use norn_wire::{FindingKind, FindingScope, Severity, TagStance, fold_tag};
 
 /// The derivation this build writes a store's rows by, recorded in every store
 /// it creates and judged at every open: a store another version wrote is
@@ -66,7 +66,7 @@ use norn_wire::{FindingKind, FindingScope, Severity, TagStance};
 /// pinned corpus from zero and digests every derived row, pinned beside the
 /// version it was taken under, and it fails when the digest moves while this
 /// does not.
-pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(4);
+pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(5);
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -966,11 +966,12 @@ fn field_declaration(kind: FieldType) -> FieldDeclaration {
 /// makes the tag rows schema-independent parse facts and these findings the
 /// schema-keyed answer about them.
 ///
-/// **One finding per distinct undeclared name, not one per token.** A document
+/// **One finding per distinct undeclared tag, not one per token.** A document
 /// that writes `#draft` in its frontmatter and three more times in its body has
 /// one thing wrong with it, and a reader paging the class wants the names.
-/// Order is the order the names are first written, so equal documents plan
-/// equal writes.
+/// Tags are distinct under the tag fold, so `#Draft` and `#draft` are one
+/// finding, which names the spelling the document writes first. Order is the
+/// order the tags are first written, so equal documents plan equal writes.
 ///
 /// A facet that reports nothing yields nothing here, which includes every vault
 /// that has not declared a tag vocabulary at all.
@@ -988,7 +989,7 @@ fn plan_tag_facet(
         .tags
         .iter()
         .filter(|tag| !facet.admits(&tag.name))
-        .filter(|tag| seen.insert(tag.name.clone()))
+        .filter(|tag| seen.insert(fold_tag(&tag.name)))
         .map(|tag| PlannedFinding {
             subject: subject.clone(),
             cause: Cause::TagBreach(TagBreach::Undeclared),
@@ -1172,6 +1173,26 @@ mod tests {
                 .ambiguity_ignore()
                 .patterns()
                 .is_empty()
+        );
+    }
+
+    /// **A tag declared twice under the tag fold is one declared-tag facet**,
+    /// at the spelling the schema writes first.
+    #[test]
+    fn a_tag_declared_in_two_spellings_is_one_facet_at_its_first() {
+        use norn_wire::{Facet, FacetKind};
+
+        let declared = Declared::pinned(
+            VaultSchema::parse(b"version: 1\ntags:\n  declared: [Work, alpha, work, WORK]\n")
+                .expect("a schema repeating a tag"),
+            "repeating",
+        );
+        assert_eq!(
+            declared
+                .content_model()
+                .facets_of(FacetKind::DeclaredTag, None)
+                .collect::<Vec<Facet>>(),
+            vec![Facet::declared_tag("Work"), Facet::declared_tag("alpha")]
         );
     }
 

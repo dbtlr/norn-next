@@ -123,18 +123,21 @@
 //! judging it is the findings pillar's job, not a constraint that would refuse
 //! to record what the file says.
 //!
-//! # `document_tags` records the tag as written
+//! # `document_tags` records the tag as written, beside its fold
 //!
-//! Case is preserved, because deciding that `#Work` and `#work` are the same
-//! tag is a matching question and matching happens at the query venue. The
-//! comparison is therefore `BINARY`; a case-folded index is the query venue's
-//! to add along with the query that needs it. `document_tags_name` is the
-//! bytewise one a find's tag part seeks: the documents carrying one name, read
-//! off the index without touching the rows. `source` says which home the tag
-//! came from — a body token or the frontmatter `tags` field — because the two
-//! are read by different grammars and a consumer may care which one an author
-//! used. Frontmatter tags may have no locatable span, so the span columns are
-//! nullable here too.
+//! `name` is the tag as written, case included, because a report shows the
+//! spelling an author used. `folded_name` is the same name under the tag fold
+//! (`norn_wire::fold_tag`: Unicode lowercase, accents kept, over the whole
+//! nested name), computed at the write, and it is the column every comparison
+//! reads: `#Work` and `#work` are two rows of one tag. SQLite's `NOCASE`
+//! folds ASCII alone, so the fold is computed in Rust rather than left to a
+//! collation. `document_tags_folded_name` is the index a find's tag part
+//! seeks and a count's tag grouping walks: the documents carrying one folded
+//! name, read off the index without touching the rows. `source` says which
+//! home the tag came from — a body token or the frontmatter `tags` field —
+//! because the two are read by different grammars and a consumer may care
+//! which one an author used. Frontmatter tags may have no locatable span, so
+//! the span columns are nullable here too.
 //!
 //! # A nullable span triple is all three or none
 //!
@@ -226,6 +229,7 @@ fn nullable_span_tables() -> Vec<String> {
     document    INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     ordinal     INTEGER NOT NULL,
     name        TEXT    NOT NULL,
+    folded_name TEXT    NOT NULL,
     source      TEXT    NOT NULL,
     span_line   INTEGER,
     span_column INTEGER,
@@ -235,6 +239,7 @@ fn nullable_span_tables() -> Vec<String> {
         ),
         "CREATE UNIQUE INDEX document_tags_document_ordinal ON document_tags(document, ordinal)"
             .to_string(),
-        "CREATE INDEX document_tags_name ON document_tags(name, document)".to_string(),
+        "CREATE INDEX document_tags_folded_name ON document_tags(folded_name, document)"
+            .to_string(),
     ]
 }

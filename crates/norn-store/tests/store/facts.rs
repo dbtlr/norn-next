@@ -608,6 +608,7 @@ fn a_derived_path_form_has_one_home() {
         "blocks_document_block_id",
         "findings_generation",
         "findings_document",
+        "document_tags_name",
     ] {
         assert!(
             !declared
@@ -625,7 +626,7 @@ fn a_derived_path_form_has_one_home() {
     // either key, and a link's own keys, which a links-to part reads beside
     // the one it sought and a link row's discard cascades through.
     for present in [
-        "document_tags_name",
+        "document_tags_folded_name",
         "documents_suffix_key",
         "documents_folded_suffix_key",
         "documents_path_nocase",
@@ -952,8 +953,9 @@ fn a_document_facts_value_cannot_be_built_from_an_unnormalized_path() {
     assert_eq!(ok.byte_length, 7);
 }
 
-/// Tags are recorded as written, from both homes, because deciding that `#Work`
-/// and `#work` are one tag is a matching question and matching is not storage.
+/// Tags are recorded as written, from both homes, each beside its fold: the
+/// written name is what a report shows, and the fold is what a comparison
+/// reads, so `#Work` and `#work` are two rows of one tag.
 #[test]
 fn a_tag_is_stored_as_written_and_says_which_home_it_came_from() {
     let scratch = Scratch::new("tags");
@@ -971,9 +973,14 @@ fn a_tag_is_stored_as_written_and_says_which_home_it_came_from() {
             span: None,
         },
         TagFact {
-            name: "area/sub-project".to_string(),
+            name: "Area/Sub-Project".to_string(),
             source: TagSource::Body,
             span: Some(span(2, 3, 20)),
+        },
+        TagFact {
+            name: "Über".to_string(),
+            source: TagSource::Body,
+            span: Some(span(3, 1, 40)),
         },
     ];
 
@@ -984,6 +991,10 @@ fn a_tag_is_stored_as_written_and_says_which_home_it_came_from() {
         .expect("reading a document")
         .expect("a document");
     assert_eq!(stored.tags, facts.tags);
+    assert_eq!(
+        stored.folded_tags,
+        ["work", "work", "area/sub-project", "über"]
+    );
 }
 
 /// A block id with no locatable position is stored with none, rather than with a

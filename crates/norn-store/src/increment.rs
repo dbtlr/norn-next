@@ -9,6 +9,7 @@
 use std::collections::BTreeSet;
 
 use norn_db::rusqlite::{CachedStatement, OptionalExtension, Transaction, params};
+use norn_wire::fold_tag;
 
 use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
@@ -430,8 +431,9 @@ impl<'t> Statements<'t> {
             )?,
             insert_tag: prepared(
                 "INSERT INTO document_tags (
-                     document, ordinal, name, source, span_line, span_column, span_offset
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     document, ordinal, name, folded_name, source, span_line, span_column,
+                     span_offset
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 "preparing a tag write",
             )?,
             insert_field: prepared(
@@ -596,6 +598,7 @@ fn upsert(
                 document,
                 ordinal as i64,
                 tag.name,
+                fold_tag(&tag.name),
                 tag.source.as_str(),
                 tag.span.map(|span| span.line),
                 tag.span.map(|span| span.column),

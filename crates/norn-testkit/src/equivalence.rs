@@ -145,6 +145,9 @@ pub struct ProjectedDocument {
     pub headings: Vec<HeadingFact>,
     pub blocks: Vec<BlockFact>,
     pub tags: Vec<TagFact>,
+    /// Each tag's name under the tag fold, in the order of `tags`: a function
+    /// of the name, and what every comparison of two tags reads.
+    pub folded_tags: Vec<String>,
     /// The field rows, typed half included: a store that healed under a
     /// re-pinned schema and one built from zero under it agree about every
     /// typed value only if the heal refilled what the pin cleared.
@@ -384,6 +387,7 @@ impl StoreProjection {
                     headings: facts.headings,
                     blocks: facts.blocks,
                     tags: facts.tags,
+                    folded_tags: facts.folded_tags,
                     fields: facts.fields,
                 });
             }
@@ -593,7 +597,18 @@ impl StoreProjection {
             push_indexed(&mut entries, &at, "link_key", &document.link_keys);
             push_indexed(&mut entries, &at, "heading", &document.headings);
             push_indexed(&mut entries, &at, "block", &document.blocks);
-            push_indexed(&mut entries, &at, "tag", &document.tags);
+            assert_eq!(
+                document.folded_tags.len(),
+                document.tags.len(),
+                "the tag rows at {at} were read back with another number of folds"
+            );
+            let tags: Vec<StoredTag<'_>> = document
+                .tags
+                .iter()
+                .zip(&document.folded_tags)
+                .map(|(fact, folded_name)| StoredTag { fact, folded_name })
+                .collect();
+            push_indexed(&mut entries, &at, "tag", &tags);
             push_indexed(&mut entries, &at, "field", document.fields.rows());
         }
         // A finding has no key of its own that survives being written to a
@@ -1157,13 +1172,20 @@ impl StoredColumns for BlockFact {
     }
 }
 
-impl StoredColumns for TagFact {
+/// A tag row: the fact as written and the fold stored beside it.
+struct StoredTag<'a> {
+    fact: &'a TagFact,
+    folded_name: &'a str,
+}
+
+impl StoredColumns for StoredTag<'_> {
     fn columns(&self) -> Vec<(&'static str, String)> {
         let mut columns = vec![
-            ("name", quoted(&self.name)),
-            ("source", quoted(self.source.as_str())),
+            ("name", quoted(&self.fact.name)),
+            ("folded_name", quoted(self.folded_name)),
+            ("source", quoted(self.fact.source.as_str())),
         ];
-        columns.extend(span_columns(self.span));
+        columns.extend(span_columns(self.fact.span));
         columns
     }
 }
@@ -1325,6 +1347,7 @@ mod tests {
                 headings: Vec::new(),
                 blocks: Vec::new(),
                 tags: Vec::new(),
+                folded_tags: Vec::new(),
                 fields: FieldRows::default(),
             }],
             findings: Vec::new(),

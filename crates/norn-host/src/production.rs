@@ -5298,6 +5298,35 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **A declared name admits every spelling of its tag, in either home.**
+    /// `Work` is declared, so `#work` in the body and `WORK` in the
+    /// frontmatter are the declared tag; `#Draft` and `#draft` are one
+    /// undeclared tag, and its one finding names the spelling written first.
+    #[test]
+    fn a_declared_name_admits_every_spelling_of_its_tag() {
+        let f = Fixture::new("facet-folds");
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\ntags:\n  declared: [Work]\n  undeclared: report\n",
+        )
+        .unwrap();
+        fs::write(
+            f.vault().join("note.md"),
+            "---\ntags: [WORK]\n---\n# body\n#work #Draft #draft\n",
+        )
+        .unwrap();
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        let targets: Vec<Option<String>> = findings_at(&mut attachment.store, "note.md")
+            .into_iter()
+            .map(|finding| finding.target)
+            .collect();
+        assert_eq!(targets, vec![Some("Draft".to_string())]);
+        ops.detach(&name, attachment);
+    }
+
     /// **A schema edit re-derives a document whose bytes never moved.** The pin
     /// discards every finding keyed by the fingerprint it replaced, and the
     /// heal after it is what records them again — so a vault that starts
@@ -10115,21 +10144,22 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// **A tag facet's patterns match a tag's bytes under either path
-    /// order**: the same bytes derived into a store recording each order,
-    /// `area/**` does not admit `#Area/work`, which is an undeclared-tag
-    /// finding on both. A tag names no path, so the root's case behaviour
-    /// does not reach it. The store's order is set by reopening it, so the
-    /// case judges both orders on any host.
+    /// **A tag facet's patterns match a tag under the tag fold, under either
+    /// path order**: the same bytes derived into a store recording each order,
+    /// `area/**` admits `#Area/work` and `#AREA`, and `#Other` and `#OTHER`
+    /// are one undeclared tag, named at the spelling written first. A tag
+    /// names no path, so the root's case behaviour does not reach it. The
+    /// store's order is set by reopening it, so the case judges both orders
+    /// on any host.
     #[test]
-    fn a_tag_pattern_matches_exactly_under_either_path_order() {
+    fn a_tag_pattern_matches_under_the_tag_fold_under_either_path_order() {
         let f = Fixture::watcherless("derive-tag-pattern-case");
         fs::write(
             f.vault().join(".norn/schema.yaml"),
             "version: 1\ntags:\n  patterns: [\"area/**\"]\n  undeclared: report\n",
         )
         .unwrap();
-        let bytes = b"# body\n#Area/work #area/home\n";
+        let bytes = b"# body\n#Area/work #area/home #AREA #Other #OTHER\n";
         let root = f.vault();
         let mut store = Store::open(
             f.root.join("tag-pattern-case.sqlite3"),
@@ -10157,11 +10187,7 @@ mod tests {
                 .into_iter()
                 .map(|finding| finding.target)
                 .collect();
-            assert_eq!(
-                targets,
-                vec![Some("Area/work".to_string())],
-                "under {order:?}"
-            );
+            assert_eq!(targets, vec![Some("Other".to_string())], "under {order:?}");
         }
     }
 
@@ -11097,6 +11123,7 @@ mod tests {
         headings: Vec<HeadingFact>,
         blocks: Vec<BlockFact>,
         tags: Vec<TagFact>,
+        folded_tags: Vec<String>,
         fields: FieldRows,
     }
 
@@ -11110,6 +11137,7 @@ mod tests {
                 headings,
                 blocks,
                 tags,
+                folded_tags,
                 fields,
             } = facts;
             Self {
@@ -11126,6 +11154,7 @@ mod tests {
                 headings,
                 blocks,
                 tags,
+                folded_tags,
                 fields,
             }
         }

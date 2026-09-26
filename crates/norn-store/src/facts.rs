@@ -173,6 +173,9 @@ pub struct BlockFact {
 }
 
 /// One `#tag`, recorded as written.
+///
+/// The store keeps the name's fold beside it (`norn_wire::fold_tag`), computed
+/// at the write, and every comparison of two tags reads the fold.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TagFact {
     /// The name without the marker, nesting included, case as written.
@@ -522,6 +525,10 @@ pub struct StoredFacts {
     pub headings: Vec<HeadingFact>,
     pub blocks: Vec<BlockFact>,
     pub tags: Vec<TagFact>,
+    /// Each tag's name under the tag fold, as stored beside it, in the order
+    /// of `tags`. Derived at the write from the name, so it is not a fact a
+    /// caller hands over.
+    pub folded_tags: Vec<String>,
     /// The field rows, typed half included, in key order and then ordinal
     /// order.
     pub fields: FieldRows,

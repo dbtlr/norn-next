@@ -30,6 +30,7 @@
 //! vault by and the [`RequestScope`] that addressing is answered from, the
 //! [`Predicate`] list a read filters by, whose path part is a glob read by the
 //! [`Pattern`] grammar a schema's path and tag sets are written in too, and
+//! whose tag part compares under the one tag fold, [`fold_tag`], and
 //! the [`ResolutionTarget`] one
 //! document is addressed by. What a read answers with is spelled here as
 //! well: the [`AnswerReading`] every answer carries — its [`TrustState`] and
@@ -369,6 +370,7 @@ mod read;
 mod reading;
 mod reload;
 mod status;
+mod tag;
 mod target;
 mod trust;
 mod vault;
@@ -422,6 +424,7 @@ pub use status::{
     Advisory, Attention, Drift, EngineStatus, Fingerprints, Published, Registration, RollUp,
     VaultStatus,
 };
+pub use tag::fold_tag;
 pub use target::{Anchor, IllegalTarget, ResolutionTarget};
 pub use trust::{NotReady, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
 pub use vault::list::{ListParams, ListReport};

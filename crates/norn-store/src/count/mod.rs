@@ -28,7 +28,14 @@
 //! **A key with a typed order groups by typed equality.** Where the
 //! declaration gives the key a typed order, a group is the values sharing one
 //! typed sort key, ordered by it: `9` and `9.0` under a number are one group.
-//! Every other key, and a tag, groups and orders by its raw text.
+//! Every other key groups and orders by its raw text.
+//!
+//! **A tag groups by its fold** (`norn_wire::fold_tag`): `#Work` and `#work`
+//! are one group, ordered by the folded name. **A tag member's label is the
+//! spelling the tally's own documents write first in the answer order** —
+//! folded path, then position in the document — so two tallies, or two
+//! conjunctions, may label one tag with two spellings, and a continuation
+//! names a tag's group by any spelling of it.
 //!
 //! **A typed member's label is the byte-least raw spelling among the tally's
 //! own documents**: the documents the conjunction matched that stand in that
@@ -87,7 +94,7 @@ mod statement;
 use norn_db::EmittedPlan;
 use norn_wire::{
     AnswerAdvisory, CountParams, CountReport, Cursor, CursorKey, GroupKey, Moved, Page, PagedRows,
-    RequestPart, Tally, Unsatisfied,
+    RequestPart, Tally, Unsatisfied, fold_tag,
 };
 
 use crate::error::{self, StoreError};
@@ -398,7 +405,7 @@ impl Snapshot {
                     rows,
                 });
                 let section = Ran::new(statement, composed).narrowed_by(shapes.clone());
-                self.read_tallies(record, section, members.len())
+                self.read_tallies(record, section, members)
             },
         )?;
         work.tallies_read = page.read;
@@ -411,8 +418,9 @@ impl Snapshot {
         &self,
         record: &mut Vec<Ran>,
         section: Ran,
-        width: usize,
+        members: &[Member<'_>],
     ) -> Result<Vec<Tally>, StoreError> {
+        let width = members.len();
         // A `null`-lead section selects no leading member: the tuple's first
         // member is `null` on every row it answers.
         let (lead_null, selected) = match section.statement {
@@ -430,8 +438,10 @@ impl Snapshot {
             if lead_null {
                 group.push(None);
             }
-            for column in 0..selected {
-                group.push(row.get(column)?);
+            // The selected columns are the members after the ones the
+            // section leaves `null`.
+            for (column, member) in members[width - selected..].iter().enumerate() {
+                group.push(member.shape.read_label(row.get(column)?));
             }
             let count: i64 = row.get(selected)?;
             Ok(Tally::new(group, u64::try_from(count).unwrap_or_default()))
@@ -481,12 +491,14 @@ impl Snapshot {
 
 /// The sort key a group labelled `label` stands at under `member`'s order: the
 /// label's typed sort key under a typed order, which is `None` where the label
-/// does not read as the type, and the label itself otherwise.
+/// does not read as the type; a tag label's fold, so every spelling of a tag
+/// names its one group; and the label itself otherwise.
 fn sort_key(member: &Member<'_>, label: &str, declared: &ContentModel) -> Option<String> {
     match (member.shape, member.key) {
         (GroupMember::Field(FieldOrder::Typed), Some(key)) => declared
             .typed_order(key)
             .and_then(|order| order.sort_key(label)),
+        (GroupMember::Tag, _) => Some(fold_tag(label)),
         _ => Some(label.to_string()),
     }
 }
