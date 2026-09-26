@@ -10,7 +10,9 @@
 //! ([`crate::link`]) — each distinct key once, a suffix key's class through the
 //! one resolver's class predicate and a path key's documents at the path under
 //! the snapshot's path order — each link's head at most [`CANDIDATE_HEAD`] of
-//! them in the ladder's order, beside its total. A link held under no key
+//! them in the ladder's order, beside its total. The head is cut in the
+//! statement, so the candidate rows it hands back, which the caller's work
+//! counts, are at most [`CANDIDATE_HEAD`] per link. A link held under no key
 //! names nothing.
 //!
 //! Every candidate a head carries is named by its **minimal disambiguating
@@ -91,14 +93,17 @@ impl Snapshot {
     /// suffixes ([`FindStatement::CandidateSuffixes`]), which no link naming
     /// no document runs. A heading or block anchor is carried as written and
     /// not checked: the row's health is about which document the link names.
+    /// The candidate rows what every link names was read as are added to
+    /// `candidates_read`.
     pub(crate) fn link_rows(
         &self,
         links: Vec<(i64, LinkFact)>,
         ignore: &AmbiguityIgnore,
         record: &mut Vec<Ran>,
+        candidates_read: &mut u64,
     ) -> Result<Vec<LinkRow>, StoreError> {
         let ids: Vec<i64> = links.iter().map(|(id, _)| *id).collect();
-        let mut named = self.link_targets(&ids, ignore, record)?;
+        let mut named = self.link_targets(&ids, ignore, record, candidates_read)?;
         let heads: Vec<Head> = ids
             .iter()
             .map(|id| named.remove(id).unwrap_or_default())
@@ -132,12 +137,15 @@ impl Snapshot {
 
     /// The head of what each link `links` names, by the link's id: at most
     /// [`CANDIDATE_HEAD`] documents in the resolution ladder's order and how
-    /// many there were. A link naming no document has no entry.
+    /// many there were. A link naming no document has no entry. The rows the
+    /// statement handed back, each one candidate of one link's head, are
+    /// added to `candidates_read`.
     fn link_targets(
         &self,
         links: &[i64],
         ignore: &AmbiguityIgnore,
         record: &mut Vec<Ran>,
+        candidates_read: &mut u64,
     ) -> Result<HashMap<i64, Head>, StoreError> {
         if links.is_empty() {
             return Ok(HashMap::new());
@@ -152,6 +160,7 @@ impl Snapshot {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .map_err(|problem| error::sql("reading what a page's links name", problem))?;
+        *candidates_read += rows.len() as u64;
         let mut heads: HashMap<i64, Head> = HashMap::new();
         for (link, document, path, total) in rows {
             let head = heads.entry(link).or_default();

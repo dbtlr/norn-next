@@ -108,8 +108,8 @@ use crate::error::{self, StoreError};
 use crate::facts::{BlockFact, HeadingFact};
 use crate::fields::ContentModel;
 use crate::find::{
-    FindWork, FoundKey, Nested, Projection, block_row, bounded_body, heading_row, identified_link,
-    tag_row, wire_block, wire_heading,
+    FindStatement, FindWork, FoundKey, Nested, Projection, block_row, bounded_body, heading_row,
+    identified_link, tag_row, wire_block, wire_heading,
 };
 use crate::read::{
     Lookups, Naming, PageRefusal, ReadFilter, ReadStatement, Stepped, TargetAmbiguity,
@@ -213,6 +213,11 @@ pub struct GetWork {
     /// passes [`DocumentText::section`] is held to. Zero where the get looks
     /// up no section.
     pub anchor_headings: u64,
+    /// The candidate rows the resolution of the links the get answers read:
+    /// each one document a link's head names, at most
+    /// [`crate::CANDIDATE_HEAD`] per link, cut in the statement that reads
+    /// them. Zero where the get answers no link.
+    pub link_candidates_read: u64,
 }
 
 impl GetWork {
@@ -226,6 +231,7 @@ impl GetWork {
             ("get_sorts", self.sorts),
             ("get_vm_steps", self.vm_steps),
             ("get_anchor_headings", self.anchor_headings),
+            ("get_link_candidates_read", self.link_candidates_read),
         ]
         .into_iter()
     }
@@ -247,6 +253,23 @@ impl GetWork {
         self.sorts += stepped.sorts;
         self.vm_steps += stepped.vm_steps;
     }
+
+    /// Move onto this one statement's work the rows `get` counts that
+    /// `statement` handed back: the heading rows a section lookup matched
+    /// over are the document's headings statement's, and the candidate rows
+    /// a link resolution read are the link-target statement's. Each count
+    /// moves once, so a get's plans sum to its work.
+    fn take_rows_of(&mut self, statement: ReadStatement, get: &mut GetWork) {
+        match statement {
+            ReadStatement::Get(GetStatement::DocumentHeadings) => {
+                self.anchor_headings = std::mem::take(&mut get.anchor_headings);
+            }
+            ReadStatement::Find(FindStatement::LinkTargets) => {
+                self.link_candidates_read = std::mem::take(&mut get.link_candidates_read);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// A statement a get ran, with the plan SQLite reported for the text and the
@@ -262,7 +285,8 @@ pub struct GetPlan {
     /// What SQLite counted stepping the statement as the get ran it, one
     /// statement's [`GetWork`]: the work of a get it refused is read here.
     /// The document's headings statement carries the heading rows the
-    /// section lookup matched over, so the plans of a get sum to its work.
+    /// section lookup matched over, and the link-target statement the
+    /// candidate rows it read, so the plans of a get sum to its work.
     pub work: GetWork,
 }
 
@@ -387,9 +411,11 @@ impl Snapshot {
         text: &dyn DocumentText,
     ) -> Result<Vec<GetPlan>, PageRefusal> {
         let mut lookups = Lookups::default();
-        let mut anchor_headings = match self.run_get(params, declared, text, &mut lookups) {
-            Ok(gotten) => gotten.work.anchor_headings,
-            Err(PageRefusal::AmbiguousTarget(_) | PageRefusal::UnknownTarget { .. }) => 0,
+        let mut counted = match self.run_get(params, declared, text, &mut lookups) {
+            Ok(gotten) => gotten.work,
+            Err(PageRefusal::AmbiguousTarget(_) | PageRefusal::UnknownTarget { .. }) => {
+                GetWork::default()
+            }
             Err(refusal) => return Err(refusal),
         };
         let mut stepped = lookups
@@ -400,11 +426,7 @@ impl Snapshot {
             .into_iter();
         Ok(self.explained(lookups.ran, |statement, filters, plan| {
             let mut work = GetWork::of(stepped.next().unwrap_or_default());
-            // The rows the section lookup matched over are the rows the
-            // headings statement handed back, so its plan carries them.
-            if statement == ReadStatement::Get(GetStatement::DocumentHeadings) {
-                work.anchor_headings = std::mem::take(&mut anchor_headings);
-            }
+            work.take_rows_of(statement, &mut counted);
             GetPlan {
                 statement,
                 filters,
@@ -437,14 +459,16 @@ impl Snapshot {
             Shape::Record(projection) => {
                 let mut unknown = Vec::new();
                 let fields = self.projected_keys(&projection, declared, lookups, &mut unknown)?;
+                let mut hydration = FindWork::default();
                 let mut rows = self.hydrate_rows(
                     &[FoundKey::unsorted(named.document, named.path.clone())],
                     &projection,
                     &fields,
                     declared,
                     lookups,
-                    &mut FindWork::default(),
+                    &mut hydration,
                 )?;
+                work.link_candidates_read += hydration.link_candidates_read;
                 let unsatisfied = self.resolve(unknown, declared, lookups)?;
                 (GetReport::record(rows.remove(0)), unsatisfied)
             }
@@ -460,6 +484,7 @@ impl Snapshot {
                     &snapshot,
                     declared,
                     lookups,
+                    &mut work,
                 )?;
                 (GetReport::collection(path, page), Vec::new())
             }
@@ -628,7 +653,7 @@ impl Snapshot {
 
     /// One page of the collection `selector` names on the named document, a
     /// links page resolving its links under `declared`'s ambiguity-ignore
-    /// set.
+    /// set and counting in `work` the candidate rows that read.
     #[allow(clippy::too_many_arguments)] // A page is named by each of these, and none of them groups with another.
     fn collection(
         &self,
@@ -639,6 +664,7 @@ impl Snapshot {
         snapshot: &norn_wire::Snapshot,
         declared: &ContentModel,
         lookups: &mut Lookups,
+        work: &mut GetWork,
     ) -> Result<CollectionPage, PageRefusal> {
         let collection = match selector {
             CollectionSelector::Findings => {
@@ -668,7 +694,12 @@ impl Snapshot {
         Ok(match collection {
             Nested::Links => {
                 let (links, next) = self.ordinal_page(&page, identified_link, lookups)?;
-                let rows = self.link_rows(links, declared.ambiguity_ignore(), &mut lookups.ran)?;
+                let rows = self.link_rows(
+                    links,
+                    declared.ambiguity_ignore(),
+                    &mut lookups.ran,
+                    &mut work.link_candidates_read,
+                )?;
                 CollectionPage::links(Page::new(rows, next, moved))
             }
             Nested::Headings => {

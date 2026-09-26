@@ -1450,6 +1450,7 @@ fn planned_work(vault: &Vault, params: &GetParams) -> GetWork {
             sorts: sum.sorts + plan.work.sorts,
             vm_steps: sum.vm_steps + plan.work.vm_steps,
             anchor_headings: sum.anchor_headings + plan.work.anchor_headings,
+            link_candidates_read: sum.link_candidates_read + plan.work.link_candidates_read,
         })
 }
 
@@ -1803,6 +1804,7 @@ fn a_gets_work_reads_out_every_count_by_name() {
         sorts: 3,
         vm_steps: 4,
         anchor_headings: 5,
+        link_candidates_read: 6,
     };
     assert_eq!(
         work.readings().collect::<Vec<_>>(),
@@ -1812,6 +1814,7 @@ fn a_gets_work_reads_out_every_count_by_name() {
             ("get_sorts", 3),
             ("get_vm_steps", 4),
             ("get_anchor_headings", 5),
+            ("get_link_candidates_read", 6),
         ]
     );
 }

@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use norn_store::{
-    ContentModel, DocumentFacts, FindStatement, LinkFact, LinkFamily, ReadFilter, Snapshot,
-    SnapshotReader, Store, StoredPathOrder, SuffixKey, Validation, induced_failure,
+    CANDIDATE_HEAD, ContentModel, DocumentFacts, FindStatement, LinkFact, LinkFamily, ReadFilter,
+    Snapshot, SnapshotReader, Store, StoredPathOrder, SuffixKey, Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -1184,6 +1184,70 @@ fn a_read_of_targets_seeks_the_class_or_the_path_each_names() {
                     path_index,
                 )
             });
+        }
+    }
+}
+
+/// **A link's head is cut in the statement that names it.** On either root,
+/// `[[glossary]]` names seven documents and carries a head of
+/// [`CANDIDATE_HEAD`] of them beside a total of seven, and the candidate rows
+/// the resolution reads are exactly the candidates the links carry, at most
+/// [`CANDIDATE_HEAD`] per link, whether a find's links column or a get's links
+/// page resolves them: no candidate is read past a head and dropped after.
+#[test]
+fn a_links_head_is_cut_in_the_statement_that_names_it() {
+    for order in [Sensitive, Folding] {
+        let linked = crowded(&format!("links-head-cut-{order:?}"), order);
+        let found = linked.find(
+            &request()
+                .with_predicates([Predicate::path("src/many.md")])
+                .with_columns([Column::links()]),
+        );
+        let [row] = &found.rows[..] else {
+            panic!("`src/many.md` is not one row: {:?}", found.rows);
+        };
+        let links = &row.links.as_ref().expect("the links column").items;
+        let glossary = links
+            .iter()
+            .find(|link| link.target == "glossary")
+            .expect("the glossary link");
+        assert_eq!(
+            (
+                glossary.targets.candidates().len(),
+                glossary.targets.total()
+            ),
+            (CANDIDATE_HEAD, 7),
+            "{order:?}"
+        );
+        let carried: u64 = links
+            .iter()
+            .map(|link| link.targets.candidates().len() as u64)
+            .sum();
+        let ceiling = (links.len() * CANDIDATE_HEAD) as u64;
+        let gotten = linked
+            .snapshot()
+            .get(
+                &GetParams::new(address(), resolution("src/many"))
+                    .with_collection(CollectionSelector::Links)
+                    .with_limit(10),
+                &declared(),
+                &NoText,
+            )
+            .unwrap_or_else(|refusal| panic!("a links page: {refusal}"));
+        for (read, reader) in [
+            (found.work.link_candidates_read, "a find's links column"),
+            (gotten.work.link_candidates_read, "a get's links page"),
+        ] {
+            assert!(
+                read <= ceiling,
+                "{reader} under {order:?} read {read} candidate rows for {} links, past \
+                 {CANDIDATE_HEAD} per link",
+                links.len()
+            );
+            assert_eq!(
+                read, carried,
+                "{reader} under {order:?} reads the candidates its links carry and no others"
+            );
         }
     }
 }

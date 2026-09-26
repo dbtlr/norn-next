@@ -728,6 +728,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
                 page_vm_steps: 0,
                 documents_hydrated: 0,
                 nested_rows: nested(0, 0, 0),
+                link_candidates_read: 0,
                 finding_rows: 0,
             }
         )
@@ -744,6 +745,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
                 page_vm_steps: 0,
                 documents_hydrated: 2,
                 nested_rows: nested(0, 0, 0),
+                link_candidates_read: 0,
                 finding_rows: 0,
             }
         )
@@ -766,6 +768,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
                 page_vm_steps: 0,
                 documents_hydrated: 2,
                 nested_rows: nested(0, 0, 0),
+                link_candidates_read: 0,
                 finding_rows: 0,
             }
         )
@@ -786,6 +789,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
                 page_vm_steps: 0,
                 documents_hydrated: 3,
                 nested_rows: nested(0, 0, 0),
+                link_candidates_read: 0,
                 finding_rows: 0,
             }
         )
@@ -803,6 +807,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
                 page_vm_steps: 0,
                 documents_hydrated: 0,
                 nested_rows: nested(1, 0, 0),
+                link_candidates_read: 0,
                 finding_rows: 0,
             }
         )
@@ -853,6 +858,7 @@ fn a_finds_work_reads_out_every_count_by_name() {
             blocks: 9,
             links: 11,
         },
+        link_candidates_read: 12,
         finding_rows: 10,
     };
     assert_eq!(
@@ -868,6 +874,7 @@ fn a_finds_work_reads_out_every_count_by_name() {
             ("find_heading_rows", 0),
             ("find_block_rows", 9),
             ("find_link_rows", 11),
+            ("find_link_candidates_read", 12),
             ("find_finding_rows", 10),
         ]
     );
