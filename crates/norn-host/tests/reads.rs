@@ -1277,20 +1277,27 @@ fn a_read_answers_the_body_its_snapshot_holds_and_reads_no_file() {
     );
 }
 
-/// Assert an answered body is `expected`, whole or cut at the row ceiling.
+/// Assert an answered body is `expected`: whole where it fits the row ceiling,
+/// and otherwise cut to the last whole character at or before it.
 fn assert_body(answered: &BodyText, expected: &str, path: &str) {
     assert_eq!(
         answered.byte_length(),
         expected.len() as u64,
         "{path}: the whole is another length"
     );
-    assert!(
-        expected.starts_with(answered.text()),
-        "{path}: the body answered is not the text layer's"
-    );
-    assert!(
-        answered.is_truncated() || answered.text() == expected,
-        "{path}: a whole body was cut"
+    if expected.len() <= norn_store::BODY_ROW_CEILING {
+        assert_eq!(
+            answered.text(),
+            expected,
+            "{path}: a body within the ceiling was cut"
+        );
+        return;
+    }
+    let cut = expected.floor_char_boundary(norn_store::BODY_ROW_CEILING);
+    assert_eq!(
+        answered.text(),
+        &expected[..cut],
+        "{path}: a body past the ceiling was not cut at the last whole character before it"
     );
 }
 
