@@ -2020,7 +2020,9 @@ fn scope_page_parameters(scope: SubjectScope<'_>, after: Option<&DocumentPath>) 
 /// [`scope_page_predicate`] states what that shape has to be.
 fn document_page_sql(scope: SubjectScope<'_>, order: StoredPathOrder) -> String {
     let predicate = scope_page_predicate(scope, order, order);
-    let ordering = document_page_ordering(order);
+    // The order the vault proved for its root: bytewise, or ASCII-folded
+    // with the bytewise tie-break that keeps it total.
+    let ordering = order.ordering("path");
     let limit = first_parameter_after_scope(scope);
     format!(
         "SELECT {STORED_DOCUMENT_COLUMNS}
@@ -2029,16 +2031,6 @@ fn document_page_sql(scope: SubjectScope<'_>, order: StoredPathOrder) -> String 
              ORDER BY {ordering}
              LIMIT ?{limit}"
     )
-}
-
-/// The order a document page states, which is the order the vault proved for
-/// its root: bytewise, or ASCII-folded with the bytewise tie-break that keeps
-/// it total where two rows fold together.
-fn document_page_ordering(order: StoredPathOrder) -> &'static str {
-    match order {
-        StoredPathOrder::Sensitive => "path",
-        StoredPathOrder::AsciiCaseInsensitive => "path COLLATE NOCASE, path",
-    }
 }
 
 /// The scope's parameters and the page bound, in the order

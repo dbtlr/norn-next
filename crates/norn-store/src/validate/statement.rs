@@ -26,23 +26,26 @@ use crate::read::{Binder, FINDING_ROW_COLUMNS, Filter, PathGlob, glob_test};
 /// [`crate::FindStatement`]s and are named there.
 ///
 /// A page of findings reads one kind after another, in the byte order of the
-/// kind's code, so each kind is a section whose findings stand in `(path, id)`
-/// order, and the page is in `(kind, path, id)` order.
+/// kind's code, so each kind is a section whose findings stand in the
+/// snapshot's path order and then by id — `(path, id)` where the root tells
+/// spellings apart and `(path COLLATE NOCASE, path, id)` where it folds ASCII
+/// case — and the page is in `(kind, path, id)` order under that path order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidateStatement {
     /// One kind's findings standing under the active fingerprint, from the
-    /// page's position on, in `(path, id)` order: a seek of
+    /// page's position on, in the snapshot's path order and then by id. Where
+    /// the root tells spellings apart, that is a seek of
     /// `findings_vault_schema_fingerprint` at `(fingerprint, kind)` bounded
     /// below by the position, or of `findings_fingerprint_kind_severity` at
     /// `(fingerprint, kind, severity)` where the request admits one severity.
-    /// A path part bounds that seek by the range its glob's literal prefix
-    /// opens where the root tells spellings apart; where it folds ASCII case,
-    /// the section seeks `findings_fingerprint_kind_severity_nocase` at
-    /// `(fingerprint, kind, severity)` for each severity it admits over the
-    /// folded prefix's range, and sorts what that range reached. A document
-    /// part that keeps what it seeks drives the statement instead: the
-    /// documents it matched each reach their findings by one seek at their
-    /// path, and those are sorted.
+    /// Where it folds ASCII case, the same seeks run over
+    /// `findings_fingerprint_kind_nocase` and
+    /// `findings_fingerprint_kind_severity_nocase`, which hold a kind's
+    /// findings in `(path COLLATE NOCASE, path, id)` order. Either way a path
+    /// part bounds the seek by the range its glob's literal prefix opens under
+    /// the same order, and nothing sorts. A document part that keeps what it
+    /// seeks drives the statement instead: the documents it matched each
+    /// reach their findings by one seek at their path, and those are sorted.
     KindPage,
     /// How many findings stand, one tally per kind and severity: an aggregate
     /// over `findings_fingerprint_kind_severity`, which covers every column a
@@ -87,6 +90,9 @@ impl ValidateStatement {
 /// What one validate statement reads.
 pub(crate) struct Findings<'a> {
     pub(crate) statement: ValidateStatement,
+    /// The snapshot's path order, which a page's findings stand in within
+    /// their kind and every path part matches under.
+    pub(crate) order: StoredPathOrder,
     /// The fingerprint the findings stand under: the active one, and the empty
     /// text where no schema is pinned.
     pub(crate) fingerprint: &'a str,
@@ -116,21 +122,26 @@ pub(crate) struct Findings<'a> {
 /// lower bound and one upper bound on `path` — the greatest lower and the least
 /// upper — so the index seek takes the tightest range whichever the request
 /// named, and each part's glob is tested on the paths that range reaches. The
-/// parts match under the snapshot's path order, and the range is read in it:
+/// parts match under the snapshot's path order, the range is read in it, and a
+/// page section's findings stand in it, keyed as
+/// [`StoredPathOrder::path_keys`] names:
 ///
 /// - **Where the root tells spellings apart**, the range is bytewise, and the
 ///   position a page section resumes after folds into the same lower bound on
 ///   `(path, id)`, so a section seeks its kind's findings in `(path, id)` order
 ///   from the tighter of the two and sorts nothing.
 /// - **Where the root folds ASCII case**, the range is the folded prefixes'
-///   `NOCASE` range, which `findings_fingerprint_kind_severity_nocase` seeks at
-///   each `(fingerprint, kind, severity)` cell the statement admits — so a
-///   page names every severity it admits, as a summary does. That index holds
-///   a kind's findings in folded path order, so the position is a bytewise
-///   test of the rows the range reaches rather than a bound on the seek, and a
-///   page section sorts what the range handed it into `(path, id)` order. A
-///   section therefore costs the findings its path parts match, whatever page
-///   it reads.
+///   `NOCASE` range, and the position folds into the same lower bound on
+///   `(path COLLATE NOCASE, path, id)`: a section seeks
+///   `findings_fingerprint_kind_nocase`, or
+///   `findings_fingerprint_kind_severity_nocase` where it admits one severity,
+///   in that order from the tighter of the two, and sorts nothing. A summary
+///   seeks the folded range at each `(fingerprint, kind, severity)` cell of
+///   `findings_fingerprint_kind_severity_nocase`.
+///
+/// A section therefore costs the findings its page reads, and the ones at its
+/// position's path that an earlier page read, whatever range its path parts
+/// match.
 ///
 /// **Every other part judges the document row at the finding's path**, which
 /// a finding standing where no document row does never satisfies — a part
@@ -152,10 +163,12 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
         .iter()
         .filter_map(|filter| filter.path_glob())
         .collect();
-    // Every path part is compiled under the snapshot's one order.
-    let folded = globs
-        .iter()
-        .any(|glob| glob.order == StoredPathOrder::AsciiCaseInsensitive);
+    let order = findings.order;
+    debug_assert!(
+        globs.iter().all(|glob| glob.order == order),
+        "every path part is compiled under the snapshot's one order"
+    );
+    let folded = order == StoredPathOrder::AsciiCaseInsensitive;
     let driven = documents.iter().any(|filter| !filter.shape.excludes());
     let on_a_document = findings.on_a_document || !documents.is_empty();
 
@@ -175,13 +188,11 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     }
     // A summary names every severity it admits, so each `(kind, severity)`
     // cell is a seek of its own and a path part's range bounds each; a page
-    // names them where it narrows by one, and where a folded range is sought
-    // through the index that leads with the severity.
+    // names them where it narrows by one.
     let every_severity: Vec<&str> = Severity::ALL.iter().map(Severity::as_str).collect();
     let severities = match (findings.statement, findings.severities) {
         (_, Some(severities)) => Some(severities),
         (ValidateStatement::Summary, None) => Some(every_severity.as_slice()),
-        (ValidateStatement::KindPage, None) if folded => Some(every_severity.as_slice()),
         (ValidateStatement::KindPage, None) => None,
     };
     if let Some(severities) = severities {
@@ -192,26 +203,34 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     }
 
     // The greatest lower bound and the least upper bound of the path parts'
-    // ranges, and where the range is bytewise, the section's position. A text
+    // ranges, and on a page, the section's position. A lower bound is a place
+    // in the section's order — one text per path key, then an id — and a text
     // orders below the empty blob a range with no upper bound is bounded by.
     // Each bound picked is one some part's own range states, so the range
-    // holds every path all the parts admit under either collation; folded
-    // lower bounds are folded text, whose byte order is their `NOCASE` order,
-    // so the greatest of them is the tightest.
-    let position = findings
-        .after
-        .map_or((String::new(), 0), |(path, id)| (path.to_string(), id));
-    let mut lower: (String, i64) = if folded {
-        (String::new(), 0)
-    } else {
-        position.clone()
+    // holds every path all the parts admit under either collation; a part's
+    // lower bound opens at the least place its text begins, which the empty
+    // text and id 0 name after its first key.
+    let keys = order.path_keys();
+    let place = |texts: &[String], id: i64| {
+        let compared: Vec<String> = keys
+            .iter()
+            .zip(texts)
+            .map(|(key, text)| key.compared(text).into_owned())
+            .collect();
+        (compared, id)
+    };
+    let mut lower: (Vec<String>, i64) = match findings.after {
+        Some((path, id)) => (vec![path.to_string(); keys.len()], id),
+        None => (vec![String::new(); keys.len()], 0),
     };
     let mut upper: Option<Value> = None;
     for glob in &globs {
-        if let Value::Text(from) = glob.lower
-            && (from.as_str(), 0) > (lower.0.as_str(), lower.1)
-        {
-            lower = (from.clone(), 0);
+        if let Value::Text(from) = glob.lower {
+            let mut opening = vec![String::new(); keys.len()];
+            opening[0] = from.clone();
+            if place(&opening, 0) > place(&lower.0, lower.1) {
+                lower = (opening, 0);
+            }
         }
         upper = Some(match (upper, glob.upper) {
             (Some(Value::Text(held)), Value::Text(to)) => Value::Text(held.min(to.clone())),
@@ -219,11 +238,7 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
             (_, to) => to.clone(),
         });
     }
-    let collation = if folded {
-        StoredPathOrder::AsciiCaseInsensitive.collation()
-    } else {
-        StoredPathOrder::Sensitive.collation()
-    };
+    let collation = order.collation();
     // Where matched documents drive the statement, each one's findings are
     // sought at its path, and a folded range is a test of what that seek
     // reaches rather than a second seek to weigh against it.
@@ -232,30 +247,35 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     } else {
         "f.path"
     };
-    match (findings.statement, folded) {
-        (ValidateStatement::KindPage, false) => {
-            let (path, id) = (
-                binder.bind(Value::Text(lower.0)),
-                binder.bind(Value::Integer(lower.1)),
-            );
-            conditions.push(format!("(f.path, f.id) > ({path}, {id})"));
-        }
-        (ValidateStatement::KindPage, true) => {
+    match findings.statement {
+        // The position and the range's lower bound are one place in the
+        // section's order, compared key by key: the first path key under its
+        // collation, which is what an index holding that order seeks from.
+        ValidateStatement::KindPage => {
+            let (texts, id) = lower;
+            let columns: Vec<&str> = std::iter::once(ranged)
+                .chain(std::iter::repeat_n("f.path", keys.len() - 1))
+                .chain(std::iter::once("f.id"))
+                .collect();
+            let mut bounds: Vec<String> = keys
+                .iter()
+                .zip(texts)
+                .map(|(key, text)| format!("{}{}", binder.bind(Value::Text(text)), key.collation()))
+                .collect();
+            bounds.push(binder.bind(Value::Integer(id)));
             conditions.push(format!(
-                "{ranged} >= {}{collation}",
-                binder.bind(Value::Text(lower.0))
+                "({}) > ({})",
+                columns.join(", "),
+                bounds.join(", ")
             ));
-            let (path, id) = (
-                binder.bind(Value::Text(position.0)),
-                binder.bind(Value::Integer(position.1)),
-            );
-            conditions.push(format!("(+f.path, f.id) > ({path}, {id})"));
         }
-        (ValidateStatement::Summary, _) => {
-            if folded || !lower.0.is_empty() {
+        ValidateStatement::Summary => {
+            let (mut texts, _) = lower;
+            let from = texts.swap_remove(0);
+            if !globs.is_empty() && (folded || !from.is_empty()) {
                 conditions.push(format!(
                     "{ranged} >= {}{collation}",
-                    binder.bind(Value::Text(lower.0))
+                    binder.bind(Value::Text(from))
                 ));
             }
         }
@@ -265,8 +285,8 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     }
     for glob in &globs {
         let pattern = binder.bind(glob.pattern.clone());
-        let order = binder.bind(glob.recorded_order.clone());
-        conditions.push(glob_test(&pattern, "f.path", &order));
+        let recorded = binder.bind(glob.recorded_order.clone());
+        conditions.push(glob_test(&pattern, "f.path", &recorded));
     }
 
     let tests: Vec<String> = documents
@@ -297,13 +317,7 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
             let limit = binder.bind(Value::Integer(
                 i64::try_from(findings.rows).expect("a page's row count fits i64"),
             ));
-            // A folded range is read in folded order, so the page's order is
-            // no index's and the unary `+` says so: the seek is the range's.
-            let ordered = if folded {
-                "+f.path, f.id"
-            } else {
-                "f.path, f.id"
-            };
+            let ordered = format!("{}, f.id", order.ordering("f.path"));
             (
                 format!(
                     "SELECT {FINDING_ROW_COLUMNS} {from}

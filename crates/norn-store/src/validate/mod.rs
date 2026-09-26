@@ -13,9 +13,11 @@
 //! # A page is the findings in `(kind, path, id)` order
 //!
 //! A page reads one kind after another, in the byte order of the kind's code,
-//! and each kind is a section in `(path, id)` order: a seek of the kind's
-//! findings from the page's position that stops at the page's bound, so
-//! nothing sorts. A page reads at most one finding past its bound to learn a
+//! and each kind is a section in the snapshot's path order and then by id —
+//! `(path, id)` where the root tells spellings apart, and `(path COLLATE
+//! NOCASE, path, id)` where it folds ASCII case, as a heal pages documents
+//! there: a seek of the kind's findings from the page's position that stops
+//! at the page's bound, so nothing sorts. A page reads at most one finding past its bound to learn a
 //! next page exists, and the cursor it mints names the last finding's kind,
 //! path and id, where the next page resumes. The kinds are the request's, or
 //! every kind where it names none; a severity floor admits the severities at
@@ -101,7 +103,8 @@ pub struct Validated {
 /// What a validate answers with.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Validation {
-    /// A page of findings, in `(kind, path, id)` order.
+    /// A page of findings, in `(kind, path, id)` order under the snapshot's
+    /// path order.
     Findings {
         /// The findings, at most the page bound of them.
         rows: Vec<FindingRow>,
@@ -204,7 +207,8 @@ struct Narrowing {
 
 impl Snapshot {
     /// The findings `params` asks for, as a page in `(kind, path, id)` order
-    /// continuing its cursor, or as one tally per kind and severity.
+    /// under the snapshot's path order continuing its cursor, or as one tally
+    /// per kind and severity.
     ///
     /// `declared` is the vault's declaration, read from the schema the
     /// snapshot pins: it decides how a conjunction's part compares and —
@@ -371,6 +375,7 @@ impl Snapshot {
             |record, (kind, after), rows| {
                 let composed = compose_findings(&Findings {
                     statement: ValidateStatement::KindPage,
+                    order: self.path_order(),
                     fingerprint: &narrowing.fingerprint,
                     kinds: &[kind],
                     severities: narrowing.severities.as_deref(),
@@ -404,6 +409,7 @@ impl Snapshot {
         }
         let composed = compose_findings(&Findings {
             statement: ValidateStatement::Summary,
+            order: self.path_order(),
             fingerprint: &narrowing.fingerprint,
             kinds: &narrowing.kinds,
             severities: narrowing.severities.as_deref(),

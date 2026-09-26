@@ -13,8 +13,7 @@ use norn_store::{
     DocumentPath, EmittedPlan, FieldOrder, FindingFacts, FrontmatterValue, GetPlan, GetWork,
     HeadingFact, IncrementOutcome, IncrementProvenance, LinkFact, LinkFamily, OffsetSpelling,
     Provenance, ReadFilter, Request, Span, Store, StoredPathOrder, SuffixKey, TagFact, TagSource,
-    TypedOrder,
-    suffix_probe,
+    TypedOrder, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::explain::StatementReads;

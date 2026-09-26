@@ -25,7 +25,7 @@ use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
     ContentModel, FindingFacts, PageRefusal, ReadStatement, Snapshot, SnapshotReader, Store,
     StoredPathOrder, TagFact, TagSource, VALIDATE_STATEMENTS, ValidatePlan, ValidateStatement,
-    Validated, Validation, induced_failure,
+    ValidateWork, Validated, Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -525,15 +525,30 @@ fn a_drain_a_page_at_a_time_answers_the_findings_one_page_does() {
     );
 }
 
-/// **On a root that folds ASCII case, a drain of a path part answers every
-/// finding it matches once, in bytewise `(kind, path, id)` order.** The
+/// A finding row's place in a page on a root that folds ASCII case, computed
+/// here rather than read off the store: its kind's code, its path with ASCII
+/// case folded, its path bytewise, and its id.
+fn folded_place(row: &FindingRow) -> (&'static str, String, String, u64) {
+    (
+        row.kind.as_str(),
+        row.path.as_str().to_ascii_lowercase(),
+        row.path.as_str().to_string(),
+        row.id,
+    )
+}
+
+/// **On a root that folds ASCII case, a validate answers every finding in
+/// folded `(kind, path, id)` order, and a drain answers each once.** The
 /// findings stand at paths whose folded and bytewise orders differ: `Z` sorts
 /// below `[`, `_` and `` ` `` bytewise and above them folded, and `Notes/`
-/// sorts with `notes/` folded. `NOTES/**` drained one and two findings at a
-/// time answers what the unnarrowed validate answers under `notes/` in any
-/// case, with no finding skipped and none repeated.
+/// sorts with `notes/` folded. `notes/B.md` and `notes/b.md` fold together, so
+/// the bytewise path breaks their tie ahead of the id, which is recorded the
+/// other way round. The unnarrowed validate and `NOTES/**`, whole and drained
+/// one, two and three findings at a time, answer in the order this test
+/// computes from each row's kind, folded path, path and id, with no finding
+/// skipped and none repeated.
 #[test]
-fn a_drain_of_a_path_part_on_a_folding_root_answers_each_finding_once_in_bytewise_order() {
+fn a_drain_on_a_folding_root_answers_each_finding_once_in_folded_order() {
     let mut validating_store = Validating::under(
         "validate-folded-drain",
         StoredPathOrder::AsciiCaseInsensitive,
@@ -544,6 +559,7 @@ fn a_drain_of_a_path_part_on_a_folding_root_answers_each_finding_once_in_bytewis
         "notes/[y.md",
         "notes/`b.md",
         "notes/b.md",
+        "notes/B.md",
         "notes/Z.md",
     ];
     for at in mixed {
@@ -551,13 +567,10 @@ fn a_drain_of_a_path_part_on_a_folding_root_answers_each_finding_once_in_bytewis
     }
     validating_store.stand(&undeclared("notes/Z.md", "one"));
     validating_store.stand(&undeclared("notes/Z.md", "two"));
-    let under_notes =
-        |row: &FindingRow| row.path.as_str().to_ascii_lowercase().starts_with("notes/");
-    let expected: Vec<FindingRow> = validating_store
-        .rows(&validating().with_limit(1000))
-        .into_iter()
-        .filter(under_notes)
-        .collect();
+    let whole = validating_store.rows(&validating().with_limit(1000));
+    assert_eq!(whole.len(), every_finding().len() + mixed.len() + 2);
+    let mut expected = whole.clone();
+    expected.sort_by_key(folded_place);
     let violations: Vec<&str> = expected
         .iter()
         .filter(|row| row.kind == FindingKind::BodyBytesNotUtf8)
@@ -566,32 +579,53 @@ fn a_drain_of_a_path_part_on_a_folding_root_answers_each_finding_once_in_bytewis
     assert_eq!(
         violations,
         [
-            "Notes/A.md",
-            "notes/Z.md",
+            "broken.md",
             "notes/[y.md",
             "notes/_x.md",
             "notes/`b.md",
-            "notes/b.md"
+            "Notes/A.md",
+            "notes/B.md",
+            "notes/b.md",
+            "notes/Z.md"
         ],
-        "the unnarrowed validate answers in bytewise path order"
+        "the order this test computes is the folded one"
     );
-    let params = validating().with_predicates([Predicate::path("NOTES/**")]);
-    for limit in [1, 2] {
-        let rows = drained(&validating_store, &params, limit);
-        let mut ids: Vec<u64> = rows.iter().map(|row| row.id).collect();
-        ids.sort_unstable();
-        ids.dedup();
+    let under_notes =
+        |row: &FindingRow| row.path.as_str().to_ascii_lowercase().starts_with("notes/");
+    let narrowed = validating().with_predicates([Predicate::path("NOTES/**")]);
+    for (params, expected) in [
+        (validating(), expected.clone()),
+        (
+            narrowed,
+            expected
+                .iter()
+                .filter(|row| under_notes(row))
+                .cloned()
+                .collect(),
+        ),
+    ] {
         assert_eq!(
-            ids.len(),
-            rows.len(),
-            "a drain of {limit} repeated a finding"
+            validating_store.rows(&params.clone().with_limit(1000)),
+            expected,
+            "{params:?} in one page"
         );
-        assert_eq!(
-            names(&rows),
-            names(&expected),
-            "NOTES/** drained {limit} at a time"
-        );
-        assert_eq!(rows, expected, "NOTES/** drained {limit} at a time");
+        for limit in [1, 2, 3] {
+            let rows = drained(&validating_store, &params, limit);
+            let mut ids: Vec<u64> = rows.iter().map(|row| row.id).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(
+                ids.len(),
+                rows.len(),
+                "a drain of {limit} repeated a finding: {params:?}"
+            );
+            assert_eq!(
+                names(&rows),
+                names(&expected),
+                "{params:?} drained {limit} at a time"
+            );
+            assert_eq!(rows, expected, "{params:?} drained {limit} at a time");
+        }
     }
 }
 
@@ -1233,111 +1267,167 @@ fn a_kind_page_seeks_its_kind_from_the_pages_position() {
     });
 }
 
+/// The index a page on a root that folds ASCII case seeks a kind's findings
+/// through, in folded path order.
+const FOLDED_KIND_INDEX: &str = "findings_fingerprint_kind_nocase";
+
+/// That index's seek from a page's position: the folded path, then the path
+/// bytewise.
+const FOLDED_KIND_SEEK: &str = "(vault_schema_fingerprint=? AND kind=? AND (path,path)>(?,?))";
+
+/// The same seek bounded above by a path part's folded range.
+const FOLDED_KIND_RANGE_SEEK: &str =
+    "(vault_schema_fingerprint=? AND kind=? AND (path,path)>(?,?) AND path<?)";
+
+/// The index a path part's range seeks one `(kind, severity)` cell through on
+/// a root that folds ASCII case: a summary's cells, and a page's where it
+/// admits one severity.
+const FOLDED_PATH_INDEX: &str = "findings_fingerprint_kind_severity_nocase";
+
 /// The folded kind and severity index's seek of one `(kind, severity)` cell
 /// over a path part's folded range.
 const FOLDED_PATH_SEEK: &str =
     "(vault_schema_fingerprint=? AND kind=? AND severity=? AND path>? AND path<?)";
 
-/// The index a path part's range seeks the findings through on a root that
-/// folds ASCII case.
-const FOLDED_PATH_INDEX: &str = "findings_fingerprint_kind_severity_nocase";
-
-/// **On a root that folds ASCII case, a path part seeks its folded range.**
-/// Each kind page section and the summary seek
+/// **On a root that folds ASCII case, a kind page seeks its kind in folded
+/// order from the page's position.** Each section, unnarrowed or narrowed by a
+/// path part, on a first page and a continuation alike, is one seek of
+/// `findings_fingerprint_kind_nocase` at `(fingerprint, kind)` bounded below
+/// by the page's position — the folded path, then the path bytewise — and
+/// above by a path part's folded range, and its findings come off the index in
+/// `(path COLLATE NOCASE, path, id)` order, so nothing sorts. **A severity
+/// floor admitting one severity seeks
 /// `findings_fingerprint_kind_severity_nocase` at `(fingerprint, kind,
-/// severity)` for every severity they admit, bounded by the glob's folded
-/// literal prefix. The index orders a kind's findings by folded path, so a page
-/// section sorts what the range handed it, once; the summary groups in the
-/// index's own order and reads no finding's row. A document part that keeps
-/// what it seeks drives the statement as it does on a root that tells
-/// spellings apart. The same glob on that root seeks `documents_path`'s twin,
-/// the bytewise range, as [`a_kind_page_seeks_its_kind_from_the_pages_position`]
-/// judges.
+/// severity)`** the same way. **A summary** seeks that index at each `(kind,
+/// severity)` cell over a path part's folded range, groups in the index's own
+/// order and reads no finding's row. A document part that keeps what it seeks
+/// drives the statement as it does on a root that tells spellings apart.
 ///
-/// Control: the index dropped, the page and the summary read something else.
+/// Controls: a continuation's plan rebuilt without its position bound fails;
+/// each index dropped, the statements it served read something else.
 #[test]
-fn a_path_part_on_a_folding_root_seeks_the_folded_findings_index() {
+fn a_kind_page_on_a_folding_root_seeks_its_kind_in_folded_order_from_the_pages_position() {
     let mut validating_store = Validating::under(
         "validate-folded-plan",
         StoredPathOrder::AsciiCaseInsensitive,
     );
-    let judge_page = |page: &QueryPlan| {
-        page.assert_no_full_scan();
-        let rows = rows_of(page, "f");
+    let pages = |validating_store: &Validating, params: &ValidateParams| {
+        plans_of(&validating_store.plans(params), ValidateStatement::KindPage)
+    };
+    let continuing = |params: &ValidateParams| {
+        let (_, next) = validating_store.page(&params.clone().with_limit(1));
+        params.clone().with_after(next.expect("a next page"))
+    };
+    let unnarrowed = validating();
+    let ranged = validating().with_predicates([Predicate::path("*.MD")]);
+    let prefixed = validating().with_predicates([Predicate::path("NOTES/**")]);
+    let continued = continuing(&unnarrowed);
+    for params in [&unnarrowed, &continued] {
+        for page in pages(&validating_store, params) {
+            judge_kind_seek(&page, FOLDED_KIND_INDEX, FOLDED_KIND_SEEK);
+        }
+    }
+    for params in [
+        ranged.clone(),
+        continuing(&ranged),
+        prefixed.clone(),
+        continuing(&prefixed),
+        validating().with_predicates([Predicate::path("*.MD"), Predicate::path("B*")]),
+    ] {
+        for page in pages(&validating_store, &params) {
+            judge_kind_seek(&page, FOLDED_KIND_INDEX, FOLDED_KIND_RANGE_SEEK);
+        }
+    }
+    let severity = validating().with_severity(Severity::Error);
+    for params in [severity.clone(), continuing(&severity)] {
+        for page in pages(&validating_store, &params) {
+            judge_kind_seek(
+                &page,
+                FOLDED_PATH_INDEX,
+                "(vault_schema_fingerprint=? AND kind=? AND severity=? AND (path,path)>(?,?))",
+            );
+        }
+    }
+    for page in pages(
+        &validating_store,
+        &severity
+            .clone()
+            .with_predicates([Predicate::path("NOTES/**")]),
+    ) {
+        judge_kind_seek(
+            &page,
+            FOLDED_PATH_INDEX,
+            "(vault_schema_fingerprint=? AND kind=? AND severity=? AND (path,path)>(?,?) AND \
+             path<?)",
+        );
+    }
+    for params in [
+        prefixed.clone(),
+        ranged.clone(),
+        severity
+            .clone()
+            .with_predicates([Predicate::path("NOTES/**")]),
+    ] {
+        let summary = plans_of(
+            &validating_store.plans(&params.clone().summarized()),
+            ValidateStatement::Summary,
+        );
+        assert_eq!(summary.len(), 1);
+        let rows = rows_of(&summary[0], "f");
+        summary[0].assert_no_full_scan();
+        summary[0].assert_no_temp_btree();
         rows.assert_searches_through("findings", Access::Index(FOLDED_PATH_INDEX));
         rows.assert_search_constraint("findings", FOLDED_PATH_SEEK);
-        let sorts = page
-            .rows()
-            .iter()
-            .filter(|row| row.detail.starts_with("USE TEMP B-TREE"))
-            .count();
         assert!(
-            sorts <= 1,
-            "a folded page section sorted more than once: {:?}",
-            page.rows()
+            rows.rows()
+                .iter()
+                .all(|row| row.detail.contains("COVERING INDEX")),
+            "a folded summary read a finding's row: {:?}",
+            summary[0].rows()
         );
-    };
-    let (_, next) = validating_store.page(&validating().with_limit(1));
-    let narrowed = [
-        validating().with_predicates([Predicate::path("NOTES/**")]),
-        validating().with_predicates([Predicate::path("*.MD"), Predicate::path("B*")]),
-        validating()
-            .with_severity(Severity::Error)
-            .with_predicates([Predicate::path("NOTES/**")]),
-        validating()
-            .with_after(next.expect("a next page"))
-            .with_predicates([Predicate::path("*.MD")]),
-    ];
-    for params in &narrowed {
-        for page in plans_of(&validating_store.plans(params), ValidateStatement::KindPage) {
-            judge_page(&page);
-        }
-        if params.after.is_none() {
-            let summary = plans_of(
-                &validating_store.plans(&params.clone().summarized()),
-                ValidateStatement::Summary,
-            );
-            assert_eq!(summary.len(), 1);
-            let rows = rows_of(&summary[0], "f");
-            summary[0].assert_no_full_scan();
-            summary[0].assert_no_temp_btree();
-            rows.assert_searches_through("findings", Access::Index(FOLDED_PATH_INDEX));
-            rows.assert_search_constraint("findings", FOLDED_PATH_SEEK);
-            assert!(
-                rows.rows()
-                    .iter()
-                    .all(|row| row.detail.contains("COVERING INDEX")),
-                "a folded summary read a finding's row: {:?}",
-                summary[0].rows()
-            );
-        }
     }
     let driven = validating()
         .with_severity(Severity::Error)
         .with_predicates([Predicate::tag("draft"), Predicate::path("*.MD")]);
-    for page in plans_of(
-        &validating_store.plans(&driven),
-        ValidateStatement::KindPage,
-    ) {
+    for page in pages(&validating_store, &driven) {
         judge_driven(&page);
     }
 
+    // Control: the continuation's position taken out of the seek.
+    let continued_pages = pages(&validating_store, &continued);
+    let unbounded = rewritten(&continued_pages[0], |detail| {
+        detail.replace(" AND (path,path)>(?,?)", "")
+    });
+    failure_of("a folded continuation that seeks from no position", || {
+        judge_kind_seek(&unbounded, FOLDED_KIND_INDEX, FOLDED_KIND_SEEK)
+    });
     validating_store.drop_index(FOLDED_PATH_INDEX);
-    let page = plans_of(
-        &validating_store.plans(&narrowed[0]),
-        ValidateStatement::KindPage,
-    );
+    let page = pages(&validating_store, &severity);
     failure_of(&format!("{FOLDED_PATH_INDEX} dropped, a page"), || {
-        judge_page(&page[0])
+        judge_kind_seek(
+            &page[0],
+            FOLDED_PATH_INDEX,
+            "(vault_schema_fingerprint=? AND kind=? AND severity=? AND (path,path)>(?,?))",
+        )
     });
     let summary = plans_of(
-        &validating_store.plans(&narrowed[0].clone().summarized()),
+        &validating_store.plans(&prefixed.clone().summarized()),
         ValidateStatement::Summary,
     );
     failure_of(&format!("{FOLDED_PATH_INDEX} dropped, a summary"), || {
         rows_of(&summary[0], "f")
             .assert_searches_through("findings", Access::Index(FOLDED_PATH_INDEX))
     });
+    validating_store.drop_index(FOLDED_KIND_INDEX);
+    for (params, constraint) in [
+        (&unnarrowed, FOLDED_KIND_SEEK),
+        (&prefixed, FOLDED_KIND_RANGE_SEEK),
+    ] {
+        let page = pages(&validating_store, params);
+        failure_of(&format!("{FOLDED_KIND_INDEX} dropped, {params:?}"), || {
+            judge_kind_seek(&page[0], FOLDED_KIND_INDEX, constraint)
+        });
+    }
 }
 
 /// **A path part narrows a validate's work on a root that folds ASCII case
@@ -1348,8 +1438,8 @@ fn a_path_part_on_a_folding_root_seeks_the_folded_findings_index() {
 /// steps at both sizes, as a page and as a summary, and steps through no full
 /// scan.
 ///
-/// Control: the folded index dropped on the larger vault, the range no longer
-/// bounds the seek, and the bar fails.
+/// Controls: each folded index dropped on the larger vault, the range no
+/// longer bounds the seek of the statement it served, and the bar fails.
 #[test]
 fn a_path_part_narrows_a_validates_work_on_a_folding_root() {
     let folding = StoredPathOrder::AsciiCaseInsensitive;
@@ -1364,9 +1454,89 @@ fn a_path_part_narrows_a_validates_work_on_a_folding_root() {
         judge_narrow(&small, &large, &params.clone().summarized());
     }
 
+    large.drop_index(FOLDED_KIND_INDEX);
+    failure_of(&format!("{FOLDED_KIND_INDEX} dropped"), || {
+        judge_narrow(&small, &large, &narrowing[0])
+    });
     large.drop_index(FOLDED_PATH_INDEX);
     failure_of(&format!("{FOLDED_PATH_INDEX} dropped"), || {
-        judge_narrow(&small, &large, &narrowing[0])
+        judge_narrow(&small, &large, &narrowing[0].clone().summarized())
+    });
+}
+
+/// The page `params` continues to after `pages` pages of `limit`, and what
+/// that page cost.
+fn paged_work(
+    validating_store: &Validating,
+    params: &ValidateParams,
+    limit: u32,
+    pages: usize,
+) -> ValidateWork {
+    let mut after: Option<Cursor> = None;
+    for _ in 0..pages {
+        let mut page = params.clone().with_limit(limit);
+        if let Some(cursor) = after.take() {
+            page = page.with_after(cursor);
+        }
+        after = Some(
+            validating_store
+                .page(&page)
+                .1
+                .expect("the drain reaches the page it is judged at"),
+        );
+    }
+    let mut page = params.clone().with_limit(limit);
+    if let Some(cursor) = after {
+        page = page.with_after(cursor);
+    }
+    validating_store.validate(&page).work
+}
+
+/// **On a root that folds ASCII case, a page of a broad range costs the page,
+/// not the range.** Over the fixture and 50, then 500, more documents each
+/// with a warning standing over it, a page of five undeclared-tag findings —
+/// unnarrowed, and narrowed by `**/*.MD` and by `**`, which match every
+/// finding — costs the same at both sizes on its first page and on the pages
+/// that continue it into the bulk, sorts nothing and steps through no full
+/// scan.
+///
+/// Control: the folded kind index dropped on the larger vault, a page of the
+/// range reaches the whole range, and the bar fails.
+#[test]
+fn a_page_of_a_broad_range_on_a_folding_root_costs_the_page_not_the_range() {
+    let folding = StoredPathOrder::AsciiCaseInsensitive;
+    let small = Validating::with_bulk_under("validate-folded-page-small", 50, folding);
+    let mut large = Validating::with_bulk_under("validate-folded-page-large", 500, folding);
+    let tags = || validating().with_kinds([FindingKind::UndeclaredTag]);
+    let broad = [
+        tags(),
+        tags().with_predicates([Predicate::path("**/*.MD")]),
+        tags().with_predicates([Predicate::path("**")]),
+    ];
+    let judge = |large: &Validating, params: &ValidateParams| {
+        for pages in [0, 1, 4] {
+            let (at_small, at_large) = (
+                paged_work(&small, params, 5, pages),
+                paged_work(large, params, 5, pages),
+            );
+            assert_eq!(
+                at_small, at_large,
+                "page {pages} of {params:?} grew with the vault"
+            );
+            assert_eq!(
+                (at_large.sorts, at_large.full_scan_steps),
+                (0, 0),
+                "page {pages} of {params:?} sorted or scanned: {at_large:?}"
+            );
+        }
+    };
+    for params in &broad {
+        judge(&large, params);
+    }
+
+    large.drop_index(FOLDED_KIND_INDEX);
+    failure_of(&format!("{FOLDED_KIND_INDEX} dropped"), || {
+        judge(&large, &broad[1])
     });
 }
 
