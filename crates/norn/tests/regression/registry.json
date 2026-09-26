@@ -1369,6 +1369,7 @@
           "crates/norn-store/tests/store/get.rs::a_get_resolves_its_target_once_and_reads_its_document_once",
           "crates/norn-store/tests/store/get.rs::a_target_naming_several_documents_refuses_with_the_bounded_head_and_the_hint",
           "crates/norn-store/tests/store/get.rs::a_heading_anchor_is_matched_in_memory_under_its_counter_ceiling",
+          "crates/norn-store/tests/store/get.rs::a_section_and_a_block_are_read_within_one_document",
           "crates/norn-host/tests/counter_gate.rs::every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document",
           "crates/norn-semantic/tests/engine/nearest.rs::the_scan_holds_no_more_than_its_limit_at_any_size",
           "crates/norn-host/tests/search.rs::a_narrowed_vector_rung_holds_its_depth_of_what_it_admits",
