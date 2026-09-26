@@ -463,6 +463,7 @@
         "tests": [
           "crates/norn-host/tests/counter_gate.rs::a_bounded_write_costs_the_same_at_both_scales",
           "crates/norn-host/tests/counter_gate.rs::a_warm_request_over_an_attached_vault_finishes_at_zero",
+          "crates/norn-host/tests/counter_gate.rs::every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document",
           "crates/norn-host/tests/counter_gate.rs::warm_requests_under_a_live_attachment_finish_at_zero",
           "crates/norn-host/tests/fd_budget.rs::attached_entry_has_a_bounded_vault_size_independent_fd_cost",
           "crates/norn-store/tests/store/get.rs::a_gets_work_follows_its_document_not_the_vault",
@@ -1265,7 +1266,8 @@
           "crates/norn-host/tests/reads.rs::a_read_answers_the_body_its_snapshot_holds_and_reads_no_file",
           "crates/norn-host/tests/reads.rs::every_read_verb_answers_with_no_file_read_on_its_thread",
           "crates/norn-host/tests/reads.rs::a_gets_sections_and_blocks_are_the_text_layers_reading",
-          "crates/norn-host/tests/counter_gate.rs::warm_requests_under_a_live_attachment_finish_at_zero"
+          "crates/norn-host/tests/counter_gate.rs::warm_requests_under_a_live_attachment_finish_at_zero",
+          "crates/norn-host/tests/counter_gate.rs::every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document"
         ]
       }
     },
@@ -1335,7 +1337,8 @@
           "crates/norn-store/tests/store/describe.rs::an_observed_field_page_walks_the_presence_index_key_by_key",
           "crates/norn-host/tests/search.rs::a_predicate_narrows_the_vector_rung_to_the_documents_it_admits",
           "crates/norn-host/tests/search.rs::a_narrowed_vector_rung_holds_its_depth_of_what_it_admits",
-          "crates/norn-semantic/tests/engine/nearest.rs::the_scan_holds_no_more_than_its_limit_at_any_size"
+          "crates/norn-semantic/tests/engine/nearest.rs::the_scan_holds_no_more_than_its_limit_at_any_size",
+          "crates/norn-host/tests/counter_gate.rs::every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document"
         ]
       }
     },
