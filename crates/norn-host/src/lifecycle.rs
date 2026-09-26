@@ -6781,6 +6781,11 @@ mod tests {
         /// and the cases that read this hold what an unwind out of that wait
         /// leaves behind.
         wait_panics: std::sync::atomic::AtomicBool,
+        /// Whether establishing a snapshot on a handle from this ledger panics
+        /// instead of answering. It runs under the entry gate, and the case
+        /// that reads this holds what an unwind there leaves behind once the
+        /// acquisition has given the gate back and taken it again.
+        establish_panics: std::sync::atomic::AtomicBool,
     }
 
     impl Default for ReaderLedger {
@@ -6797,6 +6802,7 @@ mod tests {
                 establish_statements: AtomicU64::new(norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS),
                 mint_panics: std::sync::atomic::AtomicBool::default(),
                 wait_panics: std::sync::atomic::AtomicBool::default(),
+                establish_panics: std::sync::atomic::AtomicBool::default(),
             }
         }
     }
@@ -6932,6 +6938,10 @@ mod tests {
 
         fn establish(mut turn: FakeTurn) -> Result<Established<Self::Snapshot>, ReaderUnavailable> {
             let ledger = Arc::clone(&turn.reader.ledger);
+            assert!(
+                !ledger.establish_panics.load(Ordering::SeqCst),
+                "the case asked this establishment to unwind under the entry gate"
+            );
             park_here_if_the_case_asked(&ledger);
             // Counted on both answers and on the thread that establishes, the
             // way SQLite counts a real handle's statements: an attempt that
@@ -17926,7 +17936,9 @@ mod tests {
     ///
     /// The first read's snapshot is ended by hand rather than by dropping its
     /// hold, because that drop takes the poisoned gate too; ending the
-    /// snapshot is what hands the connection on.
+    /// snapshot is what hands the connection on. The hold itself drops only
+    /// once the case has recovered the gate, so a case that fails leaves it
+    /// rather than aborting on the poison.
     #[test]
     fn an_unwind_on_a_gate_poisoned_during_a_reads_wait_gives_its_lease_back() {
         let ops = Arc::new(FakeOps::default());
@@ -17940,9 +17952,10 @@ mod tests {
             .get(&name)
             .expect("the vault is registered");
 
-        let mut first = host
-            .begin_read(&name)
-            .expect("an entry holding a reader answers a read");
+        let mut first = std::mem::ManuallyDrop::new(
+            host.begin_read(&name)
+                .expect("an entry holding a reader answers a read"),
+        );
         let reading = Arc::clone(&host);
         let reading_name = name.clone();
         let waiting = thread::spawn(move || {
@@ -17988,7 +18001,7 @@ mod tests {
             leases, 1,
             "the unwound read's lease is still counted beside the first read's"
         );
-        drop(first);
+        drop(std::mem::ManuallyDrop::into_inner(first));
         let leases = entry
             .gate
             .lock()
@@ -17999,6 +18012,72 @@ mod tests {
             host.begin_read(&name)
                 .expect("the read after the unwind was refused"),
         );
+    }
+
+    /// **An unwind under the gate an acquisition took again after its wait
+    /// poisons that gate rather than holding it.** The acquisition's lease
+    /// drops before its guard, so a lease that took the gate from that drop
+    /// would block on the gate its own frame still holds. The retake is what
+    /// says the frame holds the gate again, and this is the case that fails
+    /// where it does not.
+    ///
+    /// The first read's snapshot is ended by hand rather than by dropping its
+    /// hold, because that drop takes the gate, and the gate is poisoned by the
+    /// time the case would take it. The hold itself drops only once the case
+    /// has recovered the gate, so a case that fails leaves it rather than
+    /// blocking on a gate the unwound read still holds.
+    #[test]
+    fn a_read_whose_establishment_unwinds_after_its_wait_poisons_the_gate_rather_than_holding_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let host = Arc::new(host);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+
+        let mut first = std::mem::ManuallyDrop::new(
+            host.begin_read(&name)
+                .expect("an entry holding a reader answers a read"),
+        );
+        ops.readers.establish_panics.store(true, Ordering::SeqCst);
+        let reading = Arc::clone(&host);
+        let reading_name = name.clone();
+        let waiting = thread::spawn(move || {
+            std::panic::catch_unwind(AssertUnwindSafe(|| reading.begin_read(&reading_name)))
+        });
+        wait_until(
+            "the second read to reach the wait for the entry's connection",
+            lifecycle_wait_budget(),
+            || {
+                if ops.readers.waiting.load(Ordering::SeqCst) >= 1 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("no read is waiting yet".to_string())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        drop(first.snapshot.take());
+
+        let caught = joined_within_the_budget("the read whose establishment unwound", waiting);
+        ops.readers.establish_panics.store(false, Ordering::SeqCst);
+        assert!(
+            caught.is_err(),
+            "the establishment the case asked to unwind answered instead"
+        );
+        match entry.gate.try_lock() {
+            Err(std::sync::TryLockError::Poisoned(_)) => {}
+            Err(std::sync::TryLockError::WouldBlock) => {
+                panic!("the unwind left the entry gate held, so the entry answers nothing again")
+            }
+            Ok(_) => panic!("the unwind under the entry gate left it unpoisoned"),
+        }
+        entry.gate.clear_poison();
+        drop(std::mem::ManuallyDrop::into_inner(first));
     }
 
     /// Join `thread` once it has finished, failing the case where it has not
