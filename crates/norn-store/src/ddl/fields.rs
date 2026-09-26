@@ -129,11 +129,13 @@ pub(crate) fn statements() -> Vec<String> {
         "CREATE INDEX document_fields_typed ON document_fields(key, typed)
     WHERE typed IS NOT NULL"
             .to_string(),
-        "CREATE INDEX document_fields_least_raw ON document_fields(key, raw, path COLLATE NOCASE, path)
-    WHERE least_raw = 1"
+        "CREATE INDEX document_fields_least_raw ON document_fields(
+    key, raw, path COLLATE NOCASE, path
+) WHERE least_raw = 1"
             .to_string(),
-        "CREATE INDEX document_fields_least_typed ON document_fields(key, typed, path COLLATE NOCASE, path)
-    WHERE least_typed = 1"
+        "CREATE INDEX document_fields_least_typed ON document_fields(
+    key, typed, path COLLATE NOCASE, path
+) WHERE least_typed = 1"
             .to_string(),
         "CREATE INDEX document_fields_presence ON document_fields(key, container)
     WHERE ordinal = 0"

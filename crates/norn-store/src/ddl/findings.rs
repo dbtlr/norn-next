@@ -14,49 +14,43 @@
 //! `fingerprint < pinned OR fingerprint > pinned`. `<>` is not a predicate an
 //! index can answer, so it reads every finding in the table — including on the
 //! path where nothing is stale, which is every pin but the ones that changed
-//! the schema. Two open ranges are two index seeks over
-//! `findings_vault_schema_fingerprint`, and they cost the rows they delete.
+//! the schema. Two open ranges are two index seeks over either index leading
+//! with the fingerprint, and they cost the rows they delete.
 //!
-//! The same index carries the kind and the path after the fingerprint, which
-//! is the direction a find's finding part reads: the paths a kind of finding
-//! stands over under the active fingerprint, one seek on the pair and the paths
-//! off the index — or off `findings_fingerprint_kind_severity`, which leads
-//! with the same pair and carries the path too. The fingerprint leads rather
-//! than the kind so that a statement naming kinds alone — a subject's
-//! discard, a walk's page of subjects — is not offered a kind-led index in
-//! place of the path it seeks.
+//! `findings_fingerprint_kind_nocase` carries the kind and the path after the
+//! fingerprint, which is the direction a find's finding part reads: the paths a
+//! kind of finding stands over under the active fingerprint, one covering seek
+//! on the pair and the paths off the index. The fingerprint leads rather than
+//! the kind so that a statement naming kinds alone — a subject's discard, a
+//! walk's page of subjects — is not offered a kind-led index in place of the
+//! path it seeks.
 //!
-//! # A validate reads the findings in `(kind, path, id)` order, off five indexes
+//! # A validate reads the findings in `(kind, path, id)` order, off three indexes
 //!
 //! `validate` pages the findings standing under the active fingerprint in
-//! `(kind, path, id)` order under the store's path order, one kind at a time,
-//! and every index here carries the row id as its last column, so each order
-//! below continues by the id with nothing sorted:
+//! `(kind, path, id)` order, one kind at a time, with the path in the answer's
+//! path order on every root — `path COLLATE NOCASE`, then `path` bytewise,
+//! which makes the order total over two paths that fold together. Every index
+//! here carries the row id as its last column, so each order below continues
+//! by the id with nothing sorted:
 //!
-//! - `findings_vault_schema_fingerprint` is `(fingerprint, kind, path)`: one
-//!   kind's findings in `(path, id)` order, sought from a page's position.
-//! - `findings_fingerprint_kind_severity` is `(fingerprint, kind, severity,
-//!   path)`. A request narrowed to one severity seeks it in `(path, id)` order
-//!   within that severity, so the findings of another severity cost nothing;
-//!   and it covers a summary, whose tallies group by `(kind, severity)` in the
-//!   index's own order.
 //! - `findings_fingerprint_kind_nocase` is `(fingerprint, kind, path COLLATE
-//!   NOCASE, path)`: on a root that folds ASCII case, one kind's findings in
-//!   `(path COLLATE NOCASE, path, id)` order, sought from a page's position and
-//!   bounded by a path part's folded range. The bytewise `path` after the
-//!   folded one makes the order total over two paths that fold together, so a
-//!   seek resumes from a position's folded path and path alike.
+//!   NOCASE, path)`: one kind's findings in `(path COLLATE NOCASE, path, id)`
+//!   order, sought from a page's position and bounded by a path part's folded
+//!   range.
 //! - `findings_fingerprint_kind_severity_nocase` is `(fingerprint, kind,
-//!   severity, path COLLATE NOCASE, path)`: the same order within one
-//!   severity, which a page narrowed to one severity seeks on such a root; and
-//!   what a summary's path part seeks its folded range through at each
-//!   `(fingerprint, kind, severity)` cell, covering a tally as the bytewise
-//!   index does.
+//!   severity, path COLLATE NOCASE, path)`. A request narrowed to one severity
+//!   seeks it in the same order within that severity, so the findings of
+//!   another severity cost nothing; and it covers a summary, whose tallies
+//!   group by `(kind, severity)` in the index's own order, a path part's
+//!   folded range bounding each cell's seek, and a document part's seek at
+//!   each matched document's path.
 //! - `findings_path` is `(path, fingerprint, kind)`: the findings standing at
 //!   one path, in `(kind, id)` order, which is how a find's findings column
 //!   reads a document's head and stops at its ceiling, and how a validate a
 //!   document part narrows reaches the findings at the documents it matched.
-//!   Its leading `path` is also every subject read and discard's seek.
+//!   Its leading `path` is also every subject read and discard's seek, and a
+//!   walked-scope prune's bytewise page of subjects.
 //!
 //! # `generation` is what a repair plan cites
 //!
@@ -232,21 +226,13 @@ const STATEMENTS: &[&str] = &[
     CHECK ((span_line IS NULL) = (span_column IS NULL)
        AND (span_line IS NULL) = (span_offset IS NULL))
 )",
-    // Created ahead of the bytewise indexes: SQLite weighs a table's indexes
-    // newest first and keeps the first of two that cost the same, so a
-    // statement no folded range or order bounds reads the bytewise index it
-    // ties with. A find's finding part ties `findings_fingerprint_kind_nocase`
-    // with the bytewise kind and severity index, and
-    // `find::every_filter_seeks_the_index_its_values_are_bounds_for` in the
-    // store's plan bars fails where the folded index is created after it.
-    "CREATE INDEX findings_fingerprint_kind_nocase
-    ON findings(vault_schema_fingerprint, kind, path COLLATE NOCASE, path)",
-    "CREATE INDEX findings_fingerprint_kind_severity_nocase
-    ON findings(vault_schema_fingerprint, kind, severity, path COLLATE NOCASE, path)",
+    "CREATE INDEX findings_fingerprint_kind_severity_nocase ON findings(
+    vault_schema_fingerprint, kind, severity, path COLLATE NOCASE, path
+)",
+    "CREATE INDEX findings_fingerprint_kind_nocase ON findings(
+    vault_schema_fingerprint, kind, path COLLATE NOCASE, path
+)",
     "CREATE INDEX findings_path ON findings(path, vault_schema_fingerprint, kind)",
-    "CREATE INDEX findings_vault_schema_fingerprint ON findings(vault_schema_fingerprint, kind, path)",
-    "CREATE INDEX findings_fingerprint_kind_severity
-    ON findings(vault_schema_fingerprint, kind, severity, path)",
     "CREATE TABLE finding_classes (
     finding   INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
     class_key TEXT    NOT NULL,

@@ -520,7 +520,7 @@ fn index_shape(declared: &[String], index: &str) -> (String, Option<String>) {
         .join(" ");
     let open = folded.find('(').expect("an index names its columns");
     let close = open + folded[open..].find(')').expect("the column list closes");
-    let columns = folded[open + 1..close].to_string();
+    let columns = folded[open + 1..close].trim().to_string();
     let predicate = folded[close..]
         .split_once(" WHERE ")
         .map(|(_, predicate)| predicate.to_string());
@@ -632,7 +632,7 @@ fn a_derived_path_form_has_one_home() {
         "documents_change_feed",
         "tombstones_change_feed",
         "finding_classes_class_key",
-        "findings_vault_schema_fingerprint",
+        "findings_fingerprint_kind_nocase",
         "link_keys_link",
         "link_keys_key",
         "link_keys_folded_key",

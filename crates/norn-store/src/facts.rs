@@ -368,7 +368,7 @@ pub struct StoredSuffixKeys {
 /// The case behaviour a vault root was **proven** to have at the filesystem
 /// seam, as the store carries it.
 ///
-/// It selects six things, and rewrites no path in any of them — a stored path
+/// It selects five things, and rewrites no path in any of them — a stored path
 /// keeps the spelling the tree carries:
 ///
 /// - **The store's recorded rebuild input.** A store records the order its rows
@@ -382,19 +382,18 @@ pub struct StoredSuffixKeys {
 ///   root tells spellings apart and with ASCII case folded where it folds them.
 ///   The ambiguity-ignore globs ([`crate::AmbiguityIgnore::admits`]) and the
 ///   path part of a find, a count and a validate match under it.
-/// - **The collation a path part's range seeks under**: `documents_path` and
-///   the findings indexes' bytewise path where the root tells spellings apart,
-///   and `documents_path_nocase` and the findings indexes that compare the path
-///   under `NOCASE` where it folds them.
+/// - **The collation a find's or a count's path part seeks its range under**:
+///   `documents_path` where the root tells spellings apart, and
+///   `documents_path_nocase` over the folded prefix where it folds them.
 /// - **The collation a heal pages stored documents under**: bytewise, or
 ///   `NOCASE` with a bytewise tie-break, as the walk it merges against orders
 ///   paths. The heal hands the page its walk's proven order.
-/// - **The order a validate answers a kind's findings in**
-///   ([`crate::Snapshot::validate`]): `(path, id)` where the root tells
-///   spellings apart, and `(path COLLATE NOCASE, path, id)` where it folds
-///   them, each read off an index that holds it. One function names that
-///   order's path keys, and the page's order and the position it resumes
-///   after are both stated from it.
+///
+/// **It does not select the order a read answers paths in.** A find's pages
+/// and a validate's findings answer in one path order on every root — ASCII
+/// case folded, then bytewise — which is the read machinery's, not the root's;
+/// on a root that tells spellings apart it differs from the order a heal pages
+/// in.
 ///
 /// This crate depends on nothing in the filesystem seam, so each fold here —
 /// the `NOCASE` collation, the folded suffix key, and the globs'
@@ -442,43 +441,6 @@ impl StoredPathOrder {
         match self {
             StoredPathOrder::Sensitive => "",
             StoredPathOrder::AsciiCaseInsensitive => " COLLATE NOCASE",
-        }
-    }
-
-    /// The keys a path is ordered by under this order, most significant
-    /// first, each named by the order it compares under: the path bytewise
-    /// where the root tells spellings apart; and where it folds ASCII case,
-    /// the path folded, then the path bytewise, which makes the order total
-    /// over two paths that fold together. A page ordered by paths states its
-    /// order, and the position it resumes after, from these keys.
-    pub(crate) const fn path_keys(self) -> &'static [StoredPathOrder] {
-        match self {
-            StoredPathOrder::Sensitive => &[StoredPathOrder::Sensitive],
-            StoredPathOrder::AsciiCaseInsensitive => &[
-                StoredPathOrder::AsciiCaseInsensitive,
-                StoredPathOrder::Sensitive,
-            ],
-        }
-    }
-
-    /// `column` ordered under this order, as an `ORDER BY` states it: one
-    /// term per key [`StoredPathOrder::path_keys`] names.
-    pub(crate) fn ordering(self, column: &str) -> String {
-        self.path_keys()
-            .iter()
-            .map(|key| format!("{column}{}", key.collation()))
-            .collect::<Vec<String>>()
-            .join(", ")
-    }
-
-    /// `path` as this order's collation compares it: as itself, or with
-    /// ASCII case folded, whose byte order is its `NOCASE` order.
-    pub(crate) fn compared(self, path: &str) -> std::borrow::Cow<'_, str> {
-        match self {
-            StoredPathOrder::Sensitive => std::borrow::Cow::Borrowed(path),
-            StoredPathOrder::AsciiCaseInsensitive => {
-                std::borrow::Cow::Owned(crate::path::fold_ascii_case(path))
-            }
         }
     }
 

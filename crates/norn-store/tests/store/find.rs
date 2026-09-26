@@ -1528,9 +1528,9 @@ fn filter_bars() -> Vec<FilterBar> {
                 Seek::Index {
                     alias: "fg",
                     table: "findings",
-                    access: Access::Index("findings_fingerprint_kind_severity"),
+                    access: Access::Index("findings_fingerprint_kind_nocase"),
                     constraint: "(vault_schema_fingerprint=? AND kind=?)",
-                    dropped: "findings_fingerprint_kind_severity",
+                    dropped: "findings_fingerprint_kind_nocase",
                 },
             )],
         },

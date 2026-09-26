@@ -483,8 +483,9 @@ impl Snapshot {
     /// Every read that compiles a class or a glob reads it: the order selects
     /// the suffix key a resolution probes, and the case every glob matches
     /// under — a class's ignore globs, and the path part of a find, a count
-    /// and a validate — with the index a path part's range seeks. A find's
-    /// pages order paths the same way on every root.
+    /// and a validate — with the index a find's or a count's path part seeks
+    /// its range in. It does not order an answer: a find's pages and a
+    /// validate's findings order paths the same way on every root.
     pub fn path_order(&self) -> StoredPathOrder {
         self.order
     }

@@ -2,6 +2,7 @@
 //! read builder's composer numbers its parameters with.
 
 use norn_db::rusqlite::types::Value;
+use norn_wire::Pattern;
 
 use super::FieldOrder;
 use crate::facts::StoredPathOrder;
@@ -61,11 +62,9 @@ pub enum ReadFilter {
     /// the named document's path may name another document at its other one.
     LinksTo(SuffixKey),
     /// A finding of the kind stands over the document under the active
-    /// fingerprint: one covering seek of the findings at `(fingerprint,
-    /// kind)`, which `findings_fingerprint_kind_severity` and
-    /// `findings_vault_schema_fingerprint` both lead with and both carry the
-    /// path in, each finding's path read back to its document on
-    /// `documents_path`.
+    /// fingerprint: one covering seek of `findings_fingerprint_kind_nocase` at
+    /// `(fingerprint, kind)`, which carries the path after them, each
+    /// finding's path read back to its document on `documents_path`.
     Finding,
 }
 
@@ -147,32 +146,39 @@ pub(crate) struct Filter {
 /// A path part as the values it binds, read back by a statement that spells
 /// its range and its glob other than as a membership test of a document.
 pub(crate) struct PathGlob<'a> {
-    /// The order the range is compared under and the glob matches under.
-    pub(crate) order: StoredPathOrder,
-    /// The range's lower bound, inclusive.
-    pub(crate) lower: &'a Value,
-    /// The range's upper bound, exclusive.
-    pub(crate) upper: &'a Value,
     /// The glob's text.
     pub(crate) pattern: &'a Value,
-    /// The recorded spelling of the order, as the glob function reads it.
+    /// The recorded spelling of the root's path order, as the glob function
+    /// reads it: the fold the glob matches under.
     pub(crate) recorded_order: &'a Value,
 }
 
+impl PathGlob<'_> {
+    /// The range every path the glob matches stands in under `NOCASE`,
+    /// whatever the root's fold: from the glob's literal prefix with ASCII
+    /// case folded to the first text past it. A glob matching bytes admits
+    /// only paths spelling its prefix as written, and those fold to the folded
+    /// prefix too, so the range holds what the part admits under either fold.
+    /// A read answering in the answer's path order seeks it; the glob function
+    /// decides each path the range reaches.
+    pub(crate) fn folded_range(&self) -> (String, Value) {
+        let Value::Text(source) = self.pattern else {
+            unreachable!("a path part binds its glob as text")
+        };
+        let pattern = Pattern::parse(source).expect("a compiled path part's glob parses");
+        super::glob::path_range(&pattern, StoredPathOrder::AsciiCaseInsensitive)
+    }
+}
+
 impl Filter {
-    /// A path part's order, range and glob, as the values it binds, and
-    /// `None` for any other part.
+    /// A path part's glob and the fold it matches under, as the values it
+    /// binds, and `None` for any other part.
     pub(crate) fn path_glob(&self) -> Option<PathGlob<'_>> {
         match (self.shape, self.values.as_slice()) {
-            (ReadFilter::PathGlob(order), [lower, upper, pattern, recorded_order]) => {
-                Some(PathGlob {
-                    order,
-                    lower,
-                    upper,
-                    pattern,
-                    recorded_order,
-                })
-            }
+            (ReadFilter::PathGlob(_), [_, _, pattern, recorded_order]) => Some(PathGlob {
+                pattern,
+                recorded_order,
+            }),
             _ => None,
         }
     }
