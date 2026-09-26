@@ -1414,6 +1414,13 @@ impl EntryOps for ProductionEntryOps {
             .collect()
     }
 
+    /// The mint is the lifecycle's act, in the gate hold that publishes a
+    /// leg, and what it ran is this account's like everything else the leg
+    /// spent.
+    fn count_leg_mint(&self, statements: u64) {
+        self.evidence.count_mint_under_the_gate(statements);
+    }
+
     fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
         self.semantic.as_deref()
     }
@@ -5122,6 +5129,41 @@ mod tests {
         assert_eq!(values, [Some(1), Some(2)]);
     }
 
+    /// **The attach's reader mint is in the job account.** The attach mints
+    /// the entry's handle over the store it opened, in the gate hold that
+    /// publishes it, and the store's read-only open reports two statements:
+    /// the journal-mode read and the store-epoch read. A read over the handle
+    /// that mint left is the control: it mints nothing, and neither account's
+    /// mint reading moves for it.
+    #[test]
+    fn an_attach_accounts_the_stores_reader_mint_to_the_job_account() {
+        let f = Fixture::new("leg-mint-account");
+        let ops = fixture_ops(&f);
+        let evidence = Arc::clone(&ops.evidence);
+        let (host, name, _lease) = ready_host(&f, ops);
+
+        assert_eq!(
+            evidence.read().mint_statements_under_the_gate,
+            2,
+            "the attach's mint is missing from the job account"
+        );
+        let before = evidence.read();
+        drop(
+            host.begin_read(&name)
+                .expect("an attached vault answers a read"),
+        );
+        assert_eq!(
+            evidence.read().since(before).mint_statements_under_the_gate,
+            0,
+            "a read over a standing handle moved the job account's mint reading"
+        );
+        assert_eq!(
+            host.read_evidence().mint_statements_under_the_gate,
+            0,
+            "the attach's mint moved the read account"
+        );
+    }
+
     /// A reload and its dry run both check maintainership before they read
     /// the candidate: a replaced lock is a lost maintainership, whatever the
     /// candidate would have been refused for.
@@ -6490,6 +6532,10 @@ mod tests {
 
             fn withheld_trust(&self, attachment: &Self::Attachment) -> Option<UntrustedReason> {
                 self.inner.withheld_trust(attachment)
+            }
+
+            fn count_leg_mint(&self, statements: u64) {
+                self.inner.count_leg_mint(statements);
             }
 
             fn semantic(&self) -> Option<&SemanticEngines> {
@@ -12766,6 +12812,10 @@ mod tests {
         fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
             self.inner.detach(name, attachment);
         }
+
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
     }
 
     #[test]
@@ -13850,6 +13900,9 @@ mod tests {
         fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
             self.inner.detach(name, attachment)
         }
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
     }
 
     #[test]
@@ -14234,6 +14287,10 @@ mod tests {
 
         fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
             self.inner.detach(name, attachment);
+        }
+
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
         }
     }
 

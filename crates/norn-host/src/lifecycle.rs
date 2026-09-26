@@ -73,15 +73,16 @@ pub trait SnapshotSource: Send + 'static {
     /// slot nothing accounts for.
     ///
     /// This runs under the entry gate lock on both of its occasions — the
-    /// attach leg's publication, and the read path's repair of an entry that
-    /// serves with an empty slot — and the lock is what the contract here is
-    /// about. **The mint's own I/O
+    /// publication of a leg that installs, swaps or parks coverage, and the
+    /// read path's repair of an entry that serves with an empty slot — and the
+    /// lock is what the contract here is about. **The mint's own I/O
     /// runs there**: the production mint opens a second connection to the
     /// database the coverage is holding and runs the statements that settle
     /// its mode, and every other holder of that entry — every demand, every
-    /// reap, every read — waits behind that open. It is the priced cost of the
-    /// coupling: the handle and the trust label a read pairs it with are
-    /// published together or not at all. What the gate may not ride is a wait
+    /// reap, every read — waits behind that open. It is the cost of the
+    /// coupling, under which the handle and the trust label a read pairs it
+    /// with are published together or not at all, and the statements the mint
+    /// reports below are what measure it. What the gate may not ride is a wait
     /// for another holder of the same entry, which is why no acquisition waits
     /// for this entry's connection under it. And the mint does not panic: an
     /// unwind here poisons the gate, and every later
@@ -96,8 +97,10 @@ pub trait SnapshotSource: Send + 'static {
     /// reports [`ReaderUnavailable`] rather than unwinding.
     ///
     /// **It reports what it ran against the database beside its answer**, so
-    /// the caller holding the gate can account for what the gate paid for. A
-    /// mint that refused reports what it ran before it refused, because the
+    /// the caller holding the gate accounts for what the gate paid for: a
+    /// leg's publication in the account of the host's jobs, through
+    /// [`EntryOps::count_leg_mint`], and a read's repair in the read account.
+    /// A mint that refused reports what it ran before it refused, because the
     /// gate was held for those statements too.
     fn open_reader(&self) -> MintedReader<Self::Reader>;
 }
@@ -107,7 +110,9 @@ pub trait SnapshotSource: Send + 'static {
 /// **Both answers carry the cost**, because the mint runs under the entry gate
 /// either way: a mint that refused held that gate for the statements it ran
 /// before it refused, and a report only a successful mint made would leave the
-/// expensive refusals unaccounted.
+/// expensive refusals unaccounted. Every mint's statements land in an account,
+/// chosen by what minted: a leg's publication records them in the account of
+/// the host's jobs, and a read's repair in the read account.
 pub struct MintedReader<R> {
     /// The handle this coverage's reads run on, or why it serves none.
     pub reader: Result<R, ReaderUnavailable>,
@@ -365,6 +370,23 @@ pub trait EntryOps: Send + Sync + 'static {
     fn advisories(&self, _: &Self::Attachment) -> Vec<AttachmentAdvisory> {
         Vec::new()
     }
+    /// Account for what a leg's reader mint ran against the database while
+    /// the entry gate was held.
+    ///
+    /// A leg that installs, swaps or parks coverage has its handle minted in
+    /// the gate hold that publishes its outcome, after the leg's own call into
+    /// these ops has returned, so the mint is the lifecycle's act and this is
+    /// how its cost reaches the account an implementation keeps of its legs.
+    /// `statements` is what the mint reported, whichever way it ended. A
+    /// publication that minted nothing does not call this, and a read's mint
+    /// never reaches it: that is the read account's.
+    ///
+    /// Called under the entry gate, so it does no I/O and takes no lock.
+    ///
+    /// **There is no default.** Every implementation states where its legs'
+    /// mints land, so ops that wrap another implementation forward this to it
+    /// rather than dropping the count, and ops that keep no account say so.
+    fn count_leg_mint(&self, statements: u64);
     /// The semantic engines these ops compose, where they compose them: what a
     /// search's vector rung is answered through.
     ///
@@ -1254,37 +1276,61 @@ impl<A: SnapshotSource> EntryState<A> {
     /// entry publishing a trust label no read can answer under, and a handle
     /// minted under a later lock is one minted from coverage the entry may
     /// already have given back.
-    fn install_coverage(&mut self, attachment: A) {
+    fn install_coverage<O: EntryOps<Attachment = A>>(&mut self, ops: &O, attachment: A) {
         debug_assert!(
             self.reader.is_none(),
             "a reader stands over coverage the entry never installed"
         );
-        self.mint_reader(&attachment);
+        self.mint_for_a_leg(ops, &attachment);
         self.coverage.install(attachment);
     }
 
-    /// Mint the handle `attachment` serves reads from, recording the reason a
-    /// failed mint gives in place of it.
+    /// Mint the handle `attachment` serves reads from into `reader`, recording
+    /// the reason a failed mint gives in `unavailable` in place of it, and
+    /// answer what the mint ran against the database.
     ///
+    /// **This is the one mint an entry runs**, under the entry gate on both of
+    /// its occasions: the publication of a leg that installs, swaps or parks
+    /// coverage, and a read that meets a serving entry with an empty slot.
     /// Both answers are published: a handle the entry holds, or the reason its
     /// reads refuse. Neither leaves the other standing, so the slot and the
-    /// reason always describe one mint — the one the coverage beside them was
-    /// installed by.
-    fn mint_reader(&mut self, attachment: &A) {
-        // What the mint ran is not carried out of here. The account that reads
-        // a mint's statements is the read path's, and this mint belongs to a
-        // publication: it runs on the leg that installs or parks the coverage,
-        // and no read is waiting on the handle it produces.
-        match attachment.open_reader().reader {
-            Ok(reader) => {
-                self.reader = Some(Arc::new(reader));
-                self.reader_unavailable = None;
+    /// reason always describe one mint, the one over the coverage beside them.
+    ///
+    /// The statements are answered whichever way the mint ended, because a
+    /// mint that refused held the gate for the ones it ran before it refused.
+    /// Which account they land in is the caller's, by occasion: a leg's go to
+    /// the ops through [`EntryOps::count_leg_mint`], and a read's to the read
+    /// account, so neither account moves for the other's work.
+    ///
+    /// It takes the slot and the reason rather than the entry because a read
+    /// mints from the coverage the entry is holding, borrowed out of the entry
+    /// while the slot beside it is written.
+    fn mint_reader(
+        attachment: &A,
+        reader: &mut Option<Arc<A::Reader>>,
+        unavailable: &mut Option<ReaderUnavailable>,
+    ) -> u64 {
+        let minted = attachment.open_reader();
+        match minted.reader {
+            Ok(handle) => {
+                *reader = Some(Arc::new(handle));
+                *unavailable = None;
             }
-            Err(unavailable) => {
-                self.reader = None;
-                self.reader_unavailable = Some(unavailable);
+            Err(refused) => {
+                *reader = None;
+                *unavailable = Some(refused);
             }
         }
+        minted.statements
+    }
+
+    /// Mint the handle `attachment` serves reads from, for a leg publishing
+    /// that coverage, and hand what the mint ran to the account `ops` keep of
+    /// their legs.
+    fn mint_for_a_leg<O: EntryOps<Attachment = A>>(&mut self, ops: &O, attachment: &A) {
+        let statements =
+            Self::mint_reader(attachment, &mut self.reader, &mut self.reader_unavailable);
+        ops.count_leg_mint(statements);
     }
 
     /// Mint this entry's handle again, over the coverage it is already
@@ -1312,7 +1358,10 @@ impl<A: SnapshotSource> EntryState<A> {
     /// Those statements are reported back rather than spent unseen: they run
     /// under the read's gate hold, and the read account keeps them apart from
     /// the establishing statement so neither reading has to stand for the
-    /// other.
+    /// other. The mint is the one a leg's publication runs,
+    /// [`EntryState::mint_reader`]; what this adds is the read's own guard,
+    /// and it answers the statements rather than counting them: the read path
+    /// that calls it charges them to the read account.
     ///
     /// Answers the handle the read now runs on, and what this cost the gate.
     fn remint_for_a_read(&mut self) -> ReadMint<A::Reader> {
@@ -1323,17 +1372,8 @@ impl<A: SnapshotSource> EntryState<A> {
         if self.reader.is_none()
             && let Some(attachment) = self.coverage.held()
         {
-            let minted = attachment.open_reader();
-            statements = minted.statements;
-            match minted.reader {
-                Ok(reader) => {
-                    self.reader = Some(Arc::new(reader));
-                    self.reader_unavailable = None;
-                }
-                Err(unavailable) => {
-                    self.reader_unavailable = Some(unavailable);
-                }
-            }
+            statements =
+                Self::mint_reader(attachment, &mut self.reader, &mut self.reader_unavailable);
         }
         ReadMint {
             handle: self.reader.as_ref().map(Arc::clone),
@@ -1351,9 +1391,9 @@ impl<A: SnapshotSource> EntryState<A> {
     /// reason [`EntryState::install_coverage`] gives: the lock that installs
     /// the coverage is the lock that publishes the trust label a read pairs the
     /// handle with.
-    fn remint_coverage(&mut self, leg: u64, attachment: A) {
+    fn remint_coverage<O: EntryOps<Attachment = A>>(&mut self, ops: &O, leg: u64, attachment: A) {
         self.close_reader();
-        self.mint_reader(&attachment);
+        self.mint_for_a_leg(ops, &attachment);
         self.coverage.park_by(leg, attachment);
     }
 
@@ -1365,9 +1405,9 @@ impl<A: SnapshotSource> EntryState<A> {
     /// an empty slot mints from the coverage it is parking, which is how an
     /// entry whose mint failed, and an entry whose schema activation closed
     /// its handle, get one again.
-    fn park_coverage(&mut self, leg: u64, attachment: A) {
+    fn park_coverage<O: EntryOps<Attachment = A>>(&mut self, ops: &O, leg: u64, attachment: A) {
         if self.reader.is_none() {
-            self.mint_reader(&attachment);
+            self.mint_for_a_leg(ops, &attachment);
         }
         self.coverage.park_by(leg, attachment);
     }
@@ -5071,7 +5111,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.control_root = shared.ops.control_root(&attachment);
                     state.last_reload_error = None;
                     let withheld = shared.ops.withheld_trust(&attachment);
-                    state.install_coverage(attachment);
+                    state.install_coverage(&*shared.ops, attachment);
                     // The coverage is this attach's, and what any earlier
                     // requirement was raised against went back with the release
                     // that preceded it. Both clear here so nothing the entry
@@ -5286,7 +5326,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     // recovery is the leg that puts an entry back into
                     // service, and an entry serving without a reader is one
                     // whose reads refuse.
-                    state.park_coverage(epoch, attachment);
+                    state.park_coverage(&*shared.ops, epoch, attachment);
                     state.clear_recovery();
                     if let Some(reason) = withheld {
                         // The recovery re-read a declaration this build still
@@ -5447,7 +5487,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     // entry's reader was minted from, so the handle is minted
                     // again here: this is the one leg that swaps an attached
                     // entry's coverage for another.
-                    state.remint_coverage(epoch, attachment);
+                    state.remint_coverage(&*shared.ops, epoch, attachment);
                     // The derived state the entry holds is one this leg built
                     // from the vault, so the damage the verdict named is gone
                     // with the file it was in. The verdict is retired here
@@ -6080,10 +6120,10 @@ fn run_reload_job<O: EntryOps>(
                     // that parks coverage answers for the handle over it, and
                     // an arm that did not would be the one place the
                     // invariant is unenforced.
-                    state.park_coverage(epoch, attachment);
+                    state.park_coverage(&*shared.ops, epoch, attachment);
                 }
                 ReloadOutcome::SchemaChanged => {
-                    state.remint_coverage(epoch, attachment);
+                    state.remint_coverage(&*shared.ops, epoch, attachment);
                 }
             }
             state.trust = TrustState::Ready;
@@ -6091,7 +6131,7 @@ fn run_reload_job<O: EntryOps>(
         }
         Err(JobFailure::Reload(error)) => {
             record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
-            state.park_coverage(epoch, attachment);
+            state.park_coverage(&*shared.ops, epoch, attachment);
             let ready = state.trust == TrustState::Ready;
             let detail = state.record_reload_error(error.clone());
             if !ready {
@@ -6176,7 +6216,7 @@ fn apply_reload_runtime_failure<O: EntryOps>(
             let failure = JobFailure::WatcherTerminal(error.clone());
             let reclassify = root_moved(&error);
             record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
-            state.park_coverage(epoch, attachment);
+            state.park_coverage(&*shared.ops, epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.trust = TrustState::untrusted(watcher_lost(error));
@@ -6191,7 +6231,7 @@ fn apply_reload_runtime_failure<O: EntryOps>(
         JobFailure::Environmental(detail) => {
             let failure = JobFailure::Environmental(detail.clone());
             record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
-            state.park_coverage(epoch, attachment);
+            state.park_coverage(&*shared.ops, epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
@@ -6206,7 +6246,7 @@ fn apply_reload_runtime_failure<O: EntryOps>(
             // withdrawn label either way and no read is served under one; what
             // the mint settles is which of a handle and a reason stands when
             // the rebuild puts the entry back.
-            state.park_coverage(epoch, attachment);
+            state.park_coverage(&*shared.ops, epoch, attachment);
             state.withdraw_trust_for_damage(detail);
             let next = state
                 .claim
@@ -6716,6 +6756,11 @@ mod tests {
         /// How many coverages this fake has handed out, which names the
         /// declaration the next one pins.
         pins: AtomicUsize,
+        /// The account this fake keeps of its legs, which is the production
+        /// ops' own type: a leg's reader mint lands in it through
+        /// [`EntryOps::count_leg_mint`], so a case reads the job account the
+        /// production ops would have written.
+        account: Arc<crate::evidence::JobEvidence>,
         /// The ledger every coverage this fake installs mints its reader
         /// through, so a case reads the readers of every entry the fake serves
         /// off one place.
@@ -7069,6 +7114,10 @@ mod tests {
 
         fn advisories(&self, _: &FakeCoverage) -> Vec<AttachmentAdvisory> {
             self.advisories.lock().expect("advisories poisoned").clone()
+        }
+
+        fn count_leg_mint(&self, statements: u64) {
+            self.account.count_mint_under_the_gate(statements);
         }
 
         fn control_root(&self, _: &FakeCoverage) -> Option<std::path::PathBuf> {
@@ -15010,6 +15059,8 @@ mod tests {
             Ok(self.emit.swap(false, Ordering::SeqCst).then(Batch::default))
         }
         fn detach(&self, _: &VaultName, _: FakeCoverage) {}
+        /// No case here reads a job account, so these ops keep none.
+        fn count_leg_mint(&self, _: u64) {}
     }
 
     #[test]
@@ -15099,6 +15150,8 @@ mod tests {
             )
         }
         fn detach(&self, _: &VaultName, _: FakeCoverage) {}
+        /// No case here reads a job account, so these ops keep none.
+        fn count_leg_mint(&self, _: u64) {}
     }
 
     #[test]
@@ -16277,6 +16330,9 @@ mod tests {
         let base = scratch.root();
         let root = base.join("root");
         let ops = Arc::new(FakeOps::default());
+        // A mint over this coverage would report this, so a job account that
+        // stays at zero below is one no mint reached.
+        ops.readers.mint_statements.store(2, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
 
@@ -16297,6 +16353,11 @@ mod tests {
             0,
             "an attach that installed no coverage minted a reader from it"
         );
+        assert_eq!(
+            ops.account.read().mint_statements_under_the_gate,
+            0,
+            "an attach that installed no coverage was charged for a mint"
+        );
         assert!(!reader_stands(&host, &name));
         assert!(matches!(
             host.begin_read(&name),
@@ -16313,6 +16374,7 @@ mod tests {
     #[test]
     fn an_attach_the_entry_moved_on_from_mints_no_reader() {
         let ops = Arc::new(FakeOps::default());
+        ops.readers.mint_statements.store(2, Ordering::SeqCst);
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         ops.block_attach.store(true, Ordering::SeqCst);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
@@ -16332,6 +16394,11 @@ mod tests {
             ops.readers.opened.load(Ordering::SeqCst),
             0,
             "an attach the entry moved on from minted a reader from what it acquired"
+        );
+        assert_eq!(
+            ops.account.read().mint_statements_under_the_gate,
+            0,
+            "an attach the entry moved on from was charged for a mint"
         );
         assert!(!reader_stands(&host, &name));
 
@@ -16866,10 +16933,16 @@ mod tests {
             .close_reader();
 
         let before = host.read_evidence();
+        let jobs_before = ops.account.read();
         let hold = host
             .begin_read(&name)
             .expect("a read over coverage that mints was refused the handle it healed");
         let reading = host.read_evidence().since(before);
+        assert_eq!(
+            ops.account.read().since(jobs_before),
+            crate::evidence::EvidenceReading::default(),
+            "the read's mint moved the account of the host's jobs"
+        );
 
         assert_eq!(reading.reads_served, 1, "the account missed the read");
         assert_eq!(
@@ -16992,6 +17065,7 @@ mod tests {
             .close_reader();
 
         let before = host.read_evidence();
+        let jobs_before = ops.account.read();
         let refusal = host
             .begin_read(&name)
             .expect_err("a coverage that mints nothing answered a read");
@@ -17000,6 +17074,11 @@ mod tests {
             "the refused mint was rendered as something other than the read seam: {refusal:?}"
         );
         let reading = host.read_evidence().since(before);
+        assert_eq!(
+            ops.account.read().since(jobs_before),
+            crate::evidence::EvidenceReading::default(),
+            "the read's refused mint moved the account of the host's jobs"
+        );
 
         assert_eq!(
             (reading.reads_served, reading.statements_under_the_gate),
@@ -17087,6 +17166,301 @@ mod tests {
             (reading.reads_served, reading.statements_under_the_gate),
             (0, 0),
             "a read that was never served moved the account"
+        );
+    }
+
+    /// **A leg's reader mint is in the job account.** The attach mints the
+    /// handle over the coverage it installs, in the gate hold that publishes
+    /// it, and what that mint ran is what the leg held the gate for.
+    ///
+    /// The read account is the control: no read was taken, so its mint
+    /// reading stays at zero while the job account moves.
+    #[test]
+    fn an_attach_that_installs_coverage_accounts_its_mint_to_the_job_account() {
+        let ops = Arc::new(FakeOps::default());
+        // The number is this case's own, so nothing else either account
+        // counts produces it.
+        ops.readers.mint_statements.store(2, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert!(reader_stands(&host, &name));
+        assert_eq!(
+            ops.account.read().mint_statements_under_the_gate,
+            2,
+            "the mint the attach ran under the gate is missing from the job account"
+        );
+        assert_eq!(
+            host.read_evidence().mint_statements_under_the_gate,
+            0,
+            "a leg's mint moved the read account"
+        );
+    }
+
+    /// **A leg's mint that refuses held the gate for what it ran.** The attach
+    /// publishes over coverage whose mint refused, the entry serves every
+    /// surface but its reads, and the statements that mint ran before it
+    /// refused are in the job account as a successful mint's are.
+    #[test]
+    fn a_legs_mint_that_refuses_accounts_for_what_it_ran() {
+        let ops = Arc::new(FakeOps::default());
+        ops.readers.mint_statements.store(2, Ordering::SeqCst);
+        ops.reader_mint_fails.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert!(!reader_stands(&host, &name));
+        assert_eq!(
+            ops.account.read().mint_statements_under_the_gate,
+            2,
+            "the mint that refused ran under the gate uncounted"
+        );
+    }
+
+    /// **A leg that parks coverage over an empty slot accounts for its mint,
+    /// and one that parks over a standing handle ran none.** A config-only
+    /// reload parks the coverage it held: the first below finds the handle
+    /// standing and mints nothing, and the second finds the slot emptied and
+    /// mints it again.
+    #[test]
+    fn a_leg_that_parks_coverage_accounts_for_the_mint_it_ran() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.readers.mint_statements.store(3, Ordering::SeqCst);
+
+        let before = ops.account.read();
+        host.reload(&name)
+            .expect("a config-only reload over a standing handle");
+        assert_eq!(
+            ops.account
+                .read()
+                .since(before)
+                .mint_statements_under_the_gate,
+            0,
+            "a leg that parked over a standing handle was charged for a mint"
+        );
+
+        host.shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered")
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .close_reader();
+        let before = ops.account.read();
+        host.reload(&name)
+            .expect("a config-only reload over an empty slot");
+        assert!(reader_stands(&host, &name));
+        assert_eq!(
+            ops.account
+                .read()
+                .since(before)
+                .mint_statements_under_the_gate,
+            3,
+            "the mint the parking leg ran under the gate is missing from the job account"
+        );
+    }
+
+    /// **A leg that swaps an entry's coverage accounts for the mint it ran over
+    /// the coverage it installs.** A schema reload lets the standing handle go
+    /// and mints another in the gate hold that publishes it.
+    #[test]
+    fn a_leg_that_remints_coverage_accounts_its_mint_to_the_job_account() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.readers.mint_statements.store(3, Ordering::SeqCst);
+
+        let before = ops.account.read();
+        host.reload(&name).expect("the schema reload to succeed");
+        assert!(reader_stands(&host, &name));
+        assert_eq!(
+            ops.account
+                .read()
+                .since(before)
+                .mint_statements_under_the_gate,
+            3,
+            "the mint the re-minting leg ran under the gate is missing from the job account"
+        );
+        assert_eq!(
+            host.read_evidence().mint_statements_under_the_gate,
+            0,
+            "a leg's mint moved the read account"
+        );
+    }
+
+    /// **Rung 3 accounts for the mint it ran over the coverage it put in
+    /// place.** The attach and the rebuild each mint a handle in the gate hold
+    /// that publishes them, so the job account holds both mints rather than
+    /// the attach's alone.
+    #[test]
+    fn a_rebuild_accounts_its_mint_to_the_job_account() {
+        let ops = Arc::new(FakeOps::default());
+        ops.readers.mint_statements.store(3, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        arrange_for(&ops.damaged_poll_at, &name);
+        poll_watchers(&host.shared);
+        wait_for_one_rebuild_to_ready(&host, &name, &ops);
+
+        assert!(reader_stands(&host, &name));
+        assert_eq!(
+            ops.account.read().mint_statements_under_the_gate,
+            6,
+            "the rebuild's mint is missing from the job account beside the attach's"
+        );
+        assert_eq!(
+            host.read_evidence().mint_statements_under_the_gate,
+            0,
+            "a leg's mint moved the read account"
+        );
+    }
+
+    /// **A recovery that parks its coverage over an empty slot accounts for
+    /// the mint it ran.** The terminal watcher leaves the entry owing a
+    /// recovery with its handle standing; the case empties the slot, so the
+    /// recovery's publication is the leg that mints the handle again.
+    #[test]
+    fn a_recovery_over_an_empty_slot_accounts_its_mint_to_the_job_account() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        poll_watchers(&host.shared);
+        wait_for_state(&host, &name, backend_lost());
+        host.shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered")
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .close_reader();
+        ops.readers.mint_statements.store(3, Ordering::SeqCst);
+
+        let before = ops.account.read();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        assert!(reader_stands(&host, &name));
+        assert_eq!(
+            ops.account
+                .read()
+                .since(before)
+                .mint_statements_under_the_gate,
+            3,
+            "the mint the recovery ran under the gate is missing from the job account"
+        );
+    }
+
+    /// **A schema reload that fails after closing the handle accounts for the
+    /// mint that parks its coverage, whichever way it failed.** The schema
+    /// half closes the entry's handle, so every failure after it parks over an
+    /// empty slot and mints: a candidate that could not be pinned, and a
+    /// terminal watcher, a refusing environment or damaged derived state met
+    /// by the reload's handoff drain. Each row is its own host, and every row
+    /// that charged the wrong count is reported together.
+    #[test]
+    fn a_schema_reload_that_fails_accounts_the_mint_that_parks_its_coverage() {
+        struct Row {
+            failure: &'static str,
+            arm: fn(&FakeOps, &VaultName),
+            answered: fn(&ReloadRefusal) -> bool,
+        }
+        let rows = [
+            Row {
+                failure: "a candidate that could not be pinned",
+                arm: |ops, _| {
+                    ops.reload_schema_apply_failure
+                        .store(true, Ordering::SeqCst);
+                },
+                answered: |refusal| matches!(refusal, ReloadRefusal::Core(_)),
+            },
+            Row {
+                failure: "a terminal watcher",
+                arm: |ops, _| {
+                    *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+                },
+                answered: |refusal| {
+                    matches!(
+                        refusal,
+                        ReloadRefusal::Runtime(JobFailure::WatcherTerminal(_))
+                    )
+                },
+            },
+            Row {
+                failure: "a refusing environment",
+                arm: |ops, _| ops.environmental_poll.store(true, Ordering::SeqCst),
+                answered: |refusal| {
+                    matches!(
+                        refusal,
+                        ReloadRefusal::Runtime(JobFailure::Environmental(_))
+                    )
+                },
+            },
+            Row {
+                failure: "damaged derived state",
+                // The rung the damage hands on to mints a handle of its own,
+                // so it is held until the count is read.
+                arm: |ops, name| {
+                    arrange_for(&ops.damaged_poll_at, name);
+                    ops.block_rebuild.store(true, Ordering::SeqCst);
+                },
+                answered: |refusal| {
+                    matches!(refusal, ReloadRefusal::Runtime(JobFailure::StoreDamaged(_)))
+                },
+            },
+        ];
+
+        let mut misaccounted = Vec::new();
+        for row in rows {
+            let ops = Arc::new(FakeOps::default());
+            ops.reload_supported.store(true, Ordering::SeqCst);
+            ops.reload_schema_changed.store(true, Ordering::SeqCst);
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_for_state(&host, &name, TrustState::Ready);
+            ops.readers.mint_statements.store(3, Ordering::SeqCst);
+            (row.arm)(&ops, &name);
+
+            let before = ops.account.read();
+            let refusal = host
+                .reload(&name)
+                .expect_err("a reload armed to fail succeeded");
+            assert!(
+                (row.answered)(&refusal),
+                "the reload that met {} answered {refusal:?}",
+                row.failure
+            );
+            let charged = ops
+                .account
+                .read()
+                .since(before)
+                .mint_statements_under_the_gate;
+            if charged != 3 {
+                misaccounted.push(format!("{}: {charged}", row.failure));
+            }
+
+            ops.rebuild_release.store(true, Ordering::SeqCst);
+            drop(lease);
+            drop(host);
+        }
+        assert!(
+            misaccounted.is_empty(),
+            "a failed reload's parking mint was not charged its 3 statements: {misaccounted:?}"
         );
     }
 
