@@ -373,6 +373,47 @@ fn a_predicate_narrows_the_vector_rung_to_the_documents_it_admits() {
     assert_eq!(work.rows_read, DOCUMENTS.len() as u64);
 }
 
+/// **A narrowed vector rung holds its depth of scored rows when the
+/// conjunction admits more than the depth.** Under a path part keeping one
+/// folder that holds more documents than the rung's depth, the engine scores
+/// every document the folder holds and none outside it, holds exactly the
+/// depth of them, and its scan reads every row of the model.
+#[test]
+fn a_narrowed_vector_rung_holds_its_depth_of_what_it_admits() {
+    let depth = norn_wire::RUNG_DEPTH as usize;
+    let kept = depth + 16;
+    let dropped = 16;
+    let documents: Vec<(String, String)> = (0..kept)
+        .map(|at| (format!("keep/{at:05}.md"), format!("alpha w{at}\n")))
+        .chain((0..dropped).map(|at| (format!("drop/{at:05}.md"), format!("alpha w{at}\n"))))
+        .collect();
+    let (_sandbox, vault) = a_vault_holding(
+        "search-narrowed-depth",
+        &documents,
+        Some("[engine.semantic]\n"),
+    );
+    let serving = serve(&vault);
+
+    let narrowed = answered(
+        &serving,
+        &searching(&vault, "alpha")
+            .with_rungs(exactly([Rung::Vector]))
+            .with_limit(norn_wire::RUNG_DEPTH)
+            .with_predicates([Predicate::path("keep/**")]),
+    );
+    let delivered = paths(&narrowed);
+    assert_eq!(delivered.len(), depth);
+    assert!(
+        delivered.iter().all(|path| path.starts_with("keep/")),
+        "the rung answered a document the part does not admit"
+    );
+    assert_eq!(narrowed.work.candidates, kept as u64);
+    let work = narrowed.work.vector.expect("the vector rung ran");
+    assert_eq!(work.rows_scored, kept as u64);
+    assert_eq!(work.peak_held, depth as u64);
+    assert_eq!(work.rows_read, (kept + dropped) as u64);
+}
+
 /// The sidecar state `serving`'s engine answers from.
 fn sidecar_state(serving: &Serving, vault: &attach::Vault) -> norn_semantic::SidecarRevision {
     match serving.engines.status(vault.name()) {
