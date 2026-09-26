@@ -346,7 +346,10 @@ fn a_hybrid_search_fuses_both_rungs_by_reciprocal_rank() {
 /// **The vector rung scores only the documents the conjunction admits.** Over
 /// the whole vault the document that is the query's word repeated answers
 /// first; under a path part keeping one folder, no document outside it is
-/// answered, and the engine scored only the folder's documents.
+/// answered, and the engine scored only the folder's documents and held at
+/// most the rung's depth of them. Its scan still read every row of the
+/// model: the rung is answered by the engine's scan, not by a seek of what
+/// the part admits.
 #[test]
 fn a_predicate_narrows_the_vector_rung_to_the_documents_it_admits() {
     let (_sandbox, vault) = a_vault("search-restricted", Some("[engine.semantic]\n"));
@@ -366,6 +369,7 @@ fn a_predicate_narrows_the_vector_rung_to_the_documents_it_admits() {
     assert_eq!(paths(&narrowed), ["keep/kept.md", "keep/other.md"]);
     let work = narrowed.work.vector.expect("the vector rung ran");
     assert_eq!(work.rows_scored, 2);
+    assert!(work.peak_held <= u64::from(norn_wire::RUNG_DEPTH));
     assert_eq!(work.rows_read, DOCUMENTS.len() as u64);
 }
 
