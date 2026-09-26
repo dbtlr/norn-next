@@ -734,9 +734,10 @@ fn find_shapes(label: &str, profile: &norn_fixtures::Profile) -> FindShapes {
 /// - **`get` with suffix resolve**, the whole record of a document named by
 ///   its bare stem, one segment of suffix: the class seek, the one document
 ///   and its collections' heads.
-/// - **`links-to`**, a get's page of the links a document carries, each
-///   resolved at the read to the documents it names: a single document's
-///   links, each naming a class of one.
+/// - **`links-to`**, what one document links to: a get's page of the links it
+///   carries, each resolved at the read to the documents it names, and each
+///   naming a class of one. The `links_to` part reads the other direction,
+///   and is the backlinks shape.
 /// - **backlinks**, a find narrowed by a `links_to` part: a single target with
 ///   three backlinks, paged at [`FIND_LIMIT`].
 /// - **`validate`**, a summary narrowed by a path part to the planted
