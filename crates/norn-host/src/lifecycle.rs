@@ -4362,11 +4362,12 @@ impl<O: EntryOps> Host<O> {
                 // The gate goes back before the wait, and the demand recorded
                 // above is what holds the entry across it.
                 drop(state);
-                let turn = reader.wait_for_the_connection();
-                // Accounted where the wait ended, before the re-validation
-                // below decides how this acquisition leaves: the wait was paid
-                // either way.
+                // Accounted where the wait begins: the wait below returns only
+                // with the connection, so every wait counted here ends, and
+                // the account names a contended acquisition while it is still
+                // waiting rather than once another read has let it through.
                 self.shared.reads.count_reader_wait();
+                let turn = reader.wait_for_the_connection();
                 state = entry.gate.lock().expect("entry gate poisoned");
                 // The connection is this read's from here, so this hold is the
                 // hold that establishes and nothing else can be establishing
@@ -17644,6 +17645,60 @@ mod tests {
         assert_eq!(
             reading.widest_reader_wait, 1,
             "a read waited for the entry's connection more than once"
+        );
+    }
+
+    /// **A wait is in the account while it is still a wait.** The contention
+    /// reading moves where an acquisition finds the entry's connection taken
+    /// and gives the gate back, so a reading taken while the connection is
+    /// still held names the acquisition waiting for it. A reading that moved
+    /// only once the wait ended could not be observed here at all: nothing
+    /// ends the wait until the hold below is dropped.
+    ///
+    /// The control is the reading before the second read starts: one read
+    /// holding the connection is not contention.
+    #[test]
+    fn a_read_waiting_for_the_entrys_connection_is_counted_before_it_is_let_through() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let before = host.read_evidence();
+        let first = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+        assert_eq!(
+            host.read_evidence().since(before).reader_waits,
+            0,
+            "one read holding the connection was counted as contention"
+        );
+        thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                host.begin_read(&name)
+                    .expect("the read that waited for the connection was refused")
+            });
+            wait_until(
+                "the waiting read to be in the contention reading",
+                lifecycle_wait_budget(),
+                || match host.read_evidence().since(before).reader_waits {
+                    1 => Observed::Met(()),
+                    waits => Observed::pending(format!("the account holds {waits} waits")),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            assert!(
+                !waiting.is_finished(),
+                "the read counted as waiting finished while the connection was still held"
+            );
+            drop(first);
+            drop(waiting.join().expect("the waiting read finished"));
+        });
+        let reading = host.read_evidence().since(before);
+        assert_eq!(
+            (reading.reads_served, reading.reader_waits),
+            (2, 1),
+            "letting the waiting read through moved the contention reading again"
         );
     }
 

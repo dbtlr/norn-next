@@ -517,14 +517,16 @@ mod tests {
 /// holds what one acquisition ran across all three so a ceiling over a single
 /// read is one number rather than a sum of maxima.
 ///
-/// **Every act is counted where the act ends, never where the read leaves**,
-/// so what an acquisition did is in the account whichever way it left. The
-/// mint is counted where the mint returns, the establishment where the
-/// establishment returns, and the wait for the entry's connection where that
-/// wait ends — each of them before the branch that decides how the read
-/// leaves, so the refusals are accounted exactly as the answers are. No path
-/// out of an acquisition runs a statement under the gate, or waits out another
-/// read, and reports nothing.
+/// **Every act is counted where the acquisition pays for it, never where the
+/// read leaves**, so what an acquisition did is in the account whichever way it
+/// left. The mint is counted where the mint returns, the establishment where
+/// the establishment returns, and the wait for the entry's connection where
+/// that wait begins — each of them before the branch that decides how the read
+/// leaves, so the refusals are accounted exactly as the answers are. A wait
+/// that begins cannot be abandoned: it returns only with the connection, so a
+/// wait counted where it begins is a wait that ends. No path out of an
+/// acquisition runs a statement under the gate, or waits out another read, and
+/// reports nothing.
 ///
 /// Every field is a running total for the host's whole life. Two of them are
 /// maxima rather than sums, which is why a window over this account carries
@@ -591,11 +593,14 @@ pub struct ReadReading {
     /// connection their entry holds. Nonzero is reader contention, measured
     /// rather than assumed.
     ///
-    /// **Counted where the wait ends, whichever way the acquisition leaves.**
-    /// An acquisition that waited and was then refused — because its entry
-    /// stopped serving, or because its handle was replaced while it waited —
-    /// paid the whole of that wait, so it is one of these and is not among
-    /// `reads_served`. Those are the paths contention is most likely to be
+    /// **Counted where the wait begins, whichever way the acquisition
+    /// leaves.** The count moves while the acquisition is still waiting, so a
+    /// reading taken during contention already names every acquisition that
+    /// found the connection taken. A wait that begins returns only with the
+    /// connection, so each one counted here also ends. An acquisition that
+    /// waited and was then refused — because its entry stopped serving, or
+    /// because its handle was replaced while it waited — paid the whole of that
+    /// wait, so it is one of these and is not among `reads_served`. Those are the paths contention is most likely to be
     /// interesting on, and a reading that held only served reads would
     /// under-report exactly there.
     ///
@@ -727,10 +732,13 @@ impl ReadEvidence {
 
     /// Record that one acquisition waited for its entry's connection.
     ///
-    /// **This is called where the wait ends and not where the read leaves**,
-    /// for the reason the two statement counts are: the acquisition gave the
-    /// entry gate back and waited out another read whichever answer it went on
-    /// to get, and the re-validation that decides that answer runs after this.
+    /// **This is called where the wait begins and not where the read leaves**:
+    /// the acquisition has given the entry gate back and found the connection
+    /// taken, and it waits out another read whichever answer it goes on to get.
+    /// The wait returns only with the connection, so every wait counted here
+    /// ends, and the re-validation that decides the answer runs after both.
+    /// Counting it here lets a reading taken while reads contend name the
+    /// acquisitions that are waiting, before any of them is let through.
     ///
     /// The wait is the host's own count rather than a number the establishment
     /// reports: the acquisition is what waited, and the establishment it
