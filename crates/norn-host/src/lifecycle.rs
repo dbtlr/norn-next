@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -119,9 +120,10 @@ pub struct MintedReader<R> {
     /// The handle this coverage's reads run on, or why it serves none.
     pub reader: Result<R, ReaderUnavailable>,
     /// Statements the mint ran against the database. The establishment a read
-    /// runs afterwards is not among them: that runs on the minted handle, and
-    /// the read that holds the gate across it counts it through
-    /// [`ReadSource::statements_run`].
+    /// runs afterwards is not among them: that runs on the minted handle's
+    /// connection, which counts what SQLite runs on it only once the mint has
+    /// made it a handle, and the read that holds the gate across it reads
+    /// that count through [`ReadSource::statements_run_on_this_thread`].
     pub statements: u64,
 }
 
@@ -161,35 +163,41 @@ pub trait ReadSource: Send + Sync + 'static {
     /// out.
     fn wait_for_the_connection(self: &Arc<Self>) -> Self::Turn;
 
-    /// Statements this handle's connection has run against the database since
-    /// the handle was minted, counted where each one runs.
+    /// Statements SQLite has begun on the calling thread over every handle's
+    /// connection, transaction control included, over the thread's life. A
+    /// handle's connection counts from the moment its mint makes it a handle,
+    /// so the mint's own statements are not among them.
     ///
     /// **This is how the gate's holder attests what ran under it.** A read
-    /// reads it once it holds both the entry gate and the connection's turn,
-    /// and again as it gives the gate back; nothing else runs on the
-    /// connection while the turn is the read's, so the difference is what ran
-    /// under that hold. A statement run before the hold, or after the gate is
-    /// given back, is outside the two readings, whatever the establishment
-    /// would say about itself.
-    fn statements_run(&self) -> u64;
+    /// reads it as it takes the entry gate and again as it gives the gate
+    /// back, on the thread holding the gate. The connection's turn is taken
+    /// under that hold and a connection runs on one thread at a time, so every
+    /// statement the read's connection begins under the hold is on this
+    /// thread's count between the two readings, however it was composed. A
+    /// statement run before the gate is taken, or after it is given back, is
+    /// outside the two readings, whatever the establishment would say about
+    /// itself.
+    fn statements_run_on_this_thread() -> u64;
 
     /// Establish the snapshot this read answers from, on a turn already taken,
     /// and report the reading it was established at.
     ///
     /// **This is the one establishing statement a read runs under the entry
-    /// gate**, and it waits for nothing: the connection is already the turn's.
-    /// It is the only statement a read that found its entry's handle standing
-    /// runs under that gate; a read that healed an empty slot first also ran
-    /// its mint's statements there, and the account keeps the two apart. It
-    /// runs in the
-    /// same critical section that reads the entry's published demand, so the
-    /// demand the answer carries and the snapshot the answer comes from
-    /// describe one instant; everything after it runs outside the lock.
+    /// gate**, inside the transaction the deferred `BEGIN` before it opens,
+    /// and it waits for nothing: the connection is already the turn's. The
+    /// two are the only statements a read that found its entry's handle
+    /// standing runs under that gate; a read that healed an empty slot first
+    /// also ran its mint's statements there, and the account keeps the two
+    /// apart. It runs in the same critical section that reads the entry's
+    /// published demand, so the demand the answer carries and the snapshot the
+    /// answer comes from describe one instant; everything after it runs
+    /// outside the lock.
     ///
-    /// **What it ran is counted by the handle, whichever way it ended**: an
-    /// attempt that refused ran the statement that refused it under the
-    /// caller's gate hold, and [`ReadSource::statements_run`] moved for it
-    /// exactly as for one that answered.
+    /// **What it ran is counted by SQLite, whichever way it ended**: an
+    /// attempt that refused ran what SQLite began before it refused, and the
+    /// rollback that ended its transaction, under the caller's gate hold, and
+    /// [`ReadSource::statements_run_on_this_thread`] moved for each of them
+    /// exactly as for an attempt that answered.
     ///
     /// The entry hands the snapshot no case behaviour. What a read's paths and
     /// targets are compared under is the order the rows it reads were derived
@@ -197,10 +205,10 @@ pub trait ReadSource: Send + Sync + 'static {
     /// store minted.
     ///
     /// **The answer carries no count of what it ran.** The statements an
-    /// attempt runs are the gate holder's to attest, off the handle's
-    /// [`ReadSource::statements_run`] read on both sides of its hold, so the
-    /// gate-held statement bar is not a number the establishment reports about
-    /// itself.
+    /// attempt runs are the gate holder's to attest, off
+    /// [`ReadSource::statements_run_on_this_thread`] read on both sides of its
+    /// hold, so the gate-held statement bar is not a number the establishment
+    /// reports about itself.
     fn establish(turn: Self::Turn) -> Result<Established<Self::Snapshot>, ReaderUnavailable>;
 }
 
@@ -4278,18 +4286,33 @@ impl<O: EntryOps> Host<O> {
     ///
     /// **Both acts this runs against a database — the mint and the
     /// establishment — run under a hold of the entry gate, and each is
-    /// accounted where it returns rather than where the read leaves.** So no
-    /// exit from here runs a statement under the gate and reports nothing: the
-    /// two exits above the mint took none, the mint's own refusal and the two
-    /// refusals a waiting read can take report the mint and no establishment,
-    /// and the establishment's refusal reports both. Each act lands in its own
-    /// reading, so the reading that claims one statement per read is the reads
-    /// this served and nothing else.
+    /// accounted where the acquisition pays for it rather than where the read
+    /// leaves.** The mint reports what its open ran where it returns, and its
+    /// connection counts nothing until it is a handle's. What SQLite begins on
+    /// a handle's connection under the gate is read off SQLite's count of the
+    /// acquiring thread, taken as each round takes the gate and again as the
+    /// establishing round gives it back, so a statement is counted however it
+    /// was composed and the establishment reports no count of its own. No exit
+    /// from here runs a statement under the gate and reports nothing: the two
+    /// exits above the mint took none, the mint's own refusal and the two
+    /// refusals a waiting read can take report the mint and run nothing on a
+    /// handle's connection, and the establishment's refusal reports both. Each
+    /// act lands in its own reading, so the reading that claims each served
+    /// read's establishment is the reads this served and nothing else.
     pub fn begin_read(&self, name: &VaultName) -> Result<ReadHold<O>, ReadRefusal> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Err(ReadRefusal::NotServing(Demand::UnknownVault));
         };
         let mut state = entry.gate.lock().expect("entry gate poisoned");
+        // The readings this round of the gate opens on, taken as the gate is
+        // taken and before anything runs under it: what SQLite has begun on
+        // this thread, and the gate's take count. The connection's turn is
+        // taken under this hold, so what runs on it until the gate goes back
+        // is on this thread's count between the two readings.
+        let mut opening = HoldOpening::<<O::Attachment as SnapshotSource>::Reader>::read(
+            &entry.gate,
+            StatementsUnderEarlierRounds::NONE,
+        );
         // This acquisition's own count of the rounds of the gate it takes,
         // moved at each take: the published demand is read once per round, so
         // every round after the first is a re-reading contention cost.
@@ -4368,8 +4391,10 @@ impl<O: EntryOps> Host<O> {
             None => {
                 // Another read is answering on the entry's one connection.
                 // The gate goes back before the wait, and the demand recorded
-                // above is what holds the entry across it.
-                drop(state);
+                // above is what holds the entry across it. What ran under this
+                // round is carried into the next, and the wait between the two
+                // is outside both.
+                let earlier = opening.let_the_gate_go(state);
                 // Accounted where the wait begins: the wait below returns only
                 // with the connection, so every wait counted here ends, and
                 // the account names a contended acquisition while it is still
@@ -4377,6 +4402,7 @@ impl<O: EntryOps> Host<O> {
                 self.shared.reads.count_reader_wait();
                 let turn = reader.wait_for_the_connection();
                 state = entry.gate.lock().expect("entry gate poisoned");
+                opening = HoldOpening::read(&entry.gate, earlier);
                 gate_rounds += 1;
                 // The connection is this read's from here, so this hold is the
                 // hold that establishes and nothing else can be establishing
@@ -4413,12 +4439,12 @@ impl<O: EntryOps> Host<O> {
             }
         };
         // The gate and the connection's turn are both this read's from here,
-        // so nothing runs on the connection but what this hold runs: the
-        // handle's count and the gate's take count, read now and again where
-        // the gate goes back, are what ran under the hold and whether it
-        // stayed one hold, attested by the hold rather than reported by the
-        // establishment.
-        let opening = HoldOpening::read(&entry.gate, &*reader);
+        // so nothing runs on the connection but what this hold runs: this
+        // thread's statement count and the gate's take count, read where this
+        // round took the gate and again where it goes back, are what ran under
+        // the gate and whether the establishing round stayed one hold,
+        // attested by the hold rather than reported by the establishment.
+        //
         // The model is the entry's under this same hold, so it and the
         // snapshot established below describe one declaration.
         let content_model = Arc::clone(&state.active_content_model);
@@ -4427,7 +4453,7 @@ impl<O: EntryOps> Host<O> {
             Err(unavailable) => {
                 // A refused establishment ran its statement under this hold
                 // all the same, so the refusal is a path that paid for it.
-                let hold = opening.give_the_gate_back(state, &entry.gate, &*reader);
+                let hold = opening.give_the_gate_back(state, &entry.gate);
                 self.shared
                     .reads
                     .count_refused_establishment_under_the_gate(hold, minted.statements);
@@ -4435,7 +4461,7 @@ impl<O: EntryOps> Host<O> {
             }
         };
         state.pin();
-        let hold = opening.give_the_gate_back(state, &entry.gate, &*reader);
+        let hold = opening.give_the_gate_back(state, &entry.gate);
         self.shared
             .reads
             .count_establishment_under_the_gate(hold, minted.statements);
@@ -4536,41 +4562,83 @@ impl<O: EntryOps> Host<O> {
     }
 }
 
-/// The readings a read's establishing hold opens on: its handle's statement
-/// count and its entry gate's take count, read once the read holds both the
-/// gate and the connection's turn.
-struct HoldOpening {
+/// The readings one round of a read's acquisition opens on, as it takes the
+/// entry gate: what SQLite has begun on the acquiring thread, and the gate's
+/// take count.
+///
+/// **The statement count is the thread's, and the thread is the gate
+/// holder's.** The read takes its connection's turn under the gate, a
+/// connection runs on one thread at a time, and the reading is taken before
+/// anything runs under the round, so every statement SQLite begins on the
+/// read's connection while the gate is held is on this thread's count between
+/// this reading and the one the round lets the gate go with. The mint a round
+/// may run opens its connection uncounted, and its statements reach the read
+/// account through the mint's own report instead.
+struct HoldOpening<R> {
     statements_run: u64,
     gate_taken: u64,
+    earlier: StatementsUnderEarlierRounds,
+    reader: PhantomData<fn() -> R>,
 }
 
-impl HoldOpening {
-    fn read<T, R: ReadSource>(gate: &EntryGate<T>, reader: &R) -> Self {
+/// Statements an acquisition's earlier rounds of the entry gate ran, carried
+/// into the round that establishes.
+#[derive(Clone, Copy)]
+struct StatementsUnderEarlierRounds(u64);
+
+impl StatementsUnderEarlierRounds {
+    const NONE: Self = StatementsUnderEarlierRounds(0);
+}
+
+impl<R: ReadSource> HoldOpening<R> {
+    /// Open a round's readings, as the round takes the gate, carrying what the
+    /// acquisition's earlier rounds ran under it.
+    fn read<T>(gate: &EntryGate<T>, earlier: StatementsUnderEarlierRounds) -> Self {
         HoldOpening {
-            statements_run: reader.statements_run(),
+            statements_run: R::statements_run_on_this_thread(),
             gate_taken: gate.times_taken(),
+            earlier,
+            reader: PhantomData,
         }
     }
 
+    /// What SQLite has begun on this thread since the round opened.
+    fn statements_since_the_opening(&self) -> u64 {
+        R::statements_run_on_this_thread().saturating_sub(self.statements_run)
+    }
+
+    /// Let the gate go at the end of a round that establishes nothing, and
+    /// answer what this round and the ones before it ran under the gate, for
+    /// the next round to carry.
+    fn let_the_gate_go<T>(self, state: MutexGuard<'_, T>) -> StatementsUnderEarlierRounds {
+        let ran = self
+            .earlier
+            .0
+            .saturating_add(self.statements_since_the_opening());
+        drop(state);
+        StatementsUnderEarlierRounds(ran)
+    }
+
     /// Give back the entry gate a read established under, and answer what the
-    /// read's connection ran while that hold stood and whether it stood as one
-    /// hold.
+    /// read's acquisition ran under the gate and whether the establishing
+    /// round stood as one hold.
     ///
     /// **Both counts are read before the gate goes, by construction**: the
     /// guard is taken by value and dropped here after they are read, so a
     /// statement run after this returns is outside the reading, and one run
-    /// before the opening was read is outside it too. Nothing else runs on a
-    /// connection whose turn is taken, and nothing else takes a gate this hold
-    /// holds, so a take between the two readings is this read letting the gate
-    /// go and taking it back.
-    fn give_the_gate_back<T, R: ReadSource>(
+    /// before the round took the gate is outside it too. Nothing else takes a
+    /// gate this round holds, so a take between the two readings is this read
+    /// letting the gate go and taking it back.
+    fn give_the_gate_back<T>(
         self,
         state: MutexGuard<'_, T>,
         gate: &EntryGate<T>,
-        reader: &R,
     ) -> EstablishingHold {
         let hold = EstablishingHold {
-            statements: reader.statements_run().saturating_sub(self.statements_run),
+            statements: self
+                .earlier
+                .0
+                .saturating_add(self.statements_since_the_opening()),
             gate_retakes: gate.times_taken().saturating_sub(self.gate_taken),
         };
         drop(state);
@@ -6525,10 +6593,11 @@ mod tests {
     /// waited for a connection another read was holding.
     ///
     /// The two statement knobs are what a mint and an establishment on these
-    /// handles report having run against a database. A fake runs no statement,
-    /// so a mint reports nothing until a case sets it; an establishment
-    /// reports one, which is what the account's per-read reading is stated
-    /// against, and a case asserting either reading sets its own number.
+    /// handles run against a database. A fake runs no statement, so a mint
+    /// reports nothing until a case sets it; an establishment counts
+    /// [`norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS`] on its thread, what a
+    /// real establishment that answers runs, and a case asserting either
+    /// reading on other terms sets its own number.
     struct ReaderLedger {
         opened: AtomicUsize,
         closed: AtomicUsize,
@@ -6556,7 +6625,7 @@ mod tests {
         /// released.
         establishment_moved: Condvar,
         /// What an establishment on a handle from this ledger runs against the
-        /// database, whichever way it ends, counted on the handle it ran on.
+        /// database, whichever way it ends, counted on the thread it ran on.
         establish_statements: AtomicU64,
         /// Whether a mint over a coverage holding this ledger panics instead
         /// of answering. The real mint states that it does not, and the case
@@ -6576,7 +6645,7 @@ mod tests {
                 establishing: Mutex::default(),
                 establishment_moved: Condvar::default(),
                 mint_statements: AtomicU64::default(),
-                establish_statements: AtomicU64::new(1),
+                establish_statements: AtomicU64::new(norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS),
                 mint_panics: std::sync::atomic::AtomicBool::default(),
             }
         }
@@ -6593,15 +6662,18 @@ mod tests {
         released: bool,
     }
 
+    thread_local! {
+        /// What fake handles' establishments ran on this thread, the way
+        /// SQLite counts what a real handle's connection runs.
+        static FAKE_STATEMENTS_RUN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
     /// The snapshot handle a fake coverage mints. It reads nothing; what it
     /// carries is its own open, its own close, the establishments it answered,
     /// and **one connection**, the way a real handle does: a read holds it for
     /// as long as its snapshot stands, and the read after it waits.
     struct FakeReader {
         ledger: Arc<ReaderLedger>,
-        /// What this handle's establishments ran, the way a real handle counts
-        /// what its connection runs.
-        statements_run: AtomicU64,
         /// Whether the connection is in the handle. A read holding it makes
         /// this false, and the read that ends makes it true again.
         free: Mutex<bool>,
@@ -6660,7 +6732,6 @@ mod tests {
             MintedReader {
                 reader: Ok(FakeReader {
                     ledger: Arc::clone(&self.readers),
-                    statements_run: AtomicU64::default(),
                     free: Mutex::new(true),
                     returned: Condvar::new(),
                 }),
@@ -6701,19 +6772,18 @@ mod tests {
             }
         }
 
-        fn statements_run(&self) -> u64 {
-            self.statements_run.load(Ordering::SeqCst)
+        fn statements_run_on_this_thread() -> u64 {
+            FAKE_STATEMENTS_RUN.with(std::cell::Cell::get)
         }
 
         fn establish(mut turn: FakeTurn) -> Result<Established<Self::Snapshot>, ReaderUnavailable> {
             let ledger = Arc::clone(&turn.reader.ledger);
             park_here_if_the_case_asked(&ledger);
-            // Counted on both answers, the way a real handle counts it: an
-            // attempt that refused ran the statement it refused in.
-            turn.reader.statements_run.fetch_add(
-                ledger.establish_statements.load(Ordering::SeqCst),
-                Ordering::SeqCst,
-            );
+            // Counted on both answers and on the thread that establishes, the
+            // way SQLite counts a real handle's statements: an attempt that
+            // refused ran what it refused in.
+            let statements = ledger.establish_statements.load(Ordering::SeqCst);
+            FAKE_STATEMENTS_RUN.with(|run| run.set(run.get() + statements));
             if ledger.establish_fails.load(Ordering::SeqCst) {
                 // The turn goes back with the refusal, which is the drop
                 // below: a refused establishment leaves the handle where the
@@ -16915,18 +16985,18 @@ mod tests {
     }
 
     /// **The read-concurrency instrument.** A read that finds its entry's
-    /// handle standing runs exactly one statement while it holds the entry
-    /// gate — the statement that establishes its snapshot — and a read that
-    /// took the entry's connection without waiting paid no wait, so the
-    /// account below is four reads, four establishing statements, nothing
-    /// minted and nothing contended.
+    /// handle standing runs its snapshot's establishment while it holds the
+    /// entry gate and nothing else, and a read that took the entry's
+    /// connection without waiting paid no wait, so the account below is four
+    /// reads, four establishments' statements, nothing minted and nothing
+    /// contended.
     ///
     /// The other two readings are asserted here and not left implied: the
-    /// claim is that one statement is all these reads ran under the gate, and
-    /// the served-read reading alone cannot say that — a mint or a refused
+    /// claim is that the establishment is all these reads ran under the gate,
+    /// and the served-read reading alone cannot say that — a mint or a refused
     /// establishment would be gate-held work it does not carry.
     #[test]
-    fn a_read_runs_one_statement_under_the_gate() {
+    fn a_read_runs_only_its_establishment_under_the_gate() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
@@ -16941,10 +17011,12 @@ mod tests {
         }
         let reading = host.read_evidence().since(before);
 
+        let per_read = norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS;
         assert_eq!(reading.reads_served, 4, "the account missed a read");
         assert_eq!(
-            reading.statements_under_the_gate, 4,
-            "four reads ran something other than one statement each under the gate"
+            reading.statements_under_the_gate,
+            4 * per_read,
+            "four reads ran something other than their establishments under the gate"
         );
         assert_eq!(
             (
@@ -16960,19 +17032,19 @@ mod tests {
         );
         assert_eq!(
             host.read_evidence().widest_statements_under_the_gate,
-            1,
-            "one read ran more than the establishing statement under the gate"
+            per_read,
+            "one read ran something other than its establishment under the gate"
         );
     }
 
     /// **A read that heals accounts for the repair it ran under the gate.** An
     /// entry serving with an empty handle slot mints the handle again under
     /// the read's own gate hold, and that mint reads the database. The
-    /// establishing reading stays the sharp thing it is — one statement, the
-    /// snapshot's — while the mint's statements are reported beside it, so
-    /// nothing this read ran under the gate is left out of the account and the
-    /// repair is still told apart from the query work the exactly-one bar
-    /// refuses.
+    /// establishing reading stays the sharp thing it is, the snapshot's
+    /// establishment alone, while the mint's statements are reported beside
+    /// it, so nothing this read ran under the gate is left out of the account
+    /// and the repair is still told apart from the establishment the per-read
+    /// bar is stated against.
     ///
     /// The control is the read after it: the slot is filled by then, so it
     /// mints nothing and is charged for nothing.
@@ -17010,10 +17082,11 @@ mod tests {
             "the read's mint moved the account of the host's jobs"
         );
 
+        let per_read = norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS;
         assert_eq!(reading.reads_served, 1, "the account missed the read");
         assert_eq!(
-            reading.statements_under_the_gate, 1,
-            "the healing read's establishing reading is something other than its one statement"
+            reading.statements_under_the_gate, per_read,
+            "the healing read's establishing reading is something other than its establishment"
         );
         assert_eq!(
             reading.mint_statements_under_the_gate, 3,
@@ -17021,7 +17094,7 @@ mod tests {
         );
         assert_eq!(
             host.read_evidence().widest_statements_under_the_gate,
-            4,
+            3 + per_read,
             "the widest reading is not this read's mint and its establishment together"
         );
         drop(hold);
@@ -17163,8 +17236,8 @@ mod tests {
     }
 
     /// **The establishing statement runs under the entry gate, and the gate is
-    /// what says so.** The account above is the gate holder's reading of its
-    /// handle's statement count on both sides of its hold; what this observes
+    /// what says so.** The account above is the gate holder's reading of the
+    /// statements run on its thread on both sides of its hold; what this observes
     /// is the lock itself: while an establishment is held part way through,
     /// the entry gate is not there to be taken, and once the read has its hold
     /// the gate is free again.

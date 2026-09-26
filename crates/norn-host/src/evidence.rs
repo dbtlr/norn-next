@@ -507,22 +507,28 @@ mod tests {
 /// it held the entry gate, and what concurrent reads of one entry paid for
 /// sharing the one connection that entry holds.
 ///
-/// **What an establishment ran under the gate is the gate holder's reading.**
-/// The acquisition reads its handle's statement count and its entry gate's
-/// take count once it holds the gate and the connection's turn, and both again
-/// as it gives the gate back. The statement difference is what is counted, and
-/// the establishment reports no count of its own; the take difference is
-/// whether those two readings bound one continuous hold, because a gate given
-/// back and taken again between them is a retake the gate itself counted. A
-/// statement moved outside the hold is outside the two readings, and one run
-/// while the gate was let go and taken back is a retake.
+/// **What an establishment ran under the gate is the gate holder's reading of
+/// SQLite's own count.** A handle's connection counts every statement SQLite
+/// begins on it, on the thread that begins it. The acquisition reads its
+/// thread's count and its entry gate's take count as each round takes the
+/// gate, and both again as the establishing round gives the gate back; what a
+/// round that let the gate go ran is carried into the next, and the wait
+/// between them is outside both. The statement difference is what is counted,
+/// and the establishment reports no count of its own; the take difference is
+/// whether the establishing round's two readings bound one continuous hold,
+/// because a gate given back and taken again between them is a retake the gate
+/// itself counted. A statement moved outside the hold is outside the readings,
+/// and one run while the gate was let go and taken back is a retake.
 ///
-/// **What an acquisition runs under the gate is three readings, not one.** The
-/// establishing statement of a read that was served is exactly one, and the
-/// bar on gate-held query work is read off that; the repair a read runs when
-/// it finds the handle slot empty is under the same gate and is not query
-/// work; and an establishment that refused ran its statement under the gate
-/// and served nothing. They are counted apart so each reading says what it
+/// **What an acquisition runs under the gate is three readings, not one.** A
+/// read that was served ran its snapshot's establishment,
+/// [`norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS`]: the deferred `BEGIN`,
+/// which reads no row, and the establishing statement, the one read of the
+/// database, and the bar on gate-held query work is read off that; the repair
+/// a read runs when it finds the handle slot empty is under the same gate and
+/// is not query work; and an establishment that refused ran what SQLite began
+/// before it refused, and the rollback that ended it, under the gate and served
+/// nothing. They are counted apart so each reading says what it
 /// asserts and none of them has to stand for another, and the widest reading
 /// holds what one acquisition ran across all three so a ceiling over a single
 /// read is one number rather than a sum of maxima.
@@ -553,15 +559,16 @@ pub(crate) struct ReadEvidence {
     widest_demand_rereadings: AtomicU64,
 }
 
-/// What one acquisition's establishing hold read off its handle and its entry
-/// gate, between the reading it opened on and the one it gave the gate back
-/// with.
+/// What one acquisition read off SQLite's count of its thread and off its
+/// entry gate, between the readings its rounds of the gate opened on and the
+/// one its establishing round gave the gate back with.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct EstablishingHold {
-    /// Statements the handle counted between the two readings.
+    /// Statements SQLite began on the acquiring thread while the acquisition
+    /// held the gate, over every round it took.
     pub(crate) statements: u64,
-    /// Times the entry gate was taken between the two readings. Zero for a
-    /// hold that never let the gate go.
+    /// Times the entry gate was taken between the establishing round's two
+    /// readings. Zero for a hold that never let the gate go.
     pub(crate) gate_retakes: u64,
 }
 
@@ -570,16 +577,18 @@ pub(crate) struct EstablishingHold {
 pub struct ReadReading {
     /// Reads that took a hold, over every entry.
     pub reads_served: u64,
-    /// Snapshot-establishing statements run while the entry gate was held, as
-    /// the holder of that gate read them off the read's connection on both
-    /// sides of its hold.
+    /// Statements SQLite ran on the served reads' connections while the entry
+    /// gate was held, as the holder of that gate read them off SQLite's count
+    /// of its thread on both sides of its hold.
     ///
-    /// **One per read served**, so this moves with `reads_served`, and any
-    /// other number is a read that ran query work under the lock every other
-    /// holder of that entry waits behind. That claim is what this field is
-    /// for, so it holds the establishment alone: the repair below runs under
-    /// the same gate and is not query work, and folding the two would leave
-    /// the exactly-one reading unable to say which of them moved it.
+    /// **[`norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS`] per read served**,
+    /// the deferred `BEGIN` and the establishing statement, so this moves with
+    /// `reads_served`, and any other number is a read that ran other work
+    /// under the lock every other holder of that entry waits behind. That
+    /// claim is what this field is for, so it holds the establishment alone:
+    /// the repair below runs under the same gate and is not query work, and
+    /// folding the two would leave the per-read reading unable to say which of
+    /// them moved it.
     pub statements_under_the_gate: u64,
     /// Statements the read path's own mints ran against a database while the
     /// entry gate was held.
@@ -595,24 +604,28 @@ pub struct ReadReading {
     /// way the read that paid for it left: a mint that refused held the gate
     /// for the statements it ran before it refused.
     pub mint_statements_under_the_gate: u64,
-    /// Statements run under the entry gate by establishments that refused.
+    /// Statements SQLite ran under the entry gate for establishments that
+    /// refused.
     ///
     /// An establishment that met a busy database opened its transaction, ran
     /// the statement that refused it and rolled back, all under the gate, and
-    /// served no read. Those statements are kept here rather than in
+    /// served no read. What is counted is what SQLite began: the `BEGIN`, the
+    /// statement that refused where SQLite began running it, and the
+    /// `ROLLBACK`. Those statements are kept here rather than in
     /// `statements_under_the_gate` so that reading stays exactly the reads it
-    /// served; what is kept here makes no such claim, because an attempt that
-    /// refused before its transaction opened ran none.
+    /// served; what is kept here makes no per-attempt claim, because an
+    /// attempt refused before SQLite began a statement ran none.
     pub refused_establishment_statements_under_the_gate: u64,
     /// The most statements any one acquisition ran under the gate — **its
     /// mint's and its establishment's together** — which is the value a
     /// per-read ceiling is stated against.
     ///
     /// An acquisition contributes what it ran, whether or not it was served:
-    /// one for an acquisition that found a handle standing and established;
-    /// its mint's statements and then that one where it healed first; its
-    /// mint's alone where the mint refused; and its mint's plus the refused
-    /// establishment's where the establishment is what refused.
+    /// its establishment's statements for an acquisition that found a handle
+    /// standing and established; its mint's statements and then those where it
+    /// healed first; its mint's alone where the mint refused; and its mint's
+    /// plus the refused establishment's where the establishment is what
+    /// refused.
     pub widest_statements_under_the_gate: u64,
     /// Times an entry gate was taken again inside an establishing hold: between
     /// the reading an acquisition opened its establishing hold on and the one
@@ -768,14 +781,16 @@ impl ReadEvidence {
     /// entry gate.
     ///
     /// **`hold` is the gate holder's own reading**, not a count the
-    /// establishment reports: the acquisition read its handle's statement
-    /// count and its gate's take count once it held the gate and the
-    /// connection's turn, and again as it gave the gate back, and these are
-    /// the differences. An establishing statement run before or after that
-    /// hold is not in its statements, so the exactly-one bar read off
-    /// `statements_under_the_gate` fails for it; one run while the gate was
-    /// let go and taken back inside the hold is a retake, and the zero bar
-    /// read off `gate_retakes_within_establishing_holds` fails for that.
+    /// establishment reports: the acquisition read SQLite's count of its
+    /// thread and its gate's take count as it took the gate, and again as it
+    /// gave the gate back, and these are the differences. A statement SQLite
+    /// runs on the read's connection under the gate is in its statements
+    /// however it was composed, so the per-read bar read off
+    /// `statements_under_the_gate` fails for one more than the establishment;
+    /// an establishing statement run before or after that hold is not in them,
+    /// and the bar fails for one fewer; one run while the gate was let go and
+    /// taken back inside the hold is a retake, and the zero bar read off
+    /// `gate_retakes_within_establishing_holds` fails for that.
     ///
     /// The mint's statements are passed in again, already counted by the mint,
     /// because the widest reading is per acquisition: what one acquisition ran

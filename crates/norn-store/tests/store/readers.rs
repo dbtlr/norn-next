@@ -72,18 +72,20 @@ fn a_mint_reports_the_statements_it_ran_against_the_database() {
     );
 }
 
-/// **An establishment that refuses is counted on its handle**, and what it
-/// ran is the statement that refused it: the transaction opened, the
-/// write-generation read met a busy database, and the rollback that followed
-/// read nothing. A caller that holds a lock across the attempt waited for all
-/// of it, so a handle that counted nothing would leave that wait invisible in
-/// exactly the case it is longest.
+/// **An establishment that refuses is counted as SQLite ran it.** The
+/// transaction opened, the write-generation read met a busy database, and the
+/// rollback that followed ended the transaction. The busy here is the seam's,
+/// answered before SQLite ran the read, so what SQLite began is the `BEGIN`
+/// and the `ROLLBACK` and nothing else: the count is what ran, not what the
+/// attempt meant to run. A caller that holds a lock across the attempt waited
+/// for all of it, so a count that moved for nothing would leave that wait
+/// invisible in exactly the case it is longest.
 ///
 /// The control is the read after it. The connection came back, so the next
 /// establishment answers — which is only possible because the refused attempt
 /// rolled its transaction back rather than leaving one open.
 #[test]
-fn an_establishment_that_refuses_is_counted_on_its_handle_and_gives_the_connection_back() {
+fn an_establishment_that_refuses_is_counted_as_sqlite_ran_it_and_gives_the_connection_back() {
     // The arm below is per-thread and one-shot: it stands on this thread until
     // a pinned-scalar read consumes it, and the seam's contract is that a case
     // does not leave one standing for whatever reads next on that thread. The
@@ -102,16 +104,17 @@ fn an_establishment_that_refuses_is_counted_on_its_handle_and_gives_the_connecti
     );
 
     norn_store::induced_failure::fail_next_meta_read_as_busy();
-    let before = reader.statements_run();
+    let run = norn_store::SnapshotReader::statements_run_on_this_thread;
+    let before = run();
     reader
         .try_take()
         .expect("a handle nothing is reading holds its connection")
         .establish()
         .expect_err("a busy write-generation read established a snapshot");
     assert_eq!(
-        reader.statements_run() - before,
-        1,
-        "the handle counted something other than the statement that refused the attempt"
+        run() - before,
+        2,
+        "the count is not the BEGIN and the ROLLBACK SQLite ran around the refused read"
     );
 
     let answered = a_snapshot(&reader);

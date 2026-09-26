@@ -119,11 +119,12 @@ fn a_read_over_an_entry_that_is_not_serving_refuses_with_its_published_demand() 
 }
 
 /// **The per-read gate discipline, over a real attachment.** Each read here
-/// finds the entry's handle standing and is served, so each runs exactly one
-/// statement while it holds the entry gate — the statement that establishes
-/// its snapshot, with no mint and no refused attempt beside it — and a read
-/// that found the entry's connection free waited for nothing on its way to
-/// it.
+/// finds the entry's handle standing and is served, so what SQLite runs while
+/// it holds the entry gate is its snapshot's establishment and nothing else:
+/// the deferred `BEGIN` and the one statement that establishes the snapshot,
+/// [`norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS`], with no mint and no
+/// refused attempt beside them. A read that found the entry's connection free
+/// waited for nothing on its way to it.
 ///
 /// **The contention half of the instrument is asserted in the counter lane**,
 /// over the same production attachment: `counter_gate.rs` holds the entry's
@@ -132,7 +133,7 @@ fn a_read_over_an_entry_that_is_not_serving_refuses_with_its_published_demand() 
 /// wait where it begins, so that reading moves while the reads are still
 /// waiting and the case observes contention rather than sleeping for it.
 #[test]
-fn reads_over_one_entry_each_run_one_statement_under_the_gate() {
+fn reads_over_one_entry_each_run_only_their_establishment_under_the_gate() {
     let (_sandbox, vault) = a_vault("host-reads-overlap");
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
@@ -151,9 +152,11 @@ fn reads_over_one_entry_each_run_one_statement_under_the_gate() {
         reading.reads_served, readers,
         "the account missed one of the reads"
     );
+    let per_read = norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS;
     assert_eq!(
-        reading.statements_under_the_gate, readers,
-        "a read ran something other than one statement under the gate"
+        reading.statements_under_the_gate,
+        readers * per_read,
+        "a read ran something other than its establishment under the gate"
     );
     // Every one of these reads found the entry's handle standing and was
     // served, so none of them healed and none of them had an establishment
@@ -170,8 +173,8 @@ fn reads_over_one_entry_each_run_one_statement_under_the_gate() {
     );
     assert_eq!(
         host.read_evidence().widest_statements_under_the_gate,
-        1,
-        "one read ran more than the establishing statement under the gate"
+        per_read,
+        "one read ran something other than its establishment under the gate"
     );
     // **The control on the contention reading.** Each read here gave the
     // connection back before the next one asked for it, so none of them waited.

@@ -53,13 +53,14 @@
 //!   the two scales stop moving together. Every read pair has a control that
 //!   grows with the vault, run at the same two attachments, and each control
 //!   must read more at the larger scale on the counts it names.
-//! - **Reads contend on one entry and run one statement each under its gate.**
-//!   Under the `overlapping reads on one entry` workload, eight reads start
-//!   while a ninth holds the entry's one connection, and the hold is let go
-//!   only once the host's reader-wait reading names all eight as waiting.
-//!   Each read served runs exactly one statement under the entry gate, the one
-//!   that establishes its snapshot, as the gate holder reads it off the
-//!   handle's statement count on both sides of its hold rather than as the
+//! - **Reads contend on one entry and run only their establishment under its
+//!   gate.** Under the `overlapping reads on one entry` workload, eight reads
+//!   start while a ninth holds the entry's one connection, and the hold is let
+//!   go only once the host's reader-wait reading names all eight as waiting.
+//!   Each read served runs exactly its snapshot's establishment under the
+//!   entry gate, the deferred `BEGIN` and the one statement that establishes
+//!   the snapshot, as the gate holder reads SQLite's own count of what it
+//!   began on the holding thread on both sides of its hold rather than as the
 //!   establishment reports it, and the gate's own take count reads no retake
 //!   between those two readings, so the hold they bound is one hold; the
 //!   reader-wait reading is eight; and each contended acquisition took exactly
@@ -1530,9 +1531,13 @@ struct ConcurrencyReadings {
     widest_demand_rereadings: u64,
     /// What the establishments reported about themselves: the statements each
     /// served read's snapshot had run when its hold was handed over, summed.
+    /// A snapshot counts its query work, so this is the establishing
+    /// statement alone, one per read.
     established_statements: u64,
-    /// Every statement the served reads' connections ran for them, the count
-    /// each ran on its snapshot after its hold was handed over included.
+    /// Every statement SQLite began for the served reads, on the thread each
+    /// read ran on, from before its acquisition to after its hold was dropped:
+    /// its establishment, the count it ran on its snapshot, and the
+    /// `ROLLBACK` that ended the snapshot.
     connection_statements: u64,
 }
 
@@ -1550,18 +1555,27 @@ struct ConcurrencyReadings {
 /// and a read that never contends exhausts it naming the reading it stopped at.
 ///
 /// The count each read runs after its hold is handed over is outside the gate,
-/// so for every read the connection runs more statements than the gate held:
-/// the reading of what ran under the gate is told apart from what the
-/// connection ran.
+/// and so is the `ROLLBACK` that ends its snapshot, so for every read SQLite
+/// runs more statements than the gate held: the reading of what ran under the
+/// gate is told apart from what the connection ran, off the same count.
 fn overlapping_reads(
     host: &attach::ServingHost,
     name: &VaultName,
     overlap: Overlap,
 ) -> ConcurrencyReadings {
     let before = host.read_evidence();
+    let run = norn_store::SnapshotReader::statements_run_on_this_thread;
+    // Take a read's hold on the calling thread, reading SQLite's count of
+    // that thread first.
+    let acquire = |refused: &str| {
+        let started = run();
+        (started, host.begin_read(name).expect(refused))
+    };
     // What a served read's snapshot reported when its hold was handed over,
-    // and what it had run once the read's own statement ran on it.
-    let read_once = |hold: norn_host::ReadHold<norn_host::ProductionEntryOps>| {
+    // and every statement SQLite began for the read on its thread once the
+    // read's own statement ran and its hold was dropped. The hold is read on
+    // the thread that acquired it.
+    let read_once = |(started, hold): (u64, norn_host::ReadHold<norn_host::ProductionEntryOps>)| {
         let established = hold.snapshot().counters().statements_executed();
         hold.snapshot()
             .count(
@@ -1569,35 +1583,25 @@ fn overlapping_reads(
                 hold.content_model(),
             )
             .expect("a count over the hold's own declaration");
-        (
-            established,
-            hold.snapshot().counters().statements_executed(),
-        )
+        drop(hold);
+        (established, run() - started)
     };
     let answered: Vec<(u64, u64)> = match overlap {
         Overlap::Removed => (0..=OVERLAPPING_READS)
-            .map(|_| {
-                read_once(
-                    host.begin_read(name)
-                        .expect("an attached vault answers a read"),
-                )
-            })
+            .map(|_| read_once(acquire("an attached vault answers a read")))
             .collect(),
         Overlap::Held => {
-            let first = host
-                .begin_read(name)
-                .expect("an attached vault answers a read");
+            let first = acquire("an attached vault answers a read");
             std::thread::scope(|scope| {
-                let overlapping: Vec<_> =
-                    (0..OVERLAPPING_READS)
-                        .map(|_| {
-                            scope.spawn(|| {
-                                read_once(host.begin_read(name).expect(
-                                    "a read waiting for the entry's connection was refused",
-                                ))
-                            })
+                let overlapping: Vec<_> = (0..OVERLAPPING_READS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            read_once(acquire(
+                                "a read waiting for the entry's connection was refused",
+                            ))
                         })
-                        .collect();
+                    })
+                    .collect();
                 wait_until(
                     "every overlapping read to be waiting for the entry's connection",
                     attach::state_budget(READS_CONTEND_LIMIT),
@@ -1637,12 +1641,15 @@ const READS_CONTEND_LIMIT: Duration = Duration::from_secs(60);
 /// What the read-concurrency bar finds wrong with one run of the workload, one
 /// line per failed term; empty where the bar holds.
 ///
-/// - **One statement under the gate per read served, the establishing one.**
-///   The host's reading of what ran under the gate equals the reads it served,
-///   nothing was minted and no establishment refused, and no one acquisition
-///   ran more than one. The reading is the gate holder's, so it is checked
-///   apart from what the establishments reported about themselves, which is
-///   one each, and from what the connections ran, which is more.
+/// - **Each read served runs its establishment under the gate and nothing
+///   else.** The host's reading of what SQLite ran under the gate is
+///   [`norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS`] per read served, the
+///   deferred `BEGIN` and the establishing statement, nothing was minted and
+///   no establishment refused, and no one acquisition ran other than that.
+///   The reading is the gate holder's, so it is checked apart from what the
+///   establishments reported about themselves, which is the establishing
+///   statement alone, one each, and from what SQLite ran for the reads, which
+///   is more.
 /// - **Under one continuous hold.** The entry gate's own take count reads no
 ///   retake inside any establishing hold, so the two readings the statement
 ///   term is read between bound one hold of the gate.
@@ -1656,6 +1663,7 @@ const READS_CONTEND_LIMIT: Duration = Duration::from_secs(60);
 fn the_read_concurrency_bar_fails(readings: &ConcurrencyReadings) -> Vec<String> {
     let window = readings.window;
     let served = OVERLAPPING_READS + 1;
+    let per_read = norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS;
     let mut failed = Vec::new();
     if window.reads_served != served {
         failed.push(format!(
@@ -1663,16 +1671,17 @@ fn the_read_concurrency_bar_fails(readings: &ConcurrencyReadings) -> Vec<String>
             window.reads_served
         ));
     }
-    if window.statements_under_the_gate != window.reads_served
+    if window.statements_under_the_gate != window.reads_served * per_read
         || (
             window.mint_statements_under_the_gate,
             window.refused_establishment_statements_under_the_gate,
         ) != (0, 0)
-        || readings.widest_statements_under_the_gate != 1
+        || readings.widest_statements_under_the_gate != per_read
     {
         failed.push(format!(
-            "the gate holder read {} establishing statements under the gate for {} reads served \
-             (minted {}, refused {}, widest acquisition {}), where each read runs exactly one",
+            "the gate holder read {} statements under the gate for {} reads served (minted {}, \
+             refused {}, widest acquisition {}), where each read runs exactly its \
+             establishment's {per_read}",
             window.statements_under_the_gate,
             window.reads_served,
             window.mint_statements_under_the_gate,
@@ -1766,11 +1775,13 @@ fn record_the_concurrency_readings(heading: &str, readings: &ConcurrencyReadings
 /// while another holds the entry's one connection, every one of them is
 /// observed waiting before that hold is let go, and then each is served.
 ///
-/// Each read runs exactly one statement under the entry gate, the one that
-/// establishes its snapshot, and the count is the gate holder's: the host reads
-/// the handle's statement count on both sides of the hold, so an establishing
-/// statement moved before or after the hold reads zero here while the
-/// establishment's own report still reads one. The gate's own take count is
+/// Each read runs exactly its snapshot's establishment under the entry gate,
+/// the deferred `BEGIN` and the one statement that establishes the snapshot,
+/// and the count is the gate holder's: the host reads SQLite's count of what
+/// it began on the holding thread on both sides of the hold, so a statement
+/// SQLite runs on the connection under the gate is counted however it was
+/// composed, and an establishing statement moved before or after the hold is
+/// not, while the establishment's own report still reads one. The gate's own take count is
 /// read at the same two points, so an establishment run while the hold let the
 /// gate go and took it back reads a retake. Reader contention is the
 /// reader-wait reading, and it names every overlapping read. Each contended
@@ -1784,7 +1795,7 @@ fn record_the_concurrency_readings(heading: &str, readings: &ConcurrencyReadings
 /// another term would say nothing about this one.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
-fn overlapping_reads_on_one_entry_each_run_one_statement_under_the_gate() {
+fn overlapping_reads_on_one_entry_each_run_only_their_establishment_under_the_gate() {
     let sandbox = Sandbox::new(
         Path::new(env!("CARGO_TARGET_TMPDIR")),
         "counter-gate-read-concurrency",

@@ -354,15 +354,16 @@ impl ReadSource for norn_store::SnapshotReader {
         norn_store::SnapshotReader::wait_for_the_connection(self)
     }
 
-    /// The store's count of what the handle's snapshots ran, taken where each
-    /// statement runs, so the gate's holder reads the handle rather than a
-    /// number this seam composed.
-    fn statements_run(&self) -> u64 {
-        norn_store::SnapshotReader::statements_run(self)
+    /// SQLite's count of what it began on this thread over every handle's
+    /// connection, as the store reads it, so the gate's holder reads SQLite
+    /// rather than a number this seam or the establishment composed.
+    fn statements_run_on_this_thread() -> u64 {
+        norn_store::SnapshotReader::statements_run_on_this_thread()
     }
 
     /// The store establishes the snapshot and reports the reading it was
-    /// established at. What the attempt ran is on the handle's own count.
+    /// established at. What the attempt ran is on SQLite's count of the
+    /// establishing thread.
     fn establish(turn: Self::Turn) -> Result<Established<Self::Snapshot>, ReaderUnavailable> {
         turn.establish()
             .map(|snapshot| Established {
