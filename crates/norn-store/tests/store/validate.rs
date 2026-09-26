@@ -1321,3 +1321,26 @@ fn no_statement_a_validate_runs_reads_a_documents_payload() {
         );
     }
 }
+
+/// **A validate's work reads out whole, each count under its own name**, for
+/// the reason a find's does.
+#[test]
+fn a_validates_work_reads_out_every_count_by_name() {
+    let work = norn_store::ValidateWork {
+        statements: 1,
+        rows_read: 2,
+        full_scan_steps: 3,
+        sorts: 4,
+        vm_steps: 5,
+    };
+    assert_eq!(
+        work.readings().collect::<Vec<_>>(),
+        vec![
+            ("validate_statements", 1),
+            ("validate_rows_read", 2),
+            ("validate_full_scan_steps", 3),
+            ("validate_sorts", 4),
+            ("validate_vm_steps", 5),
+        ]
+    );
+}

@@ -1683,3 +1683,27 @@ fn no_statement_a_count_runs_reads_a_documents_payload() {
         rows.assert_reads_none_of(DOCUMENT_PAYLOAD)
     });
 }
+
+/// **A count's work reads out whole, each count under its own name**, for
+/// the reason a find's does: a harness compares two counts name by name, so
+/// each name reads the count it names.
+#[test]
+fn a_counts_work_reads_out_every_count_by_name() {
+    let work = norn_store::CountWork {
+        statements: 1,
+        tallies_read: 2,
+        full_scan_steps: 3,
+        sorts: 4,
+        vm_steps: 5,
+    };
+    assert_eq!(
+        work.readings().collect::<Vec<_>>(),
+        vec![
+            ("count_statements", 1),
+            ("count_tallies_read", 2),
+            ("count_full_scan_steps", 3),
+            ("count_sorts", 4),
+            ("count_vm_steps", 5),
+        ]
+    );
+}

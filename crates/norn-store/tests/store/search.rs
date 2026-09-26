@@ -1974,3 +1974,40 @@ fn no_statement_a_search_runs_reads_a_documents_payload() {
         snippeted.assert_reads_none_of(DOCUMENT_PAYLOAD)
     });
 }
+
+/// **A search's work reads out whole, each count under its own name**, for
+/// the reason a find's does, the nested rows one name per table.
+#[test]
+fn a_searchs_work_reads_out_every_count_by_name() {
+    let work = norn_store::SearchWork {
+        statements: 1,
+        hits_read: 2,
+        page_full_scan_steps: 3,
+        page_sorts: 4,
+        page_vm_steps: 5,
+        documents_hydrated: 6,
+        nested_rows: norn_store::NestedRows {
+            tags: 7,
+            headings: 8,
+            blocks: 9,
+            links: 10,
+        },
+        finding_rows: 11,
+    };
+    assert_eq!(
+        work.readings().collect::<Vec<_>>(),
+        vec![
+            ("search_statements", 1),
+            ("search_hits_read", 2),
+            ("search_page_full_scan_steps", 3),
+            ("search_page_sorts", 4),
+            ("search_page_vm_steps", 5),
+            ("search_documents_hydrated", 6),
+            ("search_tag_rows", 7),
+            ("search_heading_rows", 8),
+            ("search_block_rows", 9),
+            ("search_link_rows", 10),
+            ("search_finding_rows", 11),
+        ]
+    );
+}

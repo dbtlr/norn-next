@@ -1664,3 +1664,24 @@ fn a_collection_page_seeks_the_document_from_its_cursor() {
     );
     failure_of("findings_path dropped", || judge_findings(&findings[0]));
 }
+
+/// **A get's work reads out whole, each count under its own name**, for the
+/// reason a find's does.
+#[test]
+fn a_gets_work_reads_out_every_count_by_name() {
+    let work = GetWork {
+        statements: 1,
+        full_scan_steps: 2,
+        sorts: 3,
+        vm_steps: 4,
+    };
+    assert_eq!(
+        work.readings().collect::<Vec<_>>(),
+        vec![
+            ("get_statements", 1),
+            ("get_full_scan_steps", 2),
+            ("get_sorts", 3),
+            ("get_vm_steps", 4),
+        ]
+    );
+}
