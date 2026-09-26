@@ -3325,6 +3325,31 @@ impl<O: EntryOps> DemandLease<O> {
     }
 }
 
+impl<O: EntryOps> DemandLease<O> {
+    /// Give this lease back from a thread that is unwinding, reading through
+    /// a poisoned serving set or entry gate rather than panicking on it.
+    ///
+    /// A panic inside a drop on an unwinding thread aborts the process, and
+    /// both locks can be poisoned by the time an unwind reaches the lease: an
+    /// unwind on another thread under either lock poisons it for every later
+    /// taker. The give-back writes the same four fields whether or not the
+    /// gate is poisoned, so the entry's demand account stays whole for any
+    /// holder that recovers the gate.
+    ///
+    /// **The caller holds no hold of this entry's gate**: this blocks on that
+    /// gate, and the gate is not reentrant.
+    fn give_back_while_unwinding(mut self) {
+        let Some(shared) = self.held.take() else {
+            return;
+        };
+        let Some(entry) = shared.entries.get_through_poison(&self.name) else {
+            return;
+        };
+        let mut state = entry.gate.lock().unwrap_or_else(PoisonError::into_inner);
+        give_back_demand(&mut state, self.recovery_demand);
+    }
+}
+
 impl<O: EntryOps> Drop for DemandLease<O> {
     fn drop(&mut self) {
         let Some(shared) = self.held.take() else {
@@ -3334,48 +3359,94 @@ impl<O: EntryOps> Drop for DemandLease<O> {
             return;
         };
         let mut state = entry.gate.lock().expect("entry gate poisoned");
-        state.demand_leases = state.demand_leases.saturating_sub(1);
-        if let Some(generation) = self.recovery_demand {
-            state.withdraw_recovery_demand(generation);
-        }
-        if state.demand_leases == 0 {
-            state.last_demand = Instant::now();
-            state.detach_due = false;
-        }
+        give_back_demand(&mut state, self.recovery_demand);
     }
 }
 
-/// A demand lease an acquisition holds while it also holds that entry's gate.
+/// Give back one demand lease [`record_demand`] recorded: withdraw the
+/// recovery it asked for, and restart the idle interval where it was the last.
+fn give_back_demand<A: SnapshotSource>(state: &mut EntryState<A>, recovery_demand: Option<u64>) {
+    state.demand_leases = state.demand_leases.saturating_sub(1);
+    if let Some(generation) = recovery_demand {
+        state.withdraw_recovery_demand(generation);
+    }
+    if state.demand_leases == 0 {
+        state.last_demand = Instant::now();
+        state.detach_due = false;
+    }
+}
+
+/// A demand lease a read's acquisition holds, and whether the acquisition's
+/// frame holds the entry gate the lease's give-back takes.
 ///
-/// **It takes no entry gate when the thread holding it is unwinding**, and
-/// that is the whole of what it is for. A read records its lease under the
-/// first hold of the entry gate and keeps it across the gate being given back
-/// and taken again, so the lease and a live `MutexGuard` over the same
-/// non-reentrant gate are both on the acquisition's stack. An unwind out of
-/// that frame drops both: the guard releases the gate and poisons it, and a
-/// bare [`DemandLease`] would then ask for the gate it just poisoned and panic
-/// a second time inside a drop, which aborts the process. A lease dropped
-/// before the guard would block on the gate the guard still holds, and the
-/// entry would never answer again.
+/// A read records its lease under the first hold of the entry gate and keeps
+/// it across the gate being given back and taken again, so for part of the
+/// lease's life a live `MutexGuard` over the same non-reentrant gate is on the
+/// acquisition's stack beside it. **What an unwind does with the lease turns on
+/// whether that guard is live**, and [`AcquisitionLease::gate_given_back`] and
+/// [`AcquisitionLease::gate_taken_again`] are how the acquisition says so.
 ///
-/// So an unwind leaks the lease instead. The entry keeps a demand no hold is
-/// behind — it never detaches for idleness again — which is the state an entry
-/// whose gate is poisoned is in either way: every later take of that gate
-/// panics on the poison, so its account of itself is already unreadable. That
-/// is the priced cost of an unwind under the entry gate, and it is paid
-/// without blocking and without a second panic.
-struct AcquisitionLease<O: EntryOps>(Option<DemandLease<O>>);
+/// **An unwind under the gate leaks the lease.** The lease is declared after
+/// the guard, so the unwind drops the lease first, while the guard still holds
+/// the gate: a give-back there would block on the gate its own frame holds, and
+/// the entry would never answer again. The guard then drops and poisons the
+/// gate, and every later take of it panics on the poison, so the entry's
+/// account of itself is already unreadable; the leaked lease is a demand no
+/// hold is behind in an entry in that state. That is the priced cost of an
+/// unwind under the entry gate, paid without blocking and without a second
+/// panic.
+///
+/// **An unwind outside the gate gives the lease back.** The acquisition holds
+/// no guard there — in its wait for the entry's connection, and after each
+/// place it gives the gate back — so the give-back takes the gate the way any
+/// other lease's does, reading through a poison rather than panicking inside
+/// the drop. Blocking on the gate from that drop is safe because the
+/// unwinding thread holds no hold of it:
+///
+/// - [`Host::begin_read`] takes the gate as its first act, with a blocking
+///   take of a non-reentrant lock, so no frame beneath it holds that gate;
+/// - a callee that took the gate has its guard dropped by the unwind before
+///   the unwind reaches the acquisition's own locals;
+/// - so the one guard that can be live when the lease drops is the
+///   acquisition's own, and the flag reads given-back only once that guard is
+///   gone. It is set after each give-back of the gate and cleared on the
+///   retake's return, with nothing between the retake and the clearing that
+///   can unwind.
+///
+/// Nothing the unwinding thread still holds is what a gate holder waits for:
+/// the connection's turn drops before the lease, and no holder of the gate
+/// waits for a connection.
+struct AcquisitionLease<O: EntryOps> {
+    lease: Option<DemandLease<O>>,
+    /// Whether the acquisition's frame holds a live guard over the entry gate.
+    gate_held: bool,
+}
 
 impl<O: EntryOps> AcquisitionLease<O> {
+    /// The lease recorded under the acquisition's first hold of the gate,
+    /// which is held as this is made.
     fn new(lease: DemandLease<O>) -> Self {
-        AcquisitionLease(Some(lease))
+        AcquisitionLease {
+            lease: Some(lease),
+            gate_held: true,
+        }
+    }
+
+    /// The acquisition's guard over the entry gate has been dropped.
+    fn gate_given_back(&mut self) {
+        self.gate_held = false;
+    }
+
+    /// The acquisition holds a guard over the entry gate again.
+    fn gate_taken_again(&mut self) {
+        self.gate_held = true;
     }
 
     /// Hand the lease on to the hold that keeps it for the length of the read.
     /// The wrapper's own drop runs over an empty option from here, so the
     /// lease is given back by the hold and by nothing else.
     fn into_lease(mut self) -> DemandLease<O> {
-        self.0
+        self.lease
             .take()
             .expect("an acquisition holds its lease until the hold it grants takes it")
     }
@@ -3383,16 +3454,18 @@ impl<O: EntryOps> AcquisitionLease<O> {
 
 impl<O: EntryOps> Drop for AcquisitionLease<O> {
     fn drop(&mut self) {
-        let Some(lease) = self.0.take() else {
+        let Some(lease) = self.lease.take() else {
             return;
         };
-        if thread::panicking() {
+        if !thread::panicking() {
+            // Every ordinary way out of an acquisition gives the gate back
+            // before this runs, so the lease's own drop takes a free gate.
+            drop(lease);
+        } else if self.gate_held {
             std::mem::forget(lease);
-            return;
+        } else {
+            lease.give_back_while_unwinding();
         }
-        // Every ordinary way out of an acquisition gives the gate back before
-        // this runs, so the lease's own drop takes a free gate here.
-        drop(lease);
     }
 }
 
@@ -4333,9 +4406,11 @@ impl<O: EntryOps> Host<O> {
         // gate being given back and taken again, so a hold of this gate is
         // live for part of the lease's life here. Its own drop takes that same
         // gate and the gate is not reentrant, which is why it is carried in an
-        // [`AcquisitionLease`]: that wrapper is what keeps an unwind out of
-        // this acquisition from asking for the gate this frame is holding.
-        let lease = AcquisitionLease::new(DemandLease {
+        // [`AcquisitionLease`], told at every give-back and retake of the gate
+        // below: that wrapper is what keeps an unwind out of this acquisition
+        // from asking for the gate this frame is holding, and what gives the
+        // lease back from an unwind while the frame holds none.
+        let mut lease = AcquisitionLease::new(DemandLease {
             outcome: state.published_demand(),
             name: name.clone(),
             held: Some(Arc::clone(&self.shared)),
@@ -4356,6 +4431,7 @@ impl<O: EntryOps> Host<O> {
         let published = state.published_demand();
         if published != Demand::State(TrustState::Ready) {
             drop(state);
+            lease.gate_given_back();
             if scheduled {
                 // The dispatch is the demand's, and its one failure is the
                 // worker pool being gone — which is the host coming down, and
@@ -4381,6 +4457,7 @@ impl<O: EntryOps> Host<O> {
                 ReaderUnavailable::new("this entry's coverage holds no read handle")
             });
             drop(state);
+            lease.gate_given_back();
             return Err(ReadRefusal::ReaderUnavailable(unavailable));
         };
         let (turn, published) = match reader.try_take() {
@@ -4395,6 +4472,7 @@ impl<O: EntryOps> Host<O> {
                 // round is carried into the next, and the wait between the two
                 // is outside both.
                 let earlier = opening.let_the_gate_go(state);
+                lease.gate_given_back();
                 // Accounted where the wait begins: the wait below returns only
                 // with the connection, so every wait counted here ends, and
                 // the account names a contended acquisition while it is still
@@ -4418,12 +4496,14 @@ impl<O: EntryOps> Host<O> {
                 // this round runs nothing before either refusal.
                 let published;
                 (state, opening, published) = rounds.take_the_gate_again(&entry.gate, earlier);
+                lease.gate_taken_again();
                 if published != Demand::State(TrustState::Ready) {
                     // The connection goes back with the turn, before the gate
                     // does: the read waiting for it is woken by that and takes
                     // the gate after this one lets go.
                     drop(turn);
                     drop(state);
+                    lease.gate_given_back();
                     return Err(ReadRefusal::NotServing(published));
                 }
                 let still_the_entrys = state
@@ -4438,6 +4518,7 @@ impl<O: EntryOps> Host<O> {
                     });
                     drop(turn);
                     drop(state);
+                    lease.gate_given_back();
                     return Err(ReadRefusal::ReaderUnavailable(unavailable));
                 }
                 (turn, published)
@@ -4459,6 +4540,7 @@ impl<O: EntryOps> Host<O> {
                 // A refused establishment ran its statement under this hold
                 // all the same, so the refusal is a path that paid for it.
                 let hold = opening.give_the_gate_back(state, &entry.gate);
+                lease.gate_given_back();
                 self.shared
                     .reads
                     .count_refused_establishment_under_the_gate(hold, minted.statements);
@@ -4467,6 +4549,7 @@ impl<O: EntryOps> Host<O> {
         };
         state.pin();
         let hold = opening.give_the_gate_back(state, &entry.gate);
+        lease.gate_given_back();
         self.shared
             .reads
             .count_establishment_under_the_gate(hold, minted.statements);
@@ -6693,6 +6776,11 @@ mod tests {
         /// that reads this is the one that holds the read path to what happens
         /// when something under the entry gate does.
         mint_panics: std::sync::atomic::AtomicBool,
+        /// Whether a wait for a handle's connection panics on entry instead
+        /// of waiting. The acquisition that waits holds no entry gate there,
+        /// and the cases that read this hold what an unwind out of that wait
+        /// leaves behind.
+        wait_panics: std::sync::atomic::AtomicBool,
     }
 
     impl Default for ReaderLedger {
@@ -6708,6 +6796,7 @@ mod tests {
                 mint_statements: AtomicU64::default(),
                 establish_statements: AtomicU64::new(norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS),
                 mint_panics: std::sync::atomic::AtomicBool::default(),
+                wait_panics: std::sync::atomic::AtomicBool::default(),
             }
         }
     }
@@ -6818,6 +6907,10 @@ mod tests {
         }
 
         fn wait_for_the_connection(self: &Arc<Self>) -> FakeTurn {
+            assert!(
+                !self.ledger.wait_panics.load(Ordering::SeqCst),
+                "the case asked this wait to unwind outside the entry gate"
+            );
             self.ledger.waiting.fetch_add(1, Ordering::SeqCst);
             let mut free = self.free.lock().expect("a fake reader's connection");
             while !*free {
@@ -17747,6 +17840,183 @@ mod tests {
             answered(TrustState::Ready),
             "the entry's state is unreadable after the gate was recovered"
         );
+    }
+
+    /// **An unwind out of a read's wait for the entry's connection gives the
+    /// read's demand lease back.** The acquisition waits with the entry gate
+    /// given back, so nothing on the unwinding thread holds that gate and the
+    /// lease's give-back takes it free. A lease left behind is a demand no
+    /// hold stands for, and the entry it is left on never detaches for
+    /// idleness again.
+    ///
+    /// The unwinding read runs on a thread of its own under a bounded wait,
+    /// because a give-back that asked for a gate its own frame held would hang
+    /// this case rather than fail it.
+    #[test]
+    fn an_unwind_in_a_reads_wait_gives_its_lease_back() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let host = Arc::new(host);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+
+        // The shape: one read holding the entry's connection, so the next
+        // acquisition reaches the wait, and a wait that unwinds on entry.
+        let first = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+        let before = host.read_evidence();
+        ops.readers.wait_panics.store(true, Ordering::SeqCst);
+        let reading = Arc::clone(&host);
+        let reading_name = name.clone();
+        let unwinding = thread::spawn(move || {
+            std::panic::catch_unwind(AssertUnwindSafe(|| reading.begin_read(&reading_name)))
+        });
+        let caught = joined_within_the_budget("the read whose wait unwound", unwinding);
+        ops.readers.wait_panics.store(false, Ordering::SeqCst);
+        assert!(
+            caught.is_err(),
+            "the wait the case asked to unwind answered instead"
+        );
+        assert_eq!(
+            host.read_evidence().since(before).reader_waits,
+            1,
+            "the unwinding read never reached the wait for the connection"
+        );
+
+        // The gate is free and unpoisoned, and the one lease it counts is the
+        // first read's.
+        let leases = match entry.gate.try_lock() {
+            Ok(state) => state.demand_leases,
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("an unwind outside the entry gate poisoned it")
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                panic!("the unwind left the entry gate held")
+            }
+        };
+        assert_eq!(
+            leases, 1,
+            "the unwound read's lease is still counted beside the first read's"
+        );
+        drop(first);
+        let leases = entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .demand_leases;
+        assert_eq!(leases, 0, "a demand lease outlived every hold on the entry");
+        drop(
+            host.begin_read(&name)
+                .expect("the read after the unwind was refused"),
+        );
+    }
+
+    /// **An unwind outside the entry gate gives the lease back through a gate
+    /// another thread poisoned.** A read waiting for the connection holds no
+    /// gate, so another thread's unwind under the gate can poison it
+    /// meanwhile, and the woken read's retake of the gate unwinds on the
+    /// poison. The lease's give-back then meets the same poison inside a drop
+    /// on an unwinding thread, where a second panic aborts the process.
+    ///
+    /// The first read's snapshot is ended by hand rather than by dropping its
+    /// hold, because that drop takes the poisoned gate too; ending the
+    /// snapshot is what hands the connection on.
+    #[test]
+    fn an_unwind_on_a_gate_poisoned_during_a_reads_wait_gives_its_lease_back() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let host = Arc::new(host);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+
+        let mut first = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+        let reading = Arc::clone(&host);
+        let reading_name = name.clone();
+        let waiting = thread::spawn(move || {
+            std::panic::catch_unwind(AssertUnwindSafe(|| reading.begin_read(&reading_name)))
+        });
+        wait_until(
+            "the second read to reach the wait for the entry's connection",
+            lifecycle_wait_budget(),
+            || {
+                if ops.readers.waiting.load(Ordering::SeqCst) >= 1 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("no read is waiting yet".to_string())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        let poisoning = Arc::clone(&entry);
+        let poisoned = thread::spawn(move || {
+            let _held = poisoning.gate.lock().expect("entry gate poisoned");
+            panic!("an unwind under the entry gate while a read waits");
+        })
+        .join();
+        assert!(
+            poisoned.is_err(),
+            "the thread asked to poison the gate returned"
+        );
+        drop(first.snapshot.take());
+
+        let caught = joined_within_the_budget("the read woken onto a poisoned gate", waiting);
+        assert!(
+            caught.is_err(),
+            "the read that retook a poisoned gate answered instead of unwinding"
+        );
+        entry.gate.clear_poison();
+        let leases = entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .demand_leases;
+        assert_eq!(
+            leases, 1,
+            "the unwound read's lease is still counted beside the first read's"
+        );
+        drop(first);
+        let leases = entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .demand_leases;
+        assert_eq!(leases, 0, "a demand lease outlived every hold on the entry");
+        drop(
+            host.begin_read(&name)
+                .expect("the read after the unwind was refused"),
+        );
+    }
+
+    /// Join `thread` once it has finished, failing the case where it has not
+    /// finished within the lifecycle's wait budget rather than hanging it.
+    fn joined_within_the_budget<T>(what: &str, thread: thread::JoinHandle<T>) -> T {
+        wait_until(
+            &format!("{what} to finish"),
+            lifecycle_wait_budget(),
+            || {
+                if thread.is_finished() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{what} is still running"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        thread.join().expect("the thread caught its own unwind")
     }
 
     /// **An acquisition waiting for the entry's connection holds no entry
