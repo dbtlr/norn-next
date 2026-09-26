@@ -719,6 +719,86 @@ fn a_section_ended_inside_a_container_answers_no_byte_of_its_prefix() {
     assert_eq!(section(&vault, "l#A").3, "text\n");
 }
 
+/// How many headings each crowd document of [`crowded_sections`] carries.
+const CROWD_HEADINGS: usize = 12;
+
+/// A vault holding the section fixture's document at `notes/guide.md` beside
+/// `crowd` documents at `crowd/`, each carrying [`CROWD_HEADINGS`] headings,
+/// among them headings whose text the fixture's anchors name.
+fn crowded_sections(label: &str, order: StoredPathOrder, crowd: usize) -> Vault {
+    let crowd_body: String = ["Design Notes", "Last", "Nope"]
+        .into_iter()
+        .map(str::to_string)
+        .chain((3..CROWD_HEADINGS).map(|at| format!("Topic {at}")))
+        .map(|text| format!("## {text}\n{text} body\n\n"))
+        .collect();
+    let mut documents = vec![parsed("notes/guide.md", SECTIONS)];
+    documents.extend((0..crowd).map(|at| parsed(&format!("crowd/{at:04}.md"), &crowd_body)));
+    Vault::holding(label, order, &documents)
+}
+
+/// **A heading anchor is matched in memory under its counter ceiling**: the
+/// section lookup matches its anchor over the named document's heading rows,
+/// each read once, so the heading rows it matches over are at most that
+/// document's headings — one per heading, whether the anchor names a heading
+/// by its text or its slug or names none — never a heading of another
+/// document, and the same count however many documents the vault holds
+/// beside it, however many of their headings carry the anchor's text. The
+/// plans of the lookup count the rows the lookup counts.
+///
+/// Controls: the counter follows the document named, reading a crowd
+/// document's headings where the anchor names one; a get that looks up no
+/// section, a record or a page of the headings collection, matches over no
+/// heading row.
+#[test]
+fn a_heading_anchor_is_matched_in_memory_under_its_counter_ceiling() {
+    let held = parsed("notes/guide.md", SECTIONS).headings.len() as u64;
+    assert!(held > 1, "the fixture's document carries several headings");
+    for order in [Sensitive, Folding] {
+        let alone = crowded_sections(&format!("get-anchor-alone-{order:?}"), order, 0);
+        let crowded = crowded_sections(&format!("get-anchor-crowded-{order:?}"), order, 40);
+        for anchor in [
+            "guide#design notes",
+            "guide#Last",
+            "guide#design-notes",
+            "guide#Nope",
+        ] {
+            let params = getting(anchor);
+            for (vault, vault_is) in [(&alone, "alone"), (&crowded, "crowded")] {
+                let work = vault.get(&params).work;
+                assert!(
+                    work.anchor_headings <= held,
+                    "`{anchor}` {vault_is} under {order:?} matched over {} heading rows, past \
+                     the ceiling of the document's {held} headings",
+                    work.anchor_headings
+                );
+                assert_eq!(
+                    work.anchor_headings, held,
+                    "`{anchor}` {vault_is} under {order:?} matches over each of its document's \
+                     headings once"
+                );
+                assert_eq!(planned_work(vault, &params), work, "`{anchor}` {vault_is}");
+            }
+        }
+        assert_eq!(
+            crowded
+                .get(&getting("crowd/0003#Topic 7"))
+                .work
+                .anchor_headings,
+            CROWD_HEADINGS as u64,
+            "the counter follows the document the target names"
+        );
+        for params in [
+            getting("guide"),
+            getting("guide")
+                .with_collection(CollectionSelector::Headings)
+                .with_limit(2),
+        ] {
+            assert_eq!(crowded.get(&params).work.anchor_headings, 0, "{params:?}");
+        }
+    }
+}
+
 /// **A block anchor answers the block its identifier defines**: the leaf
 /// block its marker trails, or the fenced block above a marker on the line
 /// after its closing fence. **A block the document does not define is
@@ -1321,6 +1401,7 @@ fn planned_work(vault: &Vault, params: &GetParams) -> GetWork {
             full_scan_steps: sum.full_scan_steps + plan.work.full_scan_steps,
             sorts: sum.sorts + plan.work.sorts,
             vm_steps: sum.vm_steps + plan.work.vm_steps,
+            anchor_headings: sum.anchor_headings + plan.work.anchor_headings,
         })
 }
 
@@ -1673,6 +1754,7 @@ fn a_gets_work_reads_out_every_count_by_name() {
         full_scan_steps: 2,
         sorts: 3,
         vm_steps: 4,
+        anchor_headings: 5,
     };
     assert_eq!(
         work.readings().collect::<Vec<_>>(),
@@ -1681,6 +1763,7 @@ fn a_gets_work_reads_out_every_count_by_name() {
             ("get_full_scan_steps", 2),
             ("get_sorts", 3),
             ("get_vm_steps", 4),
+            ("get_anchor_headings", 5),
         ]
     );
 }

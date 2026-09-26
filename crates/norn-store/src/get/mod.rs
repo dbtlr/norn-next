@@ -57,7 +57,10 @@
 //! headings**: the anchor's text reading compares text with case and
 //! whitespace folded, which no index the store holds orders by, so the lookup
 //! is a seek of the document's heading rows and a pass over them, bounded by
-//! the one document rather than by an index of its own. A block definition is
+//! the one document rather than by an index of its own. That pass is the one
+//! in-memory match a get runs over more rows than it answers, and
+//! [`GetWork::anchor_headings`] counts the rows it is handed: at most the
+//! named document's headings, each once. A block definition is
 //! one seek of the document's definitions that stops at the first matching
 //! one. A section or a block the document does not carry is answered in band
 //! ([`Unsatisfied::MissingSection`], [`Unsatisfied::MissingBlock`]) beside the
@@ -181,12 +184,13 @@ impl Gotten {
     }
 }
 
-/// What one get read: every statement it ran, and what SQLite counted
-/// stepping them, summed over all of them.
+/// What one get read: every statement it ran, what SQLite counted stepping
+/// them, summed over all of them, and the heading rows a section lookup
+/// matched its anchor over in memory.
 ///
-/// The counters are the get's cost as SQLite ran it, so a pair of gets of
-/// the same document over two vault sizes reads whether a get's work grows
-/// with the vault by comparing them.
+/// The statement counters are the get's cost as SQLite ran it, so a pair of
+/// gets of the same document over two vault sizes reads whether a get's work
+/// grows with the vault by comparing them.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GetWork {
     /// The statements the get ran, each counted on the snapshot as it ran.
@@ -197,6 +201,13 @@ pub struct GetWork {
     pub sorts: u64,
     /// Virtual-machine operations the statements ran.
     pub vm_steps: u64,
+    /// The heading rows the section lookup handed the document reader to
+    /// match its anchor over, as the document's headings statement handed
+    /// them back: the reader compares no heading it is not handed, so what
+    /// the in-memory match compares is bounded by this count, which is at
+    /// most the named document's headings. Zero where the get looks up no
+    /// section.
+    pub anchor_headings: u64,
 }
 
 impl GetWork {
@@ -209,6 +220,7 @@ impl GetWork {
             ("get_full_scan_steps", self.full_scan_steps),
             ("get_sorts", self.sorts),
             ("get_vm_steps", self.vm_steps),
+            ("get_anchor_headings", self.anchor_headings),
         ]
         .into_iter()
     }
@@ -244,6 +256,8 @@ pub struct GetPlan {
     pub plan: EmittedPlan,
     /// What SQLite counted stepping the statement as the get ran it, one
     /// statement's [`GetWork`]: the work of a get it refused is read here.
+    /// The document's headings statement carries the heading rows the
+    /// section lookup matched over, so the plans of a get sum to its work.
     pub work: GetWork,
 }
 
@@ -368,24 +382,31 @@ impl Snapshot {
         text: &dyn DocumentText,
     ) -> Result<Vec<GetPlan>, PageRefusal> {
         let mut lookups = Lookups::default();
-        match self.run_get(params, declared, text, &mut lookups) {
-            Ok(_) | Err(PageRefusal::AmbiguousTarget(_) | PageRefusal::UnknownTarget { .. }) => {}
+        let mut anchor_headings = match self.run_get(params, declared, text, &mut lookups) {
+            Ok(gotten) => gotten.work.anchor_headings,
+            Err(PageRefusal::AmbiguousTarget(_) | PageRefusal::UnknownTarget { .. }) => 0,
             Err(refusal) => return Err(refusal),
-        }
+        };
         let mut stepped = lookups
             .ran
             .iter()
             .map(|ran| ran.stepped)
             .collect::<Vec<_>>()
             .into_iter();
-        Ok(
-            self.explained(lookups.ran, |statement, filters, plan| GetPlan {
+        Ok(self.explained(lookups.ran, |statement, filters, plan| {
+            let mut work = GetWork::of(stepped.next().unwrap_or_default());
+            // The rows the section lookup matched over are the rows the
+            // headings statement handed back, so its plan carries them.
+            if statement == ReadStatement::Get(GetStatement::DocumentHeadings) {
+                work.anchor_headings = std::mem::take(&mut anchor_headings);
+            }
+            GetPlan {
                 statement,
                 filters,
                 plan,
-                work: GetWork::of(stepped.next().unwrap_or_default()),
-            })?,
-        )
+                work,
+            }
+        })?)
     }
 
     /// The get [`Snapshot::get`] answers and [`Snapshot::get_plans`]
@@ -406,6 +427,7 @@ impl Snapshot {
         self.declaration_pinned(declared, lookups)?;
         let named = self.named(&params.target, declared, lookups)?;
         let snapshot = self.reading_facts(None, lookups)?;
+        let mut work = GetWork::default();
         let (report, unsatisfied) = match shape {
             Shape::Record(projection) => {
                 let mut unknown = Vec::new();
@@ -421,7 +443,7 @@ impl Snapshot {
                 let unsatisfied = self.resolve(unknown, declared, lookups)?;
                 (GetReport::record(rows.remove(0)), unsatisfied)
             }
-            Shape::Section(anchor) => self.section(named, anchor, text, lookups)?,
+            Shape::Section(anchor) => self.section(named, anchor, text, lookups, &mut work)?,
             Shape::Block(id) => self.block(named, id, text, lookups)?,
             Shape::Collection(selector) => {
                 let path = named.wire.clone();
@@ -437,10 +459,7 @@ impl Snapshot {
                 (GetReport::collection(path, page), Vec::new())
             }
         };
-        let mut work = GetWork {
-            statements: self.counters().statements_executed() - started,
-            ..GetWork::default()
-        };
+        work.statements = self.counters().statements_executed() - started;
         for ran in &lookups.ran {
             work.add(ran.stepped);
         }
@@ -486,13 +505,15 @@ impl Snapshot {
     }
 
     /// The section `anchor` names in the named document, or the record of its
-    /// path and the report that it carries no such section.
+    /// path and the report that it carries no such section, counting in
+    /// `work` the heading rows the anchor is matched over.
     fn section(
         &self,
         named: Named,
         anchor: &str,
         text: &dyn DocumentText,
         lookups: &mut Lookups,
+        work: &mut GetWork,
     ) -> Result<(GetReport, Vec<Unsatisfied>), StoreError> {
         let headings: Vec<HeadingFact> = self
             .run_statement(
@@ -505,6 +526,7 @@ impl Snapshot {
             .map_err(|problem| error::sql("reading a document's headings", problem))?
             .into_iter()
             .collect::<Result<_, StoreError>>()?;
+        work.anchor_headings += headings.len() as u64;
         let body = self.body_of(named.document, lookups)?;
         for heading in &headings {
             let at = held_offset(&body, heading.span.byte_offset, "a heading's offset")?;
