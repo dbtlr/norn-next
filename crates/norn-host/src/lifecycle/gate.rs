@@ -11,7 +11,7 @@
 //! statement it establishes on ran under one continuous hold.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LockResult, Mutex, MutexGuard};
+use std::sync::{LockResult, Mutex, MutexGuard, PoisonError};
 
 /// The lock over one entry's state, counting each time it is taken.
 pub(super) struct EntryGate<T> {
@@ -38,6 +38,22 @@ impl<T> EntryGate<T> {
         let locked = self.state.lock();
         self.taken.fetch_add(1, Ordering::Relaxed);
         locked
+    }
+
+    /// Take the gate from a drop, waiting for it, and count the take.
+    ///
+    /// **On an unwinding thread it reads through a poisoned gate**, because a
+    /// second panic there aborts the process; on any other thread it panics on
+    /// the poison as every other take of the gate does. Nothing recovers a
+    /// poisoned gate, so what a drop writes through the poison is read by no
+    /// later holder: reading through it is what keeps the drop from panicking,
+    /// and nothing more.
+    pub(super) fn lock_in_a_drop(&self) -> MutexGuard<'_, T> {
+        if std::thread::panicking() {
+            self.lock().unwrap_or_else(PoisonError::into_inner)
+        } else {
+            self.lock().expect("entry gate poisoned")
+        }
     }
 
     /// How many times the gate has been taken, over the entry's life.

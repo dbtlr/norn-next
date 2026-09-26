@@ -254,6 +254,15 @@ impl SnapshotReader {
         norn_db::statements_begun_on_this_thread()
     }
 
+    /// Put the connection back in the handle and wake one read waiting for it.
+    ///
+    /// **Nothing panics while the connection's mutex is held**, here or in
+    /// [`SnapshotReader::try_take`] or [`SnapshotReader::wait_for_the_connection`]:
+    /// each only moves the connection in or out of its slot, clones an
+    /// [`Arc`] and waits on the condition variable. So the mutex is never
+    /// poisoned, and the `expect` below never fires — which is what makes it
+    /// safe in the drops that call this on an unwinding thread, where a panic
+    /// would abort the process.
     fn give_the_connection_back(&self, database: Database) {
         let mut held = self
             .connection
