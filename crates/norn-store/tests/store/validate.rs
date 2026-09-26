@@ -441,7 +441,8 @@ fn requests() -> Vec<ValidateParams> {
 /// same order, whatever the bound: a continuation resumes after the last
 /// finding's kind, path and id, inside a kind and across kinds, among two
 /// findings of one kind at one path, and under every narrowing. The page
-/// stops at its last finding.
+/// stops at its last finding, **and reads one finding past its bound** to
+/// learn a next page exists: a page of two with more behind it reads three.
 #[test]
 fn a_drain_a_page_at_a_time_answers_the_findings_one_page_does() {
     let validating_store = Validating::new("validate-drain");
@@ -464,6 +465,14 @@ fn a_drain_a_page_at_a_time_answers_the_findings_one_page_does() {
             rows[1].id
         )),
         "a page stops at its last finding's kind, path and id"
+    );
+    let read = validating_store
+        .validate(&validating().with_limit(2))
+        .work
+        .rows_read;
+    assert_eq!(
+        read, 3,
+        "a page of two with a next page reads one past its bound"
     );
 }
 

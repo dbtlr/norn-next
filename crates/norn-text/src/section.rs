@@ -172,6 +172,13 @@ impl std::error::Error for SectionError {}
 /// [`BodyScan::headings`] reads them or as a caller holding them as facts
 /// recorded them: each one's level, text, slug, where it starts and where its
 /// construct ends, as offsets into `body`.
+///
+/// **It makes at most four passes over `headings`, each visiting a heading at
+/// most once**: one for each of the three readings an anchor is matched by,
+/// each run only where the one before matched no heading, and one from the
+/// matched heading to the heading that ends its section. So what it compares
+/// is at most four times the headings it is handed, and it reads no heading
+/// it is not handed.
 pub fn resolve_section(
     headings: &[Heading],
     body: &str,

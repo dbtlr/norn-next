@@ -20,6 +20,9 @@ use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
 pub(crate) struct TextLayer;
 
 impl DocumentText for TextLayer {
+    /// At most five linear passes over `headings`: one converting each stored heading
+    /// to the `norn-text` heading it was derived from, and the at most four
+    /// `norn_text::resolve_section` makes over those.
     fn section(&self, headings: &[HeadingFact], body: &str, anchor: &str) -> Option<SectionAt> {
         let headings: Vec<Heading> = headings.iter().map(text_heading).collect();
         let span =

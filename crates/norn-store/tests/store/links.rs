@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use norn_store::{
-    ContentModel, DocumentFacts, FindStatement, LinkFact, LinkFamily, ReadFilter, Snapshot,
-    SnapshotReader, Store, StoredPathOrder, SuffixKey, Validation, induced_failure,
+    CANDIDATE_HEAD, ContentModel, DocumentFacts, FindStatement, LinkFact, LinkFamily, ReadFilter,
+    Snapshot, SnapshotReader, Store, StoredPathOrder, SuffixKey, Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -24,7 +24,8 @@ use norn_wire::{
 };
 
 use crate::common::{
-    DOCUMENT_PAYLOAD, Scratch, document, reads_of, span, violation, write_documents,
+    DOCUMENT_PAYLOAD, Scratch, document, planned_get_work, reads_of, span, violation,
+    write_documents,
 };
 use crate::find::{failure_of, rows_of};
 
@@ -1184,6 +1185,82 @@ fn a_read_of_targets_seeks_the_class_or_the_path_each_names() {
                     path_index,
                 )
             });
+        }
+    }
+}
+
+/// **A link's head is cut in the statement that names it.** On either root,
+/// `[[glossary]]` names seven documents and carries a head of
+/// [`CANDIDATE_HEAD`] of them beside a total of seven, and the candidate rows
+/// the resolution reads are exactly the candidates the links carry, at most
+/// [`CANDIDATE_HEAD`] per link, whether a find's links column, a get's links
+/// page or a get's record with a links column resolves them: no candidate is
+/// read past a head and dropped after. Each get's plans sum to its work, the
+/// candidate rows among it.
+#[test]
+fn a_links_head_is_cut_in_the_statement_that_names_it() {
+    for order in [Sensitive, Folding] {
+        let linked = crowded(&format!("links-head-cut-{order:?}"), order);
+        let found = linked.find(
+            &request()
+                .with_predicates([Predicate::path("src/many.md")])
+                .with_columns([Column::links()]),
+        );
+        let [row] = &found.rows[..] else {
+            panic!("`src/many.md` is not one row: {:?}", found.rows);
+        };
+        let links = &row.links.as_ref().expect("the links column").items;
+        let glossary = links
+            .iter()
+            .find(|link| link.target == "glossary")
+            .expect("the glossary link");
+        assert_eq!(
+            (
+                glossary.targets.candidates().len(),
+                glossary.targets.total()
+            ),
+            (CANDIDATE_HEAD, 7),
+            "{order:?}"
+        );
+        let carried: u64 = links
+            .iter()
+            .map(|link| link.targets.candidates().len() as u64)
+            .sum();
+        let ceiling = (links.len() * CANDIDATE_HEAD) as u64;
+        let getting = GetParams::new(address(), resolution("src/many"));
+        let page = getting
+            .clone()
+            .with_collection(CollectionSelector::Links)
+            .with_limit(10);
+        let record = getting.with_columns([Column::links()]);
+        let mut read_by = vec![(found.work.link_candidates_read, "a find's links column")];
+        for (params, reader) in [(page, "a get's links page"), (record, "a get's record")] {
+            let gotten = linked
+                .snapshot()
+                .get(&params, &declared(), &NoText)
+                .unwrap_or_else(|refusal| panic!("{reader}: {refusal}"));
+            let plans = linked
+                .snapshot()
+                .get_plans(&params, &declared(), &NoText)
+                .unwrap_or_else(|refusal| panic!("the plans of {reader}: {refusal}"));
+            assert_eq!(
+                planned_get_work(&plans),
+                gotten.work,
+                "the plans of {reader} under {order:?} sum to its work"
+            );
+            read_by.push((gotten.work.link_candidates_read, reader));
+        }
+        for (read, reader) in read_by {
+            assert!(
+                read <= ceiling,
+                "{reader} under {order:?} read {read} candidate rows for {} links, past \
+                 {CANDIDATE_HEAD} per link",
+                links.len()
+            );
+            assert_eq!(
+                read, carried,
+                "{reader} under {order:?} reads the candidates its links carry and no others"
+            );
         }
     }
 }

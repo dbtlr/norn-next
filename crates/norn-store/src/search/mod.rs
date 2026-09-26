@@ -249,6 +249,10 @@ pub struct SearchWork {
     pub documents_hydrated: u64,
     /// The nested-table rows hydrated for the hits, by table.
     pub nested_rows: NestedRows,
+    /// The candidate rows the links column's resolution read: each one
+    /// document a link's head names, at most [`crate::CANDIDATE_HEAD`] per
+    /// link, cut in the statement that reads them.
+    pub link_candidates_read: u64,
     /// The finding rows hydrated for the hits.
     pub finding_rows: u64,
 }
@@ -270,6 +274,7 @@ impl SearchWork {
             ("search_heading_rows", self.nested_rows.headings),
             ("search_block_rows", self.nested_rows.blocks),
             ("search_link_rows", self.nested_rows.links),
+            ("search_link_candidates_read", self.link_candidates_read),
             ("search_finding_rows", self.finding_rows),
         ]
         .into_iter()
@@ -521,6 +526,7 @@ impl Snapshot {
                 self.hydrate_rows(&keys, projection, fields, declared, lookups, &mut hydration)?;
             work.documents_hydrated = hydration.documents_hydrated;
             work.nested_rows = hydration.nested_rows;
+            work.link_candidates_read = hydration.link_candidates_read;
             work.finding_rows = hydration.finding_rows;
             rows
         }

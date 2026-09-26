@@ -10,12 +10,14 @@
 
 use std::sync::Arc;
 
-use crate::common::{DOCUMENT_PAYLOAD, Scratch, document, reads_of, violation, write_documents};
+use crate::common::{
+    DOCUMENT_PAYLOAD, Scratch, document, reads_of, span, violation, write_documents,
+};
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    ContentModel, FindStatement, LexicalQuery, PageRefusal, ReadFilter, ReadStatement,
-    SEARCH_STATEMENTS, SearchPlan, SearchStatement, Searched, Snapshot, SnapshotReader, Store,
-    TagFact, TagSource,
+    ContentModel, FindStatement, LexicalQuery, LinkFact, LinkFamily, PageRefusal, ReadFilter,
+    ReadStatement, SEARCH_STATEMENTS, SearchPlan, SearchStatement, Searched, Snapshot,
+    SnapshotReader, Store, TagFact, TagSource,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan, ScanTarget};
 use norn_wire::{
@@ -853,7 +855,7 @@ fn a_part_a_search_cannot_apply_is_reported_as_a_find_reports_it() {
 /// hydration; with the fields and the body, each hit carries its own document's, in
 /// rank order, and one hydration reads exactly the hits' rows. A projected key
 /// outside the field universe is reported with the keys near it, after the
-/// conjunction's parts. A links column is refused, as a find refuses it.
+/// conjunction's parts. A links column carries each hit's links.
 #[test]
 fn a_hit_carries_the_row_its_columns_name() {
     let searching_store = Searching::new("search-columns");
@@ -929,6 +931,42 @@ fn a_hit_carries_the_row_its_columns_name() {
                 .all(|hit| hit.document.as_ref().is_some_and(|row| row.links.is_some())),
         "a hit's row does not carry the links column it names"
     );
+}
+
+/// **A search's links column counts the candidate rows its links' resolution
+/// read**: exactly the candidates the hit's links carry, as a find's and a
+/// get's count them.
+#[test]
+fn a_searchs_links_column_counts_the_candidates_its_links_carry() {
+    let wikilink = |target: &str| LinkFact {
+        family: LinkFamily::Wikilink,
+        embed: false,
+        protocol: None,
+        target: target.to_string(),
+        title: None,
+        anchor: None,
+        block_ref: None,
+        span: span(1, 1, 0),
+    };
+    let mut beacon = document("src/beacon.md", "hash-beacon", "beacon\n");
+    beacon.links = vec![wikilink("lantern"), wikilink("twin"), wikilink("nowhere")];
+    let searching_store = Searching::with_documents("search-link-candidates", vec![beacon]);
+    let linked = searching_store.search(&searching("beacon").with_columns([Column::links()]));
+    let [hit] = &linked.hits[..] else {
+        panic!("`beacon` is not one hit: {:?}", linked.hits);
+    };
+    let links = &hit
+        .document
+        .as_ref()
+        .and_then(|row| row.links.as_ref())
+        .expect("the links column")
+        .items;
+    let carried: u64 = links
+        .iter()
+        .map(|link| link.targets.candidates().len() as u64)
+        .sum();
+    assert!(carried > 0, "the hit's links name no document: {links:?}");
+    assert_eq!(linked.work.link_candidates_read, carried);
 }
 
 // ---- what a ranking above the floor draws on ----
@@ -1991,6 +2029,7 @@ fn a_searchs_work_reads_out_every_count_by_name() {
             blocks: 9,
             links: 10,
         },
+        link_candidates_read: 12,
         finding_rows: 11,
     };
     assert_eq!(
@@ -2006,6 +2045,7 @@ fn a_searchs_work_reads_out_every_count_by_name() {
             ("search_heading_rows", 8),
             ("search_block_rows", 9),
             ("search_link_rows", 10),
+            ("search_link_candidates_read", 12),
             ("search_finding_rows", 11),
         ]
     );

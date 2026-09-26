@@ -6,6 +6,7 @@
 //! Every store here is opened under the path order a case names, so a case
 //! proves the same thing on a case-sensitive host as on a folding one.
 
+use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -24,7 +25,7 @@ use norn_wire::{
     VaultAddress, VaultName,
 };
 
-use crate::common::{Scratch, document, span, unread_block, write_documents};
+use crate::common::{Scratch, document, planned_get_work, span, unread_block, write_documents};
 use crate::find::{failure_of, map, rows_of, string};
 
 use StoredPathOrder::{AsciiCaseInsensitive as Folding, Sensitive};
@@ -719,6 +720,133 @@ fn a_section_ended_inside_a_container_answers_no_byte_of_its_prefix() {
     assert_eq!(section(&vault, "l#A").3, "text\n");
 }
 
+/// How many headings each crowd document of [`crowded_sections`] carries.
+const CROWD_HEADINGS: usize = 12;
+
+/// A vault holding the section fixture's document at `notes/guide.md` beside
+/// `crowd` documents at `crowd/`, each carrying [`CROWD_HEADINGS`] headings,
+/// among them headings whose text the fixture's anchors name.
+fn crowded_sections(label: &str, order: StoredPathOrder, crowd: usize) -> Vault {
+    let body = crowd_body();
+    let mut documents = vec![parsed("notes/guide.md", SECTIONS)];
+    documents.extend((0..crowd).map(|at| parsed(&format!("crowd/{at:04}.md"), &body)));
+    Vault::holding(label, order, &documents)
+}
+
+/// The body each crowd document of [`crowded_sections`] holds.
+fn crowd_body() -> String {
+    ["Design Notes", "Last", "Nope"]
+        .into_iter()
+        .map(str::to_string)
+        .chain((3..CROWD_HEADINGS).map(|at| format!("Topic {at}")))
+        .map(|text| format!("## {text}\n{text} body\n\n"))
+        .collect()
+}
+
+/// The suite's document reader, keeping every run of headings a get hands
+/// its section lookup, one run per call.
+#[derive(Default)]
+struct Recording {
+    handed: RefCell<Vec<Vec<HeadingFact>>>,
+}
+
+impl DocumentText for Recording {
+    fn section(&self, headings: &[HeadingFact], body: &str, anchor: &str) -> Option<SectionAt> {
+        self.handed.borrow_mut().push(headings.to_vec());
+        Text.section(headings, body, anchor)
+    }
+
+    fn block(&self, body: &str, marker: usize) -> Range<usize> {
+        Text.block(body, marker)
+    }
+}
+
+impl Vault {
+    /// A get of `params` read through a [`Recording`] reader, and the runs
+    /// of headings the get handed it.
+    fn get_recorded(&self, params: &GetParams) -> (Gotten, Vec<Vec<HeadingFact>>) {
+        let reader = Recording::default();
+        let gotten = self
+            .snapshot()
+            .get(params, &declared(), &reader)
+            .unwrap_or_else(|refusal| panic!("a get of {params:?}: {refusal}"));
+        (gotten, reader.handed.into_inner())
+    }
+}
+
+/// **A heading anchor is matched in memory under its counter ceiling**: a
+/// section lookup hands the document reader the named document's headings,
+/// each once, in one call, and no heading of another document, and the get's
+/// work counts every heading row the reader was handed. So the heading rows
+/// the in-memory match runs over are exactly that document's headings, whether
+/// the anchor names a heading by its text or its slug or names none, however
+/// many documents the vault holds beside it, and however many of their
+/// headings carry the anchor's text. The plans of the lookup count the rows
+/// the lookup counts.
+///
+/// Controls: the counter follows the document named, reading a crowd
+/// document's headings where the anchor names one; a get that looks up no
+/// section, a record or a page of the headings collection, hands the reader
+/// nothing and counts no heading row.
+#[test]
+fn a_heading_anchor_is_matched_in_memory_under_its_counter_ceiling() {
+    let guide = parsed("notes/guide.md", SECTIONS).headings;
+    assert!(
+        guide.len() > 1,
+        "the fixture's document carries several headings"
+    );
+    for order in [Sensitive, Folding] {
+        let few = crowded_sections(&format!("get-anchor-few-{order:?}"), order, 1);
+        let many = crowded_sections(&format!("get-anchor-many-{order:?}"), order, 40);
+        let crowd = parsed("crowd/0000.md", &crowd_body()).headings;
+        assert_eq!(crowd.len(), CROWD_HEADINGS);
+        for (anchor, own) in [
+            ("guide#design notes", &guide),
+            ("guide#design-notes", &guide),
+            ("guide#Nope", &guide),
+            ("crowd/0000#Topic 7", &crowd),
+        ] {
+            let params = getting(anchor);
+            for (vault, vault_is) in [(&few, "beside one"), (&many, "beside forty")] {
+                let (gotten, handed) = vault.get_recorded(&params);
+                assert_eq!(
+                    handed.iter().map(Vec::len).collect::<Vec<_>>(),
+                    [own.len()],
+                    "`{anchor}` {vault_is} under {order:?}: the heading rows handed the reader, \
+                     call by call, held to the ceiling of its document's headings"
+                );
+                assert_eq!(
+                    handed,
+                    std::slice::from_ref(own),
+                    "`{anchor}` {vault_is} under {order:?} hands the reader its document's \
+                     headings, each once, in one call"
+                );
+                assert_eq!(
+                    gotten.work.anchor_headings,
+                    own.len() as u64,
+                    "`{anchor}` {vault_is} under {order:?} counts every heading row the reader \
+                     was handed"
+                );
+                assert_eq!(
+                    planned_work(vault, &params),
+                    gotten.work,
+                    "`{anchor}` {vault_is}"
+                );
+            }
+        }
+        for params in [
+            getting("guide"),
+            getting("guide")
+                .with_collection(CollectionSelector::Headings)
+                .with_limit(2),
+        ] {
+            let (gotten, handed) = many.get_recorded(&params);
+            assert!(handed.is_empty(), "{params:?} handed the reader {handed:?}");
+            assert_eq!(gotten.work.anchor_headings, 0, "{params:?}");
+        }
+    }
+}
+
 /// **A block anchor answers the block its identifier defines**: the leaf
 /// block its marker trails, or the fenced block above a marker on the line
 /// after its closing fence. **A block the document does not define is
@@ -1313,15 +1441,7 @@ fn a_gets_work_follows_its_document_not_the_vault() {
 /// The work the statements a get of `params` ran counted, summed, read off
 /// its plans.
 fn planned_work(vault: &Vault, params: &GetParams) -> GetWork {
-    vault
-        .plans(params)
-        .iter()
-        .fold(GetWork::default(), |sum, plan| GetWork {
-            statements: sum.statements + plan.work.statements,
-            full_scan_steps: sum.full_scan_steps + plan.work.full_scan_steps,
-            sorts: sum.sorts + plan.work.sorts,
-            vm_steps: sum.vm_steps + plan.work.vm_steps,
-        })
+    planned_get_work(&vault.plans(params))
 }
 
 // ---- the plan bars ----
@@ -1673,6 +1793,8 @@ fn a_gets_work_reads_out_every_count_by_name() {
         full_scan_steps: 2,
         sorts: 3,
         vm_steps: 4,
+        anchor_headings: 5,
+        link_candidates_read: 6,
     };
     assert_eq!(
         work.readings().collect::<Vec<_>>(),
@@ -1681,6 +1803,8 @@ fn a_gets_work_reads_out_every_count_by_name() {
             ("get_full_scan_steps", 2),
             ("get_sorts", 3),
             ("get_vm_steps", 4),
+            ("get_anchor_headings", 5),
+            ("get_link_candidates_read", 6),
         ]
     );
 }

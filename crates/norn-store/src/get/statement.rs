@@ -27,7 +27,8 @@ use crate::request::DOCUMENT_HEADINGS_SQL;
 pub enum GetStatement {
     /// Every heading one document carries, in document order: one range seek
     /// of `headings_document_ordinal` at the document. What a heading anchor
-    /// is matched against, so its cost is the document's headings.
+    /// is matched against, so its cost is the document's headings, and
+    /// [`crate::GetWork::anchor_headings`] counts the rows it hands back.
     DocumentHeadings,
     /// The first definition of one block identifier in one document, in
     /// document order: a range seek of `blocks_document_ordinal` at the

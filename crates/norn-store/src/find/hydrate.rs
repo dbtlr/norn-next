@@ -70,8 +70,9 @@ pub const BODY_ROW_CEILING: usize = 65_536;
 /// The instrument a caller reads what a page cost off: how many statements the
 /// find ran on its snapshot, how many keys its page statements handed back —
 /// one past the bound where a next page exists — what SQLite counted stepping
-/// those page statements, how many document rows it hydrated, and how many
-/// rows of each nested table it read.
+/// those page statements, how many document rows it hydrated, how many
+/// rows of each nested table it read, and how many candidates the links it
+/// resolved were read as.
 ///
 /// **The page counters are the page's cost as SQLite ran it**, read off each
 /// page statement's own status once its rows are read, and summed over the
@@ -97,6 +98,10 @@ pub struct FindWork {
     pub documents_hydrated: u64,
     /// The nested-table rows the hydration read, by table.
     pub nested_rows: NestedRows,
+    /// The candidate rows the links column's resolution read: each one
+    /// document a link's head names, at most [`crate::CANDIDATE_HEAD`] per
+    /// link, cut in the statement that reads them.
+    pub link_candidates_read: u64,
     /// The finding rows the findings column read: at most the ceiling per
     /// document.
     pub finding_rows: u64,
@@ -123,6 +128,7 @@ impl FindWork {
             ("find_heading_rows", self.nested_rows.headings),
             ("find_block_rows", self.nested_rows.blocks),
             ("find_link_rows", self.nested_rows.links),
+            ("find_link_candidates_read", self.link_candidates_read),
             ("find_finding_rows", self.finding_rows),
         ]
         .into_iter()
@@ -246,7 +252,9 @@ impl Snapshot {
                     let counts: Vec<usize> = carried.iter().map(|(items, _)| items.len()).collect();
                     let totals: Vec<u64> = carried.iter().map(|(_, total)| *total).collect();
                     let every = carried.into_iter().flat_map(|(items, _)| items).collect();
-                    let mut resolved = self.link_rows(every, ignore, record)?.into_iter();
+                    let mut resolved = self
+                        .link_rows(every, ignore, record, &mut work.link_candidates_read)?
+                        .into_iter();
                     for ((row, count), total) in rows.iter_mut().zip(counts).zip(totals) {
                         let links: Vec<LinkRow> = resolved.by_ref().take(count).collect();
                         row.links = Some(Collection::new(links, total).map_err(cut_below_head)?);
