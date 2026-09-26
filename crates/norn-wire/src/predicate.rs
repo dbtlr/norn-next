@@ -39,7 +39,7 @@ use crate::target::ResolutionTarget;
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Predicate {
-    /// The document's value for `key` is `value`.
+    /// One of the values the document holds for `key` is `value`.
     #[non_exhaustive]
     Eq {
         /// The frontmatter key.
@@ -47,7 +47,7 @@ pub enum Predicate {
         /// The value the key must hold, as text.
         value: String,
     },
-    /// The document's value for `key` is not `value`.
+    /// No value the document holds for `key` is `value`.
     #[non_exhaustive]
     NotEq {
         /// The frontmatter key.
@@ -55,7 +55,7 @@ pub enum Predicate {
         /// The value the key must not hold, as text.
         value: String,
     },
-    /// The document's value for `key` is one of `values`.
+    /// One of the values the document holds for `key` is one of `values`.
     #[non_exhaustive]
     In {
         /// The frontmatter key.
@@ -77,7 +77,7 @@ pub enum Predicate {
         /// The frontmatter key.
         key: String,
     },
-    /// The document's value for `key` sorts before `value`.
+    /// One of the values the document holds for `key` sorts before `value`.
     #[non_exhaustive]
     Before {
         /// The frontmatter key.
@@ -85,7 +85,7 @@ pub enum Predicate {
         /// The bound, as text.
         value: String,
     },
-    /// The document's value for `key` sorts after `value`.
+    /// One of the values the document holds for `key` sorts after `value`.
     #[non_exhaustive]
     After {
         /// The frontmatter key.
