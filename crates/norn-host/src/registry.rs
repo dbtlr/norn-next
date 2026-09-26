@@ -265,6 +265,11 @@ impl<O: EntryOps> Host<O> {
     /// Answer a `vault set`: the registration as it now stands, and what its
     /// entry publishes after the edit.
     ///
+    /// **The entry's standing is answered first.** An entry something holds
+    /// is refused `host/entry-held`, and one standing on a park in the park's
+    /// own code, before the edit's root is checked and whether or not the
+    /// edit changes anything.
+    ///
     /// A field the edit keeps stands as it was, a field it sets holds the
     /// value, and a field it clears falls back to its default. **A root the
     /// edit moves is pre-checked as a register checks one**: taken at its

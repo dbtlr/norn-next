@@ -2204,29 +2204,41 @@ impl<'a, A: SnapshotSource> Withdrawal<'a, A> {
     /// holding nothing and held by nothing. An entry something holds is
     /// refused as held and not withdrawn.
     fn begin(entry: &'a Entry<A>) -> Result<Self, RegistrationRefusal> {
-        Self::begin_where(entry, |_| Ok(()))
+        Self::begin_where(entry, Self::idle)
     }
 
     /// [`Withdrawal::begin`], refusing too an entry that stands on a park, in
     /// the park's own terms, in that same gate hold.
     fn begin_unparked(entry: &'a Entry<A>) -> Result<Self, RegistrationRefusal> {
-        Self::begin_where(entry, |state| {
-            state
-                .standing_park()
-                .map_or(Ok(()), |park| Err(RegistrationRefusal::Parked(park)))
-        })
+        Self::begin_where(entry, Self::idle_and_unparked)
     }
 
-    /// Withdraw `entry` where it holds nothing, nothing holds it, and
-    /// `admitted` finds nothing else to refuse in the same gate hold.
+    /// Admit an entry [`Withdrawal::begin`] may withdraw: one that holds
+    /// nothing and that nothing holds, refused as held otherwise.
+    fn idle(state: &EntryState<A>) -> Result<(), RegistrationRefusal> {
+        if state.held_by_anything() {
+            return Err(RegistrationRefusal::Serving(ServingRefusal::Held));
+        }
+        Ok(())
+    }
+
+    /// Admit an entry [`Withdrawal::begin_unparked`] may withdraw: one
+    /// [`Withdrawal::idle`] admits and that stands on no park, refused in the
+    /// park's own terms otherwise. The held refusal comes first.
+    fn idle_and_unparked(state: &EntryState<A>) -> Result<(), RegistrationRefusal> {
+        Self::idle(state)?;
+        state
+            .standing_park()
+            .map_or(Ok(()), |park| Err(RegistrationRefusal::Parked(park)))
+    }
+
+    /// Withdraw `entry` where `admitted` refuses nothing in the same gate
+    /// hold. Every `admitted` refuses an entry something holds.
     fn begin_where(
         entry: &'a Entry<A>,
         admitted: impl FnOnce(&EntryState<A>) -> Result<(), RegistrationRefusal>,
     ) -> Result<Self, RegistrationRefusal> {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
-        if state.held_by_anything() {
-            return Err(RegistrationRefusal::Serving(ServingRefusal::Held));
-        }
         admitted(&state)?;
         state.service = Service::Withdrawn;
         Ok(Self {
@@ -3543,7 +3555,14 @@ impl<O: EntryOps> Host<O> {
     /// entry publishes.
     ///
     /// Everything runs under the registration lock, and in this order. A name
-    /// the set does not serve is unknown. The edit is made to the registration
+    /// the set does not serve is unknown. **An entry something holds is
+    /// refused as held, and one on a park in the park's own terms, before
+    /// anything about the edit is weighed**: before its root is checked and
+    /// before whether it changes anything, by the one admission
+    /// [`Withdrawal::begin_unparked`] takes. That early read only orders the
+    /// answers; the hold that withdraws the entry, or that answers an edit
+    /// changing nothing, admits it again and is the authority. The edit is
+    /// made to the registration
     /// the set serves, not to what the registry file records under the name:
     /// the set is authoritative, and a hand edit of the file takes effect at
     /// the next start. A root it sets is taken at its canonical spelling, and
@@ -3553,8 +3572,10 @@ impl<O: EntryOps> Host<O> {
     /// than the recorded root is a move**, even where the recorded spelling
     /// reaches the same directory: the store does not record the directory it
     /// was derived from, so nothing proves the old spelling reached the
-    /// directory it reaches now. An edit that leaves every field as it stands
-    /// answers the registration as it stands, and writes nothing.
+    /// directory it reaches now. An edit that leaves every field as it stands,
+    /// on an entry the admission finds idle and unparked in the same hold,
+    /// answers the registration as it stands, and writes and withdraws
+    /// nothing.
     ///
     /// **Then the change takes the path an unregistration takes.** The entry
     /// is withdrawn from service under its own gate, in the hold that finds
@@ -3586,6 +3607,14 @@ impl<O: EntryOps> Host<O> {
         let Some(entry) = shared.entries.get(name) else {
             return Err(RegistrationRefusal::UnknownVault);
         };
+        // The entry's standing is answered before anything about the edit, so
+        // a held or parked entry is refused in its own terms whether or not
+        // the edit changes anything and whatever its root would be refused
+        // for. This read only orders the answers: the entry may change once
+        // the gate is let go, so the withdrawal below — or, for an edit that
+        // changes nothing, the hold that reads what the entry publishes —
+        // decides again in its own hold, and that decision is the authority.
+        Withdrawal::idle_and_unparked(&entry.gate.lock().expect("entry gate poisoned"))?;
         let current = &entry.registration;
         let mut amended = current.clone();
         if let Some(root) = edit.root.value() {
@@ -3601,12 +3630,9 @@ impl<O: EntryOps> Host<O> {
         amended.schema_source = edit.schema_source.applied_to(amended.schema_source.take());
         amended.poll_backend = edit.poll_backend.applied_to(amended.poll_backend);
         if amended == *current {
-            let published = entry
-                .gate
-                .lock()
-                .expect("entry gate poisoned")
-                .published_demand();
-            return Ok((amended, published));
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            Withdrawal::idle_and_unparked(&state)?;
+            return Ok((amended, state.published_demand()));
         }
         let withdrawal = Withdrawal::begin_unparked(&entry)?;
         let standing = shared.entries.registrations();
@@ -21996,6 +22022,86 @@ mod tests {
             assert!(ops.amendments.lock().unwrap().is_empty());
             assert_eq!(recorded(&ops, &name), Some(standing.clone()));
             assert_eq!(serving(&host, &name), standing);
+        }
+
+        /// A host whose one vault stands on a maintainer-contended park that
+        /// nothing holds, with the registration it serves.
+        fn parked_host(ops: &Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName, Registration) {
+            ops.contend_attach.store(true, Ordering::SeqCst);
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(ops));
+            record_startup(&host, ops, &name);
+            let standing = serving(&host, &name);
+            let contended = Demand::MaintainerContended(MaintainerIdentity::unknown());
+            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            wait_for_park(&host, &name, contended);
+            wait_for_rest(&host, &name);
+            (host, name, standing)
+        }
+
+        /// An edit that changes nothing is still refused in the park's own
+        /// code: the entry's standing is answered before whether the edit
+        /// changes anything.
+        #[test]
+        fn a_keep_only_edit_of_a_parked_entry_is_refused_in_the_parks_code() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name, standing) = parked_host(&ops);
+
+            let refusal = set(&host, SetParams::new(name.clone()))
+                .expect_err("a keep-only edit of a parked entry was answered");
+
+            assert_eq!(
+                refusal.detail(),
+                &ErrorDetail::maintainer_contended(MaintainerIdentity::unknown())
+            );
+            assert!(ops.amendments.lock().unwrap().is_empty());
+            assert_eq!(serving(&host, &name), standing);
+        }
+
+        /// A root move on a parked entry is refused in the park's own code,
+        /// even to a root the pre-checks would refuse: the entry's standing is
+        /// answered before the root is checked.
+        #[test]
+        fn a_root_move_of_a_parked_entry_is_refused_in_the_parks_code_before_the_root() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("set-parked-missing-root");
+            let (host, name, standing) = parked_host(&ops);
+
+            let refusal = set(
+                &host,
+                SetParams::new(name.clone()).with_root(Replace::set(
+                    VaultRoot::new(scratch.root().join("missing")).unwrap(),
+                )),
+            )
+            .expect_err("a parked entry was moved");
+
+            assert_eq!(
+                refusal.detail(),
+                &ErrorDetail::maintainer_contended(MaintainerIdentity::unknown())
+            );
+            assert!(ops.amendments.lock().unwrap().is_empty());
+            assert_eq!(serving(&host, &name), standing);
+        }
+
+        /// An edit to the values standing on an entry something holds is
+        /// refused as held, as any other edit of it is.
+        #[test]
+        fn a_same_value_edit_of_a_held_entry_is_refused_as_held() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            assert_eq!(serving(&host, &name).poll_backend, None);
+            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_for_state(&host, &name, TrustState::Ready);
+
+            let refusal = set(
+                &host,
+                SetParams::new(name.clone()).with_poll_backend(Change::clear()),
+            )
+            .expect_err("a same-value edit of a held entry was answered");
+
+            assert_eq!(refusal.detail(), &ErrorDetail::entry_held(name.clone()));
+            assert!(ops.amendments.lock().unwrap().is_empty());
+            assert_eq!(host.state(&name), answered(TrustState::Ready));
+            drop(lease);
         }
 
         /// A registry file that refuses the write leaves the registration that
