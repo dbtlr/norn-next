@@ -1275,7 +1275,7 @@
       "name": "comparison-semantics-are-one-rule",
       "kind": "defect-class",
       "venue": 3,
-      "property": "One comparison semantics governs every engine: SQL-bound and in-process comparison agree on every case, including numeric-versus-text equality, pinned by explicit tests. A request's value is literal text, so bracket text written inside it compares as that text; a membership part's values are the request's own typed, bracketed shape, and meet a bare and a sequence-held stored value alike; and date filters are chronologically correct regardless of offset — or the lexical contract is explicit and signalled on mixed-offset input.",
+      "property": "One comparison semantics governs every engine: SQL-bound and in-process comparison agree on every case, including numeric-versus-text equality, pinned by explicit tests. Matching is symmetric in the shape of the stored value: an equality, an inequality, a range bound and a membership part each meet a value stored bare and a value held at any position inside a sequence alike. A request's value is literal text read as the field's declared type: bracket text in it compares as that text on a text field and is refused on a field whose declared type cannot read it, and a membership part's values are a list on the wire, each item literal text. Date filters are chronologically correct regardless of offset — or the lexical contract is explicit and signalled on mixed-offset input.",
       "sources": ["NRN-110", "NRN-28", "NRN-427", "norn-legacy annoyances log", "norn-legacy engineering learnings"],
       "binding": {
         "status": "bound",
@@ -1287,7 +1287,7 @@
           "crates/norn-host/src/derivation.rs::a_find_is_advised_exactly_where_the_in_process_comparison_signals",
           "crates/norn-store/tests/store/find_advisory.rs::a_date_predicate_comparing_across_spellings_is_advised",
           "crates/norn-host/src/derivation.rs::a_value_written_bare_and_inside_a_sequence_meet_one_part_alike",
-          "crates/norn-host/src/derivation.rs::a_value_requested_in_brackets_meets_the_bare_stored_value"
+          "crates/norn-host/src/derivation.rs::bracket_text_in_a_request_value_is_literal_and_read_as_its_declared_type"
         ]
       }
     },
