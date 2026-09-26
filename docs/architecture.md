@@ -1048,21 +1048,24 @@ and growing with the target's backlinks; a payload bar holds that
 no statement a link's resolution or a links-to part runs reads a document's body or its
 frontmatter.
 
-The count shape carries no memory or timing bar yet, and neither do the
-validate, describe and search builders. The
-warm-zero counter bar gates per PR, and the find shape carries four bars of its own. In the
-counter lane, a find through a live read hold reads nothing through `norn-fs` on its own
-thread and lands nothing in the host's account of its jobs, at a pinned number of statements
-a page; and an unfiltered find, paged newest first, counts the same work at 300 documents as
-at 2000. Every other query shape carries the same two counter bars, asked through its host
-verb in the bounded form its contract makes flat: a count and a validate summary narrowed by
-a path part, a get resolving a bare stem, a get's page of a document's links, a find of one
-target's backlinks, a lexical search for a word four documents carry, and a page of two
-observed fields. Each reads above zero on its statements and its rows or steps, and each
-pair has a control that grows with the vault and fails it. In the memory lane, the two `read-` bars hold a process that attached the
-~2k-document profile and read it through a live hold to an absolute peak ceiling, and to a
-ratio over the peak of the same attach without the read. No query shape carries a timing
-bar.
+The count shape carries no memory or timing bar yet, and neither do the validate, describe
+and search builders. The warm-zero counter bar gates per PR, and the find shape carries four
+bars of its own. In the counter lane, a find through a live read hold reads nothing through
+`norn-fs` on its own thread and lands nothing in the host's account of its jobs, at a pinned
+number of statements a page; and an unfiltered find, paged newest first, counts the same
+work at 300 documents as at 2000. Count-by-field, suffix / stem resolve, links-to,
+findings-for-path and full-text match carry the same two counter bars, and so do a get's
+page of a document's links and a describe page, each asked through its host verb in the
+bounded form its contract makes flat and at a pinned number of statements. A shape's work
+counts the virtual-machine and full-scan steps of every statement run on its snapshot, and
+holds them equal across the pair. The pages the snapshot's connection touched see the
+reading a full-text match does inside its index, which the steps do not; a seek reads a page
+per level of the tree it descends and the trees deepen with the vault, so the pages are held
+to growing by a smaller ratio than the vault's documents rather than to equality. Each pair
+has a control that grows with the vault and reads more at the larger scale. In the memory
+lane, the two `read-` bars hold a process that attached the ~2k-document profile and read it
+through a live hold to an absolute peak ceiling, and to a ratio over the peak of the same
+attach without the read. No query shape carries a timing bar.
 
 ### 4. One obvious path
 

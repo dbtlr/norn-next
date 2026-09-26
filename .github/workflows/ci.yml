@@ -185,15 +185,19 @@ jobs:
   # a slowdown. A find run through a live read hold reads nothing through
   # norn-fs on its own thread, lands nothing in the host's account of its jobs,
   # and runs a pinned number of statements a page. So does every other query
-  # shape, each asked through its host verb: a count, a get resolving a bare
-  # stem, a get's page of a document's links, a find of one target's
-  # backlinks, a validate, a lexical search and a describe. And one bounded
-  # write, one bounded find, and each of those shapes in the bounded form its
-  # verb's contract makes flat, cost the same at 300 documents as at 2000 — the
-  # sharper bar, because a ceiling passes anything under it and a pair fails
-  # the moment two scales stop moving together. Each read pair runs beside a
-  # control that grows with the vault and must fail it. All three are counts:
-  # a counter says the same thing on a loaded runner, which a clock does not.
+  # shape, each asked through its host verb at a pinned number of statements:
+  # count-by-field, suffix / stem resolve, links-to, findings-for-path and
+  # full-text match, and a get's page of a document's links and a describe.
+  # And one bounded write, one bounded find, and each of those shapes in the
+  # bounded form its verb's contract makes flat, cost the same at 300 documents
+  # as at 2000 — the sharper bar, because a ceiling passes anything under it
+  # and a pair fails the moment two scales stop moving together. A shape's cost
+  # counts the steps of every statement run on its snapshot; the pages its
+  # connection touched grow with the depth of the store's trees, so they are
+  # held to growing more slowly than the vault rather than to equality. Each
+  # read pair runs beside a control that grows with the vault and must read
+  # more at the larger scale. All three are counts: a counter says the same
+  # thing on a loaded runner, which a clock does not.
   #
   # The plan bars live in the store's own suites, beside the read builders that
   # emit the SQL they judge. An `EXPLAIN` assertion is worth something only
@@ -201,8 +205,8 @@ jobs:
   # tests a string nobody executes.
   #
   # The host's account of its jobs is read only behind `induced-failure`, so
-  # this step names the feature. A build without it refuses the case that reads
-  # the account, and the lane table's own test holds this step to every feature
+  # this step names the feature. A build without it refuses the two cases that
+  # read the account, and the lane table's own test holds this step to every feature
   # the suite puts a case or a helper behind.
   #
   # The cases live in this job alone, `#[ignore]`d with a `counter-lane case:`
