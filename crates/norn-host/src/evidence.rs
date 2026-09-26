@@ -33,6 +33,12 @@
 //! thread, the guard empties that tally as it is made, and the entry point
 //! folds in what stands when the job leaves.
 //!
+//! The reader mint a leg's publication runs is the one cost of a leg that no
+//! window scopes. The lifecycle mints the handle over the coverage a leg hands
+//! back in the gate hold that publishes the leg's outcome, after the entry
+//! point has returned, and what the mint ran is added to this account where
+//! the mint returns.
+//!
 //! [window]: norn_fs::reads::ReadWindow
 //!
 //! # The read account is beside it, and is not the same subject
@@ -70,6 +76,7 @@ pub struct JobEvidence {
     rebuilds_run: AtomicU64,
     watcher_polls: AtomicU64,
     watcher_rescans_reported: AtomicU64,
+    mint_statements_under_the_gate: AtomicU64,
 }
 
 /// One reading of a host's account.
@@ -136,6 +143,23 @@ pub struct EvidenceReading {
     /// overflow itself, which is otherwise readable only as a trust state that
     /// stands for the length of the reconcile clearing it.
     pub watcher_rescans_reported: u64,
+    /// Statements the job legs' reader mints ran against a database while the
+    /// entry gate was held.
+    ///
+    /// A leg that installs, swaps or parks coverage mints the handle that
+    /// coverage serves reads from in the gate hold that publishes it, and the
+    /// mint reads the database: the journal-mode read of the read-only open,
+    /// and the store-epoch read that binds the connection to its file. Every
+    /// other holder of that entry waits behind those statements, so this is
+    /// what the legs' publications held the gate for. A read's own mint is not
+    /// here: it is the read account's, and neither account moves for the
+    /// other's work.
+    ///
+    /// **A mint that refused counts what it ran before it refused**, because
+    /// the gate was held for those statements too. A leg that minted nothing,
+    /// because it installed no coverage or parked coverage over a handle that
+    /// was already standing, adds nothing.
+    pub mint_statements_under_the_gate: u64,
 }
 
 #[cfg(any(feature = "induced-failure", test))]
@@ -180,6 +204,9 @@ impl EvidenceReading {
             watcher_rescans_reported: self
                 .watcher_rescans_reported
                 .saturating_sub(earlier.watcher_rescans_reported),
+            mint_statements_under_the_gate: self
+                .mint_statements_under_the_gate
+                .saturating_sub(earlier.mint_statements_under_the_gate),
         }
     }
 }
@@ -203,6 +230,7 @@ impl JobEvidence {
             rebuilds_run: get(&self.rebuilds_run),
             watcher_polls: get(&self.watcher_polls),
             watcher_rescans_reported: get(&self.watcher_rescans_reported),
+            mint_statements_under_the_gate: get(&self.mint_statements_under_the_gate),
         }
     }
 
@@ -221,6 +249,20 @@ impl JobEvidence {
     pub(crate) fn count_watcher_rescan(&self) {
         self.watcher_rescans_reported
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record what one leg's reader mint ran under the entry gate.
+    ///
+    /// **This is added where the mint returns, and no window folds it.** The
+    /// mint runs in the gate hold that publishes a leg's outcome, after the
+    /// ops' entry point has returned and its window has been folded, so a
+    /// thread tally written there would be emptied by the next window's
+    /// opening rather than reach this account. The caller holds the count the
+    /// mint answered with, so it is added directly, the way a rung and a
+    /// watcher poll are counted at the act.
+    pub(crate) fn count_mint_under_the_gate(&self, statements: u64) {
+        self.mint_statements_under_the_gate
+            .fetch_add(statements, Ordering::Relaxed);
     }
 
     /// Add what one job's window reported, and what that job's changesets did,
@@ -441,6 +483,18 @@ mod tests {
             ),
             (1, 2, 3, 1)
         );
+    }
+
+    /// A leg's mint reaches the account where it is counted, with no window
+    /// standing, and the fold of a later window neither carries it again nor
+    /// empties it.
+    #[test]
+    fn a_legs_mint_reaches_the_account_where_it_is_counted() {
+        let evidence = Arc::new(JobEvidence::default());
+        evidence.count_mint_under_the_gate(2);
+        assert_eq!(evidence.read().mint_statements_under_the_gate, 2);
+        drop(evidence.attributing());
+        assert_eq!(evidence.read().mint_statements_under_the_gate, 2);
     }
 }
 
