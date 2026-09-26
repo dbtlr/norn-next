@@ -29,10 +29,10 @@
 //! runs at read time over syntactic link facts, so the health a row carries
 //! is a fact about the vault at the instant of the read (the link-health
 //! findings a validate reads are a separate, stored reading, per ADR 0027):
-//! one target is healthy, none is broken, and more than one is ambiguous. **A link is judged by resolving it
-//! first** ([`LinkHealth::of_link`]): a link addressed elsewhere — a protocol
-//! other than `vault`, or a Markdown target opening with a URI scheme — is not
-//! judged and names no document, and one that resolves to no document is not
+//! one target is healthy, none is broken, and more than one is ambiguous.
+//! **A link is judged by resolving it first** ([`LinkHealth::of_link`]): a
+//! link addressed elsewhere — a protocol other than `vault`, or a Markdown
+//! target opening with a URI scheme — is not judged and names no document, and one that resolves to no document is not
 //! judged where its target names an attachment. How a target reaches
 //! documents is [`LinkAddress`], the one addressing selector. What the
 //! target resolved to crosses as a [`CandidateHead`] — the same bounded head
