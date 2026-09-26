@@ -15,12 +15,17 @@
 //! A glob matches under the order the snapshot reads, the store's recorded
 //! path order: bytewise where the root tells spellings apart, and with ASCII
 //! case folded where it folds them ([`StoredPathOrder::glob_case`]). A find's
-//! and a count's range follow: a bytewise range of the path as written on
-//! `documents_path` where the root tells spellings apart, and where it folds,
-//! a `NOCASE` range of the literal prefix with ASCII case folded on
-//! `documents_path_nocase`. A validate's range is the folded one on every
-//! root, because its findings answer in the folded order the findings indexes
-//! hold; the glob still decides each path under the root's fold.
+//! and a count's range follow ([`path_range`]): a bytewise range of the path
+//! as written on `documents_path` where the root tells spellings apart, and
+//! where it folds, a `NOCASE` range of the literal prefix with ASCII case
+//! folded on `documents_path_nocase`. A validate's range is the answer order's
+//! on every root ([`super::answer_order::answer_range`]), because its findings
+//! answer in the folded order the findings indexes hold; the glob still
+//! decides each path under the root's fold.
+//!
+//! A glob's work follows its literal prefix's range. A glob with no literal
+//! prefix, such as `**/*.MD`, ranges over every path, and the glob function
+//! reads each one on either root.
 
 use norn_db::rusqlite::functions::FunctionFlags;
 use norn_db::rusqlite::types::{Value, ValueRef};
@@ -82,26 +87,26 @@ pub(crate) fn register_functions(connection: &Connection) -> Result<(), StoreErr
 /// not start with it, exclusive — compared bytewise where `order` tells
 /// spellings apart, and under `NOCASE` where it folds ASCII case.
 ///
-/// The prefix is the text before the first wildcard. Where that wildcard opens
-/// a `**` segment, the separator before it is left out of the prefix too,
-/// because `**` matches the run of no segments: `notes/**` matches `notes`
-/// itself, which does not start with `notes/`.
-///
 /// Where `order` folds, the prefix is folded before it is stepped: `NOCASE`
 /// compares the folded spellings, so every path the folded glob matches folds
 /// to a text starting with the folded prefix, and the successor of that folded
-/// text bounds them all. A successor that steps onto an upper-case letter —
-/// `@` onto `A` — folds back to its lower case under `NOCASE`, which widens
-/// the range and never narrows it; the glob function is what decides a path.
-///
-/// The upper bound is the prefix's [`prefix_successor`]. A prefix with no
-/// successor — empty, or made only of the last character there is — is bounded
-/// above by an empty blob, which SQLite orders after every text under either
-/// collation: the range is then every path from the lower bound on.
+/// text bounds them all.
 pub(crate) fn path_range(pattern: &Pattern, order: StoredPathOrder) -> (String, Value) {
+    let prefix = literal_prefix(pattern);
+    prefix_range(match order {
+        StoredPathOrder::Sensitive => prefix.to_string(),
+        StoredPathOrder::AsciiCaseInsensitive => fold_ascii_case(prefix),
+    })
+}
+
+/// The text every path `pattern` matches starts with: the text before the
+/// first wildcard. Where that wildcard opens a `**` segment, the separator
+/// before it is left out too, because `**` matches the run of no segments:
+/// `notes/**` matches `notes` itself, which does not start with `notes/`.
+pub(crate) fn literal_prefix(pattern: &Pattern) -> &str {
     let source = pattern.as_str();
     let first_wildcard = source.find(['*', '?']).unwrap_or(source.len());
-    let mut prefix = &source[..first_wildcard];
+    let prefix = &source[..first_wildcard];
     let opens_any_depth = source[first_wildcard..].starts_with("**")
         && (prefix.is_empty() || prefix.ends_with('/'))
         && source[first_wildcard + 2..]
@@ -109,12 +114,22 @@ pub(crate) fn path_range(pattern: &Pattern, order: StoredPathOrder) -> (String, 
             .next()
             .is_none_or(|next| next == '/');
     if opens_any_depth {
-        prefix = prefix.strip_suffix('/').unwrap_or(prefix);
+        prefix.strip_suffix('/').unwrap_or(prefix)
+    } else {
+        prefix
     }
-    let prefix = match order {
-        StoredPathOrder::Sensitive => prefix.to_string(),
-        StoredPathOrder::AsciiCaseInsensitive => fold_ascii_case(prefix),
-    };
+}
+
+/// The range of texts starting with `prefix`: from `prefix`, inclusive, to its
+/// [`prefix_successor`], exclusive. A prefix with no successor — empty, or
+/// made only of the last character there is — is bounded above by an empty
+/// blob, which SQLite orders after every text under either collation: the
+/// range is then every path from the lower bound on.
+///
+/// Compared under `NOCASE`, a successor that steps onto an upper-case letter —
+/// `@` onto `A` — folds back to its lower case, which widens the range and
+/// never narrows it; the glob function is what decides a path.
+pub(crate) fn prefix_range(prefix: String) -> (String, Value) {
     let upper = prefix_successor(&prefix).map_or(Value::Blob(Vec::new()), Value::Text);
     (prefix, upper)
 }

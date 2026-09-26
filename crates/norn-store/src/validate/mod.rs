@@ -365,7 +365,7 @@ impl Snapshot {
             .conjunction
             .filters
             .iter()
-            .map(|filter| filter.shape)
+            .map(|filter| filter.shape())
             .collect();
         let page = self.read_page(
             sections,
@@ -420,7 +420,7 @@ impl Snapshot {
                 .conjunction
                 .filters
                 .iter()
-                .map(|filter| filter.shape)
+                .map(|filter| filter.shape())
                 .collect(),
         );
         let read = self

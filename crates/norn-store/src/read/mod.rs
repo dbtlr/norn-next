@@ -51,10 +51,9 @@ use crate::store::Snapshot;
 use crate::validate::ValidateStatement;
 
 pub(crate) use advisory::{Compared, DateComparison};
-pub(crate) use answer_order::{answer_after, answer_ordering, answer_place};
+pub(crate) use answer_order::{AnswerSeek, Term, answer_ordering, answer_place, answer_range};
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
-pub(crate) use filter::glob_test;
-pub(crate) use filter::{Binder, Filter, PathGlob};
+pub(crate) use filter::{Binder, Filter, PathPart};
 pub use filter::{READ_FILTERS, ReadFilter};
 pub(crate) use finding::{FINDING_ROW_COLUMNS, FindingBase, finding_base};
 pub(crate) use glob::register_functions;

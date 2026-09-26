@@ -13,7 +13,8 @@ use norn_db::rusqlite::types::Value;
 use norn_wire::Severity;
 
 use crate::read::{
-    Binder, FINDING_ROW_COLUMNS, Filter, PathGlob, answer_ordering, answer_place, glob_test,
+    AnswerSeek, Binder, FINDING_ROW_COLUMNS, Filter, PathPart, Term, answer_ordering, answer_place,
+    answer_range,
 };
 
 /// Every statement shape the validate builder runs, named.
@@ -135,12 +136,12 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     let (paths, documents): (Vec<&Filter>, Vec<&Filter>) = findings
         .filters
         .iter()
-        .partition(|filter| filter.path_glob().is_some());
-    let globs: Vec<PathGlob<'_>> = paths
+        .partition(|filter| filter.path_part().is_some());
+    let parts: Vec<&PathPart> = paths
         .iter()
-        .filter_map(|filter| filter.path_glob())
+        .filter_map(|filter| filter.path_part())
         .collect();
-    let driven = documents.iter().any(|filter| !filter.shape.excludes());
+    let driven = documents.iter().any(|filter| !filter.shape().excludes());
     let on_a_document = findings.on_a_document || !documents.is_empty();
 
     let mut conditions = vec![format!(
@@ -174,13 +175,14 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     }
 
     // The greatest lower bound and the least upper bound of the path parts'
-    // folded ranges, and on a page, the section's position. A lower bound is
-    // a place in the answer's path order — the folded path, the path, then an
-    // id — and a text orders below the empty blob a range with no upper bound
-    // is bounded by. Each bound picked is one some part's own range states, so
-    // the range holds every path all the parts admit; a part's range opens at
-    // the least place its folded prefix begins, before every path folding to
-    // it whatever its bytes, which the empty path and id 0 name.
+    // ranges in the answer order, and on a page, the section's position. A
+    // lower bound is a place in the answer order — the folded path, the path,
+    // then an id — and a text orders below the empty blob a range with no
+    // upper bound is bounded by. Each bound picked is one some part's own
+    // range states, so the range holds every path all the parts admit; a
+    // part's range opens at the least place its folded prefix begins, before
+    // every path folding to it whatever its bytes, which the empty path and
+    // id 0 name.
     let mut lower: (String, String, i64) = match findings.after {
         Some((path, id)) => {
             let (folded, path) = answer_place(path);
@@ -189,8 +191,8 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
         None => (String::new(), String::new(), 0),
     };
     let mut upper: Option<Value> = None;
-    for glob in &globs {
-        let (from, to) = glob.folded_range();
+    for part in &parts {
+        let (from, to) = answer_range(&part.pattern);
         let opening = (from, String::new(), 0);
         if opening > lower {
             lower = opening;
@@ -201,41 +203,46 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
             (_, to) => to,
         });
     }
-    // Where matched documents drive the statement, each one's findings are
-    // sought at its path, and the folded range is a test of what that seek
-    // reaches rather than a second seek to weigh against it.
-    let ranged = if driven { "+f.path" } else { "f.path" };
     let (folded, path, id) = lower;
     match findings.statement {
         // The position and the range's lower bound are one place in the
-        // answer's path order, compared key by key: the folded path first,
-        // which is what an index holding that order seeks from.
+        // answer order, which the kind's index is sought past.
         ValidateStatement::KindPage => {
             let (folded, path, id) = (
                 binder.bind(Value::Text(folded)),
                 binder.bind(Value::Text(path)),
                 binder.bind(Value::Integer(id)),
             );
-            conditions.push(format!(
-                "({ranged}, f.path, f.id) > ({folded} COLLATE NOCASE, {path}, {id})"
-            ));
+            conditions.push(
+                AnswerSeek {
+                    reach: "",
+                    comparison: ">",
+                    lead: None,
+                    path: "f.path",
+                    folded: &folded,
+                    bytewise: &path,
+                    id: Some(Term {
+                        column: "f.id",
+                        bound: &id,
+                    }),
+                }
+                .spelled(),
+            );
         }
         ValidateStatement::Summary => {
-            if !globs.is_empty() {
+            if !parts.is_empty() {
                 conditions.push(format!(
-                    "{ranged} >= {} COLLATE NOCASE",
+                    "f.path >= {} COLLATE NOCASE",
                     binder.bind(Value::Text(folded))
                 ));
             }
         }
     }
     if let Some(upper) = upper {
-        conditions.push(format!("{ranged} < {} COLLATE NOCASE", binder.bind(upper)));
+        conditions.push(format!("f.path < {} COLLATE NOCASE", binder.bind(upper)));
     }
-    for glob in &globs {
-        let pattern = binder.bind(glob.pattern.clone());
-        let recorded = binder.bind(glob.recorded_order.clone());
-        conditions.push(glob_test(&pattern, "f.path", &recorded));
+    for part in &parts {
+        conditions.push(part.glob_test("f.path", &mut binder));
     }
 
     let tests: Vec<String> = documents

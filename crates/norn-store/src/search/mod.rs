@@ -476,7 +476,7 @@ impl Snapshot {
         lookups: &mut Lookups,
         work: &mut SearchWork,
     ) -> Result<(Vec<RankedKey>, Option<RankedKey>), StoreError> {
-        let shapes: Vec<ReadFilter> = page.filters.iter().map(|filter| filter.shape).collect();
+        let shapes: Vec<ReadFilter> = page.filters.iter().map(|filter| filter.shape()).collect();
         let page = self.read_page(
             [SearchStatement::LexicalPage],
             page.rows,

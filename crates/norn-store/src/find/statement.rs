@@ -14,7 +14,7 @@ use crate::facts::StoredPathOrder;
 use crate::json::{FrontmatterValue, canonical_json};
 use crate::path::SuffixKey;
 use crate::read::{
-    Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter, answer_after, answer_ordering, key_walk,
+    AnswerSeek, Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter, Term, answer_ordering, key_walk,
 };
 use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 
@@ -59,7 +59,7 @@ pub enum FindStatement {
     /// under and no document, under the root's path order: one seek of
     /// `documents_path` at the path, and one of the range beneath it, where
     /// the root tells spellings apart, and the same two of
-    /// `documents_path_nocase` at the folded path where it folds ASCII case.
+    /// `documents_path_nocase` under `NOCASE` where it folds ASCII case.
     BareDirectory,
     /// Whether a date key holds a typed date stating no offset, and whether it
     /// holds one stating an offset: one seek of `document_fields_offset` at
@@ -301,7 +301,9 @@ pub(crate) struct Section<'a> {
 /// outside a field sort's valued section — in the order the page runs.
 ///
 /// **Where a section resumes is its lower bound**, not a test applied to the
-/// rows it read: an unset position coalesces to a bound below every row
+/// rows it read: one row-value seek past its place in the answer order
+/// ([`AnswerSeek`]), so a page among paths that fold together starts exactly
+/// past its position. An unset position coalesces to a bound below every row
 /// ascending — the empty text — and above every row descending — an empty
 /// blob, which SQLite orders after every text. So the text does not branch on
 /// whether the section resumes, and the plan is the same either way.
@@ -321,7 +323,7 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
     let order_seek = if section
         .filters
         .iter()
-        .any(|filter| !filter.shape.excludes())
+        .any(|filter| !filter.shape().excludes())
     {
         "+"
     } else {
@@ -350,11 +352,12 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
         FindStatement::PathPage(direction) => {
             let after = binder.bind(text(section.start.path));
             let (comparison, beyond, descending) = spelled(direction);
+            let place = format!("COALESCE({after}, {beyond})");
             (
                 format!(
                     "SELECT d.id, d.path, NULL FROM documents AS d
                      WHERE {}",
-                    answer_after(order_seek, "d.path", comparison, &after, beyond)
+                    path_seek(order_seek, comparison, &place)
                 ),
                 answer_ordering("d.path", descending),
                 "d.id",
@@ -366,14 +369,29 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             let after = binder.bind(text(section.start.path));
             let (comparison, beyond, descending) = spelled(direction);
             let (column, marker) = (order.column(), order.marker());
+            let (valued, place, lead) = (
+                format!("COALESCE({sort}, {beyond})"),
+                format!("COALESCE({after}, {beyond})"),
+                format!("f.{column}"),
+            );
+            let seek = AnswerSeek {
+                reach: "",
+                comparison,
+                lead: Some(Term {
+                    column: &lead,
+                    bound: &valued,
+                }),
+                path: "f.path",
+                folded: &place,
+                bytewise: &place,
+                id: None,
+            };
             (
                 format!(
                     "SELECT f.document, f.path, f.{column} FROM document_fields AS f
                      WHERE f.key = {key} AND {order_seek}f.{marker} = 1
-                       AND (f.{column}, f.path, f.path) {comparison}
-                           (COALESCE({sort}, {beyond}),
-                            COALESCE({after}, {beyond}) COLLATE NOCASE,
-                            COALESCE({after}, {beyond}))"
+                       AND {}",
+                    seek.spelled()
                 ),
                 format!(
                     "f.{column}{descending}, {}",
@@ -387,13 +405,14 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             let key = binder.bind(text(section.key));
             let (comparison, beyond, descending) = spelled(direction);
             let marker = order.marker();
+            let place = format!("COALESCE({after}, {beyond})");
             (
                 format!(
                     "SELECT d.id, d.path, NULL FROM documents AS d
                      WHERE {}
                        AND NOT EXISTS (SELECT 1 FROM document_fields AS m
                            WHERE m.document = d.id AND m.key = {key} AND m.{marker} = 1)",
-                    answer_after(order_seek, "d.path", comparison, &after, beyond)
+                    path_seek(order_seek, comparison, &place)
                 ),
                 answer_ordering("d.path", descending),
                 "d.id",
@@ -419,6 +438,22 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
                      LIMIT {limit}"
     );
     (sql, binder.into_values())
+}
+
+/// The documents past `place` in the answer order, in the direction
+/// `comparison` names, as a seek of `documents_path_nocase` reads them: a path
+/// is unique, so the folded and the bytewise path name each document's place.
+fn path_seek(reach: &str, comparison: &str, place: &str) -> String {
+    AnswerSeek {
+        reach,
+        comparison,
+        lead: None,
+        path: "d.path",
+        folded: place,
+        bytewise: place,
+        id: None,
+    }
+    .spelled()
 }
 
 /// A direction's comparison, the bound an unset position coalesces to, and the
@@ -477,7 +512,8 @@ pub(crate) fn compose_universe() -> (String, Vec<Value>) {
 /// [`FindStatement::BareDirectory`]: true where no document stands at `path`
 /// and some document stands in `[lower, upper)`, the range of paths beneath
 /// it, each compared under `order`'s collation. Where `order` folds ASCII
-/// case, the path and the bounds are the folded spelling's.
+/// case that collation is `NOCASE`, which folds both sides of each
+/// comparison, so the path and the bounds need not be folded first.
 pub(crate) fn compose_bare_directory(
     path: &str,
     lower: &str,

@@ -383,7 +383,7 @@ impl Snapshot {
         let shapes: Vec<ReadFilter> = conjunction
             .filters
             .iter()
-            .map(|filter| filter.shape)
+            .map(|filter| filter.shape())
             .collect();
         let page = self.read_page(
             sections,

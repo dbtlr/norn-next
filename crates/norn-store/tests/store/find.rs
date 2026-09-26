@@ -576,12 +576,12 @@ const PAGE_BARS: &[(FindStatement, Direction, &str)] = &[
     (
         FindStatement::PathPage(PageDirection::Ascending),
         Direction::Ascending,
-        "(path>?)",
+        "((path,path)>(?,?))",
     ),
     (
         FindStatement::PathPage(PageDirection::Descending),
         Direction::Descending,
-        "(path<?)",
+        "((path,path)<(?,?))",
     ),
 ];
 
@@ -590,7 +590,8 @@ const PAGE_BARS: &[(FindStatement, Direction, &str)] = &[
 /// path folded by ASCII case, the bytewise path breaking the tie — is the order
 /// `documents_path_nocase` holds, so the rows come off the index in page order
 /// and nothing sorts. A continuation is explained with its position bound, and
-/// the position is the search's bound: `(path>?)` ascending, `(path<?)`
+/// the position is the search's bound, the folded path and then the path
+/// bytewise: `((path,path)>(?,?))` ascending, `((path,path)<(?,?))`
 /// descending.
 ///
 /// The fingerprint read a finding filter binds is the snapshot's one point read,
@@ -621,7 +622,7 @@ fn a_path_page_seeks_the_case_insensitive_index_in_either_direction() {
             &seeded.plans(&request()),
             FindStatement::PathPage(PageDirection::Ascending),
         ),
-        "(path>?)",
+        "((path,path)>(?,?))",
     );
 
     let fingerprint = plan_of(
@@ -646,11 +647,17 @@ fn a_path_page_seeks_the_case_insensitive_index_in_either_direction() {
         continued
             .rows()
             .iter()
-            .map(|row| PlanRow::new(row.id, row.parent, row.detail.replace(" (path>?)", "")))
+            .map(|row| {
+                PlanRow::new(
+                    row.id,
+                    row.parent,
+                    row.detail.replace(" ((path,path)>(?,?))", ""),
+                )
+            })
             .collect(),
     );
     failure_of("a continuation that seeks from no bound", || {
-        judge(&unbounded, "(path>?)")
+        judge(&unbounded, "((path,path)>(?,?))")
     });
 
     // Control: the index the order is held by, gone.
@@ -685,7 +692,7 @@ const FIELD_BARS: &[FieldBar] = &[
         direction: Direction::Ascending,
         marker_index: "document_fields_least_raw",
         valued_constraint: "(key=? AND (raw,path,path)>(?,?,?))",
-        missing_constraint: "(path>?)",
+        missing_constraint: "((path,path)>(?,?))",
     },
     FieldBar {
         key: "status",
@@ -694,7 +701,7 @@ const FIELD_BARS: &[FieldBar] = &[
         direction: Direction::Descending,
         marker_index: "document_fields_least_raw",
         valued_constraint: "(key=? AND (raw,path,path)<(?,?,?))",
-        missing_constraint: "(path<?)",
+        missing_constraint: "((path,path)<(?,?))",
     },
     FieldBar {
         key: "count",
@@ -703,7 +710,7 @@ const FIELD_BARS: &[FieldBar] = &[
         direction: Direction::Ascending,
         marker_index: "document_fields_least_typed",
         valued_constraint: "(key=? AND (typed,path,path)>(?,?,?))",
-        missing_constraint: "(path>?)",
+        missing_constraint: "((path,path)>(?,?))",
     },
     FieldBar {
         key: "count",
@@ -712,7 +719,7 @@ const FIELD_BARS: &[FieldBar] = &[
         direction: Direction::Descending,
         marker_index: "document_fields_least_typed",
         valued_constraint: "(key=? AND (typed,path,path)<(?,?,?))",
-        missing_constraint: "(path<?)",
+        missing_constraint: "((path,path)<(?,?))",
     },
 ];
 
@@ -2166,6 +2173,64 @@ fn a_continuation_resumes_exactly_between_paths_that_differ_only_by_case() {
             "other/v1.2.md"
         ]
     );
+}
+
+/// The page `params` continues to after `pages` pages of `limit`, and the VM
+/// steps its page statements took.
+fn paged_vm_steps(seeded: &Seeded, params: &FindParams, limit: u32, pages: usize) -> u64 {
+    let first = params.clone().with_limit(limit);
+    let mut request = first.clone();
+    for _ in 0..pages {
+        let next = seeded
+            .page(&request)
+            .next
+            .expect("the drain reaches the page it is judged at");
+        request = first.clone().with_after(next);
+    }
+    seeded.page(&request).work.page_vm_steps
+}
+
+/// **A continuation seeks exactly past its position among paths that fold
+/// together.** On a root that tells spellings apart, 512 documents spell
+/// `aaaaaaaaa.md` in every case, so the answer's path order holds them as
+/// one run of equal folded paths, broken bytewise. Each carries `status`
+/// `tied` and no `count`. Paged five at a time, the pages ten, fifty and
+/// ninety pages in cost the VM steps the page two pages in costs, whose
+/// position already stands in the run in every order: the path order, the
+/// valued section of `status`, where the run is tied at one value, and the
+/// missing section of `count`, in either direction. A seek that stopped at
+/// the folded path would reread the run's earlier spellings on every page.
+#[test]
+fn a_continuation_among_paths_that_fold_together_costs_its_page() {
+    let mut seeded = Seeded::under("find-folded-run", StoredPathOrder::Sensitive);
+    let declared = declared();
+    let spellings: Vec<_> = (0..512u32)
+        .map(|bits| {
+            let stem: String = (0..9)
+                .map(|at| if bits & (1 << at) == 0 { 'a' } else { 'A' })
+                .collect();
+            document(&format!("{stem}.md"), &format!("hash-{stem}"), "a body\n")
+                .with_frontmatter(Some(map(vec![("status", string("tied"))])), &declared)
+        })
+        .collect();
+    write_documents(&mut seeded.store.begin_request(), &spellings);
+    for direction in [Direction::Ascending, Direction::Descending] {
+        for key in [
+            SortKey::path(),
+            SortKey::field("status"),
+            SortKey::field("count"),
+        ] {
+            let params = sorted(key.clone(), direction);
+            let steps: Vec<u64> = [2, 10, 50, 90]
+                .into_iter()
+                .map(|pages| paged_vm_steps(&seeded, &params, 5, pages))
+                .collect();
+            assert!(
+                steps.iter().all(|at| *at == steps[0]),
+                "pages 2, 10, 50 and 90 of {key:?} {direction:?} cost {steps:?} VM steps"
+            );
+        }
+    }
 }
 
 /// **A heal pages a root that tells spellings apart bytewise, while a find

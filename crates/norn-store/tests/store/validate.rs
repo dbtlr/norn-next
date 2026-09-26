@@ -398,6 +398,64 @@ fn a_path_part_judges_the_findings_path_under_the_roots_order() {
     }
 }
 
+/// **A path part ranges over its glob's folded prefix where the root tells
+/// spellings apart.** Findings at `notes/Z.md` and `notes/Za.md` stand in the
+/// answer's path order, where `notes/z` folds above `notes/[`, so `notes/Z*`
+/// admits both, as a page, drained a finding at a time, and as a summary. A
+/// range bounded bytewise, `["notes/Z", "notes/[")`, holds no path the folded
+/// order reaches.
+#[test]
+fn a_path_part_ranges_over_its_folded_prefix_where_the_root_tells_spellings_apart() {
+    let mut validating_store =
+        Validating::under("validate-sensitive-range", StoredPathOrder::Sensitive);
+    for at in ["notes/Z.md", "notes/Za.md"] {
+        validating_store.stand(&violation(at));
+    }
+    let expected = vec![
+        finding(FindingKind::BodyBytesNotUtf8, "notes/Z.md", None),
+        finding(FindingKind::BodyBytesNotUtf8, "notes/Za.md", None),
+    ];
+    let narrowed = validating().with_predicates([Predicate::path("notes/Z*")]);
+    assert_eq!(names(&validating_store.rows(&narrowed)), expected);
+    assert_eq!(names(&drained(&validating_store, &narrowed, 1)), expected);
+    assert_eq!(
+        tallied(&validating_store.summary(&narrowed)),
+        vec![(FindingKind::BodyBytesNotUtf8, Severity::Error, 2)]
+    );
+}
+
+/// **A document part matches a finding to the document at its exact path.**
+/// On a root that tells spellings apart, `a.md` holds `status: open` and
+/// `A.md` holds `status: closed`, and a finding stands at `A.md`. The two
+/// paths fold together, and the equality admits `a.md` alone, so a page and a
+/// summary narrowed by it answer the findings on `a.md` and none on `A.md`.
+#[test]
+fn a_document_part_matches_a_finding_to_the_document_at_its_exact_path() {
+    let mut validating_store =
+        Validating::under("validate-exact-document", StoredPathOrder::Sensitive);
+    let closed = document("A.md", "hash-A", "a body\n")
+        .with_frontmatter(Some(map(vec![("status", string("closed"))])), &declared());
+    let mut request = validating_store.store.begin_request();
+    write_documents(&mut request, &[closed]);
+    request
+        .record_finding(&violation("A.md"))
+        .expect("recording a finding");
+    let every = every_finding();
+    let expected = vec![
+        every[2].clone(),
+        every[3].clone(),
+        every[4].clone(),
+        every[5].clone(),
+    ];
+    let narrowed = validating().with_predicates([Predicate::equal_to("status", "open")]);
+    let rows = validating_store.rows(&narrowed);
+    assert_eq!(names(&rows), expected);
+    assert_eq!(
+        tallied(&validating_store.summary(&narrowed)),
+        tallies_of(&rows)
+    );
+}
+
 /// **The kinds narrow to the kinds named, and a severity floor to the
 /// severities at it or above**: an error floor admits the two errors, a
 /// warning floor every finding.
@@ -1145,13 +1203,13 @@ fn judge_driven(page: &QueryPlan) {
 /// order: the path folded, then bytewise.
 const KIND_INDEX: &str = "findings_fingerprint_kind_nocase";
 
-/// That index's seek from a page's position: the folded path, then the path
-/// bytewise.
-const KIND_SEEK: &str = "(vault_schema_fingerprint=? AND kind=? AND (path,path)>(?,?))";
+/// That index's seek from a page's position: the folded path, the path
+/// bytewise, then the id.
+const KIND_SEEK: &str = "(vault_schema_fingerprint=? AND kind=? AND (path,path,rowid)>(?,?,?))";
 
 /// The same seek bounded above by a path part's folded range.
 const KIND_RANGE_SEEK: &str =
-    "(vault_schema_fingerprint=? AND kind=? AND (path,path)>(?,?) AND path<?)";
+    "(vault_schema_fingerprint=? AND kind=? AND (path,path,rowid)>(?,?,?) AND path<?)";
 
 /// The index a page admitting one severity seeks its kind's findings through,
 /// and a summary its `(kind, severity)` cells.
@@ -1159,7 +1217,7 @@ const SEVERITY_INDEX: &str = "findings_fingerprint_kind_severity_nocase";
 
 /// That index's seek of one kind at one severity from a page's position.
 const SEVERITY_SEEK: &str =
-    "(vault_schema_fingerprint=? AND kind=? AND severity=? AND (path,path)>(?,?))";
+    "(vault_schema_fingerprint=? AND kind=? AND severity=? AND (path,path,rowid)>(?,?,?))";
 
 /// Both roots, each bar judged on a store over each.
 const ROOTS: [StoredPathOrder; 2] = [
@@ -1170,7 +1228,8 @@ const ROOTS: [StoredPathOrder; 2] = [
 /// **A kind page seeks its kind from the page's position, on either root.**
 /// Each section is one seek of `findings_fingerprint_kind_nocase` at
 /// `(fingerprint, kind)` bounded below by the page's position — the folded
-/// path, then the path bytewise — on a first page and a continuation alike,
+/// path, the path bytewise, then the id — on a first page and a continuation
+/// alike,
 /// and its findings come off the index in `(path COLLATE NOCASE, path, id)`
 /// order, so nothing sorts. **A path part bounds the same seek** by its
 /// glob's folded range, whether its glob matches bytes or folds, and in
@@ -1239,7 +1298,7 @@ fn judge_kind_pages(mut validating_store: Validating) {
         judge_kind_seek(
             &page,
             SEVERITY_INDEX,
-            "(vault_schema_fingerprint=? AND kind=? AND severity=? AND (path,path)>(?,?) AND \
+            "(vault_schema_fingerprint=? AND kind=? AND severity=? AND (path,path,rowid)>(?,?,?) AND \
              path<?)",
         );
     }
@@ -1309,7 +1368,7 @@ fn judge_kind_pages(mut validating_store: Validating) {
 
     // Control: the continuation's position taken out of the seek.
     let unbounded = rewritten(&continued[0], |detail| {
-        detail.replace(" AND (path,path)>(?,?)", "")
+        detail.replace(" AND (path,path,rowid)>(?,?,?)", "")
     });
     failure_of("a continuation that seeks from no position", || {
         judge_kind_seek(&unbounded, KIND_INDEX, KIND_SEEK)
@@ -1434,6 +1493,32 @@ fn a_page_of_a_broad_range_costs_the_page_not_the_range() {
         failure_of(&format!("{KIND_INDEX} dropped under {order:?}"), || {
             judge(&large, &broad[1])
         });
+    }
+}
+
+/// **A continuation among the findings at one path costs its page, on either
+/// root.** 500 undeclared-tag warnings stand at `same.md`, so the answer
+/// order holds them as one run of equal paths, broken by id. Paged five at a
+/// time, a page ten, fifty and ninety pages into the run does the work the
+/// page one page in does. A seek that stopped at the path would reread the
+/// run's earlier findings on every page.
+#[test]
+fn a_continuation_among_the_findings_at_one_path_costs_its_page() {
+    for order in ROOTS {
+        let mut validating_store = Validating::under("validate-one-path-run", order);
+        for at in 0..500 {
+            validating_store.stand(&undeclared("same.md", &format!("tag-{at:03}")));
+        }
+        let tags = validating().with_kinds([FindingKind::UndeclaredTag]);
+        let work: Vec<ValidateWork> = [1, 10, 50, 90]
+            .into_iter()
+            .map(|pages| paged_work(&validating_store, &tags, 5, pages))
+            .collect();
+        assert!(
+            work.iter().all(|at| *at == work[0]),
+            "pages 1, 10, 50 and 90 cost {:?} VM steps under {order:?}: {work:?}",
+            work.iter().map(|at| at.vm_steps).collect::<Vec<u64>>()
+        );
     }
 }
 

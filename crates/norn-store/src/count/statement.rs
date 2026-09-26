@@ -202,7 +202,7 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
     let driven = tallies
         .filters
         .iter()
-        .any(|filter| !filter.shape.excludes());
+        .any(|filter| !filter.shape().excludes());
     let alias = |at: usize| format!("g{}", at + 1);
     let (grouped, lead): (Vec<(usize, Member<'_>)>, Option<Member<'_>>) = match tallies.statement {
         CountStatement::Total => (Vec::new(), None),

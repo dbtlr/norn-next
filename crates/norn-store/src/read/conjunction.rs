@@ -7,19 +7,18 @@ use norn_db::rusqlite::types::Value;
 use norn_wire::{Pattern, Predicate, RequestPart, Unsatisfied};
 
 use super::advisory::{Compared, DateComparison};
-use super::filter::{Filter, ReadFilter};
+use super::filter::{Filter, PathPart, ReadFilter};
 use super::naming::Naming;
 use super::run::StatementFailure;
-use super::{FieldOrder, IN_VALUES_CEILING, Lookups, PageRefusal, Ran, ReadBound, glob, suggest};
+use super::{FieldOrder, IN_VALUES_CEILING, Lookups, PageRefusal, Ran, ReadBound, suggest};
 use crate::error::{self, StoreError};
-use crate::facts::StoredPathOrder;
 use crate::fields::ContentModel;
 use crate::find::{
     FindStatement, compose_bare_directory, compose_known_key, compose_match_probe, compose_universe,
 };
 use crate::json::{FrontmatterValue, canonical_json};
 use crate::link::keys_naming;
-use crate::path::{DirectoryPrefix, DocumentPath, SuffixKey, fold_ascii_case};
+use crate::path::{DirectoryPrefix, DocumentPath, SuffixKey};
 use crate::resolve::TargetClass;
 use crate::store::Snapshot;
 
@@ -233,8 +232,9 @@ impl Snapshot {
         lookups: &mut Lookups,
     ) -> Result<Part, PageRefusal> {
         let text = |value: &str| Value::Text(value.to_string());
-        let filter =
-            |shape: ReadFilter, values: Vec<Value>| Ok(Part::Filter(Filter { shape, values }));
+        let filter = |shape: ReadFilter, values: Vec<Value>| {
+            Ok(Part::Filter(Filter::Bound { shape, values }))
+        };
         // The order a key's values compare under, and a request's value as a
         // place in it: its typed sort key where the key carries a typed order,
         // its text where it does not.
@@ -299,12 +299,10 @@ impl Snapshot {
                     if let Some(part) = self.unmatchable_path(&pattern, lookups)? {
                         return Ok(Part::MatchesNothing(part));
                     }
-                    let order = self.path_order();
-                    let (lower, upper) = glob::path_range(&pattern, order);
-                    filter(
-                        ReadFilter::PathGlob(order),
-                        vec![Value::Text(lower), upper, text(glob), text(order.as_str())],
-                    )
+                    Ok(Part::Filter(Filter::Path(PathPart {
+                        pattern,
+                        order: self.path_order(),
+                    })))
                 }
             },
             Predicate::LinksTo { target, .. } => {
@@ -396,7 +394,11 @@ impl Snapshot {
     /// A glob with no wildcard is asked first whether it is a bare directory —
     /// no document at the path, and some beneath it, each under the snapshot's
     /// path order as the glob itself matches — because that is the report that
-    /// says what the request meant. Then any glob is impossible
+    /// says what the request meant. The probe is spelled with the glob as
+    /// written on either root: where the root folds, it compares under
+    /// `NOCASE`, which folds both sides, and the descendant range's bounds
+    /// differ from the path only by the separator and its successor, which no
+    /// fold moves. Then any glob is impossible
     /// where, read with each wildcard as a letter, it is no document path the
     /// store accepts: every path the glob could match is spelled that way with
     /// other characters in the holes, and the refusals the grammar makes are
@@ -408,18 +410,13 @@ impl Snapshot {
     ) -> Result<Option<Unsatisfied>, StoreError> {
         let source = pattern.as_str();
         let literal = !source.contains(['*', '?']);
-        let order = self.path_order();
-        let spelled = match order {
-            StoredPathOrder::Sensitive => source.to_string(),
-            StoredPathOrder::AsciiCaseInsensitive => fold_ascii_case(source),
-        };
-        if literal && let Ok(directory) = DirectoryPrefix::new(&spelled) {
+        if literal && let Ok(directory) = DirectoryPrefix::new(source) {
             let (lower, upper) = directory.descendant_bounds();
             let bare = self.ask(
                 &mut lookups.ran,
                 Ran::new(
                     FindStatement::BareDirectory,
-                    compose_bare_directory(&spelled, &lower, &upper, order),
+                    compose_bare_directory(source, &lower, &upper, self.path_order()),
                 ),
                 "asking whether a path names a bare directory",
             )?;

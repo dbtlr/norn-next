@@ -371,7 +371,7 @@ struct Compiled<'a> {
 
 impl Compiled<'_> {
     fn filter_shapes(&self) -> Vec<ReadFilter> {
-        self.filters.iter().map(|filter| filter.shape).collect()
+        self.filters.iter().map(|filter| filter.shape()).collect()
     }
 
     /// The field order a field sort runs in, and `None` for a path order.
