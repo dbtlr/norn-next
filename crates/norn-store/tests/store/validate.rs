@@ -245,7 +245,9 @@ fn finding(
     (kind, path.to_string(), target.map(str::to_string))
 }
 
-/// Every finding in the fixture, in `(kind, path, id)` order.
+/// Every finding in the fixture, in `(kind, path, position, id)` order. Each
+/// is about its document, so two at one path share a position and stand by
+/// id.
 fn every_finding() -> Vec<(FindingKind, String, Option<String>)> {
     vec![
         finding(FindingKind::BodyBytesNotUtf8, "broken.md", None),
@@ -269,12 +271,12 @@ fn names(rows: &[FindingRow]) -> Vec<(FindingKind, String, Option<String>)> {
 // ---- what a page answers ----
 
 /// **With no predicates every finding standing under the active fingerprint
-/// answers, in `(kind, path, id)` order**: kinds in the byte order of their
-/// codes, a kind's findings by path, and two findings of one kind at one path
-/// by id.
+/// answers, in `(kind, path, position, id)` order**: kinds in the byte order
+/// of their codes, a kind's findings by path, and two findings of one kind at
+/// one path, both about the document and so at one position, by id.
 /// A finding stands whether or not a document row stands at its path.
 #[test]
-fn with_no_predicates_every_finding_standing_answers_in_kind_path_id_order() {
+fn with_no_predicates_every_finding_standing_answers_in_kind_path_position_id_order() {
     let validating_store = Validating::new("validate-every");
     let rows = validating_store.rows(&validating());
     assert_eq!(names(&rows), every_finding());
@@ -642,7 +644,8 @@ fn a_validate_drain_resumes_between_two_findings_of_one_path() {
 
 /// A finding row's place in a page, computed here rather than read off the
 /// store: its kind's code, its path with ASCII case folded, its path bytewise,
-/// and its id.
+/// and its id. The position between the path and the id is left out, since
+/// every finding it places is about its document.
 fn folded_place(row: &FindingRow) -> (&'static str, String, String, u64) {
     (
         row.kind.as_str(),

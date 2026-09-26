@@ -873,7 +873,9 @@ order on every root — the order a find answers paths in — and a path's findi
 position, the ordinal of the link each is about with a finding about the document ahead of
 every link's; or a summary of one tally per kind and severity, which is one aggregate and is
 not paged. The position is a generated column, the ordinal with `NULL` read as `-1`, because a
-row-value seek that reaches a `NULL` passes no row. Its conjunction is compiled by the same
+row-value seek that reaches a `NULL` passes no row. A link holds at most one finding under one
+fingerprint, a partial unique index refusing a second, so only findings about the document
+share a position at one path. Its conjunction is compiled by the same
 compilation, with a `resolves` part reported as not applicable and a mixed-offset comparison
 advised as a find's is, and one rule decides what a
 part judges: a path part judges the path a finding stands at, so a finding where no document
@@ -999,7 +1001,8 @@ document's headings and its block definition, seeks of their
 seek of its `(document, ordinal)` index from the cursor's ordinal; and the findings' page, a
 seek of `findings_path` at the document's path and the active fingerprint past the cursor's
 position, kind and id, in the `(position, kind, id)` order a find's findings column reads a
-document's findings in. Resolving a target costs its class: the head sorts every document the class's ranges
+document's findings in, under a cursor key of its own, since a validate's finding cursor is a
+place in the validate's kind-first order. Resolving a target costs its class: the head sorts every document the class's ranges
 reach, so the class grows with the vault only where the vault adds documents the target
 names. A work bar reads the SQLite counters of every statement a get ran over two vault
 sizes whose classes did not grow: every shape costs the same at both, an ambiguous target's
