@@ -1305,6 +1305,7 @@
           "crates/norn-store/tests/store/find.rs::a_bare_directory_probe_is_two_seeks_of_the_path_index",
           "crates/norn-store/tests/store/find.rs::a_match_probe_reads_the_full_text_index_through_its_selection",
           "crates/norn-store/tests/store/get.rs::a_get_resolves_its_target_once_and_reads_its_document_once",
+          "crates/norn-store/tests/store/find.rs::a_find_resolves_a_links_to_parts_target_once",
           "crates/norn-store/tests/store/find.rs::hydration_reads_the_page_rows_by_id_and_each_collection_by_its_ordinal_index",
           "crates/norn-store/tests/store/find_rows.rs::a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table",
           "crates/norn-store/tests/store/get.rs::a_whole_record_holds_each_collection_and_the_body_to_the_row_ceiling",
