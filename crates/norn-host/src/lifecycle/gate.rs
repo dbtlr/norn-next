@@ -23,6 +23,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, LockResult, Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
 
 /// The part of a gated state a waiter outside the gate waits on.
 ///
@@ -120,6 +121,34 @@ impl<T> EntryGate<T> {
         self.taken.load(Ordering::Relaxed)
     }
 
+    /// The stance's generation as it stands.
+    ///
+    /// **Read it under the gate**, and pass it to
+    /// [`EntryGate::wait_for_the_stance_to_move`] once the gate is given back:
+    /// every hold that changes the stance moves the generation before it
+    /// gives the gate back, so a reading taken under the gate is behind every
+    /// change made after that hold.
+    pub(super) fn stance_generation(&self) -> u64 {
+        *self.signal.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Wait until the stance's generation moves past `seen`, or until
+    /// `deadline`, and answer whether it moved.
+    ///
+    /// **The caller holds no hold of this gate.** The wait holds the signal
+    /// alone, which no holder of the signal waits on the gate while holding,
+    /// so a holder of the gate that moves the signal is never waiting on this
+    /// wait. A deadline already past answers at once.
+    pub(super) fn wait_for_the_stance_to_move(&self, seen: u64, deadline: Instant) -> bool {
+        let generation = self.signal.lock().unwrap_or_else(PoisonError::into_inner);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (generation, _) = self
+            .moved
+            .wait_timeout_while(generation, remaining, |generation| *generation == seen)
+            .unwrap_or_else(PoisonError::into_inner);
+        *generation != seen
+    }
+
     /// Clear a poisoned gate, for a case that poisoned it on purpose.
     #[cfg(test)]
     pub(super) fn clear_poison(&self) {
@@ -189,6 +218,7 @@ impl<T: Stanced> EntryGate<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// A state whose stance is a number a case sets, and which counts the
     /// holds that ended over it.
@@ -241,19 +271,48 @@ mod tests {
     #[test]
     fn a_hold_moves_the_signal_only_where_it_changed_the_stance() {
         let gate = EntryGate::new(Dial::default());
-        let seen = *gate.signal.lock().expect("a fresh signal");
+        let seen = gate.stance_generation();
         gate.lock().expect("a fresh gate").stance = 0;
         assert_eq!(
-            *gate.signal.lock().expect("a fresh signal"),
+            gate.stance_generation(),
             seen,
             "a hold that left the stance where it was moved the signal"
         );
         gate.lock().expect("a fresh gate").stance = 1;
         assert_eq!(
-            *gate.signal.lock().expect("a fresh signal"),
+            gate.stance_generation(),
             seen.wrapping_add(1),
             "a hold that changed the stance did not move the signal once"
         );
         assert_eq!(gate.lock().expect("a fresh gate").holds_ended, 2);
+    }
+
+    /// **A waiter is woken by the change and not by the deadline.** The
+    /// deadline here is a minute out, so a wait that answers at all inside
+    /// the case was woken; the control is the wait that met no change, which
+    /// answers at its own deadline with nothing moved.
+    #[test]
+    fn a_waiter_outside_the_gate_is_woken_by_a_change_of_stance() {
+        let gate = EntryGate::new(Dial::default());
+        let seen = gate.stance_generation();
+        assert!(
+            !gate.wait_for_the_stance_to_move(seen, Instant::now() + Duration::from_millis(10)),
+            "a wait that met no change answered that the stance moved"
+        );
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                gate.wait_for_the_stance_to_move(seen, Instant::now() + Duration::from_secs(60))
+            });
+            let started = Instant::now();
+            gate.lock().expect("a fresh gate").stance = 1;
+            assert!(
+                waiter.join().expect("the waiter"),
+                "the waiter answered without the move"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the waiter waited out its deadline rather than being woken"
+            );
+        });
     }
 }

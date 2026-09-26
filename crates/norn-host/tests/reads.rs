@@ -1039,6 +1039,71 @@ fn a_get_of_an_unknown_target_refuses_as_unknown() {
     );
 }
 
+/// **A read issued after an edit answers the edit, and no read on the way to
+/// it is refused.** A burst of documents is written into a vault that is
+/// `Ready`, and reads are issued back to back from that instant: while the
+/// watcher has not reported the burst, a read answers the state before it,
+/// which is the only thing the vault can know; once the entry is taking the
+/// burst in, a read waits for it rather than refusing or answering the state
+/// the burst made stale; and a read after that answers the document written
+/// last. A read refused as not ready at any point is the failure.
+#[test]
+fn a_read_issued_after_an_edit_answers_it_and_none_is_refused_meanwhile() {
+    let (_sandbox, vault) = a_vault("host-reads-after-an-edit");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = host.read_evidence();
+
+    let folder = vault.path().join("zz-burst");
+    std::fs::create_dir_all(&folder).expect("create the burst's folder");
+    const BURST: usize = 200;
+    for index in 0..BURST {
+        std::fs::write(
+            folder.join(format!("zz-burst-{index:03}.md")),
+            format!("# Burst {index}\n\nwritten after ready ^burst{index}\n"),
+        )
+        .expect("write a burst document");
+    }
+    let last = a_target(&format!("zz-burst-{:03}", BURST - 1));
+
+    let deadline = std::time::Instant::now() + attach::READY_LIMIT;
+    let answered = loop {
+        match host.get(&GetParams::new(address(vault.name()), last.clone())) {
+            Ok(answered) => break answered,
+            Err(refused) => assert_eq!(
+                refused.detail(),
+                &ErrorDetail::unknown_target(last.clone()),
+                "a read issued after an edit was refused rather than answered: {refused:?}"
+            ),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no read answered the document written last inside {:?}",
+            attach::READY_LIMIT
+        );
+        std::thread::yield_now();
+    };
+    assert_eq!(answered.answer.reading.trust, TrustState::Ready);
+    let GetReport::Record { document, .. } = &answered.answer.report else {
+        panic!(
+            "the burst's last document answered {:?}",
+            answered.answer.report
+        );
+    };
+    assert_eq!(
+        document.path.as_str(),
+        format!("zz-burst/zz-burst-{:03}.md", BURST - 1)
+    );
+    // Reads issued back to back cannot all miss the burst's reconcile, so at
+    // least one of them met the entry taking it in and waited.
+    let reads = host.read_evidence().since(before);
+    assert!(
+        reads.settle_waits >= 1,
+        "no read met the burst being indexed, so none was held to waiting for it"
+    );
+    assert_eq!(reads.settle_expiries, 0, "a read waited out its bound");
+}
+
 /// **A part a verb could not apply reaches the answer through the host.** A
 /// get of a section or a block its document does not carry answers the
 /// document's record with exactly that part unsatisfied; a find and a count

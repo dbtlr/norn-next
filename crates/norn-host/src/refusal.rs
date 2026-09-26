@@ -19,9 +19,10 @@
 //! caller reads how far the entry has come and asks again — so it is a state
 //! that crosses, not an envelope. What becomes an envelope is a state that
 //! polling does not walk out of: one standing until a re-heal, a client
-//! demanding one, or an environment that stops refusing retires it. Reads
-//! answer from a warming entry no more than from an untrusted one, so what
-//! reads can do with a state is not the line; what retires the state is.
+//! demanding one, or an environment that stops refusing retires it. A read
+//! answers from a warming entry no more than from an untrusted one — where it
+//! waits out a change, it answers from the `Ready` the change ends at — so
+//! what reads can do with a state is not the line; what retires the state is.
 //!
 //! **A refusal a request earns renders here; the host being gone does not.**
 //! [`ReloadRefusal::answer`] hands back an envelope for everything a reload
@@ -37,7 +38,9 @@
 //! back as a state, because a poll walks out of it. A read is not a poll: it
 //! has nothing to read from either entry, so [`ReadRefusal::answer`] takes the
 //! same states through [`TrustState::not_ready`] and files them under
-//! `host/entry-not-ready`.
+//! `host/entry-not-ready` — as an entry that holds nothing to answer from yet,
+//! or, for a read that waited out its settle bound over a change, as a vault
+//! still indexing that change.
 //!
 //! **Two demands reach `host/entry-untrusted`, and deliberately.** An entry
 //! standing untrusted carries the reason its trust state carries. A root the

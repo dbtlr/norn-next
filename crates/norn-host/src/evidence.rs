@@ -538,15 +538,17 @@ mod tests {
 /// read leaves**, so what an acquisition did is in the account whichever way it
 /// left. The mint is counted where the mint returns, the establishment where
 /// the hold it ran under gives the gate back, and the wait for the entry's
-/// connection where that wait begins, so the refusals are accounted exactly as
-/// the answers are. A wait that begins cannot be abandoned: it returns only
-/// with the connection, so a wait counted where it begins is a wait that ends.
-/// No path out of an acquisition runs a statement under the gate, or waits out
-/// another read, and reports nothing.
+/// connection and the wait for `Ready` where each begins, so the refusals are
+/// accounted exactly as the answers are. A wait that begins cannot be
+/// abandoned: a wait for the connection returns only with the connection, and
+/// a wait for `Ready` returns woken or at the read's bound, so a wait counted
+/// where it begins is a wait that ends. No path out of an acquisition runs a
+/// statement under the gate, waits out another read, or waits out a change,
+/// and reports nothing.
 ///
 /// **The rounds of the gate an acquisition took are the one reading recorded
 /// where it leaves**, because the count is whole only there. It is recorded
-/// on every way out, served, refused before the wait or after it, and
+/// on every way out, served, refused before a wait or after one, and
 /// unwound, so a refused acquisition's rounds are in the account as a served
 /// one's are.
 ///
@@ -564,6 +566,9 @@ pub(crate) struct ReadEvidence {
     reader_waits: AtomicU64,
     gate_rounds_after_the_first: AtomicU64,
     widest_gate_rounds_after_the_first: AtomicU64,
+    settle_waits: AtomicU64,
+    settle_rounds: AtomicU64,
+    settle_expiries: AtomicU64,
 }
 
 /// What one acquisition read off SQLite's count of its thread and off its
@@ -667,28 +672,58 @@ pub struct ReadReading {
     /// Rounds of the entry gate acquisitions took after their first, summed
     /// over acquisitions.
     ///
-    /// **One per contended acquisition, served or refused.** Every
+    /// **One per wait for the connection, served or refused.** Every
     /// acquisition takes a first round of the gate. One that found the
-    /// connection taken gives the gate back, waits, and takes a second round,
-    /// in which it reads afresh the demand its entry publishes, because the
-    /// instant it first read is not the instant it answers under. That round
-    /// is the cost of contention: a hold of the gate taken again. The demand
+    /// connection taken gives the gate back, waits, and takes another round,
+    /// in which it reads afresh the stance its entry stands at, because the
+    /// instant it read before is not the instant it answers under. That round
+    /// is the cost of contention: a hold of the gate taken again. The stance
     /// read inside it is an in-memory read under that hold, so the round is
     /// what is counted, and a round is the one way an acquisition reads the
-    /// demand again. Each acquisition counts its own rounds and records them
+    /// stance again. Each acquisition counts its own rounds and records them
     /// once, where it leaves. So this equals [`ReadReading::reader_waits`],
     /// and a count below it is a contended acquisition that answered under
-    /// the demand it read before it waited.
+    /// the stance it read before it waited. The rounds after a wait for
+    /// `Ready` are [`ReadReading::settle_rounds`], which is what keeps that
+    /// equality whole.
     pub gate_rounds_after_the_first: u64,
     /// The most rounds of the entry gate any one acquisition took after its
     /// first.
     ///
-    /// **One, or none.** A contended acquisition holds the connection from
-    /// its second round on, so that round cannot contend and ends in the
-    /// establishment or a refusal. A reading above one is an acquisition that
-    /// took a round the read path does not have, and it is read per
-    /// acquisition so that one taking two cannot hide beside one taking none.
+    /// **One, or none, over an entry that neither settles nor replaces its
+    /// handle while a read waits.** A contended acquisition holds the
+    /// connection from the round after its wait, so that round cannot contend
+    /// and ends in the establishment or a refusal. Only an entry that settled,
+    /// or replaced the handle waited for, sends the acquisition round again:
+    /// it gives the connection back, waits out the change or takes the new
+    /// handle, and may contend once more. A reading above one over a vault at
+    /// rest is an acquisition that took a round the read path does not have,
+    /// and it is read per acquisition so that one taking two cannot hide
+    /// beside one taking none.
     pub widest_gate_rounds_after_the_first: u64,
+    /// Waits for `Ready` that acquisitions began over an entry taking in a
+    /// change: the acquisition gave the entry gate back and waited on the
+    /// entry's stance signal.
+    ///
+    /// **Counted where each wait begins**, so a reading taken while a read
+    /// waits already names it. One acquisition may wait more than once where
+    /// the entry settles, serves and settles again before it retakes the gate.
+    /// Nonzero is reads meeting a change, which the read-concurrency bars do
+    /// not provoke and do not read.
+    pub settle_waits: u64,
+    /// Rounds of the entry gate acquisitions took after a wait for `Ready`,
+    /// recorded where each acquisition leaves.
+    ///
+    /// **Counted apart from [`ReadReading::gate_rounds_after_the_first`]**, so
+    /// that reading goes on equalling [`ReadReading::reader_waits`]: every
+    /// wait for the connection is followed by one round, and every wait for
+    /// `Ready` by one round here. So this equals `settle_waits` over any
+    /// window in which no acquisition is still waiting.
+    pub settle_rounds: u64,
+    /// Acquisitions refused because the entry was still taking in its change
+    /// when their settle bound ran out: each is a
+    /// [`ReadRefusal::Unsettled`](crate::ReadRefusal::Unsettled).
+    pub settle_expiries: u64,
 }
 
 /// What happened between an earlier reading of a host's read account and a
@@ -722,6 +757,13 @@ pub struct ReadsSince {
     /// Rounds of the entry gate this window's acquisitions took after their
     /// first, recorded where each acquisition left.
     pub gate_rounds_after_the_first: u64,
+    /// Waits for `Ready` this window's acquisitions began.
+    pub settle_waits: u64,
+    /// Rounds of the entry gate this window's acquisitions took after a wait
+    /// for `Ready`.
+    pub settle_rounds: u64,
+    /// Acquisitions this window refused past their settle bound.
+    pub settle_expiries: u64,
 }
 
 impl ReadReading {
@@ -745,6 +787,9 @@ impl ReadReading {
             gate_rounds_after_the_first: self
                 .gate_rounds_after_the_first
                 .saturating_sub(earlier.gate_rounds_after_the_first),
+            settle_waits: self.settle_waits.saturating_sub(earlier.settle_waits),
+            settle_rounds: self.settle_rounds.saturating_sub(earlier.settle_rounds),
+            settle_expiries: self.settle_expiries.saturating_sub(earlier.settle_expiries),
         }
     }
 }
@@ -767,6 +812,9 @@ impl ReadEvidence {
             reader_waits: get(&self.reader_waits),
             gate_rounds_after_the_first: get(&self.gate_rounds_after_the_first),
             widest_gate_rounds_after_the_first: get(&self.widest_gate_rounds_after_the_first),
+            settle_waits: get(&self.settle_waits),
+            settle_rounds: get(&self.settle_rounds),
+            settle_expiries: get(&self.settle_expiries),
         }
     }
 
@@ -777,15 +825,20 @@ impl ReadEvidence {
     /// that is refused after its mint refused ran them under the gate exactly
     /// as a read that went on to establish did. A read that minted nothing
     /// reports zero here and moves nothing.
-    pub(crate) fn count_mint_under_the_gate(&self, statements: u64) {
+    ///
+    /// `acquisition_mints` is what every mint this acquisition ran has run so
+    /// far, this one's included: an acquisition that waited and found its
+    /// entry's slot empty again mints once more, and the widest reading is
+    /// what one acquisition ran.
+    pub(crate) fn count_mint_under_the_gate(&self, statements: u64, acquisition_mints: u64) {
         self.mint_statements_under_the_gate
             .fetch_add(statements, Ordering::Relaxed);
         // The widest is per acquisition, and this acquisition has run its
-        // mint's statements and no establishing statement yet. A read that
+        // mints' statements and no establishing statement yet. A read that
         // goes on to establish widens it again below; a read that is refused
         // from here leaves this as what it ran.
         self.widest_statements_under_the_gate
-            .fetch_max(statements, Ordering::Relaxed);
+            .fetch_max(acquisition_mints, Ordering::Relaxed);
     }
 
     /// Record what one served acquisition's establishing hold ran under the
@@ -879,6 +932,27 @@ impl ReadEvidence {
             .fetch_add(rounds, Ordering::Relaxed);
         self.widest_gate_rounds_after_the_first
             .fetch_max(rounds, Ordering::Relaxed);
+    }
+
+    /// Record that one acquisition began a wait for its entry to reach
+    /// `Ready`.
+    ///
+    /// **Called where the wait begins**, after the acquisition gave the entry
+    /// gate back, so a reading taken while the read waits names it whatever
+    /// answer it goes on to get.
+    pub(crate) fn count_settle_wait(&self) {
+        self.settle_waits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record the rounds of its entry gate one acquisition took after its
+    /// waits for `Ready`, once, where it leaves.
+    pub(crate) fn count_settle_rounds(&self, rounds: u64) {
+        self.settle_rounds.fetch_add(rounds, Ordering::Relaxed);
+    }
+
+    /// Record that one acquisition was refused past its settle bound.
+    pub(crate) fn count_settle_expiry(&self) {
+        self.settle_expiries.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record that one read was served.
