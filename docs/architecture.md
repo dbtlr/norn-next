@@ -1751,7 +1751,9 @@ already published as `Ready` — a polled batch, a reconcile turn, a schema relo
 and every other state refuses at once with its reason. A settling read gives the gate back,
 waits outside it on a signal that moves only when the stance changes, takes the gate again
 and reads the published demand afresh, and answers from the snapshot it establishes at the
-first `Ready` it observes after it began, never from the state before the change. Past a
+first `Ready` it observes after it began, never from the state before the change; where a
+schema reload minted a new reader once `Ready` returned, the read acquires that reader and
+answers from it, and it refuses only where the entry is no longer settling or `Ready`. Past a
 bound, a lifecycle policy value whose production value is the 5-second settle ceiling, it
 refuses as `host/entry-not-ready` with the message "this vault is still indexing a change". A
 teardown's publication wakes a waiting read and refuses it. While a maintenance scan holds

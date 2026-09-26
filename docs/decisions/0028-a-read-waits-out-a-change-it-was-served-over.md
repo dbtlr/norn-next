@@ -47,10 +47,12 @@ connection while it holds that lock.** Under the gate it tries for the connectio
 blocking and establishes the snapshot there where it is free; where another read holds the
 connection, the acquisition gives the gate back, waits outside it under the demand it has
 already recorded, takes the gate again and reads the published demand afresh before it
-establishes, and — where the entry has stopped serving, or its reader is no longer the one
-waited for — gives the connection back and answers what the entry now publishes under the
-stance ruled below: it waits where the entry settles, and refuses with what the entry
-publishes where it does not.
+establishes. Where the entry has stopped serving, or its reader is no longer the one waited
+for, the acquisition gives the connection back and answers what the entry now publishes
+under the stance ruled below: where the entry settles, it waits; where the entry is `Ready`
+on a reader other than the one it waited for, it acquires that reader, within the same
+bound; and it refuses with what the entry publishes only where the entry neither settles nor
+serves — lost trust, a release, a park.
 
 ADR 0015 priced that contention as "the hot per-entry lock riding across that one
 statement — a cheap read alone, a wait where a concurrent read still holds the one reader",
@@ -131,7 +133,11 @@ same critical section that reads the published demand.** There are two stances.
 gate.** A settling read gives the gate back, waits outside it on a signal that moves only
 when the stance changes, takes the gate again, and reads the published demand afresh. It
 establishes its snapshot only where that reading is `Ready`, in the same critical section,
-so the snapshot it answers from is one the change has already reached. The demand it
+so the snapshot it answers from is one the change has already reached. **A settling read
+that finds a new reader after the wait acquires that reader and answers from it, under the
+same bound**: a schema reload gives back the reader it warmed over and mints another once
+`Ready` returns, and the read the reload settled answers from that one; it refuses only
+where the entry is no longer settling or `Ready` — lost trust, a release, a park. The demand it
 recorded before the wait holds the entry across it, as it does across a wait for the
 connection.
 
