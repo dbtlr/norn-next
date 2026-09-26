@@ -34,7 +34,7 @@ mod gate;
 mod serving;
 
 use claim::{Claim, Coverage, Leg};
-use gate::EntryGate;
+use gate::{EntryGate, GateHold, Stanced};
 pub(crate) use serving::ServingRefusal;
 use serving::ServingSet;
 
@@ -46,6 +46,10 @@ pub struct LifecyclePolicy {
     pub worker_slots: usize,
     /// Cadence of the one host-wide nonblocking watcher scan.
     pub watch_poll_interval: Duration,
+    /// Longest a read waits for an entry taking in a change to reach `Ready`,
+    /// from the read's first hold of the entry gate. Operational containment:
+    /// past it the read refuses as still indexing.
+    pub read_settle_bound: Duration,
 }
 
 /// Work coalesced behind an entry's capacity-one scheduling marker.
@@ -907,6 +911,7 @@ impl<A: SnapshotSource> Entry<A> {
             registration,
             gate: EntryGate::new(EntryState {
                 trust: TrustState::Unattached,
+                trust_unbroken_since_ready: false,
                 coverage: Coverage::none(),
                 reader: None,
                 reader_unavailable: None,
@@ -946,6 +951,25 @@ impl<A: SnapshotSource> Entry<A> {
 
 struct EntryState<A: SnapshotSource> {
     trust: TrustState,
+    /// Whether the entry's trust has stood unbroken since it last published
+    /// `Ready`: no withdrawal of trust, no teardown, no new coverage and no
+    /// park between that publication and now.
+    ///
+    /// **It is what says how a warming entry entered warming**, which the
+    /// trust label does not: a reconcile's healing and a recovery's healing
+    /// carry one label. An entry healing with this set entered warming from
+    /// `Ready`, taking in a change over coverage it has served, and a read
+    /// that meets it waits for that change ([`ReadStance::Settle`]); an entry
+    /// healing without it entered warming from untrusted, or has never
+    /// served, and a read refuses at once.
+    ///
+    /// Written as every hold of the entry gate ends, by
+    /// [`EntryState::end_hold`], from the state that hold left: set by a hold
+    /// that ends at `Ready`, kept by one that ends healing, and cleared by
+    /// every other. [`EntryState::install_coverage`] and [`begin_release`]
+    /// clear it where they run, because the coverage it speaks of is the
+    /// coverage they replace or give back.
+    trust_unbroken_since_ready: bool,
     /// The entry's coverage, and who holds it.
     coverage: Coverage<A>,
     /// The read-only snapshot handle this entry's reads run on, where its
@@ -1159,6 +1183,55 @@ struct ReadMint<R> {
     statements: u64,
 }
 
+/// What a read does about an entry, read under the entry gate in the same
+/// critical section that reads the published demand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadStance {
+    /// The entry publishes `Ready`: a read establishes its snapshot here.
+    Serve,
+    /// The entry is taking in a change over coverage it has served — a polled
+    /// watcher batch, a reconcile turn, a schema reload — and a read waits,
+    /// bounded, for the `Ready` that change ends at.
+    Settle,
+    /// Everything else: an entry that has never served, lost trust, is torn
+    /// down, parked, out of service, or warming from untrusted. A read
+    /// refuses at once with what the entry publishes.
+    Refuse,
+}
+
+impl<A: SnapshotSource> Stanced for EntryState<A> {
+    type Stance = ReadStance;
+
+    fn stance(&self) -> ReadStance {
+        self.read_stance()
+    }
+
+    /// Record whether trust has stood unbroken since `Ready`, from the state
+    /// this hold left.
+    ///
+    /// A hold that ends healing keeps what the holds before it recorded,
+    /// because healing is entered both from `Ready` and from untrusted and
+    /// only the history tells the two apart. Every hold that could have
+    /// withdrawn trust ends at a state other than healing — untrusted,
+    /// unattached, parked, installing or releasing coverage — or owes a rung,
+    /// and is cleared here.
+    fn end_hold(&mut self) {
+        self.trust_unbroken_since_ready = match &self.trust {
+            TrustState::Ready => !self.stands_parked() && self.out_of_service().is_none(),
+            TrustState::Warming {
+                phase: WarmingPhase::Healing,
+                ..
+            } => {
+                self.trust_unbroken_since_ready
+                    && !self.stands_parked()
+                    && self.out_of_service().is_none()
+                    && !self.owes_a_rung()
+            }
+            _ => false,
+        };
+    }
+}
+
 impl<A: SnapshotSource> EntryState<A> {
     fn record_reload_error(&mut self, error: ReloadError) -> String {
         let detail = error.to_string();
@@ -1293,6 +1366,7 @@ impl<A: SnapshotSource> EntryState<A> {
             self.reader.is_none(),
             "a reader stands over coverage the entry never installed"
         );
+        self.trust_unbroken_since_ready = false;
         self.mint_for_a_leg(ops, &attachment);
         self.coverage.install(attachment);
     }
@@ -1557,6 +1631,13 @@ impl<A: SnapshotSource> EntryState<A> {
             })
     }
 
+    /// Whether a park stands, read without cloning what it stands on.
+    fn stands_parked(&self) -> bool {
+        self.maintainer_contended.is_some()
+            || self.duplicate_root.is_some()
+            || self.identity_refused.is_some()
+    }
+
     /// Withdraw the parks the registry raised, leaving the entry free to be
     /// worked again.
     ///
@@ -1641,6 +1722,27 @@ impl<A: SnapshotSource> EntryState<A> {
     /// this one demand through [`Demand::answer`], which carries no wildcard, so
     /// a park variant minted without a stance in the vocabulary does not
     /// compile rather than falling through to a label.
+    /// What a read does about this entry at this instant: serve it, wait for
+    /// the change it is taking in, or refuse.
+    ///
+    /// It reads what [`EntryState::published_demand`] reads, without the
+    /// clone: out of service and parked refuse; `Ready` serves; healing
+    /// settles where trust has stood unbroken since `Ready` and no rung is
+    /// owed; every other state refuses.
+    fn read_stance(&self) -> ReadStance {
+        if self.out_of_service().is_some() || self.stands_parked() {
+            return ReadStance::Refuse;
+        }
+        match &self.trust {
+            TrustState::Ready => ReadStance::Serve,
+            TrustState::Warming {
+                phase: WarmingPhase::Healing,
+                ..
+            } if self.trust_unbroken_since_ready && !self.owes_a_rung() => ReadStance::Settle,
+            _ => ReadStance::Refuse,
+        }
+    }
+
     fn published_demand(&self) -> Demand {
         if let Some(answer) = self.withdrawal_answer() {
             return answer;
@@ -2038,6 +2140,7 @@ fn begin_release<A: SnapshotSource>(state: &mut EntryState<A>) {
     // is one no dispatch reaches.
     state.claim.open();
     state.close_reader();
+    state.trust_unbroken_since_ready = false;
     state.detach_in_flight = true;
     state.trust = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
 }
@@ -3260,6 +3363,10 @@ impl HoldReading {
 pub enum ReadRefusal {
     /// The entry is not serving reads, and this is what it publishes instead.
     NotServing(Demand),
+    /// The entry was taking in a change over coverage it had served, and did
+    /// not reach `Ready` again inside the read's settle bound. It carries what
+    /// the entry published when the bound ran out.
+    Unsettled(Demand),
     /// The entry is serving and its read seam is not: the mint that would have
     /// given it a handle failed, or the snapshot could not be established.
     ReaderUnavailable(ReaderUnavailable),
@@ -3403,7 +3510,7 @@ fn give_back_demand<A: SnapshotSource>(state: &mut EntryState<A>, recovery_deman
 struct AcquisitionUnderTheGate<'g, O: EntryOps> {
     gate: &'g EntryGate<EntryState<O::Attachment>>,
     /// Taken out only as the gate is let go, by a move that consumes this.
-    state: Option<MutexGuard<'g, EntryState<O::Attachment>>>,
+    state: Option<GateHold<'g, EntryState<O::Attachment>>>,
     /// Taken out only as the gate is let go, by a move that consumes this, and
     /// by this type's drop, which gives it back under `state`.
     lease: Option<DemandLease<O>>,
@@ -3439,7 +3546,7 @@ impl<'g, O: EntryOps> AcquisitionUnderTheGate<'g, O> {
     /// that hold.
     fn new(
         gate: &'g EntryGate<EntryState<O::Attachment>>,
-        state: MutexGuard<'g, EntryState<O::Attachment>>,
+        state: GateHold<'g, EntryState<O::Attachment>>,
         lease: DemandLease<O>,
     ) -> Self {
         AcquisitionUnderTheGate {
@@ -6235,7 +6342,7 @@ fn begin_reload_leg<'entry, A: SnapshotSource>(
     entry: &'entry Entry<A>,
     epoch: u64,
     reply: &ReloadReply,
-) -> Option<(MutexGuard<'entry, EntryState<A>>, A)> {
+) -> Option<(GateHold<'entry, EntryState<A>>, A)> {
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     if !state.claim.stands_at(epoch) {
         let _ = reply.send(Err(ReloadRefusal::Unavailable(state.published_demand())));
@@ -6254,7 +6361,7 @@ fn begin_reload_leg<'entry, A: SnapshotSource>(
 enum ReloadLegEnd<'entry, A: SnapshotSource> {
     /// The claim still stands at the leg's epoch and no release opened over
     /// it: the leg publishes what its work met, under this hold.
-    Standing(MutexGuard<'entry, EntryState<A>>, A),
+    Standing(GateHold<'entry, EntryState<A>>, A),
     /// The claim was taken away or a release opened while the leg ran. The
     /// asker has been told where the entry stands, and the job returns this
     /// attachment for the release to take.
@@ -6485,7 +6592,7 @@ fn run_reload_job<O: EntryOps>(
 fn apply_reload_runtime_failure<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
-    mut state: MutexGuard<'_, EntryState<O::Attachment>>,
+    mut state: GateHold<'_, EntryState<O::Attachment>>,
     name: VaultName,
     epoch: u64,
     attachment: O::Attachment,
@@ -7974,6 +8081,7 @@ mod tests {
                 idle_after,
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -8006,6 +8114,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -8034,6 +8143,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap()
@@ -8070,6 +8180,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots,
                 watch_poll_interval,
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap()
@@ -9532,6 +9643,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -10609,6 +10721,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -11049,6 +11162,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -14827,6 +14941,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15421,6 +15536,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15518,6 +15634,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15549,6 +15666,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15578,6 +15696,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15613,6 +15732,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15799,6 +15919,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15851,6 +15972,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15898,6 +16020,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -16496,6 +16619,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -16536,6 +16660,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -16572,6 +16697,7 @@ mod tests {
                 idle_after: Duration::ZERO,
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -16614,6 +16740,7 @@ mod tests {
                 idle_after: Duration::ZERO,
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -20662,6 +20789,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -21397,6 +21525,7 @@ mod tests {
                     idle_after: Duration::from_secs(60),
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
+                    read_settle_bound: crate::READ_SETTLE_BOUND,
                 },
             )
             .unwrap()
@@ -22804,6 +22933,7 @@ mod tests {
                     idle_after: Duration::from_secs(60),
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
+                    read_settle_bound: crate::READ_SETTLE_BOUND,
                 },
             )
             .unwrap()

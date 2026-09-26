@@ -82,6 +82,16 @@ pub const STORE_VERIFICATION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// measure its headroom; observations do not tune it automatically.
 pub const WATCH_SYNCHRONIZATION_DEADLINE: Duration = Duration::from_secs(15);
 
+/// Longest a read waits for an entry taking in a change to reach `Ready`
+/// again, counted from the read's first hold of the entry gate.
+///
+/// This is operational containment, not a performance threshold. It keeps a
+/// read from waiting on a change that does not converge; it states nothing
+/// about how fast a change should settle. Its value is the settle ceiling
+/// authored for one vault walk, so a change that settles inside one walk is
+/// waited out and one that does not is refused as still indexing.
+pub const READ_SETTLE_BOUND: Duration = Duration::from_secs(5);
+
 /// Resource bounds for the concrete filesystem/store adapter.
 #[derive(Clone, Copy, Debug)]
 pub struct ProductionPolicy {
@@ -4005,6 +4015,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -4455,6 +4466,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -4506,6 +4518,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -4554,6 +4567,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -4595,6 +4609,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -4844,6 +4859,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -4947,6 +4963,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -5010,6 +5027,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -5093,6 +5111,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -5213,6 +5232,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -5658,6 +5678,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -5714,6 +5735,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -5749,6 +5771,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -6461,6 +6484,7 @@ mod tests {
                     idle_after: Duration::from_secs(60),
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_millis(5),
+                    read_settle_bound: crate::READ_SETTLE_BOUND,
                 },
             )
             .unwrap();
@@ -6681,6 +6705,7 @@ mod tests {
                     idle_after: Duration::from_secs(60),
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_millis(5),
+                    read_settle_bound: crate::READ_SETTLE_BOUND,
                 },
             )
             .unwrap();
@@ -6894,6 +6919,7 @@ mod tests {
                     idle_after: Duration::from_secs(60),
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
+                    read_settle_bound: crate::READ_SETTLE_BOUND,
                 },
             )
             .unwrap();
@@ -7178,6 +7204,7 @@ mod tests {
                     idle_after: Duration::from_secs(60),
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
+                    read_settle_bound: crate::READ_SETTLE_BOUND,
                 },
             )
             .unwrap(),
@@ -7274,6 +7301,7 @@ mod tests {
             idle_after: Duration::from_secs(60),
             worker_slots: 1,
             watch_poll_interval: Duration::from_secs(60),
+            read_settle_bound: crate::READ_SETTLE_BOUND,
         };
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
         let first = crate::Host::new(
@@ -12973,6 +13001,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -14059,6 +14088,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -14201,6 +14231,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -14463,6 +14494,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -14580,6 +14612,7 @@ mod tests {
                     idle_after: Duration::from_secs(60),
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
+                    read_settle_bound: crate::READ_SETTLE_BOUND,
                 },
             )
             .unwrap();
@@ -15148,6 +15181,7 @@ mod tests {
                         idle_after: Duration::from_secs(600),
                         worker_slots: 1,
                         watch_poll_interval: Duration::from_millis(5),
+                        read_settle_bound: crate::READ_SETTLE_BOUND,
                     },
                 )
                 .unwrap();
@@ -15465,6 +15499,7 @@ mod tests {
                     idle_after: Duration::from_secs(60),
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
+                    read_settle_bound: crate::READ_SETTLE_BOUND,
                 },
             )
             .unwrap();

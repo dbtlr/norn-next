@@ -301,6 +301,7 @@ impl Fixture {
                 idle_after: Duration::from_secs(1),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(5),
+                read_settle_bound: norn_host::READ_SETTLE_BOUND,
             },
         )
         .expect("host")
