@@ -15251,6 +15251,189 @@ mod tests {
                 wait_state(&host, &notes(), norn_wire::TrustState::Unattached);
             }
         }
+
+        /// A production host started from a registry file that records
+        /// `notes` at `root` exactly as `root` is spelled.
+        fn host_started_from_file(
+            f: &Fixture,
+            root: &Path,
+        ) -> (crate::Host<ProductionEntryOps>, ConfigDirs) {
+            let dirs = ConfigDirs::new(&f.root.join("config"), &f.root.join("data")).unwrap();
+            let registration = Registration::new(notes(), VaultRoot::new(root).unwrap());
+            norn_config::registry::mutate(&dirs, |registry| {
+                registry.insert(registration.clone());
+                Ok(())
+            })
+            .expect("the file records the vault");
+            let host = crate::Host::new(
+                crate::RegistryRead::from_entries([registration]),
+                ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(2, 2).unwrap()),
+                crate::LifecyclePolicy {
+                    idle_after: Duration::from_secs(60),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_secs(60),
+                },
+            )
+            .unwrap();
+            (host, dirs)
+        }
+
+        /// **A root spelled as the file records it, where that spelling is
+        /// not canonical, is a root move to the canonical spelling.** The
+        /// store does not record the directory it was derived from, so the
+        /// host cannot tell that the recorded spelling reached the directory
+        /// it reaches now: the file records the canonical root, and the
+        /// attach that follows derives it into a new store.
+        #[cfg(unix)]
+        #[test]
+        fn a_root_set_to_a_recorded_link_spelling_moves_to_the_canonical_root() {
+            let f = Fixture::new("set-recorded-link");
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let link = f.root.join("link");
+            std::os::unix::fs::symlink(f.vault(), &link).unwrap();
+            let (host, dirs) = host_started_from_file(&f, &link);
+            let (before, epoch_before) = attached_and_found(&host);
+            host.reap_idle(Instant::now() + Duration::from_secs(61))
+                .unwrap();
+            wait_state(&host, &notes(), norn_wire::TrustState::Unattached);
+
+            let report =
+                set_once_idle(&host, &moving_to(&link)).expect("the idle vault is respelled");
+
+            let canonical = VaultRoot::new(fs::canonicalize(&link).unwrap()).unwrap();
+            assert_eq!(report.registration.root, canonical);
+            assert_eq!(recorded(&dirs, &notes()), Some(report.registration));
+            let (after, epoch_after) = attached_and_found(&host);
+            assert_eq!(after, before);
+            assert_ne!(
+                epoch_after, epoch_before,
+                "the store derived under the recorded spelling answered"
+            );
+        }
+
+        /// An edit that keeps the root keeps the derived state: the store and
+        /// its epoch stand, and no maintainer lock is taken, so another
+        /// holder of that lock does not refuse it.
+        #[test]
+        fn an_edit_keeping_the_root_keeps_the_store_and_takes_no_maintainer_lock() {
+            let f = Fixture::new("set-keeps-store");
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            let (_, epoch_before) = attached_and_found(&host);
+            host.reap_idle(Instant::now() + Duration::from_secs(61))
+                .unwrap();
+            wait_state(&host, &notes(), norn_wire::TrustState::Unattached);
+            let derived = dirs.derived_dir(&notes());
+            let norn_fs::Acquisition::Acquired(held) =
+                norn_fs::try_acquire(&derived.join("maintainer.lock")).unwrap()
+            else {
+                panic!("the idle vault's lock is held");
+            };
+
+            let report = set_once_idle(
+                &host,
+                &SetParams::new(notes()).with_poll_backend(Change::set(PollBackend::Poll)),
+            )
+            .expect("an edit keeping the root met the maintainer lock");
+            drop(held);
+
+            assert_eq!(recorded(&dirs, &notes()), Some(report.registration));
+            assert!(
+                fs::metadata(derived.join("store.sqlite3")).is_ok(),
+                "an edit keeping the root discarded the derived database"
+            );
+            let (_, epoch_after) = attached_and_found(&host);
+            assert_eq!(
+                epoch_after, epoch_before,
+                "an edit keeping the root derived the vault into a new store"
+            );
+        }
+
+        /// A root moved to a directory standing at one of the old root's
+        /// shadow homes is left standing, contents and all: the discard the
+        /// move runs spares the root it moves to.
+        #[test]
+        fn a_root_moved_into_the_old_roots_fallback_home_is_left_standing() {
+            let f = Fixture::watcherless("set-into-fallback-home");
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            let key = dirs.derived_key(&notes());
+            let home = f
+                .vault()
+                .join(norn_fs::FALLBACK)
+                .join(key.channel())
+                .join(key.vault())
+                .join(key.data_base());
+            fs::create_dir_all(&home).unwrap();
+            let staged = home.join("norn-shadow-99999-1");
+            fs::write(&staged, b"a file in the vault moved to").unwrap();
+
+            let report = set_once_idle(&host, &moving_to(&home)).expect("the vault is moved");
+
+            assert_eq!(
+                report.registration.root,
+                VaultRoot::new(fs::canonicalize(&home).unwrap()).unwrap()
+            );
+            assert!(
+                fs::metadata(&staged).is_ok(),
+                "the discard swept the root the vault moved to"
+            );
+        }
+
+        /// **The serving set is authoritative over a hand edit of the file.**
+        /// A name the host serves that a hand edit took out of the file is
+        /// recorded again by an edit of it, as the registration served.
+        #[test]
+        fn an_edit_records_a_served_name_a_hand_edit_took_out_of_the_file() {
+            let f = Fixture::watcherless("set-hand-removed");
+            let (host, dirs) = empty_host(&f);
+            register(&host, &f.vault()).expect("the vault is registered");
+            norn_config::registry::mutate(&dirs, |registry| {
+                registry.remove(&notes());
+                Ok(())
+            })
+            .expect("a hand edit takes the vault out of the file");
+
+            let report = set_once_idle(
+                &host,
+                &SetParams::new(notes()).with_poll_backend(Change::set(PollBackend::Poll)),
+            )
+            .expect("the served vault is edited");
+
+            assert_eq!(recorded(&dirs, &notes()), Some(report.registration));
+        }
+
+        /// An edit that keeps the root writes the root the host serves over a
+        /// root a hand edit wrote into the file: the hand edit takes effect
+        /// at the next start, and an edit before then answers for the
+        /// registration served.
+        #[test]
+        fn an_edit_keeping_the_root_writes_the_served_root_over_a_hand_edited_one() {
+            let f = Fixture::watcherless("set-hand-edited-root");
+            let elsewhere = another_root(&f, &[]);
+            let (host, dirs) = empty_host(&f);
+            let served = register(&host, &f.vault())
+                .expect("the vault is registered")
+                .registration;
+            norn_config::registry::mutate(&dirs, |registry| {
+                registry.insert(Registration::new(
+                    notes(),
+                    VaultRoot::new(&elsewhere).unwrap(),
+                ));
+                Ok(())
+            })
+            .expect("a hand edit moves the root in the file");
+
+            let report = set_once_idle(
+                &host,
+                &SetParams::new(notes()).with_poll_backend(Change::set(PollBackend::Poll)),
+            )
+            .expect("the served vault is edited");
+
+            assert_eq!(report.registration.root, served.root);
+            assert_eq!(recorded(&dirs, &notes()), Some(report.registration));
+        }
     }
 
     /// The budget every lifecycle condition here is given: long enough that a

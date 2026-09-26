@@ -19881,6 +19881,67 @@ mod tests {
             );
         }
 
+        /// A replacement is refused over an entry holding its coverage, as a
+        /// removal is, and the entry that stood goes on being served.
+        #[test]
+        fn an_attached_vault_is_refused_replacement_and_goes_on_being_served() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, &name, TrustState::Ready);
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            let edited = entry
+                .registration
+                .clone()
+                .with_poll_backend(norn_config::registry::PollBackend::Poll);
+
+            assert_eq!(
+                host.shared.entries.replace(edited),
+                Err(ServingRefusal::Held),
+                "an entry holding its coverage was replaced"
+            );
+            assert!(Arc::ptr_eq(
+                &entry,
+                &host.shared.entries.get(&name).expect("the vault is served")
+            ));
+            assert_eq!(host.state(&name), answered(TrustState::Ready));
+        }
+
+        /// The entry a replacement takes out of the set stays withdrawn: a
+        /// caller still holding it is answered as held, and the name reaches
+        /// the entry serving the replacement.
+        #[test]
+        fn a_replaced_entry_answers_held_to_a_caller_still_holding_it() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(ops);
+            let replaced = host.shared.entries.get(&name).expect("the vault is served");
+            let edited = replaced
+                .registration
+                .clone()
+                .with_poll_backend(norn_config::registry::PollBackend::Poll);
+
+            assert_eq!(host.shared.entries.replace(edited.clone()), Ok(()));
+
+            let observed = replaced
+                .gate
+                .lock()
+                .unwrap()
+                .observe(&replaced.registration)
+                .map(|_| ());
+            assert_eq!(
+                observed.map_err(|unserved| unserved.answer(&name).detail().clone()),
+                Err(ErrorDetail::entry_held(name.clone()))
+            );
+            assert_eq!(
+                host.shared
+                    .entries
+                    .get(&name)
+                    .expect("the vault is served")
+                    .registration,
+                edited
+            );
+        }
+
         /// An entry holding its scheduling gate for work it has scheduled
         /// stays in the set: the job the marker stands for is work the entry
         /// owes, and a removal under it takes the entry out from under a
@@ -22231,6 +22292,144 @@ mod tests {
                 Some(PollBackend::Poll)
             );
             drop(busy_lease);
+        }
+
+        /// A field an edit keeps stands beside a field it changes: a pinned
+        /// backend survives an edit of the schema source, and a schema
+        /// source survives an edit of the backend.
+        #[test]
+        fn a_kept_field_stands_beside_an_edited_one() {
+            let ops = Arc::new(FakeOps::default());
+            let name = VaultName::new("notes").unwrap();
+            let source = schema_source("/tmp/norn-host-schemas/notes.yaml");
+            let host = quiet_host_serving(
+                &ops,
+                &RegistryEntry::new(name.clone(), VaultRoot::new("/tmp/norn-host-set").unwrap())
+                    .with_poll_backend(PollBackend::Poll),
+            );
+
+            let sourced = set(
+                &host,
+                SetParams::new(name.clone()).with_schema_source(Change::set(source.clone())),
+            )
+            .expect("the idle vault is edited");
+            assert_eq!(sourced.registration.poll_backend, Some(PollBackend::Poll));
+            assert_eq!(recorded(&ops, &name), Some(sourced.registration));
+
+            let cleared = set(
+                &host,
+                SetParams::new(name.clone()).with_poll_backend(Change::clear()),
+            )
+            .expect("the idle vault is edited");
+            assert_eq!(cleared.registration.schema_source, Some(source));
+            assert_eq!(recorded(&ops, &name), Some(cleared.registration));
+        }
+
+        /// **A root move frees the names parked on a conflict with the old
+        /// root.** `b` stands parked on a conflict naming `a`, while `a` stands
+        /// on no park: `a`'s own acquisition read the root while `b`'s link
+        /// reached elsewhere, and the link reaches `a`'s root again after it.
+        /// Moving `a` away leaves `b` alone at that root, so `b` is classified
+        /// again at once and the lease standing over it is served.
+        #[cfg(unix)]
+        #[test]
+        fn a_root_move_frees_a_name_parked_on_a_conflict_with_the_old_root() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("set-frees-alias");
+            let (root, elsewhere, moved) = (
+                scratch.root().join("root"),
+                scratch.root().join("elsewhere"),
+                scratch.root().join("moved"),
+            );
+            for directory in [&root, &elsewhere, &moved] {
+                std::fs::create_dir_all(directory).unwrap();
+            }
+            let link = scratch.root().join("link");
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+            let (a, b) = (VaultName::new("a").unwrap(), VaultName::new("b").unwrap());
+            let host = quiet_host_over_roots(
+                Arc::clone(&ops),
+                &[(&a, root.as_path()), (&b, link.as_path())],
+            );
+            let conflict = Demand::DuplicateRoot(a_conflict([a.clone(), b.clone()]));
+            drop(host.demand(&a, AttachMode::Durable).unwrap());
+            wait_for_park(&host, &a, conflict.clone());
+            let standing = host.demand(&b, AttachMode::Durable).unwrap();
+            wait_for_park(&host, &b, conflict.clone());
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+            attach_and_idle(&host, &a);
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+            assert_eq!(entry_park(&host, &a), None);
+            assert_eq!(entry_park(&host, &b), Some(conflict));
+
+            set(
+                &host,
+                SetParams::new(a.clone()).with_root(Replace::set(VaultRoot::new(&moved).unwrap())),
+            )
+            .expect("the idle vault standing on no park is moved");
+
+            assert_eq!(
+                entry_park(&host, &b),
+                None,
+                "the conflict outlived its alias's move"
+            );
+            wait_for_state(&host, &b, TrustState::Ready);
+            drop(standing);
+        }
+
+        /// **A moved root is classified as it joins.** The edit reads the new
+        /// root unreached, and the filesystem moves before the join: another
+        /// served name's root comes to reach it while the file is written.
+        /// The join's read is the authority, and parks both names on the
+        /// conflict it finds.
+        #[cfg(unix)]
+        #[test]
+        fn a_moved_root_another_name_comes_to_reach_parks_both_as_it_joins() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("set-join-classifies");
+            let (root, theirs, moved) = (
+                scratch.root().join("root"),
+                scratch.root().join("theirs"),
+                scratch.root().join("moved"),
+            );
+            std::fs::create_dir_all(&moved).unwrap();
+            let (name, other) = (
+                VaultName::new("notes").unwrap(),
+                VaultName::new("other").unwrap(),
+            );
+            let host = quiet_host_over_roots(
+                Arc::clone(&ops),
+                &[(&name, root.as_path()), (&other, theirs.as_path())],
+            );
+            let pause = RetirePause::new();
+            *ops.retire_pause.lock().unwrap() = Some(Arc::clone(&pause));
+
+            let edited = thread::scope(|scope| {
+                let editing = scope.spawn(|| {
+                    set(
+                        &host,
+                        SetParams::new(name.clone())
+                            .with_root(Replace::set(VaultRoot::new(&moved).unwrap())),
+                    )
+                });
+                let held = pause.enter();
+                std::fs::remove_dir(&theirs).unwrap();
+                std::os::unix::fs::symlink(&moved, &theirs).unwrap();
+                drop(held);
+                editing.join().expect("the edit ran")
+            });
+
+            let conflict = Demand::DuplicateRoot(a_conflict([name.clone(), other.clone()]));
+            let edited = edited.expect("the root was unreached when the edit read it");
+            assert_eq!(
+                edited.published,
+                conflict.clone().published(&name),
+                "the edit answered an entry its join did not classify"
+            );
+            assert_eq!(entry_park(&host, &name), Some(conflict.clone()));
+            assert_eq!(entry_park(&host, &other), Some(conflict));
         }
     }
 }
