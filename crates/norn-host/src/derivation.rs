@@ -2471,9 +2471,9 @@ paths:
     /// literal text and nothing else: an equality or a one-value membership
     /// asking for `[draft]` meets a document whose stored value is the quoted
     /// YAML text `[draft]`, and meets no document holding the bare word
-    /// `draft`. On a field declared a number, that same bracketed spelling
-    /// names no number and is refused as unreadable rather than read as a
-    /// list.
+    /// `draft`. On a field declared a number, a bracketed spelling such as
+    /// `[9]` names no number and is refused as unreadable rather than read as
+    /// a list.
     #[test]
     fn bracket_text_in_a_request_value_is_literal_and_read_as_its_declared_type() {
         use norn_wire::Predicate;
