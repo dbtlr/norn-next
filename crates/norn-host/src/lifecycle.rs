@@ -19402,6 +19402,53 @@ mod tests {
         drop(recovery);
     }
 
+    /// **A rebuilt entry refuses a read at once, even where it heals.** The
+    /// store was found damaged, so trust was withdrawn; the rebuild replaces
+    /// it and hands on the reconcile of what its drain saw, and the entry
+    /// heals under the phase a change heals under with no rung owed. Nothing
+    /// in the rebuilt store has been served, so a read refuses rather than
+    /// waiting.
+    #[test]
+    fn a_read_refuses_at_once_over_a_rebuilt_entry() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        // The rebuild's drain is saturated, so the rung ends healing and hands
+        // on a reconcile, which is held.
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        arrange_for(&ops.continuous_handoff_poll_for, &name);
+        arrange_for(&ops.damaged_poll_at, &name);
+        poll_watchers(&host.shared);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 1);
+        let healing = TrustState::warming(WarmingPhase::Healing, 0, None);
+        assert_eq!(host.state(&name), answered(healing.clone()));
+        assert!(
+            !host
+                .shared
+                .entries
+                .get(&name)
+                .expect("the entry is served")
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .owes_a_rung(),
+            "the entry still owes the rebuild, so the rung rather than how it entered \
+             warming would refuse the read"
+        );
+
+        assert_eq!(
+            refused_at_once(&host, &name),
+            ReadRefusal::NotServing(Demand::State(healing))
+        );
+        *ops.continuous_handoff_poll_for
+            .lock()
+            .expect("continuous handoff poll poisoned") = None;
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
     /// **A read waiting through a schema reload answers from the reader the
     /// reload minted.** The reload closes the entry's reader as it begins
     /// warming, so the handle standing before it reads a schema the entry
