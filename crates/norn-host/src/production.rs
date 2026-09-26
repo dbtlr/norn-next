@@ -10122,36 +10122,51 @@ mod tests {
     }
 
     /// **A derivation judges a document's tags by the facet's patterns under
-    /// the path order its store records**, which is the order the root proves:
-    /// `area/**` admits `#Area/work` on a root that folds ASCII case, and on
-    /// one that tells spellings apart the tag is an undeclared-tag finding. A
-    /// root's case behaviour cannot be flipped from here, so the case expects
-    /// the answer of the order this root proves.
+    /// the path order its store records**: the same bytes derived into a store
+    /// recording each order, `area/**` admits `#Area/work` where the order
+    /// folds ASCII case, and where it tells spellings apart the tag is an
+    /// undeclared-tag finding. The store's order is set by reopening it, so
+    /// the case judges both orders on any host.
     #[test]
     fn a_derivation_judges_tag_patterns_under_the_order_its_store_records() {
-        let f = Fixture::new("attach-tag-pattern-case");
+        let f = Fixture::watcherless("derive-tag-pattern-case");
         fs::write(
             f.vault().join(".norn/schema.yaml"),
             "version: 1\ntags:\n  patterns: [\"area/**\"]\n  undeclared: report\n",
         )
         .unwrap();
-        fs::write(f.vault().join("note.md"), "# body\n#Area/work\n").unwrap();
-        let (ops, name) = f.ops(64);
-        let progress = ProgressReporter::disconnected();
-
-        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        let order = attachment.store.path_order();
-        assert_eq!(order, proven_order(&f));
-        let targets: Vec<Option<String>> = findings_at(&mut attachment.store, "note.md")
-            .into_iter()
-            .map(|finding| finding.target)
-            .collect();
-        let expected = match order {
-            StoredPathOrder::Sensitive => vec![Some("Area/work".to_string())],
-            StoredPathOrder::AsciiCaseInsensitive => Vec::new(),
-        };
-        assert_eq!(targets, expected, "under {order:?}");
-        ops.detach(&name, attachment);
+        let bytes = b"# body\n#Area/work\n";
+        let root = f.vault();
+        let mut store = Store::open(
+            f.root.join("tag-pattern-case.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        for (order, expected) in [
+            (
+                StoredPathOrder::Sensitive,
+                vec![Some("Area/work".to_string())],
+            ),
+            (StoredPathOrder::AsciiCaseInsensitive, Vec::new()),
+        ] {
+            store = store.discard_and_reopen(order).unwrap();
+            ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+            let mut account = Account::default();
+            let mut pending =
+                Pending::new(&mut store, 64, root.as_path(), &[], &mut account).unwrap();
+            pending.derive(
+                "note.md",
+                bytes,
+                norn_fs::ContentHash::of(bytes).to_string(),
+            );
+            pending.flush().unwrap();
+            let targets: Vec<Option<String>> = findings_at(&mut store, "note.md")
+                .into_iter()
+                .map(|finding| finding.target)
+                .collect();
+            assert_eq!(targets, expected, "under {order:?}");
+        }
     }
 
     /// **A store an earlier derivation wrote is rebuilt from zero at the
