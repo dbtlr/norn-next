@@ -235,10 +235,10 @@ const STATEMENTS: &[&str] = &[
     // Created ahead of the bytewise indexes: SQLite weighs a table's indexes
     // newest first and keeps the first of two that cost the same, so a
     // statement no folded range or order bounds reads the bytewise index it
-    // ties with. `validate::a_summary_aggregates_over_the_kind_and_severity_index`,
-    // `validate::a_kind_page_seeks_its_kind_from_the_pages_position` and
+    // ties with. A find's finding part ties `findings_fingerprint_kind_nocase`
+    // with the bytewise kind and severity index, and
     // `find::every_filter_seeks_the_index_its_values_are_bounds_for` in the
-    // store's plan bars fail where that order moves.
+    // store's plan bars fails where the folded index is created after it.
     "CREATE INDEX findings_fingerprint_kind_nocase
     ON findings(vault_schema_fingerprint, kind, path COLLATE NOCASE, path)",
     "CREATE INDEX findings_fingerprint_kind_severity_nocase
