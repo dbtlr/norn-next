@@ -817,7 +817,7 @@ fn a_heading_anchor_is_matched_in_memory_under_its_counter_ceiling() {
                 );
                 assert_eq!(
                     handed,
-                    [own.clone()],
+                    std::slice::from_ref(own),
                     "`{anchor}` {vault_is} under {order:?} hands the reader its document's \
                      headings, each once, in one call"
                 );
