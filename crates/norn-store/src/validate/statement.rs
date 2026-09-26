@@ -194,8 +194,10 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     // The greatest lower bound and the least upper bound of the path parts'
     // ranges, and where the range is bytewise, the section's position. A text
     // orders below the empty blob a range with no upper bound is bounded by.
-    // Folded bounds are folded text, so their byte order is their `NOCASE`
-    // order, and either bound picked is one some part's own range states.
+    // Each bound picked is one some part's own range states, so the range
+    // holds every path all the parts admit under either collation; folded
+    // lower bounds are folded text, whose byte order is their `NOCASE` order,
+    // so the greatest of them is the tightest.
     let position = findings
         .after
         .map_or((String::new(), 0), |(path, id)| (path.to_string(), id));
