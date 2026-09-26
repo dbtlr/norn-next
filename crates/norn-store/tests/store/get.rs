@@ -6,6 +6,7 @@
 //! Every store here is opened under the path order a case names, so a case
 //! proves the same thing on a case-sensitive host as on a folding one.
 
+use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -726,75 +727,116 @@ const CROWD_HEADINGS: usize = 12;
 /// `crowd` documents at `crowd/`, each carrying [`CROWD_HEADINGS`] headings,
 /// among them headings whose text the fixture's anchors name.
 fn crowded_sections(label: &str, order: StoredPathOrder, crowd: usize) -> Vault {
-    let crowd_body: String = ["Design Notes", "Last", "Nope"]
+    let body = crowd_body();
+    let mut documents = vec![parsed("notes/guide.md", SECTIONS)];
+    documents.extend((0..crowd).map(|at| parsed(&format!("crowd/{at:04}.md"), &body)));
+    Vault::holding(label, order, &documents)
+}
+
+/// The body each crowd document of [`crowded_sections`] holds.
+fn crowd_body() -> String {
+    ["Design Notes", "Last", "Nope"]
         .into_iter()
         .map(str::to_string)
         .chain((3..CROWD_HEADINGS).map(|at| format!("Topic {at}")))
         .map(|text| format!("## {text}\n{text} body\n\n"))
-        .collect();
-    let mut documents = vec![parsed("notes/guide.md", SECTIONS)];
-    documents.extend((0..crowd).map(|at| parsed(&format!("crowd/{at:04}.md"), &crowd_body)));
-    Vault::holding(label, order, &documents)
+        .collect()
 }
 
-/// **A heading anchor is matched in memory under its counter ceiling**: the
-/// section lookup matches its anchor over the named document's heading rows,
-/// each read once, so the heading rows it matches over are at most that
-/// document's headings — one per heading, whether the anchor names a heading
-/// by its text or its slug or names none — never a heading of another
-/// document, and the same count however many documents the vault holds
-/// beside it, however many of their headings carry the anchor's text. The
-/// plans of the lookup count the rows the lookup counts.
+/// The suite's document reader, keeping every run of headings a get hands
+/// its section lookup, one run per call.
+#[derive(Default)]
+struct Recording {
+    handed: RefCell<Vec<Vec<HeadingFact>>>,
+}
+
+impl DocumentText for Recording {
+    fn section(&self, headings: &[HeadingFact], body: &str, anchor: &str) -> Option<SectionAt> {
+        self.handed.borrow_mut().push(headings.to_vec());
+        Text.section(headings, body, anchor)
+    }
+
+    fn block(&self, body: &str, marker: usize) -> Range<usize> {
+        Text.block(body, marker)
+    }
+}
+
+impl Vault {
+    /// A get of `params` read through a [`Recording`] reader, and the runs
+    /// of headings the get handed it.
+    fn get_recorded(&self, params: &GetParams) -> (Gotten, Vec<Vec<HeadingFact>>) {
+        let reader = Recording::default();
+        let gotten = self
+            .snapshot()
+            .get(params, &declared(), &reader)
+            .unwrap_or_else(|refusal| panic!("a get of {params:?}: {refusal}"));
+        (gotten, reader.handed.into_inner())
+    }
+}
+
+/// **A heading anchor is matched in memory under its counter ceiling**: a
+/// section lookup hands the document reader the named document's headings,
+/// each once, in one call, and no heading of another document, and the get's
+/// work counts every heading row the reader was handed. So the heading rows
+/// the in-memory match runs over are exactly that document's headings, whether
+/// the anchor names a heading by its text or its slug or names none, however
+/// many documents the vault holds beside it, and however many of their
+/// headings carry the anchor's text. The plans of the lookup count the rows
+/// the lookup counts.
 ///
 /// Controls: the counter follows the document named, reading a crowd
 /// document's headings where the anchor names one; a get that looks up no
-/// section, a record or a page of the headings collection, matches over no
-/// heading row.
+/// section, a record or a page of the headings collection, hands the reader
+/// nothing and counts no heading row.
 #[test]
 fn a_heading_anchor_is_matched_in_memory_under_its_counter_ceiling() {
-    let held = parsed("notes/guide.md", SECTIONS).headings.len() as u64;
-    assert!(held > 1, "the fixture's document carries several headings");
+    let guide = parsed("notes/guide.md", SECTIONS).headings;
+    assert!(
+        guide.len() > 1,
+        "the fixture's document carries several headings"
+    );
     for order in [Sensitive, Folding] {
-        let alone = crowded_sections(&format!("get-anchor-alone-{order:?}"), order, 0);
-        let crowded = crowded_sections(&format!("get-anchor-crowded-{order:?}"), order, 40);
-        for anchor in [
-            "guide#design notes",
-            "guide#Last",
-            "guide#design-notes",
-            "guide#Nope",
+        let few = crowded_sections(&format!("get-anchor-few-{order:?}"), order, 1);
+        let many = crowded_sections(&format!("get-anchor-many-{order:?}"), order, 40);
+        let crowd = parsed("crowd/0000.md", &crowd_body()).headings;
+        assert_eq!(crowd.len(), CROWD_HEADINGS);
+        for (anchor, own) in [
+            ("guide#design notes", &guide),
+            ("guide#design-notes", &guide),
+            ("guide#Nope", &guide),
+            ("crowd/0000#Topic 7", &crowd),
         ] {
             let params = getting(anchor);
-            for (vault, vault_is) in [(&alone, "alone"), (&crowded, "crowded")] {
-                let work = vault.get(&params).work;
-                assert!(
-                    work.anchor_headings <= held,
-                    "`{anchor}` {vault_is} under {order:?} matched over {} heading rows, past \
-                     the ceiling of the document's {held} headings",
-                    work.anchor_headings
+            for (vault, vault_is) in [(&few, "beside one"), (&many, "beside forty")] {
+                let (gotten, handed) = vault.get_recorded(&params);
+                assert_eq!(
+                    handed,
+                    [own.clone()],
+                    "`{anchor}` {vault_is} under {order:?} hands the reader its document's \
+                     headings, each once, in one call"
                 );
                 assert_eq!(
-                    work.anchor_headings, held,
-                    "`{anchor}` {vault_is} under {order:?} matches over each of its document's \
-                     headings once"
+                    gotten.work.anchor_headings,
+                    own.len() as u64,
+                    "`{anchor}` {vault_is} under {order:?} counts every heading row the reader \
+                     was handed"
                 );
-                assert_eq!(planned_work(vault, &params), work, "`{anchor}` {vault_is}");
+                assert_eq!(
+                    planned_work(vault, &params),
+                    gotten.work,
+                    "`{anchor}` {vault_is}"
+                );
             }
         }
-        assert_eq!(
-            crowded
-                .get(&getting("crowd/0003#Topic 7"))
-                .work
-                .anchor_headings,
-            CROWD_HEADINGS as u64,
-            "the counter follows the document the target names"
-        );
         for params in [
             getting("guide"),
             getting("guide")
                 .with_collection(CollectionSelector::Headings)
                 .with_limit(2),
         ] {
-            assert_eq!(crowded.get(&params).work.anchor_headings, 0, "{params:?}");
+            let (gotten, handed) = many.get_recorded(&params);
+            assert!(handed.is_empty(), "{params:?} handed the reader {handed:?}");
+            assert_eq!(gotten.work.anchor_headings, 0, "{params:?}");
         }
     }
 }
