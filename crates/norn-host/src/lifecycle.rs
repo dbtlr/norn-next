@@ -3427,9 +3427,8 @@ struct AcquisitionUnderTheGate<'g, O: EntryOps> {
 ///   [`AcquisitionUnderTheGate`], which gives this lease up as it lets that
 ///   guard go.
 ///
-/// Nothing the thread still holds is what a gate holder waits for: the
-/// connection's turn drops before the acquisition, and no holder of the gate
-/// waits for a connection.
+/// Nothing the thread still holds is what a gate holder waits for: no holder
+/// of the gate waits for a connection.
 struct AcquisitionOutsideTheGate<'g, O: EntryOps> {
     gate: &'g EntryGate<EntryState<O::Attachment>>,
     lease: DemandLease<O>,
@@ -18136,6 +18135,49 @@ mod tests {
             "the unwound read's lease is still counted beside the first read's"
         );
         drop(std::mem::ManuallyDrop::into_inner(first));
+    }
+
+    /// **A refusal under the gate gives its lease back in the same hold.** The
+    /// read waiting behind another retakes the gate after its wait, finds the
+    /// entry torn down, and is refused there: the lease goes back through the
+    /// guard that retake returned, before that guard drops, so the refusal
+    /// costs the round it is already paying for and no other. A lease that
+    /// gave itself back from its own drop instead would take the gate a
+    /// second time for the same refusal.
+    #[test]
+    fn a_refusal_under_the_gate_gives_its_lease_back_in_the_same_hold() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let host = Arc::new(host);
+        let (entry, first, waiting) = a_read_waiting_behind_another(&host, &name, &ops);
+        let before = entry.gate.times_taken();
+
+        // The teardown while the second read waits, and the first read giving
+        // its connection back, are what the wake and the retake below answer:
+        // the entry the retake finds is one that has stopped serving.
+        refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
+        drop(std::mem::ManuallyDrop::into_inner(first));
+
+        let refusal = joined_within_the_budget("the read waiting behind the first", waiting)
+            .expect("the waiting read's own thread unwound instead of answering");
+        assert!(
+            matches!(refusal, Err(ReadRefusal::NotServing(_))),
+            "the read that waited was refused as something other than the entry it found: \
+             {refusal:?}"
+        );
+        assert_eq!(
+            entry.gate.times_taken() - before,
+            5,
+            "the teardown, the first read's give-back and the second read's retake together took \
+             other than five rounds of the gate — a refusal that gives its lease back outside the \
+             hold it found the entry under costs one round more"
+        );
+        assert_eq!(
+            demand_leases(&entry),
+            0,
+            "the refused read or the first read it waited behind left a lease standing on the \
+             entry"
+        );
     }
 
     /// The first read a case holds, and a second read spawned behind it that
