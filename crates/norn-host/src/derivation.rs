@@ -2455,8 +2455,8 @@ paths:
         let documents: Vec<(&str, &str)> = vec![
             ("bare.md", "code: a\n"),
             ("bracketed.md", "code: [a]\n"),
-            ("among.md", "code: [a, b]\n"),
-            ("block.md", "code:\n  - a\n  - b\n"),
+            ("among.md", "code: [b, a]\n"),
+            ("block.md", "code:\n  - b\n  - a\n"),
             ("other.md", "code: b\n"),
             ("quoted.md", "code: \"[draft]\"\n"),
             ("draft.md", "code: draft\n"),
