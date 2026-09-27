@@ -82,8 +82,9 @@ use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
+use norn_db::EmittedPlan;
 use norn_db::rusqlite::types::Value;
-use norn_db::rusqlite::{self, Connection};
+use norn_db::rusqlite::{self, Connection, Row, params_from_iter};
 use norn_db::{Adoption, Database, OpenOutcome, RebuildReason, meta};
 use norn_wire::{FindingKind, LinkAddressKind, Severity};
 
@@ -92,6 +93,7 @@ use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{DerivationVersion, LinkFamily, Provenance, StoredPathOrder, TagSource};
 use crate::hash;
+use crate::read::{Ran, ReadFilter, ReadStatement, StatementFailure, Stepped};
 use crate::request::Request;
 
 /// The read-only snapshot handle wire reads run on.
@@ -536,18 +538,27 @@ impl Snapshot {
     /// top of that and refuse the pragma, the attach and the temporary object
     /// a statement would otherwise reach around it with.
     ///
-    /// The find builder runs its statements here, and each one it runs is
-    /// counted on [`Snapshot::counters`] beside the establishing one through
-    /// [`Snapshot::count_statement`]. The application-defined functions those
-    /// statements call are registered on this connection when its handle is
-    /// minted, by [`Store::open_reader`].
-    pub(crate) fn connection(&self) -> &Connection {
+    /// **Private to this module, on purpose.** A statement run here and not
+    /// through [`Snapshot::run_statement_staged`] escapes
+    /// [`Snapshot::counters`] — a read's cost would no longer be what
+    /// [`Snapshot::count_statement`] and [`Snapshot::count_steps`] counted —
+    /// so nothing outside this file reaches it: every read builder runs its
+    /// statements through [`Snapshot::run_statement`] or
+    /// [`Snapshot::run_statement_staged`], which count as they run, and
+    /// [`Snapshot::explained`] reaches [`Snapshot::database`] to explain a
+    /// statement already run rather than to run one. The application-defined
+    /// functions a statement calls are registered on this connection when its
+    /// handle is minted, by [`Store::open_reader`].
+    fn connection(&self) -> &Connection {
         self.database().connection()
     }
 
     /// The handle this snapshot's connection belongs to, which is what takes
     /// a plan of a statement the connection ran.
-    pub(crate) fn database(&self) -> &Database {
+    ///
+    /// Private for the reason [`Snapshot::connection`] is: [`Database`] hands
+    /// its own connection back to anything holding it.
+    fn database(&self) -> &Database {
         self.database
             .as_ref()
             .expect("a snapshot holds its connection until it is dropped")
@@ -575,6 +586,95 @@ impl Snapshot {
         let mut counters = self.counters.get();
         counters.count_steps(stepped.vm_steps, stepped.full_scan_steps);
         self.counters.set(counters);
+    }
+
+    /// Each statement in `record`, in the order it ran, as `plan` makes it of
+    /// its name, its filters, and the plan SQLite reports for it: the text it
+    /// ran, bound to the values it ran with, explained on this snapshot's
+    /// read-only connection. An explain is a report about a statement rather
+    /// than a run of it, so it is not counted.
+    pub(crate) fn explained<P>(
+        &self,
+        record: Vec<Ran>,
+        mut plan: impl FnMut(ReadStatement, Vec<ReadFilter>, EmittedPlan) -> P,
+    ) -> Result<Vec<P>, StoreError> {
+        record
+            .into_iter()
+            .map(|ran| {
+                let emitted = self
+                    .database()
+                    .emitted_plan(ran.sql(), params_from_iter(ran.values().iter()))
+                    .map_err(StoreError::from)?;
+                Ok(plan(ran.statement, ran.filters, emitted))
+            })
+            .collect()
+    }
+
+    /// Run `ran`, counted on this snapshot and recorded at the end of `record`
+    /// before it is prepared, and read each row it answers through `read`.
+    ///
+    /// Every statement a read runs is run here, and what is prepared is the
+    /// text the record holds, bound to the values it holds:
+    /// [`Snapshot::explained`] explains the record, so the plan of a
+    /// statement is the plan of what ran. Once every row is read, or the
+    /// stepping failed, the record takes what SQLite counted stepping it
+    /// ([`Stepped`]) and the snapshot adds it to its own counts.
+    pub(crate) fn run_statement<T>(
+        &self,
+        record: &mut Vec<Ran>,
+        ran: Ran,
+        read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<Vec<T>> {
+        self.run_statement_staged(record, ran, read)
+            .map_err(StatementFailure::into_inner)
+    }
+
+    /// [`Snapshot::run_statement`], its failure saying whether the statement
+    /// failed before it was stepped — preparing its text or binding its
+    /// values — or while it was stepped.
+    ///
+    /// **This, and no other function, prepares and steps a statement on this
+    /// snapshot's connection.** It is the one place [`Snapshot::connection`]
+    /// is reached to run something rather than to explain or establish, so
+    /// every statement a read runs is counted here and nowhere else can run
+    /// one uncounted.
+    pub(crate) fn run_statement_staged<T>(
+        &self,
+        record: &mut Vec<Ran>,
+        ran: Ran,
+        read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>, StatementFailure> {
+        self.count_statement();
+        record.push(ran);
+        let ran = record.last_mut().expect("the statement was just recorded");
+        let mut statement = self
+            .connection()
+            .prepare(ran.sql())
+            .map_err(StatementFailure::Preparing)?;
+        let rows = statement
+            .query_map(params_from_iter(ran.values().iter()), read)
+            .map_err(StatementFailure::Preparing)?
+            .collect::<rusqlite::Result<Vec<T>>>();
+        ran.stepped = Stepped::of(&statement);
+        self.count_steps(ran.stepped);
+        rows.map_err(StatementFailure::Stepping)
+    }
+
+    /// Run one yes-or-no probe, which answers exactly one row.
+    pub(crate) fn ask(
+        &self,
+        record: &mut Vec<Ran>,
+        probe: Ran,
+        operation: &'static str,
+    ) -> Result<bool, StoreError> {
+        self.run_statement(record, probe, |row| row.get::<_, bool>(0))
+            .and_then(|answers| {
+                answers
+                    .into_iter()
+                    .next()
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)
+            })
+            .map_err(|problem| error::sql(operation, problem))
     }
 }
 

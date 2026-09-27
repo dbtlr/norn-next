@@ -115,6 +115,11 @@
 //!   malformed. Whether it parses is asked before the page runs, by one probe
 //!   of the full-text index; a malformed query's part is reported with the
 //!   engine's words, and the page is empty, as a malformed glob's is.
+//! - **A match part whose query parses but holds no word** — every phrase a
+//!   quoted run of punctuation, or alike — is a query the full-text index
+//!   reads no token in, matching nothing by construction: it is reported the
+//!   one rule a full-text query is read by ([`crate::search::words`]) finds
+//!   unsatisfiable, the same report a search's own wordless query earns.
 //!
 //! A `links_to` part resolves its own target to one document through the one
 //! resolver, then matches the documents holding a link whose resolution is

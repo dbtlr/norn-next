@@ -2630,6 +2630,28 @@ fn a_malformed_full_text_query_is_reported_and_empties_the_page() {
     assert!(page.unsatisfied.is_empty(), "{:?}", page.unsatisfied);
 }
 
+/// **A match part whose query parses but holds no word is reported, and the
+/// page is empty**, the same report a search's own wordless query earns: a
+/// quoted run of punctuation matches nothing by construction, and answering
+/// that in silence is indistinguishable from every document failing the
+/// match.
+#[test]
+fn a_full_text_query_holding_no_word_is_reported_and_empties_the_page() {
+    let seeded = Seeded::new("find-wordless-query");
+    for query in ["\"!!!\"", "\"!!!\" AND \"???\"", "\"!!!\"*", "body:\"!!!\""] {
+        let page = seeded.page(&request().with_predicates([Predicate::matches(query)]));
+        assert!(page.rows.is_empty(), "{query:?}: {:?}", row_paths(&page));
+        assert_eq!(
+            page.unsatisfied,
+            vec![Unsatisfied::query_names_no_word(query)],
+            "{query:?}"
+        );
+    }
+    let page = seeded.page(&request().with_predicates([Predicate::matches("interloper")]));
+    assert_eq!(row_paths(&page), ["notes/a.md"]);
+    assert!(page.unsatisfied.is_empty(), "{:?}", page.unsatisfied);
+}
+
 /// **A full-text index the store cannot read is the store's fault, not a
 /// malformed query.** With `documents_fts` dropped out of band, the probe that
 /// asks whether a match part's query parses does not prepare, and the find is

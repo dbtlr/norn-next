@@ -59,7 +59,7 @@ pub(crate) use finding::{FINDING_ROW_COLUMNS, FindingBase, cursor_position, find
 pub(crate) use glob::register_functions;
 pub(crate) use keys::key_walk;
 pub(crate) use naming::{Naming, SuffixSpellings, wire_path};
-pub(crate) use run::{Lookups, Ran, Stepped};
+pub(crate) use run::{Lookups, Ran, StatementFailure, Stepped};
 
 /// How many rows a page holds when a request names no bound.
 ///
