@@ -62,7 +62,7 @@ use norn_wire::FindingKind;
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(6),
-    "550b38fb3c450bd8bfd80bfc2ed1e4a2e075d17567c58bdea14e8162ae6ee890",
+    "4f9ebc2176221222477ed790d6ab7533a409d6872cc45178f1c071206b994f6a",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -626,11 +626,11 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             .anchor_readings
             .clone()
     };
-    let decoded = readings("Sub%20Setext").expect("an encoded anchor's readings");
+    let decoded = readings("Sub Setext").expect("an encoded fragment's readings");
     assert_eq!(
         (decoded.text.as_str(), decoded.slug.as_str()),
         ("sub setext", "Sub Setext"),
-        "an encoded anchor is not read decoded"
+        "an encoded fragment is not recorded decoded"
     );
     for (anchor, marked) in [("Glossary#Repeated", "repeated"), ("## Setext", "setext")] {
         assert_eq!(

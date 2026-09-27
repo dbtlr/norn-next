@@ -14,10 +14,10 @@
 //! # How an anchor matches a heading
 //!
 //! An empty anchor is no anchor and matches no heading. Any other anchor is
-//! percent-decoded once — every `%` followed by two hexadecimal digits is the
-//! byte they spell, and a decoding that is not UTF-8 leaves the anchor as
-//! written — and the decoded anchor is read three ways, each tried only where
-//! the one before matched no heading:
+//! read as written — a Markdown link's fragment arrives here already decoded,
+//! because the link's parse decodes it ([`crate::Link::anchor`]), and a
+//! wikilink's anchor and a get target's are literal — and it is read three
+//! ways, each tried only where the one before matched no heading:
 //!
 //! 1. **Its text**, compared with each heading's [`heading_reading`]: both
 //!    sides trimmed, each run of ASCII whitespace collapsed to one space, and
@@ -31,9 +31,9 @@
 //!    (`Top#Sub`, as `[[note#Top#Sub]]` writes it) is read as its last
 //!    heading: the text after its last `#`, where text stands on both sides of
 //!    the chain's `#`s.
-//! 3. **Its slug reading, exactly**: the decoded anchor against each heading's
-//!    slug, dedupe suffix included. This is what an inline Markdown
-//!    `#fragment` addresses.
+//! 3. **Its slug reading, exactly**: the anchor against each heading's slug,
+//!    dedupe suffix included. This is what an inline Markdown `#fragment`
+//!    addresses.
 //!
 //! [`anchor_readings`] is the one place an anchor's three readings are made,
 //! and a stored link carries them, so a store's predicate over stored
@@ -328,13 +328,13 @@ fn indices(headings: &[Heading], matches: impl Fn(&Heading) -> bool) -> Vec<usiz
 /// of the third its slug.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnchorReadings {
-    /// The decoded anchor as a heading reading.
+    /// The anchor as a heading reading.
     pub text: String,
-    /// The heading text past the decoded anchor's `#` markers, as a heading
-    /// reading: an ATX-shaped anchor's heading text, or a heading chain's last
-    /// heading. `None` where the anchor has no such markers.
+    /// The heading text past the anchor's `#` markers, as a heading reading:
+    /// an ATX-shaped anchor's heading text, or a heading chain's last heading.
+    /// `None` where the anchor has no such markers.
     pub marked: Option<String>,
-    /// The decoded anchor, compared exactly with a heading's slug.
+    /// The anchor, compared exactly with a heading's slug.
     pub slug: String,
 }
 
@@ -344,11 +344,10 @@ pub fn anchor_readings(anchor: &str) -> Option<AnchorReadings> {
     if anchor.is_empty() {
         return None;
     }
-    let decoded = percent_decoded(anchor);
     Some(AnchorReadings {
-        text: heading_reading(&decoded),
-        marked: marked_text(&decoded).map(|text| heading_reading(&text)),
-        slug: decoded,
+        text: heading_reading(anchor),
+        marked: marked_text(anchor).map(|text| heading_reading(&text)),
+        slug: anchor.to_string(),
     })
 }
 
@@ -361,34 +360,6 @@ pub fn heading_reading(text: &str) -> String {
         .map(str::to_ascii_lowercase)
         .collect::<Vec<String>>()
         .join(" ")
-}
-
-/// `anchor` with every `%` followed by two hexadecimal digits read as the byte
-/// they spell, or `anchor` as written where the bytes that makes are not
-/// UTF-8. A `%` not followed by two hexadecimal digits is itself.
-fn percent_decoded(anchor: &str) -> String {
-    let bytes = anchor.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        let spelled = (bytes[at] == b'%')
-            .then(|| bytes.get(at + 1..at + 3))
-            .flatten()
-            .and_then(|digits| std::str::from_utf8(digits).ok())
-            .filter(|digits| digits.bytes().all(|digit| digit.is_ascii_hexdigit()))
-            .and_then(|digits| u8::from_str_radix(digits, 16).ok());
-        match spelled {
-            Some(byte) => {
-                decoded.push(byte);
-                at += 3;
-            }
-            None => {
-                decoded.push(bytes[at]);
-                at += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).unwrap_or_else(|_| anchor.to_string())
 }
 
 /// The heading text past `anchor`'s `#` markers: an ATX-shaped anchor's

@@ -471,6 +471,11 @@ fn an_atx_prefixed_anchor_resolves_by_its_text() {
         resolve_section(DOC, "## Alpha ##"),
         resolve_section(DOC, "Alpha")
     );
+    // A tab after the opening is an ATX opening, as it is for a heading.
+    assert_eq!(
+        resolve_section(DOC, "#\tAlpha"),
+        resolve_section(DOC, "Alpha")
+    );
 }
 
 #[test]
@@ -937,40 +942,96 @@ fn an_empty_anchor_reads_as_no_anchor() {
     );
 }
 
-/// **A percent-encoded anchor is decoded once**, as the Markdown link
-/// `[x](Note.md#My%20Heading)` is written, and every reading reads the decoded
-/// anchor. A `%` that spells no byte is itself, and a decoding that is not
-/// UTF-8 leaves the anchor as written.
+/// The heading anchor the one link `link` records, as the text layer parses
+/// it.
+fn anchor_of(link: &str) -> &'static str {
+    let mut links = BodyScan::new(link).links().into_iter();
+    let parsed = links.next().expect("one link");
+    assert!(links.next().is_none(), "one link in {link:?}");
+    parsed.anchor.expect("a heading anchor").leak()
+}
+
+/// **A wikilink anchor is literal, and a Markdown fragment is decoded once.**
+/// Only a Markdown link percent-encodes its fragment, so the text layer
+/// decodes it where the link is parsed and the resolver reads every anchor as
+/// written: `[[n#100%25]]` and `[x](n.md#100%2525)` both reach `## 100%25`,
+/// and `[x](n.md#My%20Heading)` reaches `## My Heading` where the wikilink
+/// `[[n#My%20Heading]]` does not.
 #[test]
-fn a_percent_encoded_anchor_is_decoded_once() {
-    let body = "## My Heading\nmine\n## 100%\npercent\n## Über uns\nabout\n";
+fn a_wikilink_anchor_is_literal_and_a_markdown_fragment_is_decoded_once() {
+    let body = "## 100%25\nencoded\n## My Heading\nmine\n## Über uns\nabout\n";
+    let encoded = resolve_section(body, "100%25").expect("the heading by its text");
+    assert_eq!(
+        resolve_section(body, anchor_of("[[n#100%25]]")),
+        Ok(encoded)
+    );
+    assert_eq!(
+        resolve_section(body, anchor_of("[x](n.md#100%2525)")),
+        Ok(encoded)
+    );
     let mine = resolve_section(body, "My Heading").expect("the heading by its text");
-    assert_eq!(resolve_section(body, "My%20Heading"), Ok(mine));
-    assert_eq!(resolve_section(body, "my%20heading"), Ok(mine));
-    let about = resolve_section(body, "Über uns").expect("the heading by its text");
     assert_eq!(
-        resolve_section(body, "%C3%BCber-uns"),
-        Ok(about),
-        "the slug reading reads the decoded anchor"
+        resolve_section(body, anchor_of("[x](n.md#My%20Heading)")),
+        Ok(mine)
     );
-    let percent = resolve_section(body, "100%").expect("the heading by its text");
-    assert_eq!(resolve_section(body, "100%25"), Ok(percent));
     assert_eq!(
-        resolve_section(body, "100%2525"),
+        resolve_section(body, anchor_of("[[n#My%20Heading]]")),
         Err(SectionError::HeadingNotFound {
-            heading: "100%2525".into()
+            heading: "My%20Heading".into()
         }),
-        "an anchor is decoded once, never twice"
+        "a wikilink anchor is not decoded"
+    );
+    let about = resolve_section(body, "Über uns").expect("the heading by its text");
+    for fragment in ["%C3%BCber-uns", "%c3%bcber-uns"] {
+        assert_eq!(
+            resolve_section(body, anchor_of(&format!("[x](n.md#{fragment})"))),
+            Ok(about),
+            "{fragment} reaches the heading by its slug, decoded in either case"
+        );
+    }
+}
+
+/// **A decoded `%23` in a Markdown fragment is a `#` as a written one is**:
+/// the resolver reads the anchor by its whole text first, so `C%23` reaches
+/// `## C#`, and as a heading chain only where no heading's text is the whole
+/// anchor, so `Top%23Sub` reaches `## Sub` as `Top#Sub` does. A wikilink's
+/// `%23` is three literal characters and never a chain's `#`.
+#[test]
+fn a_decoded_hash_in_a_markdown_fragment_is_read_as_a_written_one() {
+    let body = "## C#\nsharp\n# Top\nt\n## Sub\nsub\n";
+    let sharp = resolve_section(body, "C#").expect("the heading whose text holds a hash");
+    assert_eq!(
+        resolve_section(body, anchor_of("[x](n.md#C%23)")),
+        Ok(sharp)
+    );
+    let sub = resolve_section(body, "Sub").expect("the last heading");
+    assert_eq!(
+        resolve_section(body, anchor_of("[x](n.md#Top%23Sub)")),
+        Ok(sub)
     );
     assert_eq!(
-        anchor_readings("a%FFb").map(|readings| readings.slug),
-        Some("a%FFb".into()),
-        "a decoding that is not UTF-8 leaves the anchor as written"
+        resolve_section(body, anchor_of("[[n#Top%23Sub]]")),
+        Err(SectionError::HeadingNotFound {
+            heading: "Top%23Sub".into()
+        }),
+        "a wikilink's `%23` is no chain separator"
+    );
+}
+
+/// **A get's anchor is literal**, as a wikilink's is: `100%25` names the
+/// heading `100%25` and never `100%`.
+#[test]
+fn a_targets_anchor_is_read_as_written() {
+    let body = "## 100%\npercent\n## 100%25\nencoded\n";
+    let encoded = resolve_section(body, "100%25").expect("a section");
+    assert_eq!(
+        &body[encoded.content_start..encoded.content_end],
+        "encoded\n"
     );
     assert_eq!(
-        anchor_readings("50%-off").map(|readings| readings.slug),
-        Some("50%-off".into()),
-        "a `%` that spells no byte is itself"
+        anchor_readings("a%FFb").map(|readings| readings.text),
+        Some("a%ffb".into()),
+        "an anchor is read as written"
     );
 }
 
@@ -983,11 +1044,18 @@ fn a_heading_chain_matches_on_its_last_heading() {
     let sub = resolve_section(body, "Sub").expect("the last heading");
     assert_eq!(resolve_section(body, "Top#Sub"), Ok(sub));
     assert_eq!(resolve_section(body, "Anything#sub"), Ok(sub));
+    let three = "# A\na\n## B\nb\n### C\nc\n## D\nd\n";
+    let c = resolve_section(three, "C").expect("the last heading");
+    assert_eq!(
+        resolve_section(three, "A#B#C"),
+        Ok(c),
+        "a chain of three is read as its last heading"
+    );
     let encoded = "# Top\nt\n## My Sub\nmine\n";
     assert_eq!(
-        resolve_section(encoded, "Top#My%20Sub"),
+        resolve_section(encoded, anchor_of("[x](n.md#Top#My%20Sub)")),
         resolve_section(encoded, "My Sub"),
-        "a chain is read after the anchor is decoded"
+        "a Markdown fragment's chain is read after it is decoded"
     );
 
     let body = "## C# tips\ntips\n## tips\nplain\n";

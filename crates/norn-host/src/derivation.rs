@@ -1903,7 +1903,7 @@ paths:
     fn headings_and_anchors_carry_the_section_resolvers_readings() {
         let source = b"# Design  Notes
 
-[[t#Top#Design%20Notes]] [[t#]] [[t#^b]] [[t]]
+[[t#Top#Design  NOTES]] [[t#]] [[t#^b]] [[t]]
 ";
         let facts = map_document(
             "note.md",
@@ -1930,7 +1930,7 @@ paths:
                 Some(AnchorReadings {
                     text: "top#design notes".to_string(),
                     marked: Some("design notes".to_string()),
-                    slug: "Top#Design Notes".to_string(),
+                    slug: "Top#Design  NOTES".to_string(),
                 }),
                 None,
                 None,

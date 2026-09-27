@@ -985,8 +985,9 @@ another. A page of links resolves each link it holds as a find's links column do
 so a container's prefix on that line is the next section's. The store parses no document, so a section and a block are read
 through the reader the caller hands a get — `norn-text`'s one section resolver and its one
 block reading — over the one document's heading rows and body. An empty anchor, `note#` or
-`note#^`, names no place and answers the record. Any other heading anchor is percent-decoded
-once and matched by three readings, each tried only where the one before matched no heading,
+`note#^`, names no place and answers the record. Any other heading anchor is read as written —
+a target's and a wikilink's are literal, and a Markdown link's fragment was percent-decoded
+once where the link was parsed — and matched by three readings, each tried only where the one before matched no heading,
 and a read and a write match through the same three: the anchor's text with ASCII case and
 ASCII whitespace folded, against each heading's text folded the same way; the heading text
 past the anchor's `#` markers — an ATX-shaped anchor's (`## X` names the heading `X`), or a

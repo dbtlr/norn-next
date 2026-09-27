@@ -23,8 +23,10 @@
 //! Markdown link against a vault, where what was encoded is known; a target a
 //! client wrote is the literal text it wrote, and decoding it here would make
 //! `a%2Fb` and `a/b` one address when a person typed two. A heading anchor is
-//! kept as written here too, and is decoded where a section is resolved, by
-//! the one section resolver a link's anchor is read by.
+//! literal too, as a wikilink's is: `note#100%25` names the heading `100%25`.
+//! Only a Markdown link percent-encodes its fragment, and the text layer
+//! decodes that where the link is parsed, so the one section resolver reads a
+//! target's anchor and a link's alike, as written.
 
 use std::borrow::Cow;
 use std::fmt;

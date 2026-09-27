@@ -81,8 +81,10 @@
 //! Markdown one a path relative to the containing document. A wikilink
 //! `#anchor` is written as heading *text* and a Markdown `#fragment` as a
 //! heading *slug* ([`Heading::slug`]), and the one section resolver reads
-//! either by all its readings ([`anchor_readings`]). All of it is recorded raw
-//! on the link; none of it is matched there.
+//! either by all its readings ([`anchor_readings`]). A Markdown fragment is
+//! percent-decoded once where the link is parsed, because that family encodes
+//! it; everything else is recorded raw on the link, and none of it is matched
+//! there.
 //!
 //! A `protocol://` prefix is recognized, and only recognized: `[[x]]` and
 //! `[[vault://x]]` are distinct facts, nothing supplies a default protocol,

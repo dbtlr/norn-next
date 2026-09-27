@@ -131,8 +131,8 @@ fn a_fragment_splits_into_an_anchor_or_a_block_reference() {
     assert_eq!(extra_hashes.anchor.as_deref(), Some("a#b"));
 }
 
-/// The split runs over the destination as written, and this crate
-/// percent-decodes nothing. A file whose name contains a hash is addressed by
+/// The split runs over the destination as written, and the target is
+/// recorded undecoded. A file whose name contains a hash is addressed by
 /// encoding it, and the encoded form carries no fragment.
 #[test]
 fn a_percent_encoded_hash_is_not_a_fragment() {
@@ -140,6 +140,34 @@ fn a_percent_encoded_hash_is_not_a_fragment() {
     assert_eq!(link.target, "note%23draft.md");
     assert_eq!(link.anchor, None);
     assert_eq!(link.block_ref, None);
+}
+
+/// **A Markdown link's fragment is percent-decoded once, where it is
+/// parsed**, because a Markdown link is the family that percent-encodes it: a
+/// `%` followed by two hexadecimal digits, in either case, is the byte they
+/// spell. A `%` that spells no byte is itself, and a decoding that is not
+/// UTF-8 leaves the fragment as written. A wikilink's fragment is literal.
+#[test]
+fn a_markdown_fragment_is_decoded_once_and_a_wikilinks_is_literal() {
+    for (written, anchor) in [
+        ("[t](x.md#My%20Heading)\n", "My Heading"),
+        ("[t](x.md#%c3%bcber)\n", "über"),
+        ("[t](x.md#%C3%BCber)\n", "über"),
+        ("[t](x.md#100%2525)\n", "100%25"),
+        ("[t](x.md#50%-off)\n", "50%-off"),
+        ("[t](x.md#a%FFb)\n", "a%FFb"),
+        ("[t](%20x.md#a%20b)\n", "a b"),
+    ] {
+        assert_eq!(only(written).anchor.as_deref(), Some(anchor), "{written:?}");
+    }
+    assert_eq!(only("[t](%20x.md#a)\n").target, "%20x.md");
+    assert_eq!(
+        only("[t](x.md#^a%2Db)\n").block_ref.as_deref(),
+        Some("a-b"),
+        "a block reference is the fragment past its caret, decoded alike"
+    );
+    let wikilink = BodyScan::new("[[x#My%20Heading]]\n").wikilinks().remove(0);
+    assert_eq!(wikilink.anchor.as_deref(), Some("My%20Heading"));
 }
 
 // ── Code is opaque, structurally ─────────────────────────────────────────

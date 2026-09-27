@@ -471,9 +471,10 @@ const SEPARATOR: char = '/';
 ///
 /// **A path is read by URL rules.** Its query — from the first `?` — is not
 /// part of it and is cut off here; the fragment was split off when the link
-/// was recognized. Splitting it into segments, percent-decoding each, and
-/// joining it to where it is read from is the reader's. A wikilink's target,
-/// rooted or not, is read by no URL rule: nothing in it is cut off or
+/// was recognized, and a Markdown link's fragment percent-decoded there once.
+/// Splitting the path into segments, percent-decoding each, and joining it to
+/// where it is read from is the reader's. A wikilink's target and anchor,
+/// rooted or not, are read by no URL rule: nothing in them is cut off or
 /// decoded.
 ///
 /// Plain rather than `#[non_exhaustive]`: a reader matches every address, and
@@ -698,7 +699,8 @@ pub struct LinkRow {
     pub target: String,
     /// The link's title, where its grammar carries one.
     pub title: Option<String>,
-    /// The place inside the target the link names, where it names one.
+    /// The place inside the target the link names, where it names one: a
+    /// wikilink's as written, and a Markdown link's percent-decoded once.
     pub anchor: Option<Anchor>,
     /// Where the link stands in the document body.
     pub span: Span,
