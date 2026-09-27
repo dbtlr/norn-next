@@ -46,18 +46,14 @@ pub(crate) enum Report {
 pub(crate) struct Conjunction {
     pub(crate) filters: Vec<Filter>,
     pub(crate) reports: Vec<Report>,
-    /// Whether some part matches no document, which empties the answer.
+    /// Whether some part matches no document, which empties the answer: a
+    /// part that cannot be applied, and a part on a predicate key outside
+    /// the field universe.
     pub(crate) matches_nothing: bool,
     /// The parts comparing a key with a dated order against values they name,
     /// in the order the request names them: what a read's mixed-offset
     /// advisory is asked about.
     pub(crate) compared_dates: Vec<DateComparison>,
-    /// Whether some part names a predicate key outside the field universe.
-    /// Such a part filters nothing among documents, and is still a fact of a
-    /// document: a read whose rows can stand where no document does admits
-    /// only the rows standing on one. Every row a find or a count reads is a
-    /// document, so neither reads it.
-    pub(crate) names_unknown_key: bool,
 }
 
 /// Whether the verb compiling a conjunction answers a `resolves` part.
@@ -163,9 +159,10 @@ impl Snapshot {
     ///
     /// Every read that filters by a conjunction compiles it here, so a part
     /// means one thing on every verb. A part whose key is outside the field
-    /// universe is reported and filters nothing among documents
-    /// ([`Conjunction::names_unknown_key`]); a part that cannot be applied
-    /// is reported and matches nothing. A `resolves` part is compiled into a
+    /// universe is reported with the keys near it and matches no document,
+    /// as a part that cannot be applied is reported and matches nothing: no
+    /// document carries the key, so none satisfies a part on it, an absence
+    /// or an inequality included. A `resolves` part is compiled into a
     /// filter where `resolves` answers it, and reported as not applicable,
     /// filtering nothing, where it does not.
     pub(crate) fn compile_conjunction(
@@ -180,7 +177,6 @@ impl Snapshot {
             reports: Vec::new(),
             matches_nothing: false,
             compared_dates: Vec::new(),
-            names_unknown_key: false,
         };
         for predicate in predicates {
             membership_bound(predicate)?;
@@ -200,7 +196,7 @@ impl Snapshot {
                 conjunction
                     .reports
                     .push(Report::Unknown(KeyPlace::Predicate, key.to_string()));
-                conjunction.names_unknown_key = true;
+                conjunction.matches_nothing = true;
                 continue;
             }
             match self.compile_predicate(predicate, declared, lookups)? {

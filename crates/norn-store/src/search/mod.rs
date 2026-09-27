@@ -65,12 +65,11 @@
 //! The conjunction is compiled by the one compilation every read builder
 //! shares, so a part narrows a search exactly as it narrows a find and is
 //! reported the same way where it cannot be applied: a part with no meaning
-//! empties the page, and a predicate key outside the field universe is
-//! reported and filters nothing. **A `resolves` part is not applicable**: it
-//! answers which documents a target names, which is a find, so a search
-//! reports it and filters nothing by it. A part comparing dates of both offset
-//! spellings is advised as a find's is, in [`Searched::advisories`], wherever
-//! a lexical page ran.
+//! empties the page, a predicate key outside the field universe among them.
+//! **A `resolves` part is not applicable**: it answers which documents a
+//! target names, which is a find, so a search reports it and filters nothing
+//! by it. A part comparing dates of both offset spellings is advised as a
+//! find's is, in [`Searched::advisories`], wherever a lexical page ran.
 //!
 //! # A hit carries the row its columns name
 //!

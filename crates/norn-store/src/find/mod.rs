@@ -85,16 +85,16 @@
 //! **A conjunction's part that cannot be applied empties the page.** A part
 //! with no meaning narrows the answer to nothing, so a caller never receives
 //! rows broader than it asked for, and the report is what keeps the empty page
-//! from reading as a vault with nothing in it. **A key outside the field
-//! universe is the one exception**: it is reported, and the page is answered
-//! as the first entry below states, a predicate key's part filtering nothing.
-//! Every other entry below empties the page.
+//! from reading as a vault with nothing in it. A predicate key outside the
+//! field universe is such a part. **An unknown sort or projected key is the
+//! one exception**: it is reported, and the page is answered as the first
+//! entry below states. Every other entry below empties the page.
 //!
 //! - **A key outside the field universe** — the keys the declaration names
 //!   and the keys some document carries — is reported with the keys near it,
 //!   by the one did-you-mean rule every read builder shares. An unknown sort
 //!   key orders the page by path, ascending; an unknown projected key carries nothing under it; an
-//!   unknown predicate key's part filters nothing. Whether a key is known is a
+//!   unknown predicate key's part matches no document. Whether a key is known is a
 //!   declaration lookup or one existence seek of the presence rows, and the
 //!   universe itself is walked only where some key is unknown.
 //! - **A path part** is read by [`norn_wire::Pattern`]'s grammar, and matches

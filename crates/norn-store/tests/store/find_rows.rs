@@ -1250,7 +1250,8 @@ fn declaring_due() -> ContentModel {
 /// **Every unknown key is reported with the keys near it, and never applied in
 /// silence.** An unknown sort key orders the rows by path, ascending, whatever
 /// direction was asked; an unknown projected key carries nothing; an unknown
-/// predicate key's part filters nothing. The suggestions are drawn from the
+/// predicate key's part matches no document, so the page is empty and the
+/// report says why. The suggestions are drawn from the
 /// field universe — `priority` only a document carries, `due` only the
 /// declaration names — by the one rule: within two edits, case folded.
 #[test]
@@ -1283,7 +1284,7 @@ fn every_unknown_key_is_reported_with_the_keys_near_it() {
         Predicate::equal_to("priorty", "high"),
         Predicate::has("dew"),
     ]));
-    assert_eq!(paths(&unknown_part), every);
+    assert_eq!(paths(&unknown_part), Vec::<String>::new());
     assert_eq!(
         unknown_part.unsatisfied,
         [

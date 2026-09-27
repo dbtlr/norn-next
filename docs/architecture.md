@@ -815,7 +815,10 @@ not for the page, so it may stand beside rows that all write one spelling, and i
 silent where such a comparison decided the answer; a part that matches nothing empties the
 answer without comparing, and no advisory is raised beside it; and it costs one probe per
 compared dated key. Every builder that compiles a conjunction raises it through the one read
-machinery. A page with no filter reads its order index in page order, and
+machinery. **A part on a predicate key outside the field universe matches no document**, on
+every builder that compiles a conjunction, as a part that cannot be applied does: no document
+carries the key, so none satisfies a part on it, an absence or an inequality included, and the
+answer is empty beside an in-band report naming the key and the keys near it. A page with no filter reads its order index in page order, and
 sorts nothing: the path page and a field sort's valued section seek it and stop at the
 page's bound. A field sort's missing section passes every document that carries the key to
 reach one that does not, so an ascending first page, which reads the missing section first,
@@ -893,8 +896,7 @@ compilation, with a `resolves` part reported as not applicable and a mixed-offse
 advised as a find's is, and one rule decides what a
 part judges: a path part judges the path a finding stands at, so a finding where no document
 row stands is found by the path naming it, and every other part judges the document row at
-that path, which a finding with no row beside it never satisfies — a part on a key outside
-the field universe included, which filters nothing among documents. A finding row carries the
+that path, which a finding with no row beside it never satisfies. A finding row carries the
 candidate head and total the pillar stores, and an ambiguous link's finding a hint naming the
 `find` that enumerates its class, read through the one accessor a find's findings column reads through, so a finding
 is the same row on either verb. It names two statements under the same discipline, each

@@ -789,8 +789,8 @@ fn a_part_narrows_the_hits_it_keeps_in_rank_order() {
 }
 
 /// **A part a search cannot apply is reported as a find reports it.** A key
-/// outside the field universe is reported with the keys near it and filters
-/// nothing; a `resolves` part is not applicable to a search and filters
+/// outside the field universe is reported with the keys near it and empties
+/// the page; a `resolves` part is not applicable to a search and filters
 /// nothing; a match part the engine cannot parse and a glob that does not
 /// parse are reported, and empty the page. A `links_to` part whose target names
 /// no document is reported, and empties the page, as a find reports it.
@@ -805,7 +805,7 @@ fn a_part_a_search_cannot_apply_is_reported_as_a_find_reports_it() {
 
     let unknown = searching_store
         .search(&searching("lantern").with_predicates([Predicate::equal_to("statis", "open")]));
-    assert_eq!(hit_paths(&unknown), whole);
+    assert_eq!(hit_paths(&unknown), Vec::<&str>::new());
     assert_eq!(
         unknown.unsatisfied,
         vec![Unsatisfied::unknown_predicate_key(
@@ -859,6 +859,7 @@ fn a_part_a_search_cannot_apply_is_reported_as_a_find_reports_it() {
 #[test]
 fn a_hit_carries_the_row_its_columns_name() {
     let searching_store = Searching::new("search-columns");
+    let target = ResolutionTarget::new("lantern").expect("a target");
     let bare = searching("lantern harbor");
     let plans = searching_store.plans(&bare);
     assert_eq!(
@@ -878,7 +879,7 @@ fn a_hit_carries_the_row_its_columns_name() {
         &bare
             .clone()
             .with_limit(3)
-            .with_predicates([Predicate::equal_to("statis", "x")])
+            .with_predicates([Predicate::resolves(target.clone())])
             .with_columns([
                 Column::field("status"),
                 Column::field("stat"),
@@ -917,7 +918,7 @@ fn a_hit_carries_the_row_its_columns_name() {
     assert_eq!(
         projected.unsatisfied,
         vec![
-            Unsatisfied::unknown_predicate_key("statis", vec!["status".to_string()]),
+            Unsatisfied::resolves_not_applicable(target),
             Unsatisfied::unknown_projection_key("stat", vec!["status".to_string()]),
         ]
     );

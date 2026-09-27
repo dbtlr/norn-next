@@ -1437,6 +1437,7 @@
           "crates/norn-store/tests/store/find.rs::a_malformed_full_text_query_is_reported_and_empties_the_page",
           "crates/norn-store/tests/store/find.rs::a_full_text_query_holding_no_word_is_reported_and_empties_the_page",
           "crates/norn-store/tests/store/count.rs::a_by_key_outside_the_field_universe_answers_null_and_is_reported",
+          "crates/norn-store/tests/store/count.rs::a_part_a_count_cannot_apply_is_reported_as_a_find_reports_it",
           "crates/norn-store/tests/store/count.rs::a_wordless_match_part_is_reported_and_a_counts_tally_reads_nothing_it_narrowed",
           "crates/norn-store/tests/store/validate.rs::a_part_a_validate_cannot_apply_is_reported_as_a_find_reports_it",
           "crates/norn-store/tests/store/validate.rs::a_wordless_match_part_is_reported_and_a_validates_answer_holds_no_finding",

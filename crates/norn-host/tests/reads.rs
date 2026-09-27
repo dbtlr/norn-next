@@ -1248,7 +1248,8 @@ fn a_read_issued_after_an_edit_answers_it_and_none_is_refused_meanwhile() {
 /// **A part a verb could not apply reaches the answer through the host.** A
 /// get of a section or a block its document does not carry answers the
 /// document's record with exactly that part unsatisfied; a find and a count
-/// each report a predicate key outside the field universe; a validate reports a `resolves`
+/// each report a predicate key outside the field universe, and a find over one
+/// answers no row; a validate reports a `resolves`
 /// part as not applicable. Each is answered under the reading of its
 /// snapshot, never refused.
 #[test]
@@ -1281,6 +1282,11 @@ fn a_part_a_verb_could_not_apply_is_answered_unsatisfied() {
         )
         .expect("a find over an unknown key answers");
     assert_read_from_its_snapshot(&found.answer.reading, &vault);
+    assert!(
+        found.answer.report.rows.is_empty(),
+        "a find over an unknown key answered {} rows",
+        found.answer.report.rows.len()
+    );
     assert!(
         matches!(
             found.answer.unsatisfied.as_slice(),
