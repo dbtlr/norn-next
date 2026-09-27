@@ -613,6 +613,163 @@ fn one_probe_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnap
     snapshot
 }
 
+/// The stem the write-work bar's hub write targets. No generated document
+/// shares it, asserted below rather than assumed: a fixture whose word list
+/// ever drew it would put the hub in a populated class at one scale and not
+/// the other, which is a violation of the word list rather than of ADR 0027.
+const HUB_STEM: &str = "hub-gate-hub";
+
+/// The document the write-work bar's hub write derives.
+fn hub_path() -> String {
+    format!("hub-gate/{HUB_STEM}.md")
+}
+
+/// How many documents already hold a bare-stem link to the hub, fixed at both
+/// per-PR scales: the claim under test is that a hub's write costs its own
+/// in-links, never the vault around it (ADR 0027's write-work bar).
+const HUB_IN_LINKS: usize = 20;
+
+/// Plant [`HUB_IN_LINKS`] documents linking the hub by its bare stem into
+/// `vault`'s tree, before anything attaches it — so the attach heal derives
+/// them as broken links, the way any other document a vault already held
+/// would be.
+fn plant_hub_in_links(vault: &attach::Vault) {
+    for at in 0..HUB_IN_LINKS {
+        let path = vault.path().join(format!("hub-gate/in-links/{at:04}.md"));
+        std::fs::create_dir_all(path.parent().expect("a planted document's folder"))
+            .expect("creating a planted document's folder");
+        std::fs::write(&path, format!("See [[{HUB_STEM}]].\n"))
+            .expect("writing a planted hub in-link");
+    }
+}
+
+/// **The hub's stem is the planted neighborhood's alone.** No document the
+/// attachment derived beside the planted in-links shares it.
+fn assert_the_hub_stem_is_the_neighborhoods_alone(store: &mut Store) {
+    let hub = DocumentPath::new(&hub_path()).expect("a document path");
+    let mut sharing = Vec::new();
+    attach::for_each_derived_path(store, |path| {
+        if path.stem() == hub.stem() {
+            sharing.push(path.as_str().to_string());
+        }
+    });
+    assert!(
+        sharing.is_empty(),
+        "the write-work bar's hub targets stem `{}`, and the attachment already derived \
+         documents at it: {sharing:?}",
+        hub.stem()
+    );
+}
+
+/// **The write-work bar over a hub's in-links (ADR 0027).** Writing the
+/// document a fixed number of other documents already link by its bare stem
+/// re-decides exactly their links, at both per-PR scales alike: a hub's write
+/// costs its own in-links, never the vault around it.
+///
+/// [`HUB_IN_LINKS`] documents linking `[[hub-gate-hub]]` are planted beside
+/// each profile's generated tree and derived by the same attach heal that
+/// derives the rest of it — each holding a broken link until the hub itself
+/// is written. That write is then counted directly through the store, the
+/// same seam [`one_probe_write`] counts through: it re-decides exactly the
+/// planted in-links, resolves the one key their class names once, reads the
+/// hub as the one candidate that key names once, discards every one of the
+/// broken findings the in-links held, and files none in their place, at
+/// `ambiguous` (300 documents) exactly as at `realistic` (2000).
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_hub_writes_link_health_work_follows_its_in_links_at_both_scales() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let small_counters = one_hub_write("counter-gate-hub-ambiguous", &small);
+    let large_counters = one_hub_write("counter-gate-hub-realistic", &large);
+
+    for (profile, counters) in [(&small, &small_counters), (&large, &large_counters)] {
+        for (name, expected) in [
+            ("links_redecided", HUB_IN_LINKS as u64),
+            ("link_health_keys_resolved", 1),
+            ("link_health_candidates_read", 1),
+            ("findings_discarded", HUB_IN_LINKS as u64),
+            ("findings_written", 0),
+        ] {
+            assert_eq!(
+                counters.get(name),
+                expected,
+                "writing the hub over `{}` did not read `{name}` as its {HUB_IN_LINKS} planted \
+                 in-links name",
+                profile.name
+            );
+        }
+    }
+
+    SizeIndependencePair::new(
+        "writing a hub with a fixed number of in-links",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// Attach `profile` with [`HUB_IN_LINKS`] planted beside it, write the hub
+/// they all name directly through the store, and hand back what the write
+/// derived.
+fn one_hub_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    plant_hub_in_links(&vault);
+    {
+        let host = vault.host();
+        attach::attach_and_wait(&host, vault.name());
+    }
+
+    let mut store = vault.store();
+    let derived = attach::derived_documents(&mut store);
+    assert_eq!(
+        derived,
+        profile.docs + HUB_IN_LINKS,
+        "`{}` emits {} documents and {HUB_IN_LINKS} in-links were planted beside them, and the \
+         attachment derived {derived}",
+        profile.name,
+        profile.docs
+    );
+    assert_the_hub_stem_is_the_neighborhoods_alone(&mut store);
+
+    let mut request = store.begin_request();
+    let declared = request
+        .vault_schema_pin()
+        .expect("reading the pinned schema")
+        .map_or_else(norn_store::ContentModel::none, |pin| {
+            norn_store::ContentModel::under(pin.fingerprint)
+        });
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Upsert(DocumentFacts::new(
+                DocumentPath::new(&hub_path()).expect("a document path"),
+                HUB_STEM,
+                "the hub\n",
+                8,
+            ))],
+            &[],
+            &declared,
+        )
+        .expect("writing the hub");
+    let reading = request.finish();
+    assert!(
+        !reading.is_all_zero(),
+        "writing the hub counted nothing, so the bar over it holds no reading"
+    );
+    let snapshot: CounterSnapshot = reading.readings().collect();
+    record_the_counters(
+        &format!(
+            "writing a hub with {HUB_IN_LINKS} in-links over `{}`",
+            profile.name
+        ),
+        &snapshot,
+    );
+    snapshot
+}
+
 /// **The size-independence bar over a read.** The vault around a bounded find
 /// is not part of what the find costs.
 ///

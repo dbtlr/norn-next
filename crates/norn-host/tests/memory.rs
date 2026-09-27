@@ -86,6 +86,10 @@ use std::time::Duration;
 
 use attach::read::{FIND_LIMIT, bounded_find};
 use norn_host::Answered;
+use norn_store::{
+    Change as StoreChange, ContentModel, DocumentFacts, DocumentPath as StorePath,
+    IncrementProvenance,
+};
 use norn_testkit::heap;
 use norn_testkit::process::{Run, Sandbox};
 use norn_wire::{
@@ -263,6 +267,205 @@ fn peak_memory_holds_flat_from_the_ambiguity_profile_to_the_gate_profile() {
         baselines::mebibytes(small),
         baselines::mebibytes(large)
     );
+}
+
+/// The stem the memory bar's hub write targets, and the directory its
+/// in-links stand under.
+const HUB_WRITE_STEM: &str = "memory-gate-hub";
+const HUB_WRITE_DIR: &str = "memory-gate-hub-links";
+
+/// How many documents already hold a bare-stem link to the hub the memory
+/// bar's write resolves, fixed at both per-PR scales: the claim under test is
+/// that a hub's write costs its own in-links, never the vault around it
+/// (ADR 0027's bounded-working-memory obligation).
+const HUB_WRITE_IN_LINKS: usize = 200;
+
+/// The case a hub-writing child re-executes, which is the one that reads this
+/// constant.
+const HUB_WRITE_HARNESS_CASE: &str =
+    "the_hub_write_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile";
+
+/// Write [`HUB_WRITE_IN_LINKS`] documents linking the hub by its bare stem
+/// into `vault`'s tree, before anything attaches it.
+fn plant_hub_in_links(vault: &attach::Vault) {
+    for at in 0..HUB_WRITE_IN_LINKS {
+        let path = vault.path().join(format!("{HUB_WRITE_DIR}/{at:04}.md"));
+        std::fs::create_dir_all(path.parent().expect("a planted document's folder"))
+            .expect("creating a planted document's folder");
+        std::fs::write(&path, format!("See [[{HUB_WRITE_STEM}]].\n"))
+            .expect("writing a planted hub in-link");
+    }
+}
+
+/// **What a hub write adds to a process that already attached, as a
+/// difference in heap bytes across the two per-PR scales (ADR 0027's
+/// bounded-working-memory obligation).**
+///
+/// With [`HARNESS_ENV`] and its token set this process is the child: it
+/// attaches the tree the variable names — which already holds
+/// [`HUB_WRITE_IN_LINKS`] documents linking a hub nothing has written yet, so
+/// the attach heal derives every one of them as broken — marks the heap once
+/// the attachment is ready, and then writes the hub itself directly through
+/// the store, the same write ADR 0027's re-decision runs inside, instead of
+/// measuring anything. What is reported is the most that write raised the
+/// heap above the mark, so the reading is the write's own and not the
+/// attach's.
+///
+/// **This is a difference in bytes, not a ratio over a whole-process peak**,
+/// following [`the_read_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile`]:
+/// a peak resident-set ratio over an attach-and-write child is dominated by
+/// the attach and the fixed cost of the child binary, so a re-decision that
+/// held every link of the vault in memory instead of the hub's own
+/// [`HUB_WRITE_IN_LINKS`] moved that ratio from 1.05 to 1.31 against a 1.6x
+/// bar and still passed. The heap mark is taken after the attach and before
+/// the write, so it sees none of that — only what the write itself holds.
+///
+/// `ambiguous` and `realistic` differ by 1,700 documents; the planted
+/// neighborhood does not differ between them at all. A re-decision whose
+/// working memory were the vault's links rather than the hub's own would
+/// hold about 1,700 documents' worth more of them at `realistic`; this bar
+/// holds that it does not.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn the_hub_write_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile() {
+    if let Some(root) = std::env::var_os(HARNESS_ENV) {
+        hub_write_and_report(&attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV));
+        return;
+    }
+
+    let small = hub_write_heap_growth("hub-write-heap-ambiguous", "ambiguous");
+    let large = hub_write_heap_growth("hub-write-heap-realistic", "realistic");
+    let growth = large.saturating_sub(small);
+
+    baselines::record(
+        "heap the hub write holds above the attach, across the two per-PR scales",
+        &[
+            ("ambiguous, 300 documents (bytes)", small.to_string()),
+            ("realistic, 2000 documents (bytes)", large.to_string()),
+            (
+                "realistic minus ambiguous (bytes)",
+                (i128::from(large) - i128::from(small)).to_string(),
+            ),
+            (
+                "growth allowance (bytes)",
+                baselines::HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES.to_string(),
+            ),
+        ],
+    );
+
+    assert!(
+        small > 0 && large > 0,
+        "a hub write reported no heap reading above the attach, so the pair compares nothing"
+    );
+    assert!(
+        baselines::fits(growth, baselines::HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES),
+        "going from `ambiguous` (300 documents) to `realistic` (2000 documents) grew the heap \
+         the hub write holds above the attach by {growth} bytes, past the {} byte allowance: \
+         `ambiguous` held {small} bytes and `realistic` {large}",
+        baselines::HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES,
+    );
+}
+
+/// Generate `profile`'s tree with [`HUB_WRITE_IN_LINKS`] planted beside it,
+/// attach it in a child that then writes the hub they all name, and hand back
+/// the most the write raised that child's heap above the mark taken once the
+/// attachment was ready.
+fn hub_write_heap_growth(label: &str, profile: &str) -> u64 {
+    let documents = norn_fixtures::Profile::by_name(profile)
+        .unwrap_or_else(|| panic!("no profile named `{profile}`"))
+        .docs;
+    baselines::assert_the_profile_the_bars_were_authored_on();
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let harness = sandbox
+        .install_binary(&std::env::current_exe().expect("this suite's own executable"))
+        .expect("installing the harness");
+    let root: PathBuf = sandbox.work_dir().join("attached");
+    let vault = attach::Vault::generate(&root, profile);
+    plant_hub_in_links(&vault);
+    let token = attach::issue_harness_token(&root);
+
+    let outcome = Run::new(&sandbox, &harness)
+        .args([
+            "--exact",
+            HUB_WRITE_HARNESS_CASE,
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(HARNESS_ENV, &root)
+        .env(HARNESS_TOKEN_ENV, &token)
+        .deadline(ATTACH_DEADLINE)
+        .wait()
+        .expect("running the hub-write harness");
+    outcome.assert_success();
+    assert!(
+        !outcome.stdout_truncated,
+        "the harness wrote more than the capture limit, so what came back is a prefix"
+    );
+    let reported = outcome.stdout_text();
+    let expected = documents + HUB_WRITE_IN_LINKS + 1;
+    assert!(
+        reported.contains(&report_line(expected)),
+        "`{profile}` holds {documents} documents, {HUB_WRITE_IN_LINKS} in-links were planted \
+         beside them and the hub itself is one more, and the harness reported: {reported}"
+    );
+    let prefix = "hub write heap peak ";
+    let heap_line = reported
+        .lines()
+        .find(|line| line.starts_with(prefix))
+        .unwrap_or_else(|| panic!("the harness reported no heap reading: {reported}"));
+    heap_line[prefix.len()..]
+        .trim()
+        .parse()
+        .unwrap_or_else(|problem| {
+            panic!("the harness reported `{heap_line}` as a heap reading: {problem}")
+        })
+}
+
+/// The harness: adopt the tree at `root`, attach it, mark the heap once the
+/// attachment is ready, then write the hub [`HUB_WRITE_IN_LINKS`] planted
+/// documents already link by its bare stem — directly through the store,
+/// which is the write ADR 0027's re-decision runs inside — and report what
+/// the vault now derives and the most that write raised the heap above the
+/// mark.
+///
+/// **The mark is taken after the attachment is dropped and before the
+/// write, and the peak is read before anything else runs.** The attachment
+/// is dropped the same way the counter gate's direct-store writes drop it, so
+/// no watcher thread allocates beside the measurement and its teardown lands
+/// before the mark; the window between the mark and the reading holds the
+/// write's own heap alone.
+#[allow(clippy::disallowed_macros)] // The child's report is a machine-consumed stream its parent reads.
+fn hub_write_and_report(root: &Path) {
+    let vault = attach::Vault::adopt(root);
+    {
+        let host = vault.host();
+        attach::attach_and_wait(&host, vault.name());
+    }
+    let mark = heap::Mark::set();
+    let mut store = vault.store();
+    let mut request = store.begin_request();
+    let declared = request
+        .vault_schema_pin()
+        .expect("reading the pinned schema")
+        .map_or_else(ContentModel::none, |pin| {
+            ContentModel::under(pin.fingerprint)
+        });
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [StoreChange::Upsert(DocumentFacts::new(
+                StorePath::new(&format!("{HUB_WRITE_STEM}.md")).expect("a document path"),
+                HUB_WRITE_STEM,
+                "the hub\n",
+                8,
+            ))],
+            &[],
+            &declared,
+        )
+        .expect("writing the hub");
+    let peak = mark.peak_above();
+    println!("{}", report_line(attach::derived_documents(&mut store)));
+    println!("hub write heap peak {peak}");
 }
 
 /// **The read ceiling**, and the harness a reading child runs.

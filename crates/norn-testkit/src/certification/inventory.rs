@@ -346,6 +346,18 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
+        id: "churn-hub-class-change-and-rename",
+        suite: Suite::Churn,
+        lane: Lane::RealWatcher,
+        states: "a hub's stem class gains a member, loses it again, and the hub is then \
+                 renamed, each settled on its own: every backlink reads ambiguous once the \
+                 join settles, healthy once the leave settles, and broken once the rename \
+                 settles, the store equalling a build from zero after every phase",
+        carrier: "crates/norn-host/tests/churn.rs::\
+                  a_hubs_stem_class_change_and_its_rename_converges_on_a_build_from_zero",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
         id: "churn-rendering-collision-clears",
         suite: Suite::Churn,
         lane: Lane::RealWatcher,

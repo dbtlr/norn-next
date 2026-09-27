@@ -647,6 +647,203 @@ fn an_ambiguity_classs_membership_change_converges_on_a_build_from_zero() {
     }
 }
 
+/// The three backlinks [`a_hubs_stem_class_change_and_its_rename_converges_on_a_build_from_zero`]
+/// names `hub` by its bare stem.
+const HUB_BACKLINKS: [&str; 3] = [
+    "churn/hub/linker-one.md",
+    "churn/hub/linker-two.md",
+    "churn/hub/linker-three.md",
+];
+
+/// The link-health findings standing over the one link `linker` carries, in
+/// `(kind, ordinal)` pairs.
+fn backlink_link_health(vault: &attach::Vault, linker: &str) -> Vec<(String, Option<u64>)> {
+    vault
+        .store()
+        .begin_request()
+        .stored_findings(&DocumentPath::new(linker).expect("a document path"))
+        .expect("reading findings")
+        .into_iter()
+        .filter(|finding| finding.kind.starts_with("link/"))
+        .map(|finding| (finding.kind, finding.ordinal))
+        .collect()
+}
+
+/// **The lighter cousin of [`Churned::judge`]**, for a phase that wants the
+/// equivalence bar without the churn's own death bookkeeping and population
+/// floor: a fresh derivation from zero over `vault`'s tree as it stands right
+/// now, at a machine directory of its own so it shares no database with any
+/// other phase's rebuild, held equal to `vault`'s own store field by field.
+fn assert_equals_a_rebuild(vault: &attach::Vault, sandbox: &Sandbox, machine: &str, subject: &str) {
+    let second = vault.beside(&sandbox.work_dir().join(machine));
+    {
+        let host = second.host();
+        let lease = attach::attach_and_wait(&host, second.name());
+        drop(lease);
+    }
+    let mut left = vault.store();
+    let mut right = second.store();
+    StoreProjection::read(&mut left)
+        .expect("projecting the churned store")
+        .assert_equivalent(
+            &StoreProjection::read(&mut right).expect("projecting the store built from zero"),
+            subject,
+        );
+}
+
+/// **A hub's stem class gains a member, loses it again, and the hub is then
+/// renamed — three phases, each settled on its own and each checked against a
+/// build from zero before the next begins.** Three backlinks
+/// ([`HUB_BACKLINKS`]) name `hub` by its bare stem.
+///
+/// - **Phase 1.** A second document joins the class `hub/`, in another
+///   directory. Once the watcher settles, the class holds two members and
+///   every backlink's own link-health finding reads `link/ambiguous` —
+///   checked directly against the settled tree, and the store equals a build
+///   from zero over it.
+/// - **Phase 2.** The joining document is removed, settled on its own. The
+///   class holds one member again, every backlink reads healthy — no
+///   link-health finding at all — and the store equals a build from zero
+///   again.
+/// - **Phase 3.** The hub itself is renamed — a death of the old path beside
+///   a write of the new, moving both the class the backlinks resolve through
+///   and the path the old name keyed. Settled, every backlink reads
+///   `link/broken`, and the churn's own equivalence bar closes the case.
+///
+/// **Each phase settles before the next phase's acts land.** A join and a
+/// leave folded into one changeset with no settle between them would leave
+/// the tree reading exactly as it did before either, so the ambiguous and the
+/// healthy readings above would never be exercised — and a re-decision that
+/// skipped the class arm only for changesets touching `other/` would still
+/// pass a test that checked nothing until the rename covered for it. Settling
+/// after the join and after the leave is what makes each finding this test
+/// asserts the one a real edit, not a folded no-op, produced.
+#[test]
+fn a_hubs_stem_class_change_and_its_rename_converges_on_a_build_from_zero() {
+    let mut ink = churn::Ink::new(89);
+    let opening = Script::new(
+        "a hub three backlinks name by its bare stem, before its class or its name move",
+        vec![
+            Step::new(
+                "write the hub the backlinks below name",
+                Act::Write {
+                    at: "churn/hub/hub.md".to_string(),
+                    bytes: ink.document("hub"),
+                },
+            ),
+            Step::new(
+                "write the first backlink",
+                Act::Write {
+                    at: "churn/hub/linker-one.md".to_string(),
+                    bytes: b"# Linker one\n\nSee [[hub]].\n".to_vec(),
+                },
+            ),
+            Step::new(
+                "write the second backlink",
+                Act::Write {
+                    at: "churn/hub/linker-two.md".to_string(),
+                    bytes: b"# Linker two\n\nSee [[hub]].\n".to_vec(),
+                },
+            ),
+            Step::new(
+                "write the third backlink",
+                Act::Write {
+                    at: "churn/hub/linker-three.md".to_string(),
+                    bytes: b"# Linker three\n\nSee [[hub]].\n".to_vec(),
+                },
+            ),
+        ],
+    );
+    let joining = Script::new(
+        "a note joins the hub's class",
+        vec![Step::new(
+            "write a second document sharing the hub's stem, in another directory",
+            Act::Write {
+                at: "churn/hub/other/hub.md".to_string(),
+                bytes: ink.document("another hub"),
+            },
+        )],
+    );
+    let leaving = Script::new(
+        "the joining note leaves the hub's class again",
+        vec![Step::new(
+            "remove the second document",
+            Act::Remove {
+                at: "churn/hub/other/hub.md".to_string(),
+            },
+        )],
+    );
+    let renaming = Script::new(
+        "the hub is renamed",
+        vec![Step::new(
+            "rename the hub the three backlinks name",
+            Act::Rename {
+                from: "churn/hub/hub.md".to_string(),
+                to: "churn/hub/hub-renamed.md".to_string(),
+            },
+        )],
+    );
+
+    let mut churned = attach_and_churn(
+        sandbox("churn-hub-class-and-rename"),
+        &opening,
+        When::Settled,
+    );
+
+    churned = churned.then(&joining, When::Settled);
+    for linker in HUB_BACKLINKS {
+        assert_eq!(
+            backlink_link_health(&churned.vault, linker),
+            vec![(FindingKind::Ambiguous.as_str().to_string(), Some(0))],
+            "phase 1 (the note joined the hub's class): `{linker}`'s link to `hub` does not read \
+             ambiguous"
+        );
+    }
+    assert_equals_a_rebuild(
+        &churned.vault,
+        &churned.sandbox,
+        "rebuild-after-join",
+        "phase 1: a note joins the hub's stem class",
+    );
+
+    churned = churned.then(&leaving, When::Settled);
+    for linker in HUB_BACKLINKS {
+        assert_eq!(
+            backlink_link_health(&churned.vault, linker),
+            Vec::new(),
+            "phase 2 (the note left the hub's class): `{linker}`'s link to `hub` carries a \
+             link-health finding"
+        );
+    }
+    assert_equals_a_rebuild(
+        &churned.vault,
+        &churned.sandbox,
+        "rebuild-after-leave",
+        "phase 2: the note leaves the hub's stem class again",
+    );
+    // The leave killed a row, and phase 2's own maintenance account is what
+    // this checks: `assert_rows_were_taken_away` reads the account `then`
+    // just took for this phase alone, so it is asked here rather than after a
+    // later phase resets it.
+    churned.assert_rows_were_taken_away();
+
+    churned = churned.then(&renaming, When::Settled);
+    for linker in HUB_BACKLINKS {
+        assert_eq!(
+            backlink_link_health(&churned.vault, linker),
+            vec![(FindingKind::Broken.as_str().to_string(), Some(0))],
+            "phase 3 (the hub was renamed): `{linker}`'s link to the renamed hub does not read \
+             broken"
+        );
+    }
+    // The rename kills the old path's row too. `judge` itself asks the store
+    // for a tombstone at every place any phase killed — `other/hub.md` from
+    // phase 2 and `churn/hub/hub.md` from this one — read off the pillar
+    // rather than off phase 3's own maintenance account, which is what makes
+    // that check safe to run once here for both deaths at once.
+    churned.judge("a hub's stem class change and its own rename", 0);
+}
+
 /// **A rendering collision that clears.**
 ///
 /// A name the document-path grammar refuses is reported at the spelling norn

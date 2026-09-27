@@ -357,6 +357,50 @@ pub const READ_OVER_ATTACH_PEAK_RSS_PER_MILLE: u64 = 1_500;
 /// local readings, and no negative control has been read there.
 pub const READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 
+/// How many more bytes of heap a hub write may hold above the attach beneath
+/// it over the `realistic` profile than over the `ambiguous` profile.
+///
+/// **The bar that sees what a hub write's own working memory holds, apart
+/// from the attach beneath it and the vault around it.** A child attaches its
+/// profile with [`HUB_WRITE_IN_LINKS`](../../../tests/memory.rs) fixed
+/// in-links planted beside it, marks the heap once the attachment is ready,
+/// writes the hub those in-links name directly through the store, and reports
+/// the most that write raised the live heap above the mark. Peak resident set
+/// is not this bar: a whole-process ratio over an attach-and-write child is
+/// dominated by the attach and the fixed cost of the child binary, so a
+/// re-decision that held every link of the vault in a `Vec` until it returned
+/// — about 0.5 KiB per link — moved the `realistic` attach-and-write peak from
+/// 25.9 to 32.4 MiB and the ratio over `ambiguous` from 1.05 to 1.31, both
+/// under the 1.6x [`ATTACH_PAIR_PEAK_RSS_PER_MILLE`] bar. The heap mark is
+/// taken after the attach and before the write, so it never sees the heal's
+/// own allocations, and it is a difference in bytes rather than a ratio for
+/// the same reason [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] is: the reading
+/// is exact, and a ratio over a small floor moves only once a retention
+/// climbs past a fraction of it.
+///
+/// `realistic` holds 1,700 more documents than `ambiguous`; the planted
+/// in-links are the same 200 at both scales. A write whose own working memory
+/// followed the vault's link count rather than its neighborhood's would hold
+/// bytes for every one of those 1,700 extra documents' links; one that
+/// followed only the re-decided set holds the same bytes at both scales.
+///
+/// Observed on macos-arm64 on 2026-09-27, over two runs: **0 bytes** in
+/// both. Each profile held 225,588 bytes above its mark, the same
+/// 200-in-link write's own working set at both scales. The mark is taken
+/// after the attachment is dropped and the peak is read as the write
+/// returns, so neither the host's teardown nor a read of the vault falls
+/// inside the window.
+///
+/// The allowance is **4 KiB**, the same order
+/// [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] is authored at. A retention of
+/// some bytes for every one of the 1,700 extra documents fails it from
+/// **2.5 bytes a document** (4,096 / 1,700) at the observed difference.
+///
+/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; no
+/// hosted reading stands beside the local ones yet.
+pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
+
 /// How many descriptors a long mixed load may add to the count taken once the
 /// attachment is ready.
 ///
