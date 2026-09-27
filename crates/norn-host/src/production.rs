@@ -3370,8 +3370,11 @@ impl<'s> Pending<'s> {
                 // No cause here is a reading of a resolution target, so the
                 // finding belongs to no ambiguity class and no class-scoped
                 // maintenance owns it. A tag breach names a tag rather than a
-                // link target, and a tag is not a path anything resolves.
+                // link target, and a tag is not a path anything resolves. For
+                // the same reason no cause is about a path-addressed link, so
+                // the finding is keyed by no path either.
                 class_keys: BTreeSet::new(),
+                path_keys: BTreeSet::new(),
                 target,
                 span: None,
                 // Every cause here is about the document, not one of its links.

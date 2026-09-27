@@ -19,7 +19,7 @@ use crate::fields::{FieldRow, OffsetSpelling};
 use crate::hash;
 use crate::json;
 use crate::link::link_keys;
-use crate::path::{ClassKey, DocumentPath, SuffixKey};
+use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey};
 use crate::request::{self, DiscardScope};
 use crate::store::Store;
 
@@ -153,10 +153,19 @@ pub struct IncrementOutcome {
     /// went are the changeset's own entries, which the caller processed one by
     /// one to build it.
     pub affected_classes: BTreeSet<ClassKey>,
-    /// The findings the changeset discarded on both axes — those recorded about
-    /// a changed path, and those in [`IncrementOutcome::affected_classes`]. A
-    /// finding in both is counted once, because the first discard is what
-    /// removed it.
+    /// Every changed path as the path key it is, spelled in the same key space
+    /// as [`IncrementOutcome::affected_classes`]: each path the changeset
+    /// writes or kills, a rename's old path included, since a rename is a
+    /// death of the old path beside a write of the new. This is the path axis
+    /// of the findings maintenance this changeset implies — a finding keyed by
+    /// the exact path a path-addressed link spells is reached here and by no
+    /// class.
+    pub affected_paths: BTreeSet<PathKey>,
+    /// The findings the changeset discarded on every axis — those recorded
+    /// about a changed path, those in [`IncrementOutcome::affected_classes`],
+    /// and those keyed by a path in [`IncrementOutcome::affected_paths`]. A
+    /// finding more than one reaches is counted once, because the first
+    /// discard is what removed it.
     pub invalidated: Invalidation,
 }
 
@@ -185,6 +194,7 @@ pub(crate) fn apply(
             documents_deleted: 0,
             tombstones_recorded: 0,
             affected_classes: BTreeSet::new(),
+            affected_paths: BTreeSet::new(),
             invalidated: Invalidation::default(),
         });
     }
@@ -193,6 +203,7 @@ pub(crate) fn apply(
     for finding in findings {
         request::check_finding_bounds(&finding.facts)?;
         request::check_finding_classes(&finding.facts, store.path_order())?;
+        request::check_finding_paths(&finding.facts, store.path_order())?;
     }
 
     // The boundary between two acts: everything before this one has committed
@@ -205,7 +216,8 @@ pub(crate) fn apply(
     // orders by it; it is what a person reads in a report.
     let recorded_at = request::unix_seconds();
     // Every finding in this store is filed in the key space its order
-    // selects, so that is the space a changed path names its class in.
+    // selects, so that is the space a changed path names its class and its
+    // path key in.
     let class_space = SuffixKey::under(store.path_order());
     let transaction = store
         .database
@@ -243,10 +255,14 @@ pub(crate) fn apply(
             .and_then(|()| discard_the_subject(&mut statements.discard_subject, subject));
             tally.findings_discarded +=
                 applied.map_err(|problem| error::in_entry(index, subject, problem))?;
-            // A document joining a class and one leaving it both name it.
+            // A document joining a class and one leaving it both name it, and
+            // a path written and a path killed both name themselves.
             tally
                 .affected_classes
                 .insert(subject.class_key_in(class_space));
+            tally
+                .affected_paths
+                .insert(subject.path_key_in(class_space));
 
             // The point a changeset can be torn at, and the only one: between
             // two entries, with the transaction open and nothing committed. A
@@ -256,6 +272,9 @@ pub(crate) fn apply(
         }
         let discarded =
             discard_affected_classes(&mut statements.discard_class, &tally.affected_classes)?;
+        tally.findings_discarded += discarded;
+        let discarded =
+            discard_affected_paths(&mut statements.discard_path, &tally.affected_paths)?;
         tally.findings_discarded += discarded;
     }
 
@@ -302,6 +321,7 @@ pub(crate) fn apply(
         documents_deleted: tally.documents_deleted,
         tombstones_recorded: tally.tombstones_recorded,
         affected_classes: tally.affected_classes,
+        affected_paths: tally.affected_paths,
         invalidated: Invalidation {
             findings_discarded: tally.findings_discarded,
             typed_values_discarded: 0,
@@ -311,8 +331,9 @@ pub(crate) fn apply(
 
 /// What one changeset accumulated, to be reported and counted once it committed.
 ///
-/// It grows with the changeset and with nothing else: the counts are scalars and
-/// the class set holds one key per distinct stem among the changed paths.
+/// It grows with the changeset and with nothing else: the counts are scalars,
+/// the class set holds one key per distinct stem among the changed paths, and
+/// the path set one key per distinct changed path.
 #[derive(Default)]
 struct Tally {
     documents_upserted: u64,
@@ -327,6 +348,7 @@ struct Tally {
     projections: u64,
     findings_discarded: u64,
     affected_classes: BTreeSet<ClassKey>,
+    affected_paths: BTreeSet<PathKey>,
 }
 
 /// The statements one changeset runs, prepared once and reused for every entry.
@@ -351,6 +373,8 @@ struct Statements<'t> {
     discard_subject: CachedStatement<'t>,
     /// The class-scoped findings discard, over one class at a time.
     discard_class: CachedStatement<'t>,
+    /// The path-keyed findings discard, over one path key at a time.
+    discard_path: CachedStatement<'t>,
 }
 
 /// The fact rows a re-derivation replaces, one statement per table.
@@ -469,6 +493,10 @@ impl<'t> Statements<'t> {
             discard_class: prepared(
                 &request::class_discard_sql(1),
                 "preparing a class's findings discard",
+            )?,
+            discard_path: prepared(
+                request::PATH_DISCARD_SQL,
+                "preparing a path key's findings discard",
             )?,
         })
     }
@@ -813,6 +841,28 @@ fn discard_affected_classes(
         discarded += statement
             .execute(params![lower, upper])
             .map_err(|error| error::sql("discarding a class's findings", error))?
+            as u64;
+    }
+    Ok(discarded)
+}
+
+/// Discard the findings keyed by every path the changeset writes or kills, and
+/// report how many went.
+///
+/// One equality seek of `finding_paths_path_key` per path, prepared once and
+/// run per key. A path key is matched exactly and never as a prefix, so the
+/// findings about links to `glossary/x.md` stand through a change to
+/// `glossary/x.md/y.md`. The count is findings rather than rows, for the reason
+/// [`discard_affected_classes`] states.
+fn discard_affected_paths(
+    statement: &mut CachedStatement<'_>,
+    paths: &BTreeSet<PathKey>,
+) -> Result<u64, StoreError> {
+    let mut discarded = 0_u64;
+    for path in paths {
+        discarded += statement
+            .execute(params![path.as_str()])
+            .map_err(|error| error::sql("discarding a path key's findings", error))?
             as u64;
     }
     Ok(discarded)

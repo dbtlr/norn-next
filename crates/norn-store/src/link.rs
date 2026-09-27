@@ -52,7 +52,9 @@
 use norn_wire::{DOCUMENT_EXTENSION, LinkAddress};
 
 use crate::facts::LinkFact;
-use crate::path::{DocumentPath, SuffixKey, fold_ascii_case, leaf_stem, suffix_probe};
+use crate::path::{
+    DocumentPath, SuffixKey, fold_ascii_case, leaf_stem, spell_path_key, suffix_probe,
+};
 
 /// The separator between segments, in a target and in a path alike.
 const SEPARATOR: char = '/';
@@ -110,8 +112,8 @@ pub(crate) fn link_keys(link: &LinkFact, holder: &DocumentPath) -> Vec<LinkKey> 
         Addressing::Paths(paths) => paths
             .into_iter()
             .map(|path| LinkKey {
-                folded_key: fold_ascii_case(&path),
-                key: path,
+                folded_key: spell_path_key(&path, SuffixKey::Folded),
+                key: spell_path_key(&path, SuffixKey::Raw),
                 segments: None,
             })
             .collect(),
@@ -141,21 +143,18 @@ pub(crate) fn link_keys(link: &LinkFact, holder: &DocumentPath) -> Vec<LinkKey> 
 /// so a seek of them reaches every such link; which of the links it reaches
 /// resolve to the document alone is the seek's own question.
 pub(crate) fn keys_naming(document: &DocumentPath, key: SuffixKey) -> Vec<String> {
-    let (suffix, path) = match key {
-        SuffixKey::Raw => (
-            document.suffix_key().to_string(),
-            document.as_str().to_string(),
-        ),
-        SuffixKey::Folded => (
-            document.folded_suffix_key().to_string(),
-            fold_ascii_case(document.as_str()),
-        ),
+    let suffix = match key {
+        SuffixKey::Raw => document.suffix_key().to_string(),
+        SuffixKey::Folded => document.folded_suffix_key().to_string(),
     };
     let mut keys: Vec<String> = suffix
         .match_indices(SEPARATOR)
         .map(|(at, _)| suffix[..=at].to_string())
         .collect();
-    keys.push(path);
+    // The document's own path key, spelled by the one function that spells
+    // one, so a path naming this document lands on the same key a change to
+    // it discards by.
+    keys.push(document.path_key_in(key).as_str().to_string());
     keys
 }
 
@@ -423,6 +422,47 @@ mod tests {
                 "docs/norn/glossary.md"
             ]
         );
+    }
+
+    /// **A path-addressed link's keys are `path_key_in`'s keys.** A Markdown
+    /// path link and a rooted wikilink to the same document are two different
+    /// readings of the target, but both end up naming the one document at
+    /// `Dir/T.md`, and the raw and folded keys `link_keys` files them under
+    /// are the keys [`crate::path::DocumentPath::path_key_in`] gives that
+    /// document — the same bytes a change to `Dir/T.md` discards by. ADR 0027
+    /// condition 2 needs exactly this: a finding's keys are the keys the
+    /// discard ranges over.
+    #[test]
+    fn a_path_addressed_link_is_keyed_by_path_key_in() {
+        let holder = at("holder.md");
+        for (path, stem) in [("Dir/T.md", "Dir/T"), ("Été/Ü.md", "Été/Ü")] {
+            let document = at(path);
+            let raw = document.path_key_in(SuffixKey::Raw);
+            let folded = document.path_key_in(SuffixKey::Folded);
+
+            let markdown = link_keys(
+                &written(crate::facts::LinkFamily::Markdown, None, path),
+                &holder,
+            );
+            let wikilink = link_keys(
+                &written(crate::facts::LinkFamily::Wikilink, Some("vault"), stem),
+                &holder,
+            );
+
+            for (family, keys) in [("markdown", &markdown), ("wikilink", &wikilink)] {
+                assert_eq!(keys.len(), 1, "{family} link to {path} named {keys:?}");
+                assert_eq!(
+                    keys[0].key,
+                    raw.as_str(),
+                    "{family} link to {path}'s raw key"
+                );
+                assert_eq!(
+                    keys[0].folded_key,
+                    folded.as_str(),
+                    "{family} link to {path}'s folded key"
+                );
+            }
+        }
     }
 
     /// A `%` that spells no byte is itself, and a spelled byte may be any

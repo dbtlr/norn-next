@@ -15,7 +15,7 @@
 //! declaration — and every derived row each store holds is digested: the document rows with their sub-fingerprints and their raw and
 //! folded suffix keys, the links and the keys the link index holds them
 //! under, the headings, blocks and tags, the field rows
-//! with their typed halves and the offset spelling beside a typed date, every finding with its candidates and classes, the
+//! with their typed halves and the offset spelling beside a typed date, every finding with its candidates, classes and path keys, the
 //! terms the full-text index holds, and the pinned vault schema. Row
 //! identifiers, write generations and timestamps are left out, because none of
 //! them is a function of the vault: they say where a row landed, how many
@@ -61,7 +61,7 @@ use norn_wire::FindingKind;
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(5),
-    "48dae9123b61c83c6e859aa75bf01448920ed77f3116f8f7c9f4cd4ab3af611e",
+    "987f716ce8a81347fe67eadf6af829f739bee95aaa72d54e870e25a6fdc134bc",
 );
 
 /// The vault schema the main corpus is derived under: a field of every

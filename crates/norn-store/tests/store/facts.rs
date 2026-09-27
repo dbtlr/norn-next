@@ -476,6 +476,43 @@ fn a_findings_class_membership_is_a_set_of_rows() {
     );
 }
 
+/// **A finding's path keys are rows in a table of their own.** A class discard
+/// is a prefix range, and a path key such as `glossary/x.md` sorts inside the
+/// range the class `glossary/` opens, so path keys held beside class keys would
+/// be taken by a class no change to them moves. The table is `WITHOUT ROWID`
+/// with the pair as its key, cascades from the finding, and is indexed by the
+/// key the path discard seeks.
+#[test]
+fn a_findings_path_keys_are_rows_in_their_own_table() {
+    let declared = ddl::statements();
+    let paths = declared
+        .iter()
+        .find(|statement| statement.contains("CREATE TABLE finding_paths "))
+        .expect("the path-key table");
+    assert!(
+        paths.contains("PRIMARY KEY (finding, path_key)") && paths.contains("WITHOUT ROWID"),
+        "{paths}"
+    );
+    assert!(
+        paths.contains("REFERENCES findings(id) ON DELETE CASCADE"),
+        "{paths}"
+    );
+    let classes = declared
+        .iter()
+        .find(|statement| statement.contains("CREATE TABLE finding_classes "))
+        .expect("the class membership table");
+    assert!(
+        !classes.contains("path_key"),
+        "`finding_classes` holds path keys beside class keys: {classes}"
+    );
+    assert!(
+        declared
+            .iter()
+            .any(|statement| statement.contains("INDEX finding_paths_path_key ")),
+        "the path direction of findings maintenance has no index to seek through"
+    );
+}
+
 /// A nullable span triple is all three columns or none. The reader turns a
 /// partial triple into no span at all, so a row carrying one would be a position
 /// silently thrown away — the `CHECK` is what means the writer cannot make one.
@@ -618,9 +655,9 @@ fn a_derived_path_form_has_one_home() {
             "`{absent}` is declared, and no statement in this build reads it"
         );
     }
-    // The eleven that stay, because a statement in this build reads each: the
+    // The twelve that stay, because a statement in this build reads each: the
     // resolution ladder's range under either key, the order a heal's page seeks on a vault that
-    // folds ASCII case, the class direction of findings maintenance, the
+    // folds ASCII case, the class and path directions of findings maintenance, the
     // schema-key discard's two ranges, the two change feeds, each of which is
     // answered out of its own index without the row being read at all, the
     // documents a find's tag part names, the links a links-to part seeks under
@@ -634,6 +671,7 @@ fn a_derived_path_form_has_one_home() {
         "documents_change_feed",
         "tombstones_change_feed",
         "finding_classes_class_key",
+        "finding_paths_path_key",
         "findings_fingerprint_kind_nocase",
         "link_keys_link",
         "link_keys_key",

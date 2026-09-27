@@ -362,6 +362,37 @@ impl DocumentPath {
         let probe = class_probe(&stem).expect("a document's own stem is a valid class probe");
         ClassKey::of_prefix(&probe.ranges[0].lower)
     }
+
+    /// The path key a link naming this document exactly is filed under among
+    /// keys of `key`: the path as written, or with ASCII case folded.
+    ///
+    /// Path-keyed maintenance reaches a finding through the path key its
+    /// producer recorded, spelled in the key space the store's path order
+    /// selects, so a change to this document names its path in that space.
+    /// This is the one place a path key is spelled from a document's own
+    /// path; the store's `link` module spells a link's path key through
+    /// [`spell_path_key`], the same rule, so the two never drift apart.
+    pub(crate) fn path_key_in(&self, key: SuffixKey) -> PathKey {
+        // A document path is a path key, and folding ASCII case leaves one a
+        // document path: no refusal reads a letter's case.
+        PathKey(spell_path_key(&self.path, key))
+    }
+}
+
+/// The raw or ASCII-case-folded spelling of `path` in the key space `key`
+/// selects.
+///
+/// The one function that spells a path key: [`DocumentPath::path_key_in`]
+/// calls it for a document's own path, and the store's `link` module calls it
+/// for the paths a link names, which are not yet a [`DocumentPath`] at the
+/// point a key is wanted. Both land on the same bytes for the same path, which
+/// is what ties a link's recorded path key to the key a change to that path
+/// discards by.
+pub(crate) fn spell_path_key(path: &str, key: SuffixKey) -> String {
+    match key {
+        SuffixKey::Raw => path.to_string(),
+        SuffixKey::Folded => fold_ascii_case(path),
+    }
 }
 
 /// A vault-root-relative directory, as the range of stored paths beneath it.
@@ -504,6 +535,51 @@ impl ClassKey {
     }
 }
 
+/// The key a finding about a path-addressed link is filed under: one exact
+/// vault path the link spells.
+///
+/// **A path key is the other key space from a [`ClassKey`], and the two never
+/// meet.** A class key ends in the separator and ranges over every key it
+/// prefixes; a path key is a document path, which never ends in one, and it is
+/// matched by equality alone. A path key is therefore refused where it ends in
+/// the separator, and a class key handed over as a path key is refused by that
+/// same rule. Findings file the two in separate tables, so no class range
+/// reaches a path key it prefixes: the class `glossary/` holds nothing from the
+/// path key `glossary/x.md`.
+///
+/// The spelling is the one the link index holds the link's path under — see
+/// the store's `link` module — and a store files it in the key space its path
+/// order selects: the path as written where the root tells spellings apart,
+/// and with ASCII case folded where it folds, where a key holding an
+/// upper-case ASCII letter is refused wherever it is filed or explained. A
+/// changed path names its own path key in that same space
+/// ([`crate::IncrementOutcome::affected_paths`]).
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PathKey(String);
+
+impl PathKey {
+    /// Read `text` as a path key, refusing a class key and anything that is no
+    /// document path.
+    pub fn new(text: &str) -> Result<Self, StoreError> {
+        // `DocumentPath::new` already refuses a separator-terminated spelling
+        // — it reduces to an empty final segment — so this check exists only
+        // to give that refusal its clearer, path-key-specific message.
+        if text.ends_with(SEPARATOR) {
+            return Err(StoreError::Path {
+                path: text.to_string(),
+                problem: "it is separator-terminated, which is a class key's spelling and never \
+                          a path's",
+            });
+        }
+        DocumentPath::new(text)?;
+        Ok(PathKey(text.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Which of a document's two stored suffix keys a probe ranges over.
 ///
 /// The choice is the vault root's, proven at the filesystem seam and carried to
@@ -531,9 +607,23 @@ impl SuffixKey {
     /// Whether `class` is spelled in this key space: every class key is a raw
     /// one, and a folded class key is one ASCII case folding leaves as it is.
     pub(crate) fn holds(self, class: &ClassKey) -> bool {
+        self.holds_spelling(class.as_str())
+    }
+
+    /// Whether `path` is spelled in this key space, by the rule
+    /// [`SuffixKey::holds`] states for a class key: every path key is a raw
+    /// one, and a folded path key is one ASCII case folding leaves as it is.
+    pub(crate) fn holds_path(self, path: &PathKey) -> bool {
+        self.holds_spelling(path.as_str())
+    }
+
+    /// The check [`SuffixKey::holds`] and [`SuffixKey::holds_path`] both run,
+    /// against whichever key's text they were handed: every raw key is held,
+    /// and a folded key is held where ASCII case folding it changes nothing.
+    fn holds_spelling(self, spelling: &str) -> bool {
         match self {
             SuffixKey::Raw => true,
-            SuffixKey::Folded => fold_ascii_case(class.as_str()) == class.as_str(),
+            SuffixKey::Folded => fold_ascii_case(spelling) == spelling,
         }
     }
 
@@ -890,6 +980,25 @@ mod tests {
             assert!(SuffixKey::Raw.holds(&class), "`{key}`");
             assert_eq!(SuffixKey::Folded.holds(&class), folded, "`{key}`");
         }
+    }
+
+    /// A folded path key is one ASCII case folding leaves as it is, every path
+    /// key is a raw one, and a document names its own path key in either space.
+    #[test]
+    fn a_folded_key_space_holds_only_folded_path_keys() {
+        for (key, folded) in [
+            ("dir/t.md", true),
+            ("Dir/t.md", false),
+            ("été.md", true),
+            ("Été.md", true),
+        ] {
+            let path = PathKey::new(key).expect("a path key");
+            assert!(SuffixKey::Raw.holds_path(&path), "`{key}`");
+            assert_eq!(SuffixKey::Folded.holds_path(&path), folded, "`{key}`");
+        }
+        let document = DocumentPath::new("Dir/T.md").expect("a document path");
+        assert_eq!(document.path_key_in(SuffixKey::Raw).as_str(), "Dir/T.md");
+        assert_eq!(document.path_key_in(SuffixKey::Folded).as_str(), "dir/t.md");
     }
 
     /// **`class_probe` validates like every other constructor here.** A stem

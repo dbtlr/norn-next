@@ -11,7 +11,7 @@
 //! **[`Request::apply_increment`] is where documents are written, and a
 //! changeset lands whole or not at all** — that entry point states the shape of
 //! the guarantee in full. Every other write here is whole on its own: a finding
-//! and its candidate and class rows, a schema pin and the discard the new key
+//! and its candidate, class and path-key rows, a schema pin and the discard the new key
 //! implies. So a request that performed three acts and then failed has
 //! three whole acts at rest, and what a request never was is a way to group them
 //! into one.
@@ -82,7 +82,7 @@ use crate::facts::{
 };
 use crate::fields::{FieldContainer, FieldRow, FieldRows, OffsetSpelling};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
-use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixKey, SuffixProbe};
+use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, PathKey, SuffixKey, SuffixProbe};
 use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 use crate::store::Store;
 
@@ -139,11 +139,13 @@ const STORED_DOCUMENT_COLUMNS: &str = "path, content_hash, byte_length, body_off
 /// How many finding ids one further-query batches its `IN` list by.
 ///
 /// A class or a path can hold more findings than SQLite's 32766-parameter
-/// bound leaves room for in one statement — the candidate and class reads bind
-/// one parameter per id — so a findings read chunks its ids rather than binding
-/// the whole list at once. Every chunk holds between one id and this many, so
-/// those are the statements [`ExplainedStatement::FindingCandidates`] and
-/// [`ExplainedStatement::FindingClasses`] name.
+/// bound leaves room for in one statement — the candidate, class and path-key
+/// reads bind one parameter per id — so a findings read chunks its ids rather
+/// than binding the whole list at once. Every chunk holds between one id and
+/// this many, so those are the statements
+/// [`ExplainedStatement::FindingCandidates`],
+/// [`ExplainedStatement::FindingClasses`] and
+/// [`ExplainedStatement::FindingPaths`] name.
 #[cfg(not(test))]
 pub const FINDING_ID_CHUNK: usize = 500;
 /// Shrunk under test, so a unit test can cross a chunk boundary without
@@ -263,7 +265,7 @@ impl<'a> Request<'a> {
     /// There is no explicit index write, and adding one would be a second
     /// maintainer of the same rows.
     ///
-    /// **Findings are discarded on two axes**, both inside the one transaction:
+    /// **Findings are discarded on three axes**, all inside the one transaction:
     ///
     /// - *By subject path.* Every changed path — upserted or dead — takes the
     ///   findings recorded about it. A re-derivation's findings were read off
@@ -273,15 +275,21 @@ impl<'a> Request<'a> {
     ///   it belongs to, and the findings in the union of those classes go with
     ///   it — the resolution axis, where a document joining or leaving a class
     ///   invalidates findings written in documents that did not change.
+    /// - *By affected path key.* Every changed path also names itself as the
+    ///   exact path key a path-addressed link spells — a rename's old path
+    ///   included, since a rename is the old path's death beside the new path's
+    ///   write — and the findings keyed by any of those paths go with it. No
+    ///   class range reaches these: a path key is matched by equality alone.
     ///
-    /// The two axes are what make **discard-then-record** total. The store
+    /// The three axes are what make **discard-then-record** total. The store
     /// discards and never records: minting a finding is a reading of the vault
-    /// the caller performs, so [`IncrementOutcome::affected_classes`] reports
-    /// the class scope, and the subject scope needs no report because it is the
-    /// changeset the caller just built, entry by entry.
+    /// the caller performs, so [`IncrementOutcome::affected_classes`] and
+    /// [`IncrementOutcome::affected_paths`] report the class and path scopes,
+    /// and the subject scope needs no report because it is the changeset the
+    /// caller just built, entry by entry.
     ///
-    /// A finding in no class — a vault-schema violation, say — is outside the
-    /// resolution axis and reachable on the subject axis alone: it dies when the
+    /// A finding in no class and keyed by no path — a vault-schema violation,
+    /// say — is reachable on the subject axis alone: it dies when the
     /// document it is about changes, and survives every change to any other.
     /// None of this is a cascade. Nothing in the schema references `documents`
     /// from `findings`, so a finding about a path no document has is recordable
@@ -294,16 +302,17 @@ impl<'a> Request<'a> {
     /// them, so a caller streaming a heal hands over something that yields
     /// documents and the store holds one. What lives across entries is the
     /// prepared statements, which are a fixed cost, the running tally, which is
-    /// scalars, and [`IncrementOutcome::affected_classes`] — the one
-    /// changeset-sized accumulation, holding a key per distinct stem among the
-    /// changed paths.
+    /// scalars, and [`IncrementOutcome::affected_classes`] and
+    /// [`IncrementOutcome::affected_paths`] — the two changeset-sized
+    /// accumulations, holding a key per distinct stem and per distinct path
+    /// among the changed paths.
     ///
     /// **The write lock is held across the caller's whole iterator.** A
     /// changeset is atomic because it is one transaction, so however long the
     /// caller takes to produce its entries is how long no other writer on the
     /// database proceeds. A heal-scale changeset is therefore **chunked**: each
-    /// chunk is its own atomic changeset, which bounds both the lock and the
-    /// class set by the chunk rather than by the vault. Serializing writers
+    /// chunk is its own atomic changeset, which bounds the lock, the class set
+    /// and the path set by the chunk rather than by the vault. Serializing writers
     /// across *processes* is the maintainer file lock over this derived store,
     /// which is carved and not built (NORN-33); within one process the store's
     /// single connection is what serializes.
@@ -347,9 +356,14 @@ impl<'a> Request<'a> {
     /// refused ([`StoreError::KeySpace`]): no change in this store names it, so
     /// a finding filed under it is one no maintenance reaches. A producer
     /// files under [`TargetClass::class_keys`] of a class this store compiled.
+    ///
+    /// **Every path the finding is keyed by is written** too, one
+    /// `finding_paths` row each, and a path key outside that key space is
+    /// refused for the same reason.
     pub fn record_finding(&mut self, finding: &FindingFacts) -> Result<(), StoreError> {
         check_finding_bounds(finding)?;
         check_finding_classes(finding, self.store.path_order())?;
+        check_finding_paths(finding, self.store.path_order())?;
         let transaction = self
             .store
             .database
@@ -1280,12 +1294,27 @@ impl<'a> Request<'a> {
         }
     }
 
+    /// Refuse a path key spelled outside the key space the store's path order
+    /// selects.
+    fn check_path_key(&self, path: &PathKey) -> Result<(), StoreError> {
+        let order = self.store.path_order();
+        if SuffixKey::under(order).holds_path(path) {
+            Ok(())
+        } else {
+            Err(StoreError::KeySpace {
+                what: "a path key outside the store's key space",
+                order,
+            })
+        }
+    }
+
     // ---- readers ----
 
-    /// The findings one statement selects, each with the head of its candidates
-    /// and the set of classes it is in.
+    /// The findings one statement selects, each with the head of its
+    /// candidates, the set of classes it is in and the paths it is keyed by.
     ///
-    /// The candidates and the classes come back in one further statement each
+    /// The candidates, the classes and the path keys come back in one further
+    /// statement each
     /// **per chunk of [`FINDING_ID_CHUNK`] ids** rather than one per finding, so
     /// reading a class costs a small, bounded number of round trips whatever the
     /// class holds — and never one `IN` list wide enough to trip SQLite's
@@ -1343,6 +1372,17 @@ impl<'a> Request<'a> {
             for (finding, class_key) in classes {
                 if let Some(position) = positions.get(&finding) {
                     findings[*position].class_keys.insert(class_key);
+                }
+            }
+            let paths = self.read_all(
+                &finding_paths_sql(chunk.len()),
+                finding_id_parameters(chunk),
+                stored_path_key,
+                "reading a finding's path keys",
+            )?;
+            for (finding, path_key) in paths {
+                if let Some(position) = positions.get(&finding) {
+                    findings[*position].path_keys.insert(path_key);
                 }
             }
         }
@@ -1509,6 +1549,21 @@ pub(crate) fn check_finding_bounds(finding: &FindingFacts) -> Result<(), StoreEr
     Ok(())
 }
 
+/// Refuse where `holds` is false: the shape [`check_finding_classes`] and
+/// [`check_finding_paths`] both answer with, each over its own axis and its
+/// own refusal message.
+fn refuse_outside_key_space(
+    holds: bool,
+    what: &'static str,
+    order: StoredPathOrder,
+) -> Result<(), StoreError> {
+    if holds {
+        Ok(())
+    } else {
+        Err(StoreError::KeySpace { what, order })
+    }
+}
+
 /// Refuse a finding filed under a class key outside the key space a store
 /// derived under `order` files its findings in.
 ///
@@ -1520,18 +1575,33 @@ pub(crate) fn check_finding_classes(
     order: StoredPathOrder,
 ) -> Result<(), StoreError> {
     let space = SuffixKey::under(order);
-    if finding.class_keys.iter().all(|class| space.holds(class)) {
-        Ok(())
-    } else {
-        Err(StoreError::KeySpace {
-            what: "a finding's class key",
-            order,
-        })
-    }
+    refuse_outside_key_space(
+        finding.class_keys.iter().all(|class| space.holds(class)),
+        "a finding's class key",
+        order,
+    )
 }
 
-/// Write one finding, its candidate head and its class memberships, inside the
-/// transaction the caller is composing.
+/// Refuse a finding filed under a path key outside the key space a store
+/// derived under `order` files its findings in.
+///
+/// A change names its path in that key space alone, so a finding filed under a
+/// key outside it is one no change ever takes: the raw key `Dir/t.md` on a root
+/// that folds ASCII case stands through `dir/T.md` dying.
+pub(crate) fn check_finding_paths(
+    finding: &FindingFacts,
+    order: StoredPathOrder,
+) -> Result<(), StoreError> {
+    let space = SuffixKey::under(order);
+    refuse_outside_key_space(
+        finding.path_keys.iter().all(|path| space.holds_path(path)),
+        "a finding's path key",
+        order,
+    )
+}
+
+/// Write one finding, its candidate head, its class memberships and its path
+/// keys, inside the transaction the caller is composing.
 ///
 /// **The transaction is the caller's**, which is what lets a finding be written
 /// in the same act as the changeset that derived it. The generation and the
@@ -1600,6 +1670,17 @@ pub(crate) fn write_finding(
             insert
                 .execute(params![id, class_key.as_str()])
                 .map_err(|error| error::sql("writing a finding's class", error))?;
+        }
+    }
+
+    {
+        let mut insert = transaction
+            .prepare("INSERT INTO finding_paths (finding, path_key) VALUES (?1, ?2)")
+            .map_err(|error| error::sql("preparing a finding path write", error))?;
+        for path_key in &finding.path_keys {
+            insert
+                .execute(params![id, path_key.as_str()])
+                .map_err(|error| error::sql("writing a finding's path key", error))?;
         }
     }
     Ok(())
@@ -1815,6 +1896,20 @@ fn finding_classes_sql(ids: usize) -> String {
     )
 }
 
+/// The statement a findings read emits for the path keys of a chunk of `ids`
+/// findings.
+///
+/// The ids lead the primary key `(finding, path_key)`, which is the finding
+/// direction of the table; `finding_paths_path_key` is the path direction and
+/// holds nothing this read is keyed by.
+fn finding_paths_sql(ids: usize) -> String {
+    format!(
+        "SELECT finding, path_key FROM finding_paths
+         WHERE finding IN ({}) ORDER BY finding, path_key",
+        finding_id_placeholders(ids)
+    )
+}
+
 /// One placeholder per id of a chunk, numbered from one.
 fn finding_id_placeholders(ids: usize) -> String {
     (1..=ids)
@@ -1868,6 +1963,16 @@ pub(crate) fn class_discard_sql(ranges: usize) -> String {
         range_predicate("class_key", ranges)
     )
 }
+
+/// The statement that discards every finding keyed by one path key.
+///
+/// The path axis of findings maintenance, run once per path a changeset writes
+/// or kills by [`Request::apply_increment`]. It is an equality seek of
+/// `finding_paths_path_key` rather than a range: a path key names one path, and
+/// a finding keyed by a longer path the key prefixes is not keyed by it.
+pub(crate) const PATH_DISCARD_SQL: &str = "DELETE FROM findings WHERE id IN (
+             SELECT finding FROM finding_paths WHERE path_key = ?1
+         )";
 
 /// The statement that discards every finding recorded **about** one path.
 ///
@@ -2412,8 +2517,8 @@ fn stored_tombstone(row: &Row<'_>) -> Reading<StoredTombstone> {
     }))
 }
 
-/// A finding and its row id, which is what its candidates and its classes are
-/// read by.
+/// A finding and its row id, which is what its candidates, its classes and its
+/// path keys are read by.
 fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
     let id: i64 = row.get(0)?;
     let kind: String = row.get(1)?;
@@ -2444,6 +2549,7 @@ fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
                 severity,
                 path,
                 class_keys: BTreeSet::new(),
+                path_keys: BTreeSet::new(),
                 target,
                 span,
                 ordinal,
@@ -2477,6 +2583,19 @@ fn stored_class(row: &Row<'_>) -> Reading<(i64, ClassKey)> {
     Ok(match ClassKey::new(&written) {
         Ok(class_key) => Ok((finding, class_key)),
         Err(_) => Err(unreadable("finding_classes.class_key", &written)),
+    })
+}
+
+/// A path key and the finding keyed by it.
+///
+/// The key is read back through [`PathKey::new`] rather than trusted, for the
+/// reason [`stored_class`] reads a class key back.
+fn stored_path_key(row: &Row<'_>) -> Reading<(i64, PathKey)> {
+    let finding: i64 = row.get(0)?;
+    let written: String = row.get(1)?;
+    Ok(match PathKey::new(&written) {
+        Ok(path_key) => Ok((finding, path_key)),
+        Err(_) => Err(unreadable("finding_paths.path_key", &written)),
     })
 }
 
@@ -2625,10 +2744,11 @@ pub(crate) fn unix_seconds() -> i64 {
 mod tests {
     use super::*;
 
-    /// [`findings`] chunks its two follow-up `IN` lists at [`FINDING_ID_CHUNK`],
-    /// which this build shrinks to 4. Ten findings, each with one candidate and
-    /// one class of its own, cross that boundary twice, and every one has to
-    /// come back paired with the candidate and class it — and only it — wrote.
+    /// [`findings`] chunks its three follow-up `IN` lists at
+    /// [`FINDING_ID_CHUNK`], which this build shrinks to 4. Ten findings, each
+    /// with one candidate, one class and one path key of its own, cross that
+    /// boundary twice, and every one has to come back paired with the
+    /// candidate, class and path key it — and only it — wrote.
     #[test]
     fn findings_reassemble_correctly_across_a_chunk_boundary() {
         let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk");
@@ -2649,6 +2769,9 @@ mod tests {
                     severity: norn_wire::Severity::Warning,
                     path: subject.clone(),
                     class_keys: [class_key].into_iter().collect(),
+                    path_keys: [PathKey::new(&format!("target-{index}.md")).expect("a path key")]
+                        .into_iter()
+                        .collect(),
                     target: None,
                     span: None,
                     ordinal: None,
@@ -2680,16 +2803,22 @@ mod tests {
                 finding.class_keys.contains(&expected),
                 "finding {index} lost its class at a chunk boundary"
             );
+            let expected = PathKey::new(&format!("target-{index}.md")).expect("a path key");
+            assert_eq!(
+                finding.path_keys,
+                [expected].into_iter().collect(),
+                "finding {index} lost or gained a path key at a chunk boundary"
+            );
         }
     }
 
-    /// A findings read runs its two detail statements once per chunk of
+    /// A findings read runs its three detail statements once per chunk of
     /// [`FINDING_ID_CHUNK`] ids, and no more often or less.
     ///
     /// Ten findings under a chunk bound of 4 are three chunks, so the read is
     /// the statement that found them and three reads of each detail table. A
-    /// reader that bound every id into one list would run three statements, and
-    /// one that read id by id would run twenty-one.
+    /// reader that bound every id into one list would run four statements, and
+    /// one that read id by id would run thirty-one.
     #[test]
     fn a_findings_read_runs_each_detail_statement_once_per_chunk_of_ids() {
         let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk-count");
@@ -2712,6 +2841,7 @@ mod tests {
                     class_keys: [ClassKey::new(&format!("class-{index}/")).expect("a class key")]
                         .into_iter()
                         .collect(),
+                    path_keys: BTreeSet::new(),
                     target: None,
                     span: None,
                     ordinal: None,
@@ -2729,7 +2859,7 @@ mod tests {
         let chunks = findings.div_ceil(FINDING_ID_CHUNK) as u64;
         assert_eq!(
             request.read_statements() - before,
-            1 + 2 * chunks,
+            1 + 3 * chunks,
             "a read of {findings} findings under a chunk bound of {FINDING_ID_CHUNK} is one \
              statement that finds them and {chunks} of each detail statement"
         );

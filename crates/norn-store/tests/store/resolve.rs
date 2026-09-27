@@ -447,6 +447,7 @@ fn finding_about_foo(resolution: &TargetClass, class: &[String]) -> FindingFacts
         severity: Severity::Warning,
         path: path("note.md"),
         class_keys: resolution.class_keys(),
+        path_keys: BTreeSet::new(),
         target: Some("Foo".to_string()),
         span: None,
         ordinal: None,
@@ -560,6 +561,7 @@ fn finding_filed_under(class_keys: &[&str]) -> FindingFacts {
             .iter()
             .map(|key| ClassKey::new(key).expect("a class key"))
             .collect(),
+        path_keys: BTreeSet::new(),
         target: Some("Foo".to_string()),
         span: None,
         ordinal: None,

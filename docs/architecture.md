@@ -686,36 +686,36 @@ The contract is stated whole and filled shape by shape, as each builder lands. T
 a statement it emitted, because a plan cannot be taken by a crate that may not reach the
 database, and beside the plan every column the statement reads, which SQLite's authorizer
 reports while the explain is prepared and a plan never names — and, beside the statements
-the read builders below name, twenty-six named statements carry a plan bar through it:
-suffix candidates, findings in a class, the class- and subject-scoped findings discards —
-the subject discard in both the whole form and the form narrowed to the kinds a producer
-re-derives — the clear a schema pin runs over the field projection's typed values, the page
+the read builders below name, twenty-nine named statements carry a plan bar through it:
+suffix candidates, findings in a class, the class-, path- and subject-scoped findings
+discards — the path discard an equality seek of the path-key index, and the subject discard
+in both the whole form and the form narrowed to the kinds a producer re-derives — the clear a schema pin runs over the field projection's typed values, the page
 a walk reads its scope's unaccounted finding subjects through, the ordered document page a
 heal merges its walk against, the four enumerations a caller drains a whole pillar through —
 the findings table, the tombstones, every row's stored suffix keys, raw and folded, beside
 the path that has to produce them, and the vocabulary the full-text index holds — and the
 two drains a lane-2 consumer
 ([ADR 0027](decisions/0027-link-health-rides-the-changeset.md)) reads change through:
-the live document rows, and the recorded deaths — and the eleven keyed point reads: the
+the live document rows, and the recorded deaths — and the twelve keyed point reads: the
 document row a path stands at, the row a facts snapshot opens on and the six fact reads
 keyed by the row id it found, the death recorded for a path, the findings recorded about
-one, and the pinned vault-schema projection — and the two chunked reads every findings read
-collects each finding's candidate head and class memberships through, a chunk of finding ids
-at a time. Each chunked read is barred at every chunk width a read emits, as an equality
+one, the pinned vault-schema projection, and the store's last committed write generation —
+and the three chunked reads every findings read collects each finding's candidate head,
+class memberships and path keys through, a chunk of finding ids at a time. Each chunked read is barred at every chunk width a read emits, as an equality
 seek of its table's primary key on the finding id, with no full scan and no sorter, taken of
 the statement that binds exactly that many ids.
 
 A point read is barred harder than a page, because a search is not a point read on its
-own: a range over the same index reports the same step, so each of the eleven is judged on
+own: a range over the same index reports the same step, so each of the twelve is judged on
 the **equality constraint** its seek carries as well as on the index it runs through. Four
-assertions hold all eleven: it never reads its table end to end, it searches that table, and
+assertions hold all twelve: it never reads its table end to end, it searches that table, and
 the step that searches it runs through the named access and carries the equality
-constraint. Nine name a declared index. The pinned-schema read and the field-row read each
-seek the primary key of a `WITHOUT ROWID` table, which SQLite reports with no index name,
-and the bar names that access as the primary key. A fifth assertion, that it builds no
-temporary B-tree, holds the other ten and not the findings read, because the findings read
-states an order — generation, then row key — that no index over that table holds; the
-other ten state an order their own index already gives them.
+constraint. Nine name a declared index. The pinned-schema read, the write-generation read
+and the field-row read each seek the primary key of a `WITHOUT ROWID` table, which SQLite
+reports with no index name, and the bar names that access as the primary key. A fifth
+assertion, that it builds no temporary B-tree, holds the other eleven and not the findings
+read, because the findings read states an order — generation, then row key — that no index
+over that table holds; the other eleven state an order their own index already gives them.
 
 The typed-value clear is stated over the typed index's own partial predicate, so that index
 holds exactly the rows the clear touches, and the bar is that the clear reads that index and
@@ -1990,7 +1990,14 @@ class in the key space the store's order selects, the space every finding in the
 filed in, so a finding is re-decided when a document joins or leaves its class. A class and a
 class probe are compiled only under the store's recorded order, never under one a caller
 names, and a class, probe or finding class key from the other key space is refused where it
-is read or filed.
+is read or filed. Path-keyed findings maintenance is the same in the other key space: a
+changed path — written, or killed, a rename's old path included — names its own exact path in
+the store's key space, and the changeset discards every finding keyed by that path, which no
+class range reaches: a class key ends in the separator and ranges over what it prefixes, a
+path key is matched by equality alone, and the two are filed in separate tables. A path key
+outside the store's key space, or spelled as a class key, is refused where it is filed. The
+producer that files link-health findings under either kind of key, and the re-decision that
+files them again inside the changeset, are not built yet.
 
 The links table stores **syntactic facts only** — raw target, family, protocol, title, span —
 and resolution runs at query time through this one grammar; resolved edges are never stored,

@@ -403,6 +403,7 @@ mod tests {
             documents_deleted: 1,
             tombstones_recorded: 1,
             affected_classes: Default::default(),
+            affected_paths: Default::default(),
             invalidated: norn_store::Invalidation {
                 findings_discarded: 3,
                 typed_values_discarded: 0,

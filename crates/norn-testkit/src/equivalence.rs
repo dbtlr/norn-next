@@ -173,6 +173,7 @@ pub struct ProjectedFinding {
     pub candidates: Vec<(String, String)>,
     pub candidates_total: u64,
     pub class_keys: BTreeSet<String>,
+    pub path_keys: BTreeSet<String>,
     pub vault_schema_fingerprint: String,
 }
 
@@ -609,7 +610,8 @@ impl StoreProjection {
             let at = format!("finding[{}][{ordinal}]", finding.path);
             push_columns(&mut entries, &at, finding);
             // The candidate head by the rank each row is stored at, and the
-            // class memberships in the key order they are read in.
+            // class memberships and path keys in the key order they are read
+            // in.
             entries.push((
                 format!("{at}.candidate count"),
                 finding.candidates.len().to_string(),
@@ -624,6 +626,13 @@ impl StoreProjection {
             ));
             for (index, key) in finding.class_keys.iter().enumerate() {
                 entries.push((format!("{at}.class_key[{index}]"), quoted(key)));
+            }
+            entries.push((
+                format!("{at}.path_key count"),
+                finding.path_keys.len().to_string(),
+            ));
+            for (index, key) in finding.path_keys.iter().enumerate() {
+                entries.push((format!("{at}.path_key[{index}]"), quoted(key)));
             }
             *ordinal += 1;
         }
@@ -1038,6 +1047,11 @@ fn project_finding(finding: StoredFinding) -> ProjectedFinding {
             .iter()
             .map(|key| key.as_str().to_string())
             .collect(),
+        path_keys: finding
+            .path_keys
+            .iter()
+            .map(|key| key.as_str().to_string())
+            .collect(),
         vault_schema_fingerprint: finding.vault_schema_fingerprint,
     }
 }
@@ -1079,7 +1093,8 @@ const NULL: &str = "(none)";
 ///   Where a row landed, never a fact about the vault.
 /// - **The owning row's foreign key** — `document` on `links`, `headings`,
 ///   `blocks`, `document_tags` and `document_fields`; `finding` on
-///   `finding_classes` and `finding_candidates`; `document` on `link_keys`.
+///   `finding_classes`, `finding_paths` and `finding_candidates`; `document`
+///   on `link_keys`.
 ///   [`StoreProjection::entries`] already names the row this one stands under
 ///   in its `at`. A link key's `link` names the link row by its row
 ///   identifier, so it is rendered as that link's ordinal instead.

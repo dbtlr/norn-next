@@ -34,8 +34,8 @@ use norn_testkit::equivalence::{
 };
 
 use super::common::{
-    Scratch, document, document_with_every_fact, path, record_death, unread_block, violation,
-    write_document, write_documents,
+    Scratch, broken_path_link, document, document_with_every_fact, path, record_death,
+    unread_block, violation, write_document, write_documents,
 };
 
 /// The documents both stores in a pin start from.
@@ -432,6 +432,55 @@ fn a_changed_finding_ordinal_is_a_divergence() {
             .expect("recording a finding");
     });
     assert_names(&divergence, "finding[one/glossary.md][0].ordinal");
+}
+
+/// **A finding's path keys are projected.** The same finding keyed by one
+/// path in one store and by another in the second is two findings: a change
+/// to either path reaches one of them and not the other.
+#[test]
+fn a_changed_finding_path_key_is_a_divergence() {
+    let mut pair = Pair::new("pin-finding-path-key");
+    pair.left
+        .begin_request()
+        .record_finding(&broken_path_link("one/glossary.md", &["dir/t.md"]))
+        .expect("recording a finding");
+    let divergence = pair.diverged(|store| {
+        store
+            .begin_request()
+            .record_finding(&broken_path_link("one/glossary.md", &["dir/u.md"]))
+            .expect("recording a finding");
+    });
+    assert_names(&divergence, "finding[one/glossary.md][0].path_key");
+}
+
+/// **A store whose finding is keyed by a path, after that path dies, equals
+/// the store built from zero over what is left.** The incremental store holds
+/// a finding about a link to `dir/t.md` and then records that path's death;
+/// the rebuilt store never saw `dir/t.md` or the finding. The path discard is
+/// what takes the finding, so the two agree.
+#[test]
+fn a_path_keyed_finding_discarded_by_its_paths_death_equals_a_rebuild() {
+    let incremental_scratch = Scratch::new("path-death-incremental");
+    let rebuilt_scratch = Scratch::new("path-death-rebuilt");
+    let mut incremental = incremental_scratch.open();
+    let mut rebuilt = rebuilt_scratch.open();
+    populate(&mut incremental);
+    populate(&mut rebuilt);
+    {
+        let mut request = incremental.begin_request();
+        write_document(
+            &mut request,
+            &document("dir/t.md", "hash-3", "the link's target\n"),
+        );
+        request
+            .record_finding(&broken_path_link("two/notes.md", &["dir/t.md"]))
+            .expect("recording a finding");
+        record_death(&mut request, &path("dir/t.md"), Provenance::WatcherRemoval);
+    }
+
+    let incremental = StoreProjection::read(&mut incremental).expect("projecting a store");
+    let rebuilt = StoreProjection::read(&mut rebuilt).expect("projecting a store");
+    incremental.assert_equivalent(&rebuilt, "a path's death against a rebuild without it");
 }
 
 /// **A path's findings about its links are compared in link order, whatever

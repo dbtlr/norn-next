@@ -28,15 +28,15 @@ use crate::ddl;
 use super::{
     DOCUMENT_BLOCKS_SQL, DOCUMENT_FIELDS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINK_KEYS_SQL,
     DOCUMENT_LINKS_SQL, DOCUMENT_TAGS_SQL, DiscardScope, DocumentPath, FINDING_ID_CHUNK,
-    FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, MAX_PAGE, Request, STORED_TOMBSTONE_SQL,
-    SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope, SuffixProbe,
-    TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, TargetClass, class_discard_sql, document_feed_sql,
-    document_page_parameters, document_page_sql, feed_page_parameters, finding_candidates_sql,
-    finding_classes_sql, finding_id_parameters, finding_page_parameters, finding_page_sql,
-    finding_subject_parameters, finding_subjects_sql, findings_in_class_sql, probe_parameters,
-    stored_document_sql, stored_facts_document_sql, stored_findings_sql,
-    subject_discard_parameters, subject_discard_sql, suffix_candidates_sql, text_page_parameters,
-    tombstone_feed_sql,
+    FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, MAX_PAGE, PATH_DISCARD_SQL, PathKey, Request,
+    STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope,
+    SuffixProbe, TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, TargetClass, class_discard_sql,
+    document_feed_sql, document_page_parameters, document_page_sql, feed_page_parameters,
+    finding_candidates_sql, finding_classes_sql, finding_id_parameters, finding_page_parameters,
+    finding_page_sql, finding_paths_sql, finding_subject_parameters, finding_subjects_sql,
+    findings_in_class_sql, probe_parameters, stored_document_sql, stored_facts_document_sql,
+    stored_findings_sql, subject_discard_parameters, subject_discard_sql, suffix_candidates_sql,
+    text_page_parameters, tombstone_feed_sql,
 };
 
 /// The leaf a page's explained cursor is spelled with, under whatever floor the
@@ -88,8 +88,9 @@ impl<'a> Request<'a> {
         &self,
         statement: ExplainedStatement<'_>,
     ) -> Result<EmittedPlan, StoreError> {
-        if let ExplainedStatement::FindingCandidates(ids) | ExplainedStatement::FindingClasses(ids) =
-            statement
+        if let ExplainedStatement::FindingCandidates(ids)
+        | ExplainedStatement::FindingClasses(ids)
+        | ExplainedStatement::FindingPaths(ids) = statement
             && ids.get() > FINDING_ID_CHUNK
         {
             return Err(StoreError::Bound {
@@ -104,6 +105,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::SuffixCandidates(resolution) => self.check_class(resolution)?,
             ExplainedStatement::FindingsInClass(probe)
             | ExplainedStatement::ClassDiscard(probe) => self.check_probe(probe)?,
+            ExplainedStatement::PathDiscard(path) => self.check_path_key(path)?,
             _ => {}
         }
         let sql = match statement {
@@ -112,6 +114,7 @@ impl<'a> Request<'a> {
                 findings_in_class_sql(probe.range_count())
             }
             ExplainedStatement::ClassDiscard(probe) => class_discard_sql(probe.range_count()),
+            ExplainedStatement::PathDiscard(_) => PATH_DISCARD_SQL.to_string(),
             ExplainedStatement::SubjectDiscard(_, scope) => subject_discard_sql(scope),
             ExplainedStatement::TypedValueDiscard => TYPED_VALUE_DISCARD_SQL.to_string(),
             ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, order) => {
@@ -139,6 +142,7 @@ impl<'a> Request<'a> {
             }
             ExplainedStatement::FindingCandidates(ids) => finding_candidates_sql(ids.get()),
             ExplainedStatement::FindingClasses(ids) => finding_classes_sql(ids.get()),
+            ExplainedStatement::FindingPaths(ids) => finding_paths_sql(ids.get()),
         };
         let database = &self.store.database;
         Ok(match statement {
@@ -148,6 +152,9 @@ impl<'a> Request<'a> {
             ExplainedStatement::FindingsInClass(probe)
             | ExplainedStatement::ClassDiscard(probe) => {
                 database.emitted_plan(&sql, probe_parameters(probe))
+            }
+            ExplainedStatement::PathDiscard(path) => {
+                database.emitted_plan(&sql, params![path.as_str()])
             }
             ExplainedStatement::SubjectDiscard(path, scope) => database.emitted_plan(
                 &sql,
@@ -243,7 +250,8 @@ impl<'a> Request<'a> {
                 database.emitted_plan(&sql, params![norn_db::meta::WRITE_GENERATION])
             }
             ExplainedStatement::FindingCandidates(ids)
-            | ExplainedStatement::FindingClasses(ids) => {
+            | ExplainedStatement::FindingClasses(ids)
+            | ExplainedStatement::FindingPaths(ids) => {
                 let chunk: Vec<i64> = (EXPLAINED_FIRST_FINDING_ID..).take(ids.get()).collect();
                 database.emitted_plan(&sql, finding_id_parameters(&chunk))
             }
@@ -304,8 +312,9 @@ impl<'a> Request<'a> {
 ///
 /// The parameters ride the variant because a plan is taken of a statement as it
 /// is executed: the probe readers range over a [`SuffixProbe`], the
-/// increment's subject-axis discard is keyed by one path, and a finding-detail
-/// read is spelled by how many ids its chunk holds.
+/// increment's subject-axis discard is keyed by one path and its path-axis
+/// discard by one path key, and a finding-detail read is spelled by how many
+/// ids its chunk holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExplainedStatement<'a> {
     /// [`Request::suffix_candidates`], over the key the resolution's root
@@ -406,6 +415,15 @@ pub enum ExplainedStatement<'a> {
     /// [`ExplainedStatement::FindingCandidates`] by the same three readers,
     /// and spelled by a nonzero width for the same reason.
     FindingClasses(NonZeroUsize),
+    /// The path-keyed discard [`Request::apply_increment`] runs once per path
+    /// its changeset writes or kills, over the findings keyed by that exact
+    /// path. A path key outside the store's key space is refused as
+    /// [`StoreError::KeySpace`], as the discard's own filing refuses one.
+    PathDiscard(&'a PathKey),
+    /// The path keys of a chunk of this many findings, read beside
+    /// [`ExplainedStatement::FindingCandidates`] by the same three readers,
+    /// and spelled by a nonzero width for the same reason.
+    FindingPaths(NonZeroUsize),
 }
 
 /// How many keyed point reads this seam names.
@@ -419,7 +437,7 @@ pub const POINT_READS: usize = 12;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 27;
+pub const STATEMENTS: usize = 29;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -441,6 +459,7 @@ impl<'a> ExplainedStatement<'a> {
         subject: &'a DocumentPath,
         resolution: &'a TargetClass,
         probe: &'a SuffixProbe,
+        path_key: &'a PathKey,
         kinds: &'a [FindingKind],
         ids: NonZeroUsize,
     ) -> [Self; STATEMENTS] {
@@ -476,6 +495,8 @@ impl<'a> ExplainedStatement<'a> {
             Self::WriteGeneration,
             Self::FindingCandidates(ids),
             Self::FindingClasses(ids),
+            Self::PathDiscard(path_key),
+            Self::FindingPaths(ids),
         ]
     }
 
@@ -515,6 +536,8 @@ impl<'a> ExplainedStatement<'a> {
             Self::WriteGeneration => 24,
             Self::FindingCandidates(_) => 25,
             Self::FindingClasses(_) => 26,
+            Self::PathDiscard(_) => 27,
+            Self::FindingPaths(_) => 28,
         };
         assert!(
             slot < STATEMENTS,
@@ -583,7 +606,9 @@ impl<'a> ExplainedStatement<'a> {
             | Self::DocumentFeedPage
             | Self::TombstoneFeedPage
             | Self::FindingCandidates(_)
-            | Self::FindingClasses(_) => false,
+            | Self::FindingClasses(_)
+            | Self::PathDiscard(_)
+            | Self::FindingPaths(_) => false,
         }
     }
 }

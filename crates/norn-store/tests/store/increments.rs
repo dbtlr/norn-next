@@ -13,14 +13,15 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::common::{
-    Scratch, ambiguity, classes, document, document_with_every_fact, drained, full_text_matches,
-    path, snapshot, unread_block, violation, write_document, write_documents,
+    Scratch, ambiguity, broken_path_link, class, classes, document, document_with_every_fact,
+    drained, full_text_matches, path, path_key, snapshot, unread_block, violation, write_document,
+    write_documents,
 };
 use norn_wire::{CaseFold, Pattern};
 
 use norn_store::{
-    Change, DirectoryPrefix, DocumentPath, IncrementProvenance, OpenOutcome, Provenance, Request,
-    Store, StoreError, StoredPathOrder, SubjectScope,
+    Change, DerivedFinding, DirectoryPrefix, DocumentPath, ExplainedStatement, IncrementProvenance,
+    OpenOutcome, PathKey, Provenance, Request, Store, StoreError, StoredPathOrder, SubjectScope,
 };
 
 /// One upsert entry, from a document and a hash.
@@ -1269,6 +1270,338 @@ fn two_paths_in_one_class_name_that_class_once() {
         )
         .expect("applying a changeset");
     assert_eq!(outcome.affected_classes, classes(&["glossary/"]));
+}
+
+/// The path keys `texts` spell, as a set.
+fn path_keys(texts: &[&str]) -> std::collections::BTreeSet<PathKey> {
+    texts.iter().copied().map(path_key).collect()
+}
+
+/// The targets of the findings standing at `at`.
+fn targets_at(request: &Request<'_>, at: &str) -> Vec<Option<String>> {
+    let mut targets: Vec<Option<String>> = request
+        .stored_findings(&path(at))
+        .expect("reading findings")
+        .into_iter()
+        .map(|finding| finding.target)
+        .collect();
+    targets.sort();
+    targets
+}
+
+/// **A death discards the findings keyed by its exact path, and its class
+/// reaches none of them.** A path-addressed link is keyed by the path it
+/// spells, and deleting `dir/t.md` changes the class `t/`, which no path key is
+/// in. So the finding about a link to `dir/t.md` goes by the path axis alone,
+/// and the finding about a link to `other/t.md` — the same class, another path
+/// — stands.
+#[test]
+fn a_death_discards_findings_keyed_by_its_path_and_not_its_class() {
+    let scratch = Scratch::new("path-axis-death");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    write_documents(
+        &mut request,
+        &[
+            document("index.md", "hash-1", "a body\n"),
+            document("notes.md", "hash-1", "a body\n"),
+            document("dir/t.md", "hash-1", "a body\n"),
+            document("other/t.md", "hash-1", "a body\n"),
+        ],
+    );
+    request
+        .record_finding(&broken_path_link("index.md", &["dir/t.md"]))
+        .expect("recording a finding");
+    request
+        .record_finding(&broken_path_link("notes.md", &["other/t.md"]))
+        .expect("recording a finding");
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [death("dir/t.md", Provenance::WatcherRemoval)],
+            &[],
+        )
+        .expect("applying a changeset");
+
+    assert_eq!(outcome.affected_classes, classes(&["t/"]));
+    assert_eq!(outcome.affected_paths, path_keys(&["dir/t.md"]));
+    assert_eq!(
+        outcome.invalidated.findings_discarded, 1,
+        "the death did not take exactly the finding keyed by its path"
+    );
+    assert_eq!(request.counters().get("findings_discarded"), Some(1));
+    assert!(
+        targets_at(&request, "index.md").is_empty(),
+        "the finding keyed by the dead path survived its death"
+    );
+    assert_eq!(
+        targets_at(&request, "notes.md"),
+        vec![Some("other/t.md".to_string())],
+        "the dead path's class reached a finding keyed by another path in it"
+    );
+
+    request.finish();
+    store
+        .verify_integrity()
+        .expect("a store whose path-keyed finding left through a changeset");
+}
+
+/// **A rename discards under its old path and its new one.** A rename reaches
+/// the store as the old path's death beside the new path's write, and both are
+/// changed paths: the link to the old path now names nothing, and the link to
+/// the new path now names something. The two paths are in two classes neither
+/// finding is in, so the path axis is what takes them, and a finding keyed by
+/// a third path stands.
+#[test]
+fn a_rename_discards_under_the_old_path() {
+    let scratch = Scratch::new("path-axis-rename");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    write_documents(
+        &mut request,
+        &[
+            document("index.md", "hash-1", "a body\n"),
+            document("notes.md", "hash-1", "a body\n"),
+            document("journal.md", "hash-1", "a body\n"),
+            document("old/name.md", "hash-1", "a body\n"),
+        ],
+    );
+    request
+        .record_finding(&broken_path_link("index.md", &["old/name.md"]))
+        .expect("recording a finding");
+    request
+        .record_finding(&broken_path_link("notes.md", &["new/place.md"]))
+        .expect("recording a finding");
+    request
+        .record_finding(&broken_path_link("journal.md", &["else/where.md"]))
+        .expect("recording a finding");
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [
+                death("old/name.md", Provenance::WatcherRemoval),
+                upsert("new/place.md", "hash-1", "a body\n"),
+            ],
+            &[],
+        )
+        .expect("applying a changeset");
+
+    assert_eq!(
+        outcome.affected_paths,
+        path_keys(&["new/place.md", "old/name.md"]),
+        "the rename did not name both of its paths"
+    );
+    assert_eq!(outcome.invalidated.findings_discarded, 2);
+    assert!(
+        targets_at(&request, "index.md").is_empty(),
+        "the finding keyed by the rename's old path survived it"
+    );
+    assert!(
+        targets_at(&request, "notes.md").is_empty(),
+        "the finding keyed by the rename's new path survived it"
+    );
+    assert_eq!(
+        targets_at(&request, "journal.md"),
+        vec![Some("else/where.md".to_string())],
+        "the rename reached a finding keyed by a path it never named"
+    );
+}
+
+/// **A class range does not catch a path key it prefixes.** The class
+/// `glossary/` opens the range `[glossary/, glossary0)`, and the path key
+/// `glossary/x.md` sorts inside it. A write to `a/glossary.md` changes that
+/// class and leaves `glossary/x.md` as it was, so the finding about a link to
+/// it stands — through the changeset's class discard and through a class
+/// discard a caller names.
+#[test]
+fn a_class_range_does_not_catch_a_path_key_it_prefixes() {
+    let scratch = Scratch::new("path-axis-class-range");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    write_document(&mut request, &document("index.md", "hash-1", "a body\n"));
+    request
+        .record_finding(&broken_path_link("index.md", &["glossary/x.md"]))
+        .expect("recording a finding");
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [upsert("a/glossary.md", "hash-1", "a body\n")],
+            &[],
+        )
+        .expect("applying a changeset");
+    assert_eq!(outcome.affected_classes, classes(&["glossary/"]));
+    assert_eq!(
+        outcome.invalidated.findings_discarded, 0,
+        "the class `glossary/` took a finding keyed by the path `glossary/x.md`"
+    );
+
+    let probe = request.class_probe("glossary").expect("a class stem");
+    let discarded = request
+        .discard_findings_in_class(&probe)
+        .expect("discarding a class");
+    assert_eq!(discarded.findings_discarded, 0);
+    assert_eq!(
+        targets_at(&request, "index.md"),
+        vec![Some("glossary/x.md".to_string())]
+    );
+}
+
+/// **A key from the other key space is refused.** A path key never ends in the
+/// separator, which is a class key's spelling, so a class key handed over as a
+/// path key is refused, and a path is no class key either. On a root that
+/// folds ASCII case, a path key spelled with an upper-case letter is outside
+/// the key space the store names its changed paths in, so it is refused where
+/// a finding is filed under it and where a discard is explained over it.
+#[test]
+fn a_path_key_from_the_other_key_space_is_refused() {
+    for spelling in ["glossary/", "glossary/norn/", "dir/"] {
+        assert!(
+            matches!(
+                PathKey::new(spelling),
+                Err(StoreError::Path { problem, .. }) if problem.contains("class key")
+            ),
+            "`{spelling}` ends in the separator and was not refused as a class key's spelling"
+        );
+    }
+    let class_key = class("glossary/norn/");
+    assert!(
+        PathKey::new(class_key.as_str()).is_err(),
+        "a class key was read as a path key"
+    );
+    assert!(
+        norn_store::ClassKey::new("dir/t.md").is_err(),
+        "a path was read as a class key"
+    );
+
+    let scratch = Scratch::new("path-axis-key-space");
+    let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
+    let mut request = store.begin_request();
+    write_document(&mut request, &document("index.md", "hash-1", "a body\n"));
+    let raw = broken_path_link("index.md", &["Dir/t.md"]);
+
+    let refused = request.record_finding(&raw);
+    assert!(
+        matches!(refused, Err(StoreError::KeySpace { what, .. }) if what.contains("path key")),
+        "a folding store filed a finding under `Dir/t.md`: {refused:?}"
+    );
+    let refused = request.apply_increment(
+        IncrementProvenance::Derived,
+        [upsert("dir/t.md", "hash-1", "a body\n")],
+        &[DerivedFinding {
+            facts: raw,
+            replaces: None,
+        }],
+    );
+    assert!(
+        matches!(refused, Err(StoreError::KeySpace { what, .. }) if what.contains("path key")),
+        "a folding store's changeset filed a finding under `Dir/t.md`: {refused:?}"
+    );
+    let foreign = path_key("Dir/t.md");
+    assert!(
+        matches!(
+            request.emitted_plan(ExplainedStatement::PathDiscard(&foreign)),
+            Err(StoreError::KeySpace { .. })
+        ),
+        "a folding store explained a discard over a raw path key"
+    );
+    assert!(
+        targets_at(&request, "index.md").is_empty(),
+        "a refused finding is at rest"
+    );
+}
+
+/// **A root that folds ASCII case names a changed path by its folded key**,
+/// which is the spelling the link index holds a path-addressed link under
+/// there, so the death of `Dir/T.md` takes the finding keyed by `dir/t.md`.
+#[test]
+fn a_folding_store_names_a_changed_path_by_its_folded_key() {
+    let scratch = Scratch::new("path-axis-folded");
+    let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
+    let mut request = store.begin_request();
+    write_document(&mut request, &document("index.md", "hash-1", "a body\n"));
+    request
+        .record_finding(&broken_path_link("index.md", &["dir/t.md"]))
+        .expect("recording a finding");
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [death("Dir/T.md", Provenance::WatcherRemoval)],
+            &[],
+        )
+        .expect("applying a changeset");
+    assert_eq!(outcome.affected_paths, path_keys(&["dir/t.md"]));
+    assert_eq!(outcome.invalidated.findings_discarded, 1);
+    assert!(targets_at(&request, "index.md").is_empty());
+}
+
+/// **The path discard runs before the findings the same act derived are
+/// written.** A changeset that upserts `dir/t.md` names `dir/t.md` in its own
+/// [`IncrementOutcome::affected_paths`], and a `DerivedFinding` the same call
+/// hands over keyed by that path is a write the act carries, not a change it
+/// discards for. Run in the other order, the write would land and then be
+/// taken by the discard it was never meant to answer to, so the finding this
+/// test records never stands.
+#[test]
+fn a_changesets_own_derived_finding_stands_through_its_own_path_discard() {
+    let scratch = Scratch::new("path-axis-discard-before-write");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [upsert("dir/t.md", "hash-1", "a body\n")],
+            &[DerivedFinding {
+                facts: broken_path_link("about.md", &["dir/t.md"]),
+                replaces: None,
+            }],
+        )
+        .expect("applying a changeset");
+
+    assert_eq!(outcome.affected_paths, path_keys(&["dir/t.md"]));
+    assert_eq!(
+        targets_at(&request, "about.md"),
+        vec![Some("dir/t.md".to_string())],
+        "the finding keyed by the path its own changeset wrote did not stand"
+    );
+}
+
+/// **Folding a path key is ASCII-only, on a folding root too.** `É` is not
+/// an ASCII letter, so folding `Été.md` leaves it exactly as written — the
+/// same rule the link index folds by — and a folding store still names the
+/// death of `Été.md` by that unfolded key, which is what reaches the finding
+/// a link to it filed there.
+#[test]
+fn a_folding_store_folds_a_path_key_by_ascii_case_alone() {
+    let scratch = Scratch::new("path-axis-non-ascii");
+    let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
+    let mut request = store.begin_request();
+    write_document(&mut request, &document("index.md", "hash-1", "a body\n"));
+    request
+        .record_finding(&broken_path_link("index.md", &["Été.md"]))
+        .expect("recording a finding");
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [death("Été.md", Provenance::WatcherRemoval)],
+            &[],
+        )
+        .expect("applying a changeset");
+    assert_eq!(
+        outcome.affected_paths,
+        path_keys(&["Été.md"]),
+        "ASCII case folding changed a non-ASCII letter's case"
+    );
+    assert_eq!(outcome.invalidated.findings_discarded, 1);
+    assert!(targets_at(&request, "index.md").is_empty());
 }
 
 /// **A `Composed` changeset records no store-side recomputation of the state it
