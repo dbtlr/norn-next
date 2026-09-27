@@ -928,6 +928,7 @@ impl<A: SnapshotSource> Entry<A> {
                 delivered_engine: None,
                 recovery_required: false,
                 rebuild_required: false,
+                damage_met_under_a_claim: None,
                 recovery_demands: 0,
                 recovery_generation: 0,
                 identity_refused: None,
@@ -1074,6 +1075,21 @@ struct EntryState<A: SnapshotSource> {
     /// recovery run against damaged state is the loop this flag exists to keep
     /// the entry out of.
     rebuild_required: bool,
+    /// Damage a read's store met while a claim held the entry, carried to the
+    /// end of that claim.
+    ///
+    /// A claim's own end publishes over the entry, so a verdict written
+    /// beneath a running leg would be overwritten, and one written beneath a
+    /// scheduled job would owe a rebuild nothing schedules. The read leaves
+    /// the verdict here instead, and the end of every claim — a job leg's in
+    /// [`end_job_leg`], a watcher poll's in [`poll_claimed_entry`] — publishes
+    /// it through [`publish_damage_a_read_met`] once nothing holds the entry.
+    ///
+    /// It is a rebuild owed rather than one already published, so it goes
+    /// where a rebuild requirement goes: [`EntryState::clear_rebuild`] clears
+    /// it, because the store it names is gone once a rebuild has run or the
+    /// coverage has gone back.
+    damage_met_under_a_claim: Option<String>,
     /// The live demand leases asking for the recovery the entry currently owes.
     recovery_demands: usize,
     /// Which recovery requirement the demands above were raised against. A
@@ -1419,9 +1435,12 @@ impl<A: SnapshotSource> EntryState<A> {
     }
 
     /// Owe no rebuild. Called where the derived state the entry holds is one a
-    /// build from the vault has just produced.
+    /// build from the vault has just produced, or where the entry no longer
+    /// holds the store a requirement was raised against. Damage a read met
+    /// under a claim names that same store, so it clears with the requirement.
     fn clear_rebuild(&mut self) {
         self.rebuild_required = false;
+        self.damage_met_under_a_claim = None;
     }
 
     /// Owe no recovery. The demands that were waiting on one retire with it.
@@ -2161,6 +2180,35 @@ fn schedule_demanded_work<A: SnapshotSource>(
     {
         return None;
     }
+    Some(schedule_demand(state, name))
+}
+
+/// Publish the damage a read's store met, and schedule the rebuild that
+/// resolves it, where nothing holds the entry: no claim, no scheduled job and
+/// no release in flight, over coverage the entry holds, in service and
+/// unparked.
+///
+/// **This is the one place read-met damage is published.** A read over a free
+/// entry reaches it at once through [`Host::withdraw_for_read_damage`]; a read
+/// under a held claim leaves the verdict in
+/// [`EntryState::damage_met_under_a_claim`], and the end of that claim reaches
+/// it here. Where something still holds the entry the verdict stays for the
+/// end of what holds it, and `None` comes back.
+fn publish_damage_a_read_met<A: SnapshotSource>(
+    state: &mut EntryState<A>,
+    name: &VaultName,
+) -> Option<Job> {
+    if state.damage_met_under_a_claim.is_none()
+        || state.claim.is_held()
+        || !state.coverage.in_hand()
+        || state.detach_in_flight
+        || state.stands_parked()
+        || state.out_of_service().is_some()
+    {
+        return None;
+    }
+    let detail = state.damage_met_under_a_claim.take()?;
+    state.withdraw_trust_for_damage(detail);
     Some(schedule_demand(state, name))
 }
 
@@ -4958,27 +5006,27 @@ impl<O: EntryOps> Host<O> {
     /// gate it takes. The publication and the refusal come out of that one
     /// hold, so the read answers the demand it published.
     ///
-    /// **The entry publishes the damage only where nothing else holds it**:
-    /// it still serves `Ready` on the handle this read ran on, and no claim is
-    /// held and no job is scheduled against it. Every other entry publishes
-    /// nothing here, and the read is refused as follows:
+    /// **The verdict is the entry's where the entry still reads the store the
+    /// read ran on**: its reader is the handle this read ran on, it owes no
+    /// rebuild already, and no park stands over it. Every other entry
+    /// publishes nothing here, and the read is refused as follows:
     ///
-    /// - An entry that publishes anything but `Ready` — damage another read or
-    ///   a leg already published, a warming phase, a park — answers with that
-    ///   published demand, and schedules nothing more.
-    /// - An entry still `Ready` on a handle other than the one this read ran
+    /// - An entry serving `Ready` on a handle other than the one this read ran
     ///   on reads another store, so the read is refused as reader-unavailable.
-    /// - An entry `Ready` on this handle whose claim is held is running, or has
-    ///   scheduled, a leg that publishes over it when it ends, so damage
-    ///   written beneath it would be overwritten or left owing a rebuild no one
-    ///   schedules. The read is refused as reader-unavailable; the damage
-    ///   stands in the store, and the next read to meet it over a free entry
-    ///   publishes it.
+    /// - Any other entry — damage another read or a leg already published, a
+    ///   park, a teardown that let the handle go — answers with its published
+    ///   demand.
     ///
-    /// An entry `Ready` on this handle with its claim open holds its coverage
-    /// and has no detach in flight: every move that takes coverage out of the
-    /// entry's hand either holds the claim or closes the reader and publishes
-    /// a state other than `Ready` under the same hold.
+    /// **Where the verdict is the entry's, it reaches the rebuild whether or
+    /// not a claim holds the entry.** Over a free entry
+    /// [`publish_damage_a_read_met`] publishes it here and schedules the
+    /// rebuild. Where a claim holds the entry — a leg running, a watcher poll,
+    /// a job scheduled — that claim's end publishes over the entry, so the
+    /// verdict is carried to that end rather than written beneath it, and the
+    /// claim's end publishes it and schedules the rebuild with no further
+    /// read. The read is refused meanwhile as reader-unavailable where the
+    /// entry still serves `Ready`, and with what the entry publishes
+    /// otherwise.
     pub(crate) fn withdraw_for_read_damage(
         &self,
         hold: &ReadHold<O>,
@@ -4992,25 +5040,32 @@ impl<O: EntryOps> Host<O> {
             .reader
             .as_ref()
             .is_some_and(|standing| Arc::ptr_eq(standing, &hold.reader));
-        if published != Demand::State(TrustState::Ready) {
+        let serving = published == Demand::State(TrustState::Ready);
+        if !on_this_handle {
+            return if serving {
+                ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                    "this entry's reads moved to another handle while this read ran",
+                ))
+            } else {
+                ReadRefusal::NotServing(published)
+            };
+        }
+        if state.rebuild_required || state.stands_parked() {
             return ReadRefusal::NotServing(published);
         }
-        if !on_this_handle {
-            return ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
-                "this entry's reads moved to another handle while this read ran",
-            ));
+        if state.damage_met_under_a_claim.is_none() {
+            state.damage_met_under_a_claim = Some(detail);
         }
-        if state.claim.is_held() {
-            return ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
-                "the store found its derived data damaged while other work held this entry",
-            ));
+        if publish_damage_a_read_met(&mut state, name).is_none() {
+            return if serving {
+                ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                    "the store found its derived data damaged while other work held this \
+                     entry; the entry rebuilds it when that work ends",
+                ))
+            } else {
+                ReadRefusal::NotServing(published)
+            };
         }
-        debug_assert!(
-            state.coverage.in_hand() && !state.detach_in_flight,
-            "an entry serving a read's handle with its claim open does not hold its coverage"
-        );
-        state.withdraw_trust_for_damage(detail);
-        schedule_demand(&mut state, name);
         let published = state.published_demand();
         drop(state);
         // The dispatch's one failure is the worker pool being gone, which is
@@ -5452,7 +5507,12 @@ fn poll_claimed_entry<O: EntryOps>(
             // A leg that is releasing the entry schedules nothing against
             // it: the work an outstanding lease is owed is the re-attach
             // the release itself ends with, once the resources are back.
+            // Damage a read met while this poll held the entry comes first,
+            // because the rebuild it owes dominates what a lease is owed.
             if release.is_none() {
+                if schedule.is_none() {
+                    schedule = publish_damage_a_read_met(&mut state, name);
+                }
                 if schedule.is_none() {
                     schedule = schedule_demanded_work(&mut state, name);
                 }
@@ -5517,7 +5577,9 @@ fn poll_claimed_entry<O: EntryOps>(
             }
             state.claim.end_poll(epoch);
         }
-        if let Some(job) = schedule_demanded_work(&mut state, name) {
+        if let Some(job) = publish_damage_a_read_met(&mut state, name)
+            .or_else(|| schedule_demanded_work(&mut state, name))
+        {
             schedule = Some(job);
         }
     }
@@ -5607,6 +5669,12 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
 /// the schedule below published none, so what the lease is answered with there
 /// is work the entry still owes rather than coverage restarted over a verdict
 /// already given.
+///
+/// Damage a read met while this leg held the entry is the one verdict this
+/// end publishes whichever epoch the leg stands at. The leg's own verdict was
+/// written over an entry the read could not publish beneath, so where the leg
+/// leaves the entry free, [`publish_damage_a_read_met`] publishes the damage
+/// over it and the rebuild it owes is sent from here.
 fn end_job_leg<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -5641,22 +5709,30 @@ fn end_job_leg<O: EntryOps>(
             finish_release(shared, entry, name, epoch, None, ReleaseTail::HonorDemand);
             return;
         }
+        // Damage a read met while this leg held the entry is published where
+        // the leg's claim has ended, ahead of any other work a demand is
+        // owed: the rebuild it owes dominates whatever else the entry owes.
         if !state.claim.stands_at(epoch) {
             state.claim.release();
             // A marker standing here is work the entry owes that nothing has
-            // sent: the work a demand lease is owed, scheduled just above; a
-            // job a producer scheduled against the gate this leg had already
+            // sent: the rebuild or the work a demand lease is owed, scheduled
+            // just below; a job a producer scheduled against the gate this leg had already
             // given back; or a job a full queue refused and put back at the
             // entry's epoch. The producer's stood behind the leg's own
             // registration, and [`Claim::take_slot_for_marked`] sends nothing
             // beside a leg still running. The leg's end is what sends it; the
             // dispatcher tick that would otherwise reach it is one poll
             // interval away.
-            schedule_demanded_work(&mut state, name);
+            if publish_damage_a_read_met(&mut state, name).is_none() {
+                schedule_demanded_work(&mut state, name);
+            }
             if state.claim.marker().is_some() {
                 drop(state);
                 let _ = dispatch_pending(shared, entry);
             }
+        } else if publish_damage_a_read_met(&mut state, name).is_some() {
+            drop(state);
+            let _ = dispatch_pending(shared, entry);
         }
     }
 }
@@ -14764,10 +14840,14 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
-    /// **A read that meets damage while a leg holds the entry publishes
-    /// nothing.** The leg holds the entry's coverage and publishes over it
-    /// when it ends, so the read is refused as the read seam being down and
-    /// the entry goes on standing where the leg left it, owing nothing.
+    /// **A read that meets damage while a claim holds the entry publishes
+    /// nothing beneath it, and the next watcher poll to end over the free
+    /// entry publishes it.** The claim holds the entry's coverage and
+    /// publishes over it when it ends, so the read is refused as the read
+    /// seam being down and the entry goes on standing where the claim left
+    /// it. The verdict is carried, not dropped: a poll that reports nothing
+    /// ends over an entry nothing holds, publishes the damage, and schedules
+    /// the rebuild.
     #[test]
     fn a_read_that_meets_damage_under_a_held_claim_publishes_nothing() {
         let ops = Arc::new(FakeOps::default());
@@ -14801,6 +14881,75 @@ mod tests {
         }
         drop(hold);
         assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 0);
+
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        poll_watchers(&host.shared);
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(
+            host.state(&name),
+            answered(TrustState::untrusted(
+                UntrustedReason::store_damaged_rebuilding("the store is damaged")
+            )),
+            "the poll published another state than the damage the read met"
+        );
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 1);
+    }
+
+    /// **Damage a read meets under a held reconcile reaches the rebuild when
+    /// the reconcile ends, with no further read.** The read answered from
+    /// `Ready` and met the damage once a reconcile had taken the entry, so
+    /// the reconcile's own end would publish over any verdict written beneath
+    /// it. The verdict is carried to that end instead: the reconcile ends,
+    /// and the entry publishes the damage and runs the rebuild, though no
+    /// read meets the damage over a free entry.
+    #[test]
+    fn damage_a_read_meets_under_a_held_reconcile_reaches_the_rebuild_when_it_ends() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        hold_a_change_in_flight(&ops, &host, &name);
+        let refusal = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+        assert_eq!(
+            refusal,
+            ReadRefusal::NotServing(Demand::State(TrustState::warming(
+                WarmingPhase::Healing,
+                0,
+                None
+            ))),
+            "a read under a held reconcile was refused with another demand than it publishes"
+        );
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            0,
+            "a read scheduled a rebuild under a held reconcile"
+        );
+        drop(hold);
+
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(
+            host.state(&name),
+            answered(TrustState::untrusted(
+                UntrustedReason::store_damaged_rebuilding("the store is damaged")
+            )),
+            "the reconcile's end published another state than the damage the read met"
+        );
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            1,
+            "the damage a read met under a held reconcile was not rebuilt once"
+        );
     }
 
     /// **A read that meets damage on a handle the entry has already replaced

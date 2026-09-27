@@ -1820,15 +1820,19 @@ in that window can miss it.
 **A read whose store finds its derived data damaged is answered by the entry.** After the
 builder returns, one hold of the entry gate withdraws trust under the store-damaged-rebuilding
 reason, owes and schedules the rebuild, and reads the demand it published, so the read is
-refused as `host/entry-untrusted` with that reason and never as `host/read-failed`. It
-publishes only over an entry still serving on the handle the read ran on with nothing holding
-it; every other read that meets damage publishes nothing and schedules nothing. An entry that
-no longer serves — its damage already published by another read or a leg, or warming, or
-parked — answers with the demand it publishes. An entry serving from a handle that replaced
-the read's reads another store, and refuses the read as reader-unavailable. Where a leg holds
-the entry, or a job is scheduled against it, that leg publishes over the entry when it ends:
-the read is refused as reader-unavailable and the next read to meet the damage over a free
-entry publishes it.
+refused as `host/entry-untrusted` with that reason and never as `host/read-failed`. The
+verdict is the entry's only where the entry still reads the handle the read ran on, owes no
+rebuild already and stands unparked; every other read that meets damage publishes nothing and
+schedules nothing. An entry whose damage another read or a leg already published, or that is
+parked or has let the handle go, answers with the demand it publishes. An entry serving from a
+handle that replaced the read's reads another store, and refuses the read as
+reader-unavailable. Where a claim holds the entry — a leg running, a watcher poll, a job
+scheduled against it — that claim publishes over the entry when it ends, so the verdict is not
+written beneath it: the entry carries the damage to the claim's end, and the end of the job leg
+or poll that leaves the entry free publishes it and schedules the rebuild, with no further
+read. The read is refused meanwhile as reader-unavailable where the entry still serves
+`Ready`, and with what the entry publishes otherwise. The carried verdict clears with the
+store it names: a rebuild or a release drops it.
 
 A read's hold is a demand lease, and it does what a lease does: it holds the entry's idle
 interval open for as long as the read runs and restarts it when the hold drops, it clears
