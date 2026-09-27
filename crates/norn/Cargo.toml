@@ -11,7 +11,8 @@ publish.workspace = true
 
 # The certification suite renders a qualification record and reads it back, so
 # the rendering a campaign stores records in is exercised where the record's own
-# validator is.
+# validator is. The corpus suite reads the wire verb registry a ruling names.
 [dev-dependencies]
 norn-testkit = { path = "../norn-testkit" }
+norn-wire = { path = "../norn-wire" }
 serde_json = { workspace = true }

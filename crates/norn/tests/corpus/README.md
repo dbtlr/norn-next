@@ -34,6 +34,13 @@ cases run. Both the `unseeded` and `unrecorded` lists are additionally pinned
 in the harness, so no manifest edit can give a command an activation path or
 take one away.
 
+**Activation is deferred to Layer 6.** Activating a command runs its argv and
+judges the bytes that come back, and those bytes are a rendering: the command
+line, its formats and its help pages. The renderings land at Layer 6, so no
+command is activated before then, and this paragraph is the written deferral.
+Whether Layer 6 may close with any recorded case still skipped is judged by
+Layer 6's own contract, not here.
+
 ## The files
 
 | File | What it holds |
@@ -94,10 +101,74 @@ also carries `recorded_tree_delta` — what the invocation did to the vault.
 under**, not this program's exit contract; ADR 0001 says what each class
 meant and where the real contract lands.
 
-Paths in `behavior-ledger.json` — `source_file`, and each ruling's
-`source_decision` — point inside the recording checkout, **not this
-repository**. The two namespaces overlap, so reading one as a local path
-resolves to the wrong document.
+Paths in `behavior-ledger.json` — `source_file`, and the `source_decision`
+of each ruling transcribed from the pin — point inside the recording
+checkout, **not this repository**. The two namespaces overlap, so reading one
+as a local path resolves to the wrong document. For example,
+`docs/decisions/0021-verbs-return-one-layer-renders.md`, which `PD-144`,
+`PD-470` and `PD-470b` cite, is a decision record of the recording checkout;
+this repository's `0021` is a different decision, and the cited one is not in
+this repository. A ruling recorded on this line names this repository in its
+`source`, and its `source_decision` is a path here; the suite holds both
+rules.
+
+## Rulings recorded on this line
+
+Most rulings in `behavior-ledger.json` are transcribed from the pin and carry
+`PD-` ids. The rest were judged on this line, against this repository's
+surface, and their `source` names it. They keep the transcribed rulings'
+shape, with one reading of its two behavior fields for both:
+`recorded_behavior` is the behavior a ruling records as decided, and
+`prior_behavior` is the behavior it replaces. A transcribed ruling's cases
+recorded the decided behavior. A ruling recorded on this line cites cases that
+recorded the prior one, so activation re-judges those cases against the
+ruling at Layer 6.
+
+**The help class ruling, `CR-help-reads-no-vault`.** Decided, and not yet
+built: no help page is rendered on this line, and the help pages land with the
+renderings at Layer 6. When they land, a help page never reads a vault. It is
+rendered from the command's declaration alone, so it is the same inside a
+vault, outside one, and with no vault registered. The recorded help
+standard gave `find --help` a `LIVE EXAMPLES` block, a runnable query
+generated from the vault in scope with its match count; that block, and every
+instruction to generate help from a vault's contents, are struck on every
+command and in every section. The binary at the pin wired no generator for the
+block, so no recorded page carries one. The ruling is swept across every
+command and covers every recorded help page.
+
+**The shape rulings, `SR-<command>`.** Each activatable read command whose
+output shape changed carries one ruling, stating what its cases recorded and
+the shape that replaces it:
+
+| Ruling | What changed |
+|---|---|
+| `SR-find` | Offset paging (`--limit`, `--starts-at`, `--no-limit`, `--all`, a match total) becomes keyset paging by an opaque cursor over the sort value and path. |
+| `SR-get` | One or more targets answered as an array, in records, JSON or Markdown, becomes one document per request, answered as a record, a section, a block, or one page of one nested collection, and an ambiguous or unknown target is refused. |
+| `SR-count` | An unpaged total with a flat or nested distribution becomes a keyset-paged list of tallies, each a grouping tuple with a count. |
+| `SR-validate` | Unpaged findings filtered by code globs, with an exit status an error finding sets, become the findings standing under the active schema, paged by keyset or tallied by kind and severity. A standing finding is a row of a complete `VaultAnswer`, never an unsatisfied part or a refusal; exit status arrives with the renderings at Layer 6. |
+| `SR-describe` | Structure counts, a config dump and a contents summary become a keyset-paged list of declared and observed facets: keys and declarations only. |
+| `SR-top-level` | The pin's command list and global block give way to a decided command list and global block that are not yet rendered. The ruling names what the code holds today: the 14 verbs of the wire verb registry, `Verb::ALL`, and the machine-local verbs the architecture reserves. |
+
+Every format a recorded case selected is a rendering of one report, and the
+renderings land at Layer 6.
+
+**Commands the corpus has no evidence for.** The `vault` namespace is
+authored with no corpus evidence, as its `unrecorded` category says: no case
+records any of its subcommands. `search`, `doctor`, `vault resolve`,
+`model fetch` and `vault migrate` are new. No command at the pin was any of
+them, so they sit in no category and are authored with no corpus evidence.
+The wire verb registry holds `search`, `vault_resolve` and `doctor_registry`,
+the registry half of `doctor`; `model fetch` and `vault migrate` are decided
+and not yet in it. The
+nine `unseeded` commands carry no behavior at the pin, so none of them needs a
+ruling here.
+
+**`PD-134`** rules on a `--vault` flag local to `service`. `service` is
+reserved in the architecture and not yet built. It is decided to be
+re-derived at installation scope over the one host an installation
+supervises, with no per-vault form, so the flag has no successor. The ruling
+stays in the pinned set of rulings with no activation path, and the corpus
+retires it when `service`'s recorded cases retire at Layer 6.
 
 ## How these recordings were made
 

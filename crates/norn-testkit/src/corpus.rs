@@ -465,8 +465,10 @@ pub struct CommandCases {
 ///
 /// A ruling enters as contract only when the command it attaches to is
 /// activated and the ruling is re-judged affirmatively against the surface
-/// being re-derived. A command the verb charter deletes takes its rulings
-/// with it.
+/// being re-derived. A command that is deleted takes its rulings with it.
+///
+/// Most rulings are transcribed from the recording checkout; the rest are
+/// recorded on this repository's line, and [`Ruling::source`] says which.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Ruling {
@@ -476,14 +478,21 @@ pub struct Ruling {
     pub commands: Vec<String>,
     /// The recorded cases the ruling covers.
     pub cases: Vec<String>,
+    /// The behavior the ruling records as decided. A transcribed ruling's
+    /// cases recorded it.
     pub recorded_behavior: String,
+    /// The behavior the ruling replaces. A ruling recorded on this line cites
+    /// cases that recorded it.
     pub prior_behavior: String,
     pub reason: String,
-    /// A path inside the recording checkout, **not this repository**. The
+    /// A path inside the checkout [`Ruling::source`] names. For a transcribed
+    /// ruling that is the recording checkout, **not this repository**: the
     /// two namespaces overlap — both number their decision records from
-    /// `0001` — so reading this as a local path resolves to the wrong
-    /// document.
+    /// `0001` — so reading it as a local path resolves to the wrong document.
+    /// A ruling recorded on this line cites a path in this repository.
     pub source_decision: String,
+    /// Where the ruling was recorded: the recording checkout's pin for a
+    /// transcribed ruling, this repository's line for one judged here.
     pub source: Source,
 }
 
@@ -732,8 +741,8 @@ impl Corpus {
     ///
     /// Not a defect — a ruling about a command with no behavior is still
     /// evidence — but it is a ruling nobody will be prompted to judge, so it
-    /// has to be found deliberately rather than waited for. Its disposition
-    /// belongs to the verb charter, along with the command it describes.
+    /// has to be found deliberately rather than waited for. The corpus suite
+    /// pins the set and records each member's disposition beside it.
     pub fn rulings_without_an_activation_path(&self) -> Vec<&Ruling> {
         let activatable: BTreeSet<&str> = self.activatable_commands().collect();
         self.ledger

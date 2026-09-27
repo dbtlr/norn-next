@@ -38,8 +38,8 @@
 //! [`Corpus::rulings_for`](norn_testkit::corpus::Corpus::rulings_for)
 //! returns the ones that come up for re-judgment when a command is
 //! activated. A ruling becomes contract only on an affirmative judgment
-//! against the re-derived surface. A command the verb charter deletes takes
-//! its rulings with it.
+//! against the re-derived surface. A command that is deleted takes its
+//! rulings with it.
 //!
 //! # The three categories
 //!
@@ -73,6 +73,11 @@
 //! [`activated_cases_reach_a_runner`] fails loudly for any case that is
 //! activated, naming what is missing. That is the honest failure: the gate is
 //! real, and what sits behind it is not built.
+//!
+//! **Activation is deferred to Layer 6.** A case judges rendered bytes, and
+//! the renderings land at Layer 6, so no command is activated before then.
+//! The corpus README records the deferral, and the rulings that activation
+//! re-judges are already in the ledger.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -244,9 +249,13 @@ fn every_recorded_entry_reconstructs_its_bytes() {
 /// prompted to judge them, so the set is pinned here: a change to it is a
 /// change somebody should see.
 ///
-/// `PD-134` is the whole set today — it describes a flag on `service`, which
-/// carries no behavior at the pin. Its disposition belongs to the verb
-/// charter, along with the command it describes.
+/// `PD-134` is the whole set today. It rules on a `--vault` flag local to
+/// `service`, which carries no behavior at the pin. `service` is reserved in
+/// the architecture and not yet built; it is decided to be re-derived at
+/// installation scope over the one host an installation supervises, with no
+/// per-vault form, so the flag has no successor. The ruling stays here until
+/// `service`'s recorded cases retire at Layer 6, and the corpus retires it
+/// with them.
 #[test]
 fn rulings_without_an_activation_path_are_known() {
     let corpus = corpus();
@@ -260,6 +269,202 @@ fn rulings_without_an_activation_path_are_known() {
         vec!["PD-134"],
         "the set of rulings with no activation path changed"
     );
+}
+
+/// The line this repository records rulings on. A ruling whose source names
+/// it was judged here, against this repository's surface; every other ruling
+/// was transcribed from the recording checkout.
+const THIS_LINE: &str = "norn";
+
+/// The class ruling that strikes help generated from a vault.
+const HELP_CLASS_RULING: &str = "CR-help-reads-no-vault";
+
+/// Whether this repository holds a file at `relative`, a path from its root.
+///
+/// Only a path made of plain components counts: an absolute path, or one that
+/// climbs with `..`, names a file outside the tree whatever it resolves to.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: a ledger citation checked against this repository's own tree.
+fn repository_holds(relative: &str) -> bool {
+    let within = std::path::Path::new(relative)
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)));
+    within
+        && PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative)
+            .is_file()
+}
+
+#[test]
+fn a_citation_outside_the_repository_is_not_held() {
+    assert!(repository_holds("crates/norn-wire/src/verb.rs"));
+    assert!(!repository_holds("/etc/hosts"));
+    assert!(!repository_holds("../norn/crates/norn-wire/src/verb.rs"));
+    assert!(!repository_holds("crates/../crates/norn-wire/src/verb.rs"));
+}
+
+/// The rulings recorded on this line are pinned, and each one cites a
+/// decision this repository holds.
+///
+/// Two namespaces share one field. A transcribed ruling's `source_decision`
+/// is a path inside the recording checkout, whose decision records are
+/// numbered from `0001` as this repository's are, so it resolves here to the
+/// wrong document or to none. A ruling recorded on this line names this
+/// repository in its `source` and cites a path that resolves here. A ruling
+/// whose source names neither is refused, so a reader always knows which
+/// namespace a path is read in.
+#[test]
+fn rulings_recorded_on_this_line_are_known_and_cite_this_repository() {
+    let corpus = corpus();
+    let recording = &corpus.ledger.source;
+    let mut recorded_here = Vec::new();
+    for ruling in &corpus.ledger.rulings {
+        let source = &ruling.source;
+        if source.line == THIS_LINE {
+            assert!(
+                repository_holds(&ruling.source_decision),
+                "ruling `{}` is recorded on this line but cites `{}`, which this repository does not hold",
+                ruling.id,
+                ruling.source_decision
+            );
+            recorded_here.push(ruling.id.as_str());
+        } else {
+            assert!(
+                source.line == recording.line
+                    && source.branch == recording.branch
+                    && source.commit == recording.commit,
+                "ruling `{}` names neither this line nor the recording checkout as its source",
+                ruling.id
+            );
+        }
+    }
+    assert_eq!(
+        recorded_here,
+        vec![
+            HELP_CLASS_RULING,
+            "SR-find",
+            "SR-get",
+            "SR-count",
+            "SR-validate",
+            "SR-describe",
+            "SR-top-level",
+        ],
+        "the set of rulings recorded on this line changed"
+    );
+}
+
+/// The help class ruling is swept across every command, as a class ruling
+/// is, and covers every recorded help page.
+///
+/// A help page never reads a vault, on any command, so the ruling attaches to
+/// the whole command universe rather than to the commands whose pages happen
+/// to be recorded; and every recorded `--help` or `-h` invocation is one of
+/// the cases it re-judges.
+#[test]
+fn the_help_class_ruling_sweeps_every_command() {
+    let corpus = corpus();
+    let ruling = corpus
+        .ledger
+        .rulings
+        .iter()
+        .find(|ruling| ruling.id == HELP_CLASS_RULING)
+        .unwrap_or_else(|| panic!("the ledger records no ruling `{HELP_CLASS_RULING}`"));
+
+    let swept: BTreeSet<&str> = ruling.commands.iter().map(String::as_str).collect();
+    assert_eq!(
+        swept,
+        corpus.command_universe(),
+        "the help class ruling does not attach to every command"
+    );
+
+    let covered: BTreeSet<&str> = ruling.cases.iter().map(String::as_str).collect();
+    let help_pages: BTreeSet<&str> = corpus
+        .all_cases()
+        .filter(|case| case.argv.iter().any(|arg| arg == "--help" || arg == "-h"))
+        .map(|case| case.id.as_str())
+        .collect();
+    assert_eq!(
+        covered, help_pages,
+        "the help class ruling does not cover exactly the recorded help pages"
+    );
+}
+
+/// The top-level shape ruling.
+const TOP_LEVEL_RULING: &str = "SR-top-level";
+
+/// The wire registry the top-level ruling cites.
+const VERB_REGISTRY: &str = "crates/norn-wire/src/verb.rs";
+
+/// The machine-local verbs the top-level ruling names as reserved, not built.
+const RESERVED_MACHINE_LOCAL_VERBS: [&str; 4] =
+    ["self-update", "service", "completions", "manpage"];
+
+/// The commands the top-level ruling names as decided and not in the wire
+/// registry, spelled as the registry would spell them.
+const DECIDED_NOT_REGISTERED: [&str; 2] = ["vault_migrate", "model_fetch"];
+
+/// Whether `docs/architecture.md` marks `verb` reserved on a `norn-client`
+/// row: the client that owns the machine-local verbs is not written yet.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: this repository's own architecture document.
+fn architecture_reserves_client_verb(verb: &str) -> bool {
+    let architecture = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/architecture.md"),
+    )
+    .expect("reading the architecture document");
+    architecture.lines().any(|line| {
+        line.starts_with("| `norn-client`") && line.contains("*Reserved.*") && line.contains(verb)
+    })
+}
+
+/// The top-level ruling names what exists as what exists.
+///
+/// No command line is built on this line, so the ruling separates what the
+/// code holds from what is decided. It cites the wire verb registry, names
+/// every verb the registry holds, names the client's machine-local verbs only
+/// where the architecture marks them reserved, and names the decided commands
+/// the registry does not hold yet as absent from it. A verb added to or
+/// removed from the registry fails here until the ruling says so.
+#[test]
+fn the_top_level_ruling_names_what_the_registry_holds() {
+    let corpus = corpus();
+    let ruling = corpus
+        .ledger
+        .rulings
+        .iter()
+        .find(|ruling| ruling.id == TOP_LEVEL_RULING)
+        .unwrap_or_else(|| panic!("the ledger records no ruling `{TOP_LEVEL_RULING}`"));
+    assert_eq!(
+        ruling.source_decision, VERB_REGISTRY,
+        "the top-level ruling does not cite the wire verb registry"
+    );
+
+    let names = |spelling: &str| ruling.recorded_behavior.contains(&format!("`{spelling}`"));
+    let registered: BTreeSet<&str> = norn_wire::Verb::ALL
+        .iter()
+        .map(|verb| verb.as_str())
+        .collect();
+    for verb in &registered {
+        assert!(
+            names(verb),
+            "the wire registry holds `{verb}`, which the top-level ruling does not name"
+        );
+    }
+    for verb in RESERVED_MACHINE_LOCAL_VERBS {
+        assert!(
+            names(verb),
+            "the top-level ruling does not name the reserved verb `{verb}`"
+        );
+        assert!(
+            architecture_reserves_client_verb(verb),
+            "the top-level ruling names `{verb}` as reserved, and the architecture reserves no such client verb"
+        );
+    }
+    for verb in DECIDED_NOT_REGISTERED {
+        assert!(
+            !registered.contains(verb),
+            "the top-level ruling names `{verb}` as not yet registered, and the wire registry holds it"
+        );
+    }
 }
 
 /// Every activated case must reach a runner. None is activated, so nothing
