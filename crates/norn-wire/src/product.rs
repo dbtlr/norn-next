@@ -139,8 +139,9 @@ pub enum Unsatisfied {
         /// The target the request asked to resolve.
         target: ResolutionTarget,
     },
-    /// A search's query held no word, as the full-text index's tokenizer
-    /// reads words, so no document is a hit.
+    /// A query held no word, as the full-text index's tokenizer reads words,
+    /// so no document is a hit: a search's own query, or a `matches` part's
+    /// query on a find, a count or a validate.
     #[non_exhaustive]
     QueryNamesNoWord {
         /// The query the request named.
@@ -243,7 +244,7 @@ impl Unsatisfied {
         Unsatisfied::ResolvesNotApplicable { target }
     }
 
-    /// A search named `query`, which holds no word.
+    /// A search, or a `matches` part, named `query`, which holds no word.
     pub fn query_names_no_word(query: impl Into<String>) -> Self {
         Unsatisfied::QueryNamesNoWord {
             query: query.into(),

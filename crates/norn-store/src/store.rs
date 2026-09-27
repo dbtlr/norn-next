@@ -603,7 +603,7 @@ impl Snapshot {
             .map(|ran| {
                 let emitted = self
                     .database()
-                    .emitted_plan(&ran.sql, params_from_iter(ran.values))
+                    .emitted_plan(ran.sql(), params_from_iter(ran.values().iter()))
                     .map_err(StoreError::from)?;
                 Ok(plan(ran.statement, ran.filters, emitted))
             })
@@ -649,10 +649,10 @@ impl Snapshot {
         let ran = record.last_mut().expect("the statement was just recorded");
         let mut statement = self
             .connection()
-            .prepare(&ran.sql)
+            .prepare(ran.sql())
             .map_err(StatementFailure::Preparing)?;
         let rows = statement
-            .query_map(params_from_iter(ran.values.iter()), read)
+            .query_map(params_from_iter(ran.values().iter()), read)
             .map_err(StatementFailure::Preparing)?
             .collect::<rusqlite::Result<Vec<T>>>();
         ran.stepped = Stepped::of(&statement);

@@ -38,15 +38,17 @@ pub(crate) fn holds_word(term: &str) -> bool {
 /// **A phrase is what FTS5 tokenizes as content; everything else is syntax
 /// read past.** A double-quoted string is one phrase, its content read
 /// between the quotes with a doubled `""` read as one literal quote. Outside
-/// quotes, the expression splits into tokens at whitespace, `(` and `)`; the
-/// case-sensitive keywords `AND`, `OR`, `NOT`, `NEAR` and `NEAR/<digits>` are
-/// operators and name no phrase, and every other token is one, read past a
-/// trailing `*` (a prefix match) and a `column:` filter's column name, which
-/// are syntax rather than what the token names. A multi-column brace group,
-/// `{col1 col2}:`, is not specially read: its names, split at the space
-/// between them, are read as bare tokens rather than a filter, which only
-/// ever makes this answer `true` where the narrower reading would not, never
-/// the reverse.
+/// quotes, the expression splits into tokens at ASCII whitespace — the space
+/// FTS5's own parser splits at, narrower than [`char::is_whitespace`] — `(`
+/// and `)`; the case-sensitive keywords `AND`, `OR` and `NOT` are always
+/// operators and name no phrase, `NEAR` is one only where the next
+/// non-whitespace character after it is `(`, and every other token is a
+/// phrase, read past a trailing `*` (a prefix match) and a `column:`
+/// filter's column name, which are syntax rather than what the token names.
+/// A multi-column brace group, `{col1 col2}:`, is not specially read: its
+/// names, split at the space between them, are read as bare tokens rather
+/// than a filter, which only ever makes this answer `true` where the
+/// narrower reading would not, never the reverse.
 ///
 /// An expression with at least one word-holding phrase holds a word; one
 /// whose every phrase holds none, empty expressions and expressions naming no
@@ -63,7 +65,7 @@ fn phrases(expression: &str) -> impl Iterator<Item = String> + '_ {
     std::iter::from_fn(move || {
         loop {
             rest = rest.trim_start_matches(|character: char| {
-                character.is_whitespace() || character == '(' || character == ')'
+                character.is_ascii_whitespace() || character == '(' || character == ')'
             });
             if rest.is_empty() {
                 return None;
@@ -75,7 +77,7 @@ fn phrases(expression: &str) -> impl Iterator<Item = String> + '_ {
             }
             let end = rest
                 .find(|character: char| {
-                    character.is_whitespace()
+                    character.is_ascii_whitespace()
                         || character == '('
                         || character == ')'
                         || character == '"'
@@ -83,7 +85,7 @@ fn phrases(expression: &str) -> impl Iterator<Item = String> + '_ {
                 .unwrap_or(rest.len());
             let (token, after) = rest.split_at(end);
             rest = after;
-            if let Some(phrase) = phrase_of(token) {
+            if let Some(phrase) = phrase_of(token, rest) {
                 return Some(phrase.to_string());
             }
         }
@@ -118,9 +120,11 @@ fn read_quoted(mut rest: &str) -> (String, &str) {
 }
 
 /// The phrase a bare (unquoted) token names, or `None` where it is an
-/// operator naming none.
-fn phrase_of(token: &str) -> Option<&str> {
-    if is_operator(token) {
+/// operator naming none. `following` is what stands in the expression right
+/// after `token`, which is what tells `NEAR` the operator from `near` the
+/// word.
+fn phrase_of<'a>(token: &'a str, following: &str) -> Option<&'a str> {
+    if is_operator(token, following) {
         return None;
     }
     let token = token.strip_suffix('*').unwrap_or(token);
@@ -131,14 +135,21 @@ fn phrase_of(token: &str) -> Option<&str> {
     Some(token)
 }
 
-/// Whether a bare token is an FTS5 operator rather than a phrase: `AND`,
-/// `OR`, `NOT`, `NEAR`, or `NEAR` followed by `/` and one or more digits, its
-/// proximity.
-fn is_operator(token: &str) -> bool {
-    matches!(token, "AND" | "OR" | "NOT" | "NEAR")
-        || token.strip_prefix("NEAR/").is_some_and(|digits| {
-            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
-        })
+/// Whether a bare token is an FTS5 operator rather than a phrase: `AND` and
+/// `OR` and `NOT` always are; `NEAR` is one only where the next
+/// non-whitespace character in `following` is `(` — `NEAR` alone, or before
+/// anything else, is an ordinary word FTS5 reads no differently than any
+/// other bareword. `NEAR/3` is not read as a proximity operator here: FTS5
+/// itself refuses it as a syntax error, which the parse check ahead of this
+/// rule already catches.
+fn is_operator(token: &str, following: &str) -> bool {
+    match token {
+        "AND" | "OR" | "NOT" => true,
+        "NEAR" => following
+            .trim_start_matches(|character: char| character.is_ascii_whitespace())
+            .starts_with('('),
+        _ => false,
+    }
 }
 
 /// Whether the tokenizer begins a word at `character`.
@@ -768,6 +779,44 @@ mod tests {
             assert!(
                 !expression_holds_word(expression),
                 "{expression:?} was read as holding a word"
+            );
+        }
+    }
+
+    /// **`NEAR` is an operator only where `(` follows it, whitespace
+    /// allowed between.** Standing anywhere else it is an ordinary bareword,
+    /// the same as any other letters: FTS5 parses `NEAR`, `NEAR + "!!!"` and
+    /// `"!!!" NEAR` and matches a row holding "near" against each.
+    #[test]
+    fn near_is_an_operator_only_directly_before_a_group() {
+        for expression in ["NEAR", "NEAR + \"!!!\"", "\"!!!\" NEAR", "NEAR  (\"foo\")"] {
+            assert!(
+                expression_holds_word(expression),
+                "{expression:?} was read as holding no word"
+            );
+        }
+        assert!(!expression_holds_word("NEAR(\"!!!\" \"???\")"));
+    }
+
+    /// **The expression splits into tokens at ASCII whitespace alone, the
+    /// space FTS5's own parser splits at.** A no-break space does not
+    /// separate a bareword from what follows it, so `\u{a0}AND` is one token
+    /// FTS5 reads as the word "and", never the bareword `AND` split off and
+    /// misread as the operator.
+    #[test]
+    fn only_ascii_whitespace_splits_a_bare_token_from_what_precedes_it() {
+        assert!(expression_holds_word("\u{a0}AND"));
+    }
+
+    /// **FTS5's operator keywords are case-sensitive.** Lowercase `and`,
+    /// `or`, `not` and `near` are ordinary barewords, each an FTS5 phrase in
+    /// its own right, never operators.
+    #[test]
+    fn a_lowercase_operator_keyword_is_an_ordinary_word() {
+        for expression in ["and", "or", "not", "near"] {
+            assert!(
+                expression_holds_word(expression),
+                "{expression:?} was read as holding no word"
             );
         }
     }

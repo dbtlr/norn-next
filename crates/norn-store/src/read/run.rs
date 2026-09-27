@@ -20,8 +20,8 @@ use super::{ReadFilter, ReadStatement};
 pub(crate) struct Ran {
     pub(crate) statement: ReadStatement,
     pub(crate) filters: Vec<ReadFilter>,
-    pub(crate) sql: String,
-    pub(crate) values: Vec<Value>,
+    sql: String,
+    values: Vec<Value>,
     /// What SQLite counted while the statement was stepped, read once every
     /// row it answers has been read.
     pub(crate) stepped: Stepped,
@@ -81,6 +81,19 @@ impl Ran {
     pub(crate) fn narrowed_by(mut self, filters: Vec<ReadFilter>) -> Self {
         self.filters = filters;
         self
+    }
+
+    /// The text this statement runs. Read-only: once composed, a recorded
+    /// statement's text is what [`crate::store::Snapshot::explained`] explains,
+    /// never a second spelling a caller could substitute in.
+    pub(crate) fn sql(&self) -> &str {
+        &self.sql
+    }
+
+    /// The values bound to this statement, in the order its placeholders
+    /// number them. Read-only for the reason [`Ran::sql`] is.
+    pub(crate) fn values(&self) -> &[Value] {
+        &self.values
     }
 }
 
