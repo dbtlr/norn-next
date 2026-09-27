@@ -1596,3 +1596,65 @@ fn tear_the_redecision(database: &Path) -> ! {
     );
     panic!("the changeset committed, so the arrangement that arms the abort did not fire");
 }
+
+/// **A changeset naming more classes and paths than one occupancy chunk
+/// reaches every key in the chunk after the first.** Three hundred documents
+/// `f/k000.md` to `f/k299.md` are killed, and `y/zzz.md` written, in one
+/// changeset: 301 classes and 301 paths, so the keys `a.md` is reached by —
+/// the class `k299/`, the path `f/k298.md`, and the naming class `zzz/` its
+/// path link's candidate holds, with no suffix link under it — all stand in
+/// the second chunk. Each link is re-decided: two broken, and the missing
+/// anchor's candidate renamed `x/zzz`.
+#[test]
+fn a_changeset_past_one_chunk_of_keys_reaches_every_key_in_the_next() {
+    const FILLERS: usize = 300;
+    for order in [Sensitive, Folding] {
+        let label = format!("redecide-second-chunk-{order:?}");
+        let mut vault = Vault::new(&label, order);
+        let mut held: BTreeMap<String, String> = BTreeMap::new();
+        let holder = "[p](x/zzz.md#Nope)\n\n[[k299]]\n\n[p](f/k298.md)\n";
+        let mut first = vec![
+            ("a.md".to_string(), holder.to_string()),
+            ("x/zzz.md".to_string(), String::new()),
+        ];
+        first.extend((0..FILLERS).map(|at| (format!("f/k{at:03}.md"), String::new())));
+        for (at, body) in &first {
+            held.insert(at.clone(), body.clone());
+        }
+        vault.apply(
+            first
+                .iter()
+                .map(|(at, body)| Change::Upsert(derived(at, body)))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            vault.findings("a.md"),
+            [missing_anchor(0, "x/zzz.md")],
+            "{order:?}"
+        );
+        assert_eq!(named(&mut vault.store, "a.md"), [vec!["zzz".to_string()]]);
+
+        let mut second: Vec<Change> = (0..FILLERS)
+            .map(|at| {
+                let at = format!("f/k{at:03}.md");
+                held.remove(&at);
+                death(&at)
+            })
+            .collect();
+        held.insert("y/zzz.md".to_string(), String::new());
+        second.push(Change::Upsert(derived("y/zzz.md", "")));
+        vault.apply(second);
+
+        assert_eq!(
+            vault.findings("a.md"),
+            [missing_anchor(0, "x/zzz.md"), broken(1), broken(2)],
+            "{order:?}"
+        );
+        assert_eq!(
+            named(&mut vault.store, "a.md"),
+            [vec!["x/zzz".to_string()], Vec::new(), Vec::new()],
+            "{order:?}"
+        );
+        assert_rebuilds(&mut vault.store, order, &held, &label);
+    }
+}
