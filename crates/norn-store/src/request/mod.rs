@@ -2735,10 +2735,11 @@ pub(crate) fn unix_seconds() -> i64 {
 mod tests {
     use super::*;
 
-    /// [`findings`] chunks its two follow-up `IN` lists at [`FINDING_ID_CHUNK`],
-    /// which this build shrinks to 4. Ten findings, each with one candidate and
-    /// one class of its own, cross that boundary twice, and every one has to
-    /// come back paired with the candidate and class it — and only it — wrote.
+    /// [`findings`] chunks its three follow-up `IN` lists at
+    /// [`FINDING_ID_CHUNK`], which this build shrinks to 4. Ten findings, each
+    /// with one candidate, one class and one path key of its own, cross that
+    /// boundary twice, and every one has to come back paired with the
+    /// candidate, class and path key it — and only it — wrote.
     #[test]
     fn findings_reassemble_correctly_across_a_chunk_boundary() {
         let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk");

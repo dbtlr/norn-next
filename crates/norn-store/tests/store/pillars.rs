@@ -1587,17 +1587,17 @@ fn a_pins_typed_value_clear_reads_only_the_rows_that_hold_one() {
 
 /// **A finding's detail is read by primary key, a chunk of ids at a time.**
 /// Every findings read — one path's, one class's, and the page that drains the
-/// table — collects each finding's candidate head and class memberships through
-/// these two statements, once per chunk of the findings it found. A chunk that
-/// reached its rows by reading the detail tables end to end would make every
-/// findings read cost every finding the store holds.
+/// table — collects each finding's candidate head, class memberships and path
+/// keys through these three statements, once per chunk of the findings it
+/// found. A chunk that reached its rows by reading the detail tables end to end
+/// would make every findings read cost every finding the store holds.
 ///
-/// Both tables are `WITHOUT ROWID` and keyed by `(finding, …)`, so the ids lead
-/// each primary key: one seek per id, and the rows come off each seek in the
-/// order the statement states, so nothing sorts. `finding_classes` carries a
-/// second index as well, on `class_key`, which is the direction a class read
-/// seeks; a chunk holds no class key, so the bar names the primary key and a
-/// plan that answered out of the class index fails it.
+/// All three tables are `WITHOUT ROWID` and keyed by `(finding, …)`, so the
+/// ids lead each primary key: one seek per id, and the rows come off each seek
+/// in the order the statement states, so nothing sorts. `finding_classes`
+/// carries a second index as well, on `class_key`, which is the direction a
+/// class read seeks; a chunk holds no class key, so the bar names the primary
+/// key and a plan that answered out of the class index fails it.
 ///
 /// The bar ranges over every chunk width a read can emit, from one id to
 /// [`norn_store::FINDING_ID_CHUNK`]: the statement text is spelled by the width,
@@ -2363,12 +2363,12 @@ const DRAINED_ROWS: usize = 400;
 /// rows, the measured cost per row is 20 for stored suffix keys, 23 for
 /// tombstones, 26 for the heal page in path order, 28 for indexed terms, 37 for
 /// the heal page in folded order, 43 for the death change feed, 49 for the
-/// document change feed, and 51 for the findings page — the widest, because a
-/// findings page issues two further chunked statements per page to collect each
-/// finding's candidates and its classes. The two feeds sit high in that range
-/// because a row-value floor opens its cursor by comparing a pair, and the
-/// document feed reads five columns off the index where the death feed reads
-/// three.
+/// document change feed, and 62 for the findings page — the widest, because a
+/// findings page issues three further chunked statements per page to collect
+/// each finding's candidates, its classes and its path keys. The two feeds sit
+/// high in that range because a row-value floor opens its cursor by comparing a
+/// pair, and the document feed reads five columns off the index where the death
+/// feed reads three.
 ///
 /// `per_row` is about three times that widest reading, and `floor` absorbs the
 /// empty page every advancing drain ends on. **The absorber is deliberately
