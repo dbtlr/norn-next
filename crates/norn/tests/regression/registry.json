@@ -462,13 +462,15 @@
         "status": "bound",
         "tests": [
           "crates/norn-host/tests/counter_gate.rs::a_bounded_write_costs_the_same_at_both_scales",
+          "crates/norn-host/tests/counter_gate.rs::a_hub_writes_link_health_work_follows_its_in_links_at_both_scales",
           "crates/norn-host/tests/counter_gate.rs::a_warm_request_over_an_attached_vault_finishes_at_zero",
           "crates/norn-host/tests/counter_gate.rs::every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document",
           "crates/norn-host/tests/counter_gate.rs::warm_requests_under_a_live_attachment_finish_at_zero",
           "crates/norn-host/tests/fd_budget.rs::attached_entry_has_a_bounded_vault_size_independent_fd_cost",
           "crates/norn-store/tests/store/get.rs::a_gets_work_follows_its_document_not_the_vault",
           "crates/norn-store/tests/store/links.rs::a_links_to_parts_work_follows_its_backlinks_not_the_vault",
-          "crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements"
+          "crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements",
+          "crates/norn-store/tests/store/redecision.rs::a_writes_work_follows_the_neighborhood_not_the_vault"
         ]
       }
     },
@@ -496,12 +498,16 @@
       "property": "Rule-derived findings are stored state: a warm validate reads findings and derives nothing, with a rules-evaluated counter of zero, and a single-document change rewrites finding rows for the affected set alone. Maintaining every finding input while throwing the findings away is the defect.",
       "sources": ["NRN-a61", "NRN-a59"],
       "binding": {
-        "status": "dormant",
-        "reason": "findings are stored state and maintained over the affected set: crates/norn-store/src/ddl/findings.rs holds the rows, and a changeset discards and re-records them by subject and by ambiguity class rather than re-deriving the vault. A validate reads them and derives nothing: crates/norn-store/src/validate/mod.rs answers the findings standing under the active fingerprint from the pillar and runs no rule. The rule engine has no subject — the vault schema crates/norn-store/src/facts.rs pins is bytes and a fingerprint rather than a rule set — so the warm-validate clause has no rules-evaluated counter to read at zero. The residue is the absent vault-rule vocabulary: no file is settled to declare a rule set, so there is no `file::Symbol` this case can pre-commit as the carrier's name.",
-        "grounds": [
-          { "present": "crates/norn-store/src/ddl/findings.rs" },
-          { "present": "crates/norn-store/src/validate/mod.rs" },
-          { "present": "crates/norn-store/src/facts.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/tests/churn.rs::a_hubs_stem_class_change_and_its_rename_converges_on_a_build_from_zero",
+          "crates/norn-host/tests/counter_gate.rs::a_warm_request_over_an_attached_vault_finishes_at_zero",
+          "crates/norn-store/tests/store/health.rs::judgment_agrees_with_the_links_column_health",
+          "crates/norn-store/tests/store/health.rs::the_link_health_judgment_seeks_every_row_it_reads",
+          "crates/norn-store/tests/store/redecision.rs::a_new_document_resolves_a_broken_link_in_an_untouched_document",
+          "crates/norn-store/tests/store/redecision.rs::a_tear_inside_the_redecision_leaves_the_prior_findings",
+          "crates/norn-store/tests/store/redecision.rs::a_writes_work_follows_the_neighborhood_not_the_vault",
+          "crates/norn-store/tests/store/redecision.rs::incremental_equals_rebuild_including_finding_order"
         ]
       }
     },
@@ -603,9 +609,10 @@
       "sources": ["NRN-126", "NRN-122", "NRN-439", "NRN-524", "NRN-529", "NRN-117", "NRN-351", "NRN-a61"],
       "binding": {
         "status": "dormant",
-        "reason": "the core of this property is carried: crates/norn-host/tests/churn.rs settles a live attachment through ordinary editing, atomic replacement, a case flip, validity crossings, an external tool's catch-up and an active heal, then compares what it converged on against a derivation from zero over the same final tree, field by field. A configuration now exists to edit — the optional per-vault config file crates/norn-config/src/vault.rs parses — and by design it is inert to lane-1 derived state: an explicit reload that changes only the config re-derives no lane-1 state (the engine drains its own lane-2 rows on that same leg), so a config edit is not a case this property can bind; no document-alias table exists to change (the host's alias groups are registered names over one root and key no derived state). The invalidation half is narrower than the property: crates/norn-store/src/facts.rs keys invalidation to the vault schema pin, the one key lane-1 state carries, so no derived table carries a key a config change would re-derive it by. It waits on a crates/norn-store/src/facts.rs::TableInvalidationKey type beside that pin, which is the name the per-table key takes when it lands.",
+        "reason": "the core of this property is carried, and link-health re-decision sharpens it: crates/norn-host/tests/churn.rs settles a live attachment through ordinary editing, atomic replacement, a case flip, validity crossings, an external tool's catch-up, an active heal, and a hub's stem-class change and rename (ADR 0027's own instance of this claim), then compares what it converged on against a derivation from zero over the same final tree, field by field. crates/norn-store/tests/store/redecision.rs carries the property for link-health findings alone, by name and finding order: a seeded script of writes, deaths, renames and schema pins is held equal to a from-zero rebuild after every step. A configuration now exists to edit — the optional per-vault config file crates/norn-config/src/vault.rs parses — and by design it is inert to lane-1 derived state: an explicit reload that changes only the config re-derives no lane-1 state (the engine drains its own lane-2 rows on that same leg), so a config edit is not a case this property can bind; no document-alias table exists to change (the host's alias groups are registered names over one root and key no derived state). The invalidation half is narrower than the property: crates/norn-store/src/facts.rs keys invalidation to the vault schema pin, the one key lane-1 state carries, so no derived table carries a key a config change would re-derive it by. It waits on a crates/norn-store/src/facts.rs::TableInvalidationKey type beside that pin, which is the name the per-table key takes when it lands.",
         "grounds": [
           { "present": "crates/norn-host/tests/churn.rs" },
+          { "present": "crates/norn-store/tests/store/redecision.rs" },
           { "present": "crates/norn-store/src/facts.rs" },
           { "present": "crates/norn-config/src/vault.rs" },
           { "symbol-absent": "crates/norn-store/src/facts.rs::TableInvalidationKey" }
@@ -652,12 +659,13 @@
       "sources": ["NRN-a60", "NRN-a63", "NRN-a61", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the readers exist and a cost term is assertable over them: crates/norn-store/src/request/mod.rs pages every enumeration behind a cursor, and crates/norn-testkit/src/work.rs holds a drain of n rows under a line in n, so a reader that re-reads the rows ahead of its own position fails. The links column reads a page's links in a fixed number of statements: crates/norn-store/src/read/naming.rs reads what every link a find's page or a get's links page carries names in one set-valued statement over the link index's keys, and names every candidate in one more, so a request's statements do not grow with the links or the rows it returns, which crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements holds. Nothing computes link impact for a moved document, because crates/norn-serve is not in the workspace. The nested scan this class was mined from is inside one frontmatter block, where crates/norn-text/src/frontmatter/fields.rs now resolves the parsed mapping by key, and what bars it is a wall-clock ratio in a soak lane — not an evidence kind this stratum binds on.",
+        "reason": "the readers exist and a cost term is assertable over them: crates/norn-store/src/request/mod.rs pages every enumeration behind a cursor, and crates/norn-testkit/src/work.rs holds a drain of n rows under a line in n, so a reader that re-reads the rows ahead of its own position fails. The links column reads a page's links in a fixed number of statements: crates/norn-store/src/read/naming.rs reads what every link a find's page or a get's links page carries names in one set-valued statement over the link index's keys, and names every candidate in one more, so a request's statements do not grow with the links or the rows it returns, which crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements holds. Link-impact for a moved document is carried now, for link health alone: crates/norn-store/tests/store/redecision.rs re-decides a rename through the old path's key and a hub's write through its stem's class alone, each as indexed seeks over the moved document's own neighborhood rather than a scan of every link, and the mass-delete case there bounds a key no link reaches to a small constant. What is still missing is a request surface to move the document through — crates/norn-serve is not in the workspace — so no client-facing link-impact verb exists to bind the clause whole. The nested scan this class was mined from is inside one frontmatter block, where crates/norn-text/src/frontmatter/fields.rs now resolves the parsed mapping by key, and what bars it is a wall-clock ratio in a soak lane — not an evidence kind this stratum binds on.",
         "grounds": [
           { "present": "crates/norn-store/src/request/mod.rs" },
           { "present": "crates/norn-testkit/src/work.rs" },
           { "present": "crates/norn-text/src/frontmatter/fields.rs" },
           { "present": "crates/norn-store/src/read/naming.rs" },
+          { "present": "crates/norn-store/tests/store/redecision.rs" },
           { "symbol-present": "crates/norn-store/tests/store/links.rs::a_pages_links_cost_a_fixed_number_of_statements" },
           { "absent": "crates/norn-serve" }
         ]

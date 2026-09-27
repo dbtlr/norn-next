@@ -89,7 +89,7 @@ const CASE_TOTAL: usize = 113;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "492faa14f5a0e8445e5c93b28198f6e0d584a85f6d610f1670ef0918dc4f36f8";
+const CONTRACT_DIGEST: &str = "bd48ab4f843d9fced17fbc14af5c297afa918244c65e2929a95f15bb5e6d2b8d";
 
 /// The cases carried by tests today, by name.
 ///
@@ -109,6 +109,7 @@ const BOUND_CASES: &[&str] = &[
     "cache-is-authoritative-for-content",
     "comparison-semantics-are-one-rule",
     "cost-is-independent-of-vault-size",
+    "derived-findings-are-materialized-and-maintained",
     "encoding-prefix-transparency",
     "existence-probes-and-per-request-allocation-are-bounded",
     "finding-candidates-are-capped-with-a-total",
@@ -167,7 +168,6 @@ const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "a-create-never-takes-a-name-somebody-else-holds",
     "a-measurement-step-asserts-a-nonzero-pass-count",
     "comment-claims-are-test-bound",
-    "derived-findings-are-materialized-and-maintained",
     "each-file-is-read-once-per-build",
     "harness-assertions-observe-stable-facts",
     "instrumentation-exists-and-is-consumed",
