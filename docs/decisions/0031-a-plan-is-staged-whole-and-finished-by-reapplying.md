@@ -25,7 +25,10 @@ one planner and the one applier invariant 4 names.
   **transition** per file they touch, the conditions the planning read and does not write,
   and the vault's root identity. A transition names a path, the state the file must hold
   before the write, and the state it holds after; each state is either absent or a content
-  hash. Operations on one file compose in order at planning time.
+  hash. Operations on one file compose in order at planning time and stand or fall
+  together. An operation over a set of documents expands at planning time into one
+  operation per document. A move's destination must be absent at planning, or vacated by
+  another operation of the same plan, which the move then requires.
 - **Everything a plan varies on is fixed at planning time.** Every template value — a
   `{{seq}}` identifier, a timestamp, a default — resolves into the resolved plan's
   operations and paths, so recomposing a target is a pure function of the before-states
@@ -91,9 +94,10 @@ one planner and the one applier invariant 4 names.
   drops every operation whose targets all hold their after-states, and re-resolves against
   what the vault now holds only an operation none of whose targets holds its after-state.
   An operation with a target at its after-state and another that is not, an operation
-  that no longer resolves (an edit whose anchor is gone), and an operation that requires
-  either, are listed as unresolved, never re-resolved or dropped; the caller disposes of
-  them. Hashes cannot tell a target edited after this plan landed on it from one edited
+  that no longer resolves (an edit whose anchor is gone, a move whose destination is no
+  longer absent), and an operation that requires an unresolved operation, directly or
+  through others, are listed as unresolved, never re-resolved or dropped; the caller
+  disposes of them. Hashes cannot tell a target edited after this plan landed on it from one edited
   before, and the host keeps no record of an earlier attempt, so the forecast marks every
   drifted target as possibly already carrying this plan's change. Applying the fresh plan
   is the caller's decision. Auto-rebase stays rejected.
