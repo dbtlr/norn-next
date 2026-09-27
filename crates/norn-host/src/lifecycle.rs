@@ -3706,7 +3706,7 @@ impl<O: EntryOps> DemandLease<O> {
     /// already has. The lease's own drop runs over nothing from here.
     fn give_back_under(mut self, state: &mut EntryState<O::Attachment>) {
         if self.held.take().is_some() {
-            give_back_demand(state, self.recovery_demand);
+            give_back_demand(state, self.recovery_demand, Instant::now());
         }
     }
 }
@@ -3729,7 +3729,12 @@ impl<O: EntryOps> Drop for DemandLease<O> {
     /// gate's own route reads through a poison too; nothing recovers a
     /// poisoned gate, so a give-back written through one is read by no later
     /// holder.
+    ///
+    /// The instant of the drop travels with the give-back, so the idle
+    /// interval restarts from when the lease ended rather than from whichever
+    /// hold runs the give-back.
     fn drop(&mut self) {
+        let dropped_at = Instant::now();
         let Some(shared) = self.held.take() else {
             return;
         };
@@ -3737,21 +3742,30 @@ impl<O: EntryOps> Drop for DemandLease<O> {
             return;
         };
         let recovery_demand = self.recovery_demand;
-        entry
-            .gate
-            .run_under_the_next_hold(move |state| give_back_demand(state, recovery_demand));
+        entry.gate.run_under_the_next_hold(move |state| {
+            give_back_demand(state, recovery_demand, dropped_at)
+        });
     }
 }
 
-/// Give back one demand lease [`record_demand`] recorded: withdraw the
-/// recovery it asked for, and restart the idle interval where it was the last.
-fn give_back_demand<A: SnapshotSource>(state: &mut EntryState<A>, recovery_demand: Option<u64>) {
+/// Give back one demand lease [`record_demand`] recorded, which ended at
+/// `ended_at`: withdraw the recovery it asked for, and restart the idle
+/// interval from `ended_at` where it was the last.
+///
+/// The interval never moves back: give-backs left for a later hold can run
+/// in another order than their leases ended in, and the idle interval runs
+/// from the latest end.
+fn give_back_demand<A: SnapshotSource>(
+    state: &mut EntryState<A>,
+    recovery_demand: Option<u64>,
+    ended_at: Instant,
+) {
     state.demand_leases = state.demand_leases.saturating_sub(1);
     if let Some(generation) = recovery_demand {
         state.withdraw_recovery_demand(generation);
     }
     if state.demand_leases == 0 {
-        state.last_demand = Instant::now();
+        state.last_demand = state.last_demand.max(ended_at);
         state.detach_due = false;
     }
 }
@@ -20229,6 +20243,33 @@ mod tests {
             0,
             "the next hold read the dropped lease still standing"
         );
+    }
+
+    /// **A lease dropped while its gate is held restarts the idle interval
+    /// from its drop.** The give-back runs at a later hold, and the reap at
+    /// the idle interval past the drop still takes the entry: the interval
+    /// runs from when the lease ended, not from when its give-back ran.
+    ///
+    /// The dispatcher never ticks here, so the only reap is the one this case
+    /// calls, and its own take of the gate is the hold the give-back runs at.
+    #[test]
+    fn a_lease_dropped_under_a_held_gate_restarts_the_idle_interval_from_its_drop() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+
+        let held = entry.gate.lock().expect("entry gate poisoned");
+        drop(lease);
+        let dropped_at = Instant::now();
+        // The hold outlasts the drop, so the give-back runs measurably later.
+        thread::sleep(Duration::from_millis(20));
+        drop(held);
+        host.reap_idle(dropped_at + host.shared.idle_after).unwrap();
+
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
     }
 
     /// **A read's first take of the entry gate ends at its bound.** Another
