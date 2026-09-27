@@ -443,6 +443,49 @@ fn a_read_after_a_recovery_compiles_against_the_schema_the_recovery_pinned() {
     assert_eq!(answered.answer.reading.trust, TrustState::Ready);
 }
 
+/// **Counts over a schema no recovery can read answer the cause.** The attach
+/// reads a schema this build cannot declare and publishes it as untrusted;
+/// counts that follow, spaced apart, are each refused as untrusted with that
+/// cause, rather than as not ready under a recovery each of them restarted.
+#[test]
+fn counts_over_a_schema_no_recovery_can_read_answer_the_cause() {
+    let (_sandbox, vault) = a_vault("host-reads-unreadable-schema-polled");
+    let schema = vault.path().join(".norn/schema.yaml");
+    std::fs::write(&schema, b"\tinvalid: yaml\n").expect("write an unreadable schema");
+    let host = vault.host();
+    drop(
+        host.demand(vault.name(), AttachMode::Durable)
+            .expect("request attachment"),
+    );
+    let reason = attach::wait_for_withdrawn_trust(&host, vault.name(), attach::READY_LIMIT);
+    assert!(
+        matches!(reason, UntrustedReason::SchemaUnreadable { .. }),
+        "the attach withheld trust for another reason: {reason:?}"
+    );
+
+    for count in 0..3 {
+        let refused = host
+            .count(&a_count(vault.name()))
+            .expect_err("a count over an unreadable schema answered");
+        assert_eq!(
+            refused.code(),
+            &ReasonCode::HostEntryUntrusted,
+            "count {count} was refused with another code than the cause: {refused:?}"
+        );
+        assert!(
+            matches!(
+                refused.detail(),
+                ErrorDetail::EntryUntrusted {
+                    reason: UntrustedReason::SchemaUnreadable { .. },
+                    ..
+                }
+            ),
+            "count {count} was refused without the cause: {refused:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
 /// Make every page of the `documents` table and its indexes unreadable, the
 /// way a corrupt file is: the write-ahead log is folded into the database
 /// first, so the file holds every page, and then each page's type byte is

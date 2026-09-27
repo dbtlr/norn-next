@@ -1764,7 +1764,7 @@ without consulting a read, and a read in flight stops none of them. Through such
 read keeps answering from the handle it holds until it completes, and nothing promises the
 database file outlives the teardown for it: that is the contract the read path states, and its
 price is the accepted one: a read holds no coverage, so no teardown waits on it. [ADR
-0029](decisions/0029-a-read-waits-for-the-facts-it-met.md) records the rationale
+0030](decisions/0030-a-read-does-not-restart-a-recovery-only-a-change-can-answer.md) records the rationale
 and the priced costs.
 
 **Hold acquisition is the read path's one adjudication, and the handle is its proof.** A
@@ -1786,11 +1786,15 @@ and counters, where a poll is answered with the state itself. An untrusted entry
 recovery it owes demanded by the read, and the read answers under what that work publishes —
 the warming of the recovery, refused as `host/entry-not-ready` — and under the untrusted state
 it found, refused as `host/entry-untrusted` with its reason, only where no work is scheduled.
+The one recovery a read does not demand is one only a change to the vault can answer — the
+entry's own declaration withholds trust — while the entry has taken in no fact since the
+attempt that failed; that read is refused as `host/entry-untrusted` with the cause, as the
+demand-lease paragraph below states.
 A park keeps its own code. Where the demand is serving, the refusal is reader-unavailable,
 which is an entry serving every surface but this one.
 
 **A read that meets a change waits for it, as [ADR
-0029](decisions/0029-a-read-waits-for-the-facts-it-met.md) rules.** Warming splits
+0030](decisions/0030-a-read-does-not-restart-a-recovery-only-a-change-can-answer.md) rules.** Warming splits
 by stance, read under the entry gate beside the published demand: an entry that entered
 warming from `Ready` with no withdrawal of trust in between — a polled batch, a reconcile
 turn, a schema reload — settles, and every other state refuses at once with its reason,
@@ -1846,7 +1850,17 @@ the idle deadline, it withdraws an idle detach that is scheduled and not yet in 
 it raises the recovery the entry owes, giving that demand back with the hold. Where the
 entry is free to run it, the read's demand also schedules the work the entry owes, read as a
 chain: the attach where the entry holds no coverage, and under that the rebuild it owes, the
-recovery beneath that, and the reconcile where it owes neither. The read then answers under
+recovery beneath that, and the reconcile where it owes neither. **A read's demand neither
+raises nor schedules a recovery only a change to the vault can answer while nothing has
+changed**, as [ADR 0030](decisions/0030-a-read-does-not-restart-a-recovery-only-a-change-can-answer.md)
+rules. That recovery is the one owed where the entry's own declaration withholds trust — a
+schema this build cannot read — and reading the same bytes again reaches the same verdict.
+The attach, recovery or rebuild that publishes that cause records the entry's position in the
+stream of facts it takes in, unless it took in a fact while it ran; while the position stands
+there, a read is refused as `host/entry-untrusted` with the cause and restarts nothing. No
+reconcile runs over an entry owing a recovery, so a watcher fact is the one thing that moves
+the position, and the next read's demand then asks for the recovery again. A client's demand
+reads none of this, and every other recovery a read meets is demanded as before. The read then answers under
 the state that work publishes, or under the state it found where the work publishes none —
 an entry holding no coverage answers a read with the warming state of the attach the read
 asked for, so the unattached state is one no read renders — and a workload of reads alone
@@ -2142,8 +2156,8 @@ the maintainer lock, watcher coverage and the store, pins nothing, derives nothi
 the entry publishes `Untrusted` naming the cause — so the vault is observable and the
 status seam can explain it, where a refused attach would hide it and a derivation under an
 empty model would answer confidently wrong questions about every document. The entry owes
-a recovery from there; a demand after the schema is corrected re-reads it and returns the
-vault to service.
+a recovery from there; a client's demand after the schema is corrected, or a read's once the
+watcher has reported the correction, re-reads it and returns the vault to service.
 
 The host dispatches the vault identity and each registered engine's optional config
 section. A candidate's config is dispatched once, by the leg that makes the candidate active
@@ -2161,7 +2175,11 @@ and completes the current full-heal path before the reload returns. A later Lane
 makes the vault `Untrusted`. The reload does not restore an earlier candidate.
 
 Watcher facts for both control files are discarded before they reach the lifecycle. They do
-not read, validate, activate, or record control-file drift. An internal query computes drift
+not read, validate, activate, or record control-file drift. The one exception is an attachment
+whose declaration withholds trust: it has no active declaration to replace, and a changed
+control file is the change that can heal it, so there a control-file fact reaches the
+lifecycle as a schema fact. A reconcile holds that fact inert; what it moves is the entry's
+position in its fact stream, which is what makes the recovery owed to a read's demand again. An internal query computes drift
 on demand by fingerprinting the authored files without parsing them. It reports current,
 reload pending, or unreadable relative to the active fingerprints.
 

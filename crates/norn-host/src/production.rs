@@ -869,19 +869,24 @@ impl ProductionEntryOps {
             .map_err(store_effect)
     }
 
+    /// Take the facts about the two control files out of `batch`, and
+    /// answer whether it carried any.
     fn discard_control_file_facts(
         registration: &Registration,
         covered_root: &Path,
         batch: &mut norn_fs::Batch,
-    ) {
+    ) -> bool {
         let schema = Self::schema_path_at(registration, covered_root);
         let schema = schema.strip_prefix(covered_root).ok();
+        let carried_schema_source = batch.schema_dirty();
+        let roots = batch.vault_roots().len();
         batch.discard_schema_facts();
         batch.retain_vault_roots(|root| {
             let path = root.as_path();
             path != Path::new(norn_config::IN_VAULT_CONFIG_PATH)
                 && schema.is_none_or(|schema| path != schema)
         });
+        carried_schema_source || batch.vault_roots().len() != roots
     }
 
     fn heal(
@@ -1455,12 +1460,22 @@ impl EntryOps for ProductionEntryOps {
         } else {
             Some(std::mem::take(&mut attachment.heal_observed))
         };
+        // Control-file facts are discarded, because an explicit reload is
+        // what replaces an active declaration. An attachment whose declaration
+        // withholds trust has none to replace, and a changed control file is
+        // the change that can heal it: there such a fact reaches the lifecycle
+        // as the schema fact a reconcile holds inert, which moves the entry's
+        // position so a read asks for the recovery again.
+        let withholds_trust = attachment.controls.undeclarable().is_some();
         let drained = drained.and_then(|mut batch| {
-            Self::discard_control_file_facts(
+            let controls_changed = Self::discard_control_file_facts(
                 &attachment.registration,
                 &attachment.covered_root,
                 &mut batch,
             );
+            if controls_changed && withholds_trust {
+                batch.merge(norn_fs::Batch::schema_change());
+            }
             (!batch.is_empty()).then_some(batch)
         });
         // A rescan among the facts is the backend saying it lost the path set,

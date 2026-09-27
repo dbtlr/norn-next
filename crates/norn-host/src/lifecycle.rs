@@ -931,6 +931,7 @@ impl<A: SnapshotSource> Entry<A> {
                 damage_met_under_a_claim: None,
                 recovery_demands: 0,
                 recovery_generation: 0,
+                recovery_awaits_a_change_from: None,
                 identity_refused: None,
                 claim: Claim::starting_at(epoch),
                 maintainer_contended: None,
@@ -1097,6 +1098,22 @@ struct EntryState<A: SnapshotSource> {
     /// their generation, so a lease that asked for an earlier recovery neither
     /// satisfies this one nor discounts a lease that did ask for it.
     recovery_generation: u64,
+    /// Where in the stream of facts the entry takes in the last attempt stood
+    /// that failed for a cause only a change to the vault can answer: the
+    /// entry's own declaration withholding trust.
+    ///
+    /// **While the entry's position still stands here, a read's demand
+    /// neither raises nor schedules the recovery the entry owes**, because
+    /// reading the same bytes again reaches the same verdict; the read is
+    /// refused with the cause. A fact taken in moves the position past it,
+    /// and no reconcile runs over an entry owing a recovery, so a moved
+    /// position is the one sign that the cause may have changed. A client's
+    /// demand reads nothing here.
+    ///
+    /// Set only by [`EntryState::withhold_trust_until_the_vault_changes`],
+    /// and only where the attempt took in no fact while it ran. Every other
+    /// requirement of a recovery, and the clearing of one, sets it to `None`.
+    recovery_awaits_a_change_from: Option<u64>,
     /// The registry's account of a root it cannot read, from the
     /// classification that refused it. While it is set the entry is parked, and
     /// the detail is what the park answers with. A demand an acquisition can
@@ -1350,6 +1367,7 @@ impl<A: SnapshotSource> EntryState<A> {
     /// lease that watched it fail is not asking for the same run again.
     fn require_recovery(&mut self) {
         self.recovery_required = true;
+        self.recovery_awaits_a_change_from = None;
         self.retire_recovery_demands();
     }
 
@@ -1362,6 +1380,7 @@ impl<A: SnapshotSource> EntryState<A> {
     /// again.
     fn require_recovery_keeping_demands(&mut self) {
         self.recovery_required = true;
+        self.recovery_awaits_a_change_from = None;
     }
 
     /// Owe the database-side heal rung, and no recovery: a rebuild is what
@@ -1446,7 +1465,37 @@ impl<A: SnapshotSource> EntryState<A> {
     /// Owe no recovery. The demands that were waiting on one retire with it.
     fn clear_recovery(&mut self) {
         self.recovery_required = false;
+        self.recovery_awaits_a_change_from = None;
         self.retire_recovery_demands();
+    }
+
+    /// Owe the recovery that reads the vault's declaration again, over
+    /// coverage whose declaration withholds trust for `reason`, and withdraw
+    /// trust for it: the full rescan that recovery's heal reads is merged
+    /// beside it.
+    ///
+    /// **Only a change to the vault can answer this recovery**, so where the
+    /// attempt that ends here took in no fact while it ran — `took_in_a_fact`
+    /// is false — the position the entry then stands at is recorded, and a
+    /// read's demand leaves the recovery alone until a fact moves the entry
+    /// past it. An attempt that took in a fact may have read a declaration
+    /// older than that fact, so it records nothing, and the next read's
+    /// demand asks for the recovery again.
+    fn withhold_trust_until_the_vault_changes(
+        &mut self,
+        reason: UntrustedReason,
+        took_in_a_fact: bool,
+    ) {
+        self.require_recovery();
+        self.pending.merge(Batch::rescan(RescanScope::Vault));
+        self.recovery_awaits_a_change_from = (!took_in_a_fact).then_some(self.pending.taken_in);
+        self.withdraw_trust(reason);
+    }
+
+    /// Whether the recovery the entry owes is one only a change to the vault
+    /// can answer, with no fact taken in since the attempt that failed.
+    fn recovery_awaits_a_change(&self) -> bool {
+        self.recovery_required && self.recovery_awaits_a_change_from == Some(self.pending.taken_in)
     }
 
     /// Owe neither rung. Called where the coverage the requirements were raised
@@ -2241,6 +2290,11 @@ fn unheld_lease<O: EntryOps>(name: &VaultName, outcome: Demand) -> DemandLease<O
 /// which emptied the reader slot and published the releasing phase, so what a
 /// caller meets is an entry giving its resources back.
 ///
+/// `asks_for_recovery` says whether the demand raises the recovery the entry
+/// owes. Every demand does but a read's over a recovery only a change to the
+/// vault can answer, with nothing changed since the attempt that failed: see
+/// [`EntryState::recovery_awaits_a_change`].
+///
 /// **What answers the lease this call records is the lease still standing when
 /// the release ends.** A caller holding one — a client's demand — is what
 /// [`finish_release`] re-arms an attach for. A read refused by that release
@@ -2248,9 +2302,16 @@ fn unheld_lease<O: EntryOps>(name: &VaultName, outcome: Demand) -> DemandLease<O
 /// is nothing standing for it to answer and no attach is re-armed: the read
 /// asked once, was told the entry is giving its resources back, and the read
 /// after it is what asks again.
-fn record_demand<A: SnapshotSource>(state: &mut EntryState<A>) -> Option<u64> {
+fn record_demand<A: SnapshotSource>(
+    state: &mut EntryState<A>,
+    asks_for_recovery: bool,
+) -> Option<u64> {
     state.demand_leases += 1;
-    let recovery_demand = state.demand_recovery();
+    let recovery_demand = if asks_for_recovery {
+        state.demand_recovery()
+    } else {
+        None
+    };
     state.detach_due = false;
     if state.detach_scheduled && !state.detach_in_flight {
         state.claim.invalidate();
@@ -4613,7 +4674,7 @@ impl<O: EntryOps> Host<O> {
         if let Some(answer) = state.withdrawal_answer() {
             return Ok(unheld_lease(name, answer));
         }
-        let recovery_demand = record_demand(&mut state);
+        let recovery_demand = record_demand(&mut state, true);
         // A release in flight is the entry's resources on their way back, and
         // the flag says so whatever label stands beside it: the lease is
         // recorded here and honored by the release, so nothing is scheduled
@@ -4824,7 +4885,12 @@ impl<O: EntryOps> Host<O> {
         if let Some(answer) = state.withdrawal_answer() {
             return Err(ReadRefusal::NotServing(answer));
         }
-        let recovery_demand = record_demand(&mut state);
+        // A recovery only a change to the vault can answer, with nothing
+        // changed since the attempt that failed, is one a read neither raises
+        // nor schedules: reading the same bytes again reaches the same
+        // verdict, so the read is refused with the cause instead.
+        let awaits_a_change = state.recovery_awaits_a_change();
+        let recovery_demand = record_demand(&mut state, !awaits_a_change);
         // The registry's parks are not withdrawn here. Withdrawing one is
         // asking for the acquisition that adjudicates it, and a read asks for
         // an answer from derived state rather than for a root to be read
@@ -4852,7 +4918,8 @@ impl<O: EntryOps> Host<O> {
             TrustState::Unattached | TrustState::Untrusted { .. }
         ) && !state.claim.is_held()
             && !state.detach_in_flight
-            && state.parked().is_none();
+            && state.parked().is_none()
+            && !awaits_a_change;
         if scheduled {
             schedule_demand(&mut state, name);
         }
@@ -5951,6 +6018,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             state.claim.release();
             match result {
                 Ok((attachment, observed, handoff_saturated)) => {
+                    let took_in_a_fact = !observed.is_empty() || handoff_saturated;
                     state.pending.merge(observed);
                     record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
                     state.control_root = shared.ops.control_root(&attachment);
@@ -5971,9 +6039,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // The entry owes the recovery that reads the vault's
                         // declaration again, and the facts this attach observed
                         // wait in `pending` for the heal that recovery runs.
-                        state.require_recovery();
-                        state.pending.merge(Batch::rescan(RescanScope::Vault));
-                        state.withdraw_trust(reason);
+                        state.withhold_trust_until_the_vault_changes(reason, took_in_a_fact);
                     } else if state.pending.is_empty() && !handoff_saturated {
                         state.trust = TrustState::Ready;
                     } else {
@@ -6159,6 +6225,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             let mut reclassify = false;
             match result {
                 Ok(()) => {
+                    let took_in_a_fact = !observed.is_empty() || handoff_saturated;
                     state.pending.merge(observed);
                     record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
                     state.last_reload_error = None;
@@ -6172,11 +6239,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     if let Some(reason) = withheld {
                         // The recovery re-read a declaration this build still
                         // cannot act on, so it derived nothing. The entry owes
-                        // the same recovery again, which the next demand asks
-                        // for once the schema is corrected.
-                        state.require_recovery();
-                        state.pending.merge(Batch::rescan(RescanScope::Vault));
-                        state.withdraw_trust(reason);
+                        // the same recovery again, which a client's demand, or
+                        // a read's once a change arrives, asks for.
+                        state.withhold_trust_until_the_vault_changes(reason, took_in_a_fact);
                         next = schedule_due_detach(&mut state, &name);
                     } else if state.detach_due {
                         // A teardown the entry is due can be withdrawn by a
@@ -6331,6 +6396,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             match rebuilt {
                 Ok(attachment) => {
                     state.claim.release();
+                    let took_in_a_fact = !observed.is_empty() || handoff_saturated;
                     state.pending.merge(observed);
                     record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
                     let withheld = shared.ops.withheld_trust(&attachment);
@@ -6351,9 +6417,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // act on, and publishes what an attach or a recovery
                         // publishes over one: the reason, and the recovery
                         // that reads the declaration again owed beside it.
-                        state.require_recovery();
-                        state.pending.merge(Batch::rescan(RescanScope::Vault));
-                        state.withdraw_trust(reason);
+                        state.withhold_trust_until_the_vault_changes(reason, took_in_a_fact);
                         schedule_due_detach(&mut state, &name)
                     } else {
                         // A rebuild's drain can merge facts behind a pending
@@ -19249,6 +19313,138 @@ mod tests {
             host.read_evidence().widest_gate_rounds_after_the_first,
             1,
             "an acquisition took other than one round of the gate after its first"
+        );
+    }
+
+    /// The untrusted state a fake that withholds trust leaves an entry at.
+    fn withheld_state() -> TrustState {
+        TrustState::untrusted(UntrustedReason::schema_unreadable(
+            "this fake withholds trust",
+        ))
+    }
+
+    /// Wait for `name` to publish the state a fake that withholds trust
+    /// leaves it at.
+    fn wait_for_withheld_trust(host: &Host<Arc<FakeOps>>, name: &VaultName) {
+        wait_for_state(host, name, withheld_state());
+    }
+
+    /// The refusal a read over an entry whose trust is withheld, with no
+    /// recovery restarted, is answered with.
+    fn refused_for_withheld_trust() -> ReadRefusal {
+        ReadRefusal::NotServing(Demand::State(withheld_state()))
+    }
+
+    /// **Repeated reads over a declaration no recovery can read restart no
+    /// recovery, and each is refused with the cause.** The attach publishes
+    /// the withheld reason and nothing the entry takes in changes after it;
+    /// every read, with the dispatcher polling between them, is refused as
+    /// untrusted for that reason, and no recovery runs.
+    #[test]
+    fn repeated_reads_over_a_declaration_no_recovery_can_read_answer_the_cause() {
+        let ops = Arc::new(FakeOps::default());
+        ops.withholds_trust.store(true, Ordering::SeqCst);
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_withheld_trust(&host, &name);
+
+        for read in 0..5 {
+            assert_eq!(
+                host.begin_read(&name)
+                    .expect_err("a read over withheld trust was served"),
+                refused_for_withheld_trust(),
+                "read {read} was refused with another demand than the cause"
+            );
+            thread::sleep(Duration::from_millis(40));
+        }
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            0,
+            "a read restarted a recovery nothing had changed for"
+        );
+        assert_eq!(host.state(&name), answered(withheld_state()));
+    }
+
+    /// **A fact taken in after the failed attempt makes the recovery owed to
+    /// the next read's demand.** The declaration is corrected and the watcher
+    /// reports the change; the read that follows schedules the recovery, which
+    /// reads the corrected declaration and returns the vault to service.
+    #[test]
+    fn a_change_after_a_declaration_no_recovery_could_read_makes_the_next_read_recover() {
+        let ops = Arc::new(FakeOps::default());
+        ops.withholds_trust.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_withheld_trust(&host, &name);
+        assert_eq!(
+            host.begin_read(&name)
+                .expect_err("a read over withheld trust was served"),
+            refused_for_withheld_trust()
+        );
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+
+        ops.withholds_trust.store(false, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_fact_poll_batches);
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a read over withheld trust was served before any recovery");
+        assert_ne!(
+            refusal,
+            refused_for_withheld_trust(),
+            "the read after a change restarted no recovery"
+        );
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            host.begin_read(&name)
+                .expect("a recovered entry answers a read")
+                .reading()
+                .published(),
+            &Demand::State(TrustState::Ready)
+        );
+    }
+
+    /// **An attempt that took in a fact while it ran records nothing.** The
+    /// attach's own drain reports a fact the declaration it read may be older
+    /// than, so the first read's demand asks for the recovery again; that
+    /// recovery takes in nothing, and the read after it is refused with the
+    /// cause and restarts none.
+    #[test]
+    fn a_failed_attempt_that_took_in_a_fact_leaves_the_recovery_owed_to_a_read() {
+        let ops = Arc::new(FakeOps::default());
+        ops.withholds_trust.store(true, Ordering::SeqCst);
+        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_withheld_trust(&host, &name);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+
+        assert_ne!(
+            host.begin_read(&name)
+                .expect_err("a read over withheld trust was served"),
+            refused_for_withheld_trust(),
+            "a read after an attempt that took in a fact restarted no recovery"
+        );
+        wait_until(
+            "the recovery to run and publish the withheld reason again",
+            lifecycle_wait_budget(),
+            || match (ops.recovers.load(Ordering::SeqCst), host.state(&name)) {
+                (1, state) if state == answered(withheld_state()) => Observed::Met(()),
+                (recovers, state) => {
+                    Observed::pending(format!("{recovers} recoveries, the entry is {state:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            host.begin_read(&name)
+                .expect_err("a read over withheld trust was served"),
+            refused_for_withheld_trust()
+        );
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            1,
+            "a read restarted a recovery nothing had changed for"
         );
     }
 
