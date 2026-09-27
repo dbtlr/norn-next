@@ -670,6 +670,16 @@ fn assert_read_from_its_snapshot(reading: &norn_wire::AnswerReading, vault: &att
     );
 }
 
+/// The last write generation the vault's store has committed.
+fn committed_generation(vault: &attach::Vault) -> u64 {
+    let generation = vault
+        .store()
+        .begin_request()
+        .write_generation()
+        .expect("the store's generation");
+    u64::try_from(generation).expect("a generation at or above zero")
+}
+
 fn address(name: &VaultName) -> VaultAddress {
     VaultAddress::name(name.clone())
 }
@@ -1053,6 +1063,7 @@ fn a_read_issued_after_an_edit_answers_it_and_none_is_refused_meanwhile() {
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
     let before = host.read_evidence();
+    let committed_before = committed_generation(&vault);
 
     let folder = vault.path().join("zz-burst");
     std::fs::create_dir_all(&folder).expect("create the burst's folder");
@@ -1107,6 +1118,16 @@ fn a_read_issued_after_an_edit_answers_it_and_none_is_refused_meanwhile() {
     assert_eq!(
         document.path.as_str(),
         format!("zz-burst/zz-burst-{:03}.md", BURST - 1)
+    );
+    // The answer names the store's committed write generation at the instant
+    // its snapshot was established: past the one before the burst, since the
+    // snapshot holds the burst's last document, and no further than the store
+    // has committed since.
+    let generation = answered.answer.reading.generation;
+    assert!(
+        committed_before < generation && generation <= committed_generation(&vault),
+        "the answer names generation {generation}, which is not one the burst committed \
+         (the store stood at {committed_before} before it)"
     );
     // Reads issued back to back cannot all miss the burst's reconcile, so at
     // least one of them met the entry taking it in and waited.

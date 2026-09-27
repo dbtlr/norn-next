@@ -272,12 +272,19 @@ fn a_second_read_waits_for_the_one_connection_and_takes_it_when_it_comes_back() 
     );
 }
 
+/// How far past its deadline a wait for the connection may be seen to end.
+const DEADLINE_SLACK: Duration = Duration::from_millis(250);
+
 /// **A wait for the connection ends at its deadline.** While another read
 /// holds the connection, a wait answers nothing once its deadline passes, and
 /// it leaves the connection where the holding read gives it back; a deadline
 /// already past answers at once. The control is the same wait after the hand
 /// back, which takes the connection even past its deadline, because nothing
 /// is left to wait for.
+///
+/// The wait ends inside [`DEADLINE_SLACK`] of its deadline: room for a loaded
+/// host to schedule the waking thread, and well short of a wait that runs a
+/// second past it.
 #[test]
 fn a_wait_for_the_connection_ends_at_its_deadline() {
     let scratch = Scratch::new("reader-deadline");
@@ -286,22 +293,21 @@ fn a_wait_for_the_connection_ends_at_its_deadline() {
     let reader = Arc::new(store.open_reader().reader.expect("a reader"));
 
     let held = a_snapshot(&reader);
-    let bound = Duration::from_millis(50);
-    let started = Instant::now();
+    let deadline = Instant::now() + Duration::from_millis(50);
     assert!(
-        reader
-            .wait_for_the_connection_until(started + bound)
-            .is_none(),
+        reader.wait_for_the_connection_until(deadline).is_none(),
         "a wait took a connection another read holds"
     );
-    let waited = started.elapsed();
+    let ended = Instant::now();
     assert!(
-        waited >= bound,
-        "the wait ended {waited:?} before its deadline"
+        ended >= deadline,
+        "the wait ended {:?} before its deadline",
+        deadline - ended
     );
     assert!(
-        waited < Duration::from_secs(30),
-        "the wait ran {waited:?} past its deadline"
+        ended < deadline + DEADLINE_SLACK,
+        "the wait ran {:?} past its deadline",
+        ended - deadline
     );
 
     let started = Instant::now();
@@ -310,8 +316,9 @@ fn a_wait_for_the_connection_ends_at_its_deadline() {
         "a wait past its deadline took a connection another read holds"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(30),
-        "a wait past its deadline waited"
+        started.elapsed() < DEADLINE_SLACK,
+        "a wait past its deadline waited {:?}",
+        started.elapsed()
     );
 
     drop(held);
