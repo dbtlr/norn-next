@@ -29,7 +29,8 @@
 //!
 //! **The digest is the same on every host.** The corpus is written from this
 //! file rather than read off a checkout, so no line-ending or attribute
-//! conversion reaches it; no two of its names differ only by case, so a root
+//! conversion reaches it; no two of its names differ only by case, and every
+//! link that raises a link-health finding is addressed in lower case, so a root
 //! that folds case derives the same rows as one that does not; every name is
 //! valid UTF-8 in precomposed form, which every volume a lane runs on keeps as
 //! written; and the rows are vault-relative and sorted before they are hashed.
@@ -62,7 +63,7 @@ use norn_wire::{FindingKind, LinkAddressKind};
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(7),
-    "e62aa11d1a45edb9290dc7a41e719f8736a416e01c44be496de19d6b7a0ec3ef",
+    "0762d2b6487ed13020916d8a1d6b79b3a38642360a434e6968b40c67da53746d",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -191,8 +192,9 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         // two twins, and naming a document that holds neither the heading
         // nor the block its anchor names.
         ("health/Links.md", LINK_HEALTH.as_bytes().to_vec()),
-        ("twins/one/Twin.md", b"# One twin\n".to_vec()),
-        ("twins/two/Twin.md", b"# The other twin\n".to_vec()),
+        ("twins/one/twin.md", b"# One twin\n".to_vec()),
+        ("twins/two/twin.md", b"# The other twin\n".to_vec()),
+        ("health/anchored.md", b"# Anchored\n\nA held paragraph. ^held\n".to_vec()),
     ]
 }
 
@@ -283,7 +285,7 @@ Tags in another case: #Project, #UNDECLARED-BODY and #Über.
 
 See [[Notes]] and [[notes/Deep Note|shown title]] and [[Glossary#Repeated]] and [[Notes#^para-block]].
 Embed ![[picture.png]] and ![[Notes#Setext|embedded]].
-Markdown [shown](notes/Deep%20Note.md) and [anchor](Glossary.md#use-norn-bold \"a title\") and [web](https://example.com/page) and ![image](assets/pic.png) and [block](Notes.md#^para-block) and [vault](vault://Notes).
+Markdown [shown](notes/Deep%20Note.md) and [anchor](Glossary.md#use-norn-bold \"a title\") and [web](https://example.com/page) and ![image](assets/pic.png) and [block](Notes.md#^para-block) and [vault](vault://notes).
 A wikilink with a protocol: [[https://example.com/wiki|external]].
 A Markdown link climbing out of the vault: [outside](../outside.md), and one to an attachment: [the picture](assets/pic.png).
 A dotted wikilink [[v1.2]], a same-document anchor [[#Repeated]], a wikilink no suffix address reads [[../relative]] and vault wikilinks [[vault://notes/Deep Note.md]] and [[vault://v1.2]].
@@ -299,11 +301,16 @@ A paragraph closing on a block id. ^glossary-block
 ";
 
 /// A link the store judges broken, one it judges ambiguous, and two whose
-/// anchors name a heading and a block `Notes.md` does not hold.
+/// anchors name a heading and a block `health/anchored.md` does not hold.
+///
+/// A link-health finding is keyed by the link's address as the root compares
+/// it, so an address with an upper-case letter keys it one way on a root that
+/// folds case and another on one that does not. Every address here, and every
+/// document it names, is written in lower case so the rows are the same on both.
 const LINK_HEALTH: &str = "# Link health
 
-A broken [[Nowhere At All]], an ambiguous [[Twin]], a missing heading [[Notes#No Such Heading]] \
-and a missing block [[Notes#^no-such-block]].
+A broken [[nowhere at all]], an ambiguous [[twin]], a missing heading [[anchored#No Such Heading]] \
+and a missing block [[anchored#^no-such-block]].
 ";
 
 /// The target of the corpus's block references, and a document with no
@@ -537,8 +544,8 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         (
             glossary,
             Some("vault"),
-            "Notes",
-            &["Notes"],
+            "notes",
+            &["notes"],
             "a vault Markdown link is keyed by the one path from the vault root it spells, \
              never reduced",
         ),
@@ -907,7 +914,7 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         .collect();
     assert_eq!(
         missing,
-        BTreeSet::from(["Notes#No Such Heading", "Notes#^no-such-block"]),
+        BTreeSet::from(["anchored#No Such Heading", "anchored#^no-such-block"]),
         "a missing heading and a missing block are not both exercised"
     );
     assert!(
