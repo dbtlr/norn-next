@@ -1545,7 +1545,7 @@ fn a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for() {
 /// equality seeks into that one document.** The predicate the link-health
 /// judgment embeds reads the link by `links_document_ordinal`, the target's
 /// headings by `headings_document_reading` for the anchor's text and marked
-/// readings and by `headings_document_slug` for its slug reading, and the
+/// readings and by `headings_document_slug` for the anchor itself, and the
 /// target's blocks by `blocks_document_block_id`: each an equality on the
 /// document and the reading, so the predicate costs the matching rows of one
 /// document whatever the vault holds, and sorts nothing.

@@ -142,24 +142,34 @@ pub struct LinkFact {
     /// default extension.
     pub target: String,
     pub title: Option<String>,
-    /// A heading anchor after `#`, as written. Mutually exclusive with
-    /// `block_ref`.
-    pub anchor: Option<String>,
-    /// The readings `anchor` is matched against a heading by, which the host
-    /// takes from the text layer's section resolver: this crate reads no text.
-    /// `None` where the link carries no heading anchor, or an empty one, which
-    /// reads as no anchor.
-    pub anchor_readings: Option<AnchorReadings>,
-    /// A block reference after `#^`, as written. An empty one reads as no
-    /// anchor.
-    pub block_ref: Option<String>,
+    /// The place inside the target the link names, and `None` where it names
+    /// none: a link written with no fragment, or with an empty one — `note#`,
+    /// `note#^` — which names no place.
+    pub anchor: Option<LinkAnchor>,
     pub span: Span,
 }
 
-/// The three readings a heading anchor is matched by, first match winning: its
-/// text and the heading text past its `#` markers, each against a heading's
-/// [`HeadingFact::reading`], and its slug reading against a heading's slug,
-/// exactly.
+/// The place inside its target a link names.
+///
+/// Neither text is empty: an empty anchor names no place, so it is no
+/// anchor ([`LinkFact::anchor`]), and a write refuses an empty one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkAnchor {
+    /// A heading anchor after `#`, as the text layer records it, beside the
+    /// readings it is matched by, which the host takes from the text layer's
+    /// section resolver: this crate reads no text.
+    Heading {
+        written: String,
+        readings: AnchorReadings,
+    },
+    /// A block reference after `#^`, as the text layer records it.
+    Block { id: String },
+}
+
+/// The readings a heading anchor is matched by beside the anchor itself, first
+/// match winning: its text and the heading text past its `#` markers, each
+/// against a heading's [`HeadingFact::reading`], and then the anchor as
+/// written against a heading's slug, exactly.
 ///
 /// Whether any heading of a document matches an anchor under the first
 /// reading that matches one is whether any heading matches it under one of
@@ -167,13 +177,11 @@ pub struct LinkFact {
 /// over these and the stored headings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnchorReadings {
-    /// The decoded anchor as a heading reading.
+    /// The anchor as a heading reading.
     pub text: String,
-    /// The heading text past the decoded anchor's `#` markers, as a heading
-    /// reading, where it has such markers.
+    /// The heading text past the anchor's `#` markers, as a heading reading,
+    /// where it has such markers.
     pub marked: Option<String>,
-    /// The decoded anchor, compared exactly with a heading's slug.
-    pub slug: String,
 }
 
 /// How a link's target reaches documents, as far as judging it goes: the one
@@ -235,7 +243,7 @@ pub struct HeadingFact {
     /// ([`AnchorReadings`]) match this.
     pub reading: String,
     /// The anchor form, document-order dedupe suffix included. A heading
-    /// anchor's slug reading matches this.
+    /// anchor as written matches this.
     pub slug: String,
     pub span: Span,
     /// Where the heading construct ends and the section body begins.

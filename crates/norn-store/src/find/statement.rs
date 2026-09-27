@@ -245,7 +245,7 @@ impl Nested {
             Nested::Links => {
                 "n.family, n.embed, n.protocol, n.target, n.title, n.anchor, n.block_ref, \
                  n.span_line, n.span_column, n.span_offset, n.anchor_text, n.anchor_marked, \
-                 n.anchor_slug, n.id"
+                 n.id"
             }
         }
     }
@@ -263,7 +263,7 @@ impl Nested {
 }
 
 /// Where a link's row id stands among [`Nested::columns`] of the links.
-pub(crate) const LINK_ID_COLUMN: usize = 13;
+pub(crate) const LINK_ID_COLUMN: usize = 12;
 
 /// Which way a page runs.
 ///

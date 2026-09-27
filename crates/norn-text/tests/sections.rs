@@ -896,17 +896,16 @@ fn a_headings_reading_folds_ascii_case_and_space_alone() {
     assert_eq!(heading_reading(""), "");
 }
 
-/// **An anchor is read three ways**: its text as a heading reading, the heading
-/// text past its `#` markers, and its slug reading, which is the anchor exactly.
+/// **An anchor's readings are its text as a heading reading and the heading
+/// text past its `#` markers**; its slug reading is the anchor itself.
 #[test]
-fn an_anchor_is_read_as_text_past_its_markers_and_as_a_slug() {
+fn an_anchor_is_read_as_its_text_and_past_its_markers() {
     let readings = |anchor: &str| anchor_readings(anchor).expect("an anchor");
     assert_eq!(
         readings("Design  NOTES"),
         AnchorReadings {
             text: "design notes".into(),
             marked: None,
-            slug: "Design  NOTES".into(),
         }
     );
     assert_eq!(
@@ -914,7 +913,6 @@ fn an_anchor_is_read_as_text_past_its_markers_and_as_a_slug() {
         AnchorReadings {
             text: "## state ##".into(),
             marked: Some("state".into()),
-            slug: "## State ##".into(),
         },
         "an ATX anchor is marked by its opening"
     );
@@ -923,7 +921,6 @@ fn an_anchor_is_read_as_text_past_its_markers_and_as_a_slug() {
         AnchorReadings {
             text: "top#sub part".into(),
             marked: Some("sub part".into()),
-            slug: "Top#Sub Part".into(),
         },
         "a heading chain is marked by its last heading"
     );

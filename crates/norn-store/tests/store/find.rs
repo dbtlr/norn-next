@@ -131,8 +131,6 @@ pub(crate) fn seed(store: &mut Store) {
         target: "glossary".to_string(),
         title: None,
         anchor: None,
-        anchor_readings: None,
-        block_ref: None,
         span: Span {
             line: 1,
             column: 1,
@@ -1144,8 +1142,6 @@ fn judge_hydration(mut seeded: Seeded) {
             target: format!("example.com/{index}"),
             title: Some(String::new()),
             anchor: None,
-            anchor_readings: None,
-            block_ref: None,
             span: Span {
                 line: 1,
                 column: 1,

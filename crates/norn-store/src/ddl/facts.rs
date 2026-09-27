@@ -52,16 +52,23 @@
 //! the two cannot disagree, and a predicate over links reads it as a column
 //! rather than re-running the selector per row.
 //!
-//! **`anchor_text`, `anchor_marked` and `anchor_slug` are the readings a
-//! heading anchor is matched by** ([`crate::AnchorReadings`]): its text and the
-//! heading text past its `#` markers, each compared with a heading's
-//! `reading`, and its slug reading, compared with a heading's `slug`. The host
-//! takes them from the text layer's one section resolver — this crate reads no
-//! text — and hands them over with the link. They are `NULL` where the link
-//! carries no heading anchor or an empty one, which reads as no anchor, and
-//! `anchor_marked` is `NULL` too where the anchor has no `#` markers; the
-//! `CHECK` holds the three to that shape. An empty `block_ref` reads as no
-//! anchor as well.
+//! **A link names at most one place, and "no place" has one stored form.**
+//! `anchor` is a heading anchor as the text layer records it and `block_ref` a
+//! block reference; at most one of them is set, and neither is ever empty: a
+//! link written with an empty fragment, `note#` or `note#^`, names no place
+//! and stores `NULL` in both, as a link written with no fragment does.
+//! Whether a link carries an anchor is therefore whether either is set, which
+//! is the store's one spelling of that test (`carries_anchor`).
+//!
+//! **`anchor_text` and `anchor_marked` are the readings a heading anchor is
+//! matched by** ([`crate::AnchorReadings`]): its text and the heading text
+//! past its `#` markers, each compared with a heading's `reading`; `anchor`
+//! itself is compared with a heading's `slug`. The host takes the readings
+//! from the text layer's one section resolver — this crate reads no text —
+//! and hands them over inside the anchor ([`crate::LinkAnchor`]). The readings
+//! stand exactly where a heading anchor does, so none sits beside a block
+//! reference, and `anchor_marked` is `NULL` too where the anchor has no `#`
+//! markers. The table's `CHECK`s hold every link row to those shapes.
 //!
 //! **`target` is stored raw**, and compared under `BINARY`: no normalization,
 //! no percent-decoding, no case folding. What a link's target names is
@@ -197,14 +204,16 @@ const STATEMENTS: &[&str] = &[
     anchor        TEXT,
     anchor_text   TEXT,
     anchor_marked TEXT,
-    anchor_slug   TEXT,
     block_ref     TEXT,
     address       TEXT    NOT NULL,
     span_line     INTEGER NOT NULL,
     span_column   INTEGER NOT NULL,
     span_offset   INTEGER NOT NULL,
-    CHECK ((anchor_text IS NULL) = (anchor_slug IS NULL)
-        AND (anchor_text IS NOT NULL OR anchor_marked IS NULL))
+    CHECK (anchor IS NULL OR block_ref IS NULL),
+    CHECK (anchor <> ''),
+    CHECK (block_ref <> ''),
+    CHECK ((anchor IS NULL) = (anchor_text IS NULL)),
+    CHECK (anchor_text IS NOT NULL OR anchor_marked IS NULL)
 )",
     "CREATE UNIQUE INDEX links_document_ordinal ON links(document, ordinal)",
     "CREATE UNIQUE INDEX links_id_document ON links(id, document)",

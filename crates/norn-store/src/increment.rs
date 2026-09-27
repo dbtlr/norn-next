@@ -14,7 +14,7 @@ use norn_wire::fold_tag;
 use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
-use crate::facts::{DocumentFacts, FindingFacts, Invalidation, Provenance};
+use crate::facts::{DocumentFacts, FindingFacts, Invalidation, LinkAnchor, Provenance};
 use crate::fields::{FieldRow, OffsetSpelling};
 use crate::hash;
 use crate::json;
@@ -430,9 +430,9 @@ impl<'t> Statements<'t> {
             insert_link: prepared(
                 "INSERT INTO links (
                      document, ordinal, family, embed, protocol, target, title, anchor,
-                     anchor_text, anchor_marked, anchor_slug, block_ref, address, span_line,
-                     span_column, span_offset
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                     anchor_text, anchor_marked, block_ref, address, span_line, span_column,
+                     span_offset
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                  RETURNING id",
                 "preparing a link write",
             )?,
@@ -554,7 +554,13 @@ fn upsert(
     }
 
     for (ordinal, link) in facts.links.iter().enumerate() {
-        let readings = link.anchor_readings.as_ref();
+        let (anchor, readings, block_ref) = match &link.anchor {
+            Some(LinkAnchor::Heading { written, readings }) => {
+                (Some(written), Some(readings), None)
+            }
+            Some(LinkAnchor::Block { id }) => (None, None, Some(id)),
+            None => (None, None, None),
+        };
         let row: i64 = statements
             .insert_link
             .query_row(
@@ -566,11 +572,10 @@ fn upsert(
                     link.protocol,
                     link.target,
                     link.title,
-                    link.anchor,
+                    anchor,
                     readings.map(|readings| &readings.text),
                     readings.and_then(|readings| readings.marked.as_ref()),
-                    readings.map(|readings| &readings.slug),
-                    link.block_ref,
+                    block_ref,
                     address_kind(link).as_str(),
                     link.span.line,
                     link.span.column,

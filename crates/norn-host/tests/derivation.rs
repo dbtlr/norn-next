@@ -51,8 +51,8 @@ use std::path::Path;
 
 use norn_host::DERIVATION_VERSION;
 use norn_store::{
-    DerivationVersion, FieldContainer, FieldRow, LinkAddressKind, LinkFamily, OffsetSpelling,
-    OpenOutcome, TagSource,
+    DerivationVersion, FieldContainer, FieldRow, LinkAddressKind, LinkAnchor, LinkFact, LinkFamily,
+    OffsetSpelling, OpenOutcome, TagSource,
 };
 use norn_testkit::equivalence::{DerivedRows, assert_operationally_valid};
 use norn_testkit::process::Sandbox;
@@ -62,7 +62,7 @@ use norn_wire::FindingKind;
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(6),
-    "4f9ebc2176221222477ed790d6ab7533a409d6872cc45178f1c071206b994f6a",
+    "c48391a5ac7908510ff20b48a834ba7b706ae9e75c0b7040b64e72db8b327d11",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -428,7 +428,9 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             "{family:?}: no anchor"
         );
         assert!(
-            links.iter().any(|link| link.fact.block_ref.is_some()),
+            links
+                .iter()
+                .any(|link| matches!(link.fact.anchor, Some(LinkAnchor::Block { .. }))),
             "{family:?}: no block reference"
         );
     }
@@ -604,7 +606,7 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             .iter()
             .any(|link| link.fact.family == LinkFamily::Wikilink
                 && link.fact.title.as_deref() == Some("see here")
-                && link.fact.anchor.as_deref() == Some("Setext")),
+                && written_anchor(&link.fact) == Some("Setext")),
         "no frontmatter wikilink carrying an alias and an anchor is exercised"
     );
     // The readings a heading and a heading anchor are matched by, and the
@@ -620,34 +622,36 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         glossary
             .links
             .iter()
-            .find(|link| link.fact.anchor.as_deref() == Some(anchor))
+            .find_map(|link| match &link.fact.anchor {
+                Some(LinkAnchor::Heading { written, readings }) if written == anchor => {
+                    Some(readings.clone())
+                }
+                _ => None,
+            })
             .unwrap_or_else(|| panic!("the glossary holds no link anchored `{anchor}`"))
-            .fact
-            .anchor_readings
-            .clone()
     };
-    let decoded = readings("Sub Setext").expect("an encoded fragment's readings");
     assert_eq!(
-        (decoded.text.as_str(), decoded.slug.as_str()),
-        ("sub setext", "Sub Setext"),
+        readings("Sub Setext").text,
+        "sub setext",
         "an encoded fragment is not recorded decoded"
     );
     for (anchor, marked) in [("Glossary#Repeated", "repeated"), ("## Setext", "setext")] {
         assert_eq!(
-            readings(anchor)
-                .and_then(|readings| readings.marked)
-                .as_deref(),
+            readings(anchor).marked.as_deref(),
             Some(marked),
             "`{anchor}` is not read past its markers"
         );
     }
-    assert_eq!(readings(""), None, "an empty anchor carries readings");
-    assert!(
+    assert_eq!(
         glossary
             .links
             .iter()
-            .any(|link| link.fact.block_ref.as_deref() == Some("")),
-        "no empty block reference is exercised"
+            .filter(|link| link.fact.family == LinkFamily::Wikilink
+                && link.fact.target == "Notes"
+                && link.fact.anchor.is_none())
+            .count(),
+        3,
+        "`[[Notes]]`, `[[Notes#]]` and `[[Notes#^]]` are not all stored with no anchor"
     );
     let kinds: BTreeSet<&str> = glossary
         .links
@@ -906,5 +910,13 @@ fn assert_the_allowing_vault_exercises_its_stance(rows: &DerivedRows) {
                 .any(|tag| tag.fact.name == name && tag.fact.source == source),
             "no undeclared {source:?} tag `{name}` is exercised"
         );
+    }
+}
+
+/// The heading anchor `link` was written with, where it carries one.
+fn written_anchor(link: &LinkFact) -> Option<&str> {
+    match &link.anchor {
+        Some(LinkAnchor::Heading { written, .. }) => Some(written),
+        _ => None,
     }
 }

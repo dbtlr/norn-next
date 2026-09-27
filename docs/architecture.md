@@ -2009,10 +2009,13 @@ through this one grammar; resolved edges are never stored, and a materialized pr
 only ever arrive as keyed, invalidated derived state. The two readings are what judging a link
 reads without resolving it: its address kind — addressed elsewhere, naming an attachment, or
 naming a document — from the one addressing selector and its attachment test that a link's
-health reads, and its heading anchor's three readings, which the host takes from the section
-resolver. Each heading row carries its text's reading beside its slug, so whether a document
-holds the heading or block a link's anchor names is one predicate of equality seeks into that
-document: its headings by reading and by slug, and its blocks by identifier.
+health reads, and the two readings its heading anchor is matched by beside the anchor itself,
+which the host takes from the section resolver and hands over inside the anchor. A link names
+no place in one stored form, whether written with no fragment or an empty one, so whether it
+carries an anchor is one predicate too. Each heading row carries its text's reading beside its
+slug, so whether a document holds the heading or block a link's anchor names is one predicate
+of equality seeks into that document: its headings by reading and by slug, and its blocks by
+identifier.
 Beside it, the link index holds each link under the keys its target spells in the
 documents' own key space — a function of the link and its document's path, never of what
 the vault holds — and backlinks are equality seeks of those keys, each link confirmed at the

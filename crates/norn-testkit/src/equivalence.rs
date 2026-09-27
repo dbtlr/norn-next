@@ -91,8 +91,8 @@ use std::fmt::Write as _;
 use norn_fixtures::digest::{Sha256, hex};
 use norn_store::{
     BlockFact, DocumentPath, FieldRow, FieldRows, FindingCursor, HeadingFact, IndexedTerm,
-    LinkFact, OffsetSpelling, PillarReport, Span, Store, StoreError, StoredFinding, StoredLink,
-    StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone, ddl,
+    LinkAnchor, LinkFact, OffsetSpelling, PillarReport, Span, Store, StoreError, StoredFinding,
+    StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone, ddl,
 };
 use norn_wire::{FindingKind, FindingScope};
 
@@ -1128,14 +1128,20 @@ trait StoredColumns {
 impl StoredColumns for StoredLink {
     fn columns(&self) -> Vec<(&'static str, String)> {
         let link: &LinkFact = &self.fact;
-        let readings = link.anchor_readings.as_ref();
+        let (anchor, readings, block_ref) = match &link.anchor {
+            Some(LinkAnchor::Heading { written, readings }) => {
+                (Some(written.as_str()), Some(readings), None)
+            }
+            Some(LinkAnchor::Block { id }) => (None, None, Some(id.as_str())),
+            None => (None, None, None),
+        };
         let mut columns = vec![
             ("family", quoted(link.family.as_str())),
             ("embed", flag(link.embed)),
             ("protocol", optional_text(link.protocol.as_deref())),
             ("target", quoted(&link.target)),
             ("title", optional_text(link.title.as_deref())),
-            ("anchor", optional_text(link.anchor.as_deref())),
+            ("anchor", optional_text(anchor)),
             (
                 "anchor_text",
                 optional_text(readings.map(|readings| readings.text.as_str())),
@@ -1144,11 +1150,7 @@ impl StoredColumns for StoredLink {
                 "anchor_marked",
                 optional_text(readings.and_then(|readings| readings.marked.as_deref())),
             ),
-            (
-                "anchor_slug",
-                optional_text(readings.map(|readings| readings.slug.as_str())),
-            ),
-            ("block_ref", optional_text(link.block_ref.as_deref())),
+            ("block_ref", optional_text(block_ref)),
             ("address", quoted(self.address.as_str())),
         ];
         columns.extend(span_columns(Some(link.span)));
@@ -1425,9 +1427,9 @@ mod tests {
                 protocol: None,
                 target: "Notes".to_string(),
                 title: None,
-                anchor: None,
-                anchor_readings: None,
-                block_ref: Some("para".to_string()),
+                anchor: Some(LinkAnchor::Block {
+                    id: "para".to_string(),
+                }),
                 span: Span {
                     line: 1,
                     column: 2,
@@ -1450,7 +1452,9 @@ mod tests {
         assert_eq!(at("span_offset"), "1");
 
         let mut moved = linked.clone();
-        moved.documents[0].links[0].fact.block_ref = Some("other".to_string());
+        moved.documents[0].links[0].fact.anchor = Some(LinkAnchor::Block {
+            id: "other".to_string(),
+        });
         let divergence = linked
             .compare(&moved)
             .divergence

@@ -287,8 +287,6 @@ mod tests {
             target: target.to_string(),
             title: None,
             anchor: None,
-            anchor_readings: None,
-            block_ref: None,
             span: crate::facts::Span {
                 line: 1,
                 column: 1,

@@ -29,7 +29,7 @@ use norn_wire::{Anchor, Candidate, CandidateHead, LinkRow};
 
 use super::Ran;
 use crate::error::{self, StoreError};
-use crate::facts::{CANDIDATE_HEAD, LinkFact};
+use crate::facts::{CANDIDATE_HEAD, LinkAnchor, LinkFact};
 use crate::find::{
     FindStatement, SpellingRange, compose_candidate_suffixes, compose_class_head,
     compose_class_total, compose_link_targets, wire_span,
@@ -113,11 +113,10 @@ impl Snapshot {
             .into_iter()
             .zip(targets)
             .map(|((_, link), targets)| {
-                let anchor = match (link.block_ref, link.anchor) {
-                    (Some(id), _) => Some(Anchor::block(id)),
-                    (None, Some(text)) => Some(Anchor::heading(text)),
-                    (None, None) => None,
-                };
+                let anchor = link.anchor.map(|anchor| match anchor {
+                    LinkAnchor::Heading { written, .. } => Anchor::heading(written),
+                    LinkAnchor::Block { id } => Anchor::block(id),
+                });
                 LinkRow::new(
                     link.family.wire(),
                     link.embed,

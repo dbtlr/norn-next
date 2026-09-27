@@ -1,29 +1,44 @@
-//! Whether a document holds the place a link's anchor names: one predicate over
-//! readings stored per heading, per block and per link.
+//! Whether a link carries an anchor, and whether a document holds the place
+//! that anchor names: two predicates over readings stored per heading, per
+//! block and per link.
+//!
+//! A link carries an anchor where its heading anchor or its block reference is
+//! set ([`carries_anchor`]): the store writes "no anchor" in one form, both
+//! `NULL`, whether the link was written with no fragment or an empty one.
 //!
 //! A heading anchor matches a heading under the first of its three readings
 //! that matches any ([`crate::AnchorReadings`]), so whether a document holds
 //! the heading it names is whether any heading matches one of the three: a
 //! heading reading equal to the anchor's text or marked reading, or a slug
-//! equal to its slug reading. A block reference matches a block definition by
-//! its identifier, exactly. Each is an equality seek on an index that leads
-//! with the document — `headings_document_reading`, `headings_document_slug`
-//! and `blocks_document_block_id` — so the predicate costs a handful of seeks
-//! into one document, whatever the vault holds.
+//! equal to the anchor as written. A block reference matches a block
+//! definition by its identifier, exactly. Each is an equality seek on an index
+//! that leads with the document — `headings_document_reading`,
+//! `headings_document_slug` and `blocks_document_block_id` — so the predicate
+//! costs a handful of seeks into one document, whatever the vault holds.
 //!
-//! The predicate is meaningful only for a link that carries an anchor: a link
-//! with none holds no reading and no block reference, and the predicate is
-//! false for it.
+//! [`anchor_held`] is meaningful only for a link that carries an anchor: a
+//! link with none holds no reading and no block reference, and the predicate
+//! is false for it.
 //!
-//! **A dormant carrier.** The link-health judgment ([ADR 0027]) files a
-//! missing-anchor finding where a link resolves to one document and that
-//! document does not hold the place the link's anchor names, and it embeds
-//! [`anchor_held`] to decide that. The store judges no finding yet, so no
-//! reader runs the predicate: [`link_anchor_held_sql`] is explained through
-//! [`crate::ExplainedStatement::LinkAnchorHeld`], which is what bars the
-//! indexes it seeks until the judgment runs it.
+//! **A dormant carrier.** Its consuming layer is the link-health judgment the
+//! store re-decision ([ADR 0027]) rules into the store: it files a
+//! missing-anchor finding where a link carries an anchor and resolves to one
+//! document that does not hold the place the anchor names, and it embeds
+//! [`carries_anchor`] and [`anchor_held`] to decide that. The store judges no
+//! finding yet, so no reader runs either predicate: [`link_anchor_held_sql`]
+//! is explained through [`crate::ExplainedStatement::LinkAnchorHeld`], which
+//! is what bars the indexes it seeks until the judgment runs it.
 //!
 //! [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+
+/// The predicate that the `links` row aliased `link` carries an anchor: a
+/// heading anchor or a block reference.
+///
+/// `link` is a table alias spliced into the text, never a value a caller
+/// supplies.
+pub(crate) fn carries_anchor(link: &str) -> String {
+    format!("({link}.anchor IS NOT NULL OR {link}.block_ref IS NOT NULL)")
+}
 
 /// The predicate that the document whose row id `target` evaluates to holds
 /// the place named by the anchor of the `links` row aliased `link`.
@@ -36,21 +51,22 @@ pub(crate) fn anchor_held(link: &str, target: &str) -> String {
                   WHERE hr.document = {target}
                     AND hr.reading IN ({link}.anchor_text, {link}.anchor_marked))
           OR EXISTS (SELECT 1 FROM headings AS hs
-                     WHERE hs.document = {target} AND hs.slug = {link}.anchor_slug)
+                     WHERE hs.document = {target} AND hs.slug = {link}.anchor)
           OR EXISTS (SELECT 1 FROM blocks AS hb
                      WHERE hb.document = {target} AND hb.block_id = {link}.block_ref))"
     )
 }
 
-/// Whether the document whose row id is `?3` holds the place named by the
-/// anchor of the link at ordinal `?2` among the links of the document whose
-/// row id is `?1`.
+/// Whether the link at ordinal `?2` among the links of the document whose row
+/// id is `?1` carries an anchor, and whether the document whose row id is `?3`
+/// holds the place that anchor names: two columns, [`carries_anchor`] and
+/// [`anchor_held`] over the link.
 ///
-/// The link is reached by `links_document_ordinal`, and the predicate is
-/// [`anchor_held`] over it.
+/// The link is reached by `links_document_ordinal`.
 pub(crate) fn link_anchor_held_sql() -> String {
     format!(
-        "SELECT {} FROM links AS l WHERE l.document = ?1 AND l.ordinal = ?2",
+        "SELECT {}, {} FROM links AS l WHERE l.document = ?1 AND l.ordinal = ?2",
+        carries_anchor("l"),
         anchor_held("l", "?3")
     )
 }
@@ -62,8 +78,8 @@ mod tests {
 
     use super::*;
     use crate::facts::{
-        AnchorReadings, BlockFact, DerivationVersion, DocumentFacts, HeadingFact, LinkFact,
-        LinkFamily, Span, StoredPathOrder,
+        AnchorReadings, BlockFact, DerivationVersion, DocumentFacts, HeadingFact, LinkAnchor,
+        LinkFact, LinkFamily, Span, StoredPathOrder,
     };
     use crate::increment::{Change, IncrementProvenance};
     use crate::path::DocumentPath;
@@ -245,11 +261,19 @@ mod tests {
     }
 
     /// A link to `target` naming `anchor`, carrying the readings the text
-    /// layer gives it, as the host derives them.
+    /// layer gives it, as the host derives them: an empty anchor is no anchor.
     fn link(target: &str, anchor: &Anchor) -> LinkFact {
-        let (anchor, block_ref) = match anchor {
-            Anchor::Heading(text) => (Some(text.clone()), None),
-            Anchor::Block(id) => (None, Some(id.clone())),
+        let anchor = match anchor {
+            Anchor::Heading(written) => {
+                anchor_readings(written).map(|readings| LinkAnchor::Heading {
+                    written: written.clone(),
+                    readings: AnchorReadings {
+                        text: readings.text,
+                        marked: readings.marked,
+                    },
+                })
+            }
+            Anchor::Block(id) => (!id.is_empty()).then(|| LinkAnchor::Block { id: id.clone() }),
         };
         LinkFact {
             family: LinkFamily::Wikilink,
@@ -257,24 +281,17 @@ mod tests {
             protocol: None,
             target: target.to_string(),
             title: None,
-            anchor_readings: anchor.as_deref().and_then(anchor_readings).map(|readings| {
-                AnchorReadings {
-                    text: readings.text,
-                    marked: readings.marked,
-                    slug: readings.slug,
-                }
-            }),
             anchor,
-            block_ref,
             span: span(),
         }
     }
 
-    /// **The stored predicate agrees with the section resolver.** Over
+    /// **The stored predicates agree with the section resolver.** Over
     /// generated documents and anchors, [`anchor_held`] over the readings the
     /// store holds is true exactly where `resolve_section` finds a section for
     /// a heading anchor, and exactly where the document defines the block a
-    /// block reference names. The generated anchors reach a heading through
+    /// block reference names, and [`carries_anchor`] is true exactly where the
+    /// anchor is not empty. The generated anchors reach a heading through
     /// each of the three readings alone, so a predicate missing one, or
     /// comparing the text under a case fold alone, disagrees.
     #[test]
@@ -335,14 +352,23 @@ mod tests {
                     }
                     Anchor::Block(id) => blocks.contains(id),
                 };
-                let stored: bool = store
+                let (carried, stored): (bool, bool) = store
                     .connection()
                     .query_row(
                         &link_anchor_held_sql(),
                         params![holder_id, ordinal as i64, target_id],
-                        |row| row.get(0),
+                        |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .expect("evaluating the predicate");
+                let written = match anchor {
+                    Anchor::Heading(written) | Anchor::Block(written) => written,
+                };
+                assert_eq!(
+                    carried,
+                    !written.is_empty(),
+                    "case {case}, link {ordinal}: an anchor is carried exactly where it is \
+                     not empty"
+                );
                 assert_eq!(
                     stored,
                     expected,
@@ -390,6 +416,95 @@ mod tests {
             (slug_alone, "a heading reached by its slug alone"),
         ] {
             assert!(count >= 20, "the generator reached {what} {count} times");
+        }
+    }
+
+    /// **A link row holds one of the anchor shapes a link carries, and no
+    /// other**: no anchor, a heading anchor beside its readings, or a block
+    /// reference, and "no anchor" in one form. Each refused row below breaks
+    /// one rule the `links` table's `CHECK`s state, and only that one.
+    #[test]
+    fn a_link_row_holds_only_the_anchor_shapes_a_link_carries() {
+        let root = norn_testkit::scratch::Scratch::new("norn-store-anchor-shapes");
+        let mut store = Store::open_throwaway(
+            root.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            DerivationVersion::new(1),
+        )
+        .expect("opening a store");
+        let at = DocumentPath::new("h.md").expect("a path");
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::Upsert(DocumentFacts::new(
+                    at.clone(),
+                    "hash",
+                    "",
+                    0,
+                ))],
+                &[],
+            )
+            .expect("writing a document");
+        let document: i64 = store
+            .connection()
+            .query_row(
+                "SELECT id FROM documents WHERE path = ?1",
+                [at.as_str()],
+                |row| row.get(0),
+            )
+            .expect("a document row");
+
+        type Shape = [Option<&'static str>; 4];
+        let mut ordinal = 0;
+        let mut write = |[anchor, text, marked, block_ref]: Shape| {
+            ordinal += 1;
+            store.connection().execute(
+                "INSERT INTO links (
+                     document, ordinal, family, embed, target, anchor, anchor_text,
+                     anchor_marked, block_ref, address, span_line, span_column, span_offset
+                 ) VALUES (?1, ?2, 'wikilink', 0, 't', ?3, ?4, ?5, ?6, 'document', 1, 1, 0)",
+                params![document, ordinal, anchor, text, marked, block_ref],
+            )
+        };
+
+        for (shape, what) in [
+            ([None, None, None, None], "no anchor"),
+            ([Some("A"), Some("a"), None, None], "a heading anchor"),
+            (
+                [Some("## A"), Some("## a"), Some("a"), None],
+                "a heading anchor with a marked reading",
+            ),
+            ([None, None, None, Some("b")], "a block reference"),
+        ] {
+            write(shape).unwrap_or_else(|problem| panic!("{what} is refused: {problem}"));
+        }
+        for (shape, what) in [
+            (
+                [Some("A"), Some("a"), None, Some("b")],
+                "a heading anchor beside a block reference",
+            ),
+            ([Some(""), Some(""), None, None], "an empty heading anchor"),
+            ([None, None, None, Some("")], "an empty block reference"),
+            (
+                [Some("A"), None, None, None],
+                "a heading anchor without readings",
+            ),
+            ([None, Some("a"), None, None], "readings with no anchor"),
+            (
+                [None, Some("a"), None, Some("b")],
+                "readings beside a block reference",
+            ),
+            (
+                [None, None, Some("a"), None],
+                "a marked reading with no text",
+            ),
+        ] {
+            let refused = write(shape).expect_err(what);
+            assert!(
+                refused.to_string().contains("CHECK constraint failed"),
+                "{what}: {refused}"
+            );
         }
     }
 }

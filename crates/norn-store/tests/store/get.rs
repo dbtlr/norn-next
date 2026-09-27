@@ -12,10 +12,10 @@ use std::sync::Arc;
 
 use norn_store::{
     BODY_ROW_CEILING, BlockFact, ContentModel, DocumentFacts, DocumentText, FindStatement,
-    FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, HeadingFact, LinkFact,
-    LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, SectionAt, Snapshot,
-    SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity, Validation,
-    induced_failure,
+    FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, HeadingFact, LinkAnchor,
+    LinkFact, LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, SectionAt,
+    Snapshot, SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity,
+    Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
@@ -27,7 +27,7 @@ use norn_wire::{
 };
 
 use crate::common::{
-    Scratch, anchor_readings, document, planned_get_work, span, unread_block, write_documents,
+    Scratch, document, heading_anchor, planned_get_work, span, unread_block, write_documents,
 };
 use crate::find::{failure_of, map, rows_of, string};
 
@@ -945,9 +945,13 @@ fn paged_vault_under(label: &str, bulk: usize, order: StoredPathOrder) -> Vault 
             protocol: None,
             target: format!("target-{at}"),
             title: None,
-            anchor: (at == 1).then(|| "Heading".to_string()),
-            anchor_readings: (at == 1).then(|| anchor_readings("Heading")).flatten(),
-            block_ref: (at == 2).then(|| "b0".to_string()),
+            anchor: match at {
+                1 => heading_anchor("Heading"),
+                2 => Some(LinkAnchor::Block {
+                    id: "b0".to_string(),
+                }),
+                _ => None,
+            },
             span: span(1, 1, at as u64),
         })
         .collect();

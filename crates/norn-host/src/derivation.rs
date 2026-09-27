@@ -45,8 +45,8 @@ use std::sync::Arc;
 use norn_config::schema::{FieldType, Offset, TypedValue, UndeclaredTags, VaultSchema};
 use norn_store::{
     AnchorReadings, BlockFact, Change, ContentModel, DerivationVersion, DiscardScope,
-    DocumentFacts, DocumentPath, FieldDeclaration, FrontmatterValue, HeadingFact, LinkFact,
-    LinkFamily, OffsetSpelling, Provenance, Span, TagFact, TagSource, TypedOrder,
+    DocumentFacts, DocumentPath, FieldDeclaration, FrontmatterValue, HeadingFact, LinkAnchor,
+    LinkFact, LinkFamily, OffsetSpelling, Provenance, Span, TagFact, TagSource, TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, FindingScope, Severity, TagStance, fold_tag};
@@ -1023,7 +1023,24 @@ pub(crate) fn plan_quarantine(path: &Path, quarantine: Quarantine) -> PlannedFin
     }
 }
 
+/// The store's fact for one link the text layer parsed. An empty anchor —
+/// `note#`, `note#^` — names no place, so the fact carries none; a heading
+/// anchor carries the readings the text layer's section resolver matches it
+/// by.
 fn map_link(link: norn_text::Link) -> LinkFact {
+    let anchor = match (link.anchor, link.block_ref) {
+        (Some(written), _) => {
+            norn_text::anchor_readings(&written).map(|readings| LinkAnchor::Heading {
+                written,
+                readings: AnchorReadings {
+                    text: readings.text,
+                    marked: readings.marked,
+                },
+            })
+        }
+        (None, Some(id)) => (!id.is_empty()).then_some(LinkAnchor::Block { id }),
+        (None, None) => None,
+    };
     LinkFact {
         family: match link.family {
             norn_text::LinkFamily::Wikilink => LinkFamily::Wikilink,
@@ -1033,20 +1050,11 @@ fn map_link(link: norn_text::Link) -> LinkFact {
         protocol: link.protocol,
         target: link.target,
         title: link.title,
-        anchor_readings: link
-            .anchor
-            .as_deref()
-            .and_then(norn_text::anchor_readings)
-            .map(|readings| AnchorReadings {
-                text: readings.text,
-                marked: readings.marked,
-                slug: readings.slug,
-            }),
-        anchor: link.anchor,
-        block_ref: link.block_ref,
+        anchor,
         span: span(link.span),
     }
 }
+
 fn span(value: SourceSpan) -> Span {
     Span {
         line: value.line as u64,
@@ -1897,13 +1905,15 @@ paths:
 
     /// **Every heading and every heading anchor carries the readings the
     /// text layer's section resolver matches them by**, so a store's predicate
-    /// over the stored readings and a get's section agree. A link with no
-    /// heading anchor, or an empty one, carries none.
+    /// over the stored readings and a get's section agree. Each reading is its
+    /// own field, and each is checked against a value no other field holds. A
+    /// Markdown fragment arrives decoded, and a link with no anchor, or an
+    /// empty one, carries none.
     #[test]
     fn headings_and_anchors_carry_the_section_resolvers_readings() {
         let source = b"# Design  Notes
 
-[[t#Top#Design  NOTES]] [[t#]] [[t#^b]] [[t]]
+[[t#Top#Design  NOTES]] [x](t.md#My%20Top#Sub) [[t#]] [[t#^b]] [[t#^]] [[t]]
 ";
         let facts = map_document(
             "note.md",
@@ -1919,20 +1929,26 @@ paths:
             .map(|heading| heading.reading.clone())
             .collect();
         assert_eq!(readings, ["design notes"]);
-        let anchors: Vec<Option<AnchorReadings>> = facts
-            .links
-            .iter()
-            .map(|link| link.anchor_readings.clone())
-            .collect();
+        let anchors: Vec<Option<LinkAnchor>> =
+            facts.links.iter().map(|link| link.anchor.clone()).collect();
+        let heading = |written: &str, text: &str, marked: &str| {
+            Some(LinkAnchor::Heading {
+                written: written.to_string(),
+                readings: AnchorReadings {
+                    text: text.to_string(),
+                    marked: Some(marked.to_string()),
+                },
+            })
+        };
         assert_eq!(
             anchors,
             [
-                Some(AnchorReadings {
-                    text: "top#design notes".to_string(),
-                    marked: Some("design notes".to_string()),
-                    slug: "Top#Design  NOTES".to_string(),
-                }),
+                heading("Top#Design  NOTES", "top#design notes", "design notes"),
+                heading("My Top#Sub", "my top#sub", "sub"),
                 None,
+                Some(LinkAnchor::Block {
+                    id: "b".to_string()
+                }),
                 None,
                 None,
             ]

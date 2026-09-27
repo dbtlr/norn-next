@@ -130,7 +130,7 @@ pub use error::StoreError;
 pub use facts::{
     AnchorReadings, BlockFact, CANDIDATE_HEAD, CandidateFact, DerivationVersion, DocumentFacts,
     FeedDocument, FeedTombstone, FindingFacts, HeadingFact, IndexedTerm, Invalidation,
-    LinkAddressKind, LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span,
+    LinkAddressKind, LinkAnchor, LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span,
     StoredDocument, StoredFacts, StoredFinding, StoredLink, StoredLinkKey, StoredPathOrder,
     StoredSuffixKeys, StoredTag, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };

@@ -35,9 +35,10 @@
 //!    dedupe suffix included. This is what an inline Markdown `#fragment`
 //!    addresses.
 //!
-//! [`anchor_readings`] is the one place an anchor's three readings are made,
-//! and a stored link carries them, so a store's predicate over stored
-//! readings and this resolver agree about which headings an anchor matches.
+//! [`anchor_readings`] is the one place an anchor's first two readings are
+//! made, and a stored link carries them beside the anchor, so a store's
+//! predicate over stored readings and this resolver agree about which
+//! headings an anchor matches.
 //!
 //! The text reading comes first, so an anchor that names a heading by its
 //! whole text is never reinterpreted as another heading's marked text or slug.
@@ -307,7 +308,7 @@ fn matching_indices(headings: &[Heading], anchor: &str) -> Vec<usize> {
         matches = by_reading(marked);
     }
     if matches.is_empty() {
-        matches = indices(headings, |heading| heading.slug == readings.slug);
+        matches = indices(headings, |heading| heading.slug == anchor);
     }
     matches
 }
@@ -322,10 +323,11 @@ fn indices(headings: &[Heading], matches: impl Fn(&Heading) -> bool) -> Vec<usiz
         .collect()
 }
 
-/// The three readings an anchor is matched by, as the module states them.
+/// The two readings an anchor is matched by beside itself, as the module
+/// states them: its third reading is the anchor as written, against a
+/// heading's slug.
 ///
-/// A heading's side of the first two readings is its [`heading_reading`], and
-/// of the third its slug.
+/// A heading's side of both is its [`heading_reading`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnchorReadings {
     /// The anchor as a heading reading.
@@ -334,8 +336,6 @@ pub struct AnchorReadings {
     /// an ATX-shaped anchor's heading text, or a heading chain's last heading.
     /// `None` where the anchor has no such markers.
     pub marked: Option<String>,
-    /// The anchor, compared exactly with a heading's slug.
-    pub slug: String,
 }
 
 /// The readings `anchor` is matched by, or `None` for an empty anchor, which
@@ -347,7 +347,6 @@ pub fn anchor_readings(anchor: &str) -> Option<AnchorReadings> {
     Some(AnchorReadings {
         text: heading_reading(anchor),
         marked: marked_text(anchor).map(|text| heading_reading(&text)),
-        slug: anchor.to_string(),
     })
 }
 

@@ -76,10 +76,10 @@ use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{
     AnchorReadings, BlockFact, CANDIDATE_HEAD, CandidateFact, FeedDocument, FeedTombstone,
-    FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkAddressKind, LinkFact, LinkFamily,
-    PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding,
-    StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone,
-    TagFact, TagSource, VaultSchemaPin,
+    FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkAddressKind, LinkAnchor, LinkFact,
+    LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts,
+    StoredFinding, StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag,
+    StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 use crate::fields::{FieldContainer, FieldRow, FieldRows, OffsetSpelling};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
@@ -1804,7 +1804,7 @@ fn stored_facts_document_sql() -> String {
 /// carry the same shape over their own tables.
 const DOCUMENT_LINKS_SQL: &str = "SELECT family, embed, protocol, target, title, anchor, block_ref,
                         span_line, span_column, span_offset, anchor_text, anchor_marked,
-                        anchor_slug, address
+                        address
                  FROM links WHERE document = ?1 ORDER BY ordinal";
 
 /// The statement [`Request::stored_facts`] reads a document's link keys with:
@@ -2610,15 +2610,21 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
         Ok(span) => span,
         Err(damaged) => return Ok(Err(damaged)),
     };
-    let text: Option<String> = row.get(10)?;
-    let slug: Option<String> = row.get(12)?;
-    let anchor_readings = match (text, slug) {
-        (Some(text), Some(slug)) => Some(AnchorReadings {
-            text,
-            marked: row.get(11)?,
-            slug,
+    let anchor = match (row.get(5)?, row.get(10)?, row.get(6)?) {
+        (Some(written), Some(text), None) => Some(LinkAnchor::Heading {
+            written,
+            readings: AnchorReadings {
+                text,
+                marked: row.get(11)?,
+            },
         }),
-        _ => None,
+        (None, None, Some(id)) => Some(LinkAnchor::Block { id }),
+        (None, None, None) => None,
+        _ => {
+            return Ok(Err(StoreError::Damaged {
+                what: "a link row's anchor columns hold no shape this schema writes".to_string(),
+            }));
+        }
     };
     Ok(Ok(LinkFact {
         family,
@@ -2626,9 +2632,7 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
         protocol: row.get(2)?,
         target: row.get(3)?,
         title: row.get(4)?,
-        anchor: row.get(5)?,
-        anchor_readings,
-        block_ref: row.get(6)?,
+        anchor,
         span,
     }))
 }
@@ -2636,7 +2640,7 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
 /// A link row as [`Request::stored_facts`] reads it: the link, and the address
 /// kind stored beside it after the columns [`stored_link`] reads.
 fn stored_link_row(row: &Row<'_>) -> Reading<StoredLink> {
-    let written: String = row.get(13)?;
+    let written: String = row.get(12)?;
     let Some(address) = LinkAddressKind::from_str(&written) else {
         return Ok(Err(unreadable("links.address", &written)));
     };
