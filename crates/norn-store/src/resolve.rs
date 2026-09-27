@@ -14,12 +14,10 @@
 //! exclusion, and a link key's class or path — so no two surfaces can disagree
 //! about a class.
 //!
-//! **The class keys are a dormant carrier with no consumer.**
-//! [`TargetClass::class_keys`] spells the set of class keys a target is read
-//! through. The link-health judgment ([`crate::health`]) keys a link's findings
-//! by the link's stored keys in `link_keys` rather than by this set, so nothing
-//! outside its tests calls it; whether its roadmap obligation is withdrawn is
-//! an open ruling.
+//! [`TargetClass::class_keys`] spells the class keys a target is read
+//! through. The link-health judgment ([`crate::health`]) keys a link's
+//! findings by the link's stored `link_keys` rows, not by this set, and
+//! nothing outside this module's tests calls [`TargetClass::class_keys`].
 //!
 //! # Case is the root's
 //!
