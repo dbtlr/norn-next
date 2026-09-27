@@ -112,6 +112,7 @@ mod fields;
 mod find;
 mod get;
 mod hash;
+mod health;
 mod increment;
 mod json;
 mod link;

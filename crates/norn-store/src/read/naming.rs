@@ -25,11 +25,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use norn_db::rusqlite::types::Value;
 use norn_wire::{Anchor, Candidate, CandidateHead, LinkRow};
 
 use super::Ran;
 use crate::error::{self, StoreError};
-use crate::facts::{CANDIDATE_HEAD, LinkAnchor, LinkFact};
+use crate::facts::{CANDIDATE_HEAD, LinkAnchor, LinkFact, StoredPathOrder};
 use crate::find::{
     FindStatement, SpellingRange, compose_candidate_suffixes, compose_class_head,
     compose_class_total, compose_link_targets, wire_span,
@@ -248,9 +249,41 @@ impl Snapshot {
         if named.is_empty() {
             return Ok(HashMap::new());
         }
-        let order = self.path_order();
-        // Every spelling of every candidate, the classes compiled once and
-        // held while the statement's ranges borrow their bounds.
+        let spellings = SuffixSpellings::new(named, ignore, self.path_order())?;
+        let rows: Vec<(usize, i64)> = self
+            .run_statement(
+                record,
+                Ran::new(FindStatement::CandidateSuffixes, spellings.statement()?),
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|problem| error::sql("naming candidates by their suffixes", problem))?;
+        spellings.suffixes(rows)
+    }
+}
+
+/// Every suffix spelling of a set of candidates, each spelling's class
+/// compiled once, and the ranges [`FindStatement::CandidateSuffixes`] reads
+/// them through: the one way a candidate's minimal disambiguating suffix is
+/// found, whichever connection the statement runs on.
+pub(crate) struct SuffixSpellings<'a> {
+    /// Each candidate's id, one of its spellings, and the class it opens, in
+    /// the order the candidate's spellings run.
+    spelled: Vec<(i64, String, TargetClass)>,
+    /// The index in `spelled` of the spelling each range of the statement
+    /// belongs to.
+    owners: Vec<usize>,
+    ignore: &'a AmbiguityIgnore,
+    order: StoredPathOrder,
+}
+
+impl<'a> SuffixSpellings<'a> {
+    /// The spellings of each candidate `named` holds, by its id and its path,
+    /// compiled under `order` less the places `ignore` names.
+    pub(crate) fn new(
+        named: &BTreeMap<i64, &str>,
+        ignore: &'a AmbiguityIgnore,
+        order: StoredPathOrder,
+    ) -> Result<Self, StoreError> {
         let mut spelled: Vec<(i64, String, TargetClass)> = Vec::new();
         for (document, path) in named {
             for spelling in DocumentPath::new(path)?.suffix_spellings() {
@@ -259,37 +292,56 @@ impl Snapshot {
                 }
             }
         }
-        let mut ranges: Vec<SpellingRange<'_>> = Vec::new();
-        let mut owners: Vec<usize> = Vec::new();
-        for (at, (_, spelling, class)) in spelled.iter().enumerate() {
-            for (lower, upper) in class.probe().ranges() {
-                ranges.push(SpellingRange {
-                    lower,
-                    upper,
-                    segments: spelling.split('/').count(),
-                });
-                owners.push(at);
-            }
-        }
-        let rows: Vec<(usize, i64)> = self
-            .run_statement(
-                record,
-                Ran::new(
-                    FindStatement::CandidateSuffixes,
-                    compose_candidate_suffixes(&ranges, ignore, order)?,
-                ),
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|problem| error::sql("naming candidates by their suffixes", problem))?;
-        let mut members: Vec<BTreeSet<i64>> = vec![BTreeSet::new(); spelled.len()];
+        let owners = spelled
+            .iter()
+            .enumerate()
+            .flat_map(|(at, (_, _, class))| class.probe().ranges().map(move |_| at))
+            .collect();
+        Ok(SuffixSpellings {
+            spelled,
+            owners,
+            ignore,
+            order,
+        })
+    }
+
+    /// The statement that reads at most two documents of each range of each
+    /// spelling's class, each row the range's index and a document's id.
+    pub(crate) fn statement(&self) -> Result<(String, Vec<Value>), StoreError> {
+        let ranges: Vec<SpellingRange<'_>> = self
+            .spelled
+            .iter()
+            .flat_map(|(_, spelling, class)| {
+                let segments = spelling.split('/').count();
+                class
+                    .probe()
+                    .ranges()
+                    .map(move |(lower, upper)| SpellingRange {
+                        lower,
+                        upper,
+                        segments,
+                    })
+            })
+            .collect();
+        compose_candidate_suffixes(&ranges, self.ignore, self.order)
+    }
+
+    /// Each candidate's minimal disambiguating suffix, by its id, read off the
+    /// rows [`SuffixSpellings::statement`] answered: the first of its
+    /// spellings whose class held it alone.
+    pub(crate) fn suffixes(
+        self,
+        rows: Vec<(usize, i64)>,
+    ) -> Result<HashMap<i64, String>, StoreError> {
+        let mut members: Vec<BTreeSet<i64>> = vec![BTreeSet::new(); self.spelled.len()];
         for (range, document) in rows {
-            let owner = owners.get(range).ok_or_else(|| StoreError::Damaged {
+            let owner = self.owners.get(range).ok_or_else(|| StoreError::Damaged {
                 what: format!("a suffix read answered a range it was not asked, {range}"),
             })?;
             members[*owner].insert(document);
         }
         let mut suffixes: HashMap<i64, String> = HashMap::new();
-        for ((document, spelling, _), members) in spelled.into_iter().zip(members) {
+        for ((document, spelling, _), members) in self.spelled.into_iter().zip(members) {
             if members.len() == 1 && members.contains(&document) {
                 suffixes.entry(document).or_insert(spelling);
             }

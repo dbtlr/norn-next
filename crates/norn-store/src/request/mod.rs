@@ -81,7 +81,8 @@ use crate::facts::{
     StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone,
     TagFact, TagSource, VaultSchemaPin,
 };
-use crate::fields::{FieldContainer, FieldRow, FieldRows, OffsetSpelling};
+use crate::fields::{ContentModel, FieldContainer, FieldRow, FieldRows, OffsetSpelling};
+use crate::health;
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, PathKey, SuffixKey, SuffixProbe};
 use crate::resolve::{self, AmbiguityIgnore, TargetClass};
@@ -168,7 +169,7 @@ pub struct Request<'a> {
 /// Each count is a [`Cell`] because the readers take `&self` — the connection
 /// they borrow is a field of the same struct.
 #[derive(Default)]
-struct ReadWork {
+pub(crate) struct ReadWork {
     steps: Cell<u64>,
     statements: Cell<u64>,
 }
@@ -1242,6 +1243,23 @@ impl<'a> Request<'a> {
         )
     }
 
+    /// The link-health findings about every link the documents at
+    /// `documents` hold, judged against the documents this store holds now
+    /// under the ambiguity-ignore globs `declared` names.
+    pub fn judge_link_health(
+        &self,
+        documents: &[DocumentPath],
+        declared: &ContentModel,
+    ) -> Result<Vec<FindingFacts>, StoreError> {
+        health::judge(
+            self.store.connection(),
+            &self.read_work,
+            self.store.path_order(),
+            declared.ambiguity_ignore(),
+            documents,
+        )
+    }
+
     /// Every finding belonging to an ambiguity class the probe opens.
     ///
     /// This is what scopes findings maintenance: a changed path names a class,
@@ -1426,7 +1444,7 @@ impl<'a> Request<'a> {
 
     /// The same, on a connection the caller names — a read snapshot's own
     /// transaction — with the steps and the statement still this request's.
-    fn read_all_on<T>(
+    pub(crate) fn read_all_on<T>(
         connection: &Connection,
         work: &ReadWork,
         sql: &str,
@@ -2639,7 +2657,7 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
 
 /// A link row as [`Request::stored_facts`] reads it: the link, and the address
 /// kind stored beside it after the columns [`stored_link`] reads.
-fn stored_link_row(row: &Row<'_>) -> Reading<StoredLink> {
+pub(crate) fn stored_link_row(row: &Row<'_>) -> Reading<StoredLink> {
     let written: String = row.get(12)?;
     let Some(address) = LinkAddressKind::ALL
         .into_iter()

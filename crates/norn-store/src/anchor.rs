@@ -20,16 +20,11 @@
 //! link with none holds no reading and no block reference, and the predicate
 //! is false for it.
 //!
-//! **A dormant carrier.** Its consuming layer is the link-health judgment the
-//! store re-decision ([ADR 0027]) rules into the store: it files a
-//! missing-anchor finding where a link carries an anchor and resolves to one
-//! document that does not hold the place the anchor names, and it embeds
-//! [`carries_anchor`] and [`anchor_held`] to decide that. The store judges no
-//! finding yet, so no reader runs either predicate: [`link_anchor_held_sql`]
-//! is explained through [`crate::ExplainedStatement::LinkAnchorHeld`], which
-//! is what bars the indexes it seeks until the judgment runs it.
-//!
-//! [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+//! Both are spliced into one statement, the link-health judgment's
+//! ([`crate::health::statement::anchors_sql`]), which judges a missing anchor
+//! where a link carries one and resolves to one document that does not hold
+//! the place it names. That judgment is a dormant carrier until the changeset
+//! runs it ([`crate::health`]).
 
 /// The predicate that the `links` row aliased `link` carries an anchor: a
 /// heading anchor or a block reference.
@@ -57,30 +52,16 @@ pub(crate) fn anchor_held(link: &str, target: &str) -> String {
     )
 }
 
-/// Whether the link at ordinal `?2` among the links of the document whose row
-/// id is `?1` carries an anchor, and whether the document whose row id is `?3`
-/// holds the place that anchor names: two columns, [`carries_anchor`] and
-/// [`anchor_held`] over the link.
-///
-/// The link is reached by `links_document_ordinal`.
-pub(crate) fn link_anchor_held_sql() -> String {
-    format!(
-        "SELECT {}, {} FROM links AS l WHERE l.document = ?1 AND l.ordinal = ?2",
-        carries_anchor("l"),
-        anchor_held("l", "?3")
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use norn_db::rusqlite::params;
+    use norn_db::rusqlite::{OptionalExtension, params, params_from_iter};
     use norn_text::{BodyScan, Heading, SectionAddress, anchor_readings, heading_reading};
 
-    use super::*;
     use crate::facts::{
         AnchorReadings, BlockFact, DerivationVersion, DocumentFacts, HeadingFact, LinkAnchor,
         LinkFact, LinkFamily, Span, StoredPathOrder,
     };
+    use crate::health::statement::{anchors_parameters, anchors_sql};
     use crate::increment::{Change, IncrementProvenance};
     use crate::path::DocumentPath;
     use crate::store::Store;
@@ -352,14 +333,28 @@ mod tests {
                     }
                     Anchor::Block(id) => blocks.contains(id),
                 };
-                let (carried, stored): (bool, bool) = store
+                let link: i64 = store
                     .connection()
                     .query_row(
-                        &link_anchor_held_sql(),
-                        params![holder_id, ordinal as i64, target_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        "SELECT id FROM links WHERE document = ?1 AND ordinal = ?2",
+                        params![holder_id, ordinal as i64],
+                        |row| row.get(0),
                     )
+                    .expect("a link row");
+                // A link carrying no anchor answers no row; one carrying an
+                // anchor answers whether the target holds it.
+                let judged: Option<bool> = store
+                    .connection()
+                    .query_row(
+                        &anchors_sql(),
+                        params_from_iter(
+                            anchors_parameters(&[(link, target_id)]).expect("the pair's values"),
+                        ),
+                        |row| row.get(1),
+                    )
+                    .optional()
                     .expect("evaluating the predicate");
+                let (carried, stored) = (judged.is_some(), judged.unwrap_or(false));
                 let written = match anchor {
                     Anchor::Heading(written) | Anchor::Block(written) => written,
                 };

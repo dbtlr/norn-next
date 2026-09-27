@@ -58,7 +58,7 @@ pub use filter::{READ_FILTERS, ReadFilter};
 pub(crate) use finding::{FINDING_ROW_COLUMNS, FindingBase, cursor_position, finding_base};
 pub(crate) use glob::register_functions;
 pub(crate) use keys::key_walk;
-pub(crate) use naming::{Naming, wire_path};
+pub(crate) use naming::{Naming, SuffixSpellings, wire_path};
 pub(crate) use run::{Lookups, Ran, Stepped};
 
 /// How many rows a page holds when a request names no bound.

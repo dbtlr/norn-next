@@ -17,7 +17,9 @@ use norn_wire::{
     VaultName,
 };
 
-use crate::common::{Scratch, ambiguity, document, unread_block, violation, write_documents};
+use crate::common::{
+    Scratch, ambiguity, classes, document, unread_block, violation, write_documents,
+};
 use crate::find::{
     SEED_SCHEMA, Seeded, declared, integer_order, map, order_of, request, sorted, string,
 };
@@ -972,6 +974,7 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
         let mut finding = unread_block("notes/a.md");
         finding.kind = kind;
         finding.ordinal = Some(ordinal);
+        finding.class_keys = classes(&["glossary/"]);
         finding
     };
     for finding in [
@@ -1067,7 +1070,15 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
         "the findings about the document, then link 0's, then link 1's"
     );
     assert_eq!(a.items[1].head.total(), 3);
-    assert!(a.items[1].hint.is_some());
+    // Only the ambiguous link's finding carries a hint, though link 0's and
+    // the document's stand in a class too.
+    assert_eq!(
+        a.items
+            .iter()
+            .map(|item| item.hint.is_some())
+            .collect::<Vec<_>>(),
+        [false, false, false, true]
+    );
     assert_eq!(by_path("notes/B.md").items, Vec::new());
     assert_eq!(by_path("notes/B.md").total, 0);
     assert_eq!(

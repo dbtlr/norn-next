@@ -801,8 +801,12 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::FindingPaths(_) => {
             "a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead"
         }
-        ExplainedStatement::LinkAnchorHeld => {
-            "the_anchor_predicate_seeks_one_documents_readings_slugs_and_blocks"
+        ExplainedStatement::LinkHealthLinks
+        | ExplainedStatement::LinkHealthHeads
+        | ExplainedStatement::LinkHealthTotals
+        | ExplainedStatement::LinkHealthSuffixes
+        | ExplainedStatement::LinkHealthAnchors => {
+            "the_link_health_judgment_seeks_every_row_it_reads"
         }
     }
 }
@@ -1152,9 +1156,9 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             norn_store::SubjectScope::Vault,
             norn_store::StoredPathOrder::Sensitive,
         ),
-        ExplainedStatement::LinkAnchorHeld,
     ]
     .into_iter()
+    .chain(crate::health::LINK_HEALTH)
     .chain(ENUMERATIONS.iter().copied())
     .chain(FEEDS.iter().copied())
     .chain(ExplainedStatement::point_reads(&subject))
@@ -1180,8 +1184,8 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             "a_pins_typed_value_clear_reads_only_the_rows_that_hold_one",
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
+            "the_link_health_judgment_seeks_every_row_it_reads",
             "the_path_discard_seeks_finding_paths_path_key",
-            "the_anchor_predicate_seeks_one_documents_readings_slugs_and_blocks",
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<&str>>()
@@ -1479,7 +1483,11 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::FindingClasses(_)
         | ExplainedStatement::PathDiscard(_)
         | ExplainedStatement::FindingPaths(_)
-        | ExplainedStatement::LinkAnchorHeld => None,
+        | ExplainedStatement::LinkHealthLinks
+        | ExplainedStatement::LinkHealthHeads
+        | ExplainedStatement::LinkHealthTotals
+        | ExplainedStatement::LinkHealthSuffixes
+        | ExplainedStatement::LinkHealthAnchors => None,
     }
 }
 
@@ -1538,74 +1546,6 @@ fn a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for() {
         if !expected.sorts {
             read.assert_no_temp_btree();
         }
-    }
-}
-
-/// **Whether a document holds the place a link's anchor names is a handful of
-/// equality seeks into that one document.** The predicate the link-health
-/// judgment embeds reads the link by `links_document_ordinal`, the target's
-/// headings by `headings_document_reading` for the anchor's text and marked
-/// readings and by `headings_document_slug` for the anchor itself, and the
-/// target's blocks by `blocks_document_block_id`: each an equality on the
-/// document and the reading, so the predicate costs the matching rows of one
-/// document whatever the vault holds, and sorts nothing.
-///
-/// Control: each of the three indexes dropped on a store of its own, and the
-/// same bar fails.
-#[test]
-fn the_anchor_predicate_seeks_one_documents_readings_slugs_and_blocks() {
-    let seeks = [
-        ("l", "links_document_ordinal", "(document=? AND ordinal=?)"),
-        (
-            "hr",
-            "headings_document_reading",
-            "(document=? AND reading=?)",
-        ),
-        ("hs", "headings_document_slug", "(document=? AND slug=?)"),
-        (
-            "hb",
-            "blocks_document_block_id",
-            "(document=? AND block_id=?)",
-        ),
-    ];
-    let judge = |store: &mut norn_store::Store| {
-        let read = plan(
-            store
-                .begin_request()
-                .emitted_plan(ExplainedStatement::LinkAnchorHeld)
-                .expect("a query plan"),
-        );
-        read.assert_no_full_scan();
-        read.assert_no_temp_btree();
-        for (alias, index, constraint) in seeks {
-            let steps: Vec<&PlanRow> = read
-                .rows()
-                .iter()
-                .filter(|row| row.searches() == Some(alias))
-                .collect();
-            assert!(
-                !steps.is_empty()
-                    && steps.iter().all(|row| {
-                        row.index() == Some(index) && row.constraint() == Some(constraint)
-                    }),
-                "`{alias}` is not an equality seek of `{index}` on {constraint}: {:?}\n\
-                 emitted SQL: {}",
-                read.rows(),
-                read.sql()
-            );
-        }
-    };
-
-    let scratch = Scratch::new("anchor-predicate-plan");
-    judge(&mut scratch.open());
-
-    for (_, index, _) in &seeks[1..] {
-        let scratch = Scratch::new(&format!("anchor-predicate-plan-without-{index}"));
-        let mut store = scratch.open();
-        induced_failure::execute_out_of_band(&mut store, &format!("DROP INDEX {index}"))
-            .unwrap_or_else(|problem| panic!("dropping {index}: {problem}"));
-        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| judge(&mut store)));
-        assert!(failed.is_err(), "the bar held with {index} dropped");
     }
 }
 
