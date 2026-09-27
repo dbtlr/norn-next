@@ -283,8 +283,8 @@ pub trait EntryOps: Send + Sync + 'static {
     /// Apply one coalesced document envelope. A rescan widens rather than
     /// discarding uncertainty.
     ///
-    /// A control-file fact reaches this method only as the schema fact an
-    /// attachment whose vault schema withholds trust takes one in as. That
+    /// A control-file fact reaches this method only one way: an attachment
+    /// whose vault schema withholds trust takes it in as the schema fact. That
     /// fact can stand pending across the recovery that heals the attachment
     /// and reach the reconcile after it, where it is inert: a reconcile
     /// derives documents and reads no control file.
