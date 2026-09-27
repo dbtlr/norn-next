@@ -26,9 +26,12 @@ one planner and the one applier invariant 4 names.
   and the vault's root identity. A transition names a path, the state the file must hold
   before the write, and the state it holds after; each state is either absent or a content
   hash. Operations on one file compose in order at planning time and stand or fall
-  together. An operation over a set of documents expands at planning time into one
-  operation per document. A move's destination must be absent at planning, or vacated by
-  another operation of the same plan, which the move then requires.
+  together. An operation over a set of documents — a `set` over a query, a folder move —
+  expands at planning time into one operation per document. A move's destination must be
+  absent at planning, or vacated by another operation of the same plan, which the move then
+  requires; on a root that folds case, a destination that differs from its source only in
+  case names the source itself, and a case-only rename is that move, not an occupied
+  name.
 - **Everything a plan varies on is fixed at planning time.** Every template value — a
   `{{seq}}` identifier, a timestamp, a default — resolves into the resolved plan's
   operations and paths, so recomposing a target is a pure function of the before-states
