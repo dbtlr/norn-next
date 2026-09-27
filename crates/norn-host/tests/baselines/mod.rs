@@ -384,21 +384,21 @@ pub const READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// bytes for every one of those 1,700 extra documents' links; one that
 /// followed only the re-decided set holds the same bytes at both scales.
 ///
-/// Observed on macos-arm64 on 2026-09-27, over three runs: **-938 bytes** in
-/// every one — `ambiguous` held 197,393 bytes above its attach's mark and
-/// `realistic` 196,455, identically across the three readings. Both are the
-/// same 200-in-link write's own working set, near the floor of one
-/// allocation's own bookkeeping, and the difference does not favor either
-/// scale.
+/// Observed on macos-arm64 on 2026-09-27, over two runs: **0 bytes** in
+/// both. Each profile held 225,588 bytes above its mark, the same
+/// 200-in-link write's own working set at both scales. The mark is taken
+/// after the attachment is dropped and the peak is read as the write
+/// returns, so neither the host's teardown nor a read of the vault falls
+/// inside the window.
 ///
-/// The allowance is **4 KiB**, the same order [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`]
-/// is authored at and for the same reason: it sits far above the observed
-/// noise floor and far below the megabyte-scale growth the mutation above
-/// produced, which this bar catches by orders of magnitude rather than by a
-/// hair.
+/// The allowance is **4 KiB**, the same order
+/// [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] is authored at. A retention of
+/// some bytes for every one of the 1,700 extra documents fails it from
+/// **2.5 bytes a document** (4,096 / 1,700) at the observed difference.
 ///
 /// **Platform scope: the Linux measurement lane.** The per-PR `memory
-/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates.
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; no
+/// hosted reading stands beside the local ones yet.
 pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 
 /// How many descriptors a long mixed load may add to the count taken once the

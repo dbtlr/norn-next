@@ -428,19 +428,20 @@ fn hub_write_heap_growth(label: &str, profile: &str) -> u64 {
 /// the vault now derives and the most that write raised the heap above the
 /// mark.
 ///
-/// **The mark is taken after the attach and before the write.** The
-/// attachment is dropped before the write runs, the same way the counter
-/// gate's direct-store writes are, so no watcher thread allocates beside the
-/// measurement; what the mark sees from that point on is the write's own
-/// heap, never the heal's.
+/// **The mark is taken after the attachment is dropped and before the
+/// write, and the peak is read before anything else runs.** The attachment
+/// is dropped the same way the counter gate's direct-store writes drop it, so
+/// no watcher thread allocates beside the measurement and its teardown lands
+/// before the mark; the window between the mark and the reading holds the
+/// write's own heap alone.
 #[allow(clippy::disallowed_macros)] // The child's report is a machine-consumed stream its parent reads.
 fn hub_write_and_report(root: &Path) {
     let vault = attach::Vault::adopt(root);
-    let mark = {
+    {
         let host = vault.host();
         attach::attach_and_wait(&host, vault.name());
-        heap::Mark::set()
-    };
+    }
+    let mark = heap::Mark::set();
     let mut store = vault.store();
     let mut request = store.begin_request();
     let declared = request
@@ -462,8 +463,9 @@ fn hub_write_and_report(root: &Path) {
             &declared,
         )
         .expect("writing the hub");
+    let peak = mark.peak_above();
     println!("{}", report_line(attach::derived_documents(&mut store)));
-    println!("hub write heap peak {}", mark.peak_above());
+    println!("hub write heap peak {peak}");
 }
 
 /// **The read ceiling**, and the harness a reading child runs.
