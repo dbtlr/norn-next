@@ -346,6 +346,17 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
+        id: "churn-hub-class-change-and-rename",
+        suite: Suite::Churn,
+        lane: Lane::RealWatcher,
+        states: "a hub's stem class gains and loses a member, and the hub is then renamed, \
+                 converging on a build from zero with every backlink's link-health finding \
+                 equal to the rebuild's",
+        carrier: "crates/norn-host/tests/churn.rs::\
+                  a_hubs_stem_class_change_and_its_rename_converges_on_a_build_from_zero",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
         id: "churn-rendering-collision-clears",
         suite: Suite::Churn,
         lane: Lane::RealWatcher,

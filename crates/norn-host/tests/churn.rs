@@ -647,6 +647,113 @@ fn an_ambiguity_classs_membership_change_converges_on_a_build_from_zero() {
     }
 }
 
+/// **A hub's stem class gains and loses a member, and the hub is then
+/// renamed.** Three backlinks name `hub` by its bare stem; another document
+/// joins the class `hub/` and leaves it again, and then the hub itself is
+/// renamed — a death of the old path beside a write of the new, which moves
+/// both the class the backlinks resolve through and the path the old name
+/// keyed. The link-health findings the changeset re-decides alongside those
+/// acts (ADR 0027) are held to the same bar as every other derived fact: the
+/// running host's store equals a build from zero over the same final tree,
+/// field by field and finding by finding.
+#[test]
+fn a_hubs_stem_class_change_and_its_rename_converges_on_a_build_from_zero() {
+    let mut ink = churn::Ink::new(89);
+    let opening = Script::new(
+        "a hub three backlinks name by its bare stem, before its class or its name move",
+        vec![
+            Step::new(
+                "write the hub the backlinks below name",
+                Act::Write {
+                    at: "churn/hub/hub.md".to_string(),
+                    bytes: ink.document("hub"),
+                },
+            ),
+            Step::new(
+                "write the first backlink",
+                Act::Write {
+                    at: "churn/hub/linker-one.md".to_string(),
+                    bytes: b"# Linker one\n\nSee [[hub]].\n".to_vec(),
+                },
+            ),
+            Step::new(
+                "write the second backlink",
+                Act::Write {
+                    at: "churn/hub/linker-two.md".to_string(),
+                    bytes: b"# Linker two\n\nSee [[hub]].\n".to_vec(),
+                },
+            ),
+            Step::new(
+                "write the third backlink",
+                Act::Write {
+                    at: "churn/hub/linker-three.md".to_string(),
+                    bytes: b"# Linker three\n\nSee [[hub]].\n".to_vec(),
+                },
+            ),
+        ],
+    );
+    let changing = Script::new(
+        "a note joins the hub's class and leaves it again, then the hub is renamed",
+        vec![
+            Step::new(
+                "write a second document sharing the hub's stem, in another directory",
+                Act::Write {
+                    at: "churn/hub/other/hub.md".to_string(),
+                    bytes: ink.document("another hub"),
+                },
+            ),
+            Step::new(
+                "take the joining document out of the class again",
+                Act::Remove {
+                    at: "churn/hub/other/hub.md".to_string(),
+                },
+            ),
+            Step::new(
+                "rename the hub the three backlinks name",
+                Act::Rename {
+                    from: "churn/hub/hub.md".to_string(),
+                    to: "churn/hub/hub-renamed.md".to_string(),
+                },
+            ),
+        ],
+    );
+    let mut churned = churn_the_vault(
+        "churn-hub-class-and-rename",
+        &churn::Phased::new(opening, changing),
+    );
+    churned.assert_rows_were_taken_away();
+    churned.judge("a hub's stem class change and its own rename", 0);
+
+    // The rename moves the class `hub/`'s only member to a name none of the
+    // three backlinks spell, and no other document ever takes it: a build
+    // from zero over the final tree files every backlink broken, and so must
+    // the churned store — the claim the equivalence bar above states in the
+    // aggregate, read here off the three links it is really about.
+    const LINKERS: [&str; 3] = [
+        "churn/hub/linker-one.md",
+        "churn/hub/linker-two.md",
+        "churn/hub/linker-three.md",
+    ];
+    for (label, vault) in churned.both_derivations() {
+        let mut store = vault.store();
+        for linker in LINKERS {
+            let findings: Vec<(String, Option<u64>)> = store
+                .begin_request()
+                .stored_findings(&DocumentPath::new(linker).expect("a document path"))
+                .expect("reading findings")
+                .into_iter()
+                .filter(|finding| finding.kind.starts_with("link/"))
+                .map(|finding| (finding.kind, finding.ordinal))
+                .collect();
+            assert_eq!(
+                findings,
+                vec![(FindingKind::Broken.as_str().to_string(), Some(0))],
+                "{label}: `{linker}`'s link to the renamed hub does not read broken"
+            );
+        }
+    }
+}
+
 /// **A rendering collision that clears.**
 ///
 /// A name the document-path grammar refuses is reported at the spelling norn
