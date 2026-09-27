@@ -2,8 +2,9 @@
 //! stops, how it is addressed, and what a replace leaves alone.
 
 use norn_text::{
-    BodyScan, Document, EditError, Heading, SectionAddress, SectionError, SectionSpan, Value,
-    resolve_section as resolve_section_over, slugify,
+    AnchorReadings, BodyScan, Document, EditError, Heading, SectionAddress, SectionError,
+    SectionSpan, Value, anchor_readings, heading_reading, resolve_section as resolve_section_over,
+    slugify,
 };
 
 /// A section resolved against a bare body, through the one public entry point
@@ -875,4 +876,134 @@ fn replacing_a_section_leaves_the_frontmatter_untouched() {
             .map(|map| map.keys().collect::<Vec<_>>()),
         Some(vec!["title", "tags"])
     );
+}
+
+// ── The readings an anchor and a heading are compared by ─────────────────
+
+/// **A heading's reading is its text as an anchor compares it**: trimmed, each
+/// run of ASCII space one space, ASCII case folded, and nothing outside ASCII
+/// touched.
+#[test]
+fn a_headings_reading_folds_ascii_case_and_space_alone() {
+    assert_eq!(heading_reading("  Design \t Notes "), "design notes");
+    assert_eq!(heading_reading("ÉMILE"), "Émile".to_ascii_lowercase());
+    assert_eq!(heading_reading("Intro\u{a0}"), "intro\u{a0}");
+    assert_eq!(heading_reading(""), "");
+}
+
+/// **An anchor is read three ways**: its text as a heading reading, the heading
+/// text past its `#` markers, and its slug reading, which is the anchor exactly.
+#[test]
+fn an_anchor_is_read_as_text_past_its_markers_and_as_a_slug() {
+    let readings = |anchor: &str| anchor_readings(anchor).expect("an anchor");
+    assert_eq!(
+        readings("Design  NOTES"),
+        AnchorReadings {
+            text: "design notes".into(),
+            marked: None,
+            slug: "Design  NOTES".into(),
+        }
+    );
+    assert_eq!(
+        readings("## State ##"),
+        AnchorReadings {
+            text: "## state ##".into(),
+            marked: Some("state".into()),
+            slug: "## State ##".into(),
+        },
+        "an ATX anchor is marked by its opening"
+    );
+    assert_eq!(
+        readings("Top#Sub Part"),
+        AnchorReadings {
+            text: "top#sub part".into(),
+            marked: Some("sub part".into()),
+            slug: "Top#Sub Part".into(),
+        },
+        "a heading chain is marked by its last heading"
+    );
+}
+
+/// **An empty anchor reads as no anchor.** `[[note#]]` names the note, and so
+/// does a target written `note#`.
+#[test]
+fn an_empty_anchor_reads_as_no_anchor() {
+    assert_eq!(anchor_readings(""), None);
+    let body = "#\nempty heading\n## Alpha\na\n";
+    assert_eq!(
+        resolve_section(body, ""),
+        Err(SectionError::HeadingNotFound { heading: "".into() }),
+        "an empty anchor names no heading, the empty one included"
+    );
+}
+
+/// **A percent-encoded anchor is decoded once**, as the Markdown link
+/// `[x](Note.md#My%20Heading)` is written, and every reading reads the decoded
+/// anchor. A `%` that spells no byte is itself, and a decoding that is not
+/// UTF-8 leaves the anchor as written.
+#[test]
+fn a_percent_encoded_anchor_is_decoded_once() {
+    let body = "## My Heading\nmine\n## 100%\npercent\n## Über uns\nabout\n";
+    let mine = resolve_section(body, "My Heading").expect("the heading by its text");
+    assert_eq!(resolve_section(body, "My%20Heading"), Ok(mine));
+    assert_eq!(resolve_section(body, "my%20heading"), Ok(mine));
+    let about = resolve_section(body, "Über uns").expect("the heading by its text");
+    assert_eq!(
+        resolve_section(body, "%C3%BCber-uns"),
+        Ok(about),
+        "the slug reading reads the decoded anchor"
+    );
+    let percent = resolve_section(body, "100%").expect("the heading by its text");
+    assert_eq!(resolve_section(body, "100%25"), Ok(percent));
+    assert_eq!(
+        resolve_section(body, "100%2525"),
+        Err(SectionError::HeadingNotFound {
+            heading: "100%2525".into()
+        }),
+        "an anchor is decoded once, never twice"
+    );
+    assert_eq!(
+        anchor_readings("a%FFb").map(|readings| readings.slug),
+        Some("a%FFb".into()),
+        "a decoding that is not UTF-8 leaves the anchor as written"
+    );
+    assert_eq!(
+        anchor_readings("50%-off").map(|readings| readings.slug),
+        Some("50%-off".into()),
+        "a `%` that spells no byte is itself"
+    );
+}
+
+/// **A heading chain matches on its last heading**, as `[[note#Top#Sub]]` is
+/// written, where no heading's own text is the whole anchor: a heading whose
+/// text holds a `#` is still reached by that text first.
+#[test]
+fn a_heading_chain_matches_on_its_last_heading() {
+    let body = "# Top\nt\n## Sub\nsub\n## Other\no\n";
+    let sub = resolve_section(body, "Sub").expect("the last heading");
+    assert_eq!(resolve_section(body, "Top#Sub"), Ok(sub));
+    assert_eq!(resolve_section(body, "Anything#sub"), Ok(sub));
+    let encoded = "# Top\nt\n## My Sub\nmine\n";
+    assert_eq!(
+        resolve_section(encoded, "Top#My%20Sub"),
+        resolve_section(encoded, "My Sub"),
+        "a chain is read after the anchor is decoded"
+    );
+
+    let body = "## C# tips\ntips\n## tips\nplain\n";
+    let tips = resolve_section(body, "C# tips").expect("the heading whose text holds a hash");
+    assert_eq!(&body[tips.content_start..tips.content_end], "tips\n");
+
+    // A chain names a heading on both sides of a `#`: a hash run opening the
+    // anchor is not a chain, and a chain ending in a `#` names no last heading.
+    let body = "## Alpha\na\n";
+    for anchor in ["#Alpha", "####### Alpha", "Alpha#", "Alpha# "] {
+        assert_eq!(
+            resolve_section(body, anchor),
+            Err(SectionError::HeadingNotFound {
+                heading: anchor.into()
+            }),
+            "for {anchor:?}"
+        );
+    }
 }
