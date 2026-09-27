@@ -682,6 +682,7 @@ fn a_finding_filed_outside_the_store_s_key_space_is_refused() {
             facts: filed,
             replaces: None,
         }],
+        &norn_store::ContentModel::none(),
     );
     assert!(
         matches!(refused, Err(StoreError::KeySpace { order: Folding, .. })),

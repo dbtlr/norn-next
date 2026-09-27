@@ -147,6 +147,18 @@ pub fn full_text_matches(store: &Store, expression: &str) -> Vec<String> {
         .collect()
 }
 
+/// The declaration of the schema `request`'s store pins, declaring nothing,
+/// or of no schema where it pins none: the declaration a changeset's link
+/// health is judged under in a case that declares no ambiguity-ignore glob.
+pub fn pinned_declaration(request: &Request<'_>) -> ContentModel {
+    request
+        .vault_schema_pin()
+        .expect("reading the pinned schema")
+        .map_or_else(ContentModel::none, |pin| {
+            ContentModel::under(pin.fingerprint)
+        })
+}
+
 /// Write one document as a changeset of its own.
 ///
 /// The store's one way in for document facts is a changeset, so a case that is
@@ -159,6 +171,7 @@ pub fn write_document(request: &mut Request<'_>, facts: &DocumentFacts) -> Incre
             IncrementProvenance::Derived,
             [Change::Upsert(facts.clone())],
             &[],
+            &pinned_declaration(request),
         )
         .expect("applying a document upsert")
 }
@@ -177,6 +190,7 @@ pub fn record_death(
                 provenance,
             }],
             &[],
+            &pinned_declaration(request),
         )
         .expect("applying a death")
 }
@@ -193,6 +207,7 @@ pub fn write_documents(request: &mut Request<'_>, facts: &[DocumentFacts]) -> In
                 .map(Change::Upsert)
                 .collect::<Vec<_>>(),
             &[],
+            &pinned_declaration(request),
         )
         .expect("applying a changeset")
 }

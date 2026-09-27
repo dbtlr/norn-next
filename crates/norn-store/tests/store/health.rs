@@ -41,7 +41,7 @@ fn declared() -> ContentModel {
 /// The document at `at` whose body is `body`, with the links, headings and
 /// blocks the text layer reads out of it, mapped onto the store's facts as the
 /// host maps them.
-fn derived(at: &str, body: &str) -> DocumentFacts {
+pub(crate) fn derived(at: &str, body: &str) -> DocumentFacts {
     let scan = norn_text::BodyScan::new(body);
     let mut facts = DocumentFacts::new(path(at), format!("hash-{at}"), body, body.len() as u64);
     let span = |value: norn_text::SourceSpan| Span {
@@ -102,7 +102,7 @@ fn derived(at: &str, body: &str) -> DocumentFacts {
 }
 
 /// A body holding each of `lines` as a paragraph of its own.
-fn body_of(lines: &[&str]) -> String {
+pub(crate) fn body_of(lines: &[&str]) -> String {
     lines.iter().map(|line| format!("{line}\n\n")).collect()
 }
 

@@ -30,6 +30,7 @@ mod lifecycle;
 mod links;
 mod pillars;
 mod readers;
+mod redecision;
 mod resolve;
 mod search;
 mod validate;

@@ -1838,6 +1838,7 @@ mod tests {
                 crate::increment::IncrementProvenance::Derived,
                 [crate::increment::Change::Upsert(facts)],
                 &[],
+                &crate::fields::ContentModel::none(),
             )
             .expect("a changeset that writes one document");
     }

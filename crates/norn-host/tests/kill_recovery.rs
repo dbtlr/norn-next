@@ -140,9 +140,12 @@ fn tear_increment() -> ! {
             28,
         ))
     });
-    let _ = store
-        .begin_request()
-        .apply_increment(IncrementProvenance::Derived, changes, &[]);
+    let _ = store.begin_request().apply_increment(
+        IncrementProvenance::Derived,
+        changes,
+        &[],
+        &norn_store::ContentModel::none(),
+    );
     panic!("induced abort did not fire")
 }
 

@@ -3472,6 +3472,7 @@ impl<'s> Pending<'s> {
                 IncrementProvenance::Derived,
                 self.changes.drain(..),
                 &findings,
+                self.declared.model.content_model(),
             )
             .map_err(store_effect)?;
         // The outcome is the store's account of what this changeset did, and it
@@ -10102,7 +10103,12 @@ mod tests {
         });
         store
             .begin_request()
-            .apply_increment(norn_store::IncrementProvenance::Derived, changes, &[])
+            .apply_increment(
+                norn_store::IncrementProvenance::Derived,
+                changes,
+                &[],
+                &norn_store::ContentModel::none(),
+            )
             .unwrap();
     }
 
@@ -10308,6 +10314,7 @@ mod tests {
                     NOTE.len() as u64,
                 ))],
                 &[],
+                &norn_store::ContentModel::none(),
             )
             .unwrap();
         let stale_epoch = stale.epoch().to_string();

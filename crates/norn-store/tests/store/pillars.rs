@@ -1915,6 +1915,7 @@ fn a_feed_drained_a_page_at_a_time_reaches_every_row_in_generation_order() {
                 provenance: Provenance::HealPrune,
             }),
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("recording two deaths in one changeset")
         .generation
@@ -2015,6 +2016,7 @@ fn a_path_killed_and_rewritten_in_one_changeset_stands_only_in_the_document_feed
                 norn_store::Change::Upsert(document(at.as_str(), "hash-2", "another body\n")),
             ],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("killing and rewriting one path in one changeset");
 

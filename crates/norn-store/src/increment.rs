@@ -15,7 +15,7 @@ use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{DocumentFacts, FindingFacts, Invalidation, LinkAnchor, Provenance};
-use crate::fields::{FieldRow, OffsetSpelling};
+use crate::fields::{ContentModel, FieldRow, OffsetSpelling};
 use crate::hash;
 use crate::json;
 use crate::link::{address_kind, link_keys};
@@ -180,6 +180,7 @@ pub(crate) fn apply(
     counters: &mut DerivationCounters,
     changes: impl IntoIterator<Item = Change>,
     findings: &[DerivedFinding<'_>],
+    declared: &ContentModel,
 ) -> Result<IncrementOutcome, StoreError> {
     // The first entry is what decides whether the changeset half is an act at
     // all, so it is taken before anything is opened: an empty changeset writes
@@ -222,6 +223,11 @@ pub(crate) fn apply(
     let transaction = store
         .database
         .immediate_transaction("opening the increment transaction")?;
+    // The pin is read in the transaction every row is written in, so no pin
+    // lands between the comparisons below and the writes they admit.
+    let pinned: Option<String> =
+        norn_db::meta::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
+    refuse_a_declaration_the_store_does_not_pin(declared, pinned.as_deref())?;
 
     let mut tally = Tally::default();
     let mut generation = None;
@@ -237,7 +243,7 @@ pub(crate) fn apply(
             // them.
             let applied = match &change {
                 Change::Upsert(facts) => {
-                    refuse_typed_values_the_pin_does_not_derive(&transaction, facts).and_then(
+                    refuse_typed_values_the_pin_does_not_derive(pinned.as_deref(), facts).and_then(
                         |()| upsert(&mut statements, stamp, recorded_at, facts, &mut tally),
                     )
                 }
@@ -768,7 +774,7 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
 }
 
 /// Refuse a document whose typed field values were derived under a schema the
-/// store does not pin.
+/// store does not pin, which is `pinned`.
 ///
 /// **The typed column holds only what the pinned schema derives.** A pin
 /// clears it in the pin's own transaction, and the walk refills it under the
@@ -782,7 +788,7 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
 /// under no declaration, or under a stale one that types none of its keys,
 /// writes the typed column as a pin leaves it — empty — for the walk to fill.
 fn refuse_typed_values_the_pin_does_not_derive(
-    transaction: &Transaction<'_>,
+    pinned: Option<&str>,
     facts: &DocumentFacts,
 ) -> Result<(), StoreError> {
     let typed = facts
@@ -790,17 +796,35 @@ fn refuse_typed_values_the_pin_does_not_derive(
         .rows()
         .iter()
         .any(|row| matches!(row, FieldRow::Value { typed: Some(_), .. }));
-    if !typed {
-        return Ok(());
-    }
-    let pinned: Option<String> =
-        norn_db::meta::get_meta(transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
-    if pinned.as_deref() == facts.fields_schema() {
+    if !typed || pinned == facts.fields_schema() {
         return Ok(());
     }
     Err(StoreError::UnpinnedDeclaration {
+        what: "typed field values were derived",
         derived_under: facts.fields_schema().map(str::to_string),
-        pinned,
+        pinned: pinned.map(str::to_string),
+    })
+}
+
+/// Refuse the declaration a changeset's link health is judged under where it
+/// was read from a schema the store does not pin, which is `pinned`.
+///
+/// **Link-health findings are judged under the pinned schema's
+/// ambiguity-ignore globs**, and filed under its fingerprint, so a finding
+/// judged under another declaration's globs is one a rebuild under the pinned
+/// schema would not file — and one a later pin's discard would not reach as
+/// the finding it is.
+fn refuse_a_declaration_the_store_does_not_pin(
+    declared: &ContentModel,
+    pinned: Option<&str>,
+) -> Result<(), StoreError> {
+    if declared.schema() == pinned {
+        return Ok(());
+    }
+    Err(StoreError::UnpinnedDeclaration {
+        what: "the declaration a changeset's link health is judged under was read",
+        derived_under: declared.schema().map(str::to_string),
+        pinned: pinned.map(str::to_string),
     })
 }
 

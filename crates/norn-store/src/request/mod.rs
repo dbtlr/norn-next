@@ -322,13 +322,24 @@ impl<'a> Request<'a> {
     /// `provenance` marks where the post-state came from. It changes no
     /// statement the store runs, and what it binds is how a counter reading is
     /// read — see [`crate::DerivationCounters`].
+    ///
+    /// # The declaration is the pinned schema's
+    ///
+    /// `declared` is the declaration the store judges the changeset's link
+    /// health under. It is refused ([`StoreError::UnpinnedDeclaration`])
+    /// before any entry is written where it was read from a schema other than
+    /// the one the store pins — the pin read in the changeset's own
+    /// transaction, so no pin lands between the comparison and the writes it
+    /// admits — and a store that pins no schema takes
+    /// [`ContentModel::none`].
     pub fn apply_increment(
         &mut self,
         _provenance: IncrementProvenance,
         changes: impl IntoIterator<Item = Change>,
         findings: &[DerivedFinding<'_>],
+        declared: &ContentModel,
     ) -> Result<IncrementOutcome, StoreError> {
-        increment::apply(self.store, &mut self.counters, changes, findings)
+        increment::apply(self.store, &mut self.counters, changes, findings, declared)
     }
 
     /// Record one finding, with the head of its candidates.

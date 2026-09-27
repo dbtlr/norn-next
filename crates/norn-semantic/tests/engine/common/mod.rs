@@ -231,6 +231,7 @@ pub fn write_document(store: &mut Store, facts: &DocumentFacts) {
             IncrementProvenance::Derived,
             [Change::Upsert(facts.clone())],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a document upsert");
 }
@@ -246,6 +247,7 @@ pub fn record_death(store: &mut Store, at: &str) {
                 provenance: Provenance::PlanDelete,
             }],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a death");
 }

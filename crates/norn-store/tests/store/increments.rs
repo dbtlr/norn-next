@@ -562,6 +562,7 @@ fn one_changeset_stamps_one_generation_across_every_row_it_wrote() {
                 death("gone.md", Provenance::WatcherRemoval),
             ],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     let stamped = outcome
@@ -595,6 +596,7 @@ fn one_changeset_stamps_one_generation_across_every_row_it_wrote() {
             IncrementProvenance::Derived,
             [upsert("four.md", "hash-1", "four\n")],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     assert_eq!(next.generation, Some(stamped + 1));
@@ -615,11 +617,17 @@ fn an_empty_changeset_writes_nothing_and_takes_no_generation() {
             IncrementProvenance::Derived,
             [upsert("one.md", "hash-1", "one\n")],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
 
     let empty = request
-        .apply_increment(IncrementProvenance::Derived, [], &[])
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [],
+            &[],
+            &norn_store::ContentModel::none(),
+        )
         .expect("applying an empty changeset");
     assert_eq!(empty.generation, None);
     assert_eq!(empty.documents_upserted, 0);
@@ -635,6 +643,7 @@ fn an_empty_changeset_writes_nothing_and_takes_no_generation() {
             IncrementProvenance::Derived,
             [upsert("two.md", "hash-1", "two\n")],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     assert_eq!(
@@ -672,6 +681,7 @@ fn the_last_entry_for_a_path_is_the_one_that_stands() {
                 upsert("revived.md", "hash-1", "a body\n"),
             ],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
 
@@ -749,6 +759,7 @@ fn a_path_named_three_times_ends_where_its_last_entry_left_it() {
                 death("twice/dead.md", Provenance::PlanDelete),
             ],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
 
@@ -817,6 +828,7 @@ fn a_re_death_within_one_changeset_keeps_the_hash_already_recorded() {
                 death("glossary.md", Provenance::HealPrune),
             ],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     assert_eq!(outcome.documents_deleted, 1);
@@ -857,6 +869,7 @@ fn deriving_a_path_clears_its_own_tombstone_and_no_other() {
                 .chain(standing.iter())
                 .map(|at| death(at, Provenance::HealPrune)),
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("recording four deaths");
 
@@ -865,6 +878,7 @@ fn deriving_a_path_clears_its_own_tombstone_and_no_other() {
             IncrementProvenance::Derived,
             [upsert("docs/a.md", "hash-1", "a body\n")],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("deriving one of the dead paths");
 
@@ -950,6 +964,7 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
             IncrementProvenance::Derived,
             [upsert("docs/norn/glossary.md", "hash-2", "another body\n")],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
 
@@ -978,6 +993,7 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
             IncrementProvenance::Derived,
             [death("archive/notes.md", Provenance::HealPrune)],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     assert_eq!(died.affected_classes, classes(&["notes/"]));
@@ -1000,6 +1016,7 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
             IncrementProvenance::Derived,
             [upsert("docs/index.md", "hash-2", "another body\n")],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     assert_eq!(subject.affected_classes, classes(&["index/"]));
@@ -1077,6 +1094,7 @@ fn a_changeset_discards_the_findings_recorded_about_every_path_it_names() {
                 death("about/to/die.md", Provenance::PlanDelete),
             ],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
 
@@ -1150,6 +1168,7 @@ fn a_finding_stands_beside_the_document_row_at_its_subject() {
             IncrementProvenance::Derived,
             [upsert("note.md", "hash-2", "another body\n")],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     assert_eq!(outcome.invalidated.findings_discarded, 1);
@@ -1199,6 +1218,7 @@ fn a_finding_both_axes_reach_is_counted_once() {
             IncrementProvenance::Derived,
             [upsert("docs/glossary.md", "hash-2", "another body\n")],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     assert_eq!(outcome.affected_classes, classes(&["glossary/"]));
@@ -1239,6 +1259,7 @@ fn a_changeset_counts_a_finding_in_two_of_its_classes_once() {
                 upsert("notes.md", "hash-1", "a body\n"),
             ],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
 
@@ -1279,6 +1300,7 @@ fn two_paths_in_one_class_name_that_class_once() {
                 death("three/glossary.md", Provenance::HealPrune),
             ],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     assert_eq!(outcome.affected_classes, classes(&["glossary/"]));
@@ -1334,6 +1356,7 @@ fn a_death_discards_findings_keyed_by_its_path_and_not_its_class() {
             IncrementProvenance::Derived,
             [death("dir/t.md", Provenance::WatcherRemoval)],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
 
@@ -1399,6 +1422,7 @@ fn a_rename_discards_under_the_old_path() {
                 upsert("new/place.md", "hash-1", "a body\n"),
             ],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
 
@@ -1445,6 +1469,7 @@ fn a_class_range_does_not_catch_a_path_key_it_prefixes() {
             IncrementProvenance::Derived,
             [upsert("a/glossary.md", "hash-1", "a body\n")],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     assert_eq!(outcome.affected_classes, classes(&["glossary/"]));
@@ -1509,6 +1534,7 @@ fn a_path_key_from_the_other_key_space_is_refused() {
             facts: raw,
             replaces: None,
         }],
+        &norn_store::ContentModel::none(),
     );
     assert!(
         matches!(refused, Err(StoreError::KeySpace { what, .. }) if what.contains("path key")),
@@ -1546,6 +1572,7 @@ fn a_folding_store_names_a_changed_path_by_its_folded_key() {
             IncrementProvenance::Derived,
             [death("Dir/T.md", Provenance::WatcherRemoval)],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     assert_eq!(outcome.affected_paths, path_keys(&["dir/t.md"]));
@@ -1574,6 +1601,7 @@ fn a_changesets_own_derived_finding_stands_through_its_own_path_discard() {
                 facts: broken_path_link("about.md", &["dir/t.md"]),
                 replaces: None,
             }],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
 
@@ -1605,6 +1633,7 @@ fn a_folding_store_folds_a_path_key_by_ascii_case_alone() {
             IncrementProvenance::Derived,
             [death("Été.md", Provenance::WatcherRemoval)],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     assert_eq!(
@@ -1640,6 +1669,7 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
                     death("gone.md", Provenance::PlanDelete),
                 ],
                 &[],
+                &norn_store::ContentModel::none(),
             )
             .expect("applying a changeset");
         let outcome = request
@@ -1650,6 +1680,7 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
                     "hash-2",
                 ))],
                 &[],
+                &norn_store::ContentModel::none(),
             )
             .expect("re-deriving a document");
         assert_eq!(outcome.documents_upserted, 1);
@@ -1735,6 +1766,7 @@ fn a_changeset_is_applied_from_a_generator_that_materializes_nothing() {
                 ))
             }),
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset out of a generator");
 
@@ -1814,6 +1846,7 @@ fn a_refused_changeset_rolls_back_the_entries_that_ran_before_it() {
                 upsert("notes/four.md", "hash-1", "never reached\n"),
             ],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect_err("a changeset carrying an entry that does not add up");
 
@@ -1888,6 +1921,7 @@ fn a_refused_changeset_rolls_back_the_entries_that_ran_before_it() {
             IncrementProvenance::Derived,
             [upsert("notes/five.md", "hash-1", "a body\n")],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a changeset");
     assert_eq!(
@@ -2110,6 +2144,7 @@ fn tear_a_changeset(database: &Path) -> ! {
             upsert("notes/four.md", "hash-1", &torn_body()),
         ],
         &[],
+        &norn_store::ContentModel::none(),
     );
     panic!("the changeset committed, so the arrangement that arms the abort did not fire");
 }

@@ -2148,7 +2148,12 @@ paths:
                 .collect();
             store
                 .begin_request()
-                .apply_increment(norn_store::IncrementProvenance::Derived, changes, &[])
+                .apply_increment(
+                    norn_store::IncrementProvenance::Derived,
+                    changes,
+                    &[],
+                    declared.content_model(),
+                )
                 .expect("writing the derived documents");
             let reader = std::sync::Arc::new(store.open_reader().reader.expect("a reader"));
             DerivedVault {

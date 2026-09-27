@@ -584,6 +584,7 @@ fn one_probe_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnap
                 7,
             ))],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("applying a document upsert");
     let reading = request.finish();

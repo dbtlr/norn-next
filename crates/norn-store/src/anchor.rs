@@ -311,6 +311,7 @@ mod tests {
                         Change::Upsert(holder),
                     ],
                     &[],
+                    &crate::fields::ContentModel::none(),
                 )
                 .expect("writing a case");
             let id = |at: &DocumentPath| -> i64 {
@@ -439,6 +440,7 @@ mod tests {
                     0,
                 ))],
                 &[],
+                &crate::fields::ContentModel::none(),
             )
             .expect("writing a document");
         let document: i64 = store
