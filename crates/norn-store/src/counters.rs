@@ -103,8 +103,9 @@ pub(crate) enum Counter {
     /// Keys the re-decision resolved: each once across a run of consecutive
     /// chunks holding it, and once more for each later run.
     LinkHealthKeysResolved,
-    /// Candidates the re-decision's resolution read: each resolution's head,
-    /// and each filled key's whole total the one time the changeset counts it.
+    /// Candidates the re-decision's resolution read: a filled key's whole
+    /// total the first time the changeset resolves it, and the head's rows at
+    /// every other resolution.
     LinkHealthCandidatesRead,
 }
 

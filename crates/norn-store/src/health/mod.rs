@@ -198,9 +198,11 @@ struct Summary {
 }
 
 /// What each key a judgment has resolved names, so a judgment taken in chunks
-/// resolves each distinct key once between them, however many chunks hold a
-/// link under it ([ADR 0027]'s fifth condition) — and how each candidate its
-/// findings carried is named, so a candidate is named once too.
+/// resolves a key once across a run of consecutive chunks that hold it, and
+/// counts a filled key's total once however many runs hold it ([ADR 0027]'s
+/// fifth condition) — and how each candidate its findings carried is named,
+/// so a candidate is named once while its key is held. A set nothing evicts
+/// from, as the public judgment door's, resolves each distinct key once.
 ///
 /// A summary is what the store held when it was read, under the store's key
 /// space and the ignore set the judgment was taken under. One set is valid
@@ -234,8 +236,9 @@ pub struct KeySummaries {
 }
 
 impl KeySummaries {
-    /// How many distinct keys the judgments taken against this set have
-    /// resolved: each key once, however many links and chunks hold it.
+    /// How many key resolutions the judgments taken against this set have
+    /// made: one per run of consecutive chunks holding a key, and so one per
+    /// distinct key where nothing is evicted between chunks.
     pub fn keys_resolved(&self) -> u64 {
         self.resolved
     }
