@@ -2,14 +2,16 @@
 //! every time it has been taken, and the signal a waiter outside it is woken
 //! by.
 //!
-//! **Every hold of an entry's state begins in [`EntryGate::lock`].** The mutex
-//! is private to this module, so no lock site elsewhere can take the state
-//! without moving the count, and the count moves while the taker holds the
-//! gate. A holder that reads [`EntryGate::times_taken`] twice without giving
-//! the gate back reads the same number both times; a holder that gave it back
-//! and took it again between the two readings reads a difference of at least
-//! one, its own retake. That difference is how a read attests that the
-//! statement it establishes on ran under one continuous hold.
+//! **Every hold of an entry's state begins in a take of this module's** —
+//! [`EntryGate::lock`], or its bounded form [`EntryGate::lock_until`] — and
+//! every take counts itself. The mutex is private to this module, so no lock
+//! site elsewhere can take the state without moving the count, and the count
+//! moves while the taker holds the gate. A holder that reads
+//! [`EntryGate::times_taken`] twice without giving the gate back reads the
+//! same number both times; a holder that gave it back and took it again
+//! between the two readings reads a difference of at least one, its own
+//! retake. That difference is how a read attests that the statement it
+//! establishes on ran under one continuous hold.
 //!
 //! **Every hold ends in [`GateHold`]'s drop, and that is where the signal
 //! moves.** A hold reads the state's [`Stanced::stance`] as it is taken and
@@ -19,10 +21,20 @@
 //! only counters inside one stance wakes nobody. The lock order is the gate,
 //! then the signal. A holder of the gate may take the signal; a waiter on the
 //! signal holds nothing else, so no holder of the signal waits for the gate.
+//!
+//! **A take can be bounded, and work can be left for the next hold.**
+//! [`EntryGate::lock_until`] waits for the gate no later than a deadline:
+//! every hold's end, once the gate is back, wakes the takers waiting that way,
+//! and a taker waiting that way holds nothing but the lock that counts it, so
+//! it never waits on the gate while holding it. A caller that owes the state
+//! a write and must not wait for the gate — a demand lease going back from its
+//! drop, whatever thread drops it — leaves it with
+//! [`EntryGate::run_under_the_next_hold`], and the next take of the gate runs
+//! it before its taker reads the state.
 
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, LockResult, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Condvar, LockResult, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Instant;
 
 /// The part of a gated state a waiter outside the gate waits on.
@@ -55,6 +67,18 @@ pub(super) struct EntryGate<T> {
     signal: Mutex<u64>,
     /// Notified with every move of the signal.
     moved: Condvar,
+    /// The takers waiting for the gate by a deadline, and how many holds have
+    /// ended while any of them waited.
+    release: Mutex<Released>,
+    /// Notified as a hold ends, once the gate is back, where a taker waits by
+    /// a deadline.
+    freed: Condvar,
+    /// Writes a caller that could not wait for the gate left for the next
+    /// hold, run by that hold before its taker reads the state.
+    deferred: Mutex<Vec<Deferred<T>>>,
+    /// Whether `deferred` holds work, so a take that finds none reads it
+    /// without taking that lock.
+    has_deferred: AtomicBool,
     /// A case's hook, run once by the next read acquisition that lets this
     /// gate go, in the instant after the guard goes back: the window a change
     /// published there has to wake the read from.
@@ -62,18 +86,57 @@ pub(super) struct EntryGate<T> {
     let_go_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
+/// A write left for the next hold of a gate.
+type Deferred<T> = Box<dyn FnOnce(&mut T) + Send>;
+
+/// The takers waiting for a gate by a deadline, and the holds that ended
+/// while any did.
+#[derive(Default)]
+struct Released {
+    waiting: usize,
+    ended: u64,
+}
+
 /// One hold of an entry gate: the state, reached through `Deref`, and the
 /// stance the hold began at.
 ///
-/// **Its drop is where the stance's signal moves.** The guard is the last
-/// field to go, so the signal moves while the gate is still held, and a
+/// **Its drop is where the stance's signal moves.** The guard goes after the
+/// drop's own body, so the signal moves while the gate is still held, and a
 /// waiter that read the generation under the gate and let the gate go cannot
-/// miss a change made after it let go.
+/// miss a change made after it let go. The takers waiting by a deadline are
+/// woken by the field after the guard, once the gate is back.
 pub(super) struct GateHold<'g, T: Stanced> {
     signal: &'g Mutex<u64>,
     moved: &'g Condvar,
     opened: T::Stance,
     guard: MutexGuard<'g, T>,
+    /// Declared after the guard, so it drops once the gate is back. Nothing
+    /// reads it: its drop is its whole work.
+    _freed: FreedOnDrop<'g>,
+}
+
+/// What wakes the takers waiting for a gate by a deadline, as a hold's last
+/// field to drop.
+struct FreedOnDrop<'g> {
+    release: &'g Mutex<Released>,
+    freed: &'g Condvar,
+}
+
+impl Drop for FreedOnDrop<'_> {
+    /// Wake every taker waiting by a deadline, where one waits.
+    ///
+    /// It takes the lock that counts those takers, and a taker counts itself
+    /// under that lock before it tries the gate, so a hold that ends after a
+    /// taker found the gate taken finds that taker counted and wakes it. It
+    /// reads through a poison, because it runs on an unwinding thread too.
+    fn drop(&mut self) {
+        let mut released = self.release.lock().unwrap_or_else(PoisonError::into_inner);
+        if released.waiting > 0 {
+            released.ended = released.ended.wrapping_add(1);
+            drop(released);
+            self.freed.notify_all();
+        }
+    }
 }
 
 impl<T: Stanced> Deref for GateHold<'_, T> {
@@ -114,6 +177,10 @@ impl<T> EntryGate<T> {
             taken: AtomicU64::new(0),
             signal: Mutex::new(0),
             moved: Condvar::new(),
+            release: Mutex::new(Released::default()),
+            freed: Condvar::new(),
+            deferred: Mutex::new(Vec::new()),
+            has_deferred: AtomicBool::new(false),
             #[cfg(test)]
             let_go_hook: Mutex::new(None),
         }
@@ -198,6 +265,73 @@ impl<T: Stanced> EntryGate<T> {
         }
     }
 
+    /// Take the gate, waiting for it no later than `deadline`, and count the
+    /// take; or, where the deadline passes first, take nothing and answer
+    /// nothing.
+    ///
+    /// The gate is tried once more whatever the clock says, so a caller that
+    /// arrives at its deadline takes a free gate rather than being turned
+    /// away from it. **The wait holds no hold of the gate**: it holds the
+    /// lock that counts the takers waiting by a deadline, and tries the gate
+    /// without blocking under it, and a hold's end wakes it once the gate is
+    /// back.
+    pub(super) fn lock_until(&self, deadline: Instant) -> Option<LockResult<GateHold<'_, T>>> {
+        let mut released = self.release.lock().unwrap_or_else(PoisonError::into_inner);
+        released.waiting += 1;
+        let taken = loop {
+            match self.state.try_lock() {
+                Ok(guard) => break Some(Ok(guard)),
+                Err(TryLockError::Poisoned(poisoned)) => break Some(Err(poisoned.into_inner())),
+                Err(TryLockError::WouldBlock) => {}
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break None;
+            }
+            let seen = released.ended;
+            released = self
+                .freed
+                .wait_timeout_while(released, remaining, |released| released.ended == seen)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        };
+        released.waiting -= 1;
+        drop(released);
+        let taken = taken?;
+        self.taken.fetch_add(1, Ordering::Relaxed);
+        Some(match taken {
+            Ok(guard) => Ok(self.hold(guard)),
+            Err(guard) => Err(PoisonError::new(self.hold(guard))),
+        })
+    }
+
+    /// Leave `work` for the next hold of the gate, which runs it before its
+    /// taker reads the state; and run it now, under a hold of its own, where
+    /// the gate is free.
+    ///
+    /// **It never waits for the gate**, so a caller can make a write it owes
+    /// from anywhere: from a drop, from a thread a deadline turned away from
+    /// the gate, or from a thread that holds the gate itself. The write lands
+    /// with whichever hold comes next rather than holding that caller until
+    /// the gate is free, and every reader of the state is a later hold, so no
+    /// reader misses it. A poisoned gate is read through, as a drop must.
+    pub(super) fn run_under_the_next_hold(&self, work: impl FnOnce(&mut T) + Send + 'static) {
+        {
+            let mut deferred = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
+            deferred.push(Box::new(work));
+            self.has_deferred.store(true, Ordering::Release);
+        }
+        let free = match self.state.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        if let Some(guard) = free {
+            self.taken.fetch_add(1, Ordering::Relaxed);
+            drop(self.hold(guard));
+        }
+    }
+
     /// Take the gate from a drop, waiting for it, and count the take.
     ///
     /// **On an unwinding thread it reads through a poisoned gate**, because a
@@ -232,14 +366,35 @@ impl<T: Stanced> EntryGate<T> {
         }
     }
 
-    /// A hold over `guard`, opened at the stance the state stands at now.
+    /// A hold over `guard`, opened at the stance the state stands at now, with
+    /// the writes left for it run.
+    ///
+    /// **Every take of the gate comes through here**, so a write left by
+    /// [`EntryGate::run_under_the_next_hold`] lands before any taker reads
+    /// the state. It runs inside the hold, so a stance it changes moves the
+    /// signal where the hold ends, as any other write does.
     fn hold<'g>(&'g self, guard: MutexGuard<'g, T>) -> GateHold<'g, T> {
-        GateHold {
+        let mut hold = GateHold {
             signal: &self.signal,
             moved: &self.moved,
             opened: guard.stance(),
             guard,
+            _freed: FreedOnDrop {
+                release: &self.release,
+                freed: &self.freed,
+            },
+        };
+        if self.has_deferred.load(Ordering::Acquire) {
+            let work = {
+                let mut deferred = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
+                self.has_deferred.store(false, Ordering::Release);
+                std::mem::take(&mut *deferred)
+            };
+            for write in work {
+                write(&mut *hold);
+            }
         }
+        hold
     }
 }
 
@@ -333,6 +488,68 @@ mod tests {
             "a hold that changed the stance did not move the signal once"
         );
         assert_eq!(gate.lock().expect("a fresh gate").holds_ended, 2);
+    }
+
+    /// **A bounded take ends at its deadline, and is woken by a hold's end
+    /// before it.** A take whose deadline passes while the gate is held
+    /// answers nothing; a take with a minute left is woken once the holder
+    /// gives the gate back, and takes it.
+    #[test]
+    fn a_bounded_take_ends_at_its_deadline_and_is_woken_by_a_holds_end() {
+        let gate = EntryGate::new(Dial::default());
+        let held = gate.lock().expect("a fresh gate");
+        std::thread::scope(|scope| {
+            assert!(
+                scope
+                    .spawn(|| gate
+                        .lock_until(Instant::now() + Duration::from_millis(10))
+                        .is_none())
+                    .join()
+                    .expect("the bounded take"),
+                "a take bounded by a passed deadline took a held gate"
+            );
+            let taker = scope.spawn(|| {
+                let started = Instant::now();
+                let taken = gate
+                    .lock_until(Instant::now() + Duration::from_secs(60))
+                    .is_some();
+                (taken, started.elapsed())
+            });
+            // The taker is given time to be waiting before the hold ends, so
+            // the end is what wakes it.
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+            let (taken, waited) = taker.join().expect("the bounded take");
+            assert!(taken, "a bounded take found no gate once the hold ended");
+            assert!(
+                waited < Duration::from_secs(30),
+                "the bounded take waited out its deadline rather than being woken"
+            );
+        });
+    }
+
+    /// **A write left for the next hold lands before that hold's taker reads
+    /// the state**, and a write left over a free gate lands at once.
+    #[test]
+    fn a_write_left_for_the_next_hold_lands_before_its_taker_reads() {
+        let gate = EntryGate::new(Dial::default());
+        let held = gate.lock().expect("a fresh gate");
+        gate.run_under_the_next_hold(|dial| dial.stance = 3);
+        assert_eq!(
+            held.stance, 0,
+            "a write left for the next hold ran under this one"
+        );
+        drop(held);
+        assert_eq!(gate.lock().expect("a fresh gate").stance, 3);
+        // Two holds have ended; a write over a free gate ends a third of its
+        // own, which the reading hold below counts before its own end.
+        gate.run_under_the_next_hold(|dial| dial.stance = 4);
+        let reading = gate.lock().expect("a fresh gate");
+        assert_eq!(reading.stance, 4);
+        assert_eq!(
+            reading.holds_ended, 3,
+            "a write over a free gate ran under no hold of its own"
+        );
     }
 
     /// **A waiter is woken by the change and not by the deadline.** The

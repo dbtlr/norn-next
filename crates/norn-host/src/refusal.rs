@@ -1,7 +1,7 @@
 //! What a demand is, said in the wire vocabulary.
 //!
 //! [`Demand`] is host-local: it carries this crate's own
-//! [`AliasConflict`](crate::AliasConflict) and the registry's own account of a
+//! [`AliasConflict`] and the registry's own account of a
 //! root it cannot read. What leaves the host is
 //! neither — it is `norn-wire`'s [`TrustState`] or its [`ErrorEnvelope`] — so
 //! the translation between the two lives here, on the host side of the seam.

@@ -83,7 +83,8 @@ pub const STORE_VERIFICATION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 pub const WATCH_SYNCHRONIZATION_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Longest a read waits for an entry taking in a change, counted from the
-/// read's first hold of the entry gate and covering every wait it takes.
+/// read's first take of the entry gate and covering every wait it takes, that
+/// take among them.
 ///
 /// This is operational containment, not a performance threshold. It keeps a
 /// read from waiting on a change that does not converge; it states nothing
@@ -869,19 +870,29 @@ impl ProductionEntryOps {
             .map_err(store_effect)
     }
 
+    /// Take the facts about the two control files out of `batch`, and
+    /// answer whether it carried any.
+    ///
+    /// A rescan of the schema source is a fact about the schema: the watcher
+    /// reports one alone where the folder a schema outside the vault sits in
+    /// is replaced, so it counts as a change to that schema.
     fn discard_control_file_facts(
         registration: &Registration,
         covered_root: &Path,
         batch: &mut norn_fs::Batch,
-    ) {
+    ) -> bool {
         let schema = Self::schema_path_at(registration, covered_root);
         let schema = schema.strip_prefix(covered_root).ok();
+        let carried_schema_source =
+            batch.schema_dirty() || batch.rescans().contains(&RescanScope::Schema);
+        let roots = batch.vault_roots().len();
         batch.discard_schema_facts();
         batch.retain_vault_roots(|root| {
             let path = root.as_path();
             path != Path::new(norn_config::IN_VAULT_CONFIG_PATH)
                 && schema.is_none_or(|schema| path != schema)
         });
+        carried_schema_source || batch.vault_roots().len() != roots
     }
 
     fn heal(
@@ -1455,12 +1466,22 @@ impl EntryOps for ProductionEntryOps {
         } else {
             Some(std::mem::take(&mut attachment.heal_observed))
         };
+        // Control-file facts are discarded, because an explicit reload is
+        // what replaces an active declaration. An attachment whose declaration
+        // withholds trust has none to replace, and a changed control file is
+        // the change that can heal it: there such a fact reaches the lifecycle
+        // as the schema fact a reconcile holds inert, which moves the entry's
+        // position so a read asks for the recovery again.
+        let withholds_trust = attachment.controls.undeclarable().is_some();
         let drained = drained.and_then(|mut batch| {
-            Self::discard_control_file_facts(
+            let controls_changed = Self::discard_control_file_facts(
                 &attachment.registration,
                 &attachment.covered_root,
                 &mut batch,
             );
+            if controls_changed && withholds_trust {
+                batch.merge(norn_fs::Batch::schema_change());
+            }
             (!batch.is_empty()).then_some(batch)
         });
         // A rescan among the facts is the backend saying it lost the path set,
@@ -7783,6 +7804,78 @@ mod tests {
 
         assert_eq!(ops.poll(&name, &mut attachment).unwrap(), None);
         ops.detach(&name, attachment);
+    }
+
+    /// An attachment over a vault schema this build cannot read, polled for
+    /// `observed`: the batch the poll hands the lifecycle.
+    fn polled_over_an_undeclarable_schema(
+        label: &str,
+        observed: impl FnOnce(&norn_fs::PathNormalizer) -> norn_fs::Batch,
+    ) -> Option<norn_fs::Batch> {
+        let f = Fixture::new(label);
+        fs::write(f.vault().join(".norn/schema.yaml"), "version: 9\n").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert!(
+            ops.withheld_trust(&attachment).is_some(),
+            "the attachment serves under its vault schema, so this proves nothing"
+        );
+        attachment.subscription.take();
+        let paths = norn_fs::PathNormalizer::detect(&f.vault()).unwrap();
+        attachment.heal_observed = observed(&paths);
+        let polled = ops.poll(&name, &mut attachment).unwrap();
+        ops.detach(&name, attachment);
+        polled
+    }
+
+    /// Whether `polled` is the schema fact alone: no control-file root and no
+    /// rescan beside it.
+    fn is_the_schema_fact_alone(polled: Option<&norn_fs::Batch>) -> bool {
+        polled.is_some_and(|batch| {
+            batch.schema_dirty() && batch.vault_roots().is_empty() && batch.rescans().is_empty()
+        })
+    }
+
+    /// **Over an attachment whose vault schema withholds trust, a change to a
+    /// control file reaches the lifecycle as the schema fact.** The two
+    /// control files are reported as vault paths, and neither path reaches
+    /// the lifecycle: the change arrives as the schema fact a reconcile holds
+    /// inert.
+    #[test]
+    fn control_file_facts_over_an_undeclarable_schema_reach_the_lifecycle_as_the_schema_fact() {
+        let polled = polled_over_an_undeclarable_schema("control-watch-undeclarable", |paths| {
+            let mut controls = norn_fs::Batch::vault_change(
+                paths
+                    .normalize(Path::new(norn_config::IN_VAULT_SCHEMA_PATH))
+                    .unwrap(),
+            );
+            controls.merge(norn_fs::Batch::vault_change(
+                paths
+                    .normalize(Path::new(norn_config::IN_VAULT_CONFIG_PATH))
+                    .unwrap(),
+            ));
+            controls
+        });
+        assert!(
+            is_the_schema_fact_alone(polled.as_ref()),
+            "the control-file change reached the lifecycle as {polled:?}"
+        );
+    }
+
+    /// **A schema rescan is a schema change.** The watcher reports a rescan of
+    /// the schema source alone where the folder a schema outside the vault
+    /// sits in is replaced; over an attachment whose vault schema withholds
+    /// trust, that rescan reaches the lifecycle as the schema fact.
+    #[test]
+    fn a_schema_rescan_over_an_undeclarable_schema_reaches_the_lifecycle_as_the_schema_fact() {
+        let polled = polled_over_an_undeclarable_schema("schema-rescan-undeclarable", |_| {
+            norn_fs::Batch::rescan(RescanScope::Schema)
+        });
+        assert!(
+            is_the_schema_fact_alone(polled.as_ref()),
+            "the schema rescan reached the lifecycle as {polled:?}"
+        );
     }
 
     /// A place a real document occupies is that document's. A rendering that
