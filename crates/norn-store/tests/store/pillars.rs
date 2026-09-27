@@ -802,6 +802,8 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
             "a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead"
         }
         ExplainedStatement::LinkHealthLinks
+        | ExplainedStatement::LinkHealthClassLinks
+        | ExplainedStatement::LinkHealthPathLinks
         | ExplainedStatement::LinkHealthHeads
         | ExplainedStatement::LinkHealthTotals
         | ExplainedStatement::LinkHealthSuffixes
@@ -1484,6 +1486,8 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::PathDiscard(_)
         | ExplainedStatement::FindingPaths(_)
         | ExplainedStatement::LinkHealthLinks
+        | ExplainedStatement::LinkHealthClassLinks
+        | ExplainedStatement::LinkHealthPathLinks
         | ExplainedStatement::LinkHealthHeads
         | ExplainedStatement::LinkHealthTotals
         | ExplainedStatement::LinkHealthSuffixes

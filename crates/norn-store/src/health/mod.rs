@@ -1,6 +1,6 @@
-//! Link health: the findings the store judges about the links a set of
-//! documents holds — **broken**, **ambiguous** and **missing anchor**, each a
-//! finding about exactly one link, at warning severity ([ADR 0027]).
+//! Link health: the findings the store judges about a selection of links —
+//! **broken**, **ambiguous** and **missing anchor**, each a finding about
+//! exactly one link, at warning severity ([ADR 0027]).
 //!
 //! # The rules are the ones every surface reads a link's health by
 //!
@@ -35,27 +35,39 @@
 //! are disjoint, so the merge is the head of the whole. So **each distinct key
 //! is resolved once**, however many of the links carry it: one statement reads
 //! every distinct key's head ([`statement::heads_sql`]), and one counts the
-//! keys whose head filled ([`statement::totals_sql`]). The links cost their
+//! keys whose head filled ([`statement::totals_sql`]). What a key names is
+//! kept ([`KeySummaries`]), so a judgment taken in chunks of links resolves a
+//! key the first chunk resolved in no later one. The links cost their
 //! own seeks, and each key its class, so the work is the links plus the
 //! candidates they resolve against. Resolving each link against its class, as
 //! a read's links column does, would cost the links times the candidates.
 //!
-//! Five statements judge a set of documents, whatever it holds: the links and
-//! their keys, the keys' heads, the filled heads' totals, the anchors of the
-//! links naming one document, and the suffixes of the candidates the findings
-//! carry. A statement with nothing to read is not run.
+//! # Which links are judged is the selection's, and what is found is not
+//!
+//! The links are selected apart from their judgment ([`LinkSelection`]): by
+//! the documents holding them, by a class their suffix keys fall in, or by
+//! the path key they spell — the three ways the changeset reaches a link.
+//! Each selection is one statement ([`statement::links_sql`]) reading the same
+//! rows, a link and every key it is held under, so a link is judged alike
+//! whichever selection reached it.
+//!
+//! Five statements judge a selection, whatever it holds: the one reading the
+//! links and their keys, the keys' heads, the filled heads' totals, the
+//! anchors of the links naming one document, and the suffixes of the
+//! candidates the findings carry. A statement with nothing to read is not run.
 //!
 //! **A dormant carrier.** Its consuming layer is the re-decision
 //! [ADR 0027] rules into the changeset: after every entry of a changeset is
 //! written, the store judges the links the changeset reaches and files these
 //! findings in the same transaction. That re-decision is not built, so no
-//! write reaches this module yet: [`crate::Request::judge_link_health`] is its
-//! one door, and the plan seam bars each statement it runs.
+//! write reaches this module yet: [`crate::Request::judge_selected_links`] is
+//! its one door, and the plan seam bars each statement it runs.
 //!
 //! [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 
 pub(crate) mod statement;
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use norn_db::rusqlite::{Connection, params_from_iter};
@@ -68,7 +80,7 @@ use crate::facts::{
 use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey};
 use crate::read::SuffixSpellings;
 use crate::request::{ReadWork, Request, stored_link_row, unreadable};
-use crate::resolve::AmbiguityIgnore;
+use crate::resolve::{self, AmbiguityIgnore};
 
 /// The message every broken link's finding carries.
 const BROKEN: &str = "the link names no document";
@@ -79,16 +91,47 @@ const AMBIGUOUS: &str = "the link names more than one document";
 /// The message every missing anchor's finding carries.
 const MISSING_ANCHOR: &str = "the document the link names holds no place its anchor names";
 
+/// Which links a judgment judges.
+///
+/// The re-decision [ADR 0027] rules into the changeset reaches its links three
+/// ways, and each is a selection here: the links a written document holds, the
+/// suffix-addressed links whose keys fall in the class of a changed path, and
+/// the path-addressed links whose key is a changed path. Each is read by an
+/// index seek ([`statement::links_sql`]), and whichever way a link is reached
+/// it is judged alike: the selection decides which links are read, and never
+/// what is found about them.
+///
+/// A key is spelled in the key space the store's path order selects, as the
+/// changeset names its classes and paths
+/// ([`crate::IncrementOutcome::affected_classes`],
+/// [`crate::IncrementOutcome::affected_paths`]).
+///
+/// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+#[derive(Clone, Copy, Debug)]
+pub enum LinkSelection<'a> {
+    /// Every link the documents at these paths hold. A path named twice holds
+    /// its links once, and a path no document stands at holds none.
+    Documents(&'a [DocumentPath]),
+    /// Every link held under a suffix key inside this class: every
+    /// suffix-addressed link that could name a document the class holds.
+    Class(&'a ClassKey),
+    /// Every link held under exactly this path key: every path-addressed link
+    /// spelling this path.
+    Path(&'a PathKey),
+}
+
+/// One key a link is held under, in the root's key space, beside its segment
+/// count, which a suffix key carries and a path key does not.
+type Key = (String, Option<u64>);
+
 /// One link under judgment: where it is held, its row, and its keys.
 struct Held {
     holder: String,
     id: i64,
     ordinal: u64,
     link: StoredLink,
-    /// Each key the link index holds the link under, in the root's key space,
-    /// beside its segment count, which a suffix key carries and a path key
-    /// does not.
-    keys: Vec<(String, Option<u64>)>,
+    /// Each key the link index holds the link under, each once.
+    keys: Vec<Key>,
 }
 
 /// One document a key names: its row id, its path, and its rung on the
@@ -100,57 +143,49 @@ struct Named {
     rung: String,
 }
 
+impl Named {
+    /// How `self` stands against `other` on the resolution ladder.
+    fn ladder(&self, other: &Named) -> Ordering {
+        resolve::ladder_cmp((&self.rung, &self.path), (&other.rung, &other.path))
+    }
+}
+
 /// What one key names: the head of it in ladder order, and how many.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Summary {
     head: Vec<Named>,
     total: u64,
 }
 
-/// Every distinct key the judged links hold, in the two key spaces a link is
-/// addressed in, each with its summary once it is read.
-#[derive(Default)]
-struct Keys {
-    classes: Vec<(String, u64)>,
-    paths: Vec<String>,
-    /// Where each key stands: the arm and its index in that arm's list.
-    places: BTreeMap<(String, Option<u64>), (i64, usize)>,
-    summaries: [Vec<Summary>; 2],
+/// What each key a judgment has resolved names, so a judgment taken in chunks
+/// resolves each distinct key once between them, however many chunks hold a
+/// link under it ([ADR 0027]'s fifth condition).
+///
+/// A summary is what the store held when it was read, under the store's key
+/// space and the ignore set the judgment was taken under. One set therefore
+/// serves the chunks of one judgment — one store, one declaration, and no
+/// write between them — and a judgment after a write takes a new one.
+///
+/// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+#[derive(Debug, Default)]
+pub struct KeySummaries {
+    summaries: HashMap<Key, Summary>,
+    resolved: u64,
 }
 
-impl Keys {
-    fn of(links: &[Held]) -> Self {
-        let mut keys = Keys::default();
-        for (key, segments) in links.iter().flat_map(|held| &held.keys) {
-            if keys.places.contains_key(&(key.clone(), *segments)) {
-                continue;
-            }
-            let place = match segments {
-                Some(segments) => {
-                    keys.classes.push((key.clone(), *segments));
-                    (statement::CLASS_ARM, keys.classes.len() - 1)
-                }
-                None => {
-                    keys.paths.push(key.clone());
-                    (statement::PATH_ARM, keys.paths.len() - 1)
-                }
-            };
-            keys.places.insert((key.clone(), *segments), place);
-        }
-        keys.summaries = [
-            keys.classes.iter().map(|_| Summary::default()).collect(),
-            keys.paths.iter().map(|_| Summary::default()).collect(),
-        ];
-        keys
+impl KeySummaries {
+    /// How many distinct keys the judgments taken against this set have
+    /// resolved: each key once, however many links and chunks hold it.
+    pub fn keys_resolved(&self) -> u64 {
+        self.resolved
     }
 
-    fn is_empty(&self) -> bool {
-        self.places.is_empty()
-    }
-
-    fn summary_of(&self, key: &str, segments: Option<u64>) -> &Summary {
-        let (arm, index) = self.places[&(key.to_string(), segments)];
-        &self.summaries[arm as usize][index]
+    /// What `key` names, refused where no judgment against this set resolved
+    /// it.
+    fn of(&self, key: &Key) -> Result<&Summary, StoreError> {
+        self.summaries.get(key).ok_or_else(|| StoreError::Damaged {
+            what: format!("a judgment read a key it did not resolve, {key:?}"),
+        })
     }
 }
 
@@ -183,10 +218,12 @@ enum Verdict {
     One(Named),
 }
 
-/// The link-health findings about every link the documents at `documents`
-/// hold, judged against the documents the store holds now under the key space
-/// `order` selects, less the places `ignore` keeps out of a class. Each
-/// statement runs on `connection` and its steps are added to `work`.
+/// The link-health findings about every link `selection` selects, judged
+/// against the documents the store holds now under the key space `order`
+/// selects, less the places `ignore` keeps out of a class. Each key the links
+/// hold that `summaries` does not yet hold is resolved and kept there, so a
+/// judgment taken in chunks resolves each key once. Each statement runs on
+/// `connection` and its steps are added to `work`.
 ///
 /// The findings are in the order of the holding document's path, then the
 /// link's ordinal.
@@ -195,17 +232,17 @@ pub(crate) fn judge(
     work: &ReadWork,
     order: StoredPathOrder,
     ignore: &AmbiguityIgnore,
-    documents: &[DocumentPath],
+    selection: LinkSelection<'_>,
+    summaries: &mut KeySummaries,
 ) -> Result<Vec<FindingFacts>, StoreError> {
-    if documents.is_empty() {
-        return Ok(Vec::new());
-    }
     let key = SuffixKey::under(order);
-    let links = held_links(connection, work, key, documents)?;
-    let mut keys = Keys::of(&links);
-    resolve_keys(connection, work, key, order, ignore, &mut keys)?;
+    let links = selected_links(connection, work, key, selection)?;
+    resolve_keys(connection, work, key, order, ignore, &links, summaries)?;
 
-    let verdicts: Vec<Option<Verdict>> = links.iter().map(|held| verdict(held, &keys)).collect();
+    let verdicts = links
+        .iter()
+        .map(|held| verdict(held, summaries))
+        .collect::<Result<Vec<Option<Verdict>>, StoreError>>()?;
     let missing = missing_anchors(connection, work, &links, &verdicts)?;
 
     let mut named: BTreeMap<i64, &str> = BTreeMap::new();
@@ -239,26 +276,29 @@ pub(crate) fn judge(
     Ok(findings)
 }
 
-/// Every link the documents at `documents` hold, with its keys in the key
-/// space `key` selects, in the order of the holding path, then the ordinal.
-fn held_links(
+/// Every link `selection` selects, with its keys in the key space `key`
+/// selects, in the order of the holding path, then the ordinal.
+fn selected_links(
     connection: &Connection,
     work: &ReadWork,
     key: SuffixKey,
-    documents: &[DocumentPath],
+    selection: LinkSelection<'_>,
 ) -> Result<Vec<Held>, StoreError> {
-    // Each document once, so a path named twice reads its links once.
-    let paths: Vec<&str> = documents
-        .iter()
-        .map(DocumentPath::as_str)
-        .collect::<BTreeSet<&str>>()
-        .into_iter()
-        .collect();
+    let values = match selection {
+        LinkSelection::Documents([]) => return Ok(Vec::new()),
+        LinkSelection::Documents(documents) => {
+            // Each document once, so a path named twice reads its links once.
+            let paths: BTreeSet<&str> = documents.iter().map(DocumentPath::as_str).collect();
+            statement::documents_parameters(&paths.into_iter().collect::<Vec<&str>>())?
+        }
+        LinkSelection::Class(class) => statement::class_parameters(class),
+        LinkSelection::Path(path) => statement::path_parameters(path),
+    };
     let rows = Request::read_all_on(
         connection,
         work,
-        &statement::links_sql(key),
-        params_from_iter(statement::links_parameters(&paths)?),
+        &statement::links_sql(key, statement::Selected::of(selection)),
+        params_from_iter(values),
         |row| {
             let link = stored_link_row(row)?;
             let holder: String = row.get(13)?;
@@ -293,32 +333,54 @@ fn held_links(
             });
             links.len() - 1
         });
-        links[at].keys.extend(key);
+        let keys = &mut links[at].keys;
+        keys.extend(key.filter(|key| !keys.contains(key)));
     }
     links.sort_by(|left, right| (&left.holder, left.ordinal).cmp(&(&right.holder, right.ordinal)));
     Ok(links)
 }
 
-/// Read every distinct key's head, and the total of every key whose head
-/// filled, into `keys`.
+/// Resolve every distinct key `links` hold that `summaries` does not hold
+/// yet: read each one's head, and the total of each whose head filled, and
+/// keep them in `summaries`.
 fn resolve_keys(
     connection: &Connection,
     work: &ReadWork,
     key: SuffixKey,
     order: StoredPathOrder,
     ignore: &AmbiguityIgnore,
-    keys: &mut Keys,
+    links: &[Held],
+    summaries: &mut KeySummaries,
 ) -> Result<(), StoreError> {
-    if keys.is_empty() {
+    let unresolved: BTreeSet<&Key> = links
+        .iter()
+        .flat_map(|held| &held.keys)
+        .filter(|key| !summaries.summaries.contains_key(*key))
+        .collect();
+    if unresolved.is_empty() {
         return Ok(());
     }
-    let classes: Vec<(&str, u64)> = keys
-        .classes
-        .iter()
-        .map(|(key, segments)| (key.as_str(), *segments))
-        .collect();
-    let paths: Vec<&str> = keys.paths.iter().map(String::as_str).collect();
-    let summaries = &mut keys.summaries;
+    // The keys in the order the two arms list them, each arm's list the
+    // statements walk.
+    let mut listed: [Vec<&Key>; 2] = [Vec::new(), Vec::new()];
+    let mut classes: Vec<(&str, u64)> = Vec::new();
+    let mut paths: Vec<&str> = Vec::new();
+    for listed_key in unresolved {
+        match listed_key {
+            (text, Some(segments)) => {
+                classes.push((text, *segments));
+                listed[0].push(listed_key);
+            }
+            (text, None) => {
+                paths.push(text);
+                listed[1].push(listed_key);
+            }
+        }
+    }
+    let mut read: [Vec<Summary>; 2] = [
+        classes.iter().map(|_| Summary::default()).collect(),
+        paths.iter().map(|_| Summary::default()).collect(),
+    ];
     let heads = Request::read_all_on(
         connection,
         work,
@@ -344,84 +406,91 @@ fn resolve_keys(
         "reading what a judgment's keys name",
     )?;
     for (arm, index, named) in heads {
-        summary(summaries, arm, index)?.head.push(named);
+        summary(&mut read, arm, index)?.head.push(named);
     }
 
     // A head cut below its bound is the whole of what its key names; only a
     // filled head is counted.
     let mut filled: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
-    for (arm, heads) in summaries.iter_mut().enumerate() {
+    for (arm, heads) in read.iter_mut().enumerate() {
         for (index, summary) in heads.iter_mut().enumerate() {
-            summary
-                .head
-                .sort_by(|left, right| (&left.rung, &left.path).cmp(&(&right.rung, &right.path)));
+            summary.head.sort_by(Named::ladder);
             summary.total = summary.head.len() as u64;
             if summary.head.len() >= CANDIDATE_HEAD {
                 filled[arm].push(index);
             }
         }
     }
-    if filled.iter().all(Vec::is_empty) {
-        return Ok(());
+    if filled.iter().any(|filled| !filled.is_empty()) {
+        let classes: Vec<(&str, u64)> = filled[0].iter().map(|at| classes[*at]).collect();
+        let paths: Vec<&str> = filled[1].iter().map(|at| paths[*at]).collect();
+        let totals = Request::read_all_on(
+            connection,
+            work,
+            &statement::totals_sql(key),
+            params_from_iter(statement::keys_parameters(
+                &classes, &paths, ignore, order, None,
+            )?),
+            |row| {
+                Ok(Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, usize>(1)?,
+                    row.get::<_, u64>(2)?,
+                )))
+            },
+            "counting what a judgment's keys name",
+        )?;
+        for (arm, at, total) in totals {
+            let index = usize::try_from(arm)
+                .ok()
+                .and_then(|arm| filled.get(arm))
+                .and_then(|filled| filled.get(at))
+                .copied()
+                .ok_or_else(|| StoreError::Damaged {
+                    what: format!("a count answered a key it was not asked, {arm}:{at}"),
+                })?;
+            summary(&mut read, arm, index)?.total = total;
+        }
     }
-    let classes: Vec<(&str, u64)> = filled[0].iter().map(|at| classes[*at]).collect();
-    let paths: Vec<&str> = filled[1].iter().map(|at| paths[*at]).collect();
-    let totals = Request::read_all_on(
-        connection,
-        work,
-        &statement::totals_sql(key),
-        params_from_iter(statement::keys_parameters(
-            &classes, &paths, ignore, order, None,
-        )?),
-        |row| {
-            Ok(Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, usize>(1)?,
-                row.get::<_, u64>(2)?,
-            )))
-        },
-        "counting what a judgment's keys name",
-    )?;
-    for (arm, at, total) in totals {
-        let index = usize::try_from(arm)
-            .ok()
-            .and_then(|arm| filled.get(arm))
-            .and_then(|filled| filled.get(at))
-            .copied()
-            .ok_or_else(|| StoreError::Damaged {
-                what: format!("a count answered a key it was not asked, {arm}:{at}"),
-            })?;
-        summary(summaries, arm, index)?.total = total;
+
+    for (keys, read) in listed.into_iter().zip(read) {
+        for (key, summary) in keys.into_iter().zip(read) {
+            summaries.summaries.insert(key.clone(), summary);
+            summaries.resolved += 1;
+        }
     }
     Ok(())
 }
 
 /// What resolving `held` against its keys' summaries found, and `None` where
 /// its health raises nothing.
-fn verdict(held: &Held, keys: &Keys) -> Option<Verdict> {
-    let summaries: Vec<&Summary> = held
+fn verdict(held: &Held, summaries: &KeySummaries) -> Result<Option<Verdict>, StoreError> {
+    let read = held
         .keys
         .iter()
-        .map(|(key, segments)| keys.summary_of(key, *segments))
-        .collect();
-    let total: u64 = summaries.iter().map(|summary| summary.total).sum();
-    match LinkHealth::of_address(held.link.address, total) {
+        .map(|key| summaries.of(key))
+        .collect::<Result<Vec<&Summary>, StoreError>>()?;
+    let total: u64 = read.iter().map(|summary| summary.total).sum();
+    Ok(match LinkHealth::of_address(held.link.address, total) {
         LinkHealth::Broken => Some(Verdict::Broken),
         LinkHealth::Ambiguous => {
-            let mut head: Vec<Named> = summaries
+            let mut head: Vec<Named> = read
                 .iter()
                 .flat_map(|summary| summary.head.iter().cloned())
                 .collect();
-            head.sort_by(|left, right| (&left.rung, &left.path).cmp(&(&right.rung, &right.path)));
+            head.sort_by(Named::ladder);
             head.truncate(CANDIDATE_HEAD);
             Some(Verdict::Ambiguous { head, total })
         }
-        LinkHealth::Healthy => summaries
+        LinkHealth::Healthy => read
             .iter()
             .find_map(|summary| summary.head.first().cloned())
             .map(Verdict::One),
-        _ => None,
-    }
+        LinkHealth::NotJudged => None,
+        // The wire's health is non-exhaustive, so a health it adds compiles
+        // here; it stops the judgment rather than raising nothing.
+        unknown => unreachable!("a link health the judgment has no finding for: {unknown:?}"),
+    })
 }
 
 /// The positions in `links` of every link naming one document that carries an

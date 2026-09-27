@@ -4,7 +4,8 @@
 //!
 //! Every statement is driven by a list a `json_each` walks — the documents,
 //! the distinct keys, the candidates' spellings, the links with one target —
-//! and `CROSS JOIN` keeps that list the outer loop, so each entry costs its own
+//! or by one seek of the link index — a class's range, or a path key — and
+//! `CROSS JOIN` keeps that driver the outer loop, so each entry costs its own
 //! seeks and nothing is read end to end.
 
 use norn_db::rusqlite::types::Value;
@@ -13,8 +14,9 @@ use crate::anchor::{anchor_held, carries_anchor};
 use crate::error::StoreError;
 use crate::facts::StoredPathOrder;
 use crate::find::path_list;
+use crate::health::LinkSelection;
 use crate::json::{FrontmatterValue, canonical_json};
-use crate::path::SuffixKey;
+use crate::path::{ClassKey, PathKey, SuffixKey};
 use crate::resolve::{self, AmbiguityIgnore};
 
 /// Which arm of [`heads_sql`] and [`totals_sql`] a row came from: a suffix
@@ -25,32 +27,86 @@ pub(crate) const CLASS_ARM: i64 = 0;
 /// documents at a path key.
 pub(crate) const PATH_ARM: i64 = 1;
 
-/// [`crate::ExplainedStatement::LinkHealthLinks`]: every link the documents at
-/// the paths `?1` lists hold, one row per key the link index holds it under
-/// in the key space `key` selects, and one row with no key for a link held
-/// under none.
+/// Which way [`links_sql`] reaches the links it reads: the statement's shape
+/// for each [`LinkSelection`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Selected {
+    /// By the documents holding them: an equality seek of `documents_path`
+    /// per path, then of `links_document_ordinal` per document.
+    Documents,
+    /// By a class: a range seek of the link index over the class's keys.
+    Class,
+    /// By a path key: an equality seek of the link index at the key.
+    Path,
+}
+
+impl Selected {
+    /// The shape `selection` is read in.
+    pub(crate) fn of(selection: LinkSelection<'_>) -> Self {
+        match selection {
+            LinkSelection::Documents(_) => Selected::Documents,
+            LinkSelection::Class(_) => Selected::Class,
+            LinkSelection::Path(_) => Selected::Path,
+        }
+    }
+}
+
+/// The links a judgment judges, reached the way `selected` names, one row per
+/// key the link index holds each under in the key space `key` selects, and
+/// one row with no key for a link held under none:
+/// [`crate::ExplainedStatement::LinkHealthLinks`] over the documents at the
+/// paths `?1` lists, [`crate::ExplainedStatement::LinkHealthClassLinks`] over
+/// the links held under a key in the class `?1` opens and `?2` closes, and
+/// [`crate::ExplainedStatement::LinkHealthPathLinks`] over the links held
+/// under the path key `?1`.
 ///
 /// The row's first thirteen columns are a link row's, in the order
 /// [`crate::request::stored_link_row`] reads them; then the holding
 /// document's path, the link's row id and ordinal, and the key and its
-/// segment count.
-pub(crate) fn links_sql(key: SuffixKey) -> String {
+/// segment count. A link the selection reaches is read with every key it is
+/// held under, whichever of them reached it.
+pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
     let link_key = resolve::link_key_column(key);
+    let (from, reached) = match selected {
+        Selected::Documents => (
+            "json_each(?1) AS j CROSS JOIN documents AS d CROSS JOIN links AS l",
+            "d.path = j.value AND l.document = d.id".to_string(),
+        ),
+        Selected::Class => (
+            "link_keys AS s CROSS JOIN links AS l CROSS JOIN documents AS d",
+            format!(
+                "s.{link_key} >= ?1 AND s.{link_key} < ?2 AND l.id = s.link AND d.id = l.document"
+            ),
+        ),
+        Selected::Path => (
+            "link_keys AS s CROSS JOIN links AS l CROSS JOIN documents AS d",
+            format!("s.{link_key} = ?1 AND l.id = s.link AND d.id = l.document"),
+        ),
+    };
     format!(
         "SELECT l.family, l.embed, l.protocol, l.target, l.title, l.anchor, l.block_ref,
                 l.span_line, l.span_column, l.span_offset, l.anchor_text, l.anchor_marked,
                 l.address, d.path, l.id, l.ordinal, k.{link_key}, k.segments
-         FROM json_each(?1) AS j
-         CROSS JOIN documents AS d
-         CROSS JOIN links AS l
+         FROM {from}
          LEFT JOIN link_keys AS k ON k.link = l.id
-         WHERE d.path = j.value AND l.document = d.id"
+         WHERE {reached}"
     )
 }
 
-/// The values [`links_sql`] binds: the documents' paths.
-pub(crate) fn links_parameters(documents: &[&str]) -> Result<Vec<Value>, StoreError> {
+/// The values [`links_sql`] binds over documents: their paths.
+pub(crate) fn documents_parameters(documents: &[&str]) -> Result<Vec<Value>, StoreError> {
     Ok(vec![path_list(documents)?])
+}
+
+/// The values [`links_sql`] binds over a class: its bounds.
+pub(crate) fn class_parameters(class: &ClassKey) -> Vec<Value> {
+    let (lower, upper) = class.bounds();
+    vec![Value::Text(lower), Value::Text(upper)]
+}
+
+/// The values [`links_sql`] binds over a path key: the key.
+pub(crate) fn path_parameters(path: &PathKey) -> Vec<Value> {
+    vec![Value::Text(path.as_str().to_string())]
 }
 
 /// [`crate::ExplainedStatement::LinkHealthHeads`]: the head of what each
@@ -67,6 +123,10 @@ pub(crate) fn links_parameters(documents: &[&str]) -> Result<Vec<Value>, StoreEr
 /// [`resolve::link_key_path`], its rung the key itself, so a path key's rows
 /// rank by the path alone. Each head is cut in the statement, so a key costs
 /// its class and hands back at most `?5` rows, however large the class.
+///
+/// The rows come back in no stated order: the judgment orders each head, and
+/// merges a link's heads, by [`resolve::ladder_cmp`], the order the cut here
+/// spells in SQL.
 pub(crate) fn heads_sql(key: SuffixKey) -> String {
     let rung = key.column();
     let class = class_predicate(key);

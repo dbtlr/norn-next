@@ -27,7 +27,8 @@ use std::collections::BTreeMap;
 
 use crate::ddl;
 use crate::facts::CANDIDATE_HEAD;
-use crate::health::statement as health;
+use crate::health::statement::{self as health, Selected};
+use crate::path::ClassKey;
 use crate::read::SuffixSpellings;
 use crate::resolve::AmbiguityIgnore;
 
@@ -153,7 +154,9 @@ impl<'a> Request<'a> {
             ExplainedStatement::FindingCandidates(ids) => finding_candidates_sql(ids.get()),
             ExplainedStatement::FindingClasses(ids) => finding_classes_sql(ids.get()),
             ExplainedStatement::FindingPaths(ids) => finding_paths_sql(ids.get()),
-            ExplainedStatement::LinkHealthLinks => health::links_sql(key),
+            ExplainedStatement::LinkHealthLinks => health::links_sql(key, Selected::Documents),
+            ExplainedStatement::LinkHealthClassLinks => health::links_sql(key, Selected::Class),
+            ExplainedStatement::LinkHealthPathLinks => health::links_sql(key, Selected::Path),
             ExplainedStatement::LinkHealthHeads => health::heads_sql(key),
             ExplainedStatement::LinkHealthTotals => health::totals_sql(key),
             ExplainedStatement::LinkHealthSuffixes => explained_suffixes(order)?.0,
@@ -275,7 +278,19 @@ impl<'a> Request<'a> {
             // each entry costs its own seeks.
             ExplainedStatement::LinkHealthLinks => database.emitted_plan(
                 &sql,
-                params_from_iter(health::links_parameters(&[EXPLAINED_PAGE_CURSOR_LEAF])?),
+                params_from_iter(health::documents_parameters(&[EXPLAINED_PAGE_CURSOR_LEAF])?),
+            ),
+            ExplainedStatement::LinkHealthClassLinks => database.emitted_plan(
+                &sql,
+                params_from_iter(health::class_parameters(&ClassKey::new(
+                    EXPLAINED_CLASS_KEY,
+                )?)),
+            ),
+            ExplainedStatement::LinkHealthPathLinks => database.emitted_plan(
+                &sql,
+                params_from_iter(health::path_parameters(&PathKey::new(
+                    EXPLAINED_PAGE_CURSOR_LEAF,
+                )?)),
             ),
             ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthTotals => {
                 let head =
@@ -473,9 +488,16 @@ pub enum ExplainedStatement<'a> {
     /// and spelled by a nonzero width for the same reason.
     FindingPaths(NonZeroUsize),
     /// The links a link-health judgment judges
-    /// ([`Request::judge_link_health`]): every link a list of documents holds,
-    /// beside the keys the link index holds each under.
+    /// ([`Request::judge_selected_links`]) selected by the documents holding
+    /// them: every link a list of documents holds, beside the keys the link
+    /// index holds each under.
     LinkHealthLinks,
+    /// The links a judgment judges selected by a class: every link held under
+    /// a key in one class's range, beside every key it is held under.
+    LinkHealthClassLinks,
+    /// The links a judgment judges selected by a path key: every link held
+    /// under exactly that key, beside every key it is held under.
+    LinkHealthPathLinks,
     /// The head of what each distinct key a judgment's links hold names, at
     /// most [`crate::CANDIDATE_HEAD`] documents of a suffix key's class or at
     /// a path key's path, in the resolution ladder's order.
@@ -504,7 +526,7 @@ pub const POINT_READS: usize = 12;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 34;
+pub const STATEMENTS: usize = 36;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -565,6 +587,8 @@ impl<'a> ExplainedStatement<'a> {
             Self::PathDiscard(path_key),
             Self::FindingPaths(ids),
             Self::LinkHealthLinks,
+            Self::LinkHealthClassLinks,
+            Self::LinkHealthPathLinks,
             Self::LinkHealthHeads,
             Self::LinkHealthTotals,
             Self::LinkHealthSuffixes,
@@ -611,10 +635,12 @@ impl<'a> ExplainedStatement<'a> {
             Self::PathDiscard(_) => 27,
             Self::FindingPaths(_) => 28,
             Self::LinkHealthLinks => 29,
-            Self::LinkHealthHeads => 30,
-            Self::LinkHealthTotals => 31,
-            Self::LinkHealthSuffixes => 32,
-            Self::LinkHealthAnchors => 33,
+            Self::LinkHealthClassLinks => 30,
+            Self::LinkHealthPathLinks => 31,
+            Self::LinkHealthHeads => 32,
+            Self::LinkHealthTotals => 33,
+            Self::LinkHealthSuffixes => 34,
+            Self::LinkHealthAnchors => 35,
         };
         assert!(
             slot < STATEMENTS,
@@ -687,6 +713,8 @@ impl<'a> ExplainedStatement<'a> {
             | Self::PathDiscard(_)
             | Self::FindingPaths(_)
             | Self::LinkHealthLinks
+            | Self::LinkHealthClassLinks
+            | Self::LinkHealthPathLinks
             | Self::LinkHealthHeads
             | Self::LinkHealthTotals
             | Self::LinkHealthSuffixes

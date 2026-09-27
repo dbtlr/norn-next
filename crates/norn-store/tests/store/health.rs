@@ -10,9 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use norn_store::{
-    AnchorReadings, BlockFact, CANDIDATE_HEAD, ContentModel, DocumentFacts, ExplainedStatement,
-    FindingFacts, HeadingFact, LinkAnchor, LinkFact, LinkFamily, Request, Snapshot, SnapshotReader,
-    Span, Store, StoredPathOrder, SuffixKey, Validation, induced_failure,
+    AnchorReadings, BlockFact, CANDIDATE_HEAD, ClassKey, ContentModel, DocumentFacts,
+    ExplainedStatement, FindingFacts, HeadingFact, KeySummaries, LinkAnchor, LinkFact, LinkFamily,
+    LinkSelection, PathKey, Request, Snapshot, SnapshotReader, Span, Store, StoredPathOrder,
+    SuffixKey, Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -139,6 +140,15 @@ impl Judging {
             .judge_link_health(&holders, &declared())
             .expect("judging link health");
         (findings, request.read_steps())
+    }
+
+    /// The findings judged about the links `selection` selects, against key
+    /// summaries of their own.
+    fn selected(&mut self, selection: LinkSelection<'_>) -> Vec<FindingFacts> {
+        self.store
+            .begin_request()
+            .judge_selected_links(selection, &mut KeySummaries::default(), &declared())
+            .unwrap_or_else(|refusal| panic!("judging {selection:?}: {refusal}"))
     }
 
     /// The findings judged about the links the document at `at` holds, by
@@ -850,6 +860,137 @@ fn a_findings_keys_are_its_links_keys() {
     }
 }
 
+// ---- selecting the links judged ----
+
+/// **A link is judged alike however it is selected.** The links a document
+/// holds are selected by that document, and again by the class or the path
+/// every one of them is held under, and the two judgments are the same
+/// findings in the same order: broken, ambiguous and missing an anchor
+/// through a class, and missing an anchor and healthy through a path.
+#[test]
+fn a_link_is_judged_alike_by_its_document_and_by_the_key_it_is_held_under() {
+    for order in [Sensitive, Folding] {
+        let mut documents = targets();
+        documents.push(derived(
+            "src/c.md",
+            &body_of(&[
+                "[[dup]]",
+                "![[dup]]",
+                "[[notes/dup]]",
+                "[[notes/dup#Nope]]",
+                "[[nowhere/dup]]",
+                "[[dup.md]]",
+            ]),
+        ));
+        documents.push(derived(
+            "src/p.md",
+            &body_of(&[
+                "[a](../notes/dup.md)",
+                "[b](../notes/dup.md#Nope)",
+                "[[vault://notes/dup#^nope]]",
+            ]),
+        ));
+        let mut judging = Judging::new(&format!("health-selected-{order:?}"), order, &documents);
+
+        let by_document = judging.selected(LinkSelection::Documents(&[path("src/c.md")]));
+        let class = ClassKey::new("dup/").expect("a class key");
+        assert_eq!(
+            judging.selected(LinkSelection::Class(&class)),
+            by_document,
+            "{order:?}"
+        );
+        let kinds: BTreeSet<&str> = by_document
+            .iter()
+            .map(|finding| finding.kind.as_str())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                FindingKind::Broken,
+                FindingKind::Ambiguous,
+                FindingKind::MissingAnchor
+            ]
+            .map(|kind| kind.as_str())
+            .into_iter()
+            .collect(),
+            "{order:?}: the fixture's reach"
+        );
+
+        let by_document = judging.selected(LinkSelection::Documents(&[path("src/p.md")]));
+        let at = PathKey::new("notes/dup.md").expect("a path key");
+        assert_eq!(
+            judging.selected(LinkSelection::Path(&at)),
+            by_document,
+            "{order:?}"
+        );
+        assert_eq!(
+            by_document
+                .iter()
+                .map(|finding| (finding.ordinal, finding.kind))
+                .collect::<Vec<_>>(),
+            [
+                (Some(1), FindingKind::MissingAnchor),
+                (Some(2), FindingKind::MissingAnchor)
+            ],
+            "{order:?}"
+        );
+    }
+}
+
+/// **A judgment taken in chunks resolves each key once.** Ten documents each
+/// hold `[[hub]]` and a path link to one of the documents it names, so their
+/// links hold two keys between them. Judged in two chunks of five documents
+/// against one set of key summaries, the two keys are resolved once each,
+/// the second chunk reads less than it does against summaries of its own,
+/// and the findings are the ones a single judgment of the ten finds.
+#[test]
+fn a_judgment_taken_in_chunks_resolves_each_key_once() {
+    let mut documents: Vec<DocumentFacts> = (0..7)
+        .map(|at| derived(&format!("m/{at}/hub.md"), "hub\n"))
+        .collect();
+    documents.extend((0..10).map(|at| {
+        derived(
+            &format!("h/{at}.md"),
+            &body_of(&["[[hub]]", "[p](../m/0/hub.md#Nope)"]),
+        )
+    }));
+    let mut judging = Judging::new("health-chunks", Sensitive, &documents);
+    let holders: Vec<_> = (0..10).map(|at| path(&format!("h/{at}.md"))).collect();
+    let (first, second) = holders.split_at(5);
+
+    let request = judging.request();
+    let mut summaries = KeySummaries::default();
+    let judge = |chunk: &[norn_store::DocumentPath], summaries: &mut KeySummaries| {
+        let before = request.read_steps();
+        let findings = request
+            .judge_selected_links(LinkSelection::Documents(chunk), summaries, &declared())
+            .expect("judging a chunk");
+        (findings, request.read_steps() - before)
+    };
+    let (mut chunked, _) = judge(first, &mut summaries);
+    assert_eq!(summaries.keys_resolved(), 2, "the first chunk's keys");
+    let (findings, warm) = judge(second, &mut summaries);
+    chunked.extend(findings);
+    assert_eq!(
+        summaries.keys_resolved(),
+        2,
+        "the second chunk resolved a key the first already had"
+    );
+
+    let mut own = KeySummaries::default();
+    let (alone, cold) = judge(second, &mut own);
+    assert_eq!(own.keys_resolved(), 2);
+    assert_eq!(alone, chunked[10..]);
+    assert!(
+        warm < cold,
+        "reused summaries read as much: {warm} >= {cold}"
+    );
+
+    let (whole, _) = judging.judged(&holders.iter().map(|at| at.as_str()).collect::<Vec<_>>());
+    assert_eq!(chunked, whole);
+    assert_eq!(chunked.len(), 20);
+}
+
 // ---- the work bar ----
 
 /// A store holding `links` documents `h/NNN.md` that each link `[[hub]]`, and
@@ -912,8 +1053,10 @@ fn judgment_work_is_links_plus_candidates() {
 // ---- the plan bars ----
 
 /// The statements the judgment runs, each of which the bar below judges.
-pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 5] = [
+pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 7] = [
     ExplainedStatement::LinkHealthLinks,
+    ExplainedStatement::LinkHealthClassLinks,
+    ExplainedStatement::LinkHealthPathLinks,
     ExplainedStatement::LinkHealthHeads,
     ExplainedStatement::LinkHealthTotals,
     ExplainedStatement::LinkHealthSuffixes,
@@ -950,21 +1093,48 @@ fn seek(alias: &'static str, access: Access<'static>, constraint: &str) -> Seek 
 
 /// The seeks each judgment statement is held to under `order`.
 fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek> {
-    let (class_index, key, path_index) = match order {
-        Sensitive => ("documents_suffix_key", "suffix_key", "documents_path"),
+    let (class_index, key, path_index, link_index, link_key) = match order {
+        Sensitive => (
+            "documents_suffix_key",
+            "suffix_key",
+            "documents_path",
+            "link_keys_key",
+            "key",
+        ),
         Folding => (
             "documents_folded_suffix_key",
             "folded_suffix_key",
             "documents_path_nocase",
+            "link_keys_folded_key",
+            "folded_key",
         ),
     };
     let range = format!("({key}>? AND {key}<?)");
+    // A link a key reached, its holder, and every key it is held under.
+    let reached = |selected: Seek| {
+        vec![
+            selected,
+            seek("l", Access::RowId, "(rowid=?)"),
+            seek("d", Access::RowId, "(rowid=?)"),
+            seek("k", Access::Index("link_keys_link"), "(link=?)"),
+        ]
+    };
     match statement {
         ExplainedStatement::LinkHealthLinks => vec![
             seek("d", Access::Index("documents_path"), "(path=?)"),
             seek("l", Access::Index("links_document_ordinal"), "(document=?)"),
             seek("k", Access::Index("link_keys_link"), "(link=?)"),
         ],
+        ExplainedStatement::LinkHealthClassLinks => reached(seek(
+            "s",
+            Access::Index(link_index),
+            &format!("({link_key}>? AND {link_key}<?)"),
+        )),
+        ExplainedStatement::LinkHealthPathLinks => reached(seek(
+            "s",
+            Access::Index(link_index),
+            &format!("({link_key}=?)"),
+        )),
         ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthTotals => vec![
             seek("dl", Access::Index(class_index), &range),
             seek("dp", Access::Index(path_index), "(path=?)"),
@@ -1004,6 +1174,28 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
             .expect("a query plan"),
     );
     read.assert_no_full_scan();
+    // A head is the ladder's first rows of a class, read in suffix-key order
+    // off the suffix-key index, and the ladder breaks a tie between equal keys
+    // by the path, which that index does not carry. So SQLite sorts only the
+    // rows sharing one key — the last term of the order — and the head's limit
+    // stops the read once it fills: a partial sort bounded by a run of equal
+    // keys, never the class. Every other statement sorts nothing.
+    if statement == ExplainedStatement::LinkHealthHeads {
+        let sorts: Vec<&str> = read
+            .rows()
+            .iter()
+            .map(|row| row.detail.as_str())
+            .filter(|detail| detail.contains("TEMP B-TREE"))
+            .collect();
+        assert_eq!(
+            sorts,
+            ["USE TEMP B-TREE FOR LAST TERM OF ORDER BY"],
+            "{statement:?} under {order:?}: {:?}",
+            read.rows()
+        );
+    } else {
+        read.assert_no_temp_btree();
+    }
     for Seek {
         alias,
         access,
@@ -1030,14 +1222,18 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
     }
 }
 
-/// **Every statement the judgment runs seeks what it reads.** The links a set
-/// of documents holds are an equality seek of `documents_path` per document,
-/// of `links_document_ordinal` per document row, and of `link_keys_link` per
-/// link; each distinct key's head and total a range seek of the suffix key the
-/// root probes, or a seek of the path at a path key; each candidate's
-/// suffixes a range seek of the same suffix key; and each anchor a link
-/// reached by its row id and a handful of equality seeks into the one
-/// document it names. Nothing is read end to end.
+/// **Every statement the judgment runs seeks what it reads, and sorts
+/// nothing past a head.** The links a set of documents holds are an equality
+/// seek of `documents_path` per document, of `links_document_ordinal` per
+/// document row, and of `link_keys_link` per link; the links held under a
+/// class a range seek of the link index over the key the root probes, and
+/// those held under a path key an equality seek of it, each link then reached
+/// by its row id and its holder by its own; each distinct key's head and
+/// total a range seek of the suffix key the root probes, or a seek of the
+/// path at a path key; each candidate's suffixes a range seek of the same
+/// suffix key; and each anchor a link reached by its row id and a handful of
+/// equality seeks into the one document it names. Nothing is read end to end,
+/// and only a head sorts, and only the rows sharing one key.
 ///
 /// Controls: each index a statement seeks dropped on a store of its own, and
 /// the bar fails for that statement.

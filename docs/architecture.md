@@ -686,7 +686,7 @@ The contract is stated whole and filled shape by shape, as each builder lands. T
 a statement it emitted, because a plan cannot be taken by a crate that may not reach the
 database, and beside the plan every column the statement reads, which SQLite's authorizer
 reports while the explain is prepared and a plan never names — and, beside the statements
-the read builders below name, thirty-four named statements carry a plan bar through it:
+the read builders below name, thirty-six named statements carry a plan bar through it:
 suffix candidates, findings in a class, the class-, path- and subject-scoped findings
 discards — the path discard an equality seek of the path-key index, and the subject discard
 in both the whole form and the form narrowed to the kinds a producer re-derives — the clear a schema pin runs over the field projection's typed values, the page
@@ -701,9 +701,10 @@ document row a path stands at, the row a facts snapshot opens on and the six fac
 keyed by the row id it found, the death recorded for a path, the findings recorded about
 one, the pinned vault-schema projection, and the store's last committed write generation —
 and the three chunked reads every findings read collects each finding's candidate head,
-class memberships and path keys through, a chunk of finding ids at a time — and the five
-statements the link-health judgment runs, which no write reaches yet: the links a set of
-documents holds beside their keys, the head of what each distinct key names and the total
+class memberships and path keys through, a chunk of finding ids at a time — and the seven
+statements the link-health judgment runs, which no write reaches yet: the links it judges
+beside their keys, selected three ways — by the documents holding them, by a class their
+suffix keys fall in, and by the path key they spell — the head of what each distinct key names and the total
 of each head that filled, the suffixes naming the candidates its findings carry, and whether
 the one document a link names holds the place its anchor names. Each chunked read is barred at every chunk width a read emits, as an equality
 seek of its table's primary key on the finding id, with no full scan and no sorter, taken of

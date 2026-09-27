@@ -146,6 +146,7 @@ pub use find::{
     NESTED_ROW_CEILING, Nested, NestedRows, PageDirection,
 };
 pub use get::{DocumentText, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, SectionAt};
+pub use health::{KeySummaries, LinkSelection};
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use read::{

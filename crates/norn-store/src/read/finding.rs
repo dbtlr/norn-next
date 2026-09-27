@@ -227,6 +227,11 @@ impl Snapshot {
 /// ties to the byte-least. Only an ambiguous link's finding has candidates
 /// past its head to enumerate, so every other kind has none; and neither has a
 /// finding in no class, nor one whose address a target cannot spell.
+///
+/// An ambiguous finding in a class — a suffix-addressed link's — carries the
+/// hint whether or not its head holds the whole total: the hint names the
+/// class, not the candidates the head left out. An ambiguous rooted name is
+/// keyed by paths alone, stands in no class, and so carries none.
 fn hint_of(kind: FindingKind, classes: &BTreeSet<ClassKey>) -> Option<Hint> {
     if kind != FindingKind::Ambiguous {
         return None;

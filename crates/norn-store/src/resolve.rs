@@ -55,6 +55,7 @@
 //! takes from the order ([`StoredPathOrder::glob_case`]), so an ignore glob and
 //! a find's path part written alike name the same places on any root.
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use norn_db::rusqlite::functions::FunctionFlags;
@@ -409,8 +410,26 @@ pub(crate) fn ladder_order(class: &TargetClass) -> String {
 
 /// The resolution ladder's order over rows whose probed key is `key` and whose
 /// path is `path`, each an expression: the key, then the path.
+///
+/// [`ladder_cmp`] is the same order over rows read into memory, and the two
+/// must agree: a head a statement cuts in this order is merged and re-cut in
+/// that one.
 pub(crate) fn ladder(key: &str, path: &str) -> String {
     format!("{key}, {path}")
+}
+
+/// The resolution ladder's order over two rows read into memory, each its
+/// probed key — its rung — and its path: the key, then the path, each
+/// compared byte by byte.
+///
+/// It is the order [`ladder`] spells in SQL. The two agree because every
+/// column a rung or a path is read from — `documents.suffix_key`,
+/// `documents.folded_suffix_key`, `documents.path` and `link_keys.key` or
+/// `link_keys.folded_key` — takes the `BINARY` collation, which compares
+/// bytes as Rust compares `str`. A column given another collation, or a
+/// ladder over another expression, changes both or neither.
+pub(crate) fn ladder_cmp(left: (&str, &str), right: (&str, &str)) -> Ordering {
+    left.cmp(&right)
 }
 
 /// Register the exclusion and the prefix step on `connection`, so every
