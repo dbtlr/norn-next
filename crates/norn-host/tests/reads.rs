@@ -1323,6 +1323,69 @@ fn a_part_a_verb_could_not_apply_is_answered_unsatisfied() {
     );
 }
 
+/// **A row judged without its frontmatter carries the finding that says
+/// why.** A document whose frontmatter block never closes, and one whose block
+/// does not parse, are read with no frontmatter, so a field part and a field
+/// sort judge each as missing every key. Each row they answer carries the
+/// finding naming the unread block in its findings column, and a find by that
+/// finding's kind answers the document.
+#[test]
+fn a_row_judged_without_its_frontmatter_carries_the_finding_that_says_why() {
+    let (_sandbox, vault, host) = a_verb_vault(
+        "host-reads-unread-frontmatter",
+        &[(
+            "zz-broken/zz-unreadable.md",
+            "---\ncreated: : :\n---\nbody\n",
+        )],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let unread = [
+        ("zz-broken/zz-unclosed.md", FindingKind::FrontmatterUnclosed),
+        (
+            "zz-broken/zz-unreadable.md",
+            FindingKind::FrontmatterUnreadable,
+        ),
+    ];
+    let at = || FindParams::new(address(vault.name()));
+    for judged in [
+        at().with_predicates([Predicate::missing("created")]),
+        at().with_sort(Sort::new(SortKey::field("created"), Direction::Ascending)),
+    ] {
+        let found = host
+            .find(&judged.with_columns([Column::findings()]).with_limit(1000))
+            .expect("a find judging a field answers");
+        for (path, kind) in unread {
+            let row = found
+                .answer
+                .report
+                .rows
+                .iter()
+                .find(|row| row.path.as_str() == path)
+                .unwrap_or_else(|| {
+                    panic!("`{path}` is not among {:?}", paths_of(&found.answer.report))
+                });
+            let findings = row.findings.as_ref().expect("the findings column");
+            assert!(
+                findings.items.iter().any(|finding| finding.kind == kind),
+                "`{path}` carries {:?}, not a `{kind}` finding",
+                findings.items
+            );
+        }
+    }
+    for (path, kind) in unread {
+        let found = host
+            .find(&at().with_predicates([Predicate::has_finding(kind)]))
+            .expect("a find by a finding's kind answers");
+        assert!(
+            paths_of(&found.answer.report)
+                .iter()
+                .any(|found| found == path),
+            "a find by `{kind}` answered {:?}",
+            paths_of(&found.answer.report)
+        );
+    }
+}
+
 /// **A get cuts every section and every block as `norn-text` reads it out of
 /// the document**, over every document the attachment derived: a heading's
 /// section is the span `resolve_section` answers for the heading's text over

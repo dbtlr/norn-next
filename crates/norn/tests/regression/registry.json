@@ -796,7 +796,8 @@
         "status": "bound",
         "tests": [
           "crates/norn-host/src/derivation.rs::an_unread_block_plans_an_upsert_and_a_finding_naming_the_spelling_it_read",
-          "crates/norn-host/src/production.rs::every_wholly_unread_block_derives_its_body_facts_and_names_its_cause"
+          "crates/norn-host/src/production.rs::every_wholly_unread_block_derives_its_body_facts_and_names_its_cause",
+          "crates/norn-host/tests/reads.rs::a_row_judged_without_its_frontmatter_carries_the_finding_that_says_why"
         ]
       }
     },
