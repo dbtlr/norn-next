@@ -6217,19 +6217,31 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.withdraw_trust(reason);
                         schedule_due_detach(&mut state, &name)
-                    } else if state.detach_due {
-                        state.trust = TrustState::Ready;
-                        schedule_due_detach(&mut state, &name)
-                    } else if state.pending.is_empty() && !handoff_saturated {
-                        state.trust = TrustState::Ready;
-                        None
                     } else {
-                        state.publish_pending_reconcile();
-                        Some(
-                            state
-                                .claim
-                                .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
-                        )
+                        // A rebuild's drain can merge facts behind a pending
+                        // batch this leg never touched, so what is left to
+                        // derive is published where the leg leaves it: healing
+                        // over the fact, in place of the progress phase the
+                        // rung reported while it ran, where one is owed;
+                        // `Ready` where nothing is, exactly as the reconcile
+                        // and maintenance legs publish it. That holds where a
+                        // teardown is due too, because a demand can withdraw
+                        // it before it runs.
+                        if handoff_saturated || !state.pending.is_empty() {
+                            state.publish_pending_reconcile();
+                        }
+                        state.publish_ready_where_nothing_is_left(handoff_saturated);
+                        if state.detach_due {
+                            schedule_due_detach(&mut state, &name)
+                        } else if handoff_saturated || !state.pending.is_empty() {
+                            Some(
+                                state
+                                    .claim
+                                    .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
+                            )
+                        } else {
+                            None
+                        }
                     };
                     drop(state);
                     if let Some(job) = next {
@@ -19867,6 +19879,74 @@ mod tests {
     #[test]
     fn a_read_withdrawing_a_teardown_after_a_maintenance_that_left_nothing_answers() {
         a_read_withdrawing_a_teardown_after(Job::Maintenance, None);
+    }
+
+    /// **A rebuild that leaves a fact pending publishes no `Ready` though a
+    /// teardown is due.** Its drain can merge facts behind a pending batch
+    /// the rung never derives, unlike a reconcile's own turn over the batch
+    /// it takes, so the healing the rung leaves behind — not the `Ready` the
+    /// unfixed leg published unconditionally — is what a read that withdraws
+    /// the teardown meets: the coverage the rung reminted carries no
+    /// continuity for a read to settle across, so the read is refused
+    /// healing rather than served a `Ready` the fact is still owed against.
+    /// A poll schedules the reconcile the fact is owed once the worker the
+    /// rung's teardown was waiting on frees up, and a read answers once that
+    /// commits.
+    #[test]
+    fn a_poll_schedules_the_reconcile_that_a_rebuild_left_pending() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, subject, holding_lease) = a_leg_ending_due_a_teardown(
+            &ops,
+            Job::Rebuild,
+            Some(a_fact()),
+            Duration::from_secs(2),
+            Duration::from_millis(5),
+        );
+
+        assert_ne!(
+            host.state(&subject),
+            answered(TrustState::Ready),
+            "a rebuild published Ready though a fact from its drain was still pending"
+        );
+        let refusal = host
+            .begin_read(&subject)
+            .expect_err("a read met a rebuild's pending fact and a due teardown as service");
+        assert!(
+            matches!(
+                refusal,
+                ReadRefusal::NotServing(Demand::State(TrustState::Warming {
+                    phase: WarmingPhase::Healing,
+                    ..
+                }))
+            ),
+            "a read over a rebuild's pending fact was refused as {refusal:?}, not the healing it left"
+        );
+
+        // Nothing schedules the reconcile the fact is owed until the worker
+        // the holding vault's attach pinned frees up for the dispatcher's
+        // next poll to use.
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &subject, TrustState::Ready);
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            1,
+            "the fact a rebuild left pending was not reconciled once"
+        );
+        assert_eq!(
+            host.begin_read(&subject)
+                .expect("a rebuild's fact reconciled by the poll answers a read")
+                .reading()
+                .published(),
+            &Demand::State(TrustState::Ready)
+        );
+        drop(holding_lease);
+    }
+
+    /// **A rebuild that left nothing to derive publishes `Ready` though a
+    /// teardown is due**, so a read that withdraws the teardown answers.
+    #[test]
+    fn a_read_withdrawing_a_teardown_after_a_rebuild_that_left_nothing_answers() {
+        a_read_withdrawing_a_teardown_after(Job::Rebuild, None);
     }
 
     /// **A batch carrying no fact leaves the entry's position where it
