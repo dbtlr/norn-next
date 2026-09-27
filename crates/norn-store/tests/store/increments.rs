@@ -1541,6 +1541,69 @@ fn a_folding_store_names_a_changed_path_by_its_folded_key() {
     assert!(targets_at(&request, "index.md").is_empty());
 }
 
+/// **The path discard runs before the findings the same act derived are
+/// written.** A changeset that upserts `dir/t.md` names `dir/t.md` in its own
+/// [`IncrementOutcome::affected_paths`], and a `DerivedFinding` the same call
+/// hands over keyed by that path is a write the act carries, not a change it
+/// discards for. Run in the other order, the write would land and then be
+/// taken by the discard it was never meant to answer to, so the finding this
+/// test records never stands.
+#[test]
+fn a_changesets_own_derived_finding_stands_through_its_own_path_discard() {
+    let scratch = Scratch::new("path-axis-discard-before-write");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [upsert("dir/t.md", "hash-1", "a body\n")],
+            &[DerivedFinding {
+                facts: broken_path_link("about.md", &["dir/t.md"]),
+                replaces: None,
+            }],
+        )
+        .expect("applying a changeset");
+
+    assert_eq!(outcome.affected_paths, path_keys(&["dir/t.md"]));
+    assert_eq!(
+        targets_at(&request, "about.md"),
+        vec![Some("dir/t.md".to_string())],
+        "the finding keyed by the path its own changeset wrote did not stand"
+    );
+}
+
+/// **Folding a path key is ASCII-only, on a folding root too.** `É` is not
+/// an ASCII letter, so folding `Été.md` leaves it exactly as written — the
+/// same rule the link index folds by — and a folding store still names the
+/// death of `Été.md` by that unfolded key, which is what reaches the finding
+/// a link to it filed there.
+#[test]
+fn a_folding_store_folds_a_path_key_by_ascii_case_alone() {
+    let scratch = Scratch::new("path-axis-non-ascii");
+    let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
+    let mut request = store.begin_request();
+    write_document(&mut request, &document("index.md", "hash-1", "a body\n"));
+    request
+        .record_finding(&broken_path_link("index.md", &["Été.md"]))
+        .expect("recording a finding");
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [death("Été.md", Provenance::WatcherRemoval)],
+            &[],
+        )
+        .expect("applying a changeset");
+    assert_eq!(
+        outcome.affected_paths,
+        path_keys(&["Été.md"]),
+        "ASCII case folding changed a non-ASCII letter's case"
+    );
+    assert_eq!(outcome.invalidated.findings_discarded, 1);
+    assert!(targets_at(&request, "index.md").is_empty());
+}
+
 /// **A `Composed` changeset records no store-side recomputation of the state it
 /// was handed.** The mark changes no statement the increment runs, so the bar is
 /// the counters: the same changeset reads the same counters under either mark,
