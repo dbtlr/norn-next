@@ -9575,17 +9575,25 @@ mod tests {
 
     /// **A status holds no demand, so an idle entry it was asked about is
     /// reaped as if it had not been asked**, whichever shape the status
-    /// took.
+    /// took: the reap lands at the deadline the last lease set, which a
+    /// status that recorded a demand would have moved, and one still holding
+    /// a lease would have blocked.
+    ///
+    /// The dispatcher never ticks here, so the only reap is the one this case
+    /// calls. An ambient reap takes an unleased entry the tick after it
+    /// attaches, and Ready is then a window no wait is sure to observe.
     #[test]
     fn a_status_holds_no_demand_so_an_idle_entry_is_still_reaped() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
+        let released = Instant::now();
         wait_for_state(&host, &name, TrustState::Ready);
 
         status_of(&host, &name);
         rolled_up(&host);
-        host.reap_idle(Instant::now()).unwrap();
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
+        host.reap_idle(released + host.shared.idle_after).unwrap();
 
         wait_for_state(&host, &name, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
