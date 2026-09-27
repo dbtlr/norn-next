@@ -136,9 +136,9 @@ fn phrase_of(token: &str) -> Option<&str> {
 /// proximity.
 fn is_operator(token: &str) -> bool {
     matches!(token, "AND" | "OR" | "NOT" | "NEAR")
-        || token
-            .strip_prefix("NEAR/")
-            .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        || token.strip_prefix("NEAR/").is_some_and(|digits| {
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 /// Whether the tokenizer begins a word at `character`.

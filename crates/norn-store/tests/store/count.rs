@@ -1002,9 +1002,8 @@ fn a_wordless_match_part_is_reported_and_a_counts_tally_reads_nothing_it_narrowe
         vec![Unsatisfied::query_names_no_word("\"!!!\"")]
     );
 
-    let beside = counting_store.count(
-        &counting(vec![field("aliases")]).with_predicates([wordless, open]),
-    );
+    let beside =
+        counting_store.count(&counting(vec![field("aliases")]).with_predicates([wordless, open]));
     assert_eq!(beside.tallies, Vec::new());
     assert_eq!(
         beside.unsatisfied,
