@@ -14,13 +14,12 @@
 //! exclusion, and a link key's class or path — so no two surfaces can disagree
 //! about a class.
 //!
-//! **The class keys are a dormant carrier.** [`TargetClass::class_keys`] is the
-//! set a finding about a target is filed under, and its consumer is the
-//! link-health findings the link-health unit of Layer 3 files: a producer that
-//! reads a link's target, reads its class here, and files what it found under
-//! these keys. The current call graph does not reach it, because no producer
-//! files a link-health finding yet — every finding the host files is about its
-//! own subject and belongs to no class.
+//! **The class keys are a dormant carrier with no consumer.**
+//! [`TargetClass::class_keys`] spells the set of class keys a target is read
+//! through. The link-health judgment ([`crate::health`]) keys a link's findings
+//! by the link's stored keys in `link_keys` rather than by this set, so nothing
+//! outside its tests calls it; whether its roadmap obligation is withdrawn is
+//! an open ruling.
 //!
 //! # Case is the root's
 //!
