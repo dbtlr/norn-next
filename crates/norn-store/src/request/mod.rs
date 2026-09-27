@@ -1542,6 +1542,10 @@ impl<'a> Request<'a> {
 
     /// The same, on a connection the caller names — a read snapshot's own
     /// transaction — with the steps and the statement still this request's.
+    ///
+    /// The statement is taken from the connection's cache, so a statement one
+    /// act runs once per key or per page — a changeset's re-decision runs
+    /// several per class it changed — is compiled once and not per run.
     pub(crate) fn read_all_on<T>(
         connection: &Connection,
         work: &ReadWork,
@@ -1551,8 +1555,10 @@ impl<'a> Request<'a> {
         operation: &'static str,
     ) -> Result<Vec<T>, StoreError> {
         let mut statement = connection
-            .prepare(sql)
+            .prepare_cached(sql)
             .map_err(|error| error::sql(operation, error))?;
+        // A cached statement carries the steps of every earlier run.
+        statement.reset_status(StatementStatus::VmStep);
         let rows = statement
             .query_map(parameters, read)
             .map_err(|error| error::sql(operation, error))?;
@@ -1752,36 +1758,42 @@ pub(crate) fn write_finding(
         norn_db::meta::get_meta(transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
             .unwrap_or_default();
 
+    // Each statement is cached: a changeset's re-decision files a finding per
+    // link it finds wanting, each through these same statements.
     let id: i64 = transaction
-        .query_row(
+        .prepare_cached(
             "INSERT INTO findings (
                  vault_schema_fingerprint, generation, kind, severity, path, target,
                  span_line, span_column, span_offset, candidates_total, message, detail,
                  ordinal
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              RETURNING id",
-            params![
-                fingerprint,
-                generation,
-                finding.kind.as_str(),
-                finding.severity.as_str(),
-                finding.path.as_str(),
-                finding.target,
-                finding.span.map(|span| span.line),
-                finding.span.map(|span| span.column),
-                finding.span.map(|span| span.byte_offset),
-                finding.candidates_total,
-                finding.message,
-                finding.detail,
-                finding.ordinal,
-            ],
-            |row| row.get(0),
         )
+        .and_then(|mut insert| {
+            insert.query_row(
+                params![
+                    fingerprint,
+                    generation,
+                    finding.kind.as_str(),
+                    finding.severity.as_str(),
+                    finding.path.as_str(),
+                    finding.target,
+                    finding.span.map(|span| span.line),
+                    finding.span.map(|span| span.column),
+                    finding.span.map(|span| span.byte_offset),
+                    finding.candidates_total,
+                    finding.message,
+                    finding.detail,
+                    finding.ordinal,
+                ],
+                |row| row.get(0),
+            )
+        })
         .map_err(|error| error::sql("writing a finding", error))?;
 
     {
         let mut insert = transaction
-            .prepare(
+            .prepare_cached(
                 "INSERT INTO finding_candidates (finding, rank, path, suffix)
                  VALUES (?1, ?2, ?3, ?4)",
             )
@@ -1800,7 +1812,7 @@ pub(crate) fn write_finding(
 
     {
         let mut insert = transaction
-            .prepare("INSERT INTO finding_classes (finding, class_key) VALUES (?1, ?2)")
+            .prepare_cached("INSERT INTO finding_classes (finding, class_key) VALUES (?1, ?2)")
             .map_err(|error| error::sql("preparing a finding class write", error))?;
         for class_key in &finding.class_keys {
             insert
@@ -1811,7 +1823,7 @@ pub(crate) fn write_finding(
 
     {
         let mut insert = transaction
-            .prepare("INSERT INTO finding_paths (finding, path_key) VALUES (?1, ?2)")
+            .prepare_cached("INSERT INTO finding_paths (finding, path_key) VALUES (?1, ?2)")
             .map_err(|error| error::sql("preparing a finding path write", error))?;
         for path_key in &finding.path_keys {
             insert
