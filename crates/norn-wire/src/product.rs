@@ -72,7 +72,9 @@ pub enum Unsatisfied {
         did_you_mean: Vec<String>,
     },
     /// A predicate named a key the vault's field universe does not hold, so
-    /// no document satisfies that part and the answer holds nothing.
+    /// no document satisfies that part and the answer matches no document:
+    /// a find or validate page holds no row, and an ungrouped count tallies
+    /// zero.
     #[non_exhaustive]
     UnknownPredicateKey {
         /// The key the request named.

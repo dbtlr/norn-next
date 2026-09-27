@@ -819,8 +819,8 @@ machinery. **A part on a predicate key outside the field universe matches no doc
 every builder that compiles a conjunction, as a part that cannot be applied does: a key neither
 declared nor carried by any document is read as a likely misspelling and not applied, so a typo
 never widens an answer, an absence or an inequality included, which over such a key would
-otherwise match every document; the answer is empty beside an in-band report naming the key and
-the keys near it. A page with no filter reads its order index in page order, and
+otherwise match every document; the answer matches no document (a page holds no row, an
+ungrouped count tallies zero) beside an in-band report naming the key and the keys near it. A page with no filter reads its order index in page order, and
 sorts nothing: the path page and a field sort's valued section seek it and stop at the
 page's bound. A field sort's missing section passes every document that carries the key to
 reach one that does not, so an ascending first page, which reads the missing section first,
