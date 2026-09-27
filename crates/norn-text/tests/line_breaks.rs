@@ -661,9 +661,12 @@ fn the_scan_sees_a_line_rule_however_it_is_spelled() {
 fn the_pinned_sources_are_every_module_the_crate_declares() {
     /// `line` with a trailing `//` comment cut off and the cut end retrimmed.
     /// A declaration followed by a comment is still a declaration; neither
-    /// reader below sees past the `//` on its own.
+    /// reader below sees past the `//` on its own. The `//` an attribute's own
+    /// string carries, `#[doc = "see a//b"] mod foo;`, is not a comment, so
+    /// the search shares [`attribute_close`]'s quote tracking rather than
+    /// matching blind.
     fn strip_trailing_comment(line: &str) -> &str {
-        match line.find("//") {
+        match find_outside_a_string(line, "//") {
             Some(at) => line[..at].trim_end(),
             None => line,
         }
@@ -733,18 +736,29 @@ fn the_pinned_sources_are_every_module_the_crate_declares() {
             || (before.starts_with("pub(") && before.ends_with(')'))
     }
 
-    /// The byte offset of `attribute`'s own closing `]`, skipping one inside
-    /// a `"..."` string with `\"` and `\\` read as escapes so a quote they
-    /// carry does not end the string early.
+    /// The byte offset of `attribute`'s own closing `]`: [`find_outside_a_string`]
+    /// over `]`, so one inside a `"..."` string, `#[doc = "x]y"]`, names no
+    /// boundary here.
     fn attribute_close(attribute: &str) -> Option<usize> {
-        let bytes = attribute.as_bytes();
+        find_outside_a_string(attribute, "]")
+    }
+
+    /// The byte offset of `needle`'s first match in `text` that stands
+    /// outside a `"..."` string, with `\"` and `\\` read as escapes so a
+    /// quote a string carries does not end it early. Shared by
+    /// [`strip_trailing_comment`] and [`attribute_close`], so a `//` or a `]`
+    /// a string carries is never read as the boundary either search for.
+    fn find_outside_a_string(text: &str, needle: &str) -> Option<usize> {
+        let bytes = text.as_bytes();
         let mut in_string = false;
         let mut at = 0;
         while at < bytes.len() {
+            if !in_string && text[at..].starts_with(needle) {
+                return Some(at);
+            }
             match bytes[at] {
                 b'\\' if in_string => at += 1,
                 b'"' => in_string = !in_string,
-                b']' if !in_string => return Some(at),
                 _ => {}
             }
             at += 1;
@@ -771,6 +785,13 @@ fn the_pinned_sources_are_every_module_the_crate_declares() {
     assert!(
         declares_a_module(r#"#[doc = "x]y"] mod foo;"#),
         "a `]` inside an attribute's string hid a real module declaration"
+    );
+    // An attribute whose string carries a `//`: a naive trailing-comment cut
+    // would have taken it for one and truncated the line before `mod foo;`
+    // ever appeared.
+    assert!(
+        declares_a_module(r#"#[doc = "see a//b"] mod foo;"#),
+        "a `//` inside an attribute's string was read as a trailing comment"
     );
     let text = |file: &str| {
         SOURCES
