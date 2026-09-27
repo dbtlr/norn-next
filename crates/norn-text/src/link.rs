@@ -280,8 +280,8 @@ pub(crate) fn parse_tokens(text: &str, ignored: &[Range<usize>]) -> Vec<Link> {
 /// parse resolves `\#` to a hash, and a split over its answer reads the real
 /// filename `note\#draft.md` as a note with a `draft.md` anchor. An escaped
 /// hash is a literal; an unescaped one opens a fragment, inside `<…>` as well
-/// as outside it. Percent-encoding is resolved nowhere, so `note%23draft.md`
-/// names a file and carries no anchor.
+/// as outside it. Percent-encoding is not read before the split, so
+/// `note%23draft.md` names a file and carries no anchor.
 pub(crate) fn markdown_link(
     raw: &str,
     destination: &str,
@@ -499,10 +499,10 @@ fn is_scheme_identifier(candidate: &str) -> bool {
 /// A protocol prefix stays with the returned target; [`Link::protocol`] is
 /// where recognition happens.
 ///
-/// What an anchor *addresses* is the family's business rather than this
-/// function's: a wikilink anchor is heading text, a Markdown fragment is a
-/// heading slug, and the raw fragment recorded here is what both readings
-/// start from.
+/// What an anchor *addresses* is the section resolver's business rather than
+/// this function's ([`crate::anchor_readings`]): the raw fragment recorded
+/// here is what its readings start from, a wikilink's and a Markdown link's
+/// alike.
 pub(crate) fn split_fragment(raw: &str) -> (&str, Option<&str>, Option<&str>) {
     split_at_hash(raw, raw.find('#'))
 }
