@@ -349,10 +349,13 @@ impl<'a> Pages<'a> {
             PagedBy::Class(class) => statement::class_parameters(class, &after, LINK_HEALTH_CHUNK),
             PagedBy::Path(path) => statement::path_parameters(path, &after, LINK_HEALTH_CHUNK),
         };
-        let (links, last) = read_links(connection, work, key, self.selected, values)?;
-        // A page as long as its bound may have one after it; a shorter one is
-        // the last.
-        self.after = last.filter(|_| links.len() == LINK_HEALTH_CHUNK);
+        let (links, driven) = read_links(connection, work, key, self.selected, values)?;
+        // A page whose driver read as many rows as its bound may have one
+        // after it; a shorter one is the last.
+        self.after = driven
+            .last()
+            .filter(|_| driven.len() == LINK_HEALTH_CHUNK)
+            .cloned();
         Ok((!links.is_empty()).then_some(links))
     }
 }
@@ -540,15 +543,16 @@ fn judge_links(
 
 /// The links one read of [`statement::links_sql`] in the shape `selected`
 /// reaches, bound to `values`, each with its keys in the key space `key`
-/// selects, in the order of the holding path, then the ordinal; and the last
-/// driver row the read reached, which a page resumes past.
+/// selects, in the order of the holding path, then the ordinal; and the
+/// driver rows a paged read reached, in order, the last of which a page
+/// resumes past.
 fn read_links(
     connection: &Connection,
     work: &ReadWork,
     key: SuffixKey,
     selected: Selected,
     values: Vec<Value>,
-) -> Result<(Vec<Held>, Option<After>), StoreError> {
+) -> Result<(Vec<Held>, BTreeSet<After>), StoreError> {
     let rows = Request::read_all_on(
         connection,
         work,
@@ -594,11 +598,9 @@ fn read_links(
     )?;
     let mut links: Vec<Held> = Vec::new();
     let mut by_id: HashMap<i64, usize> = HashMap::new();
-    let mut last: Option<After> = None;
+    let mut driven: BTreeSet<After> = BTreeSet::new();
     for (holder, generation, id, ordinal, link, key, after) in rows {
-        if after > last {
-            last = after;
-        }
+        driven.extend(after);
         let at = *by_id.entry(id).or_insert_with(|| {
             links.push(Held {
                 holder,
@@ -614,7 +616,7 @@ fn read_links(
         keys.extend(key.filter(|key| !keys.contains(key)));
     }
     links.sort_by(|left, right| (&left.holder, left.ordinal).cmp(&(&right.holder, right.ordinal)));
-    Ok((links, last))
+    Ok((links, driven))
 }
 
 /// Resolve every distinct key `links` hold that `summaries` does not hold
