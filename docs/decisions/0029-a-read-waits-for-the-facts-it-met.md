@@ -177,7 +177,8 @@ code, with the message "this vault is still indexing a change".
 
 **Teardown never waits for a read, and a waiting read is no exception.** A teardown's
 publication moves the stance to refuse, which wakes every waiting read, and each of them
-takes the gate again and refuses with what the entry then publishes.
+takes the gate again and refuses with what the entry then publishes, unless the entry has
+reached `Ready` again before that retake.
 
 **The bound is operational containment, not a performance threshold.** It keeps a read from
 waiting on a change that does not converge, and it states nothing about how fast a change

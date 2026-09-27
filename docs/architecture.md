@@ -1780,8 +1780,8 @@ hold of the entry gate ends by recording whether trust has stood unbroken since 
 moves the gate's stance signal where the hold changed the stance or how far the entry has
 derived the facts it took in. The bound runs from the read's first hold of the entry gate and
 covers every wait the read takes, the wait for the connection and the wait for the change
-together. Every batch of facts the entry takes in moves its position in its fact stream, and a
-reconcile turn that commits records that it has derived through the position it took its facts
+together. Every batch the entry takes in that carries a fact moves its position in its fact
+stream, and a reconcile turn that commits records that it has derived through the position it took its facts
 at. A settling read records that position under the first hold that finds the entry settling,
 gives the gate back, waits outside it on the signal, takes the gate again and reads the stance
 afresh. It answers from the snapshot it establishes at the first of two things it observes:

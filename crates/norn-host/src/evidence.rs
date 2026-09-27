@@ -538,13 +538,13 @@ mod tests {
 /// read leaves**, so what an acquisition did is in the account whichever way it
 /// left. The mint is counted where the mint returns, the establishment where
 /// the hold it ran under gives the gate back, and the wait for the entry's
-/// connection and the wait for `Ready` where each begins, so the refusals are
+/// connection and the settle wait where each begins, so the refusals are
 /// accounted exactly as the answers are. A wait that begins cannot be
-/// abandoned: a wait for the connection returns only with the connection, and
-/// a wait for `Ready` returns woken or at the read's bound, so a wait counted
-/// where it begins is a wait that ends. No path out of an acquisition runs a
-/// statement under the gate, waits out another read, or waits out a change,
-/// and reports nothing.
+/// abandoned: a wait for the connection returns with the connection or at the
+/// read's bound, and a settle wait returns woken or at the read's bound, so a
+/// wait counted where it begins is a wait that ends. No path out of an
+/// acquisition runs a statement under the gate, waits out another read, or
+/// waits out a change, and reports nothing.
 ///
 /// **The rounds of the gate an acquisition took are the one reading recorded
 /// where it leaves**, because the count is whole only there. It is recorded
@@ -683,8 +683,8 @@ pub struct ReadReading {
     /// stance again. Each acquisition counts its own rounds and records them
     /// once, where it leaves. So this equals [`ReadReading::reader_waits`],
     /// and a count below it is a contended acquisition that answered under
-    /// the stance it read before it waited. The rounds after a wait for
-    /// `Ready` are [`ReadReading::settle_rounds`], which is what keeps that
+    /// the stance it read before it waited. The rounds after a settle wait
+    /// are [`ReadReading::settle_rounds`], which is what keeps that
     /// equality whole.
     pub gate_rounds_after_the_first: u64,
     /// The most rounds of the entry gate any one acquisition took after its
@@ -701,9 +701,10 @@ pub struct ReadReading {
     /// and it is read per acquisition so that one taking two cannot hide
     /// beside one taking none.
     pub widest_gate_rounds_after_the_first: u64,
-    /// Waits for `Ready` that acquisitions began over an entry taking in a
-    /// change: the acquisition gave the entry gate back and waited on the
-    /// entry's stance signal.
+    /// Settle waits that acquisitions began over an entry taking in a change:
+    /// the acquisition gave the entry gate back and waited on the entry's
+    /// stance signal, for the entry to publish `Ready` or to derive the facts
+    /// the read met.
     ///
     /// **Counted where each wait begins**, so a reading taken while a read
     /// waits already names it. One acquisition may wait more than once where
@@ -711,13 +712,13 @@ pub struct ReadReading {
     /// Nonzero is reads meeting a change, which the read-concurrency bars do
     /// not provoke and do not read.
     pub settle_waits: u64,
-    /// Rounds of the entry gate acquisitions took after a wait for `Ready`,
+    /// Rounds of the entry gate acquisitions took after a settle wait,
     /// recorded where each acquisition leaves.
     ///
     /// **Counted apart from [`ReadReading::gate_rounds_after_the_first`]**, so
     /// that reading goes on equalling [`ReadReading::reader_waits`]: every
-    /// wait for the connection is followed by one round, and every wait for
-    /// `Ready` by one round here. So this equals `settle_waits` over any
+    /// wait for the connection is followed by one round, and every settle
+    /// wait by one round here. So this equals `settle_waits` over any
     /// window in which no acquisition is still waiting.
     pub settle_rounds: u64,
     /// Acquisitions refused because the entry was still taking in its change
@@ -757,10 +758,10 @@ pub struct ReadsSince {
     /// Rounds of the entry gate this window's acquisitions took after their
     /// first, recorded where each acquisition left.
     pub gate_rounds_after_the_first: u64,
-    /// Waits for `Ready` this window's acquisitions began.
+    /// Settle waits this window's acquisitions began.
     pub settle_waits: u64,
-    /// Rounds of the entry gate this window's acquisitions took after a wait
-    /// for `Ready`.
+    /// Rounds of the entry gate this window's acquisitions took after a
+    /// settle wait.
     pub settle_rounds: u64,
     /// Acquisitions this window refused past their settle bound.
     pub settle_expiries: u64,
@@ -934,8 +935,8 @@ impl ReadEvidence {
             .fetch_max(rounds, Ordering::Relaxed);
     }
 
-    /// Record that one acquisition began a wait for its entry to reach
-    /// `Ready`.
+    /// Record that one acquisition began a settle wait: a wait for its entry
+    /// to publish `Ready` or to derive the facts the read met.
     ///
     /// **Called where the wait begins**, after the acquisition gave the entry
     /// gate back, so a reading taken while the read waits names it whatever
@@ -945,7 +946,7 @@ impl ReadEvidence {
     }
 
     /// Record the rounds of its entry gate one acquisition took after its
-    /// waits for `Ready`, once, where it leaves.
+    /// settle waits, once, where it leaves.
     pub(crate) fn count_settle_rounds(&self, rounds: u64) {
         self.settle_rounds.fetch_add(rounds, Ordering::Relaxed);
     }

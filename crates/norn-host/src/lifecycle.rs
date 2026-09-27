@@ -2186,7 +2186,8 @@ fn unheld_lease<O: EntryOps>(name: &VaultName, outcome: Demand) -> DemandLease<O
 /// the idle interval is restarted, and an idle detach that is scheduled and
 /// not yet dispatched is withdrawn — the claim it was scheduled under is
 /// invalidated and re-opened, so the work this demand asks for is what the
-/// entry does next.
+/// entry does next. Facts the teardown was scheduled over stay pending, and
+/// the next watcher poll schedules the reconcile they are owed.
 ///
 /// A detach already in flight is not withdrawn. It has run [`begin_release`],
 /// which emptied the reader slot and published the releasing phase, so what a
@@ -4660,7 +4661,7 @@ impl<O: EntryOps> Host<O> {
     /// untrusted, a teardown, and every park.
     ///
     /// **No acquisition waits while it holds the entry gate**, for the entry's
-    /// connection or for `Ready`. An entry's reads share one connection and
+    /// connection or for the change a settling read met. An entry's reads share one connection and
     /// the read holding it gives it back only when it ends, asking for the
     /// entry gate on its way out — so a gate held across that wait is a gate
     /// no holder can take again; and the change a settling read waits for is
@@ -4690,7 +4691,7 @@ impl<O: EntryOps> Host<O> {
     /// gate.
     ///
     /// The acquisition counts the rounds it takes after a wait for the
-    /// connection apart from the rounds after a wait for `Ready`, and records
+    /// connection apart from the rounds after a settle wait, and records
     /// both once, where it leaves, on every way out.
     ///
     /// **A read is demand the way a client's demand is**, served or refused.
@@ -5067,7 +5068,7 @@ struct HoldOpening<R> {
 ///
 /// **The two kinds of round are counted apart**, so the rounds after a wait
 /// for the connection go on equalling the waits for it, and the rounds after
-/// a wait for `Ready` equal the waits for that.
+/// a settle wait equal the settle waits.
 ///
 /// **The rounds are recorded once, where this drops**, which is where the
 /// acquisition leaves whichever way it leaves: served, refused before a wait
@@ -5076,7 +5077,7 @@ struct AcquisitionRounds<'r> {
     reads: &'r ReadEvidence,
     /// Rounds taken after waits for the connection, and the first round.
     taken: u64,
-    /// Rounds taken after waits for `Ready`.
+    /// Rounds taken after settle waits.
     settled: u64,
 }
 
@@ -5107,7 +5108,7 @@ impl<'r> AcquisitionRounds<'r> {
         Self::retake(outside, earlier)
     }
 
-    /// Take the entry gate again once a wait for `Ready` has ended, woken or
+    /// Take the entry gate again once a settle wait has ended, woken or
     /// out of time, answering what [`AcquisitionRounds::take_the_gate_again`]
     /// answers.
     fn take_the_gate_again_after_settling<'g, O: EntryOps>(
@@ -19237,11 +19238,11 @@ mod tests {
         );
     }
 
-    /// Wait for the read account to name `waits` waits for `Ready` begun
-    /// since `before`.
+    /// Wait for the read account to name `waits` settle waits begun since
+    /// `before`.
     fn wait_for_settle_waits<O: EntryOps>(host: &Host<O>, before: ReadReading, waits: u64) {
         wait_until(
-            "a read to begin its wait for the entry to reach ready",
+            "a read to begin its settle wait",
             lifecycle_wait_budget(),
             || match host.read_evidence().since(before).settle_waits {
                 begun if begun == waits => Observed::Met(()),
@@ -20057,7 +20058,7 @@ mod tests {
         );
     }
 
-    /// **A wait for `Ready` is counted where it begins.** The account names
+    /// **A settle wait is counted where it begins.** The account names
     /// the waiting read while it still waits, and the round it takes after
     /// the wait lands where it leaves, apart from the rounds a wait for the
     /// connection takes.
@@ -20502,8 +20503,8 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
-    /// **The bound is one bound, from the read's first hold, across the wait
-    /// for `Ready` and the wait for the connection.** A read meets a change
+    /// **The bound is one bound, from the read's first hold, across the settle
+    /// wait and the wait for the connection.** A read meets a change
     /// and waits for it; the change lands while another read holds the
     /// connection, so the read goes on to wait for that. The deadline that
     /// wait is given is the one the first hold set, not a fresh bound from
