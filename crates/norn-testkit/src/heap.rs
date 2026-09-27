@@ -1,12 +1,14 @@
 //! A counting global allocator: the live heap bytes this process holds and
 //! the highest they have reached since a mark.
 //!
-//! **Installed only in the binary that declares it.** The `memory` test target
-//! is its own binary, so the `#[global_allocator]` it names wraps that binary's
-//! allocations and no other target's. Every allocation still goes to the
-//! system allocator unchanged; the wrapper adds two relaxed atomic updates, so
-//! the resident set the kernel accounts to the process is what it would be
-//! without it.
+//! **Installed only in the binary that declares it.** A test target that
+//! measures the heap is its own binary and names [`Counting`] as its
+//! `#[global_allocator]`, so the wrapper counts that binary's allocations and
+//! no other target's. Every allocation still goes to the system allocator
+//! unchanged; the wrapper adds two relaxed atomic updates, so the resident set
+//! the kernel accounts to the process is what it would be without it. The
+//! count is process-wide, so a binary that measures runs its measurement with
+//! nothing else allocating beside it.
 //!
 //! **What it sees is the Rust heap.** An allocation made through the global
 //! allocator is counted; memory a linked C library takes from `malloc`

@@ -80,13 +80,13 @@
 
 mod attach;
 mod baselines;
-mod heap;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use attach::read::{FIND_LIMIT, bounded_find};
 use norn_host::Answered;
+use norn_testkit::heap;
 use norn_testkit::process::{Run, Sandbox};
 use norn_wire::{
     Column, CountParams, CountReport, DescribeParams, DescribeReport, DocumentPath, DocumentRow,
