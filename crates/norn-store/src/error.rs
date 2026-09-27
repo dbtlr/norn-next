@@ -96,6 +96,16 @@ pub enum StoreError {
         /// The path order the store's rows were derived under.
         order: StoredPathOrder,
     },
+    /// A caller handed over a finding only the store files: one of a kind the
+    /// store judges itself — link health — or one about a link, which only
+    /// such a finding is. Refused rather than written: a finding the store
+    /// judges is re-decided by the changeset that reaches its link, and one a
+    /// caller filed would stand beside it or be discarded by a re-decision its
+    /// caller never sees.
+    StoreJudged {
+        /// What the finding was that only the store files.
+        what: &'static str,
+    },
     /// One entry of a changeset was refused, named by where it sits and what it
     /// is about. A streaming heal hands over tens of thousands of entries and
     /// fails on whichever one is pathological, so the refusal that reaches the
@@ -142,6 +152,10 @@ impl fmt::Display for StoreError {
                 "{what} is spelled in another key space than the store's `{}` path order selects",
                 order.as_str()
             ),
+            StoreError::StoreJudged { what } => write!(
+                f,
+                "{what} is a finding the store judges and files itself, and no caller records one"
+            ),
             StoreError::Entry {
                 index,
                 path,
@@ -175,7 +189,8 @@ impl StoreError {
             | StoreError::Lifecycle { .. }
             | StoreError::Bound { .. }
             | StoreError::UnpinnedDeclaration { .. }
-            | StoreError::KeySpace { .. } => None,
+            | StoreError::KeySpace { .. }
+            | StoreError::StoreJudged { .. } => None,
         }
     }
 }

@@ -207,6 +207,7 @@ pub(crate) fn apply(
     // Every bound is read before the transaction, so a refused finding costs no
     // lock and leaves nothing half applied.
     for finding in findings {
+        request::check_callers_finding(&finding.facts)?;
         request::check_finding_bounds(&finding.facts)?;
         request::check_finding_classes(&finding.facts, store.path_order())?;
         request::check_finding_paths(&finding.facts, store.path_order())?;

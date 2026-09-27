@@ -34,7 +34,7 @@ use norn_testkit::equivalence::{
 };
 
 use super::common::{
-    Scratch, broken_path_link, document, document_with_every_fact, path, record_death,
+    Scratch, keyed_by_paths, document, document_with_every_fact, path, record_death,
     unread_block, violation, write_document, write_documents,
 };
 
@@ -421,14 +421,12 @@ fn a_changed_finding_ordinal_is_a_divergence() {
         finding.ordinal = Some(ordinal);
         finding
     };
-    pair.left
-        .begin_request()
-        .record_finding(&about_link(1))
+    // A finding about a link is the store's own to file, so it stands
+    // through the fenced door.
+    induced_failure::record_finding_out_of_band(&mut pair.left, &about_link(1))
         .expect("recording a finding");
     let divergence = pair.diverged(|store| {
-        store
-            .begin_request()
-            .record_finding(&about_link(2))
+        induced_failure::record_finding_out_of_band(store, &about_link(2))
             .expect("recording a finding");
     });
     assert_names(&divergence, "finding[one/glossary.md][0].ordinal");
@@ -442,12 +440,12 @@ fn a_changed_finding_path_key_is_a_divergence() {
     let mut pair = Pair::new("pin-finding-path-key");
     pair.left
         .begin_request()
-        .record_finding(&broken_path_link("one/glossary.md", &["dir/t.md"]))
+        .record_finding(&keyed_by_paths("one/glossary.md", &["dir/t.md"]))
         .expect("recording a finding");
     let divergence = pair.diverged(|store| {
         store
             .begin_request()
-            .record_finding(&broken_path_link("one/glossary.md", &["dir/u.md"]))
+            .record_finding(&keyed_by_paths("one/glossary.md", &["dir/u.md"]))
             .expect("recording a finding");
     });
     assert_names(&divergence, "finding[one/glossary.md][0].path_key");
@@ -473,7 +471,7 @@ fn a_path_keyed_finding_discarded_by_its_paths_death_equals_a_rebuild() {
             &document("dir/t.md", "hash-3", "the link's target\n"),
         );
         request
-            .record_finding(&broken_path_link("two/notes.md", &["dir/t.md"]))
+            .record_finding(&keyed_by_paths("two/notes.md", &["dir/t.md"]))
             .expect("recording a finding");
         record_death(&mut request, &path("dir/t.md"), Provenance::WatcherRemoval);
     }
@@ -497,10 +495,8 @@ fn findings_about_two_links_filed_in_two_orders_leave_two_stores_equal() {
         finding
     };
     for (store, ordinals) in [(&mut pair.left, [1, 2]), (&mut pair.right, [2, 1])] {
-        let mut request = store.begin_request();
         for ordinal in ordinals {
-            request
-                .record_finding(&about_link(ordinal))
+            induced_failure::record_finding_out_of_band(store, &about_link(ordinal))
                 .expect("recording a finding");
         }
     }

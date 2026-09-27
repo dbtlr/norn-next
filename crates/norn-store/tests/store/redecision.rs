@@ -13,15 +13,15 @@ use std::path::Path;
 use std::process::Command;
 
 use norn_store::{
-    Change, ContentModel, DerivationCounters, IncrementProvenance, OpenOutcome, Provenance, Store,
-    StoreError, StoredPathOrder,
+    Change, ContentModel, DerivationCounters, DerivedFinding, FindingFacts, IncrementProvenance,
+    OpenOutcome, Provenance, Store, StoreError, StoredPathOrder,
 };
 use norn_testkit::equivalence::{DerivedRows, StoreProjection};
 use norn_wire::{
     FindParams, FindingKind, Pattern, Predicate, ResolutionTarget, VaultAddress, VaultName,
 };
 
-use crate::common::{Scratch, path, snapshot};
+use crate::common::{Scratch, path, snapshot, unread_block};
 use crate::health::derived;
 
 use StoredPathOrder::{AsciiCaseInsensitive as Folding, Sensitive};
@@ -258,6 +258,97 @@ fn a_changeset_under_a_declaration_the_store_does_not_pin_is_refused() {
             &ContentModel::under("pinned"),
         )
         .expect("the pinned schema's declaration");
+}
+
+// ---- the doors a caller files through ----
+
+/// The findings only the store files: one of each link-health kind about the
+/// document, and one of a caller's kind about a link, each beside what its
+/// refusal names.
+fn store_judged(at: &str) -> Vec<(FindingFacts, &'static str)> {
+    let mut judged: Vec<(FindingFacts, &'static str)> = [
+        FindingKind::Broken,
+        FindingKind::Ambiguous,
+        FindingKind::MissingAnchor,
+    ]
+    .into_iter()
+    .map(|kind| {
+        let mut finding = unread_block(at);
+        finding.kind = kind;
+        (finding, "a link-health finding")
+    })
+    .collect();
+    let mut about_a_link = unread_block(at);
+    about_a_link.ordinal = Some(0);
+    judged.push((about_a_link, "a finding about a link"));
+    judged
+}
+
+/// **A caller's door refuses a finding only the store files.** A finding of
+/// each link-health kind, and a finding of a caller's kind about a link, is
+/// refused by [`norn_store::Request::record_finding`] and by a changeset
+/// carrying it, before anything is written: no finding stands, and the
+/// changeset's document and generation do not either. The caller's own kind
+/// about the document is recorded through both.
+#[test]
+fn a_callers_door_refuses_a_finding_only_the_store_files() {
+    let mut vault = Vault::new("redecide-doors", Sensitive);
+    let before = vault
+        .store
+        .begin_request()
+        .write_generation()
+        .expect("the write generation");
+    for (finding, what) in store_judged("a.md") {
+        let refused = StoreError::StoreJudged { what };
+        assert_eq!(
+            vault.store.begin_request().record_finding(&finding),
+            Err(refused.clone()),
+            "{finding:?}"
+        );
+        assert_eq!(
+            vault.store.begin_request().apply_increment(
+                IncrementProvenance::Derived,
+                upserts(&[("a.md", "[[nowhere]]\n")]),
+                &[DerivedFinding {
+                    facts: finding.clone(),
+                    replaces: None,
+                }],
+                &declared(),
+            ),
+            Err(refused),
+            "{finding:?}"
+        );
+    }
+    let request = vault.store.begin_request();
+    assert_eq!(
+        request.stored_findings(&path("a.md")).expect("a read"),
+        Vec::new()
+    );
+    assert_eq!(request.stored_document(&path("a.md")).expect("a read"), None);
+    assert_eq!(
+        request.write_generation().expect("the write generation"),
+        before
+    );
+    request.finish();
+
+    vault
+        .store
+        .begin_request()
+        .record_finding(&unread_block("a.md"))
+        .expect("a caller's finding about the document");
+    vault
+        .store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            upserts(&[("b.md", "b\n")]),
+            &[DerivedFinding {
+                facts: unread_block("b.md"),
+                replaces: None,
+            }],
+            &declared(),
+        )
+        .expect("a changeset carrying a caller's finding about the document");
 }
 
 // ---- the re-decided set ----

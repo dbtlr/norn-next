@@ -414,13 +414,11 @@ fn a_findings_position_is_its_ordinal_with_the_documents_first() {
             .map(|finding| finding.ordinal)
             .collect()
     };
-    {
-        let mut request = store.begin_request();
-        for ordinal in [None, None, Some(1)] {
-            request
-                .record_finding(&about(ordinal))
-                .expect("recording a finding");
-        }
+    // A finding about a link is the store's own to file, so it stands
+    // through the fenced door.
+    for ordinal in [None, None, Some(1)] {
+        induced_failure::record_finding_out_of_band(&mut store, &about(ordinal))
+            .expect("recording a finding");
     }
     assert_eq!(ordinals(&mut store), [None, None, Some(1)]);
 
@@ -464,14 +462,14 @@ fn a_second_finding_about_one_link_is_refused() {
         finding.ordinal = ordinal;
         finding
     };
-    let mut request = store.begin_request();
-    request
-        .record_finding(&about(FindingKind::Broken, Some(1)))
+    // A finding about a link is the store's own to file, so each stands
+    // through the fenced door, which writes it as the store files one.
+    induced_failure::record_finding_out_of_band(&mut store, &about(FindingKind::Broken, Some(1)))
         .expect("recording the first finding about link 1");
     for kind in [FindingKind::Ambiguous, FindingKind::Broken] {
-        let refused = request
-            .record_finding(&about(kind, Some(1)))
-            .expect_err("a second finding about link 1");
+        let refused =
+            induced_failure::record_finding_out_of_band(&mut store, &about(kind, Some(1)))
+                .expect_err("a second finding about link 1");
         let StoreError::Sql {
             operation, message, ..
         } = &refused
@@ -486,11 +484,11 @@ fn a_second_finding_about_one_link_is_refused() {
         about(FindingKind::BodyBytesNotUtf8, None),
         about(FindingKind::BodyBytesNotUtf8, None),
     ] {
-        request
-            .record_finding(&finding)
+        induced_failure::record_finding_out_of_band(&mut store, &finding)
             .expect("recording a finding");
     }
-    let stored: Vec<(String, Option<u64>)> = request
+    let stored: Vec<(String, Option<u64>)> = store
+        .begin_request()
         .stored_findings(&at)
         .expect("reading findings")
         .into_iter()

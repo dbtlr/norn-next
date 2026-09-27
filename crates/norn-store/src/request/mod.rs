@@ -407,6 +407,7 @@ impl<'a> Request<'a> {
     /// `finding_paths` row each, and a path key outside that key space is
     /// refused for the same reason.
     pub fn record_finding(&mut self, finding: &FindingFacts) -> Result<(), StoreError> {
+        check_callers_finding(finding)?;
         check_finding_bounds(finding)?;
         check_finding_classes(finding, self.store.path_order())?;
         check_finding_paths(finding, self.store.path_order())?;
@@ -1647,6 +1648,25 @@ pub enum DiscardScope<'a> {
 /// [`CANDIDATE_HEAD`], and one longer than the total it claims to be the head
 /// of. The total is what makes the head a head, so a total below the head's own
 /// length describes no vault.
+/// Refuse a finding a caller hands the store that only the store files: one
+/// of the link-health kinds, which the store judges inside every changeset
+/// ([`crate::health`]), or one about a link, which only such a finding is.
+/// Every door a caller files a finding through reads this first:
+/// [`Request::record_finding`] and a changeset's [`crate::DerivedFinding`].
+pub(crate) fn check_callers_finding(finding: &FindingFacts) -> Result<(), StoreError> {
+    if crate::health::LINK_HEALTH_KINDS.contains(&finding.kind) {
+        return Err(StoreError::StoreJudged {
+            what: "a link-health finding",
+        });
+    }
+    if finding.ordinal.is_some() {
+        return Err(StoreError::StoreJudged {
+            what: "a finding about a link",
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn check_finding_bounds(finding: &FindingFacts) -> Result<(), StoreError> {
     if finding.candidates.len() > CANDIDATE_HEAD {
         return Err(StoreError::Bound {

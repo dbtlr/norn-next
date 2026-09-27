@@ -211,10 +211,11 @@ impl Vault {
         found.remove(0)
     }
 
+    /// Stand `finding` at rest. The suite's findings are about links and
+    /// filed under link-health kinds, which are the store's own to file, so
+    /// they stand through the fenced door.
     fn stand(&mut self, finding: &FindingFacts) {
-        self.store
-            .begin_request()
-            .record_finding(finding)
+        induced_failure::record_finding_out_of_band(&mut self.store, finding)
             .expect("recording a finding");
     }
 

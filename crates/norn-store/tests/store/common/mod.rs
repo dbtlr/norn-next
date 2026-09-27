@@ -566,22 +566,23 @@ pub fn path_key(text: &str) -> PathKey {
     PathKey::new(text).unwrap_or_else(|problem| panic!("`{text}` is a path key: {problem}"))
 }
 
-/// A finding about the first link in the document at `at`, a path-addressed
-/// one, keyed by the exact paths `keys` and by no class: the shape a broken
-/// `[x](dir/t.md)` is filed in.
-pub fn broken_path_link(at: &str, keys: &[&str]) -> FindingFacts {
+/// A finding at `at` keyed by the exact paths `keys` and by no class — the
+/// key shape a path-addressed link's finding takes — filed under a caller's
+/// kind about the document, which is how a caller's door takes one: a
+/// finding about a link, and a link-health kind, are the store's alone.
+pub fn keyed_by_paths(at: &str, keys: &[&str]) -> FindingFacts {
     FindingFacts {
-        kind: FindingKind::Broken,
+        kind: FindingKind::PathNamesNoDocument,
         severity: Severity::Warning,
         path: path(at),
         class_keys: BTreeSet::new(),
         path_keys: keys.iter().copied().map(path_key).collect(),
         target: keys.first().map(|key| key.to_string()),
         span: Some(span(1, 1, 0)),
-        ordinal: Some(0),
+        ordinal: None,
         candidates: Vec::new(),
         candidates_total: 0,
-        message: format!("a link in `{at}` names no document"),
+        message: format!("a path `{at}` names holds no document"),
         detail: None,
     }
 }

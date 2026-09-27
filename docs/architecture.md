@@ -2039,7 +2039,8 @@ of them was about that no key of an affected class reaches: a finding keyed unde
 only through a candidate's naming class. A class's walk seeks a partial index holding suffix
 keys alone, so a path key spelled under a folder named like the class's stem is never read.
 A link-health finding carries every key its link is held under, so the discard reaching any
-of them takes it before its link is judged again.
+of them takes it before its link is judged again. Only the store files a link-health finding
+or a finding about a link: a caller's door refuses both.
 
 **The re-decision holds a chunk and the keys it still needs.** It reads, judges and files a
 chunk of links at a time, and keeps what each distinct key names so each is resolved once.

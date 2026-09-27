@@ -156,6 +156,32 @@ pub mod induced_failure {
             .map_err(|error| error::sql("running SQL out of band", error))
     }
 
+    /// Record a finding through no caller's door: one the store judges and
+    /// files itself — a link-health finding, or one about a link — which
+    /// [`crate::Request::record_finding`] refuses
+    /// ([`StoreError::StoreJudged`]).
+    ///
+    /// The arrangement a reader's suite needs to stand such a finding exactly
+    /// where its order is under test — at a chosen ordinal, filed in a chosen
+    /// order — without the links a changeset would judge it from. It writes
+    /// through the one write every finding is filed by, its bounds and key
+    /// spaces checked as a caller's are, in a transaction of its own.
+    pub fn record_finding_out_of_band(
+        store: &mut Store,
+        finding: &crate::FindingFacts,
+    ) -> Result<(), StoreError> {
+        crate::request::check_finding_bounds(finding)?;
+        crate::request::check_finding_classes(finding, store.path_order())?;
+        crate::request::check_finding_paths(finding, store.path_order())?;
+        let transaction = store
+            .database
+            .immediate_transaction("opening the finding transaction")?;
+        crate::request::write_finding(&transaction, finding)?;
+        transaction
+            .commit()
+            .map_err(|error| error::sql("committing a finding out of band", error))
+    }
+
     /// Make the next read of a pinned `meta` scalar fail as though the database
     /// were held by somebody else.
     ///

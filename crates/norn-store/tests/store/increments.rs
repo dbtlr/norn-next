@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::common::{
-    Scratch, broken_path_link, class, classes, document, document_with_every_fact, drained,
+    Scratch, keyed_by_paths, class, classes, document, document_with_every_fact, drained,
     full_text_matches, path, path_key, path_names_no_document_in_class, snapshot, unread_block,
     violation, write_document, write_documents,
 };
@@ -1345,10 +1345,10 @@ fn a_death_discards_findings_keyed_by_its_path_and_not_its_class() {
         ],
     );
     request
-        .record_finding(&broken_path_link("index.md", &["dir/t.md"]))
+        .record_finding(&keyed_by_paths("index.md", &["dir/t.md"]))
         .expect("recording a finding");
     request
-        .record_finding(&broken_path_link("notes.md", &["other/t.md"]))
+        .record_finding(&keyed_by_paths("notes.md", &["other/t.md"]))
         .expect("recording a finding");
 
     let outcome = request
@@ -1405,13 +1405,13 @@ fn a_rename_discards_under_the_old_path() {
         ],
     );
     request
-        .record_finding(&broken_path_link("index.md", &["old/name.md"]))
+        .record_finding(&keyed_by_paths("index.md", &["old/name.md"]))
         .expect("recording a finding");
     request
-        .record_finding(&broken_path_link("notes.md", &["new/place.md"]))
+        .record_finding(&keyed_by_paths("notes.md", &["new/place.md"]))
         .expect("recording a finding");
     request
-        .record_finding(&broken_path_link("journal.md", &["else/where.md"]))
+        .record_finding(&keyed_by_paths("journal.md", &["else/where.md"]))
         .expect("recording a finding");
 
     let outcome = request
@@ -1461,7 +1461,7 @@ fn a_class_range_does_not_catch_a_path_key_it_prefixes() {
 
     write_document(&mut request, &document("index.md", "hash-1", "a body\n"));
     request
-        .record_finding(&broken_path_link("index.md", &["glossary/x.md"]))
+        .record_finding(&keyed_by_paths("index.md", &["glossary/x.md"]))
         .expect("recording a finding");
 
     let outcome = request
@@ -1520,7 +1520,7 @@ fn a_path_key_from_the_other_key_space_is_refused() {
     let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
     let mut request = store.begin_request();
     write_document(&mut request, &document("index.md", "hash-1", "a body\n"));
-    let raw = broken_path_link("index.md", &["Dir/t.md"]);
+    let raw = keyed_by_paths("index.md", &["Dir/t.md"]);
 
     let refused = request.record_finding(&raw);
     assert!(
@@ -1564,7 +1564,7 @@ fn a_folding_store_names_a_changed_path_by_its_folded_key() {
     let mut request = store.begin_request();
     write_document(&mut request, &document("index.md", "hash-1", "a body\n"));
     request
-        .record_finding(&broken_path_link("index.md", &["dir/t.md"]))
+        .record_finding(&keyed_by_paths("index.md", &["dir/t.md"]))
         .expect("recording a finding");
 
     let outcome = request
@@ -1598,7 +1598,7 @@ fn a_changesets_own_derived_finding_stands_through_its_own_path_discard() {
             IncrementProvenance::Derived,
             [upsert("dir/t.md", "hash-1", "a body\n")],
             &[DerivedFinding {
-                facts: broken_path_link("about.md", &["dir/t.md"]),
+                facts: keyed_by_paths("about.md", &["dir/t.md"]),
                 replaces: None,
             }],
             &norn_store::ContentModel::none(),
@@ -1625,7 +1625,7 @@ fn a_folding_store_folds_a_path_key_by_ascii_case_alone() {
     let mut request = store.begin_request();
     write_document(&mut request, &document("index.md", "hash-1", "a body\n"));
     request
-        .record_finding(&broken_path_link("index.md", &["Été.md"]))
+        .record_finding(&keyed_by_paths("index.md", &["Été.md"]))
         .expect("recording a finding");
 
     let outcome = request
