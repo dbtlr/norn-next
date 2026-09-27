@@ -1390,6 +1390,9 @@ fn a_class_walk_reads_no_path_link_spelled_inside_its_range() {
     assert_eq!(counted(&counters, "links_redecided"), 20);
     let (_, many) = folder_write(2000, "hub/");
     let (_, elsewhere) = folder_write(2000, "elsewhere/");
+    eprintln!(
+        "hub.md write steps: 100 under hub/ {few}, 2000 under hub/ {many}, 2000 elsewhere {elsewhere}"
+    );
     assert_eq!(
         (few, many),
         (elsewhere, elsewhere),

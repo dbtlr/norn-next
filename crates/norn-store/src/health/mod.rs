@@ -483,9 +483,18 @@ pub(crate) struct Redecided {
 ///
 /// Each arm is read a chunk of [`LINK_HEALTH_CHUNK`] links at a time, judged
 /// and filed before the next is read, against one set of key summaries kept
-/// across the whole changeset ([`KeySummaries`], one per distinct key
-/// resolved), so what is held at once is a chunk and the summaries of the
-/// keys the re-decided set holds, never the set itself.
+/// across the whole changeset ([`KeySummaries`]), so each distinct key is
+/// resolved once.
+///
+/// **A link holds at most one key in any class**: its keys are one per
+/// reduction of its target, and two reductions name two stems, so two
+/// classes. A class's keyed pass walks its keys in order, so once the walk
+/// has passed a key no link it has yet to judge holds that key — every other
+/// link holding it belongs to this pass and was read already, or to an
+/// earlier arm — and the pass forgets it; a path key's pass forgets its key
+/// when it ends. So what is held at once is a chunk, a page's keys of the
+/// walk under way, and the keys of the written documents' links and of the
+/// links a class's findings pass judged, never the re-decided set.
 ///
 /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 pub(crate) fn redecide(
