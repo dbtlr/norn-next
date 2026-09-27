@@ -140,7 +140,7 @@ pub struct MintedReader<R> {
 /// that holds it gives it back only when it ends — so an acquisition that
 /// waited for it under the entry gate would be waiting for a lock the holding
 /// read needs in order to let go. [`ReadSource::try_take`] is the act a caller
-/// under the gate performs; [`ReadSource::wait_for_the_connection`] is the act
+/// under the gate performs; [`ReadSource::wait_for_the_connection_until`] is the act
 /// it performs with the gate given back.
 pub trait ReadSource: Send + Sync + 'static {
     /// One read's established snapshot. It holds the handle it was established
@@ -160,12 +160,15 @@ pub trait ReadSource: Send + Sync + 'static {
     /// on it.
     fn try_take(self: &Arc<Self>) -> Option<Self::Turn>;
 
-    /// Wait for this handle's connection, and take it.
+    /// Wait for this handle's connection until `deadline`, and take it; or,
+    /// where the deadline passes first, answer nothing.
     ///
-    /// **Never called under the entry gate.** It blocks until the read holding
-    /// the connection ends, and that read asks for the entry gate on its way
-    /// out.
-    fn wait_for_the_connection(self: &Arc<Self>) -> Self::Turn;
+    /// **Never called under the entry gate.** It waits for the read holding
+    /// the connection to end, and that read asks for the entry gate on its
+    /// way out. The wait ends when the connection comes back or when the
+    /// deadline passes, whichever is first, so nothing else — a teardown that
+    /// wakes no waiter among them — keeps it waiting.
+    fn wait_for_the_connection_until(self: &Arc<Self>, deadline: Instant) -> Option<Self::Turn>;
 
     /// Statements SQLite has begun on the calling thread over every handle's
     /// connection, transaction control included, over the thread's life. A
@@ -4535,13 +4538,16 @@ impl<O: EntryOps> Host<O> {
     ///
     /// **The settle bound runs from the first hold and covers every wait.**
     /// A settling read that meets its bound refuses as
-    /// [`ReadRefusal::Unsettled`] with what the entry publishes, and a read
-    /// that finds its handle replaced past its bound refuses as
-    /// [`ReadRefusal::ReaderUnavailable`]. A wait for the connection runs to
-    /// the connection, as a read's hold on it is bounded by the read's own
-    /// shape, and its time counts against the bound. A teardown waits for no
-    /// read: its publication moves the stance to refuse, which wakes every
-    /// settling read into a refusal.
+    /// [`ReadRefusal::Unsettled`] with what the entry publishes. A wait for
+    /// the connection ends when the connection comes back or when the bound
+    /// runs out, whichever is first, and a read that finds the connection
+    /// still held past its bound refuses as [`ReadRefusal::ReaderUnavailable`]:
+    /// the entry serves, and its read seam is taken. A zero bound therefore
+    /// refuses at once wherever the read would wait. A teardown waits for no
+    /// read: its publication moves the stance, which wakes every settling
+    /// read, and a woken read refuses with what the entry then publishes
+    /// unless the entry has reached `Ready` again by the time it retakes the
+    /// gate.
     ///
     /// The acquisition counts the rounds it takes after a wait for the
     /// connection apart from the rounds after a wait for `Ready`, and records
@@ -4702,26 +4708,39 @@ impl<O: EntryOps> Host<O> {
             if let Some(turn) = reader.try_take() {
                 break (turn, reader);
             }
-            // Another read is answering on the entry's one connection. The
-            // gate goes back before the wait, and the demand recorded above is
-            // what holds the entry across it. What ran under this round is
-            // carried into the next, and the wait between the two is outside
-            // both.
+            // Another read is answering on the entry's one connection, and
+            // past the bound this read waits for it no longer: the entry
+            // serves every surface but this read's seam.
+            if Instant::now() >= deadline {
+                return Err(ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                    "another read held this entry's connection past this read's bound",
+                )));
+            }
+            // The gate goes back before the wait, and the demand recorded
+            // above is what holds the entry across it. What ran under this
+            // round is carried into the next, and the wait between the two is
+            // outside both.
             let (earlier, outside) = opening.let_the_gate_go(state);
-            // Accounted where the wait begins: the wait below returns only
-            // with the connection, so every wait counted here ends, and the
-            // account names a contended acquisition while it is still waiting
-            // rather than once another read has let it through.
+            // Accounted where the wait begins, so the account names a
+            // contended acquisition while it is still waiting rather than once
+            // another read has let it through or its bound has run out.
             self.shared.reads.count_reader_wait();
-            let turn = reader.wait_for_the_connection();
-            // The connection is this read's from here, so nothing else can be
-            // establishing on it. What may have moved is the entry: the round
-            // reads its stance afresh, and the handle waited for is checked to
-            // still be the handle its reads run on. A rung-3 rebuild swaps one
-            // for another while the entry goes on serving, a schema reload
-            // closes one and mints another, and a teardown takes the entry out
-            // of service while the handle stands.
+            let turn = reader.wait_for_the_connection_until(deadline);
+            // What may have moved is the entry: the round reads its stance
+            // afresh, and a handle waited for is checked to still be the
+            // handle its reads run on. A rung-3 rebuild swaps one for another
+            // while the entry goes on serving, a schema reload closes one and
+            // mints another, and a teardown takes the entry out of service
+            // while the handle stands.
             (state, opening, stance) = rounds.take_the_gate_again(outside, earlier);
+            // A wait the bound ended took no connection, and the loop answers
+            // the stance this round read: past the bound, every arm of it
+            // that would wait refuses instead.
+            let Some(turn) = turn else {
+                continue;
+            };
+            // The connection is this read's from here, so nothing else can be
+            // establishing on it.
             let still_the_entrys = state
                 .reader
                 .as_ref()
@@ -4733,16 +4752,9 @@ impl<O: EntryOps> Host<O> {
             // the read waiting for it is woken by that and takes the gate
             // after this one lets go. What this round ran under the gate
             // before here is zero by construction: it ran nothing on a
-            // handle's connection.
+            // handle's connection. The loop answers the stance this round
+            // read, on the handle the entry serves now.
             drop(turn);
-            if stance == ReadStance::Serve && Instant::now() >= deadline {
-                let unavailable = state.reader_unavailable.clone().unwrap_or_else(|| {
-                    ReaderUnavailable::new(
-                        "this entry's reads moved to another handle while this read waited",
-                    )
-                });
-                return Err(ReadRefusal::ReaderUnavailable(unavailable));
-            }
         };
         // The gate and the connection's turn are both this read's from here,
         // so nothing runs on the connection but what this hold runs: this
@@ -7041,6 +7053,8 @@ mod tests {
         /// and the cases that read this hold what an unwind out of that wait
         /// leaves behind.
         wait_panics: std::sync::atomic::AtomicBool,
+        /// The deadline the last wait for a handle's connection was given.
+        waited_until: Mutex<Option<Instant>>,
         /// Whether establishing a snapshot on a handle from this ledger panics
         /// instead of answering. It runs under the entry gate, and the case
         /// that reads this holds what an unwind there leaves behind once the
@@ -7062,6 +7076,7 @@ mod tests {
                 establish_statements: AtomicU64::new(norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS),
                 mint_panics: std::sync::atomic::AtomicBool::default(),
                 wait_panics: std::sync::atomic::AtomicBool::default(),
+                waited_until: Mutex::default(),
                 establish_panics: std::sync::atomic::AtomicBool::default(),
             }
         }
@@ -7172,24 +7187,36 @@ mod tests {
             })
         }
 
-        fn wait_for_the_connection(self: &Arc<Self>) -> FakeTurn {
+        fn wait_for_the_connection_until(
+            self: &Arc<Self>,
+            deadline: Instant,
+        ) -> Option<FakeTurn> {
             assert!(
                 !self.ledger.wait_panics.load(Ordering::SeqCst),
                 "the case asked this wait to unwind outside the entry gate"
             );
+            *self
+                .ledger
+                .waited_until
+                .lock()
+                .expect("a fake reader's deadline") = Some(deadline);
             self.ledger.waiting.fetch_add(1, Ordering::SeqCst);
             let mut free = self.free.lock().expect("a fake reader's connection");
             while !*free {
-                free = self
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return None;
+                }
+                (free, _) = self
                     .returned
-                    .wait(free)
+                    .wait_timeout(free, remaining)
                     .expect("a fake reader's connection");
             }
             *free = false;
-            FakeTurn {
+            Some(FakeTurn {
                 reader: Arc::clone(self),
                 holds_the_connection: true,
-            }
+            })
         }
 
         fn statements_run_on_this_thread() -> u64 {
@@ -19544,6 +19571,184 @@ mod tests {
             ReadStance::Refuse,
             "an entry whose trust was withdrawn settles a read"
         );
+    }
+
+    /// **A read waits for the connection no longer than its bound.** One read
+    /// holds the entry's connection and does not end; a second read over the
+    /// same `Ready` entry waits for it, and refuses as reader-unavailable when
+    /// its bound runs out, while the first read still holds the connection.
+    #[test]
+    fn a_read_waiting_for_the_connection_refuses_at_its_bound() {
+        let ops = Arc::new(FakeOps::default());
+        let bound = Duration::from_millis(50);
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), bound);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let first = host.begin_read(&name).expect("the first read");
+
+        let before = host.read_evidence();
+        let started = Instant::now();
+        let (refusal, took) = thread::scope(|scope| {
+            let reading = scope.spawn(|| {
+                let refusal = host
+                    .begin_read(&name)
+                    .expect_err("a read took a connection another read holds");
+                (refusal, started.elapsed())
+            });
+            // A read that waits past its bound is let go by the first read's
+            // end, so the case fails rather than hanging.
+            let refused = wait_until(
+                "the waiting read to refuse at its bound",
+                lifecycle_wait_budget(),
+                || match reading.is_finished() {
+                    true => Observed::Met(()),
+                    false => Observed::pending("the read is still waiting"),
+                },
+            );
+            if let Err(failure) = refused {
+                drop(first);
+                panic!("{failure}");
+            }
+            let answered = reading.join().expect("the read finished");
+            drop(first);
+            answered
+        });
+        assert!(took >= bound, "the read refused {took:?} before its bound");
+        let ReadRefusal::ReaderUnavailable(unavailable) = &refusal else {
+            panic!("a read past its bound on the connection refused as {refusal:?}");
+        };
+        assert!(
+            unavailable.detail().contains("connection"),
+            "the refusal names something other than the connection: {unavailable}"
+        );
+        let reading = host.read_evidence().since(before);
+        assert_eq!(
+            (reading.reader_waits, reading.reads_served),
+            (1, 0),
+            "the account holds another shape than one wait and no read served"
+        );
+    }
+
+    /// **A zero bound refuses at once where the connection is held.** The
+    /// read does not wait for the connection at all.
+    #[test]
+    fn a_read_with_a_zero_bound_refuses_at_once_where_the_connection_is_held() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::ZERO);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let first = host.begin_read(&name).expect("the first read");
+
+        let before = host.read_evidence();
+        let started = Instant::now();
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a read took a connection another read holds");
+        assert!(
+            started.elapsed() < LONG_SETTLE / 4,
+            "a read with a zero bound waited {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "a read with a zero bound refused as {refusal:?}"
+        );
+        assert_eq!(
+            host.read_evidence().since(before).reader_waits,
+            0,
+            "a read with a zero bound waited for the connection"
+        );
+        drop(first);
+    }
+
+    /// **A zero bound refuses at once where the entry settles.** The entry is
+    /// taking in a change, and a read with no time to wait refuses as still
+    /// indexing without waiting for it.
+    #[test]
+    fn a_read_with_a_zero_bound_refuses_at_once_where_the_entry_settles() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::ZERO);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_a_change_in_flight(&ops, &host, &name);
+
+        let before = host.read_evidence();
+        let started = Instant::now();
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a read answered from an entry still indexing a change");
+        assert!(
+            started.elapsed() < LONG_SETTLE / 4,
+            "a read with a zero bound waited {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(refusal, ReadRefusal::Unsettled(_)),
+            "a read with a zero bound refused as {refusal:?}"
+        );
+        let reading = host.read_evidence().since(before);
+        assert_eq!(
+            (reading.settle_waits, reading.settle_expiries),
+            (0, 1),
+            "a read with a zero bound waited for the change"
+        );
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **The bound is one bound, from the read's first hold, across the wait
+    /// for `Ready` and the wait for the connection.** A read meets a change
+    /// and waits for it; the change lands while another read holds the
+    /// connection, so the read goes on to wait for that. The deadline that
+    /// wait is given is the one the first hold set, not a fresh bound from
+    /// where the wait for the connection began.
+    #[test]
+    fn a_read_that_settles_and_then_waits_for_the_connection_keeps_one_bound() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let first = host.begin_read(&name).expect("the first read");
+        hold_a_change_in_flight(&ops, &host, &name);
+
+        let before = host.read_evidence();
+        thread::scope(|scope| {
+            let began = Instant::now();
+            let reading = scope.spawn(|| host.begin_read(&name));
+            wait_for_settle_waits(&host, before, 1);
+            let settling = Instant::now();
+            // The change lands a moment after the read began waiting, so a
+            // bound taken afresh where the connection wait begins lies past
+            // one taken at the first hold.
+            thread::sleep(Duration::from_millis(20));
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+            wait_until(
+                "the settled read to wait for the connection",
+                lifecycle_wait_budget(),
+                || match host.read_evidence().since(before).reader_waits {
+                    0 => Observed::pending("no wait for the connection yet"),
+                    _ => Observed::Met(()),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let deadline = ops
+                .readers
+                .waited_until
+                .lock()
+                .expect("a fake reader's deadline")
+                .expect("the wait for the connection was given a deadline");
+            assert!(
+                deadline >= began + LONG_SETTLE && deadline <= settling + LONG_SETTLE,
+                "the wait for the connection was given a bound of its own"
+            );
+            drop(first);
+            drop(
+                reading
+                    .join()
+                    .expect("the read finished")
+                    .expect("the read was refused once the connection came back"),
+            );
+        });
     }
 
     /// Every read against one entry runs on that entry's one handle. A read in

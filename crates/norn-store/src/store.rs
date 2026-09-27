@@ -80,6 +80,7 @@ use std::cell::Cell;
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 
 use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{self, Connection};
@@ -103,8 +104,8 @@ use crate::request::Request;
 /// **Taking the connection and establishing on it are two acts**, because the
 /// caller holds a lock across the second and may not hold it across the first:
 /// [`SnapshotReader::try_take`] answers at once with the connection or with
-/// nothing, and [`SnapshotReader::wait_for_the_connection`] waits for it.
-/// Either way what comes back is a [`ConnectionTurn`], and
+/// nothing, and [`SnapshotReader::wait_for_the_connection_until`] waits for it
+/// up to a deadline. Either way what a caller takes is a [`ConnectionTurn`], and
 /// [`ConnectionTurn::establish`] is the one way a snapshot is made. A turn
 /// that establishes nothing gives the connection back when it drops, an
 /// unwind included.
@@ -197,13 +198,24 @@ impl SnapshotReader {
         })
     }
 
-    /// Wait for this handle's connection, and take it.
+    /// Wait for this handle's connection until `deadline`, and take it.
     ///
-    /// **It blocks until the read holding the connection ends.** A caller
-    /// holding a lock the holding read needs in order to end would deadlock
-    /// here, which is why [`SnapshotReader::try_take`] exists and why this is
-    /// the spelling taken with no such lock held.
-    pub fn wait_for_the_connection(self: &Arc<Self>) -> ConnectionTurn {
+    /// **The wait ends one of two ways**: the connection comes back, and the
+    /// turn is answered; or the deadline passes first, and nothing is. A
+    /// deadline already past takes the connection where it is free and
+    /// answers nothing where it is not, without waiting. So a wait whose
+    /// wake-up never comes — a holding read that never ends, or a teardown
+    /// that wakes nobody — is bounded by the caller's deadline and by nothing
+    /// else.
+    ///
+    /// A caller holding a lock the holding read needs in order to end would
+    /// wait out its whole deadline here and then be answered nothing, which
+    /// is why [`SnapshotReader::try_take`] exists and why this is the spelling
+    /// taken with no such lock held.
+    pub fn wait_for_the_connection_until(
+        self: &Arc<Self>,
+        deadline: Instant,
+    ) -> Option<ConnectionTurn> {
         let mut held = self
             .connection
             .lock()
@@ -212,15 +224,19 @@ impl SnapshotReader {
             if let Some(database) = held.take() {
                 break database;
             }
-            held = self
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            (held, _) = self
                 .returned
-                .wait(held)
+                .wait_timeout(held, remaining)
                 .expect("a snapshot reader's connection is poisoned");
         };
-        ConnectionTurn {
+        Some(ConnectionTurn {
             reader: Arc::clone(self),
             database: Some(database),
-        }
+        })
     }
 
     /// The database this handle reads, from its creation to its discard.
@@ -257,7 +273,8 @@ impl SnapshotReader {
     /// Put the connection back in the handle and wake one read waiting for it.
     ///
     /// **Nothing panics while the connection's mutex is held**, here or in
-    /// [`SnapshotReader::try_take`] or [`SnapshotReader::wait_for_the_connection`]:
+    /// [`SnapshotReader::try_take`] or
+    /// [`SnapshotReader::wait_for_the_connection_until`]:
     /// each only moves the connection in or out of its slot, clones an
     /// [`Arc`] and waits on the condition variable. So the mutex is never
     /// poisoned, and the `expect` below never fires — which is what makes it

@@ -360,8 +360,8 @@ impl ReadSource for norn_store::SnapshotReader {
         norn_store::SnapshotReader::try_take(self)
     }
 
-    fn wait_for_the_connection(self: &Arc<Self>) -> Self::Turn {
-        norn_store::SnapshotReader::wait_for_the_connection(self)
+    fn wait_for_the_connection_until(self: &Arc<Self>, deadline: Instant) -> Option<Self::Turn> {
+        norn_store::SnapshotReader::wait_for_the_connection_until(self, deadline)
     }
 
     /// SQLite's count of what it began on this thread over every handle's
