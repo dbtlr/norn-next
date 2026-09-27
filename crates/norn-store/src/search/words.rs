@@ -40,19 +40,27 @@ pub(crate) fn holds_word(term: &str) -> bool {
 /// between the quotes with a doubled `""` read as one literal quote. Outside
 /// quotes, the expression splits into tokens at ASCII whitespace — the space
 /// FTS5's own parser splits at, narrower than [`char::is_whitespace`] — `(`,
-/// `)` and `,`; the number after a comma is a `NEAR` group's distance and
-/// names no phrase; the case-sensitive keywords `AND`, `OR` and `NOT` are always
-/// operators and name no phrase, `NEAR` is one only where the next
-/// non-whitespace character after it is `(`, and every other token is a
-/// phrase, read past a trailing `*` (a prefix match) and a `column:`
+/// `)`, `,` and `{`; the number after a comma is a `NEAR` group's distance and
+/// names no phrase; a brace group (`{col1 col2}`) and the `:` after it are a
+/// column filter and name no phrase; the case-sensitive keywords `AND`, `OR`
+/// and `NOT` are always operators and name no phrase, `NEAR` is one only where
+/// the next non-whitespace character after it is `(`, and every other token is
+/// a phrase, read past a trailing `*` (a prefix match) and a `column:`
 /// filter's column name, which are syntax rather than what the token names.
-/// Only a column filter written as one token, `column:`, is read past. A
-/// multi-column brace group (`{col1 col2}:`), a filter with space before its
-/// colon (`body : x`), and a quoted column name (`"body": x`) are not
-/// specially read: their names are read as phrases rather than a filter,
-/// which only ever makes this answer `true` where the narrower reading would
-/// not, never the reverse. Such a filter over wordless phrases is answered
-/// as the index answers it, empty, rather than reported.
+///
+/// **This answer is `false` only where FTS5 reads no word in any phrase, so a
+/// query holding a word is never reported as holding none.** Where the two
+/// readings part, this one answers `true` and the index answers no match, so
+/// the read answers empty with no report, as the index itself answers:
+///
+/// - a column filter with space before its colon, `body : "!!!"`, or with a
+///   quoted column name, `"body": "!!!"`, whose name is read here as a
+///   phrase rather than a filter;
+/// - a phrase holding no word as an operand of an explicit `AND`, `foo AND
+///   "!!!"` or `"!!!" AND foo`, or as the left operand of `NOT`, `"!!!" NOT
+///   foo`, which FTS5 reads as emptying the whole expression, where a phrase
+///   holding no word beside another under the implicit `AND`, `foo "!!!"`, is
+///   dropped and the expression matches `foo`.
 ///
 /// An expression with at least one word-holding phrase holds a word; one
 /// whose every phrase holds none, empty expressions and expressions naming no
@@ -82,6 +90,11 @@ fn phrases(expression: &str) -> impl Iterator<Item = String> + '_ {
                 after_comma = true;
                 continue;
             }
+            if let Some(group) = rest.strip_prefix('{') {
+                rest = column_group_end(group);
+                after_comma = false;
+                continue;
+            }
             if let Some(after_quote) = rest.strip_prefix('"') {
                 let (content, after) = read_quoted(after_quote);
                 rest = after;
@@ -95,6 +108,7 @@ fn phrases(expression: &str) -> impl Iterator<Item = String> + '_ {
                         || character == ')'
                         || character == '"'
                         || character == ','
+                        || character == '{'
                 })
                 .unwrap_or(rest.len());
             let (token, after) = rest.split_at(end);
@@ -109,6 +123,17 @@ fn phrases(expression: &str) -> impl Iterator<Item = String> + '_ {
             }
         }
     })
+}
+
+/// What stands after a brace column filter whose opening `{` is already read:
+/// past its closing `}` and the `:` after it, whitespace allowed before the
+/// colon. A group with no closing brace reads to the expression's end.
+fn column_group_end(group: &str) -> &str {
+    let Some((_columns, after)) = group.split_once('}') else {
+        return "";
+    };
+    let after = after.trim_start_matches(|character: char| character.is_ascii_whitespace());
+    after.strip_prefix(':').unwrap_or(after)
 }
 
 /// The content of a double-quoted phrase whose opening quote is already read,
@@ -638,6 +663,16 @@ mod tests {
             }
         }
 
+        /// How many rows the index matches against `expression`.
+        fn matched(&self, expression: &str) -> i64 {
+            self.store
+                .connection()
+                .prepare_cached("SELECT count(*) FROM documents_fts WHERE documents_fts MATCH ?1")
+                .expect("the probe")
+                .query_row([expression], |row| row.get(0))
+                .expect("a match against the probe")
+        }
+
         fn reads_a_word(&self, text: &str) -> bool {
             let mut statement = self
                 .store
@@ -775,6 +810,8 @@ mod tests {
             "foo*",
             "body:foo",
             "body:\"foo\"",
+            "foo{body}:\"!!!\"",
+            "foo {body}: \"!!!\"",
         ];
         for expression in holding {
             assert!(
@@ -800,6 +837,60 @@ mod tests {
                 "{expression:?} was read as holding a word"
             );
         }
+    }
+
+    /// **A brace column filter is syntax, and `{` ends the bareword before
+    /// it.** FTS5 reads `anchor{body}:"!!!"` as the word `anchor` and then a
+    /// filter over a phrase holding no word, which it drops, so the
+    /// expression matches `anchor` with or without space around the group;
+    /// a group over phrases holding no word alone matches nothing and holds
+    /// no word.
+    #[test]
+    fn a_brace_column_filter_is_syntax_and_ends_the_word_before_it() {
+        let probe = Probe::new();
+        for expression in [
+            "anchor{body}:\"!!!\"",
+            "anchor {body}: \"!!!\"",
+            "anchor {body} : \"!!!\"",
+            "{body}:anchor",
+            "{body}:\"!!!\" anchor",
+        ] {
+            assert_eq!(probe.matched(expression), 1, "FTS5 over {expression:?}");
+            assert!(
+                expression_holds_word(expression),
+                "{expression:?} was read as holding no word"
+            );
+        }
+        for expression in ["{body}:\"!!!\"", "{body} : \"!!!\"", "{body body}:\"!!!\""] {
+            assert_eq!(probe.matched(expression), 0, "FTS5 over {expression:?}");
+            assert!(
+                !expression_holds_word(expression),
+                "{expression:?} was read as holding a word"
+            );
+        }
+    }
+
+    /// **Where FTS5 reads an expression as matching nothing and this rule
+    /// reads a word in it, the rule errs toward the word**, so the read
+    /// answers the index's empty match rather than a report: the spellings
+    /// [`expression_holds_word`] names.
+    #[test]
+    fn the_spellings_read_past_err_toward_a_word() {
+        let probe = Probe::new();
+        for expression in [
+            "body : \"!!!\"",
+            "\"body\": \"!!!\"",
+            "anchor AND \"!!!\"",
+            "\"!!!\" AND anchor",
+            "\"!!!\" NOT anchor",
+        ] {
+            assert_eq!(probe.matched(expression), 0, "FTS5 over {expression:?}");
+            assert!(
+                expression_holds_word(expression),
+                "{expression:?} was read as holding no word"
+            );
+        }
+        assert_eq!(probe.matched("anchor \"!!!\""), 1);
     }
 
     /// **A `NEAR` group's distance is syntax, not a phrase.** In

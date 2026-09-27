@@ -2625,16 +2625,27 @@ fn a_malformed_full_text_query_is_reported_and_empties_the_page() {
             "an empty page still ran a page statement: {plans:?}"
         );
     }
-    let page = seeded.page(&request().with_predicates([Predicate::matches("interloper")]));
-    assert_eq!(row_paths(&page), ["notes/a.md"]);
-    assert!(page.unsatisfied.is_empty(), "{:?}", page.unsatisfied);
+    for query in [
+        "interloper",
+        "interloper{body}:\"!!!\"",
+        "interloper {body}: \"!!!\"",
+    ] {
+        let page = seeded.page(&request().with_predicates([Predicate::matches(query)]));
+        assert_eq!(row_paths(&page), ["notes/a.md"], "{query:?}");
+        assert!(
+            page.unsatisfied.is_empty(),
+            "{query:?}: {:?}",
+            page.unsatisfied
+        );
+    }
 }
 
 /// **A match part whose query parses but holds no word is reported, and the
 /// page is empty**, the same report a search's own wordless query earns: a
 /// quoted run of punctuation matches nothing by construction, and answering
 /// that in silence is indistinguishable from every document failing the
-/// match.
+/// match. A word written against a brace column filter holds a word, with or
+/// without space between them.
 #[test]
 fn a_full_text_query_holding_no_word_is_reported_and_empties_the_page() {
     let seeded = Seeded::new("find-wordless-query");
@@ -2647,9 +2658,19 @@ fn a_full_text_query_holding_no_word_is_reported_and_empties_the_page() {
             "{query:?}"
         );
     }
-    let page = seeded.page(&request().with_predicates([Predicate::matches("interloper")]));
-    assert_eq!(row_paths(&page), ["notes/a.md"]);
-    assert!(page.unsatisfied.is_empty(), "{:?}", page.unsatisfied);
+    for query in [
+        "interloper",
+        "interloper{body}:\"!!!\"",
+        "interloper {body}: \"!!!\"",
+    ] {
+        let page = seeded.page(&request().with_predicates([Predicate::matches(query)]));
+        assert_eq!(row_paths(&page), ["notes/a.md"], "{query:?}");
+        assert!(
+            page.unsatisfied.is_empty(),
+            "{query:?}: {:?}",
+            page.unsatisfied
+        );
+    }
 }
 
 /// **A full-text index the store cannot read is the store's fault, not a

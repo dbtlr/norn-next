@@ -911,7 +911,8 @@ fn an_ungrouped_count_continued_after_its_one_tally_answers_an_empty_page() {
 /// rather than refused. **The other parts a count cannot apply are reported
 /// as a find reports them**, through the same compilation: a malformed glob
 /// empties the page, and a predicate key outside the field universe is
-/// reported with its near keys and filters nothing.
+/// reported with its near keys and matches no document, so a grouped count
+/// answers no tally and one grouped by nothing its one tally, of zero.
 #[test]
 fn a_part_a_count_cannot_apply_is_reported_as_a_find_reports_it() {
     let counting_store = Counting::new("count-unsatisfied");
@@ -974,16 +975,28 @@ fn a_part_a_count_cannot_apply_is_reported_as_a_find_reports_it() {
     assert_eq!(grouped_unmatched.tallies, Vec::new());
     assert!(grouped_unmatched.unsatisfied.is_empty());
 
-    let unknown = counting_store
-        .count(&counting(vec![field("aliases")]).with_predicates([Predicate::has("stauts"), open]));
-    assert_eq!(unknown.tallies, earned);
-    assert_eq!(
-        unknown.unsatisfied,
-        vec![Unsatisfied::unknown_predicate_key(
-            "stauts",
-            vec!["status".to_string()]
-        )]
+    let reported = vec![Unsatisfied::unknown_predicate_key(
+        "stauts",
+        vec!["status".to_string()],
+    )];
+    let unknown = counting_store.count(
+        &counting(vec![field("aliases")]).with_predicates([Predicate::has("stauts"), open.clone()]),
     );
+    assert_eq!(unknown.tallies, Vec::new());
+    assert_eq!(unknown.unsatisfied, reported);
+    for part in [
+        Predicate::missing("stauts"),
+        Predicate::not_equal_to("stauts", "open"),
+    ] {
+        let ungrouped_unknown = counting_store
+            .count(&counting(Vec::new()).with_predicates([part.clone(), open.clone()]));
+        assert_eq!(ungrouped_unknown.tallies, vec![tally(&[], 0)], "{part:?}");
+        assert_eq!(
+            ungrouped_unknown.work.tallies_read, 0,
+            "a tally statement ran under {part:?}"
+        );
+        assert_eq!(ungrouped_unknown.unsatisfied, reported, "{part:?}");
+    }
 }
 
 /// **A match part whose query parses but holds no word is reported, and the

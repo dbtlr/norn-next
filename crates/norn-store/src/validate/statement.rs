@@ -100,10 +100,6 @@ pub(crate) struct Findings<'a> {
     /// The conjunction's parts: a path part judges the finding's own path,
     /// and every other part the document row at it.
     pub(crate) filters: &'a [Filter],
-    /// Whether the conjunction names a part that judges a document and
-    /// filters nothing among documents — a predicate key outside the field
-    /// universe — so a finding stands in the answer only on a document row.
-    pub(crate) on_a_document: bool,
     pub(crate) rows: usize,
 }
 
@@ -125,15 +121,13 @@ pub(crate) struct Findings<'a> {
 /// prefix in another case, which the glob then rejects.
 ///
 /// **Every other part judges the document row at the finding's path**, which
-/// a finding standing where no document row does never satisfies — a part
-/// on a key outside the field universe included, which filters nothing among
-/// documents and so asks only that the row stands. Where some such part
-/// keeps what it seeks, the matched documents drive the statement:
+/// a finding standing where no document row does never satisfies. Where some
+/// such part keeps what it seeks, the matched documents drive the statement:
 /// `CROSS JOIN` keeps them the outer loop, reached by the part's seek, and
 /// each one's findings are one seek at its path, so the statement costs what
-/// the part matched and sorts that. Where every such part excludes or filters
-/// nothing, the statement seeks its kind as an unnarrowed one does and tests
-/// each finding's document row, one seek of `documents_path` at its path.
+/// the part matched and sorts that. Where every such part excludes, the
+/// statement seeks its kind as an unnarrowed one does and tests each
+/// finding's document row, one seek of `documents_path` at its path.
 pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) {
     let mut binder = Binder::default();
     let (paths, documents): (Vec<&Filter>, Vec<&Filter>) = findings
@@ -145,7 +139,7 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
         .filter_map(|filter| filter.path_part())
         .collect();
     let driven = documents.iter().any(|filter| !filter.shape().excludes());
-    let on_a_document = findings.on_a_document || !documents.is_empty();
+    let on_a_document = !documents.is_empty();
 
     let mut conditions = vec![format!(
         "f.vault_schema_fingerprint = {}",

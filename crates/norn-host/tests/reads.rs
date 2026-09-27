@@ -505,11 +505,15 @@ fn attach_over_the_unreadable_schema(vault: &attach::Vault) -> attach::ServingHo
     host
 }
 
-/// **Counts over a schema no recovery can read answer the cause.** The attach
-/// reads a schema this build cannot declare and publishes it as untrusted;
-/// once the watcher has settled, counts that follow, spaced apart, are each
-/// refused as untrusted with that cause, rather than as not ready under a
-/// recovery each of them restarted.
+/// **Counts over a schema no recovery can read answer the cause, and start
+/// no recovery.** The attach reads a schema this build cannot declare and
+/// publishes it as untrusted; once the watcher has settled, counts that
+/// follow, spaced apart, are each refused as untrusted with that cause, rather
+/// than as not ready under a recovery each of them restarted. A recovery a
+/// count started and that failed again before the next count would still
+/// leave the cause standing, so the host's cumulative count of recoveries run
+/// is read too, where the account is readable: it does not move across the
+/// counts.
 #[test]
 fn counts_over_a_schema_no_recovery_can_read_answer_the_cause() {
     let (_sandbox, vault) = a_vault("host-reads-unreadable-schema-polled");
@@ -517,6 +521,8 @@ fn counts_over_a_schema_no_recovery_can_read_answer_the_cause() {
         .expect("write an unreadable schema");
     let host = attach_over_the_unreadable_schema(&vault);
 
+    #[cfg(feature = "induced-failure")]
+    let recoveries_before = host.evidence().recoveries_run;
     for count in 0..3 {
         let refused = host
             .count(&a_count(vault.name()))
@@ -527,6 +533,12 @@ fn counts_over_a_schema_no_recovery_can_read_answer_the_cause() {
         );
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
+    #[cfg(feature = "induced-failure")]
+    assert_eq!(
+        host.evidence().recoveries_run,
+        recoveries_before,
+        "the counts over an unreadable schema ran a recovery"
+    );
 }
 
 /// **A corrected vault schema is a change a read acts on.** Counts over an
@@ -1248,7 +1260,8 @@ fn a_read_issued_after_an_edit_answers_it_and_none_is_refused_meanwhile() {
 /// **A part a verb could not apply reaches the answer through the host.** A
 /// get of a section or a block its document does not carry answers the
 /// document's record with exactly that part unsatisfied; a find and a count
-/// each report a predicate key outside the field universe; a validate reports a `resolves`
+/// each report a predicate key outside the field universe, and a find over one
+/// answers no row; a validate reports a `resolves`
 /// part as not applicable. Each is answered under the reading of its
 /// snapshot, never refused.
 #[test]
@@ -1281,6 +1294,11 @@ fn a_part_a_verb_could_not_apply_is_answered_unsatisfied() {
         )
         .expect("a find over an unknown key answers");
     assert_read_from_its_snapshot(&found.answer.reading, &vault);
+    assert!(
+        found.answer.report.rows.is_empty(),
+        "a find over an unknown key answered {} rows",
+        found.answer.report.rows.len()
+    );
     assert!(
         matches!(
             found.answer.unsatisfied.as_slice(),
@@ -1315,6 +1333,69 @@ fn a_part_a_verb_could_not_apply_is_answered_unsatisfied() {
         validated.answer.unsatisfied,
         [Unsatisfied::resolves_not_applicable(resolving)]
     );
+}
+
+/// **A row judged without its frontmatter carries the finding that says
+/// why.** A document whose frontmatter block never closes, and one whose block
+/// does not parse, are read with no frontmatter, so a field part and a field
+/// sort judge each as missing every key. Each row they answer carries the
+/// finding naming the unread block in its findings column, and a find by that
+/// finding's kind answers the document.
+#[test]
+fn a_row_judged_without_its_frontmatter_carries_the_finding_that_says_why() {
+    let (_sandbox, vault, host) = a_verb_vault(
+        "host-reads-unread-frontmatter",
+        &[(
+            "zz-broken/zz-unreadable.md",
+            "---\ncreated: : :\n---\nbody\n",
+        )],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let unread = [
+        ("zz-broken/zz-unclosed.md", FindingKind::FrontmatterUnclosed),
+        (
+            "zz-broken/zz-unreadable.md",
+            FindingKind::FrontmatterUnreadable,
+        ),
+    ];
+    let at = || FindParams::new(address(vault.name()));
+    for judged in [
+        at().with_predicates([Predicate::missing("created")]),
+        at().with_sort(Sort::new(SortKey::field("created"), Direction::Ascending)),
+    ] {
+        let found = host
+            .find(&judged.with_columns([Column::findings()]).with_limit(1000))
+            .expect("a find judging a field answers");
+        for (path, kind) in unread {
+            let row = found
+                .answer
+                .report
+                .rows
+                .iter()
+                .find(|row| row.path.as_str() == path)
+                .unwrap_or_else(|| {
+                    panic!("`{path}` is not among {:?}", paths_of(&found.answer.report))
+                });
+            let findings = row.findings.as_ref().expect("the findings column");
+            assert!(
+                findings.items.iter().any(|finding| finding.kind == kind),
+                "`{path}` carries {:?}, not a `{kind}` finding",
+                findings.items
+            );
+        }
+    }
+    for (path, kind) in unread {
+        let found = host
+            .find(&at().with_predicates([Predicate::has_finding(kind)]))
+            .expect("a find by a finding's kind answers");
+        assert!(
+            paths_of(&found.answer.report)
+                .iter()
+                .any(|found| found == path),
+            "a find by `{kind}` answered {:?}",
+            paths_of(&found.answer.report)
+        );
+    }
 }
 
 /// **A get cuts every section and every block as `norn-text` reads it out of

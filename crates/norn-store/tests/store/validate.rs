@@ -896,8 +896,8 @@ fn a_summary_tallies_what_a_drain_answers() {
 /// rather than refused, on a page and on a summary. **The other parts a
 /// validate cannot apply are reported as a find reports them**, through the
 /// same compilation: a malformed glob empties the answer, and a predicate key
-/// outside the field universe is reported with its near keys and filters
-/// nothing among documents.
+/// outside the field universe is reported with its near keys and empties it
+/// too.
 #[test]
 fn a_part_a_validate_cannot_apply_is_reported_as_a_find_reports_it() {
     let validating_store = Validating::new("validate-unsatisfied");
@@ -954,11 +954,12 @@ fn a_part_a_validate_cannot_apply_is_reported_as_a_find_reports_it() {
         )]
     );
     assert_eq!(
-        match unknown.answer {
-            Validation::Findings { rows, .. } => rows,
-            Validation::Summary { .. } => Vec::new(),
-        },
-        earned
+        unknown.answer,
+        Validation::Findings {
+            rows: Vec::new(),
+            next: None,
+            moved: Vec::new()
+        }
     );
 }
 
@@ -1011,14 +1012,13 @@ fn tallied(tallies: &[KindTally]) -> Vec<(FindingKind, Severity, u64)> {
         .collect()
 }
 
-/// **A part on a key outside the field universe is reported and filters
-/// nothing among documents, and it is still a part that judges a document**,
-/// so it admits no finding standing where no document row does: on a page
-/// and on a summary, an equality, an inequality, a presence, an absence and a
-/// bound alike answer every finding standing on a document and none at
-/// `broken.md` or `notes/gone.md`.
+/// **A part on a key outside the field universe is reported and matches no
+/// document, so it admits no finding**: on a page and on a summary, an
+/// equality, an inequality, a presence, an absence and a bound alike answer
+/// no finding, neither one standing on a document nor one at `broken.md` or
+/// `notes/gone.md`, where no document row stands.
 #[test]
-fn a_part_on_an_unknown_key_admits_no_finding_without_a_document() {
+fn a_part_on_an_unknown_key_admits_no_finding() {
     let mut validating_store = Validating::new("validate-unknown-key");
     validating_store.stand(&violation("notes/gone.md"));
     let documentless = ["broken.md", "notes/gone.md"];
@@ -1029,11 +1029,12 @@ fn a_part_on_an_unknown_key_admits_no_finding_without_a_document() {
             .all(|path| every.iter().any(|row| row.path.as_str() == *path)),
         "both documentless findings stand"
     );
-    let documented: Vec<FindingRow> = every
-        .into_iter()
-        .filter(|row| !documentless.contains(&row.path.as_str()))
-        .collect();
-    assert_eq!(names(&documented), every_finding()[1..].to_vec());
+    assert!(
+        every
+            .iter()
+            .any(|row| !documentless.contains(&row.path.as_str())),
+        "a finding stands on a document"
+    );
     let reported = vec![Unsatisfied::unknown_predicate_key(
         "stauts",
         vec!["status".to_string()],
@@ -1051,14 +1052,14 @@ fn a_part_on_an_unknown_key_admits_no_finding_without_a_document() {
         assert_eq!(answered.unsatisfied, reported, "{part:?}");
         assert_eq!(
             validating_store.rows(&params),
-            documented,
+            Vec::new(),
             "a page of {part:?}"
         );
         let summarized = validating_store.validate(&params.clone().summarized());
         assert_eq!(summarized.unsatisfied, reported, "{part:?}");
         assert_eq!(
-            tallied(&validating_store.summary(&params)),
-            tallies_of(&documented),
+            validating_store.summary(&params),
+            Vec::new(),
             "a summary of {part:?}"
         );
     }

@@ -796,7 +796,8 @@
         "status": "bound",
         "tests": [
           "crates/norn-host/src/derivation.rs::an_unread_block_plans_an_upsert_and_a_finding_naming_the_spelling_it_read",
-          "crates/norn-host/src/production.rs::every_wholly_unread_block_derives_its_body_facts_and_names_its_cause"
+          "crates/norn-host/src/production.rs::every_wholly_unread_block_derives_its_body_facts_and_names_its_cause",
+          "crates/norn-host/tests/reads.rs::a_row_judged_without_its_frontmatter_carries_the_finding_that_says_why"
         ]
       }
     },
@@ -1437,6 +1438,7 @@
           "crates/norn-store/tests/store/find.rs::a_malformed_full_text_query_is_reported_and_empties_the_page",
           "crates/norn-store/tests/store/find.rs::a_full_text_query_holding_no_word_is_reported_and_empties_the_page",
           "crates/norn-store/tests/store/count.rs::a_by_key_outside_the_field_universe_answers_null_and_is_reported",
+          "crates/norn-store/tests/store/count.rs::a_part_a_count_cannot_apply_is_reported_as_a_find_reports_it",
           "crates/norn-store/tests/store/count.rs::a_wordless_match_part_is_reported_and_a_counts_tally_reads_nothing_it_narrowed",
           "crates/norn-store/tests/store/validate.rs::a_part_a_validate_cannot_apply_is_reported_as_a_find_reports_it",
           "crates/norn-store/tests/store/validate.rs::a_wordless_match_part_is_reported_and_a_validates_answer_holds_no_finding",

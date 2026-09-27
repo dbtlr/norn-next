@@ -49,9 +49,8 @@
 //! finding's path**: a field, a tag, a full-text match, a finding, each is a
 //! fact of a document, and a finding with no document row beside it satisfies
 //! none of them, an inequality and an absence included. A part on a predicate
-//! key outside the field universe is one of them: it is reported with the keys
-//! near it and filters nothing among documents, so it admits every finding
-//! standing on a document row and none standing where no row does.
+//! key outside the field universe is reported with the keys near it and, as a
+//! part that cannot be applied does, admits no finding.
 //!
 //! # A summary is an aggregate, and is not paged
 //!
@@ -382,7 +381,6 @@ impl Snapshot {
                     severities: narrowing.severities.as_deref(),
                     after,
                     filters: &narrowing.conjunction.filters,
-                    on_a_document: narrowing.conjunction.names_unknown_key,
                     rows,
                 });
                 let section =
@@ -415,7 +413,6 @@ impl Snapshot {
             severities: narrowing.severities.as_deref(),
             after: None,
             filters: &narrowing.conjunction.filters,
-            on_a_document: narrowing.conjunction.names_unknown_key,
             rows: 0,
         });
         let summary = Ran::new(ValidateStatement::Summary, composed).narrowed_by(

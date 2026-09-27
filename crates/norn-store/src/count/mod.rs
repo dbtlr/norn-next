@@ -79,10 +79,11 @@
 //! parts that cannot be applied are reported the same way: a part with no
 //! meaning empties the match — a grouped count answers no tally, and one
 //! grouped by nothing its one tally, of zero, exactly as a filter matching no
-//! document does — and a predicate key outside the field universe is reported
-//! and filters nothing. **A `resolves` part is not applicable**: it answers
-//! which documents a target names, which is a find, so a count reports it
-//! ([`Unsatisfied::ResolvesNotApplicable`]) and filters nothing by it.
+//! document does — and a predicate key outside the field universe is such a
+//! part, reported with the keys near it. **A `resolves` part is not
+//! applicable**: it answers which documents a target names, which is a find,
+//! so a count reports it ([`Unsatisfied::ResolvesNotApplicable`]) and filters
+//! nothing by it.
 //!
 //! **A count is advised of a mixed-offset comparison as a find is**, in
 //! [`Counted::advisories`]: a grouping by a key with a dated order compares
@@ -452,9 +453,8 @@ impl Snapshot {
 
     /// The members `by` groups by, each read under the order the declaration
     /// gives its key, with a field key outside the field universe reported —
-    /// its member still groups, and every document's member for it is `null`,
-    /// exactly as an unknown predicate key filters nothing and is reported. A
-    /// tag member is never unknown.
+    /// its member still groups, and every document's member for it is `null`.
+    /// A tag member is never unknown.
     fn members<'a>(
         &self,
         by: &'a [GroupKey],
