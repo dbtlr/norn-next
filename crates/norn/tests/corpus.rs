@@ -250,7 +250,8 @@ fn every_recorded_entry_reconstructs_its_bytes() {
 /// change somebody should see.
 ///
 /// `PD-134` is the whole set today. It rules on a `--vault` flag local to
-/// `service`, which carries no behavior at the pin. `service` is re-derived at
+/// `service`, which carries no behavior at the pin. `service` is reserved in
+/// the architecture and not yet built; it is decided to be re-derived at
 /// installation scope over the one host an installation supervises, with no
 /// per-vault form, so the flag has no successor. The ruling stays here until
 /// `service`'s recorded cases retire at Layer 6, and the corpus retires it
@@ -371,6 +372,84 @@ fn the_help_class_ruling_sweeps_every_command() {
         covered, help_pages,
         "the help class ruling does not cover exactly the recorded help pages"
     );
+}
+
+/// The top-level shape ruling.
+const TOP_LEVEL_RULING: &str = "SR-top-level";
+
+/// The wire registry the top-level ruling cites.
+const VERB_REGISTRY: &str = "crates/norn-wire/src/verb.rs";
+
+/// The machine-local verbs the top-level ruling names as reserved, not built.
+const RESERVED_MACHINE_LOCAL_VERBS: [&str; 4] =
+    ["self-update", "service", "completions", "manpage"];
+
+/// The commands the top-level ruling names as decided and not in the wire
+/// registry, spelled as the registry would spell them.
+const DECIDED_NOT_REGISTERED: [&str; 2] = ["vault_migrate", "model_fetch"];
+
+/// Whether `docs/architecture.md` marks `verb` reserved on a `norn-client`
+/// row: the client that owns the machine-local verbs is not written yet.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: this repository's own architecture document.
+fn architecture_reserves_client_verb(verb: &str) -> bool {
+    let architecture = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/architecture.md"),
+    )
+    .expect("reading the architecture document");
+    architecture.lines().any(|line| {
+        line.starts_with("| `norn-client`") && line.contains("*Reserved.*") && line.contains(verb)
+    })
+}
+
+/// The top-level ruling names what exists as what exists.
+///
+/// No command line is built on this line, so the ruling separates what the
+/// code holds from what is decided. It cites the wire verb registry, names
+/// every verb the registry holds, names the client's machine-local verbs only
+/// where the architecture marks them reserved, and names the decided commands
+/// the registry does not hold yet as absent from it. A verb added to or
+/// removed from the registry fails here until the ruling says so.
+#[test]
+fn the_top_level_ruling_names_what_the_registry_holds() {
+    let corpus = corpus();
+    let ruling = corpus
+        .ledger
+        .rulings
+        .iter()
+        .find(|ruling| ruling.id == TOP_LEVEL_RULING)
+        .unwrap_or_else(|| panic!("the ledger records no ruling `{TOP_LEVEL_RULING}`"));
+    assert_eq!(
+        ruling.source_decision, VERB_REGISTRY,
+        "the top-level ruling does not cite the wire verb registry"
+    );
+
+    let names = |spelling: &str| ruling.recorded_behavior.contains(&format!("`{spelling}`"));
+    let registered: BTreeSet<&str> = norn_wire::Verb::ALL
+        .iter()
+        .map(|verb| verb.as_str())
+        .collect();
+    for verb in &registered {
+        assert!(
+            names(verb),
+            "the wire registry holds `{verb}`, which the top-level ruling does not name"
+        );
+    }
+    for verb in RESERVED_MACHINE_LOCAL_VERBS {
+        assert!(
+            names(verb),
+            "the top-level ruling does not name the reserved verb `{verb}`"
+        );
+        assert!(
+            architecture_reserves_client_verb(verb),
+            "the top-level ruling names `{verb}` as reserved, and the architecture reserves no such client verb"
+        );
+    }
+    for verb in DECIDED_NOT_REGISTERED {
+        assert!(
+            !registered.contains(verb),
+            "the top-level ruling names `{verb}` as not yet registered, and the wire registry holds it"
+        );
+    }
 }
 
 /// Every activated case must reach a runner. None is activated, so nothing

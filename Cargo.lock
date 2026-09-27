@@ -400,6 +400,7 @@ name = "norn"
 version = "0.0.0"
 dependencies = [
  "norn-testkit",
+ "norn-wire",
  "serde_json",
 ]
 

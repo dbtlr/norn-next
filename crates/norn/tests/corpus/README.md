@@ -124,9 +124,11 @@ recorded the decided behavior. A ruling recorded on this line cites cases that
 recorded the prior one, so activation re-judges those cases against the
 ruling at Layer 6.
 
-**The help class ruling, `CR-help-reads-no-vault`.** A help page never reads a
-vault. It is rendered from the command's declaration alone, so it is the same
-inside a vault, outside one, and with no vault registered. The recorded help
+**The help class ruling, `CR-help-reads-no-vault`.** Decided, and not yet
+built: no help page is rendered on this line, and the help pages land with the
+renderings at Layer 6. When they land, a help page never reads a vault. It is
+rendered from the command's declaration alone, so it is the same inside a
+vault, outside one, and with no vault registered. The recorded help
 standard gave `find --help` a `LIVE EXAMPLES` block, a runnable query
 generated from the vault in scope with its match count; that block, and every
 instruction to generate help from a vault's contents, are struck on every
@@ -143,9 +145,9 @@ the shape that replaces it:
 | `SR-find` | Offset paging (`--limit`, `--starts-at`, `--no-limit`, `--all`, a match total) becomes keyset paging by an opaque cursor over the sort value and path. |
 | `SR-get` | One or more targets answered as an array, in records, JSON or Markdown, becomes one document per request, answered as a record, a section, a block, or one page of one nested collection, and an ambiguous or unknown target is refused. |
 | `SR-count` | An unpaged total with a flat or nested distribution becomes a keyset-paged list of tallies, each a grouping tuple with a count. |
-| `SR-validate` | Unpaged findings filtered by code globs, with an exit status an error finding sets, become the findings standing under the active schema, paged by keyset or tallied by kind and severity; a standing finding sets no exit status. |
+| `SR-validate` | Unpaged findings filtered by code globs, with an exit status an error finding sets, become the findings standing under the active schema, paged by keyset or tallied by kind and severity. A standing finding is a row of a complete `VaultAnswer`, never an unsatisfied part or a refusal; exit status arrives with the renderings at Layer 6. |
 | `SR-describe` | Structure counts, a config dump and a contents summary become a keyset-paged list of declared and observed facets: keys and declarations only. |
-| `SR-top-level` | The pin's command list and global block become the commands this line carries, with the full global reference on the top-level page alone. |
+| `SR-top-level` | The pin's command list and global block give way to a decided command list and global block that are not yet rendered. The ruling names what the code holds today: the 14 verbs of the wire verb registry, `Verb::ALL`, and the machine-local verbs the architecture reserves. |
 
 Every format a recorded case selected is a rendering of one report, and the
 renderings land at Layer 6.
@@ -154,11 +156,15 @@ renderings land at Layer 6.
 authored with no corpus evidence, as its `unrecorded` category says: no case
 records any of its subcommands. `search`, `doctor`, `vault resolve`,
 `model fetch` and `vault migrate` are new. No command at the pin was any of
-them, so they sit in no category and are authored with no corpus evidence. The
+them, so they sit in no category and are authored with no corpus evidence.
+The wire verb registry holds `search`, `vault_resolve` and `doctor_registry`,
+the registry half of `doctor`; `model fetch` and `vault migrate` are decided
+and not yet in it. The
 nine `unseeded` commands carry no behavior at the pin, so none of them needs a
 ruling here.
 
 **`PD-134`** rules on a `--vault` flag local to `service`. `service` is
+reserved in the architecture and not yet built. It is decided to be
 re-derived at installation scope over the one host an installation
 supervises, with no per-vault form, so the flag has no successor. The ruling
 stays in the pinned set of rulings with no activation path, and the corpus
