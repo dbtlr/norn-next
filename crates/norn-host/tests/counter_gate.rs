@@ -574,6 +574,15 @@ fn one_probe_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnap
     assert_the_attachment_derived_the_profile(&mut store, profile);
     assert_the_probes_stem_is_the_probes_alone(&mut store);
     let mut request = store.begin_request();
+    // The probe holds no link and its stem is its own, so the link health the
+    // write re-decides reads no ambiguity-ignore glob: the pinned schema's
+    // fingerprint is the whole of the declaration it is judged under.
+    let declared = request
+        .vault_schema_pin()
+        .expect("reading the pinned schema")
+        .map_or_else(norn_store::ContentModel::none, |pin| {
+            norn_store::ContentModel::under(pin.fingerprint)
+        });
     request
         .apply_increment(
             IncrementProvenance::Derived,
@@ -584,7 +593,7 @@ fn one_probe_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnap
                 7,
             ))],
             &[],
-            &norn_store::ContentModel::none(),
+            &declared,
         )
         .expect("applying a document upsert");
     let reading = request.finish();
