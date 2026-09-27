@@ -35,7 +35,7 @@
 
 use std::collections::BTreeSet;
 
-use norn_wire::{CaseFold, FindingKind, Severity};
+use norn_wire::{CaseFold, FindingKind, LinkAddressKind, Severity};
 
 use crate::fields::{ContentModel, FieldRows};
 use crate::json::FrontmatterValue;
@@ -128,8 +128,9 @@ impl TagSource {
 /// There is no resolution field and no addressing mode: how this target
 /// resolves derives from `protocol` and `family`, protocol first, in the one
 /// place that derivation lives. The store derives the link's
-/// [`LinkAddressKind`] from those at the write, so it is read back
-/// ([`StoredLink`]) and never handed over.
+/// [`LinkAddressKind`] from those at the write, through the wire's
+/// [`norn_wire::LinkAddress::kind`], so it is read back ([`StoredLink`]) and
+/// never handed over.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinkFact {
     pub family: LinkFamily,
@@ -182,53 +183,6 @@ pub struct AnchorReadings {
     /// The heading text past the anchor's `#` markers, as a heading reading,
     /// where it has such markers.
     pub marked: Option<String>,
-}
-
-/// How a link's target reaches documents, as far as judging it goes: the one
-/// fact about a link's addressing that `links.address` stores.
-///
-/// Derived at the write from [`norn_wire::LinkAddress`] and
-/// [`norn_wire::LinkAddress::names_an_attachment`], so it agrees with
-/// [`norn_wire::LinkHealth::of_link`] over every link: a link addressed
-/// elsewhere is never judged, one naming an attachment is not judged where it
-/// resolves to no document, and every other link is judged by what it
-/// resolves to.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LinkAddressKind {
-    /// The link addresses no document of the vault.
-    Elsewhere,
-    /// The link's target names an attachment.
-    Attachment,
-    /// The link's target can name only a document.
-    Document,
-}
-
-impl LinkAddressKind {
-    /// The whole vocabulary, which is what `links.address` is checked
-    /// against.
-    pub(crate) const ALL: &'static [LinkAddressKind] = &[
-        LinkAddressKind::Elsewhere,
-        LinkAddressKind::Attachment,
-        LinkAddressKind::Document,
-    ];
-
-    /// The kind as `links.address` holds it.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            LinkAddressKind::Elsewhere => "elsewhere",
-            LinkAddressKind::Attachment => "attachment",
-            LinkAddressKind::Document => "document",
-        }
-    }
-
-    pub(crate) fn from_str(stored: &str) -> Option<Self> {
-        match stored {
-            "elsewhere" => Some(LinkAddressKind::Elsewhere),
-            "attachment" => Some(LinkAddressKind::Attachment),
-            "document" => Some(LinkAddressKind::Document),
-            _ => None,
-        }
-    }
 }
 
 /// One heading.

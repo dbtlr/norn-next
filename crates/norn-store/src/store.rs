@@ -84,14 +84,12 @@ use std::sync::{Arc, Condvar, Mutex};
 use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{self, Connection};
 use norn_db::{Adoption, Database, OpenOutcome, RebuildReason, meta};
-use norn_wire::{FindingKind, Severity};
+use norn_wire::{FindingKind, LinkAddressKind, Severity};
 
 use crate::counters::SnapshotCounters;
 use crate::ddl;
 use crate::error::{self, StoreError};
-use crate::facts::{
-    DerivationVersion, LinkAddressKind, LinkFamily, Provenance, StoredPathOrder, TagSource,
-};
+use crate::facts::{DerivationVersion, LinkFamily, Provenance, StoredPathOrder, TagSource};
 use crate::hash;
 use crate::request::Request;
 

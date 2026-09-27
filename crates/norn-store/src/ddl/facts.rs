@@ -46,11 +46,11 @@
 //! **`address` is what judging a link reads of that selector**, and nothing
 //! more: `elsewhere`, where the link addresses no document of the vault;
 //! `attachment`, where its target names one, so resolving to no document
-//! leaves it unjudged; and `document` otherwise. It is computed at the write
-//! from `LinkAddress` and its attachment test ([`crate::LinkAddressKind`]), the
-//! same two a link's read-time health (`LinkHealth::of_link`) is judged by, so
-//! the two cannot disagree, and a predicate over links reads it as a column
-//! rather than re-running the selector per row.
+//! leaves it unjudged; and `document` otherwise. It is the wire's
+//! `LinkAddress::kind`, computed at the write, which is the one classification
+//! a link's read-time health (`LinkHealth::of_link`) is judged by too, so the
+//! two cannot disagree, and a predicate over links reads it as a column rather
+//! than re-running the selector per row.
 //!
 //! **A link names at most one place, and "no place" has one stored form.**
 //! `anchor` is a heading anchor as the text layer records it and `block_ref` a

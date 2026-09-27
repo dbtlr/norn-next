@@ -14,10 +14,10 @@ use crate::common::{
 };
 use norn_store::{
     BlockFact, Change, ContentModel, DocumentFacts, FrontmatterValue, HeadingFact,
-    IncrementProvenance, LinkAddressKind, LinkFact, LinkFamily, Provenance, StoreError,
-    StoredLinkKey, TagFact, TagSource, ddl, induced_failure,
+    IncrementProvenance, LinkFact, LinkFamily, Provenance, StoreError, StoredLinkKey, TagFact,
+    TagSource, ddl, induced_failure,
 };
-use norn_wire::LinkHealth;
+use norn_wire::{LinkAddressKind, LinkHealth};
 
 /// One of every fact shape, written and read back unchanged — including the
 /// optional fields that are absent, which is where a column that quietly

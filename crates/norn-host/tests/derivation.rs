@@ -51,18 +51,18 @@ use std::path::Path;
 
 use norn_host::DERIVATION_VERSION;
 use norn_store::{
-    DerivationVersion, FieldContainer, FieldRow, LinkAddressKind, LinkAnchor, LinkFact, LinkFamily,
-    OffsetSpelling, OpenOutcome, TagSource,
+    DerivationVersion, FieldContainer, FieldRow, LinkAnchor, LinkFact, LinkFamily, OffsetSpelling,
+    OpenOutcome, TagSource,
 };
 use norn_testkit::equivalence::{DerivedRows, assert_operationally_valid};
 use norn_testkit::process::Sandbox;
-use norn_wire::FindingKind;
+use norn_wire::{FindingKind, LinkAddressKind};
 
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(6),
-    "c48391a5ac7908510ff20b48a834ba7b706ae9e75c0b7040b64e72db8b327d11",
+    "2aa8920a88f1164b3d209af8e3c49573f89358e01d1cf3425730aaa7491b6c2a",
 );
 
 /// The vault schema the main corpus is derived under: a field of every

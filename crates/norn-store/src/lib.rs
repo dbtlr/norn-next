@@ -129,10 +129,10 @@ pub use describe::{DESCRIBE_STATEMENTS, DescribePlan, DescribeStatement, Describ
 pub use error::StoreError;
 pub use facts::{
     AnchorReadings, BlockFact, CANDIDATE_HEAD, CandidateFact, DerivationVersion, DocumentFacts,
-    FeedDocument, FeedTombstone, FindingFacts, HeadingFact, IndexedTerm, Invalidation,
-    LinkAddressKind, LinkAnchor, LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span,
-    StoredDocument, StoredFacts, StoredFinding, StoredLink, StoredLinkKey, StoredPathOrder,
-    StoredSuffixKeys, StoredTag, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    FeedDocument, FeedTombstone, FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkAnchor,
+    LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts,
+    StoredFinding, StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag,
+    StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;

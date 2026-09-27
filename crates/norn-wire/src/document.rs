@@ -544,6 +544,51 @@ impl<'a> LinkAddress<'a> {
             _ => false,
         }
     }
+
+    /// How the address stands to judging the link: the one classification a
+    /// link's health ([`LinkHealth::of_link`]) and a store's stored kind both
+    /// read.
+    pub fn kind(&self) -> LinkAddressKind {
+        match self {
+            LinkAddress::Elsewhere => LinkAddressKind::Elsewhere,
+            address if address.names_an_attachment() => LinkAddressKind::Attachment,
+            _ => LinkAddressKind::Document,
+        }
+    }
+}
+
+/// How a link's address stands to judging it ([`LinkAddress::kind`]).
+///
+/// Plain rather than `#[non_exhaustive]`: a reader matches every kind, and a
+/// kind nobody chose a judgment for should fail to compile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkAddressKind {
+    /// The link addresses no document of the vault, so it is never judged.
+    Elsewhere,
+    /// The link's target names an attachment, so it is judged only where it
+    /// resolves to a document.
+    Attachment,
+    /// The link's target can name only a document, so resolving to none
+    /// breaks it.
+    Document,
+}
+
+impl LinkAddressKind {
+    /// Every kind, in declaration order.
+    pub const ALL: [LinkAddressKind; 3] = [
+        LinkAddressKind::Elsewhere,
+        LinkAddressKind::Attachment,
+        LinkAddressKind::Document,
+    ];
+
+    /// The kind as one word: `elsewhere`, `attachment` or `document`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            LinkAddressKind::Elsewhere => "elsewhere",
+            LinkAddressKind::Attachment => "attachment",
+            LinkAddressKind::Document => "document",
+        }
+    }
 }
 
 /// `target` with its query — from the first `?` — cut off.
@@ -590,23 +635,22 @@ impl LinkHealth {
     /// The health of a link of `family`, written with `protocol` and
     /// `target`, whose target resolved to `targets` documents.
     ///
-    /// **A link is judged by resolving it first.** A link addressed elsewhere
-    /// ([`LinkAddress::Elsewhere`]) is not judged. Any other link is healthy
-    /// where it resolved to one document and ambiguous where it resolved to
-    /// more; one that resolved to none is not judged where its target names an
-    /// attachment ([`LinkAddress::names_an_attachment`]), and broken
-    /// otherwise. The count is the head's total rather than the candidates it
+    /// **A link is judged by resolving it first**, read through its address's
+    /// kind ([`LinkAddress::kind`]). A link addressed elsewhere is not judged.
+    /// Any other link is healthy where it resolved to one document and
+    /// ambiguous where it resolved to more; one that resolved to none is not
+    /// judged where its target names an attachment, and broken otherwise. The count is the head's total rather than the candidates it
     /// carries, so a head cut at its bound reports the health of the whole
     /// class.
     ///
     /// This is the whole of the derivation, so a producer cannot file one
     /// reading of a link and a consumer another.
     pub fn of_link(family: LinkFamily, protocol: Option<&str>, target: &str, targets: u64) -> Self {
-        let address = LinkAddress::of(family, protocol, target);
-        match (address, targets) {
-            (LinkAddress::Elsewhere, _) => LinkHealth::NotJudged,
-            (_, 0) if address.names_an_attachment() => LinkHealth::NotJudged,
-            (_, 0) => LinkHealth::Broken,
+        match (LinkAddress::of(family, protocol, target).kind(), targets) {
+            (LinkAddressKind::Elsewhere, _) | (LinkAddressKind::Attachment, 0) => {
+                LinkHealth::NotJudged
+            }
+            (LinkAddressKind::Document, 0) => LinkHealth::Broken,
             (_, 1) => LinkHealth::Healthy,
             _ => LinkHealth::Ambiguous,
         }

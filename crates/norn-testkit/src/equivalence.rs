@@ -1436,7 +1436,7 @@ mod tests {
                     byte_offset: 1,
                 },
             },
-            address: norn_store::LinkAddressKind::Document,
+            address: norn_wire::LinkAddressKind::Document,
         });
         let entries = linked.entries();
         let at = |column: &str| {

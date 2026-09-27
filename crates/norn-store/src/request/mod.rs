@@ -69,17 +69,17 @@ use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{
     self, Connection, OptionalExtension, Params, Row, StatementStatus, params, params_from_iter,
 };
-use norn_wire::FindingKind;
+use norn_wire::{FindingKind, LinkAddressKind};
 
 use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{
     AnchorReadings, BlockFact, CANDIDATE_HEAD, CandidateFact, FeedDocument, FeedTombstone,
-    FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkAddressKind, LinkAnchor, LinkFact,
-    LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts,
-    StoredFinding, StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag,
-    StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkAnchor, LinkFact, LinkFamily,
+    PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding,
+    StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone,
+    TagFact, TagSource, VaultSchemaPin,
 };
 use crate::fields::{FieldContainer, FieldRow, FieldRows, OffsetSpelling};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
@@ -2641,7 +2641,10 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
 /// kind stored beside it after the columns [`stored_link`] reads.
 fn stored_link_row(row: &Row<'_>) -> Reading<StoredLink> {
     let written: String = row.get(12)?;
-    let Some(address) = LinkAddressKind::from_str(&written) else {
+    let Some(address) = LinkAddressKind::ALL
+        .into_iter()
+        .find(|kind| kind.as_str() == written)
+    else {
         return Ok(Err(unreadable("links.address", &written)));
     };
     Ok(stored_link(row)?.map(|fact| StoredLink { fact, address }))

@@ -49,9 +49,9 @@
 //! the separator and a path never does, so the two kinds share one key column
 //! and no key of one kind equals a key of the other.
 
-use norn_wire::{DOCUMENT_EXTENSION, LinkAddress};
+use norn_wire::{DOCUMENT_EXTENSION, LinkAddress, LinkAddressKind};
 
-use crate::facts::{LinkAddressKind, LinkFact};
+use crate::facts::LinkFact;
 use crate::path::{
     DocumentPath, SuffixKey, fold_ascii_case, leaf_stem, spell_path_key, suffix_probe,
 };
@@ -91,15 +91,10 @@ impl<'a> Addressing<'a> {
     }
 }
 
-/// How `link`'s target reaches documents as far as judging it goes, which
-/// `links.address` stores: elsewhere where the wire's address says so, an
-/// attachment where the address names one, and otherwise a document.
+/// How `link`'s address stands to judging it, which `links.address` stores:
+/// the wire's one classification ([`LinkAddress::kind`]).
 pub(crate) fn address_kind(link: &LinkFact) -> LinkAddressKind {
-    match LinkAddress::of(link.family.wire(), link.protocol.as_deref(), &link.target) {
-        LinkAddress::Elsewhere => LinkAddressKind::Elsewhere,
-        address if address.names_an_attachment() => LinkAddressKind::Attachment,
-        _ => LinkAddressKind::Document,
-    }
+    LinkAddress::of(link.family.wire(), link.protocol.as_deref(), &link.target).kind()
 }
 
 /// One key the link index holds a link under.
