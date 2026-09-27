@@ -96,12 +96,13 @@ pub enum StoreError {
         /// The path order the store's rows were derived under.
         order: StoredPathOrder,
     },
-    /// A caller handed over a finding only the store files: one of a kind the
-    /// store judges itself — link health — or one about a link, which only
-    /// such a finding is. Refused rather than written: a finding the store
-    /// judges is re-decided by the changeset that reaches its link, and one a
-    /// caller filed would stand beside it or be discarded by a re-decision its
-    /// caller never sees.
+    /// A caller handed over a finding only the store files, or a discard that
+    /// reaches one: a finding of a kind the store judges itself — link health
+    /// — or one about a link, which only such a finding is. Refused rather
+    /// than run: a finding the store judges is re-decided by the changeset
+    /// that reaches its link, so one a caller filed would stand beside it or
+    /// be discarded by a re-decision its caller never sees, and one a caller
+    /// discarded would stay gone until that changeset came.
     StoreJudged {
         /// What the finding was that only the store files.
         what: &'static str,
@@ -154,7 +155,8 @@ impl fmt::Display for StoreError {
             ),
             StoreError::StoreJudged { what } => write!(
                 f,
-                "{what} is a finding the store judges and files itself, and no caller records one"
+                "{what} is a finding the store judges and files itself, and no caller records or \
+                 discards one"
             ),
             StoreError::Entry {
                 index,

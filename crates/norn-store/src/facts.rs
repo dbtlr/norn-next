@@ -843,13 +843,14 @@ pub struct VaultSchemaPin {
 
 /// What a maintenance act discarded.
 ///
-/// Three acts report one: a schema pin, a class discard a caller asked for, and
-/// the class-scoped discard an increment folds into its own transaction.
+/// Three acts report one: a schema pin, a subject discard a caller asked for,
+/// and a changeset, over every axis its findings maintenance discards along.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Invalidation {
     /// Findings the act removed — derived under a different vault schema, or
-    /// belonging to a class being re-derived. Parse-fact rows carry no schema key
-    /// and no class, so none of them is ever counted here.
+    /// about a subject, in a class or keyed by a path being re-derived.
+    /// Parse-fact rows carry no schema key, no class and no path key, so none
+    /// of them is ever counted here.
     pub findings_discarded: u64,
     /// Field values whose typed sort key the act cleared, because it was derived
     /// under a different vault schema. Only a schema pin clears one; the row

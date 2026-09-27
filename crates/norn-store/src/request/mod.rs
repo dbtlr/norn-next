@@ -276,7 +276,9 @@ impl<'a> Request<'a> {
     /// - *By affected ambiguity class.* Every changed path also names the class
     ///   it belongs to, and the findings in the union of those classes go with
     ///   it — the resolution axis, where a document joining or leaving a class
-    ///   invalidates findings written in documents that did not change.
+    ///   invalidates findings written in documents that did not change. This
+    ///   discard runs inside the link-health re-decision below, which judges
+    ///   again each link a finding it takes was about.
     /// - *By affected path key.* Every changed path also names itself as the
     ///   exact path key a path-addressed link spells — a rename's old path
     ///   included, since a rename is the old path's death beside the new path's
@@ -302,18 +304,21 @@ impl<'a> Request<'a> {
     ///
     /// **Link-health findings are the one family the store judges and
     /// records** ([ADR 0027]): broken, ambiguous and missing an anchor, each
-    /// about one link. After every entry is written, the three discards have
-    /// run and the findings handed over are recorded, the store re-decides
-    /// every link the changeset reaches — each link a written document holds,
-    /// each suffix-addressed link whose keys fall in an affected class, and
-    /// each path-addressed link spelling an affected path — under the
+    /// about one link. After every entry is written, the subject and path
+    /// discards have run and the findings handed over are recorded, the store
+    /// re-decides every link the changeset reaches — each link a written
+    /// document holds, each suffix-addressed link whose keys fall in an
+    /// affected class, each path-addressed link spelling an affected path,
+    /// and each link a finding under an affected class was about — under the
     /// ambiguity-ignore globs `declared` names, and records a finding for
     /// each that is unhealthy, in the same transaction. Every finding it
-    /// replaces is already gone when it records one: the subject discard took
-    /// the findings at each written path, and every link-health finding
-    /// carries all its link's class and path keys, so the class or path
-    /// discard that reached any of them took it. Each link is judged once
-    /// however many ways the changeset reaches it.
+    /// replaces is gone when it records one: the subject discard took the
+    /// findings at each written path, the path discard those keyed by an
+    /// affected path, and the re-decision discards the findings under each
+    /// affected class that this changeset did not file; every link-health
+    /// finding carries all its link's class and path keys, so the discard
+    /// that reached any of them took it. Each link is judged once however many
+    /// ways the changeset reaches it.
     ///
     /// The re-decision reads, judges and records a chunk of links at a time,
     /// resolving each distinct key once for the whole changeset, so what it
@@ -423,61 +428,12 @@ impl<'a> Request<'a> {
         Ok(())
     }
 
-    /// Discard every finding in the class a probe opens, and report what went.
-    ///
-    /// The write side of class-scoped maintenance reached **by a class rather
-    /// than by a change**: a caller that knows which class to re-derive says so
-    /// here, where a changeset says it by naming the paths that moved and
-    /// [`Request::apply_increment`] discards the classes those paths are in,
-    /// inside its link-health re-decision, a chunk of findings at a time over
-    /// the same class range.
-    ///
-    /// This is also the reason findings need no cascade: a finding is keyed by
-    /// path and class, outlives the document it is about, and leaves the table
-    /// through this discard — counted, rather than as a side effect of a delete
-    /// somewhere else.
-    ///
-    /// **Discard, then record, is the idempotence story.** Re-deriving a class is
-    /// a discard followed by a [`Request::record_finding`] for each finding that
-    /// holds now, so two derivations of one class cannot leave two copies and
-    /// there is no dedupe rule for a caller to keep.
-    ///
-    /// A finding in more than one class goes **whole**: the membership row this
-    /// range matched identifies the finding, and deleting the finding takes its
-    /// other memberships with it. The count is findings rather than rows, because
-    /// a cascade is not what `changes()` reports.
-    ///
-    /// The probe is one in the store's own key space, as
-    /// [`Request::class_probe`] and [`TargetClass::probe`] build it; a probe
-    /// over the other key is refused ([`StoreError::KeySpace`]).
-    pub fn discard_findings_in_class(
-        &mut self,
-        probe: &SuffixProbe,
-    ) -> Result<Invalidation, StoreError> {
-        self.check_probe(probe)?;
-        let discarded = self
-            .store
-            .connection()
-            .execute(
-                &class_discard_sql(probe.range_count()),
-                probe_parameters(probe),
-            )
-            .map_err(|error| error::sql("discarding a class's findings", error))?
-            as u64;
-        self.counters.add(Counter::FindingsDiscarded, discarded);
-        Ok(Invalidation {
-            findings_discarded: discarded,
-            typed_values_discarded: 0,
-        })
-    }
-
     /// Discard every finding recorded **about** one path, and report what went.
     ///
     /// The write side of the subject axis reached **by a path rather than by a
-    /// change**, which is the mirror of [`Request::discard_findings_in_class`]
-    /// standing beside the class discard [`Request::apply_increment`] folds in.
-    /// The subject axis runs the same statement whichever door it is reached
-    /// through.
+    /// change**, beside the subject discard [`Request::apply_increment`] runs
+    /// once per path its changeset names. The subject axis runs the same
+    /// statement whichever door it is reached through.
     ///
     /// It exists because a subject is not always a path a changeset can name. A
     /// finding about a place that holds no derivable document is never the
@@ -485,13 +441,16 @@ impl<'a> Request<'a> {
     /// reaches it, and discard-then-record — the idempotence story every finding
     /// producer is held to — has no other door for that caller.
     ///
-    /// `scope` is how much of the subject the caller is re-deriving. Every
-    /// producer through this door names kinds, because what a finding
-    /// replaces at its subject is what the act that derived it read and no act
-    /// reads a place's every cause at once; a caller that does concludes them
-    /// all and discards [`DiscardScope::EveryKind`]. Discard-then-record holds
-    /// either way, because what a caller replaces is exactly what it ranged
-    /// over.
+    /// `scope` is how much of the subject the caller is re-deriving, and it
+    /// names kinds, because what a finding replaces at its subject is what the
+    /// act that derived it read. Discard-then-record holds because what a
+    /// caller replaces is exactly what it ranged over.
+    ///
+    /// A scope reaching a finding only the store files is refused
+    /// ([`StoreError::StoreJudged`]) before anything is discarded:
+    /// [`DiscardScope::EveryKind`], and a list naming a link-health kind. A
+    /// link-health finding is discarded and filed again by the changeset that
+    /// reaches its link, and nothing a caller records would file it again.
     ///
     /// A finding goes **whole**, memberships included, and the count is findings
     /// rather than rows.
@@ -500,6 +459,7 @@ impl<'a> Request<'a> {
         path: &DocumentPath,
         scope: DiscardScope<'_>,
     ) -> Result<Invalidation, StoreError> {
+        check_callers_discard(scope)?;
         let discarded = self
             .store
             .connection()
@@ -1640,20 +1600,17 @@ pub enum DiscardScope<'a> {
     /// licenses the whole form is one of two things per finding — a finding that
     /// may not stand where a row does is one nothing could read for as long as
     /// that row stands, and a finding that may is one the act that wrote the row
-    /// re-derived. A caller reaching [`Request::discard_findings_about`] names
-    /// kinds instead, and this arm is how the whole form's plan is read back
-    /// through [`ExplainedStatement::SubjectDiscard`].
+    /// re-derived. A caller's door refuses this arm, since it reaches the
+    /// link-health findings only the store files: a caller reaching
+    /// [`Request::discard_findings_about`] or a changeset's
+    /// [`crate::DerivedFinding::replaces`] names kinds instead, and this arm is
+    /// how the whole form's plan is read back through
+    /// [`ExplainedStatement::SubjectDiscard`].
     EveryKind,
     /// The findings of these kinds and no others.
     Kinds(&'a [FindingKind]),
 }
 
-/// Refuse a finding whose candidate head is not a head.
-///
-/// Two shapes are refused rather than stored: one longer than
-/// [`CANDIDATE_HEAD`], and one longer than the total it claims to be the head
-/// of. The total is what makes the head a head, so a total below the head's own
-/// length describes no vault.
 /// Refuse a finding a caller hands the store that only the store files: one
 /// of the link-health kinds, which the store judges inside every changeset
 /// ([`crate::health`]), or one about a link, which only such a finding is.
@@ -1673,6 +1630,34 @@ pub(crate) fn check_callers_finding(finding: &FindingFacts) -> Result<(), StoreE
     Ok(())
 }
 
+/// Refuse a discard a caller names whose scope reaches a finding only the
+/// store files: [`DiscardScope::EveryKind`], or a list naming one of the
+/// link-health kinds. Nothing a caller records files such a finding again,
+/// so discard-then-record would end it for good; the changeset that reaches
+/// its link is what discards and re-files it. Every door a caller discards
+/// through reads this first: [`Request::discard_findings_about`] and a
+/// changeset's [`crate::DerivedFinding::replaces`].
+pub(crate) fn check_callers_discard(scope: DiscardScope<'_>) -> Result<(), StoreError> {
+    let reaches_link_health = match scope {
+        DiscardScope::EveryKind => true,
+        DiscardScope::Kinds(kinds) => kinds
+            .iter()
+            .any(|kind| crate::health::LINK_HEALTH_KINDS.contains(kind)),
+    };
+    if reaches_link_health {
+        return Err(StoreError::StoreJudged {
+            what: "a link-health finding",
+        });
+    }
+    Ok(())
+}
+
+/// Refuse a finding whose candidate head is not a head.
+///
+/// Two shapes are refused rather than stored: one longer than
+/// [`CANDIDATE_HEAD`], and one longer than the total it claims to be the head
+/// of. The total is what makes the head a head, so a total below the head's own
+/// length describes no vault.
 pub(crate) fn check_finding_bounds(finding: &FindingFacts) -> Result<(), StoreError> {
     if finding.candidates.len() > CANDIDATE_HEAD {
         return Err(StoreError::Bound {
@@ -2093,22 +2078,6 @@ fn findings_in_class_sql(ranges: usize) -> String {
         "SELECT {FINDING_COLUMNS} FROM findings
          WHERE id IN (SELECT finding FROM finding_classes WHERE {})
          ORDER BY id",
-        range_predicate("class_key", ranges)
-    )
-}
-
-/// The statement that discards every finding in the classes a probe of `ranges`
-/// ranges opens.
-///
-/// One builder, two execution sites: [`Request::discard_findings_in_class`] runs
-/// it over a probe a caller named, and an increment runs it over each class its
-/// changed paths are in. A second spelling of it would be a second answer to
-/// "which findings does re-deriving a class take".
-pub(crate) fn class_discard_sql(ranges: usize) -> String {
-    format!(
-        "DELETE FROM findings WHERE id IN (
-             SELECT finding FROM finding_classes WHERE {}
-         )",
         range_predicate("class_key", ranges)
     )
 }

@@ -279,10 +279,11 @@ fn a_schema_change_counts_the_pin_and_the_discard_it_folds_in() {
     assert_eq!(reading.get("findings_discarded"), Some(1));
 }
 
-/// Discarding a class counts the findings it removed. It is the only way a
-/// finding leaves the table, which is what makes every deletion billed.
+/// A changeset changing a class counts the findings its discard removed. A
+/// finding leaves the table only through a counted discard, which is what
+/// makes every deletion billed.
 #[test]
-fn discarding_a_class_counts_the_findings_it_removed() {
+fn a_changesets_class_discard_counts_the_findings_it_removed() {
     let scratch = Scratch::new("class-discard-counts");
     let mut store = scratch.open();
 
@@ -308,10 +309,8 @@ fn discarding_a_class_counts_the_findings_it_removed() {
         ))
         .expect("recording a finding");
 
-    let invalidation = request
-        .discard_findings_in_class(&request.class_probe("glossary").expect("a class stem"))
-        .expect("discarding a class");
-    assert_eq!(invalidation.findings_discarded, 2);
+    let outcome = write_document(&mut request, &document("glossary.md", "hash-1", "a body\n"));
+    assert_eq!(outcome.invalidated.findings_discarded, 2);
     let reading = request.finish();
     assert_eq!(reading.get("findings_discarded"), Some(2));
     assert_eq!(reading.get("findings_written"), Some(3));

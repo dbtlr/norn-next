@@ -1451,8 +1451,7 @@ fn a_rename_discards_under_the_old_path() {
 /// `glossary/` opens the range `[glossary/, glossary0)`, and the path key
 /// `glossary/x.md` sorts inside it. A write to `a/glossary.md` changes that
 /// class and leaves `glossary/x.md` as it was, so the finding about a link to
-/// it stands — through the changeset's class discard and through a class
-/// discard a caller names.
+/// it stands through the changeset's class discard.
 #[test]
 fn a_class_range_does_not_catch_a_path_key_it_prefixes() {
     let scratch = Scratch::new("path-axis-class-range");
@@ -1477,12 +1476,6 @@ fn a_class_range_does_not_catch_a_path_key_it_prefixes() {
         outcome.invalidated.findings_discarded, 0,
         "the class `glossary/` took a finding keyed by the path `glossary/x.md`"
     );
-
-    let probe = request.class_probe("glossary").expect("a class stem");
-    let discarded = request
-        .discard_findings_in_class(&probe)
-        .expect("discarding a class");
-    assert_eq!(discarded.findings_discarded, 0);
     assert_eq!(
         targets_at(&request, "index.md"),
         vec![Some("glossary/x.md".to_string())]

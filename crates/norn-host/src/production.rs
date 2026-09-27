@@ -11835,7 +11835,7 @@ mod tests {
             .begin_request()
             .discard_findings_about(
                 &DocumentPath::new("note.md").unwrap(),
-                norn_store::DiscardScope::EveryKind,
+                norn_store::DiscardScope::Kinds(&[FindingKind::FrontmatterUnreadable]),
             )
             .unwrap();
         assert_eq!(finding_total(&mut attachment.store), 0);

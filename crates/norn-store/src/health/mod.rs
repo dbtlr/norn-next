@@ -106,7 +106,8 @@ use crate::read::SuffixSpellings;
 use crate::request::{self, ReadWork, Request, stored_link_row, unreadable};
 use crate::resolve::{self, AmbiguityIgnore};
 
-/// The kinds the store judges and files itself, and no caller records.
+/// The kinds the store judges and files itself, and no caller records or
+/// discards.
 pub(crate) const LINK_HEALTH_KINDS: [FindingKind; 3] = [
     FindingKind::Broken,
     FindingKind::Ambiguous,

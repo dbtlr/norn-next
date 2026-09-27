@@ -95,6 +95,11 @@ pub struct DerivedFinding<'a> {
     /// names needs none. What names a scope here is a producer filing at a
     /// subject the changeset does not name — a place holding no derivable
     /// document — where discard-then-record has no other door.
+    ///
+    /// A scope reaching a finding only the store files —
+    /// [`DiscardScope::EveryKind`], or a list naming a link-health kind — is
+    /// refused ([`crate::StoreError::StoreJudged`]) before the changeset takes
+    /// its lock, as [`crate::Request::discard_findings_about`] refuses it.
     pub replaces: Option<DiscardScope<'a>>,
 }
 
@@ -208,6 +213,9 @@ pub(crate) fn apply(
     // lock and leaves nothing half applied.
     for finding in findings {
         request::check_callers_finding(&finding.facts)?;
+        if let Some(scope) = finding.replaces {
+            request::check_callers_discard(scope)?;
+        }
         request::check_finding_bounds(&finding.facts)?;
         request::check_finding_classes(&finding.facts, store.path_order())?;
         request::check_finding_paths(&finding.facts, store.path_order())?;

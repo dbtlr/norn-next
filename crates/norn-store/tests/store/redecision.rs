@@ -13,8 +13,8 @@ use std::path::Path;
 use std::process::Command;
 
 use norn_store::{
-    Change, ContentModel, DerivationCounters, DerivedFinding, FindingFacts, IncrementProvenance,
-    OpenOutcome, Provenance, Store, StoreError, StoredPathOrder,
+    Change, ContentModel, DerivationCounters, DerivedFinding, DiscardScope, FindingFacts,
+    IncrementProvenance, OpenOutcome, Provenance, Store, StoreError, StoredPathOrder,
 };
 use norn_testkit::equivalence::{DerivedRows, StoreProjection};
 use norn_wire::{
@@ -352,6 +352,107 @@ fn a_callers_door_refuses_a_finding_only_the_store_files() {
             &declared(),
         )
         .expect("a changeset carrying a caller's finding about the document");
+}
+
+/// The discard scopes a caller could name that reach a link-health finding:
+/// every kind, each link-health kind alone, and one beside a caller's kind.
+const REACHING_LINK_HEALTH: [DiscardScope<'static>; 5] = [
+    DiscardScope::EveryKind,
+    DiscardScope::Kinds(&[FindingKind::Broken]),
+    DiscardScope::Kinds(&[FindingKind::Ambiguous]),
+    DiscardScope::Kinds(&[FindingKind::MissingAnchor]),
+    DiscardScope::Kinds(&[FindingKind::FrontmatterUnreadable, FindingKind::Broken]),
+];
+
+/// **A caller's subject discard never takes a finding only the store files.**
+/// `a.md` holds a broken link, and a discard about `a.md` whose scope reaches
+/// a link-health kind is refused before it runs: the broken link's finding
+/// stands, since nothing a caller records would file it again. A scope of the
+/// caller's own kinds takes the caller's finding and leaves the link's.
+#[test]
+fn a_callers_subject_discard_refuses_a_scope_reaching_link_health() {
+    let mut vault = Vault::new("redecide-subject-discard", Sensitive);
+    vault.write(&[("a.md", "[[nowhere]]\n")]);
+    vault
+        .store
+        .begin_request()
+        .record_finding(&unread_block("a.md"))
+        .expect("a caller's finding about the document");
+    for scope in REACHING_LINK_HEALTH {
+        assert_eq!(
+            vault
+                .store
+                .begin_request()
+                .discard_findings_about(&path("a.md"), scope),
+            Err(StoreError::StoreJudged {
+                what: "a link-health finding"
+            }),
+            "{scope:?}"
+        );
+        assert_eq!(vault.findings("a.md"), [broken(0)], "{scope:?}");
+    }
+
+    let taken = vault
+        .store
+        .begin_request()
+        .discard_findings_about(
+            &path("a.md"),
+            DiscardScope::Kinds(&[FindingKind::FrontmatterUnreadable]),
+        )
+        .expect("a discard of a caller's kind");
+    assert_eq!(taken.findings_discarded, 1);
+    assert_eq!(vault.findings("a.md"), [broken(0)]);
+}
+
+/// **A changeset's replacement never takes a finding only the store files.**
+/// `a.md` holds a broken link. A changeset writing `b.md` and carrying a
+/// caller's finding about `a.md` that replaces a scope reaching a link-health
+/// kind there is refused before anything is written: the broken link's
+/// finding stands, and `b.md`, the caller's finding and a generation do not.
+#[test]
+fn a_changesets_replacement_refuses_a_scope_reaching_link_health() {
+    let mut vault = Vault::new("redecide-replacement", Sensitive);
+    vault.write(&[("a.md", "[[nowhere]]\n")]);
+    let before = vault
+        .store
+        .begin_request()
+        .write_generation()
+        .expect("the write generation");
+    for scope in REACHING_LINK_HEALTH {
+        assert_eq!(
+            vault.store.begin_request().apply_increment(
+                IncrementProvenance::Derived,
+                upserts(&[("b.md", "b\n")]),
+                &[DerivedFinding {
+                    facts: unread_block("a.md"),
+                    replaces: Some(scope),
+                }],
+                &declared(),
+            ),
+            Err(StoreError::StoreJudged {
+                what: "a link-health finding"
+            }),
+            "{scope:?}"
+        );
+        assert_eq!(vault.findings("a.md"), [broken(0)], "{scope:?}");
+    }
+    let request = vault.store.begin_request();
+    assert_eq!(
+        request
+            .stored_findings(&path("a.md"))
+            .expect("a read")
+            .len(),
+        1,
+        "a refused changeset filed its finding"
+    );
+    assert_eq!(
+        request.stored_document(&path("b.md")).expect("a read"),
+        None
+    );
+    assert_eq!(
+        request.write_generation().expect("the write generation"),
+        before
+    );
 }
 
 // ---- the re-decided set ----

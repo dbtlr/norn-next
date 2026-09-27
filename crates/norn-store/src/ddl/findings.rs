@@ -250,13 +250,15 @@
 //! it.
 //!
 //! The way is class-scoped maintenance, in both directions:
-//! [`crate::Request::findings_in_class`] reads the class and
-//! [`crate::Request::discard_findings_in_class`] empties it. **Discard-then-
-//! record is the idempotence story** — re-deriving a class discards it and
-//! records what holds now, so there is no dedupe rule to keep and no way for two
-//! derivations of one class to leave two copies. Every deletion goes through
-//! that verb, which is what makes findings leaving the table counted rather than
-//! a side effect of a cascade nobody billed.
+//! [`crate::Request::findings_in_class`] reads the class, and a changeset that
+//! changes a path in it empties it inside its link-health re-decision, a chunk
+//! of findings at a time by row id. **Discard-then-record is the idempotence
+//! story** — re-deriving a class discards it and records what holds now, so
+//! there is no dedupe rule to keep and no way for two derivations of one class
+//! to leave two copies. Every deletion is a counted discard — a changeset's
+//! subject, class and path discards, a caller's subject discard, and a schema
+//! pin's — which is what makes findings leaving the table counted rather than a
+//! side effect of a cascade nobody billed.
 //!
 //! Nothing here references `links` either. Fact rows are replaced wholesale on
 //! every re-derivation, so a reference into them would delete every finding

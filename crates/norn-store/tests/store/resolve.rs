@@ -614,7 +614,7 @@ fn a_class_compiled_under_another_order_is_refused() {
 /// folding root a finding about `Foo` is filed under the folded key `foo/`, so
 /// the class probe the store builds for the stem `Foo` reaches it, and a probe
 /// over the raw key — which ranges over `Foo/` and would miss it — is refused
-/// by the read, the discard and the plan alike.
+/// by the read and its plan alike.
 #[test]
 fn a_class_probe_reaches_the_findings_filed_in_the_store_s_key_space() {
     let mut vault = Vault::holding("resolve-class-probe", Folding, &["a/Foo.md", "b/foo.md"]);
@@ -640,10 +640,6 @@ fn a_class_probe_reaches_the_findings_filed_in_the_store_s_key_space() {
         request
             .emitted_plan(ExplainedStatement::FindingsInClass(&raw))
             .map(|_| ()),
-        request
-            .emitted_plan(ExplainedStatement::ClassDiscard(&raw))
-            .map(|_| ()),
-        request.discard_findings_in_class(&raw).map(|_| ()),
     ] {
         assert!(
             matches!(refused, Err(StoreError::KeySpace { order: Folding, .. })),
@@ -656,7 +652,7 @@ fn a_class_probe_reaches_the_findings_filed_in_the_store_s_key_space() {
             .expect("reading the class")
             .len(),
         1,
-        "a refused discard took the finding"
+        "a refused read took the finding"
     );
 }
 
