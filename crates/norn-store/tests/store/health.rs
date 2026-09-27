@@ -616,6 +616,95 @@ fn a_dotted_leaf_totals_both_reductions() {
     }
 }
 
+/// The finding the judgment raises about the one link `h.md` holds, and the
+/// links column's reading of that link, on a store under `order` holding
+/// `documents` and `h.md` linking `link`.
+fn judged_beside_the_links_column(
+    label: &str,
+    order: StoredPathOrder,
+    documents: &[&str],
+    link: &str,
+) -> (FindingFacts, LinkRow) {
+    let mut all: Vec<DocumentFacts> = documents.iter().map(|at| derived(at, "x\n")).collect();
+    all.push(derived("h.md", &body_of(&[link])));
+    let mut judging = Judging::new(&format!("{label}-{order:?}"), order, &all);
+    let mut findings = judging.by_ordinal("h.md");
+    let finding = findings.remove(&0).expect("a finding about the link");
+    let [row] = &judging.links("h.md")[..] else {
+        panic!("`h.md` holds one link");
+    };
+    (finding, row.clone())
+}
+
+/// **A head merged across two keys is cut to the bound.** `[[v1.2]]` over five
+/// `*/v1.2.md` and three `*/v1.md` reads a full head from each class; the
+/// finding carries the first [`CANDIDATE_HEAD`] of the eight in the ladder's
+/// order, as the links column does, beside the total eight.
+#[test]
+fn a_head_merged_across_two_keys_is_cut_to_the_bound() {
+    let mut documents: Vec<String> = (1..=5).map(|at| format!("d{at}/v1.2.md")).collect();
+    documents.extend((1..=3).map(|at| format!("e{at}/v1.md")));
+    let documents: Vec<&str> = documents.iter().map(String::as_str).collect();
+    for order in [Sensitive, Folding] {
+        let (finding, row) =
+            judged_beside_the_links_column("health-merged-cut", order, &documents, "[[v1.2]]");
+        assert_eq!(finding.kind, FindingKind::Ambiguous, "{order:?}");
+        assert_eq!(finding.candidates.len(), CANDIDATE_HEAD, "{order:?}");
+        assert_eq!(finding_head(&finding), row_head(&row), "{order:?}");
+        assert_eq!(
+            (finding.candidates_total, row.targets.total()),
+            (8, 8),
+            "{order:?}"
+        );
+    }
+}
+
+/// **A class larger than the head is cut in the ladder's order, not the
+/// path's.** On a root that folds ASCII case, six `*/A.md` whose directories
+/// differ in case rank one way by the folded suffix key the ladder reads and
+/// another by the path: `F/A.md` is the least path and the last rung. The
+/// head is the ladder's first five, as the links column reads it.
+#[test]
+fn a_class_larger_than_the_head_is_cut_in_the_ladders_order() {
+    let documents = ["F/A.md", "a/A.md", "b/A.md", "c/A.md", "d/A.md", "e/A.md"];
+    let (finding, row) =
+        judged_beside_the_links_column("health-ladder-cut", Folding, &documents, "[[A]]");
+    assert_eq!(finding.candidates_total, 6);
+    assert_eq!(finding_head(&finding), row_head(&row));
+    assert_eq!(
+        finding
+            .candidates
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect::<Vec<_>>(),
+        ["a/A.md", "b/A.md", "c/A.md", "d/A.md", "e/A.md"]
+    );
+}
+
+/// **A rooted name's documents rank by the key that reached them.** On a root
+/// that folds ASCII case, `[[vault://v1.Z]]` is keyed `v1.z.md` and `v1.md`;
+/// the key ranks `v1.md` first, though the path `v1.Z.md` is the lesser. The
+/// head is in that order, as the links column reads it.
+#[test]
+fn a_rooted_names_documents_rank_by_the_key_that_reached_them() {
+    let (finding, row) = judged_beside_the_links_column(
+        "health-rooted-rung",
+        Folding,
+        &["v1.Z.md", "v1.md"],
+        "[[vault://v1.Z]]",
+    );
+    assert_eq!(finding.kind, FindingKind::Ambiguous);
+    assert_eq!(finding_head(&finding), row_head(&row));
+    assert_eq!(
+        finding
+            .candidates
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect::<Vec<_>>(),
+        ["v1.md", "v1.Z.md"]
+    );
+}
+
 /// **A missing anchor is judged by the readings the store holds.** Against one
 /// document holding `# My Heading`, `## Top`, `### Sub` and a block `^blk`: a
 /// heading anchor names its heading by its text under the case and space fold,
