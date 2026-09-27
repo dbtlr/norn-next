@@ -164,9 +164,12 @@ struct Summary {
 /// link under it ([ADR 0027]'s fifth condition).
 ///
 /// A summary is what the store held when it was read, under the store's key
-/// space and the ignore set the judgment was taken under. One set therefore
-/// serves the chunks of one judgment — one store, one declaration, and no
-/// write between them — and a judgment after a write takes a new one.
+/// space and the ignore set the judgment was taken under. One set is valid
+/// only within one transaction or snapshot — the read that filled it and
+/// every judgment that reuses it see the same store, under the same
+/// declaration, with no write between them — and a judgment after a write
+/// takes a new one. It holds one summary per distinct key it has resolved, so
+/// the caller bounds its size by the keys it chooses to resolve against it.
 ///
 /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 #[derive(Debug, Default)]
