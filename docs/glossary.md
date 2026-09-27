@@ -110,6 +110,9 @@ How a boundary invariant is currently carried: by a withheld dependency edge, an
 **Review-held invariant**:
 An invariant carried by an explicit human judgment because no executable rule currently expresses it.
 
+**Composition product**:
+A single outcome computed by matching a value against every combination of the inputs that determine it, with no wildcard arm, so a new combination fails to compile until the match names its own row.
+
 **Dormant carrier**:
 An unreached implementation path retained because the layer roadmap names its future consumer. A path with no named consumer is speculative, not dormant.
 _Avoid_: Dead code, speculative seam
@@ -171,6 +174,10 @@ _Avoid_: Event queue, event bus
 
 **Store epoch**:
 The identity a derived database carries from creation to discard. Progress recorded against one epoch is not valid in the next.
+
+**Cursor envelope**:
+A typed continuation position — where a page stopped, and what it was read against — rendered as one opaque string on the wire. A client holds the string unchanged and never decodes or branches on what it carries.
+_Avoid_: Cursor (unqualified) — elsewhere in this glossary "cursor" names a change-feed position, a different concept from the wire continuation
 
 **Watermark**:
 How far an engine has drained one feed: how many writes the store had committed when the engine last read that feed to its end, qualified by the store epoch that count was taken in. Freshness is how many committed writes a reader's view of the store holds past the watermark.
