@@ -9576,7 +9576,8 @@ mod tests {
     /// **A status holds no demand, so an idle entry it was asked about is
     /// reaped as if it had not been asked**, whichever shape the status
     /// took: the reap lands at the deadline the last lease set, which a
-    /// status that held a lease or recorded a demand would have moved.
+    /// status that recorded a demand would have moved, and one still holding
+    /// a lease would have blocked.
     ///
     /// The dispatcher never ticks here, so the only reap is the one this case
     /// calls. An ambient reap takes an unleased entry the tick after it
