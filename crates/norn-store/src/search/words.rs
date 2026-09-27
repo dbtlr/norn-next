@@ -46,10 +46,13 @@ pub(crate) fn holds_word(term: &str) -> bool {
 /// non-whitespace character after it is `(`, and every other token is a
 /// phrase, read past a trailing `*` (a prefix match) and a `column:`
 /// filter's column name, which are syntax rather than what the token names.
-/// A multi-column brace group, `{col1 col2}:`, is not specially read: its
-/// names, split at the space between them, are read as bare tokens rather
-/// than a filter, which only ever makes this answer `true` where the
-/// narrower reading would not, never the reverse.
+/// Only a column filter written as one token, `column:`, is read past. A
+/// multi-column brace group (`{col1 col2}:`), a filter with space before its
+/// colon (`body : x`), and a quoted column name (`"body": x`) are not
+/// specially read: their names are read as phrases rather than a filter,
+/// which only ever makes this answer `true` where the narrower reading would
+/// not, never the reverse. Such a filter over wordless phrases is answered
+/// as the index answers it, empty, rather than reported.
 ///
 /// An expression with at least one word-holding phrase holds a word; one
 /// whose every phrase holds none, empty expressions and expressions naming no
