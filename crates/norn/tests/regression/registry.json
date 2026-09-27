@@ -461,6 +461,7 @@
       "binding": {
         "status": "bound",
         "tests": [
+          "crates/norn-host/tests/counter_gate.rs::a_bounded_find_costs_the_same_at_both_scales",
           "crates/norn-host/tests/counter_gate.rs::a_bounded_write_costs_the_same_at_both_scales",
           "crates/norn-host/tests/counter_gate.rs::a_hub_writes_link_health_work_follows_its_in_links_at_both_scales",
           "crates/norn-host/tests/counter_gate.rs::a_warm_request_over_an_attached_vault_finishes_at_zero",
@@ -1163,12 +1164,9 @@
       "property": "A read's wait is bounded and reported, and an in-flight write does not serialize the read surface. One session mutex held across a blocking round trip is the shape this forbids: under it a 40-second apply blocks every concurrent read for 40 seconds with no diagnostic.",
       "sources": ["NRN-530", "NRN-55"],
       "binding": {
-        "status": "dormant",
-        "reason": "the shape this forbids is refused by construction: an entry's reads run on the handle its coverage minted, crates/norn-store/src/store.rs::SnapshotReader — a second connection opened with the read-only flag beside the one writer connection a store holds behind &mut — so no session mutex is held across anything and no read borrows the writer; crates/norn-host/src/lifecycle.rs answers concurrent reads of one entry through that single handle rather than opening another, and what those reads serialize on is that handle's connection rather than the write. One write-side operation does reach the read surface: a schema reload withdraws that entry's reader for the length of the reload, and the same hold that withdraws it takes the entry out of Ready, so a read asked for inside that window is refused with the warming state the reload runs under rather than queued behind the write. What has no subject is the contention this property is stated against. A read's wait for its entry's connection is reported, on the host's own read account rather than by the read — a read carries no wait of its own — and is bounded nowhere; and the long apply that would hold the surface is the host's single applier, which is not built: the name it takes is pre-committed as crates/norn-host/src/lib.rs::Applier.",
-        "grounds": [
-          { "symbol-present": "crates/norn-store/src/store.rs::SnapshotReader" },
-          { "present": "crates/norn-host/src/lifecycle.rs" },
-          { "symbol-absent": "crates/norn-host/src/lib.rs::Applier" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/tests/counter_gate.rs::overlapping_reads_on_one_entry_each_run_only_their_establishment_under_the_gate"
         ]
       }
     },
@@ -1318,7 +1316,9 @@
           "crates/norn-store/tests/store/find_rows.rs::a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table",
           "crates/norn-store/tests/store/get.rs::a_whole_record_holds_each_collection_and_the_body_to_the_row_ceiling",
           "crates/norn-store/tests/store/find_rows.rs::a_row_cut_by_a_ceiling_says_how_much_the_whole_held",
-          "crates/norn-host/tests/memory.rs::reading_the_gate_profile_holds_the_process_near_its_attach_peak"
+          "crates/norn-host/tests/memory.rs::reading_the_gate_profile_holds_the_process_near_its_attach_peak",
+          "crates/norn-host/tests/memory.rs::the_gate_profile_reads_inside_its_memory_bar",
+          "crates/norn-host/tests/memory.rs::the_read_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile"
         ]
       }
     },
