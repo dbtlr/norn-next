@@ -280,12 +280,27 @@ const THIS_LINE: &str = "norn";
 const HELP_CLASS_RULING: &str = "CR-help-reads-no-vault";
 
 /// Whether this repository holds a file at `relative`, a path from its root.
+///
+/// Only a path made of plain components counts: an absolute path, or one that
+/// climbs with `..`, names a file outside the tree whatever it resolves to.
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: a ledger citation checked against this repository's own tree.
 fn repository_holds(relative: &str) -> bool {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(relative)
-        .is_file()
+    let within = std::path::Path::new(relative)
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)));
+    within
+        && PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative)
+            .is_file()
+}
+
+#[test]
+fn a_citation_outside_the_repository_is_not_held() {
+    assert!(repository_holds("crates/norn-wire/src/verb.rs"));
+    assert!(!repository_holds("/etc/hosts"));
+    assert!(!repository_holds("../norn/crates/norn-wire/src/verb.rs"));
+    assert!(!repository_holds("crates/../crates/norn-wire/src/verb.rs"));
 }
 
 /// The rulings recorded on this line are pinned, and each one cites a
