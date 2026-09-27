@@ -60,7 +60,11 @@ fn every_reading_carries_every_counter() {
     );
 }
 
-/// What a document write derives, counted by what it wrote.
+/// What a document write derives, counted by what it wrote — the rows, and
+/// the link health the store re-decides for the links it holds: both links
+/// judged, the one key the suffix-addressed link is held under resolved to
+/// the one document it names, and the missing anchor that document holds no
+/// heading for filed.
 #[test]
 fn a_document_write_counts_what_it_wrote() {
     let scratch = Scratch::new("write");
@@ -76,9 +80,13 @@ fn a_document_write_counts_what_it_wrote() {
         vec![
             ("documents_upserted", 1),
             ("field_rows_written", 4),
+            ("findings_written", 1),
             ("frontmatter_projections", 1),
             ("heading_rows_written", 2),
+            ("link_health_candidates_read", 1),
+            ("link_health_keys_resolved", 1),
             ("link_rows_written", 2),
+            ("links_redecided", 2),
             ("tag_rows_written", 2),
             ("block_rows_written", 2),
         ]

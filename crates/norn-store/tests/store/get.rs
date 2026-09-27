@@ -943,7 +943,13 @@ fn paged_vault_under(label: &str, bulk: usize, order: StoredPathOrder) -> Vault 
             },
             embed: false,
             protocol: None,
-            target: format!("target-{at}"),
+            // A wikilink names its target by stem, and a Markdown link by
+            // its path.
+            target: if at % 2 == 0 {
+                format!("target-{at}")
+            } else {
+                format!("targets/target-{at}.md")
+            },
             title: None,
             anchor: match at {
                 1 => heading_anchor("Heading"),
@@ -968,6 +974,15 @@ fn paged_vault_under(label: &str, bulk: usize, order: StoredPathOrder) -> Vault 
         document("a/twin.md", "hash-twin-a", "a\n"),
         document("b/twin.md", "hash-twin-b", "b\n"),
     ];
+    // Each link names a document holding the place its anchor names, so the
+    // store files no link-health finding and the findings `paged.md` holds
+    // are the ones stood below.
+    documents.extend((0..HELD).map(|at| {
+        parsed(
+            &format!("targets/target-{at}.md"),
+            "# Heading\n\npara ^b0\n",
+        )
+    }));
     documents.extend((0..bulk).map(|at| {
         document(
             &format!("bulk/{at:04}.md"),

@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 
 use crate::ddl;
 use crate::facts::CANDIDATE_HEAD;
+use crate::health::LINK_HEALTH_CHUNK;
 use crate::health::statement::{self as health, Selected};
 use crate::path::ClassKey;
 use crate::read::SuffixSpellings;
@@ -161,6 +162,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::LinkHealthTotals => health::totals_sql(key),
             ExplainedStatement::LinkHealthSuffixes => explained_suffixes(order)?.0,
             ExplainedStatement::LinkHealthAnchors => health::anchors_sql(),
+            ExplainedStatement::LinkHealthWrittenLinks => health::links_sql(key, Selected::Written),
         };
         let database = &self.store.database;
         Ok(match statement {
@@ -280,17 +282,39 @@ impl<'a> Request<'a> {
                 &sql,
                 params_from_iter(health::documents_parameters(&[EXPLAINED_PAGE_CURSOR_LEAF])?),
             ),
-            ExplainedStatement::LinkHealthClassLinks => database.emitted_plan(
+            // A paged selection is explained resuming past a driver row
+            // inside its own range, for the reason a page's cursor is bound
+            // — see [`explained_page_cursor`] — at the bound a re-decision
+            // reads it by.
+            ExplainedStatement::LinkHealthClassLinks => {
+                let class = ClassKey::new(EXPLAINED_CLASS_KEY)?;
+                database.emitted_plan(
+                    &sql,
+                    params_from_iter(health::class_parameters(
+                        &class,
+                        &explained_after(class.as_str()),
+                        LINK_HEALTH_CHUNK,
+                    )),
+                )
+            }
+            ExplainedStatement::LinkHealthPathLinks => {
+                let path = PathKey::new(EXPLAINED_PAGE_CURSOR_LEAF)?;
+                database.emitted_plan(
+                    &sql,
+                    params_from_iter(health::path_parameters(
+                        &path,
+                        &explained_after(path.as_str()),
+                        LINK_HEALTH_CHUNK,
+                    )),
+                )
+            }
+            ExplainedStatement::LinkHealthWrittenLinks => database.emitted_plan(
                 &sql,
-                params_from_iter(health::class_parameters(&ClassKey::new(
-                    EXPLAINED_CLASS_KEY,
-                )?)),
-            ),
-            ExplainedStatement::LinkHealthPathLinks => database.emitted_plan(
-                &sql,
-                params_from_iter(health::path_parameters(&PathKey::new(
-                    EXPLAINED_PAGE_CURSOR_LEAF,
-                )?)),
+                params_from_iter(health::written_parameters(
+                    EXPLAINED_FEED_GENERATION,
+                    &explained_after(EXPLAINED_PAGE_CURSOR_LEAF),
+                    LINK_HEALTH_CHUNK,
+                )),
             ),
             ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthTotals => {
                 let head =
@@ -492,11 +516,14 @@ pub enum ExplainedStatement<'a> {
     /// them: every link a list of documents holds, beside the keys the link
     /// index holds each under.
     LinkHealthLinks,
-    /// The links a judgment judges selected by a class: every link held under
-    /// a key in one class's range, beside every key it is held under.
+    /// The links a judgment judges selected by a class: a page of the links
+    /// held under a key in one class's range, beside every key each is held
+    /// under — the second arm of the re-decision
+    /// [`Request::apply_increment`] runs.
     LinkHealthClassLinks,
-    /// The links a judgment judges selected by a path key: every link held
-    /// under exactly that key, beside every key it is held under.
+    /// The links a judgment judges selected by a path key: a page of the
+    /// links held under exactly that key, beside every key each is held under
+    /// — the re-decision's third arm.
     LinkHealthPathLinks,
     /// The head of what each distinct key a judgment's links hold names, at
     /// most [`crate::CANDIDATE_HEAD`] documents of a suffix key's class or at
@@ -513,6 +540,11 @@ pub enum ExplainedStatement<'a> {
     /// place that link's anchor names, for the links carrying an anchor: the
     /// anchor predicate over a list of links and their targets.
     LinkHealthAnchors,
+    /// The links the re-decision [`Request::apply_increment`] runs judges
+    /// first: a page of the links held by the documents its changeset wrote,
+    /// the documents stamped with its generation, beside every key each is
+    /// held under.
+    LinkHealthWrittenLinks,
 }
 
 /// How many keyed point reads this seam names.
@@ -526,7 +558,7 @@ pub const POINT_READS: usize = 12;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 36;
+pub const STATEMENTS: usize = 37;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -593,6 +625,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::LinkHealthTotals,
             Self::LinkHealthSuffixes,
             Self::LinkHealthAnchors,
+            Self::LinkHealthWrittenLinks,
         ]
     }
 
@@ -641,6 +674,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::LinkHealthTotals => 33,
             Self::LinkHealthSuffixes => 34,
             Self::LinkHealthAnchors => 35,
+            Self::LinkHealthWrittenLinks => 36,
         };
         assert!(
             slot < STATEMENTS,
@@ -718,7 +752,8 @@ impl<'a> ExplainedStatement<'a> {
             | Self::LinkHealthHeads
             | Self::LinkHealthTotals
             | Self::LinkHealthSuffixes
-            | Self::LinkHealthAnchors => false,
+            | Self::LinkHealthAnchors
+            | Self::LinkHealthWrittenLinks => false,
         }
     }
 }
@@ -727,6 +762,16 @@ impl<'a> ExplainedStatement<'a> {
 /// key, bound rather than null, for the reason [`explained_page_cursor`]
 /// states.
 const EXPLAINED_CLASS_KEY: &str = "explained/";
+
+/// The driver row a paged link selection is explained resuming past: `text`,
+/// with the row keys bound inside their table's range.
+fn explained_after(text: &str) -> health::After {
+    health::After {
+        text: text.to_string(),
+        first: EXPLAINED_DOCUMENT_ROW,
+        second: EXPLAINED_DOCUMENT_ROW,
+    }
+}
 
 /// The candidate-suffix statement a judgment runs, as its text and values,
 /// over one candidate: the statement a read names candidates by, spelled

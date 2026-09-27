@@ -28,15 +28,21 @@ pub(crate) const CLASS_ARM: i64 = 0;
 pub(crate) const PATH_ARM: i64 = 1;
 
 /// Which way [`links_sql`] reaches the links it reads: the statement's shape
-/// for each [`LinkSelection`].
+/// for each [`LinkSelection`], and for the links a changeset wrote.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Selected {
     /// By the documents holding them: an equality seek of `documents_path`
-    /// per path, then of `links_document_ordinal` per document.
+    /// per path, then of `links_document_ordinal` per document. Read whole.
     Documents,
-    /// By a class: a range seek of the link index over the class's keys.
+    /// By the write that stamped their documents: a seek of
+    /// `documents_change_feed` at one generation, in path order, then of
+    /// `links_document_ordinal` per document. Read a page at a time.
+    Written,
+    /// By a class: a range seek of the link index over the class's keys. Read
+    /// a page at a time.
     Class,
-    /// By a path key: an equality seek of the link index at the key.
+    /// By a path key: an equality seek of the link index at the key. Read a
+    /// page at a time.
     Path,
 }
 
@@ -51,63 +57,157 @@ impl Selected {
     }
 }
 
+/// Where a paged selection resumes: the row of its driver it read last, which
+/// [`links_sql`] hands back beside every link it reads.
+///
+/// The driver is the one index a paged shape seeks, and the page resumes past
+/// this row of it: for the links a write stamped, the holding document's path
+/// and the link's ordinal (`second` unused); for a class or a path key, the
+/// link index row's key, its document, and its link, which the index holds in
+/// that order.
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct After {
+    pub(crate) text: String,
+    pub(crate) first: i64,
+    pub(crate) second: i64,
+}
+
+impl After {
+    /// Where a class's first page starts: before every key the class opens.
+    pub(crate) fn class_start(class: &ClassKey) -> Self {
+        After {
+            text: class.bounds().0,
+            first: -1,
+            second: -1,
+        }
+    }
+
+    /// Where a path key's first page starts: before every row at the key.
+    pub(crate) fn path_start(path: &PathKey) -> Self {
+        After {
+            text: path.as_str().to_string(),
+            first: -1,
+            second: -1,
+        }
+    }
+
+    /// Where the first page of a write's links starts: before every path.
+    pub(crate) fn written_start() -> Self {
+        After {
+            text: String::new(),
+            first: -1,
+            second: 0,
+        }
+    }
+}
+
 /// The links a judgment judges, reached the way `selected` names, one row per
 /// key the link index holds each under in the key space `key` selects, and
 /// one row with no key for a link held under none:
 /// [`crate::ExplainedStatement::LinkHealthLinks`] over the documents at the
-/// paths `?1` lists, [`crate::ExplainedStatement::LinkHealthClassLinks`] over
-/// the links held under a key in the class `?1` opens and `?2` closes, and
+/// paths `?1` lists, read whole; and, a page of at most the bound the last
+/// parameter names at a time, each resuming past the driver row [`After`]
+/// spells, [`crate::ExplainedStatement::LinkHealthWrittenLinks`] over the
+/// links of the documents stamped with the generation `?1`,
+/// [`crate::ExplainedStatement::LinkHealthClassLinks`] over the links held
+/// under a key in the class `?1` closes, and
 /// [`crate::ExplainedStatement::LinkHealthPathLinks`] over the links held
 /// under the path key `?1`.
 ///
 /// The row's first thirteen columns are a link row's, in the order
 /// [`crate::request::stored_link_row`] reads them; then the holding
-/// document's path, the link's row id and ordinal, and the key and its
-/// segment count. A link the selection reaches is read with every key it is
-/// held under, whichever of them reached it.
+/// document's path, the link's row id and ordinal, the key and its segment
+/// count, the holding document's generation, and the driver row a page
+/// resumes past, which a whole read leaves `NULL`. A link the selection
+/// reaches is read with every key it is held under, whichever of them reached
+/// it.
+///
+/// A page is cut in its driver, a subquery the rest of the statement runs
+/// once as its outer loop, so the bound counts links and never the keys each
+/// is read beside, and a page costs its own links however far into its
+/// driver it starts.
 pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
     let link_key = resolve::link_key_column(key);
-    let (from, reached) = match selected {
-        Selected::Documents => (
-            "json_each(?1) AS j CROSS JOIN documents AS d CROSS JOIN links AS l",
-            "d.path = j.value AND l.document = d.id".to_string(),
+    let columns = format!(
+        "l.family, l.embed, l.protocol, l.target, l.title, l.anchor, l.block_ref,
+                l.span_line, l.span_column, l.span_offset, l.anchor_text, l.anchor_marked,
+                l.address, d.path, l.id, l.ordinal, k.{link_key}, k.segments, d.generation"
+    );
+    let driver = match selected {
+        Selected::Documents => {
+            return format!(
+                "SELECT {columns}, NULL, NULL, NULL
+         FROM json_each(?1) AS j CROSS JOIN documents AS d CROSS JOIN links AS l
+         LEFT JOIN link_keys AS k ON k.link = l.id
+         WHERE d.path = j.value AND l.document = d.id"
+            );
+        }
+        Selected::Written => "SELECT lw.id AS link, dw.path AS after_text,
+                        lw.ordinal AS after_first, 0 AS after_second
+                 FROM documents AS dw CROSS JOIN links AS lw
+                 WHERE dw.generation = ?1 AND dw.path >= ?2 AND lw.document = dw.id
+                   AND lw.ordinal > CASE WHEN dw.path = ?2 THEN ?3 ELSE -1 END
+                 ORDER BY dw.path, lw.ordinal LIMIT ?5"
+            .to_string(),
+        Selected::Class => format!(
+            "SELECT s.link AS link, s.{link_key} AS after_text, s.document AS after_first,
+                        s.link AS after_second
+                 FROM link_keys AS s
+                 WHERE (s.{link_key}, s.document, s.link) > (?2, ?3, ?4) AND s.{link_key} < ?1
+                   AND s.segments IS NOT NULL
+                 ORDER BY s.{link_key}, s.document, s.link LIMIT ?5"
         ),
-        Selected::Class => (
-            "link_keys AS s CROSS JOIN links AS l CROSS JOIN documents AS d",
-            format!(
-                "s.segments IS NOT NULL AND s.{link_key} >= ?1 AND s.{link_key} < ?2 \
-                 AND l.id = s.link AND d.id = l.document"
-            ),
-        ),
-        Selected::Path => (
-            "link_keys AS s CROSS JOIN links AS l CROSS JOIN documents AS d",
-            format!("s.{link_key} = ?1 AND l.id = s.link AND d.id = l.document"),
+        Selected::Path => format!(
+            "SELECT s.link AS link, s.{link_key} AS after_text, s.document AS after_first,
+                        s.link AS after_second
+                 FROM link_keys AS s
+                 WHERE s.{link_key} = ?1 AND (s.document, s.link) > (?3, ?4)
+                 ORDER BY s.document, s.link LIMIT ?5"
         ),
     };
     format!(
-        "SELECT l.family, l.embed, l.protocol, l.target, l.title, l.anchor, l.block_ref,
-                l.span_line, l.span_column, l.span_offset, l.anchor_text, l.anchor_marked,
-                l.address, d.path, l.id, l.ordinal, k.{link_key}, k.segments
-         FROM {from}
+        "SELECT {columns}, p.after_text, p.after_first, p.after_second
+         FROM ({driver}) AS p CROSS JOIN links AS l CROSS JOIN documents AS d
          LEFT JOIN link_keys AS k ON k.link = l.id
-         WHERE {reached}"
+         WHERE l.id = p.link AND d.id = l.document"
     )
+}
+
+/// The values [`links_sql`] binds over one page of the links the write
+/// stamped with `generation` wrote: the generation, where the page resumes,
+/// and its bound.
+pub(crate) fn written_parameters(generation: i64, after: &After, limit: usize) -> Vec<Value> {
+    paged(Value::Integer(generation), after, limit)
+}
+
+/// The values [`links_sql`] binds over one page of a class: its upper bound,
+/// where the page resumes, and its bound. The lower bound is the first
+/// page's resume point ([`After::class_start`]).
+pub(crate) fn class_parameters(class: &ClassKey, after: &After, limit: usize) -> Vec<Value> {
+    paged(Value::Text(class.bounds().1), after, limit)
+}
+
+/// The values [`links_sql`] binds over one page of a path key: the key,
+/// where the page resumes, and its bound.
+pub(crate) fn path_parameters(path: &PathKey, after: &After, limit: usize) -> Vec<Value> {
+    paged(Value::Text(path.as_str().to_string()), after, limit)
+}
+
+/// A paged shape's values: what it selects by, the three columns of the
+/// driver row it resumes past, and its bound.
+fn paged(selected_by: Value, after: &After, limit: usize) -> Vec<Value> {
+    vec![
+        selected_by,
+        Value::Text(after.text.clone()),
+        Value::Integer(after.first),
+        Value::Integer(after.second),
+        Value::Integer(i64::try_from(limit).expect("a page bound fits i64")),
+    ]
 }
 
 /// The values [`links_sql`] binds over documents: their paths.
 pub(crate) fn documents_parameters(documents: &[&str]) -> Result<Vec<Value>, StoreError> {
     Ok(vec![path_list(documents)?])
-}
-
-/// The values [`links_sql`] binds over a class: its bounds.
-pub(crate) fn class_parameters(class: &ClassKey) -> Vec<Value> {
-    let (lower, upper) = class.bounds();
-    vec![Value::Text(lower), Value::Text(upper)]
-}
-
-/// The values [`links_sql`] binds over a path key: the key.
-pub(crate) fn path_parameters(path: &PathKey) -> Vec<Value> {
-    vec![Value::Text(path.as_str().to_string())]
 }
 
 /// [`crate::ExplainedStatement::LinkHealthHeads`]: the head of what each

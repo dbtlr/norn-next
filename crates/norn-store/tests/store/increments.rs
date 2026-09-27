@@ -1650,10 +1650,13 @@ fn a_folding_store_folds_a_path_key_by_ascii_case_alone() {
 /// the counters: the same changeset reads the same counters under either mark,
 /// and the counters that moved are the rows it wrote and discarded.
 ///
-/// The one counter here that names a computation is the canonical-JSON
-/// projection, and it is storage encoding rather than derivation — the identical
-/// code path under either mark, learning nothing the caller did not hand over.
-/// See `norn_store::DerivationCounters`.
+/// The one counter here that names a computation over what was handed over is
+/// the canonical-JSON projection, and it is storage encoding rather than
+/// derivation — the identical code path under either mark, learning nothing
+/// the caller did not hand over. The link health the store re-decides is its
+/// own judgment rather than a recomputation of anything composed: it reads the
+/// facts handed over beside the documents already stored, and runs the same
+/// under either mark. See `norn_store::DerivationCounters`.
 #[test]
 fn a_composed_changeset_recomputes_nothing_it_was_handed() {
     let reading = |provenance| {
@@ -1692,8 +1695,12 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
     derived.assert_equal_counts(&composed, "the same changeset under either mark");
 
     // The whole of what a Composed changeset moved: rows written, rows
-    // discarded, deaths recorded, and the projections that encoded supplied
-    // frontmatter for storage. Nothing was minted and nothing was re-derived.
+    // discarded, deaths recorded, the projections that encoded supplied
+    // frontmatter for storage, and the store's own link-health judgment —
+    // seven links re-decided over the two changesets, two keys resolved to
+    // the one document each names, and the four missing anchors filed, two of
+    // them replacing the two the second changeset discarded. Nothing handed
+    // over was re-derived.
     assert_eq!(
         composed.nonzero(),
         vec![
@@ -1701,20 +1708,23 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
             ("documents_upserted", 3),
             ("fact_rows_discarded", 12),
             ("field_rows_written", 12),
+            ("findings_discarded", 2),
+            ("findings_written", 4),
             ("frontmatter_projections", 3),
             ("heading_rows_written", 6),
+            ("link_health_candidates_read", 2),
+            ("link_health_keys_resolved", 2),
             ("link_rows_written", 6),
+            ("links_redecided", 7),
             ("tag_rows_written", 6),
             ("tombstones_recorded", 1),
         ]
     );
-    for minted in ["findings_written", "vault_schema_pins"] {
-        assert_eq!(
-            composed.get(minted),
-            0,
-            "a changeset minted `{minted}`, which is not a changeset's to mint"
-        );
-    }
+    assert_eq!(
+        composed.get("vault_schema_pins"),
+        0,
+        "a changeset pinned a schema, which is not a changeset's to pin"
+    );
 }
 
 /// **A changeset is streamed, and what lives across its entries is bounded.** The

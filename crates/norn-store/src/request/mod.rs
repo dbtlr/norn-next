@@ -339,7 +339,14 @@ impl<'a> Request<'a> {
         findings: &[DerivedFinding<'_>],
         declared: &ContentModel,
     ) -> Result<IncrementOutcome, StoreError> {
-        increment::apply(self.store, &mut self.counters, changes, findings, declared)
+        increment::apply(
+            self.store,
+            &mut self.counters,
+            &self.read_work,
+            changes,
+            findings,
+            declared,
+        )
     }
 
     /// Record one finding, with the head of its candidates.

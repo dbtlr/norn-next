@@ -10,10 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use norn_store::{
-    AnchorReadings, BlockFact, CANDIDATE_HEAD, ClassKey, ContentModel, DocumentFacts,
-    ExplainedStatement, FindingFacts, HeadingFact, KeySummaries, LinkAnchor, LinkFact, LinkFamily,
-    LinkSelection, PathKey, Request, Snapshot, SnapshotReader, Span, Store, StoredPathOrder,
-    SuffixKey, Validation, induced_failure,
+    AnchorReadings, BlockFact, CANDIDATE_HEAD, Change, ClassKey, ContentModel, DocumentFacts,
+    ExplainedStatement, FindingFacts, HeadingFact, IncrementProvenance, KeySummaries, LinkAnchor,
+    LinkFact, LinkFamily, LinkSelection, PathKey, Request, Snapshot, SnapshotReader, Span, Store,
+    StoredPathOrder, SuffixKey, Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -21,7 +21,7 @@ use norn_wire::{
     ResolutionTarget, Severity, ValidateParams, VaultAddress, VaultName,
 };
 
-use crate::common::{Scratch, path, write_documents};
+use crate::common::{Scratch, path};
 use crate::find::failure_of;
 
 use StoredPathOrder::{AsciiCaseInsensitive as Folding, Sensitive};
@@ -122,7 +122,15 @@ impl Judging {
             .begin_request()
             .pin_vault_schema(SCHEMA.as_bytes(), SCHEMA)
             .expect("pinning the suite's schema");
-        write_documents(&mut store.begin_request(), documents);
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                documents.iter().cloned().map(Change::Upsert),
+                &[],
+                &declared(),
+            )
+            .expect("writing the documents");
         let reader = Arc::new(store.open_reader().reader.expect("a reader"));
         Judging {
             _scratch: scratch,
@@ -526,14 +534,7 @@ fn an_ambiguous_finding_carries_head_total_and_hint_and_a_broken_one_no_hint() {
         !broken.class_keys.is_empty(),
         "a broken suffix link is keyed by the class it names"
     );
-    {
-        let mut request = judging.request();
-        for finding in &findings {
-            request
-                .record_finding(finding)
-                .unwrap_or_else(|refusal| panic!("recording {finding:?}: {refusal}"));
-        }
-    }
+    assert_filed(&judging.request(), "src/h.md", &findings);
 
     let rows = judging.validated();
     let by_target: BTreeMap<String, &FindingRow> = rows
@@ -851,13 +852,47 @@ fn a_findings_keys_are_its_links_keys() {
             findings[&4].class_keys.is_empty() && findings[&4].path_keys.is_empty(),
             "{order:?}: a link naming no vault path is keyed by nothing"
         );
-        let mut request = judging.request();
-        for finding in findings.values() {
-            request
-                .record_finding(finding)
-                .unwrap_or_else(|refusal| panic!("{order:?}: recording {finding:?}: {refusal}"));
-        }
+        let judged: Vec<FindingFacts> = findings.into_values().collect();
+        assert_filed(&judging.request(), "Src/h.md", &judged);
     }
+}
+
+/// Assert the store filed, at `holder`, exactly the link-health findings
+/// `judged` holds: each written inside the changeset that wrote the holder.
+pub(crate) fn assert_filed(request: &Request<'_>, holder: &str, judged: &[FindingFacts]) {
+    let filed: Vec<_> = request
+        .stored_findings(&path(holder))
+        .expect("reading findings")
+        .into_iter()
+        .map(|finding| {
+            (
+                finding.kind,
+                finding.ordinal,
+                finding.target,
+                finding.class_keys,
+                finding.path_keys,
+                finding.candidates,
+                finding.candidates_total,
+                finding.message,
+            )
+        })
+        .collect();
+    let judged: Vec<_> = judged
+        .iter()
+        .map(|finding| {
+            (
+                finding.kind.as_str().to_string(),
+                finding.ordinal,
+                finding.target.clone(),
+                finding.class_keys.clone(),
+                finding.path_keys.clone(),
+                finding.candidates.clone(),
+                finding.candidates_total,
+                finding.message.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(filed, judged, "the findings the store filed at `{holder}`");
 }
 
 // ---- selecting the links judged ----
@@ -1107,7 +1142,7 @@ fn judgment_work_is_links_plus_candidates() {
 // ---- the plan bars ----
 
 /// The statements the judgment runs, each of which the bar below judges.
-pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 7] = [
+pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 8] = [
     ExplainedStatement::LinkHealthLinks,
     ExplainedStatement::LinkHealthClassLinks,
     ExplainedStatement::LinkHealthPathLinks,
@@ -1115,6 +1150,7 @@ pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 7] = [
     ExplainedStatement::LinkHealthTotals,
     ExplainedStatement::LinkHealthSuffixes,
     ExplainedStatement::LinkHealthAnchors,
+    ExplainedStatement::LinkHealthWrittenLinks,
 ];
 
 fn plan(emitted: norn_store::EmittedPlan) -> QueryPlan {
@@ -1164,14 +1200,17 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
         ),
     };
     let range = format!("({key}>? AND {key}<?)");
-    // A link a key reached, its holder, and every key it is held under.
-    let reached = |selected: Seek| {
-        vec![
-            selected,
-            seek("l", Access::RowId, "(rowid=?)"),
-            seek("d", Access::RowId, "(rowid=?)"),
-            seek("k", Access::Index("link_keys_link"), "(link=?)"),
-        ]
+    // A page's driver, then each link it reached, its holder, and every key
+    // it is held under.
+    let reached = |driver: Vec<Seek>| {
+        driver
+            .into_iter()
+            .chain([
+                seek("l", Access::RowId, "(rowid=?)"),
+                seek("d", Access::RowId, "(rowid=?)"),
+                seek("k", Access::Index("link_keys_link"), "(link=?)"),
+            ])
+            .collect()
     };
     match statement {
         ExplainedStatement::LinkHealthLinks => vec![
@@ -1179,16 +1218,28 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
             seek("l", Access::Index("links_document_ordinal"), "(document=?)"),
             seek("k", Access::Index("link_keys_link"), "(link=?)"),
         ],
-        ExplainedStatement::LinkHealthClassLinks => reached(seek(
+        ExplainedStatement::LinkHealthClassLinks => reached(vec![seek(
             "s",
             Access::Index(link_index),
-            &format!("({link_key}>? AND {link_key}<?)"),
-        )),
-        ExplainedStatement::LinkHealthPathLinks => reached(seek(
+            &format!("(({link_key},document,link)>(?,?,?) AND {link_key}<?)"),
+        )]),
+        ExplainedStatement::LinkHealthPathLinks => reached(vec![seek(
             "s",
             Access::Index(link_index),
-            &format!("({link_key}=?)"),
-        )),
+            &format!("({link_key}=? AND (document,link)>(?,?))"),
+        )]),
+        ExplainedStatement::LinkHealthWrittenLinks => reached(vec![
+            seek(
+                "dw",
+                Access::Index("documents_change_feed"),
+                "(generation=? AND path>?)",
+            ),
+            seek(
+                "lw",
+                Access::Index("links_document_ordinal"),
+                "(document=? AND ordinal>?)",
+            ),
+        ]),
         ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthTotals => vec![
             seek("dl", Access::Index(class_index), &range),
             seek("dp", Access::Index(path_index), "(path=?)"),
@@ -1233,8 +1284,15 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
     // by the path, which that index does not carry. So SQLite sorts only the
     // rows sharing one key — the last term of the order — and the head's limit
     // stops the read once it fills: a partial sort bounded by a run of equal
-    // keys, never the class. Every other statement sorts nothing.
-    if statement == ExplainedStatement::LinkHealthHeads {
+    // keys, never the class. A page of a write's links is read in path order
+    // off the change-feed index, which does not say a path is one document's,
+    // so SQLite sorts the links of one path by ordinal — the one document's
+    // own links, which the changeset wrote — and the page's limit stops the
+    // read. Every other statement sorts nothing.
+    if matches!(
+        statement,
+        ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthWrittenLinks
+    ) {
         let sorts: Vec<&str> = read
             .rows()
             .iter()
@@ -1250,6 +1308,22 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
     } else {
         read.assert_no_temp_btree();
     }
+    // A page is cut in its driver, which runs once as the outer loop: a
+    // co-routine yielding a page, never a table of the whole selection.
+    let paged = matches!(
+        statement,
+        ExplainedStatement::LinkHealthClassLinks
+            | ExplainedStatement::LinkHealthPathLinks
+            | ExplainedStatement::LinkHealthWrittenLinks
+    );
+    let details: Vec<&str> = read.rows().iter().map(|row| row.detail.as_str()).collect();
+    assert!(
+        !details
+            .iter()
+            .any(|detail| detail.starts_with("MATERIALIZE"))
+            && details.contains(&"CO-ROUTINE p") == paged,
+        "{statement:?} under {order:?}: {details:?}"
+    );
     for Seek {
         alias,
         access,

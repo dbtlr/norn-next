@@ -814,7 +814,8 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::LinkHealthHeads
         | ExplainedStatement::LinkHealthTotals
         | ExplainedStatement::LinkHealthSuffixes
-        | ExplainedStatement::LinkHealthAnchors => {
+        | ExplainedStatement::LinkHealthAnchors
+        | ExplainedStatement::LinkHealthWrittenLinks => {
             "the_link_health_judgment_seeks_every_row_it_reads"
         }
     }
@@ -1504,7 +1505,8 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::LinkHealthHeads
         | ExplainedStatement::LinkHealthTotals
         | ExplainedStatement::LinkHealthSuffixes
-        | ExplainedStatement::LinkHealthAnchors => None,
+        | ExplainedStatement::LinkHealthAnchors
+        | ExplainedStatement::LinkHealthWrittenLinks => None,
     }
 }
 
@@ -3639,6 +3641,8 @@ fn a_vault_schema_change_discards_findings_and_nothing_else() {
     assert_eq!(pin.fingerprint, "schema-1");
     assert_eq!(pin.generation, pinned.generation);
 
+    // The document's first link names no document, so the write files its
+    // broken-link finding beside the violation recorded after it.
     let facts = document_with_every_fact(subject.as_str(), "hash-1");
     write_document(&mut request, &facts);
     request
@@ -3649,7 +3653,7 @@ fn a_vault_schema_change_discards_findings_and_nothing_else() {
             .stored_findings(&subject)
             .expect("reading findings")
             .len(),
-        1
+        2
     );
 
     // The schema moves, and exactly the schema-keyed table goes — reported by the
@@ -3659,7 +3663,7 @@ fn a_vault_schema_change_discards_findings_and_nothing_else() {
         .expect("re-pinning a vault schema");
     assert!(repinned.repinned);
     assert!(repinned.generation > pinned.generation);
-    assert_eq!(repinned.invalidated.findings_discarded, 1);
+    assert_eq!(repinned.invalidated.findings_discarded, 2);
     assert_eq!(
         request
             .stored_findings(&subject)

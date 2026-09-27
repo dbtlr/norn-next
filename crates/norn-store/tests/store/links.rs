@@ -992,10 +992,14 @@ fn a_count_and_a_validate_narrow_by_links_to() {
             .record_finding(&violation(at))
             .expect("recording a finding");
     }
+    // Narrowed to the kind recorded above: the documents linking to the
+    // target hold link-health findings of their own too.
     let validated = linked
         .snapshot()
         .validate(
-            &ValidateParams::new(address()).with_predicates([part]),
+            &ValidateParams::new(address())
+                .with_predicates([part])
+                .with_kinds([norn_wire::FindingKind::BodyBytesNotUtf8]),
             &declared(),
         )
         .expect("a validate");

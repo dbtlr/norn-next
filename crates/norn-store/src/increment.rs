@@ -17,10 +17,11 @@ use crate::error::{self, StoreError};
 use crate::facts::{DocumentFacts, FindingFacts, Invalidation, LinkAnchor, Provenance};
 use crate::fields::{ContentModel, FieldRow, OffsetSpelling};
 use crate::hash;
+use crate::health::{self, Redecided};
 use crate::json;
 use crate::link::{address_kind, link_keys};
 use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey};
-use crate::request::{self, DiscardScope};
+use crate::request::{self, DiscardScope, ReadWork};
 use crate::store::Store;
 
 /// One entry in a changeset.
@@ -178,6 +179,7 @@ pub struct IncrementOutcome {
 pub(crate) fn apply(
     store: &mut Store,
     counters: &mut DerivationCounters,
+    work: &ReadWork,
     changes: impl IntoIterator<Item = Change>,
     findings: &[DerivedFinding<'_>],
     declared: &ContentModel,
@@ -219,7 +221,8 @@ pub(crate) fn apply(
     // Every finding in this store is filed in the key space its order
     // selects, so that is the space a changed path names its class and its
     // path key in.
-    let class_space = SuffixKey::under(store.path_order());
+    let order = store.path_order();
+    let class_space = SuffixKey::under(order);
     let transaction = store
         .database
         .immediate_transaction("opening the increment transaction")?;
@@ -296,6 +299,24 @@ pub(crate) fn apply(
         request::write_finding(&transaction, facts)?;
     }
 
+    // Link health, re-decided last, so every fact it reads is the one this
+    // changeset leaves and every finding it replaces is already gone: the
+    // subject discard took the findings at each written path, and the class
+    // and path discards took every finding keyed by a class or a path this
+    // changeset changed.
+    let redecided = match generation {
+        Some(generation) => health::redecide(
+            &transaction,
+            work,
+            order,
+            declared.ambiguity_ignore(),
+            generation,
+            &tally.affected_classes,
+            &tally.affected_paths,
+        )?,
+        None => Redecided::default(),
+    };
+
     transaction
         .commit()
         .map_err(|error| error::sql("committing an increment", error))?;
@@ -319,7 +340,13 @@ pub(crate) fn apply(
     counters.add(Counter::FieldRowsWritten, tally.field_rows);
     counters.add(Counter::FrontmatterProjections, tally.projections);
     counters.add(Counter::FindingsDiscarded, tally.findings_discarded);
-    counters.add(Counter::FindingsWritten, findings.len() as u64);
+    counters.add(
+        Counter::FindingsWritten,
+        findings.len() as u64 + redecided.findings,
+    );
+    counters.add(Counter::LinksRedecided, redecided.links);
+    counters.add(Counter::LinkHealthKeysResolved, redecided.keys_resolved);
+    counters.add(Counter::LinkHealthCandidatesRead, redecided.candidates_read);
 
     Ok(IncrementOutcome {
         generation,

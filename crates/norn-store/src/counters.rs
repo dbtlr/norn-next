@@ -87,6 +87,14 @@ pub(crate) enum Counter {
     /// Typed field values a schema pin cleared.
     TypedValuesDiscarded,
     VaultSchemaPins,
+    /// Links a changeset re-decided the link health of, each once however
+    /// many ways the changeset reached it.
+    LinksRedecided,
+    /// Distinct keys the re-decision resolved, each once per changeset.
+    LinkHealthKeysResolved,
+    /// Candidates the re-decision's resolution read: the documents each key
+    /// it resolved names, summed over the keys.
+    LinkHealthCandidatesRead,
 }
 
 impl Counter {
@@ -106,6 +114,9 @@ impl Counter {
         Counter::FindingsDiscarded,
         Counter::TypedValuesDiscarded,
         Counter::VaultSchemaPins,
+        Counter::LinksRedecided,
+        Counter::LinkHealthKeysResolved,
+        Counter::LinkHealthCandidatesRead,
     ];
 
     /// The name the counter is compared by. A harness matches readings on these
@@ -126,6 +137,9 @@ impl Counter {
             Counter::FindingsDiscarded => "findings_discarded",
             Counter::TypedValuesDiscarded => "typed_values_discarded",
             Counter::VaultSchemaPins => "vault_schema_pins",
+            Counter::LinksRedecided => "links_redecided",
+            Counter::LinkHealthKeysResolved => "link_health_keys_resolved",
+            Counter::LinkHealthCandidatesRead => "link_health_candidates_read",
         }
     }
 }

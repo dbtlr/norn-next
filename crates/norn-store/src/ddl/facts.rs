@@ -231,8 +231,8 @@ const STATEMENTS: &[&str] = &[
     CHECK ((segments IS NULL) = (substr(key, -1) <> '/'))
 )",
     "CREATE UNIQUE INDEX link_keys_link ON link_keys(link, key)",
-    "CREATE INDEX link_keys_key ON link_keys(key, document)",
-    "CREATE INDEX link_keys_folded_key ON link_keys(folded_key, document)",
+    "CREATE INDEX link_keys_key ON link_keys(key, document, link)",
+    "CREATE INDEX link_keys_folded_key ON link_keys(folded_key, document, link)",
     "CREATE TABLE headings (
     id               INTEGER PRIMARY KEY,
     document         INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,

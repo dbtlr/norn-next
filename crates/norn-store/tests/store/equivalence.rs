@@ -565,14 +565,16 @@ fn a_row_identifier_a_generation_and_a_timestamp_leave_two_stores_equal() {
 
     let one = document_with_every_fact("one/glossary.md", "hash-1");
     let two = document("two/notes.md", "hash-2", "a second body\n");
-    write_documents(&mut left.begin_request(), &[one.clone(), two.clone()]);
-    write_documents(&mut right.begin_request(), &[two, one.clone()]);
+    // The schema is pinned ahead of the writes, so each store judges its
+    // documents' link health under the fingerprint the comparison reads.
     for store in [&mut left, &mut right] {
         store
             .begin_request()
             .pin_vault_schema(b"version: 1\n", "schema-fingerprint")
             .expect("pinning the vault schema");
     }
+    write_documents(&mut left.begin_request(), &[one.clone(), two.clone()]);
+    write_documents(&mut right.begin_request(), &[two, one.clone()]);
     // A re-derivation of facts that did not change still takes a generation, so
     // from here the two stores describe one vault at two different generations.
     write_document(&mut right.begin_request(), &one);

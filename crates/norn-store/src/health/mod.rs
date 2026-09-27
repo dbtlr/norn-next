@@ -67,10 +67,13 @@
 
 pub(crate) mod statement;
 
+use statement::{After, Selected};
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use norn_db::rusqlite::{Connection, params_from_iter};
+use norn_db::rusqlite::types::Value;
+use norn_db::rusqlite::{Connection, Transaction, params_from_iter};
 use norn_wire::{FindingKind, LinkHealth};
 
 use crate::error::StoreError;
@@ -79,7 +82,7 @@ use crate::facts::{
 };
 use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey};
 use crate::read::SuffixSpellings;
-use crate::request::{ReadWork, Request, stored_link_row, unreadable};
+use crate::request::{self, ReadWork, Request, stored_link_row, unreadable};
 use crate::resolve::{self, AmbiguityIgnore};
 
 /// The message every broken link's finding carries.
@@ -129,6 +132,8 @@ type Key = (String, Option<u64>);
 /// One link under judgment: where it is held, its row, and its keys.
 struct Held {
     holder: String,
+    /// The write generation the holding document was last written at.
+    generation: i64,
     id: i64,
     ordinal: u64,
     link: StoredLink,
@@ -176,6 +181,7 @@ struct Summary {
 pub struct KeySummaries {
     summaries: HashMap<Key, Summary>,
     resolved: u64,
+    candidates: u64,
 }
 
 impl KeySummaries {
@@ -183,6 +189,12 @@ impl KeySummaries {
     /// resolved: each key once, however many links and chunks hold it.
     pub fn keys_resolved(&self) -> u64 {
         self.resolved
+    }
+
+    /// How many candidates resolving those keys read: the documents each key
+    /// names, summed over the keys, each key counted once.
+    pub fn candidates_read(&self) -> u64 {
+        self.candidates
     }
 
     /// What `key` names, refused where no judgment against this set resolved
@@ -230,8 +242,9 @@ enum Verdict {
 /// judgment taken in chunks resolves each key once. Each statement runs on
 /// `connection` and its steps are added to `work`.
 ///
-/// The findings are in the order of the holding document's path, then the
-/// link's ordinal.
+/// A class or a path key is read a page of [`LINK_HEALTH_CHUNK`] links at a
+/// time, each page judged before the next is read. The findings are in the
+/// order of the holding document's path, then the link's ordinal.
 pub(crate) fn judge(
     connection: &Connection,
     work: &ReadWork,
@@ -241,14 +254,246 @@ pub(crate) fn judge(
     summaries: &mut KeySummaries,
 ) -> Result<Vec<FindingFacts>, StoreError> {
     let key = SuffixKey::under(order);
-    let links = selected_links(connection, work, key, selection)?;
-    resolve_keys(connection, work, key, order, ignore, &links, summaries)?;
+    let mut findings = Vec::new();
+    match selection {
+        LinkSelection::Documents([]) => {}
+        LinkSelection::Documents(documents) => {
+            // Each document once, so a path named twice reads its links once.
+            let paths: BTreeSet<&str> = documents.iter().map(DocumentPath::as_str).collect();
+            let values =
+                statement::documents_parameters(&paths.into_iter().collect::<Vec<&str>>())?;
+            let (links, _) = read_links(connection, work, key, Selected::Documents, values)?;
+            findings = judge_links(connection, work, order, ignore, &links, summaries)?;
+        }
+        LinkSelection::Class(_) | LinkSelection::Path(_) => {
+            let mut pages = Pages::new(selection);
+            while let Some(links) = pages.next(connection, work, key)? {
+                findings.extend(judge_links(
+                    connection, work, order, ignore, &links, summaries,
+                )?);
+            }
+        }
+    }
+    findings.sort_by(|left, right| {
+        (left.path.as_str(), left.ordinal).cmp(&(right.path.as_str(), right.ordinal))
+    });
+    Ok(findings)
+}
+
+/// How many links one page of a paged selection holds at most: the chunk a
+/// re-decision reads, judges and files before it reads the next, which is
+/// what bounds the links, keys and findings it holds at once.
+pub(crate) const LINK_HEALTH_CHUNK: usize = 256;
+
+/// A paged selection, read a page of [`LINK_HEALTH_CHUNK`] links at a time.
+struct Pages<'a> {
+    selected: Selected,
+    by: PagedBy<'a>,
+    /// Where the next page resumes, or `None` once a page came back short.
+    after: Option<After>,
+}
+
+/// What a paged selection selects by.
+enum PagedBy<'a> {
+    Written(i64),
+    Class(&'a ClassKey),
+    Path(&'a PathKey),
+}
+
+impl<'a> Pages<'a> {
+    /// The pages of a class or a path key's links.
+    fn new(selection: LinkSelection<'a>) -> Self {
+        let (by, after) = match selection {
+            LinkSelection::Class(class) => (PagedBy::Class(class), After::class_start(class)),
+            LinkSelection::Path(path) => (PagedBy::Path(path), After::path_start(path)),
+            LinkSelection::Documents(_) => unreachable!("a documents selection is read whole"),
+        };
+        Pages {
+            selected: Selected::of(selection),
+            by,
+            after: Some(after),
+        }
+    }
+
+    /// The pages of the links of every document the write stamped with
+    /// `generation` wrote.
+    fn written(generation: i64) -> Self {
+        Pages {
+            selected: Selected::Written,
+            by: PagedBy::Written(generation),
+            after: Some(After::written_start()),
+        }
+    }
+
+    /// The next page, or `None` once the selection is read through.
+    fn next(
+        &mut self,
+        connection: &Connection,
+        work: &ReadWork,
+        key: SuffixKey,
+    ) -> Result<Option<Vec<Held>>, StoreError> {
+        let Some(after) = self.after.take() else {
+            return Ok(None);
+        };
+        let values = match self.by {
+            PagedBy::Written(generation) => {
+                statement::written_parameters(generation, &after, LINK_HEALTH_CHUNK)
+            }
+            PagedBy::Class(class) => statement::class_parameters(class, &after, LINK_HEALTH_CHUNK),
+            PagedBy::Path(path) => statement::path_parameters(path, &after, LINK_HEALTH_CHUNK),
+        };
+        let (links, last) = read_links(connection, work, key, self.selected, values)?;
+        // A page as long as its bound may have one after it; a shorter one is
+        // the last.
+        self.after = last.filter(|_| links.len() == LINK_HEALTH_CHUNK);
+        Ok((!links.is_empty()).then_some(links))
+    }
+}
+
+/// What one changeset's link-health re-decision did.
+#[derive(Debug, Default)]
+pub(crate) struct Redecided {
+    /// Links judged, each once however many ways the changeset reached it.
+    pub(crate) links: u64,
+    /// Distinct keys resolved, each once across every chunk.
+    pub(crate) keys_resolved: u64,
+    /// Candidates the resolution read: the documents each key names, summed
+    /// over the keys resolved.
+    pub(crate) candidates_read: u64,
+    /// Findings filed.
+    pub(crate) findings: u64,
+}
+
+/// Re-decide the link health of every link the changeset that stamped
+/// `generation` reaches, inside its `transaction`, and file the findings:
+/// [ADR 0027]'s re-decided set, which is
+///
+/// 1. every link a document the changeset wrote holds — those stamped with
+///    `generation`;
+/// 2. every suffix-addressed link whose keys fall in one of `classes`, the
+///    classes of the paths it wrote or killed;
+/// 3. every path-addressed link whose key is one of `paths`, the paths it
+///    wrote or killed.
+///
+/// **Every finding a re-decided link held is gone before it is judged**, so
+/// its new finding never meets the old one: the subject discard took every
+/// finding at a written document's path, and every finding carries all its
+/// link's keys, so the class or path discard that took the finding of a link
+/// the second or third arm reaches took it whichever of the link's keys
+/// reached it.
+///
+/// **Each link is judged once.** A link the changeset reaches more than one
+/// way is judged by the first arm that reaches it and skipped by the rest,
+/// and which arm is first is a predicate over the link's own facts: a link
+/// whose document the changeset stamped belongs to the first arm, and a link
+/// the second or third arm reaches under one key belongs to the least of its
+/// affected classes or paths. So nothing is remembered between chunks but the
+/// key summaries, and the arms hold no set of the links they judged.
+///
+/// Each arm is read a chunk of [`LINK_HEALTH_CHUNK`] links at a time, judged
+/// and filed before the next is read, against one set of key summaries kept
+/// across the whole changeset ([`KeySummaries`], one per distinct key
+/// resolved), so what is held at once is a chunk and the summaries of the
+/// keys the re-decided set holds, never the set itself.
+///
+/// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+pub(crate) fn redecide(
+    transaction: &Transaction<'_>,
+    work: &ReadWork,
+    order: StoredPathOrder,
+    ignore: &AmbiguityIgnore,
+    generation: i64,
+    classes: &BTreeSet<ClassKey>,
+    paths: &BTreeSet<PathKey>,
+) -> Result<Redecided, StoreError> {
+    let key = SuffixKey::under(order);
+    let mut summaries = KeySummaries::default();
+    let mut redecided = Redecided::default();
+    let mut file = |links: Vec<Held>, summaries: &mut KeySummaries| -> Result<(), StoreError> {
+        redecided.links += links.len() as u64;
+        for finding in judge_links(transaction, work, order, ignore, &links, summaries)? {
+            request::write_finding(transaction, &finding)?;
+            redecided.findings += 1;
+        }
+        // The point a re-decision can be torn at: a chunk filed, the
+        // transaction open, nothing committed. A build without the
+        // `induced-failure` feature carries no check here.
+        #[cfg(feature = "induced-failure")]
+        crate::faults::abort_if_the_redecision_is_torn();
+        Ok(())
+    };
+
+    let mut written = Pages::written(generation);
+    while let Some(links) = written.next(transaction, work, key)? {
+        file(links, &mut summaries)?;
+    }
+    for class in classes {
+        let mut pages = Pages::new(LinkSelection::Class(class));
+        while let Some(mut links) = pages.next(transaction, work, key)? {
+            links.retain(|held| {
+                held.generation != generation
+                    && !held.keys.iter().any(|(text, segments)| {
+                        segments.is_some()
+                            && class_of(text).is_some_and(|other| {
+                                other < class.as_str() && classes_hold(classes, other)
+                            })
+                    })
+            });
+            file(links, &mut summaries)?;
+        }
+    }
+    for path in paths {
+        let mut pages = Pages::new(LinkSelection::Path(path));
+        while let Some(mut links) = pages.next(transaction, work, key)? {
+            links.retain(|held| {
+                held.generation != generation
+                    && !held.keys.iter().any(|(text, segments)| {
+                        segments.is_none()
+                            && text.as_str() < path.as_str()
+                            && PathKey::new(text).is_ok_and(|other| paths.contains(&other))
+                    })
+            });
+            file(links, &mut summaries)?;
+        }
+    }
+    redecided.keys_resolved = summaries.keys_resolved();
+    redecided.candidates_read = summaries.candidates_read();
+    Ok(redecided)
+}
+
+/// The class a suffix key falls in: its first segment, separator included,
+/// which is the key of the class every document whose stem that segment spells
+/// is in.
+fn class_of(key: &str) -> Option<&str> {
+    key.find('/').map(|at| &key[..=at])
+}
+
+/// Whether `classes` holds the class spelled `class`.
+fn classes_hold(classes: &BTreeSet<ClassKey>, class: &str) -> bool {
+    ClassKey::new(class).is_ok_and(|class| classes.contains(&class))
+}
+
+/// The findings about `links`, judged as [`judge`] states, resolving each key
+/// `summaries` does not yet hold. The findings are in the order `links` is.
+fn judge_links(
+    connection: &Connection,
+    work: &ReadWork,
+    order: StoredPathOrder,
+    ignore: &AmbiguityIgnore,
+    links: &[Held],
+    summaries: &mut KeySummaries,
+) -> Result<Vec<FindingFacts>, StoreError> {
+    if links.is_empty() {
+        return Ok(Vec::new());
+    }
+    let key = SuffixKey::under(order);
+    resolve_keys(connection, work, key, order, ignore, links, summaries)?;
 
     let verdicts = links
         .iter()
         .map(|held| verdict(held, summaries))
         .collect::<Result<Vec<Option<Verdict>>, StoreError>>()?;
-    let missing = missing_anchors(connection, work, &links, &verdicts)?;
+    let missing = missing_anchors(connection, work, links, &verdicts)?;
 
     let mut named: BTreeMap<i64, &str> = BTreeMap::new();
     for (at, verdict) in verdicts.iter().enumerate() {
@@ -281,28 +526,21 @@ pub(crate) fn judge(
     Ok(findings)
 }
 
-/// Every link `selection` selects, with its keys in the key space `key`
-/// selects, in the order of the holding path, then the ordinal.
-fn selected_links(
+/// The links one read of [`statement::links_sql`] in the shape `selected`
+/// reaches, bound to `values`, each with its keys in the key space `key`
+/// selects, in the order of the holding path, then the ordinal; and the last
+/// driver row the read reached, which a page resumes past.
+fn read_links(
     connection: &Connection,
     work: &ReadWork,
     key: SuffixKey,
-    selection: LinkSelection<'_>,
-) -> Result<Vec<Held>, StoreError> {
-    let values = match selection {
-        LinkSelection::Documents([]) => return Ok(Vec::new()),
-        LinkSelection::Documents(documents) => {
-            // Each document once, so a path named twice reads its links once.
-            let paths: BTreeSet<&str> = documents.iter().map(DocumentPath::as_str).collect();
-            statement::documents_parameters(&paths.into_iter().collect::<Vec<&str>>())?
-        }
-        LinkSelection::Class(class) => statement::class_parameters(class),
-        LinkSelection::Path(path) => statement::path_parameters(path),
-    };
+    selected: Selected,
+    values: Vec<Value>,
+) -> Result<(Vec<Held>, Option<After>), StoreError> {
     let rows = Request::read_all_on(
         connection,
         work,
-        &statement::links_sql(key, statement::Selected::of(selection)),
+        &statement::links_sql(key, selected),
         params_from_iter(values),
         |row| {
             let link = stored_link_row(row)?;
@@ -311,6 +549,15 @@ fn selected_links(
             let ordinal: i64 = row.get(15)?;
             let key: Option<String> = row.get(16)?;
             let segments: Option<i64> = row.get(17)?;
+            let generation: i64 = row.get(18)?;
+            let after = match row.get::<_, Option<String>>(19)? {
+                Some(text) => Some(After {
+                    text,
+                    first: row.get(20)?,
+                    second: row.get(21)?,
+                }),
+                None => None,
+            };
             Ok(link.and_then(|link| {
                 let ordinal = u64::try_from(ordinal)
                     .map_err(|_| unreadable("links.ordinal", &ordinal.to_string()))?;
@@ -320,17 +567,30 @@ fn selected_links(
                             .map_err(|_| unreadable("link_keys.segments", &segments.to_string()))
                     })
                     .transpose()?;
-                Ok((holder, id, ordinal, link, key.map(|key| (key, segments))))
+                Ok((
+                    holder,
+                    generation,
+                    id,
+                    ordinal,
+                    link,
+                    key.map(|key| (key, segments)),
+                    after,
+                ))
             }))
         },
         "reading the links a judgment judges",
     )?;
     let mut links: Vec<Held> = Vec::new();
     let mut by_id: HashMap<i64, usize> = HashMap::new();
-    for (holder, id, ordinal, link, key) in rows {
+    let mut last: Option<After> = None;
+    for (holder, generation, id, ordinal, link, key, after) in rows {
+        if after > last {
+            last = after;
+        }
         let at = *by_id.entry(id).or_insert_with(|| {
             links.push(Held {
                 holder,
+                generation,
                 id,
                 ordinal,
                 link,
@@ -342,7 +602,7 @@ fn selected_links(
         keys.extend(key.filter(|key| !keys.contains(key)));
     }
     links.sort_by(|left, right| (&left.holder, left.ordinal).cmp(&(&right.holder, right.ordinal)));
-    Ok(links)
+    Ok((links, last))
 }
 
 /// Resolve every distinct key `links` hold that `summaries` does not hold
@@ -460,8 +720,9 @@ fn resolve_keys(
 
     for (keys, read) in listed.into_iter().zip(read) {
         for (key, summary) in keys.into_iter().zip(read) {
-            summaries.summaries.insert(key.clone(), summary);
             summaries.resolved += 1;
+            summaries.candidates += summary.total;
+            summaries.summaries.insert(key.clone(), summary);
         }
     }
     Ok(())
