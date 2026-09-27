@@ -702,8 +702,9 @@ keyed by the row id it found, the death recorded for a path, the findings record
 one, the pinned vault-schema projection, and the store's last committed write generation —
 and the three chunked reads every findings read collects each finding's candidate head,
 class memberships and path keys through, a chunk of finding ids at a time — and the twelve
-statements the link-health re-decision runs inside every changeset: the links it judges
-beside their keys, selected five ways — by the documents holding them, by the write that
+statements the link-health judgment runs, eleven of them inside every changeset's
+re-decision: the links it judges beside their keys, selected five ways — by the documents
+holding them (the read door's selection, which no changeset runs), by the write that
 stamped their documents, by a class their suffix keys fall in, by the path key they spell,
 and by the row ids of the links a page of discarded findings was about, the write's, the
 class's and the path key's a page at a time off a driver that runs once as the outer loop
