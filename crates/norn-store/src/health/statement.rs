@@ -3,10 +3,11 @@
 //! ([`crate::ExplainedStatement`]).
 //!
 //! Every statement is driven by a list a `json_each` walks — the documents,
-//! the distinct keys, the candidates' spellings, the links with one target —
-//! or by one seek of the link index — a class's range, or a path key — and
-//! `CROSS JOIN` keeps that driver the outer loop, so each entry costs its own
-//! seeks and nothing is read end to end.
+//! the links or findings by row id, the distinct keys, the candidates'
+//! spellings, the links with one target — or by one range or equality seek:
+//! a class's range of the suffix keys, a path key, or a class's range of the
+//! findings' class keys. `CROSS JOIN` keeps that driver the outer loop, so
+//! each entry costs its own seeks and nothing is read end to end.
 
 use norn_db::rusqlite::types::Value;
 
@@ -107,7 +108,8 @@ impl After {
 /// key the link index holds each under in the key space `key` selects, and
 /// one row with no key for a link held under none:
 /// [`crate::ExplainedStatement::LinkHealthLinks`] over the documents at the
-/// paths `?1` lists, read whole; and, a page of at most the bound the last
+/// paths `?1` lists, and [`crate::ExplainedStatement::LinkHealthFoundLinks`]
+/// over the links whose row ids `?1` lists, each read whole; and, a page of at most the bound the last
 /// parameter names at a time, each resuming past the driver row [`After`]
 /// spells, [`crate::ExplainedStatement::LinkHealthWrittenLinks`] over the
 /// links of the documents stamped with the generation `?1`,
