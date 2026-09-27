@@ -223,9 +223,9 @@ pub(crate) fn documents_parameters(documents: &[&str]) -> Result<Vec<Value>, Sto
 /// The values [`links_sql`] binds over links, and [`discard_sql`] over
 /// findings: their row ids.
 pub(crate) fn ids_parameters(ids: &[i64]) -> Result<Vec<Value>, StoreError> {
-    Ok(vec![Value::Text(canonical_json(&FrontmatterValue::Sequence(
-        ids.iter().copied().map(FrontmatterValue::Int).collect(),
-    ))?)])
+    Ok(vec![Value::Text(canonical_json(
+        &FrontmatterValue::Sequence(ids.iter().copied().map(FrontmatterValue::Int).collect()),
+    )?)])
 }
 
 /// [`crate::ExplainedStatement::LinkHealthClassFindings`]: a page of the

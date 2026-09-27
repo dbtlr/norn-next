@@ -13,8 +13,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::common::{
-    Scratch, keyed_by_paths, class, classes, document, document_with_every_fact, drained,
-    full_text_matches, path, path_key, path_names_no_document_in_class, snapshot, unread_block,
+    Scratch, class, classes, document, document_with_every_fact, drained, full_text_matches,
+    keyed_by_paths, path, path_key, path_names_no_document_in_class, snapshot, unread_block,
     violation, write_document, write_documents,
 };
 use norn_wire::{CaseFold, Pattern};

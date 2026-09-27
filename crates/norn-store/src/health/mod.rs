@@ -584,7 +584,10 @@ pub(crate) fn redecide(
             // so a key the walk has passed is one no link still to be judged
             // holds: every later link holding it belongs to this class's pass
             // and was read already.
-            let passed = pages.after.as_ref().map_or(upper.as_str(), |after| after.text.as_str());
+            let passed = pages
+                .after
+                .as_ref()
+                .map_or(upper.as_str(), |after| after.text.as_str());
             summaries.forget_suffix_keys(&lower, passed);
         }
     }

@@ -324,7 +324,10 @@ fn a_callers_door_refuses_a_finding_only_the_store_files() {
         request.stored_findings(&path("a.md")).expect("a read"),
         Vec::new()
     );
-    assert_eq!(request.stored_document(&path("a.md")).expect("a read"), None);
+    assert_eq!(
+        request.stored_document(&path("a.md")).expect("a read"),
+        None
+    );
     assert_eq!(
         request.write_generation().expect("the write generation"),
         before
@@ -521,6 +524,80 @@ fn a_dotted_leaf_link_is_refiled_when_either_of_its_classes_changes() {
     }
 }
 
+/// **A rooted name is re-decided through a path key its other key sorts
+/// below.** `[[vault://v1.2]]` is held under the paths `v1.2.md` and `v1.md`,
+/// and names `v1.2.md` alone. Writing `v1.md` alone changes one of its paths:
+/// its other key sorts below the one changed but is no changed path, so the
+/// link belongs to the changed one's pass, and is filed ambiguous; killing
+/// `v1.md` heals it the same way.
+#[test]
+fn a_rooted_name_is_redecided_through_its_one_changed_path() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::new(&format!("redecide-rooted-{order:?}"), order);
+        vault.write(&[("h.md", "[[vault://v1.2]]\n"), ("v1.2.md", "x\n")]);
+        assert_eq!(vault.findings("h.md"), [], "{order:?}");
+
+        vault.write(&[("v1.md", "one\n")]);
+        assert_eq!(
+            vault.findings("h.md"),
+            [ambiguous(0, &["v1.2.md", "v1.md"], 2)],
+            "{order:?}"
+        );
+        vault.kill("v1.md");
+        assert_eq!(vault.findings("h.md"), [], "{order:?}");
+    }
+}
+
+/// How many links one page of a re-decision reads.
+const PAGE: usize = 256;
+
+/// **A written document's links are read past a page's end.** One new
+/// document holds one link more than a page, each naming nothing, and every
+/// one of them is filed broken: the next page resumes inside the document the
+/// last one ended in.
+#[test]
+fn a_written_document_longer_than_a_page_files_every_link() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::new(&format!("redecide-long-written-{order:?}"), order);
+        let body = "[[missing]]\n\n".repeat(PAGE + 1);
+        let counters = vault.write(&[("h.md", &body)]);
+        let expected: Vec<Filed> = (0..=PAGE as u64).map(broken).collect();
+        assert_eq!(vault.findings("h.md"), expected, "{order:?}");
+        assert_eq!(
+            counted(&counters, "links_redecided"),
+            PAGE as u64 + 1,
+            "{order:?}"
+        );
+    }
+}
+
+/// **A path key's links are read past a page's end, each once.** One
+/// document holds one link more than a page to `t.md#Missing`, which `t.md`
+/// holds; rewriting `t.md` without the heading re-decides every one of them
+/// through the path key, and files a missing anchor for each exactly once —
+/// a link read twice would be a second finding about one link, which the
+/// changeset refuses.
+#[test]
+fn a_path_keys_links_past_a_page_are_each_redecided_once() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::new(&format!("redecide-long-path-{order:?}"), order);
+        let body = "[p](t.md#Missing)\n\n".repeat(PAGE + 1);
+        vault.write(&[("t.md", "# Missing\n"), ("h.md", &body)]);
+        assert_eq!(vault.findings("h.md"), [], "{order:?}");
+
+        let counters = vault.write(&[("t.md", "# Other\n")]);
+        let expected: Vec<Filed> = (0..=PAGE as u64)
+            .map(|ordinal| missing_anchor(ordinal, "t.md"))
+            .collect();
+        assert_eq!(vault.findings("h.md"), expected, "{order:?}");
+        assert_eq!(
+            counted(&counters, "links_redecided"),
+            PAGE as u64 + 1,
+            "{order:?}"
+        );
+    }
+}
+
 /// **An ambiguous link is no one's backlink**, and the findings agree with the
 /// read that says so: `[[t]]` names `a/t.md` and `b/t.md`, so it is filed
 /// ambiguous and a links-to read of either document leaves its holder out,
@@ -625,11 +702,7 @@ fn assert_rebuilds(
 /// Run `script` on both roots, a changeset per step — `Some(body)` writes the
 /// path, `None` kills it — and after each step hold the suffixes the findings
 /// at `at` carry to the step's `expected`, and the store to a rebuild.
-fn candidates_named_after(
-    label: &str,
-    at: &str,
-    script: &[(&[(&str, Option<&str>)], &[&[&str]])],
-) {
+fn candidates_named_after(label: &str, at: &str, script: &[(&[(&str, Option<&str>)], &[&[&str]])]) {
     for order in [Sensitive, Folding] {
         let mut vault = Vault::new(&format!("{label}-{order:?}"), order);
         let mut held: BTreeMap<String, String> = BTreeMap::new();
@@ -997,7 +1070,10 @@ fn heal(
 fn assert_same(store: &mut Store, other: &mut Store, subject: &str) {
     StoreProjection::read(store)
         .expect("a projection")
-        .assert_equivalent(&StoreProjection::read(other).expect("a projection"), subject);
+        .assert_equivalent(
+            &StoreProjection::read(other).expect("a projection"),
+            subject,
+        );
     assert_eq!(
         DerivedRows::read(store).expect("the derived rows").fields(),
         DerivedRows::read(other).expect("the derived rows").fields(),
@@ -1162,7 +1238,11 @@ fn a_neighborhood_of_many_pages_equals_a_rebuild() {
                 0,
                 &label,
             );
-            assert_same(&mut store, &mut rebuilt, &format!("{label} after step {at}"));
+            assert_same(
+                &mut store,
+                &mut rebuilt,
+                &format!("{label} after step {at}"),
+            );
         }
     }
 }
@@ -1271,7 +1351,9 @@ fn folder_write(beside: usize, folder: &str) -> (DerivationCounters, u64) {
     let mut documents: Vec<(String, String)> = (0..20)
         .map(|at| (format!("h/{at:03}.md"), "[[hub]]\n".to_string()))
         .collect();
-    documents.extend((0..beside).map(|at| (format!("u{at:04}.md"), format!("[p]({folder}{at:04}.md)\n"))));
+    documents.extend(
+        (0..beside).map(|at| (format!("u{at:04}.md"), format!("[p]({folder}{at:04}.md)\n"))),
+    );
     vault.apply(
         documents
             .iter()

@@ -252,7 +252,9 @@ fn hint_of(kind: FindingKind, target: Option<&str>, classes: &BTreeSet<ClassKey>
         let address = class.address();
         address == spelled || address == spelled.to_ascii_lowercase()
     })?;
-    ResolutionTarget::new(class.address()).ok().map(Hint::resolves)
+    ResolutionTarget::new(class.address())
+        .ok()
+        .map(Hint::resolves)
 }
 
 /// The row `base` reads as, over its candidate head and the hint its kind
@@ -316,7 +318,11 @@ mod tests {
             _ => None,
         };
         let ambiguous = |written: &str, keys: &[&str]| {
-            target(hint_of(FindingKind::Ambiguous, Some(written), &classes(keys)))
+            target(hint_of(
+                FindingKind::Ambiguous,
+                Some(written),
+                &classes(keys),
+            ))
         };
         assert_eq!(
             ambiguous("norn/glossary", &["glossary/norn/", "glossary.md/"]),

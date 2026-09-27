@@ -831,7 +831,9 @@ fn a_findings_keys_are_its_links_keys() {
                 match candidate.rsplit('/').next() {
                     Some("V1.2.md") => &["V1.2/", "V1/", "V1.2.md/"],
                     Some("V1.md") => &["V1/", "V1.md/"],
-                    other => panic!("{order:?}: a candidate the fixture holds no name of: {other:?}"),
+                    other => {
+                        panic!("{order:?}: a candidate the fixture holds no name of: {other:?}")
+                    }
                 }
             };
             let in_space = |class: &str| match space {
@@ -843,7 +845,9 @@ fn a_findings_keys_are_its_links_keys() {
                 .filter(|(_, class)| *class)
                 .map(|(key, _)| key.clone())
                 .chain(finding.candidates.iter().flat_map(|candidate| {
-                    naming(candidate.path.as_str()).iter().map(|class| in_space(class))
+                    naming(candidate.path.as_str())
+                        .iter()
+                        .map(|class| in_space(class))
                 }))
                 .collect();
             let expected_paths: BTreeSet<String> = keys

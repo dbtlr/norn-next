@@ -88,11 +88,9 @@ fn hub_write_peak(links: usize, label: &str, target: impl Fn(usize) -> String) -
             .iter()
             .map(|at| {
                 let offset = at * LINKS_PER_HOLDER;
-                Change::Upsert(holder(
-                    &format!("h/{at:04}.md"),
-                    LINKS_PER_HOLDER,
-                    &|n| target(offset + n),
-                ))
+                Change::Upsert(holder(&format!("h/{at:04}.md"), LINKS_PER_HOLDER, &|n| {
+                    target(offset + n)
+                }))
             })
             .collect();
         if chunk[0] == 0 {
@@ -116,8 +114,16 @@ fn hub_write_peak(links: usize, label: &str, target: impl Fn(usize) -> String) -
         .expect("writing a second hub");
     let peak = mark.peak_above();
     let counters = request.finish();
-    assert_eq!(counters.get("links_redecided"), Some(links as u64), "{label}");
-    assert_eq!(counters.get("findings_written"), Some(links as u64), "{label}");
+    assert_eq!(
+        counters.get("links_redecided"),
+        Some(links as u64),
+        "{label}"
+    );
+    assert_eq!(
+        counters.get("findings_written"),
+        Some(links as u64),
+        "{label}"
+    );
     peak
 }
 

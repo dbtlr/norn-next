@@ -34,8 +34,8 @@ use norn_testkit::equivalence::{
 };
 
 use super::common::{
-    Scratch, keyed_by_paths, document, document_with_every_fact, path, record_death,
-    unread_block, violation, write_document, write_documents,
+    Scratch, document, document_with_every_fact, keyed_by_paths, path, record_death, unread_block,
+    violation, write_document, write_documents,
 };
 
 /// The documents both stores in a pin start from.
