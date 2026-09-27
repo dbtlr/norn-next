@@ -61,8 +61,8 @@ use norn_wire::{FindingKind, LinkAddressKind};
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(6),
-    "2aa8920a88f1164b3d209af8e3c49573f89358e01d1cf3425730aaa7491b6c2a",
+    DerivationVersion::new(7),
+    "4566a61f62a1cee95e42ec3cdf7de4dfb5aa161a02e6ab3b0d546bc004000eb4",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -187,6 +187,12 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
             ".hidden/Hidden Note.md",
             b"# Hidden\n\nA #hidden-tag.\n".to_vec(),
         ),
+        // A link of each link-health kind: naming no document, naming the
+        // two twins, and naming a document that holds neither the heading
+        // nor the block its anchor names.
+        ("health/Links.md", LINK_HEALTH.as_bytes().to_vec()),
+        ("twins/one/Twin.md", b"# One twin\n".to_vec()),
+        ("twins/two/Twin.md", b"# The other twin\n".to_vec()),
     ]
 }
 
@@ -290,6 +296,14 @@ A paragraph closing on a block id. ^glossary-block
 # not a heading, #not-a-tag, [[not a link]]
 ```
 ^after-fence
+";
+
+/// A link the store judges broken, one it judges ambiguous, and two whose
+/// anchors name a heading and a block `Notes.md` does not hold.
+const LINK_HEALTH: &str = "# Link health
+
+A broken [[Nowhere At All]], an ambiguous [[Twin]], a missing heading [[Notes#No Such Heading]] \
+and a missing block [[Notes#^no-such-block]].
 ";
 
 /// The target of the corpus's block references, and a document with no
@@ -873,12 +887,29 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         FindingKind::FrontmatterUnclosed,
         FindingKind::FrontmatterUnreadable,
         FindingKind::UndeclaredTag,
+        FindingKind::Broken,
+        FindingKind::Ambiguous,
+        FindingKind::MissingAnchor,
     ] {
         assert!(
             kinds.contains(kind.as_str()),
             "no `{kind}` finding is exercised; the corpus derived {kinds:?}"
         );
     }
+    // A missing anchor of each kind a link carries: a heading, and a block.
+    let missing: BTreeSet<&str> = projection
+        .findings()
+        .iter()
+        .filter(|finding| {
+            finding.path == "health/Links.md" && finding.kind == FindingKind::MissingAnchor.as_str()
+        })
+        .filter_map(|finding| finding.target.as_deref())
+        .collect();
+    assert_eq!(
+        missing,
+        BTreeSet::from(["Notes#No Such Heading", "Notes#^no-such-block"]),
+        "a missing heading and a missing block are not both exercised"
+    );
     assert!(
         !projection.indexed_terms().is_empty(),
         "the full-text index holds no term"
